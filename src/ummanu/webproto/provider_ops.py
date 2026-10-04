@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.board.backend import BOARD_STORE_KIND, card_client
+from ummanu.runtime.codex_home import installation_codex_dir
 from ummanu.tasks import TaskError, task_audit_for
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
@@ -190,3 +191,12 @@ class ProviderOperationLayer(ProtocolBoundary):
 def _count(value: Any) -> int | None:
     """A count the provider layer already normalised (a whole number or `None`), read defensively."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def codex_usage_home(data_dir: str | None) -> Callable[[], Path | None]:
+    """The web usage layer's Codex home: the CODEX_HOME this installation's heads run on.
+
+    Resolved on every read (`installation_codex_dir`), so a re-login or a data-dir move is seen
+    without a restart; None, and so `~/.codex`, only when the installation holds no Codex login.
+    """
+    return lambda: installation_codex_dir(data_dir)

@@ -198,13 +198,24 @@ class ProviderUsageLayer:
         post_json: Callable[[str, dict[str, str], dict[str, Any], float], Any] = _post_json,
         now: Callable[[], float] = time.time,
         timeout: float = 3.0,
+        codex_home: str | os.PathLike[str] | Callable[[], Path | None] | None = None,
     ) -> None:
         self.home = Path(home) if home is not None else Path.home()
+        # The CODEX_HOME the installation's heads run with (`<data_dir>/codex-home`). Its login is
+        # the one the heads keep refreshed and its `sessions/` the one they write; `~/.codex` is
+        # only the fallback for a process with no installation to resolve one from.
+        self._codex_home = codex_home
         self.fetch_json = fetch_json
         self.post_json = post_json
         self.now = now
         self.timeout = timeout
         self._cached: tuple[float, dict[str, Any]] | None = None
+
+    @property
+    def codex_dir(self) -> Path:
+        """The Codex home the bar reads its login and session fallback from, resolved per read."""
+        configured = self._codex_home() if callable(self._codex_home) else self._codex_home
+        return Path(configured) if configured is not None else self.home / ".codex"
 
     def invalidate(self) -> None:
         """Forget the cached snapshot, so the next render asks the providers again."""
@@ -223,7 +234,7 @@ class ProviderUsageLayer:
         deduplicates on `redeem_request_id`, so a repeat under the same id spends nothing twice.
         The token goes into the header and nowhere else; no reason carries it.
         """
-        auth = self.home / ".codex" / "auth.json"
+        auth = self.codex_dir / "auth.json"
         token = self._auth(auth, ("tokens", "access_token"))
         if token is None:
             return "error", "Codex login is unavailable"
@@ -308,11 +319,12 @@ class ProviderUsageLayer:
             return self._unavailable("claude", "Claude", "Claude usage is temporarily unavailable")
 
     def _codex(self, observed: float) -> dict[str, Any]:
-        token = self._auth(self.home / ".codex" / "auth.json", ("tokens", "access_token"))
+        auth = self.codex_dir / "auth.json"
+        token = self._auth(auth, ("tokens", "access_token"))
         if token is not None:
             try:
                 headers = {"Authorization": f"Bearer {token}"}
-                account = self._auth(self.home / ".codex" / "auth.json", ("tokens", "account_id"))
+                account = self._auth(auth, ("tokens", "account_id"))
                 if account:
                     headers["ChatGPT-Account-Id"] = account
                 raw = self.fetch_json(CODEX_USAGE_URL, headers, self.timeout)
@@ -479,7 +491,7 @@ class ProviderUsageLayer:
                     return
                 descend(path / entry.name, depth + 1)
 
-        descend(self.home / ".codex" / "sessions", 0)
+        descend(self.codex_dir / "sessions", 0)
         dated_files = []
         for path in found:
             try:
