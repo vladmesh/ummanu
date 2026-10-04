@@ -18,6 +18,7 @@ from ummanu.host import (
     plan_input_errors,
 )
 from ummanu.host_apply import resolve_installed_packaged
+from ummanu.installation import add_bootstrap_credential_arguments
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.restore import (
     RestoreError,
@@ -42,6 +43,7 @@ def add_restore_subcommands(subparsers) -> None:
     bootstrap.add_argument("--instance-remote", help="private instance remote for host bootstrap")
     bootstrap.add_argument("--instance-dir", help="local instance checkout for host bootstrap")
     bootstrap.add_argument("--installation-user", help="dedicated OS account for host bootstrap")
+    add_bootstrap_credential_arguments(bootstrap)
     bootstrap.add_argument("--dry-run", action="store_true")
     bootstrap.set_defaults(handler=run_bootstrap)
 

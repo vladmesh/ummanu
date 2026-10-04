@@ -165,7 +165,10 @@ class BootstrapTests(unittest.TestCase):
             target, data, scratch = root / "instance", root / "data", root / ".instance.snapshot-x"
 
             def lay_out(remote: str, directory: Path, **kwargs: object) -> SnapshotCheckout:
-                self.assertEqual((remote, kwargs), ("remote", {"dry_run": False, "installation_user": "dev"}))
+                self.assertEqual(
+                    (remote, kwargs),
+                    ("remote", {"dry_run": False, "bootstrap_credential": None, "installation_user": "dev"}),
+                )
                 directory.mkdir()
                 (directory / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
                 scratch.mkdir()

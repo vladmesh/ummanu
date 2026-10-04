@@ -2289,6 +2289,20 @@ def run_install(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def add_bootstrap_credential_arguments(parser) -> None:
+    """The one declaration of the external clone credential, shared by `install`, `recover` and `bootstrap`."""
+    bootstrap = parser.add_mutually_exclusive_group()
+    bootstrap.add_argument(
+        "--bootstrap-credential-file",
+        help="mode-0600 external GitHub credential used only to clone a private instance remote",
+    )
+    bootstrap.add_argument(
+        "--bootstrap-credential-stdin",
+        action="store_true",
+        help="read a one-line external bootstrap credential from standard input before clone",
+    )
+
+
 def add_install_commands(subparsers) -> None:
     def arguments(parser, *, recovery_default: bool) -> None:
         parser.add_argument("--instance-remote", required=True, help="private Git checkpoint remote")
@@ -2303,16 +2317,7 @@ def add_install_commands(subparsers) -> None:
             "--recovery-phrase-file",
             help="read the recovery phrase from this file; never pass it on the command line",
         )
-        bootstrap = parser.add_mutually_exclusive_group()
-        bootstrap.add_argument(
-            "--bootstrap-credential-file",
-            help="mode-0600 external GitHub credential used only to clone a private instance remote",
-        )
-        bootstrap.add_argument(
-            "--bootstrap-credential-stdin",
-            action="store_true",
-            help="read a one-line external bootstrap credential from standard input before clone",
-        )
+        add_bootstrap_credential_arguments(parser)
         phrase.add_argument(
             "--recovery-phrase-stdin",
             action="store_true",

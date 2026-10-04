@@ -29,6 +29,7 @@ from ummanu.board.provision import verify_roles as verify_board_store_roles
 from ummanu.installation import (
     InstallError,
     SnapshotCheckout,
+    _bootstrap_credential,
     _clone_or_reuse,
     _ensure_installation_user,
     _reads_remote_shape,
@@ -147,11 +148,16 @@ def _mark_bootstrap_checkout(target: Path, *, work_tree: bool = True) -> None:
 def bootstrap(args: argparse.Namespace) -> int:
     target = Path(args.instance_dir).expanduser().resolve()
     snapshot: SnapshotCheckout | None = None
+    credential: Path | None = None
+    disposable_credential: Path | None = None
     try:
         if not args.dry_run and os.geteuid() != 0:
             raise BootstrapError("host bootstrap must run as root")
         if not args.dry_run:
             _host_supported()
+            # The external credential for a private remote is read and checked exactly as `recover`
+            # reads it, before the host is changed; a preview clones nothing, so it consumes none.
+            credential, disposable_credential = _bootstrap_credential(args, target)
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
         # The clone step makes recovery's one shape decision (docs/RECOVERY.md, "Two remote
@@ -162,6 +168,7 @@ def bootstrap(args: argparse.Namespace) -> int:
                 args.instance_remote,
                 target,
                 dry_run=args.dry_run,
+                bootstrap_credential=credential,
                 installation_user=args.installation_user,
             )
         if snapshot is None:
@@ -170,6 +177,7 @@ def bootstrap(args: argparse.Namespace) -> int:
                 target,
                 recovery=True,
                 dry_run=args.dry_run,
+                bootstrap_credential=credential,
                 installation_user=args.installation_user,
             )
         if not args.dry_run:
@@ -192,5 +200,7 @@ def bootstrap(args: argparse.Namespace) -> int:
         print(f"ummanu bootstrap\nstatus: failed: {exc}")
         return 1
     finally:
+        if disposable_credential is not None:
+            disposable_credential.unlink(missing_ok=True)
         if snapshot is not None:
             shutil.rmtree(snapshot.scratch, ignore_errors=True)
