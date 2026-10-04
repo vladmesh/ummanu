@@ -8,6 +8,8 @@ dispatcher submitted to a real PO service, with what the PO's handover and the o
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -94,18 +96,29 @@ class HandedOverFixture(DispatcherFixture):
     def hand_over(self, reason: str = REASON) -> None:
         """What `task handover` leaves on the card and in its audit, done by the PO inside its turn."""
         board = self.cards
+        board.card.get("extensions", {}).get("extra", {}).pop("owner_answer", None)
         board.card.setdefault("extensions", {}).setdefault("extra", {}).update(mark_values(SINCE, reason, "po"))
         board.card["comments"].append(
             {"created_at": SINCE, "marker": "po", "body": "[po]\n" + render_handover_comment(reason)}
         )
-        board.log.append({"request_id": "handover-1", "ref": REF, "kind": HANDED_TO_OWNER, "event_id": "evt-h"})
+        board.log.append({"request_id": "handover-1", "ref": REF, "kind": HANDED_TO_OWNER, "event_id": f"evt-h-{len(board.log)}", "payload": {"po_session": self.record().po_submission.session_id}})
 
     def owner_says(self, text: str, event_id: str) -> None:
         self.cards.card["comments"].append({"created_at": _now_iso(), "marker": "owner", "body": f"[owner]\n{text}"})
         self.cards.log.append(
             {"request_id": f"req-{event_id}", "ref": REF, "kind": "commented", "event_id": event_id,
-             "payload": {"marker": "owner"}}
+             "payload": {"marker": "owner", "body_sha256": hashlib.sha256(text.encode()).hexdigest()}}
         )
+        # Model the current writer's atomic owner-comment settlement and durable delivery record.
+        from ummanu.board.owner_handover import OWNER_ANSWER, MARK_KEYS, waiting_owner, current_handover
+        mark = waiting_owner(self.cards.card)
+        if mark is not None:
+            handover = current_handover(self.cards.log)
+            bag = self.cards.card["extensions"]["extra"]
+            bag[OWNER_ANSWER] = json.dumps({"event_id": event_id, "handover_event": handover["event_id"],
+                "quotation": text, "mark": mark, "at": _now_iso(), "po_session": self.record().po_submission.session_id})
+            for key in MARK_KEYS:
+                bag.pop(key, None)
 
     def submitted_card(self, description: str = "Which relay do we pay for?") -> tuple[Any, str]:
         self.start()

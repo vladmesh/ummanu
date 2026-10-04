@@ -17,6 +17,8 @@ import unittest
 from pathlib import Path
 from typing import Any, ClassVar
 
+from jsonschema import Draft202012Validator
+
 from tests.po_fake_store import FakePoStore
 from tests.web_fakes import Recording
 from ummanu.board.e2e_record import e2e_view
@@ -531,9 +533,9 @@ class SprintPageTests(PageFixture):
         self.assertEqual(
             [row[0] for row in rows],
             [
-                '<span class="chip chip-warn">a run</span>',
+                '<span class="chip">a run</span>',
                 '<span class="chip chip-warn">the owner</span>',
-                '<span class="chip chip-warn">the PO</span>',
+                '<span class="chip">the PO</span>',
             ],
         )
         self.assertIn('href="/tasks/ummanu-540"', rows[0][1])
@@ -551,6 +553,10 @@ class CardWaitsTests(unittest.TestCase):
     """`card_waits`, the derivation of `work.waiting_on`, over each kind."""
 
     def test_each_kind(self) -> None:
+        schema = json.loads((Path(__file__).resolve().parents[1] /
+                             "src/ummanu/schemas/web-sprint.schema.json").read_text())
+        entry_schema = schema["$defs"]["work"]["properties"]["waiting_on"]["items"]
+        validator = Draft202012Validator(entry_schema)
         handed = {
             "extensions": {
                 "extra": {
@@ -585,9 +591,9 @@ class CardWaitsTests(unittest.TestCase):
                     "ref": "c",
                     "type": "code",
                     "state": "validate",
-                    "e2e": {"runs": [], "mark": "e2e: budget spent, waiting on d-1"},
+                    "e2e": {"runs": [], "mark": "e2e: budget spent, waiting on d-1", "waiting_on": "d-1"},
                 },
-                [("owner", "d-1")],
+                [("dependency", "d-1")],
             ),
             (
                 {
@@ -605,11 +611,12 @@ class CardWaitsTests(unittest.TestCase):
                     "state": "done",
                     "e2e": {"placement": "after_merge", "mark": "e2e: budget spent, waiting on d-2"},
                 },
-                [("owner", "d-2")],
+                [("dependency", "d-2")],
             ),
             ({"ref": "d", "type": "decision", "state": "in_progress", **handed}, [("owner", "pay")]),
             ({"ref": "d", "type": "decision", "state": "in_progress"}, [("po", "with the PO")]),
             ({"ref": "o", "type": "operation", "state": "in_progress"}, [("po", "with the PO")]),
+            ({"ref": "c", "type": "code", "state": "blocked"}, [("observer", "sprint observer")]),
             # And the cards that wait for nothing.
             ({"ref": "w", "type": "wait", "state": "done", "wait": wait("delivered")}, []),
             ({"ref": "w", "type": "wait", "state": "blocked", "wait": wait()}, []),
@@ -633,6 +640,7 @@ class CardWaitsTests(unittest.TestCase):
                 found = card_waits(card)
                 self.assertEqual([entry["kind"] for entry in found], [kind for kind, _ in expected])
                 for entry, (_kind, fragment) in zip(found, expected, strict=True):
+                    self.assertEqual(list(validator.iter_errors(entry)), [])
                     self.assertEqual(entry["card"], card["ref"])
                     self.assertIn(fragment, entry["detail"])
                     self.assertIn(entry["kind"], WAITING_ON_KINDS)

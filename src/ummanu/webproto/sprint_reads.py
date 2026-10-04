@@ -112,7 +112,7 @@ from typing import Any
 from ummanu.board.backend import PRODUCT_ISSUE, SPRINT, board_client
 from ummanu.board.completion_evidence import is_po_executed
 from ummanu.board.e2e_record import AFTER_MERGE, AM_COVERED, AM_PENDING, e2e_state
-from ummanu.board.owner_handover import waiting_owner
+from ummanu.board.owner_handover import OWNER_ESCALATION, attention_record, waiting_owner
 from ummanu.board.wait_card import RESULT_READY as WAIT_RESULT_READY
 from ummanu.board.wait_card import TARGET_CARD, TARGET_RUN, TARGET_TIME
 from ummanu.board.wait_card import WAITING as WAIT_WAITING
@@ -260,7 +260,9 @@ WAITING_STATES = (WAITING_WORKING, WAITING_WAITING, WAITING_BLOCKED, WAITING_END
 WAITING_ON_RUN = "run"
 WAITING_ON_OWNER = "owner"
 WAITING_ON_PO = "po"
-WAITING_ON_KINDS = (WAITING_ON_RUN, WAITING_ON_OWNER, WAITING_ON_PO)
+WAITING_ON_DEPENDENCY = "dependency"
+WAITING_ON_OBSERVER = "observer"
+WAITING_ON_KINDS = (WAITING_ON_RUN, WAITING_ON_OWNER, WAITING_ON_PO, WAITING_ON_DEPENDENCY, WAITING_ON_OBSERVER)
 
 #: The e2e run states (`E2eRun.status`) in which the run has not answered yet.
 E2E_IN_FLIGHT = frozenset({"dispatching", "identifying", "wait_card_pending", "waiting"})
@@ -2150,6 +2152,8 @@ def _po_card_wait(reference: str | None, card: dict[str, Any] | None) -> tuple[s
     mark = waiting_owner(card)
     if mark is not None:
         return WAITING_WAITING, f"{reference} ({kind}) is handed to the owner: {mark['reason']}"
+    if escalation := attention_record(card, OWNER_ESCALATION):
+        return WAITING_WAITING, f"{reference} ({kind}) has an unresolved owner escalation: {escalation['reason']}"
     return WAITING_WAITING, f"{reference} ({kind}) is with the PO"
 
 
@@ -2172,8 +2176,10 @@ def _waiting_on(read: SourceSet) -> list[dict[str, Any]] | None:
         return []
     linked = read.value(SOURCE_CARDS)
     found: list[dict[str, Any]] = []
-    for card in (linked.get(reference) if isinstance(linked, dict) else None) or []:
-        if isinstance(card, dict):
+    cards = (linked.get(reference) if isinstance(linked, dict) else None) or []
+    superseded = {str((card.get("workspace") or {}).get("supersedes") or "") for card in cards if isinstance(card, dict)}
+    for card in cards:
+        if isinstance(card, dict) and card.get("ref") not in superseded:
             found.extend(card_waits(card))
     return found
 
@@ -2190,7 +2196,7 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
     reference = str(card.get("ref") or "")
     state = str(card.get("state") or "")
     kind = str(card.get("type") or "")
-    if not reference:
+    if not reference or card.get("closed"):
         return []
     live = state != "done"
     found: list[dict[str, Any]] = []
@@ -2240,7 +2246,10 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
     elif covering is not None and covering.state == AM_PENDING:
         said(WAITING_ON_RUN, AFTER_MERGE_QUEUED)
     if e2e.get("mark") and (live or e2e.get("placement") == AFTER_MERGE):
-        said(WAITING_ON_OWNER, str(e2e.get("mark")))
+        holder = str(e2e.get("waiting_on") or (covering.decision if covering else "") or "")
+        said(WAITING_ON_DEPENDENCY, str(e2e.get("mark")))
+        if holder:
+            found[-1]["holder"] = holder
     if not live:
         return found
     mark = waiting_owner(card)
@@ -2249,8 +2258,12 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
             WAITING_ON_OWNER,
             f"{kind or 'card'} handed to the owner: {mark.get('reason') or 'no reason recorded'}",
         )
+    elif escalation := attention_record(card, OWNER_ESCALATION):
+        said(WAITING_ON_OWNER, str(escalation["reason"]))
     elif is_po_executed(card) and state == "in_progress":
         said(WAITING_ON_PO, f"{kind} card with the PO")
+    elif state == "blocked" and kind != "wait" and not e2e_state(card).budget_decline:
+        said(WAITING_ON_OBSERVER, "Blocked work returns to the sprint observer")
     return found
 
 

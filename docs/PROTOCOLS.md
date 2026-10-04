@@ -411,7 +411,7 @@ card, column or role is refused, as is an empty reason, and a card already hande
 - **the audit record** of kind `handed_to_owner` (payload: `to`, `reason_sha256`, the card's `kind` and
   `sprint`, and the mark's moment).
 
-After that transaction commits, the same call writes the owner event `card_handed_to_owner` (class
+In that same transaction the call writes the owner event `card_handed_to_owner` (class
 `needs_owner`, subject the card; [Owner events](#owner-events-and-the-bell)) under the dedup key
 `card_handed_to_owner:<card>:<event id of the handover>`, so a repeat writes nothing new.
 
@@ -420,32 +420,39 @@ and writes nothing, and the same id with another card or reason is refused. `tas
 carry the mark as a top-level `waiting_owner: {since, reason, by}`, and the card page shows a
 `waiting for the owner` chip and the reason.
 
-**The owner's answer.** The owner answers in one of two ways:
+**The owner's answer.** A genuine owner card comment after the current handover atomically records
+its quotation, clears `waiting_owner` and settles the matching unread owner event. The PO can record
+an answer from its conversation without writing as owner:
 
-- a card comment, `task comment --ref <card> --role owner --body-file <file>`. `owner` is a comment role
-  only: allowed on any card, always written with actor `owner`, and refused for every other verb;
-- a message in the sprint's PO session on the `/po` page. The PO completes the card from there with
-  `task complete`; there is no other machinery.
+```text
+task record-owner-answer --ref <card> --role po --handover-event <handover event_id> --body-file <quotation-file> --request-id <new-id>
+```
 
-On a marked card the dispatcher reads the card's audit each tick. When an owner comment follows the
-latest handover, it submits one follow-up input to the same PO session, `source: dispatcher`, carrying
-the card ref, the handover reason, the owner's comments since the handover in board order, the event
-id of the latest one (which a raise of an e2e budget names as `--authorized-by`) and the completion
-command. Its request id is `dispatcher-po-owner-answer-<card>-<event id of that owner
-comment>`, kept on the dispatcher record with the frozen text, so a repeat, an unanswered submit or a
-rebuilt record never makes a second input for the same comment. It carries the card's facts with
-`input: owner_answer`, which the service does not check against the sprint's productions. A later
-owner comment makes one more follow-up, carrying every comment since the handover. A follow-up the service does not answer is
-repeated next tick under the same id; one it refuses outright (its session closed, say) Blocks the card
-with `the PO service refused the owner answer of this card: <reason>`, and one it set aside in
-`po-queue/refused/` Blocks it with `the PO service set the owner's answer aside and will not run it:
-<reason>`. The owner's comments are the only thing that re-submits: a settled turn on a marked card,
-the first one or a follow-up, means wait (`po-card-waiting-owner`, then `po-card-owner-answered`), never
-Blocked. A follow-up whose turn ended `failed` or `interrupted` with the card still marked waits as
-`po-card-owner-answer-turn-ended`, with the reason `the owner's answer reached the PO, but its turn
-failed` (or `was interrupted`); the `po_turn_failed` owner event tells the owner. The PO completes the
-card with `task complete`, which takes the mark off in the same transaction as the Done; any other move
-out of In progress takes it off too, and with it marks the card's `needs_owner` events read.
+The quotation must be non-empty and name this card's current unanswered handover. Both channels store
+`owner_answer` in the extension bag: the handover and answer audit IDs, exact quotation, original mark,
+PO session and answer time. The card remains In progress. A repeated request replays its recorded
+answer without satisfying a later handover. Earlier comments and another card's answer grant nothing.
+A new unresolved question requires an explicit new handover and a new request ID.
+
+The dispatcher delivers the recorded answer to the handover's PO session under
+`dispatcher-po-owner-answer-<card>-<answer event_id>`, with frozen text and `input: owner_answer`.
+The durable answer keeps this path active after the mark clears, so an ended initial turn cannot
+accidentally Block the unfinished card. A lost submission or dispatcher record recovers the same
+ID and text. Existing released owner-comment follow-ups are accepted only through their genuine
+owner audit marker, current handover order and exact quotation digest. The view never settles them.
+A refused/set-aside delivery retains its real PO return failure; failed execution escalates, while
+intentional owner interruption is distinct. A completed follow-up turn without `task complete` or a
+new unanswered handover immediately returns the unfinished card to the observer through Blocked,
+with its recorded answer still settled. Initial and answer follow-ups use one current-episode outcome
+rule: closed/superseded cards and new handovers win over turn outcomes; failed execution escalates
+immediately, and queued/running or not-yet-submitted work escalates at 30 minutes from the durable
+claim or answer time. Retries preserve that clock and submission ID. An unavailable PO read is degraded
+evidence. An interrupted follow-up retains the intentional stop; an interrupted initial turn keeps
+its existing Blocked route. Another owner turn requires another explicit handover.
+
+Recording an answer applies no standing grant. The PO may quote/reference an already recorded
+standing decision as its basis. New sprint authority goes through `sprint record-owner-decisions`
+with stable decision IDs, so grants are not spent twice.
 
 The dashboard's card comment form answers too: on a card carrying the mark it posts with role and actor
 `owner` (the web front is behind the owner's password), so the dispatcher forwards it like a CLI owner
@@ -737,10 +744,10 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 
 | kind | class | written by, at | subject | dedup key |
 | --- | --- | --- | --- | --- |
-| `card_handed_to_owner` | `needs_owner` | `TaskWriter.handover` (`task handover`, inside a PO turn), after the handover commits | the card | `card_handed_to_owner:<card>:<handover event id>` |
+| `card_handed_to_owner` | `needs_owner` | `TaskWriter.handover` (`task handover`, inside a PO turn), in the handover transaction | the card | `card_handed_to_owner:<card>:<handover event id>` |
 | `steward_needs_human` | `needs_owner` | `TaskWriter.move` of a steward report card to Blocked by role `steward` whose reason carries a non-empty "Needs a human" section | the report card | `steward_needs_human:<card>:<move event id>` |
-| `e2e_budget_spent` | `needs_owner` | the dispatcher's e2e stage ([The e2e stage](#the-e2e-stage)), before it Blocks a code card outside every sprint, with no PO origin, whose e2e cap is spent; its text is the Blocked reason. Also the after-merge stage ([After merge](#after-merge)), when a covered card outside every open sprint, with no PO origin, has its cap spent and is declined | the card | `e2e_budget_spent:<card>:<cap>` |
-| `e2e_after_merge` | `needs_owner` | the dispatcher's after-merge e2e ([After merge](#after-merge)): a run that ended with no verdict (another conclusion, a wait outcome other than `target_reached`, refused, unidentified, ambiguous, run on another SHA); or a red run whose hotfix card no open sprint and no PO origin owns, after that card is Blocked | the run's carrier (the newest covered card), or the hotfix card | `e2e_after_merge:<dispatch id>`, `e2e_after_merge:hotfix:<dispatch id>` |
+| `e2e_budget_spent` | `notice` | the dispatcher's e2e stage ([The e2e stage](#the-e2e-stage)), before it Blocks a code card outside every sprint, with no PO origin, whose e2e cap is spent; its text is the Blocked reason. Also the after-merge stage ([After merge](#after-merge)), when a covered card outside every open sprint, with no PO origin, has its cap spent and is declined | the card | `e2e_budget_spent:<card>:<cap>` |
+| `e2e_after_merge` | `notice` | the dispatcher's after-merge e2e ([After merge](#after-merge)): a run that ended with no verdict (another conclusion, a wait outcome other than `target_reached`, refused, unidentified, ambiguous, run on another SHA); or a red run whose hotfix card no open sprint and no PO origin owns, after that card is Blocked | the run's carrier (the newest covered card), or the hotfix card | `e2e_after_merge:<dispatch id>`, `e2e_after_merge:hotfix:<dispatch id>` |
 | `sprint_closed` | `notice` | `SprintWriter.close`, after the close commits | the sprint | `sprint_closed:<sprint>:<close event id>` |
 | `sprint_stopped` | `notice` | `SprintWriter` in the budget charge that reached the hard limit (the dispatcher's budget pass), in its transaction | the sprint | `sprint_stopped:<sprint>:<charge request id>` |
 | `budget_signal` | `notice` | `SprintWriter.record_budget` once the sprint's budget reaches its signal threshold | the sprint | `budget_signal:<sprint>` |
@@ -757,11 +764,25 @@ owes migrations (merged code runs before the upgrade applies them; refused as `s
 [Board schema gate](#board-schema-gate)), no board store at all. A producer's
 own write never depends on it.
 
-**Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark stays unread:
-a click on it is refused and "mark all read" takes notices only. Its `read_at` is set when the mark
-clears, by `TaskWriter._reset_transition_metadata` in the transition's own transaction (a savepoint on
-PostgreSQL): `task complete`, or any other move out of In progress. A `needs_owner` event whose card
-carries no mark (the steward's report) is read by a click.
+**Owner-turn precedence.** A current unanswered explicit handover comes first; otherwise an
+unresolved timed/failed PO episode; otherwise a routine notice or no live wait. `po_card_escalated`
+is `needs_owner`, with an explicit failure/deadline reason and dedup key
+`po_card_escalated:<card>:<claim or answer event_id>`. The dispatcher counts 30 minutes from the
+persisted board claim, including queued time, or from the recorded answer for its follow-up. It
+checks current card and turn state; completed, interrupted, superseded/cancelled and handed-over
+work does not become a routine timeout. Restart and retry cannot reset that clock. A replaced/ended
+episode settles its escalation in the card transaction. The service's `po_turn_failed` remains a
+notice for the execution audit; the dispatcher supplies the scoped unresolved escalation.
+
+`card_waits_for_person` now denotes a routine PO/observer notice, including an unrelated fresh
+Blocked episode. Direct e2e notifications are notices; complete routing of uncovered/unowned e2e
+cases to PO is separate work. Steward's explicit non-empty "Needs a human" escalation remains valid.
+
+**Stay-unread.** A current unanswered handover or unresolved PO escalation holds its matching event.
+The refusal names the unanswered handover or the escalation reason. A recorded answer ends the
+handover before card completion. Per-event read is allowed for notices and unheld events; bulk read
+marks notices and reports the count. A zero-notice bulk button is disabled with its reason.
+Historical routine events are reclassified without changing IDs, quotations or read history.
 
 **The web.** The header of every page shows the bell, the unread count read from the board for that
 render (`?` with the reason when the board cannot count, for instance while it owes migrations); it links to the
@@ -769,7 +790,8 @@ unread view. `GET /owner-events` lists the unread events, open `needs_owner` eve
 newest first, each with its class badge and a link to its subject; `?all=1` lists every event, unread
 rows highlighted. `?unread=1` from an older link, or any other value, is the unread default. A
 notice's "Mark read" posts `/owner-events/{id}/read`; "Mark all notices read" posts
-`/owner-events/read-all`; both return to the view they were pressed from. A board without the table lists no events, with the source `unavailable`, and
+`/owner-events/read-all`; both return to the view they were pressed from, and bulk read displays the marked notice count, all remaining needs_owner events, the held count and the
+unheld count that can be read individually (including steward escalations). A board without the table lists no events, with the source `unavailable`, and
 refuses the two writes (503). From a terminal: `ummanu owner-events list`
 ([Operations](OPERATIONS.md#owner-events)).
 
@@ -4115,7 +4137,9 @@ stored (secretary-1811). It is a list rather than a section; the document's `car
 | `run` | a merged card whose after-merge mark is `covered` -- every card a coalesced run covers, not only its carrier -- unless the carrier's own record of that run has answered | `after-merge e2e run <run URL> carried by <carrier>, covering merge <sha>` (the dispatch id while the run is not identified) |
 | `run` | a merged card whose after-merge mark is `pending` (queued, no run covers it yet) | `queued for the next after-merge run` |
 | `owner` | a card carrying the `waiting_owner` mark ([Handover to the owner](#handover-to-the-owner)) | `<kind> handed to the owner: <reason>` |
-| `owner` | a card waiting on an e2e budget decision (`e2e.mark`) | the mark, `e2e: budget spent, waiting on <decision>` |
+| `owner` | an unresolved timed/failed PO episode | the explicit escalation reason |
+| `dependency` | a card waiting on an e2e budget decision (`e2e.mark`) | the mark and `holder`, linked to the decision card |
+| `observer` | routine Blocked work | its return to the sprint observer |
 | `po` | a `decision` or `operation` card In progress without the mark | `<kind> card with the PO` |
 
 One card may carry more than one entry (a run and a budget mark), but one run is said once per card:

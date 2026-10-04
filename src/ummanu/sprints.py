@@ -719,6 +719,9 @@ class SprintReader:
         result["resume"] = resume
         if include_resume_freshness:
             result["resume_freshness"] = self._resume_freshness(result, resume)
+        refusal = owner_decisions.e2e_refusal(decisions)
+        if refusal:
+            result["e2e"]["summary"] += f"; no more e2e (standing decision {result['ref']}/{refusal['id']})"
         return result
 
     def linked_cards(self) -> dict[str, list[dict[str, Any]]]:

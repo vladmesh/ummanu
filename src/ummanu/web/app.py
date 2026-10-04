@@ -634,7 +634,11 @@ class WebApp:
         # Unread is the default (secretary-1778): only `?all=1` widens it, and `?unread=1` from an
         # older link or any other value lands on the default rather than failing.
         unread_only = _one(query, "all") not in {"1", "true", "yes", "on"}
-        return _html(200, pages.owner_events(self._owner_event_layer().owner_event_list(unread_only=unread_only)))
+        document = self._owner_event_layer().owner_event_list(unread_only=unread_only)
+        marked = _one(query, "marked")
+        if marked is not None and marked.isdecimal():
+            document["read_feedback"] = _owner_read_feedback(int(marked), document)
+        return _html(200, pages.owner_events(document))
 
     def _owner_event_read(self, params, _query, body) -> Response:
         _fields(body, OWNER_EVENT_FIELDS, "owner event read")
@@ -643,8 +647,11 @@ class WebApp:
 
     def _owner_events_read_all(self, _params, _query, body) -> Response:
         _fields(body, OWNER_EVENT_FIELDS, "owner events read")
-        self._owner_event_layer().mark_all_read()
-        return _redirect(_owner_events_back(body), what="every notice is read")
+        result = self._owner_event_layer().mark_all_read()
+        marked = result["marked"]
+        back = _owner_events_back(body)
+        back += ("&" if "?" in back else "?") + f"marked={marked}"
+        return _redirect(back, what=_owner_read_feedback(marked, result))
 
     def _owner_event_layer(self) -> Any:
         if self.owner_events is None:
@@ -1404,3 +1411,11 @@ def _redirect(location: str, *, what: str = "this sprint is open") -> Response:
     return Response(
         303, pages.redirect(location, what=what).encode("utf-8"), HTML_TYPE, {"Location": location}
     )
+
+
+def _owner_read_feedback(marked: int, document: dict[str, Any]) -> str:
+    held = document["held_count"]
+    needs = document["needs_owner_count"]
+    return (f"Marked {marked} notices read; {needs} owner-attention events remain: "
+            f"{held} held by an unanswered handover or unresolved escalation, "
+            f"{needs - held} can be marked read individually. Bulk read marks notices only.")

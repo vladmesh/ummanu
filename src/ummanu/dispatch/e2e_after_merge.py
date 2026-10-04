@@ -911,7 +911,7 @@ def _hotfix(runtime: Any, project: str, carrier_ref: str, run: E2eRun) -> str:
         text = (
             f"{UNOWNED_HOTFIX_REASON}: the after-merge e2e run {run.run_url} concluded {run.conclusion} on "
             f"`main` @ `{run.sha[:12]}`, covering {', '.join(item['ref'] for item in run.covered)}. The hotfix "
-            f"card {hotfix} has no open sprint and no PO session to go to: the owner decides who fixes it."
+            f"card {hotfix} has no open sprint and no PO session to go to; its return route needs assignment."
         )
         if runtime.reader.show(hotfix).get("state") == "ready":
             runtime.writer.move(
@@ -981,7 +981,7 @@ def _requeue(
     _bell(
         runtime,
         carrier_ref,
-        f"After-merge e2e run of {', '.join(item['ref'] for item in run.covered)} needs the owner: {what}",
+        f"After-merge e2e run of {', '.join(item['ref'] for item in run.covered)} ended without an actionable verdict: {what}",
         f"{owner_events.E2E_AFTER_MERGE}:{run.dispatch_id}",
     )
     known = {str(entry.get("ref")) for entry in queue["pending"]}
@@ -1253,7 +1253,7 @@ def _batch_unowned(
     text = (
         f"No after-merge e2e run is dispatched: it would cover {', '.join(by_ref)}, outside every open sprint, "
         f"and the e2e cap of {', '.join(spent)} is spent. No covered card came from a PO session, so there is "
-        "nobody to hand the money decision to but the owner: re-cut the work in a sprint with an e2e budget, "
+        "no PO route for the money decision. Re-cut the work in a sprint with an e2e budget, "
         "or through the PO."
     )
     for ref in spent:

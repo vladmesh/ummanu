@@ -13,8 +13,8 @@ leaves the card In progress and the tick degraded; it is not a failure of the ca
 
 After the submit the per-tick check reads the PO store, never the service: `po_requests` names the
 turn the input became once the service claimed it. A turn that settled while the card is still In
-progress Blocks the card; anything else waits, since the input may be queued behind a seed or
-another turn. An input the service set aside in `po-queue/refused/` will never become a turn, so it
+progress Blocks the card when completed/interrupted; failed execution instead escalates its
+unresolved episode. Queued/running work escalates at 30 minutes from its audited claim. An input the service set aside in `po-queue/refused/` will never become a turn, so it
 Blocks the card with the service's reason.
 
 Every input carries the card's facts beside its text (`card_ref`, `kind`, `touches_production`,
@@ -34,24 +34,29 @@ card with an origin records the session it is submitted to (`po_return.executor`
 the card; it proves nothing about who completed it (the completion records that itself, `po_session`).
 
 The PO may hand the card to the owner inside its turn (`task handover`, secretary-1761). A card that
-carries that mark is not Blocked when the turn settles: it waits for the owner. Each owner comment on
-it after the handover becomes one follow-up input to the same PO session, carrying the reason, the
-owner's comments since the handover in order and the completion command, under a request id derived
-from the card ref and that comment's event id. The PO completes the card with `task complete`,
-which takes the mark off.
+carries that mark is not Blocked when the turn settles: it waits for the owner. A genuine owner
+comment or a PO-recorded conversation quotation answers that epoch and becomes one follow-up to
+the same session, carrying the reason, quotation and completion command, under a request id derived
+from the card ref and answer event id. The PO completes the card with `task complete`,
+which ends the card. The answer already cleared the handover atomically; a durable answer record
+selects the follow-up episode; a completed turn without completion or a new handover returns
+the unfinished card to the observer through Blocked.
 """
 
 from __future__ import annotations
 
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from ummanu.board import po_origin as origin_field
 from ummanu.board.completion_evidence import missing_completion_evidence
 from ummanu.board.owner_handover import (
+    OWNER_ANSWER,
+    attention_record,
     owner_answer_event_ids,
-    owner_comments_since_handover,
+    po_episode,
     waiting_owner,
 )
 from ummanu.board.production_rights import (
@@ -66,7 +71,6 @@ from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.dispatch.helpers import _worker_id
 from ummanu.dispatch.origin_returns import record_return_state, succeed_origin
 from ummanu.dispatch.po_delivery import DISPATCHER_SOURCE, SUCCESSORS_PER_TICK
-from ummanu.dispatch.po_delivery import already_submitted as _already_submitted
 from ummanu.dispatch.state import (
     DispatcherRecord,
     PoSubmission,
@@ -84,9 +88,9 @@ from ummanu.dispatch.state import (
 from ummanu.po.client import OutcomeUnknown, PoServiceError, ServiceRefused, ServiceUnavailable
 from ummanu.po.queue import QueuedInput
 from ummanu.po.store import (
+    COMPLETED,
     FAILED,
     INTERRUPTED,
-    RUNNING,
     PoRequest,
     PoStoreError,
     RequestConflict,
@@ -345,8 +349,8 @@ def _production_lines(submission: PoSubmission, *, owner_answer: bool = False) -
     if owner_answer:
         return [
             (
-                f"Touches production: {production}. You handed the card to the owner, and the owner "
-                "decided on it in the answer below; touch no other production in this turn."
+                f"Touches production: {production}. Follow the quoted owner answer below and the "
+                "sprint's effective recorded authority; touch no other production in this turn."
             )
         ]
     if not submission.sprint_ref:
@@ -391,9 +395,10 @@ def render_owner_answer_input(
     lines = [
         (
             f"The owner answered {kind} card {reference} {_of_sprint(submission)}, which you handed to "
-            f"the owner on {mark['since']}. Complete the card in this turn if the answer settles it. If "
-            "it does not, say on the card what is still missing and end the turn: the card keeps waiting "
-            "for the owner and is not Blocked."
+            f"the owner on {mark['since']}. Finish the work and complete the card in this turn. Only "
+            "a new unresolved question needing the owner warrants a new explicit handover and request ID. Ending "
+            "this turn without completing the card or a new handover returns the unfinished card "
+            "to the observer through Blocked. The recorded answer has ended the previous owner turn."
         ),
         "",
         f"Card: {reference} ({kind}): {task.get('title') or ''}",
@@ -403,15 +408,23 @@ def render_owner_answer_input(
         "",
         mark["reason"],
         "",
-        "## The owner's comments since the handover, in order",
+        "## Recorded owner answer",
         "",
     ]
     for answer in answers:
         lines += [f"### {answer['created_at'] or 'undated'}", "", answer["body"] or "(empty)", ""]
+    lines += ["Recording this answer applies no grant. Reference an existing standing decision by its ID; "
+              "do not apply an already recorded grant again.", ""]
     if submission.owner_event_id:
         # A command that applies the owner's answer on the owner's authority names it (`--authorized-by`
         # of `sprint e2e-budget`, secretary-1796).
-        lines += [f"The owner's latest comment is event `{submission.owner_event_id}`.", ""]
+        answer = attention_record(task, OWNER_ANSWER) or {}
+        if answer.get("channel", "comment") == "comment":
+            lines += [f"The owner's comment is event `{submission.owner_event_id}`.", ""]
+        else:
+            lines += [f"The quoted owner answer is recorded as event `{submission.owner_event_id}`.",
+                "This answer applies no grant. Record new sprint authority with `sprint record-owner-decisions` "
+                "and stable decision IDs; do not apply an already recorded grant again.", ""]
     lines += [
         "",
         "## Complete the card",
@@ -549,10 +562,13 @@ def advance_po_card(
             )
         records[ref] = record
         runtime.save_records(payload, records)
-    if not record.po_submission.submitted:
-        return _submit(runtime, task, record, records, payload)
-    if waiting_owner(task) is not None:
+    if waiting_owner(task) is not None or attention_record(task, OWNER_ANSWER) is not None:
         return _await_owner(runtime, task, record, records, payload)
+    if not record.po_submission.submitted:
+        outcome = _episode_outcome(runtime, task, record, records, payload)
+        if outcome is not None:
+            return outcome
+        return _submit(runtime, task, record, records, payload)
     return _settle(runtime, task, record, records, payload)
 
 
@@ -603,17 +619,16 @@ def _submit(
             return _unanswered(runtime, task, record, records, payload, step, exc)
         return _refused(runtime, task, record, records, payload, step, exc)
     except RequestConflict as exc:
-        # The submit id is this attempt's own: a conflict says it already carries an input, which
-        # is the one this record composed before it was lost and rebuilt (from the card and sprint as
-        # they are now, so its text may differ). Anything else is refused.
-        answer = (
-            _already_submitted(runtime, submission.submit_request_id, submission.session_id)
-            if step == "submit"
-            else None
-        )
-        if answer is None:
-            return _refused(runtime, task, record, records, payload, step, exc)
-    except (PoServiceError, PoStoreError) as exc:
+        # Read the same episode after a conflicting retry; unavailable evidence stays degraded.
+        outcome = _episode_outcome(runtime, task, record, records, payload) if step == "submit" else None
+        if outcome is not None:
+            return outcome
+        return _refused(runtime, task, record, records, payload, step, exc)
+    except (SessionClosed, SessionNotFound) as exc:
+        return _refused(runtime, task, record, records, payload, step, exc)
+    except PoStoreError as exc:
+        return _unanswered(runtime, task, record, records, payload, step, exc)
+    except PoServiceError as exc:
         return _refused(runtime, task, record, records, payload, step, exc)
     submission.submitted = True
     seq = answer.get("seq")
@@ -686,26 +701,53 @@ def _settle(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    outcome = _episode_outcome(runtime, task, record, records, payload)
+    if outcome is not None:
+        return outcome
+    # The delivery record disappeared. Retry the frozen input under the same episode ID,
+    # after the shared rule has applied the persisted deadline and current board precedence.
+    record.po_submission.submitted = False
+    return _submit(runtime, task, record, records, payload)
+
+
+def _episode_outcome(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """One outcome rule for the current audited claim or answer and its actual PO request.
+
+    None means no delivery is recorded: the caller may retry that episode's stable submission ID.
+    The board is reread after the PO store, before a turn or clock can have a consequence.
+    """
     ref = task["ref"]
+    current = runtime.reader.show(ref)
+    superseded = getattr(runtime.writer, "_card_superseded", None)
+    if (current.get("closed") or current.get("state") != "in_progress"
+            or (superseded is not None and superseded(ref))):
+        records.pop(ref, None)
+        runtime.save_records(payload, records)
+        return _closed(current, record.attempt_id, record)
+    if waiting_owner(current) is not None:
+        return _waiting(record, ref, "po-card-waiting-owner", f"handed to the owner: {waiting_owner(current)['reason']}")
+    answer = attention_record(current, OWNER_ANSWER)
+    previous = attention_record(task, OWNER_ANSWER)
+    if answer != previous:
+        return _await_owner(runtime, current, record, records, payload) if answer else _episode_outcome(
+            runtime, current, record, records, payload)
     submission = record.po_submission
+    episode = ({"event_id": answer["event_id"], "occurred_at": answer["at"]} if answer
+               else po_episode(runtime.audit.events(ref)))
+    request_id = owner_answer_request_id(ref, answer["event_id"]) if answer else submission.submit_request_id
+    turn = None
     try:
-        if submission.seq is None:
-            known = runtime.po.request(submission.submit_request_id)
-            if known is None and (set_aside := runtime.po.refused(submission.submit_request_id)) is not None:
-                return _block(
-                    runtime,
-                    task,
-                    records,
-                    payload,
-                    record.attempt_id,
-                    "the PO service set the card's input aside and will not run it: "
-                    f"{set_aside.get('reason') or 'no reason recorded'}",
-                )
-            if known is None or known.seq is None:
-                return _waiting(record, ref, "po-card-queued", "the input waits in the PO queue")
-            submission.seq = int(known.seq)
-            runtime.save_records(payload, records)
-        turn = runtime.po.turn(submission.session_id, submission.seq)
+        known = runtime.po.request(request_id)
+        set_aside = None if known is not None else runtime.po.refused(request_id)
+        queued = runtime.po.queued(request_id) if known is None and set_aside is None else None
+        if known is not None and known.seq is not None:
+            turn = runtime.po.turn(known.session_id, int(known.seq))
     except PoStoreError as exc:
         return {
             "status": "degraded",
@@ -715,26 +757,52 @@ def _settle(
             "action": "po-store-unanswered",
             "reason": f"the PO store did not answer for the card's turn: {exc}",
         }
-    if turn.state == RUNNING:
-        return _waiting(record, ref, "po-card-turn-running", f"PO turn {turn.session_id}/{turn.seq} runs")
-    # The turn has settled. The card read at the top of the tick may predate the PO's completion,
-    # which lands inside that very turn, so the card is read again before anything is decided.
-    current = runtime.reader.show(ref)
-    if current.get("state") != "in_progress":
-        records.pop(ref, None)
+    latest = runtime.reader.show(ref)
+    if latest != current or (superseded is not None and superseded(ref)):
+        return _episode_outcome(runtime, current, record, records, payload)
+    if known is not None or queued is not None:
+        delivery = known if known is not None else queued
+        submission.session_id = delivery.session_id
+        if answer:
+            submission.owner_submitted = True
+        else:
+            submission.submitted = True
+            submission.seq = known.seq if known is not None else None
+            record.state = PO_SUBMITTED
         runtime.save_records(payload, records)
-        return _closed(current, record.attempt_id, record)
-    if waiting_owner(current) is not None:
-        # The PO handed the card to the owner in that turn: it waits for the owner, not Blocked.
-        return _await_owner(runtime, current, record, records, payload)
-    return _block(
-        runtime,
-        current,
-        records,
-        payload,
-        record.attempt_id,
-        f"PO turn {turn.session_id}/{turn.seq} ended {turn.state} without completing the card",
-    )
+    if set_aside is not None:
+        subject = "owner's answer" if answer else "card's input"
+        return _block(runtime, current, records, payload, record.attempt_id,
+                      f"the PO service set the {subject} aside and will not run it: "
+                      f"{set_aside.get('reason') or 'no reason recorded'}")
+    if turn is not None and turn.state in {COMPLETED, INTERRUPTED}:
+        if turn.state == INTERRUPTED and answer:
+            return _waiting(record, ref, "po-card-owner-answer-turn-ended",
+                            "the recorded owner answer reached the PO, but its turn was interrupted; "
+                            "a new owner comment requires a new explicit handover for a new question")
+        return _block(runtime, current, records, payload, record.attempt_id,
+                      f"PO turn {turn.session_id}/{turn.seq} ended {turn.state} without completing the card")
+    failed = turn is not None and turn.state == FAILED
+    if episode is not None and (failed or time.time() - datetime.fromisoformat(
+            episode["occurred_at"]).timestamp() >= 30 * 60):
+        from ummanu.tasks import TaskError
+        reason = ("PO execution failed without its required response" if failed
+                  else "PO ownership episode has no required response after 30 minutes")
+        try:
+            runtime.writer.escalate_po_card(actor=runtime.owner, reference=ref,
+                                           episode=episode["event_id"], reason=reason)
+        except TaskError as exc:
+            if exc.code != "attention_resolved":
+                raise
+    if turn is not None:
+        action = "po-card-owner-answer-turn-ended" if answer and failed else (
+            "po-card-owner-answered" if answer else "po-card-turn-failed" if failed else "po-card-turn-running")
+        return _waiting(record, ref, action, "PO execution failed; unresolved episode escalated" if failed
+                        else f"PO turn {turn.session_id}/{turn.seq} runs")
+    if known is not None or queued is not None:
+        return _waiting(record, ref, "po-card-owner-answered" if answer else "po-card-queued",
+                        "the input waits in the PO queue")
+    return None
 
 
 def _await_owner(
@@ -744,79 +812,76 @@ def _await_owner(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """A card the PO handed to the owner: wait, and pass each owner answer on to the PO once.
+    """Deliver the board-recorded answer once, retaining its epoch and originating session.
 
-    Nothing polls the owner. The latest owner comment after the handover names the follow-up input
-    (`owner_answer_request_id`); a new one replaces the previous follow-up, which carried fewer
-    comments. The same comment always gives the same id and text, so a repeat, a lost answer or a
-    rebuilt record never makes a second input.
+    Released owner comments with a still-open mark are first accepted through the audited
+    compatibility writer. The answer's stable event ID owns every retry and lost-record recovery.
     """
     ref = task["ref"]
+    current = runtime.reader.show(ref)
+    if current != task:
+        return advance_po_card(runtime, current, records, payload, record.attempt_id)
     submission = record.po_submission
+    answer = attention_record(task, OWNER_ANSWER)
     mark = waiting_owner(task) or {}
-    try:
-        answered = owner_answer_event_ids(runtime.audit.events(ref))
-    except Exception as exc:  # noqa: BLE001 - an audit that does not answer is retried next tick
-        return {
-            "status": "degraded",
-            "step": "po-card",
-            "pilot_ref": ref,
-            "attempt_id": record.attempt_id,
-            "action": "po-owner-answer-unread",
-            "reason": f"the card's audit could not be read for the owner's answer: {exc}",
-        }
-    if not answered:
-        return _waiting(
-            record, ref, "po-card-waiting-owner", f"handed to the owner: {mark.get('reason') or ''}"
-        )
-    request_id = owner_answer_request_id(ref, answered[-1])
+    if answer is None:
+        try:
+            answered = owner_answer_event_ids(runtime.audit.events(ref))
+            from ummanu.tasks import TaskError
+            for event_id in reversed(answered):
+                try:
+                    runtime.writer.accept_owner_comment(actor=runtime.owner, reference=ref, event_id=event_id)
+                except TaskError as exc:
+                    if exc.code == "empty_owner_answer":
+                        continue
+                    raise
+                task = runtime.reader.show(ref)
+                answer = attention_record(task, OWNER_ANSWER)
+                break
+        except Exception as exc:  # noqa: BLE001 - recovery is retried, never guessed by a read
+            return {**_waiting(record, ref, "po-owner-answer-unread", f"owner answer recovery unavailable: {exc}"),
+                    "status": "degraded"}
+    if answer is None:
+        return _waiting(record, ref, "po-card-waiting-owner", f"handed to the owner: {mark.get('reason') or ''}")
+    outcome = _episode_outcome(runtime, task, record, records, payload)
+    if outcome is not None:
+        return outcome
+    mark = answer["mark"]
+    request_id = owner_answer_request_id(ref, answer["event_id"])
     if submission.owner_request_id != request_id:
-        comments = owner_comments_since_handover(task.get("comments") or [])
-        submission.owner_event_id = answered[-1]
+        # The handover's session is authoritative even if a dispatcher record was rebuilt.
+        submission.session_id = answer.get("po_session") or submission.session_id
+        if not submission.session_id:
+            # Released handovers could omit their session. Read only the initial request's
+            # session identity; its ended turn cannot decide the answer episode's outcome.
+            try:
+                initial = runtime.po.request(submission.submit_request_id)
+            except PoStoreError as exc:
+                return _unanswered(runtime, task, record, records, payload, "owner answer session", exc)
+            if initial is not None:
+                submission.session_id = initial.session_id
+            elif submission.sprint_ref:
+                try:
+                    resolved = runtime.po.sprint_session(sprint_ref=submission.sprint_ref,
+                                                        request_id=submission.session_request_id)
+                    submission.session_id = str(resolved["session_id"])
+                except ServiceRefused as exc:
+                    if exc.code in _UNANSWERED_CODES:
+                        return _unanswered(runtime, task, record, records, payload, "owner answer session", exc)
+                    return _refused(runtime, task, record, records, payload, "owner answer session", exc)
+                except (SessionClosed, SessionNotFound) as exc:
+                    return _refused(runtime, task, record, records, payload, "owner answer session", exc)
+                except (ServiceUnavailable, OutcomeUnknown, PoStoreError) as exc:
+                    return _unanswered(runtime, task, record, records, payload, "owner answer session", exc)
+                except PoServiceError as exc:
+                    return _refused(runtime, task, record, records, payload, "owner answer session", exc)
+        submission.owner_event_id = answer["event_id"]
         submission.owner_request_id = request_id
-        submission.owner_text = render_owner_answer_input(task, submission, mark, comments)
+        submission.owner_text = render_owner_answer_input(task, submission, mark,
+            answer.get("comments") or [{"created_at": answer["at"], "body": answer["quotation"]}])
         submission.owner_submitted = False
         runtime.save_records(payload, records)
-    if submission.owner_submitted:
-        ended = None
-        try:
-            known = runtime.po.request(request_id)
-            set_aside = None if known is not None else runtime.po.refused(request_id)
-            if known is not None and known.seq is not None:
-                # The follow-up's turn: settled without completing the card (it is still marked),
-                # it says so, instead of reading as with the PO for good (secretary-1770).
-                state = runtime.po.turn(known.session_id, int(known.seq)).state
-                ended = state if state in {FAILED, INTERRUPTED} else None
-        except PoStoreError as exc:
-            set_aside, unread = None, exc
-        else:
-            unread = None
-        if set_aside is not None:
-            return _block(
-                runtime,
-                task,
-                records,
-                payload,
-                record.attempt_id,
-                "the PO service set the owner's answer aside and will not run it: "
-                f"{set_aside.get('reason') or 'no reason recorded'}",
-            )
-        if ended is not None:
-            return _waiting(
-                record,
-                ref,
-                "po-card-owner-answer-turn-ended",
-                f"handed to the owner: {mark.get('reason') or ''}; the owner's answer reached the PO, "
-                f"but its turn {'failed' if ended == FAILED else 'was interrupted'}; a new owner comment "
-                "sends it again",
-            )
-        return _waiting(
-            record,
-            ref,
-            "po-card-owner-answered",
-            f"handed to the owner: {mark.get('reason') or ''}; the owner's answer is with the PO"
-            + (f" (the PO store did not answer: {unread})" if unread is not None else ""),
-        )
+    submission.owner_submitted = False
     step = "owner answer"
     try:
         runtime.po.submit(
@@ -833,9 +898,15 @@ def _await_owner(
             return _unanswered(runtime, task, record, records, payload, step, exc)
         return _refused(runtime, task, record, records, payload, step, exc)
     except RequestConflict as exc:
-        if _already_submitted(runtime, request_id, submission.session_id) is None:
-            return _refused(runtime, task, record, records, payload, step, exc)
-    except (PoServiceError, PoStoreError) as exc:
+        outcome = _episode_outcome(runtime, task, record, records, payload)
+        if outcome is not None:
+            return outcome
+        return _refused(runtime, task, record, records, payload, step, exc)
+    except (SessionClosed, SessionNotFound) as exc:
+        return _refused(runtime, task, record, records, payload, step, exc)
+    except PoStoreError as exc:
+        return _unanswered(runtime, task, record, records, payload, step, exc)
+    except PoServiceError as exc:
         return _refused(runtime, task, record, records, payload, step, exc)
     submission.owner_submitted = True
     submission.unanswered = 0
@@ -920,6 +991,17 @@ def _block(
     reason: str,
 ) -> dict[str, Any]:
     ref = task["ref"]
+    current = runtime.reader.show(ref)
+    record = records.get(ref)
+    superseded = getattr(runtime.writer, "_card_superseded", None)
+    if (current.get("closed") or (task.get("state") == "in_progress" and current.get("state") != "in_progress")
+            or (superseded is not None and superseded(ref))):
+        records.pop(ref, None)
+        runtime.save_records(payload, records)
+        return _closed(current, attempt_id, record)
+    if record is not None and (waiting_owner(current) is not None or
+            attention_record(current, OWNER_ANSWER) != attention_record(task, OWNER_ANSWER)):
+        return _await_owner(runtime, current, record, records, payload)
     runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,

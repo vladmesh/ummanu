@@ -533,7 +533,8 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         self.assertEqual(self.card()["e2e"]["runs_dispatched"], 3)
         self.assertEqual(self.card()["e2e"]["run_cap"], 3)
         [bell] = [event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == CARD_REF]
-        self.assertEqual((bell.kind, bell.event_class), ("e2e_budget_spent", "needs_owner"))
+        self.assertEqual((bell.kind, bell.event_class), ("e2e_budget_spent", "notice"))
+        self.assertFalse(bell.held or bell.pinned)
         self.assertIn("e2e run cap reached (3)", bell.text)
 
 

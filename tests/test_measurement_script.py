@@ -581,12 +581,25 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         """
         idle, running = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
         base = self.serve(listed=((idle, False), (running, True)))
-        with mock.patch.object(measure, "WARM_REQUESTS", 2):
-            code, text = self.run_main(base)
-
-        self.assertEqual(code, measure.EXIT_MET, text)
-        self.assertIn(f"/po poll: GET /po/api/sessions/{running}", text)
-        self.assertIn(f"whose own JSON reports a running turn ({running})", text)
+        # Selection and the actual polling route are the subject here. A whole measurement's
+        # exit also depends on this host meeting the token 50 ms schedule, which is unrelated.
+        # CadenceAndLaunchTests and the verdict tests keep that separate contract intact.
+        scenario = measure.prepare(base, None)
+        self.assertEqual(scenario.poll_target, f"/po/api/sessions/{running}")
+        self.assertIn(f"whose own JSON reports a running turn ({running})", scenario.poll_explanation)
+        self.assertFalse(scenario.poll_substitute)
+        answered = threading.Event()
+        fetch = measure.fetch
+        def observe_poll(*args, **kwargs):
+            sample = fetch(*args, **kwargs)
+            if args[1] == scenario.poll_target:
+                answered.set()
+            return sample
+        with mock.patch.object(measure, "fetch", side_effect=observe_poll), measure.SessionPoll(
+                base, scenario.poll_target, scenario.cookie) as poll:
+            self.assertTrue(answered.wait(5), "the selected running session was never polled")
+        poll.check()
+        self.assertGreaterEqual(poll.successes, 1)
         polled = [path for _method, path in self.server.seen if path.startswith("/po/api/")]  # type: ignore[attr-defined]
         # The idle one was read once, to find out that it was idle, and never again.
         self.assertEqual(sum(1 for path in polled if path.endswith(idle)), 1, polled)
@@ -737,12 +750,23 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         17 s, 27 s and 38 s on three runs, so a single round could have reported either verdict.
         Here round one is fast and the later rounds are slow, and the run must come out red.
         """
-        warm = 2
-        # Requests on `/`: one warm-up, then `warm` timed ones, then four per round. Slowing the
-        # eighth GET onwards leaves the warm phase and round one fast and makes round two slow.
-        first_slow = 1 + warm + measure.CONCURRENT_REQUESTS + 1
-        base = self.serve(slow_get_after=("/", first_slow, (measure.CONCURRENT_THRESHOLD_MS + 200) / 1000.0))
-        with mock.patch.object(measure, "WARM_REQUESTS", warm):
+        # Raw GET counts include discarded rounds, so they cannot decide which *accepted* round
+        # is fast. Supply measured rounds here; the real polling/collection mechanism is covered
+        # by CadenceAndLaunchTests and RoundsUnderThePollTests. Judge, rendering and exit stay real.
+        def measured_rounds(scenario, report):
+            for index, duration_ms in enumerate((10, measure.CONCURRENT_THRESHOLD_MS + 200,
+                                                 measure.CONCURRENT_THRESHOLD_MS + 400)):
+                started = float(index * 10)
+                report.concurrent.append(measure.Round(
+                    samples=[measure.Sample(route="/", status=200, started_at=started,
+                                            ended_at=started + duration_ms / 1000)
+                             for _ in range(measure.CONCURRENT_REQUESTS)],
+                    launched_at=started, polls_in_flight=1,
+                    in_flight_at_start=[1] * measure.CONCURRENT_REQUESTS))
+            measure._judge_worst_round(scenario, report)
+
+        base = self.serve()
+        with mock.patch.object(measure, "_measure", side_effect=measured_rounds):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_EXCEEDED, text)
@@ -751,6 +775,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         fastest = max(float(value) for value in rounds[0][1].split(", "))
         self.assertLess(fastest, measure.CONCURRENT_THRESHOLD_MS, "round one was meant to be fast")
         self.assertNotEqual(rounds[0][4], " <- judged", "the fast first round must not be the judged one")
+        self.assertEqual(rounds[-1][4], " <- judged", "the slowest round must be judged")
         for index in range(1, measure.CONCURRENT_REQUESTS + 1):
             self.assertIn(f"concurrent GET / #{index} of {measure.CONCURRENT_REQUESTS}", text)
         self.assertIn("EXCEEDS", text)

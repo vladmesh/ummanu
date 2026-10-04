@@ -96,6 +96,9 @@ class OwnerEventLayer:
             events=snapshot["unread_events"] if unread_only else snapshot["events"],
             unread=snapshot["unread"],
             unread_only=unread_only,
+            held_count=snapshot.get("held_count", sum(e.get("held", False) and e.get("class") == "needs_owner" for e in snapshot["unread_events"])),
+            needs_owner_count=snapshot.get("needs_owner_count", sum(e.get("class") == "needs_owner" for e in snapshot["unread_events"])),
+            notice_count=snapshot.get("notice_count", sum(e.get("class") == "notice" for e in snapshot["unread_events"])),
         )
 
     def unread_count(self) -> dict[str, Any]:
@@ -127,7 +130,12 @@ class OwnerEventLayer:
             marked = int(self._events().mark_all_read())
         except OwnerEventError as exc:
             raise RuntimeUnavailable(str(exc)) from None
-        return {"schema_version": SCHEMA_VERSION, "kind": "owner_events_read", "marked": marked}
+        remaining = self._events().snapshot()
+        held = [e for e in remaining["unread_events"] if e.get("held") and e.get("class") == "needs_owner"]
+        return {"schema_version": SCHEMA_VERSION, "kind": "owner_events_read", "marked": marked,
+                "remaining": remaining["unread"],
+                "needs_owner_count": remaining.get("needs_owner_count", sum(e.get("class") == "needs_owner" for e in remaining["unread_events"])),
+                "held": held, "held_count": remaining.get("held_count", len(held))}
 
     @staticmethod
     def _document(
@@ -138,6 +146,9 @@ class OwnerEventLayer:
         events: list[dict[str, Any]],
         unread: int,
         unread_only: bool,
+        notice_count: int,
+        held_count: int,
+        needs_owner_count: int,
     ) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -146,6 +157,9 @@ class OwnerEventLayer:
             "source": {"state": state, "reason": reason},
             "unread_only": unread_only,
             "unread": unread,
+            "notice_count": notice_count,
+            "held_count": held_count,
+            "needs_owner_count": needs_owner_count,
             "events": events,
         }
 

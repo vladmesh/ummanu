@@ -745,7 +745,8 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0024_e2e_after_merge_kind` | `e2e_after_merge` in `owner_event_kind_in_vocabulary` and, as a `needs_owner` kind, in `owner_event_class_follows_kind`, both restated: an after-merge e2e run that needs the owner (secretary-1807); the after-merge records themselves are typed fields of a card's `e2e` bag field, no column; the downgrade restores `0023`'s two constraints and fails while an `e2e_after_merge` event exists |
 | `0025_card_waits_for_person` | additive widening of the owner-event vocabulary/class constraints for real sprint Blocked decisions and PO waits; backfills unresolved open sprint waits lacking an open needs_owner event, skips superseded/archived/wait cards, preserves prior rows; no column or new ledger; downgrade refuses while the added kind exists |
 | `0026_sprint_local_runs` | additive `sprints.local_run_exceptions` jsonb, not null, default `[]`, array CHECK; existing sprints gain no exceptions; released empty create intents retain request identity; ships through the automatic release migration boundary; downgrade refuses while a nonempty declaration exists |
-| `0027_sprint_owner_decisions` | additive quoted owner decision array, default `[]`; existing permission/counter/charge records unchanged; downgrade refuses nonempty authority (head) |
+| `0027_sprint_owner_decisions` | additive quoted owner decision array, default `[]`; existing permission/counter/charge records unchanged; downgrade refuses nonempty authority |
+| `0028_owner_turns` | reclassifies released `card_waits_for_person`, `e2e_budget_spent`, `e2e_after_merge` rows as notices, preserving IDs, quotations, dedup keys and read history; adds `po_card_escalated` with matching current kind/class constraints. The `owner_event_routine_notice` trigger normalizes actual 0023/0024/0025 producers' obsolete class during release activation, so their real occurrences remain notices. Downgrade refuses while any changed kind exists rather than fabricate old attention. No new table or column. |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -1114,7 +1115,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0027_sprint_owner_decisions`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0028_owner_turns`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1198,7 +1199,7 @@ derived from the product. A key on many rows indicates a missing column.
 Three typed keys live here on purpose, with no column: the owner-handover mark of a `decision` or
 `operation` card (`waiting_owner`, `waiting_owner_reason`, `waiting_owner_by`; `board/owner_handover.py`,
 [Protocols](PROTOCOLS.md#handover-to-the-owner)). Only `task handover` writes them, a card that leaves
-In progress drops them, and they are read only through `waiting_owner`, which treats a partial or
+In progress or an atomically recorded owner answer drops them, and they are read only through `waiting_owner`, which treats a partial or
 malformed set as no mark. A store without them reads exactly as before.
 
 One more typed key, with no column either: `touches_production` of an `operation` card, a registered
@@ -1263,3 +1264,11 @@ bag, the current bag winning a field both name.
 
 Nothing renumbers or re-derives an existing reference. Entity identities recorded before this store
 carry another store word and still read back to their number (§2.2).
+
+Owner-turn records in `extensions.extra`: `owner_answer` is JSON text containing the current
+handover audit ID, answer audit ID, verbatim quotation, original mark, PO session and answer time;
+`owner_escalation` is JSON text containing a persisted claim/answer episode ID and explicit reason.
+Card mutations and their required owner-event creation/settlement share the SQL transaction.
+Released three-field handovers remain valid. The dispatcher accepts an existing released owner
+comment only by its owner audit marker, current handover order and exact body digest, then delivers
+the durable answer through the existing deterministic PO submission ID. No answer is synthesized.

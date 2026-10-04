@@ -46,7 +46,7 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 #: `head_revision()` reads from the script directory; the schema gate (`board.schema_gate`) compares
 #: against this literal so that a healthy read never imports Alembic, and `tests/test_board_store.py`
 #: holds the two equal.
-#: `0027_sprint_owner_decisions` is the head: PO sessions, turns and feed, the one record of /po
+#: `0028_owner_turns` is the head: PO sessions, turns and feed, the one record of /po
 #: request ids, who closed a session and when, the card kinds with their review choice and
 #: live-impact flag, the indexes the audit's narrowed reads are served by, the budget pass's
 #: candidate index, the extension bag under its neutral key, a PO session's reasoning effort
@@ -55,8 +55,9 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 #: session's title, the headless card kind `wait`, the owner event kind of a delegated card's
 #: returned result, the outbox of the returns a delegated card owes, and a sprint's e2e run budget
 #: with the bell kind of a spent per-card e2e cap, and the bell kind of an after-merge e2e run that
-#: needs the owner, creation-only sprint local-run exceptions, and quoted standing owner decisions.
-EXPECTED_SCHEMA_REVISION = "0027_sprint_owner_decisions"
+#: returns a notice, creation-only sprint local-run exceptions, quoted standing owner decisions,
+#: and explicit owner-turn attention with routine legacy notices reclassified.
+EXPECTED_SCHEMA_REVISION = "0028_owner_turns"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("ummanu.board.migrations"), recorded here

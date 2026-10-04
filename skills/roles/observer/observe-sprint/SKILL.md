@@ -517,3 +517,12 @@ manufacture entries or ask for an answer already covered. Latest scoped answers 
 finite e2e grant adds once, and a later `no_more_e2e` refusal stops new dispatches even with
 budget room. Advance consent covers only its explicit action, scope and maximum uses;
 check recorded operations before using it. It implies no additional money or production right.
+
+Owner attention follows durable turns. Routine decision/operation admission, Blocked work,
+reslice/supersession and planned wait outcomes do not directly ask the owner. Send uncovered
+questions to the PO through a decision/operation card. Only the PO explicitly hands a card over;
+the dispatcher escalates an unresolved PO episode after 30 minutes or failed execution. The PO
+records conversation answers with `task record-owner-answer --role po --handover-event <event_id>
+--body-file <quotation-file> --request-id <id>`; genuine owner card comments also settle attention.
+An answered unfinished card is with the PO. Apply recorded standing decisions once, by ID, and
+follow dependency-card links instead of counting each dependent as an owner question.

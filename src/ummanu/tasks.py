@@ -76,9 +76,17 @@ from ummanu.board.owner_handover import (
     CLEAR_MARK,
     HANDED_TO_OWNER,
     OWNER,
+    OWNER_ANSWER,
+    OWNER_ANSWER_RECORDED,
+    OWNER_ESCALATION,
     OWNER_ROLE,
+    attention_record,
     carries_mark_fields,
+    current_handover,
     mark_values,
+    owner_answer_event_ids,
+    owner_comments_since_handover,
+    po_episode,
     render_handover_comment,
     waiting_owner,
 )
@@ -1678,6 +1686,17 @@ class TaskWriter:
                     event=event,
                     request_id=request_id,
                 )
+                if supersedes:
+                    try:
+                        previous = self.reader.show(supersedes)
+                    except TaskError as exc:
+                        if exc.code != "not_found":
+                            raise
+                        previous = {}
+                    if carries_mark_fields(previous) or attention_record(previous, OWNER_ESCALATION):
+                        owner_events.settle_required_wait(supersedes, to=self.client)
+                        self.client.call("saveTaskMetadata", task_id=_task_number(previous),
+                                         values={**CLEAR_MARK, OWNER_ESCALATION: ""})
             except _CommittedWriteError:
                 raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
             except Exception:
@@ -1871,6 +1890,18 @@ class TaskWriter:
             role = self._role(role, COMMENT_ROLES, actor=actor)
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
+
+        def mutation(task: dict[str, Any]) -> None:
+            self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}")
+            if role == OWNER_ROLE and body.strip() and waiting_owner(task) is not None:
+                handover = current_handover(self.audit.events(reference))
+                if handover is None:
+                    raise TaskError("validation", "owner mark has no audited handover", 2)
+                occurrence = self.audit.pending_event(request_id)
+                self._store_owner_answer(task, handover, body, occurrence)
+
+        # Fix the request identity before staging so the answer can name its own audit event.
+        request_id = request_id or str(uuid.uuid4())
         return self._write(
             "commented",
             role,
@@ -1878,11 +1909,120 @@ class TaskWriter:
             reference,
             request_id,
             payload,
-            lambda task: self.client.call(
-                "createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"
-            ),
+            mutation,
             identity=payload,
         )
+
+    def _store_owner_answer(self, task: dict[str, Any], handover: Any, quotation: str, occurrence: Any,
+                            *, comments: Any = None) -> None:
+        mark = waiting_owner(task)
+        if not quotation.strip():
+            raise TaskError("empty_owner_answer", "empty owner comment is not an answer", 2)
+        if (mark is None or occurrence is None or task.get("state") != "in_progress"
+                or task.get("closed") or self._card_superseded(task["ref"])):
+            raise TaskError("validation", "answer requires a current unanswered handover", 2)
+        if (handover.get("payload") or {}).get("waiting_owner") != mark["since"]:
+            raise TaskError("validation", "owner mark does not match the audited handover epoch", 2)
+        answer = {"handover_event": handover["event_id"], "event_id": occurrence["event_id"],
+                  "quotation": quotation, "mark": mark,
+                  "po_session": (handover.get("payload") or {}).get(PO_SESSION_KEY, ""),
+                  "at": occurrence["occurred_at"],
+                  "channel": "comment" if occurrence["kind"] == "commented" else "conversation"}
+        if comments is not None:
+            answer["comments"] = comments
+        owner_events.settle_required_wait(task["ref"], to=self.client)
+        self.client.call("saveTaskMetadata", task_id=_task_number(task),
+                         values={**CLEAR_MARK, OWNER_ESCALATION: "", OWNER_ANSWER: json.dumps(answer)})
+
+    def record_owner_answer(self, *, role: str, actor: str, reference: str, handover_event: str,
+                            quotation: str, request_id: str | None = None) -> dict[str, Any]:
+        """PO records a verbatim conversation answer to one handover; it grants nothing itself."""
+        role = self._role(role, {Role.PO}, actor=actor)
+        quotation = self._redact_for_board(quotation)
+        if not quotation.strip() or not handover_event.strip():
+            raise TaskError("validation", "answer needs a non-empty owner quotation and handover event ID", 2)
+        request_id = request_id or str(uuid.uuid4())
+        identity = {"handover_event": handover_event, "quotation_sha256": _digest(quotation)}
+
+        def mutation(task: dict[str, Any]) -> None:
+            events = self.audit.events(reference)
+            handover = current_handover(events)
+            if owner_answer_event_ids(events) and any(comment["body"].strip() for comment in
+                    owner_comments_since_handover(task.get("comments") or [])):
+                raise TaskError("validation", "this handover already has an owner answer; accept that comment before a new handover", 2)
+            if (task.get("closed") or task.get("state") != "in_progress" or handover is None
+                    or handover["event_id"] != handover_event):
+                raise TaskError("validation", "answer must name this card's current handover", 2)
+            self._store_owner_answer(task, handover, quotation, self.audit.pending_event(request_id))
+            self.client.call("createComment", task_id=_task_number(task), user_id=0,
+                             content=f"[po]\n[owner-answer:{handover_event}]\n\n{quotation}")
+
+        return self._write(OWNER_ANSWER_RECORDED, role, actor, reference, request_id, identity,
+                           mutation, identity=identity)
+
+    def accept_owner_comment(self, *, actor: str, reference: str, event_id: str) -> dict[str, Any]:
+        """Released owner-comment follow-ups: settle their real answer before delivery.
+
+        Only the dispatcher's recovery path uses this adapter. The owner audit marker and
+        exact body digest must match a comment after the current audited handover.
+        """
+        role = self._role("dispatcher", {Role.DISPATCHER}, actor=actor)
+        identity = {"owner_comment": event_id}
+        request_id = f"owner-comment-answer-{event_id}"
+
+        def mutation(task: dict[str, Any]) -> None:
+            events = self.audit.events(reference)
+            handover = current_handover(events)
+            if handover is None:
+                raise TaskError("validation", "no audited handover for this owner comment", 2)
+            after = False
+            event = None
+            for item in events:
+                if item.get("event_id") == handover["event_id"]:
+                    after = True
+                elif after and item.get("event_id") == event_id and item.get("kind") == "commented" and (item.get("payload") or {}).get("marker") == OWNER_ROLE:
+                    event = item
+            if event is None:
+                raise TaskError("validation", "comment is not an owner answer after this handover", 2)
+            for comment in task.get("comments") or []:
+                text = str(comment.get("body") or "")
+                if comment.get("marker") == OWNER_ROLE and text.startswith("[owner]\n"):
+                    text = text[len("[owner]\n"):]
+                    if _digest(text) == event["payload"].get("body_sha256"):
+                        self._store_owner_answer(task, handover, text, event,
+                            comments=owner_comments_since_handover(task.get("comments") or []))
+                        return
+            raise TaskError("validation", "audited owner quotation is unavailable", 2)
+
+        return self._write("owner_comment_accepted", role, actor, reference, request_id, identity,
+                           mutation, identity=identity)
+
+    def _card_superseded(self, reference: str) -> bool:
+        return bool(getattr(self.client, "credentials", None) and self.client._query(
+            "SELECT 1 FROM task_supersessions WHERE supersedes = %s", (reference,)))
+
+    def escalate_po_card(self, *, actor: str, reference: str, episode: str, reason: str) -> dict[str, Any]:
+        """Dispatcher escalates an unresolved persisted PO episode, atomically with its bell."""
+        role = self._role("dispatcher", {Role.DISPATCHER}, actor=actor)
+        if not reason.strip() or not episode.strip():
+            raise TaskError("validation", "escalation requires an episode and explicit reason", 2)
+        identity = {"episode": episode}
+        request_id = f"po-escalation-{episode}"
+
+        def mutation(task: dict[str, Any]) -> None:
+            claim = po_episode(self.audit.events(reference))
+            answer = attention_record(task, OWNER_ANSWER)
+            expected = answer["event_id"] if answer else (claim["event_id"] if claim else "")
+            if (self._card_superseded(reference) or not is_po_executed(task) or task.get("closed") or task.get("state") != "in_progress"
+                    or waiting_owner(task) is not None or expected != episode):
+                raise TaskError("attention_resolved", "PO episode was resolved or replaced", 3)
+            owner_events.record_required_wait(owner_events.PO_CARD_ESCALATED, reference, reason,
+                                             f"po_card_escalated:{reference}:{episode}", to=self.client)
+            self.client.call("saveTaskMetadata", task_id=_task_number(task),
+                             values={OWNER_ESCALATION: json.dumps({"episode": episode, "reason": reason})})
+
+        return self._write("po_card_escalated", role, actor, reference, request_id,
+                           {**identity, "reason": reason}, mutation, identity=identity)
 
     def post_merge_ci(
         self,
@@ -2218,6 +2358,8 @@ class TaskWriter:
 
         def mutation(task: dict[str, Any]) -> None:
             number = _task_number(task)
+            if self._card_superseded(reference):
+                raise TaskError("attention_resolved", "superseded card cannot open a new owner turn", 3)
             occurrence = self.audit.pending_event(request_id)
             if occurrence is None:
                 raise TaskError("backend_error", "handover has no staged occurrence", 1)
@@ -2228,8 +2370,8 @@ class TaskWriter:
                 f"{owner_events.CARD_HANDED_TO_OWNER}:{reference}:{occurrence['event_id']}",
                 to=self.client,
             )
-            owner_events.record_person_wait({**task, "state": "done"}, "", to=self.client)
-            self.client.call("saveTaskMetadata", task_id=number, values=mark_values(since, reason, actor))
+            owner_events.settle_required_wait(reference, to=self.client, kind=owner_events.PO_CARD_ESCALATED)
+            self.client.call("saveTaskMetadata", task_id=number, values={**mark_values(since, reason, actor), OWNER_ANSWER: "", OWNER_ESCALATION: ""})
             self.client.call(
                 "createComment",
                 task_id=number,
@@ -3439,6 +3581,10 @@ class TaskWriter:
         # A card handed to the owner waits for the owner only while it is In progress: whatever
         # moves it on (`task complete` above all) takes the mark off in the same transaction.
         clear_mark = CLEAR_MARK if source == "in_progress" and carries_mark_fields(task) else {}
+        if attention_record(task, OWNER_ESCALATION):
+            clear_mark = {**clear_mark, OWNER_ESCALATION: ""}
+        if target == "ready" and attention_record(task, OWNER_ANSWER):
+            clear_mark = {**clear_mark, OWNER_ANSWER: ""}
         if clear_mark:
             owner_events.settle_required_wait(str(task.get("ref") or ""), to=self.client)
         if target in {"ready", "done"}:

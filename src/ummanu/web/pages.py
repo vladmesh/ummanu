@@ -1883,8 +1883,9 @@ def owner_events(document: dict[str, Any]) -> str:
             action = ""
         elif event.get("class") == "needs_owner" and event.get("held"):
             action = (
-                f'<span class="held">stays unread until {escape(subject)} leaves waiting_owner: '
-                "the PO completes the card</span>"
+                f'<span class="held">stays unread: {escape(subject)}: '
+                + ("current handover has no recorded owner answer" if event.get("kind") == "card_handed_to_owner"
+                   else "PO escalation remains unresolved: " + escape(str(event.get("text") or ""))) + "</span>"
             )
         else:
             action = (
@@ -1906,14 +1907,17 @@ def owner_events(document: dict[str, Any]) -> str:
         )
     all_mark = ' aria-current="true"' if not unread_only else ""
     unread_mark = ' aria-current="true"' if unread_only else ""
+    disabled = ' disabled title="No unread notices to mark; bulk read marks notices only"' if not document.get("notice_count", 0) else ""
     actions = (
         '<div class="owner-events-actions">'
         f'<div class="filters"><a href="/owner-events"{unread_mark}>Unread</a>'
         f'<a href="/owner-events?all=1"{all_mark}>All</a></div>'
         f'<form method="post" action="/owner-events/read-all">{back}'
-        '<button type="submit" class="quiet" title="marks every unread notice read; '
-        'what needs the owner stays">Mark all notices read</button></form></div>'
+        f'<button type="submit" class="quiet"{disabled}>Mark all notices read</button></form></div>'
     )
+    actions += '<p>Bulk read marks notices only. Other events can be marked read individually unless held.</p>'
+    if not document.get("notice_count", 0):
+        actions += '<p>No unread notices to mark.</p>'
     listing = _section(
         document.get("source"),
         events,
@@ -1925,6 +1929,7 @@ def owner_events(document: dict[str, Any]) -> str:
         [
             '<div class="lead"><h1>Owner events</h1>',
             f'<span class="age">read at {escape(str(document.get("observed_at") or "an unknown time"))}</span></div>',
+            f'<p role="status">{escape(str(document.get("read_feedback") or ""))}</p>',
             _panel(
                 "What needs you, and what you should know", actions + listing, count=document.get("unread")
             ),
@@ -3992,7 +3997,7 @@ def _sprint_now(work: dict[str, Any], observer: dict[str, Any]) -> str:
 
 
 #: How a sprint's `waiting_on` kind reads on its page.
-WAITING_ON_LABELS = {"run": "a run", "owner": "the owner", "po": "the PO"}
+WAITING_ON_LABELS = {"run": "a run", "owner": "the owner", "po": "the PO", "dependency": "a dependency card", "observer": "the observer"}
 
 
 def _waiting_on(items: Any) -> str:
@@ -4004,10 +4009,10 @@ def _waiting_on(items: Any) -> str:
         [
             _chip(
                 WAITING_ON_LABELS.get(str(entry.get("kind") or ""), str(entry.get("kind") or "unknown")),
-                "warn",
+                "warn" if entry.get("kind") == "owner" else "",
             ),
             _link(str(entry.get("card") or "")),
-            _linked_text(str(entry.get("detail") or "")),
+            _linked_text(str(entry.get("detail") or "")) + (" · " + _link(str(entry["holder"])) if entry.get("holder") else ""),
         ]
         for entry in entries
     ]

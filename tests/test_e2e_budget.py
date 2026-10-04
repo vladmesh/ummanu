@@ -186,6 +186,11 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
     def test_standing_refusal_with_room_and_later_card_blocks_without_dispatch_card_or_bell(self) -> None:
         self.arrange()
         self.record_standing()
+        from ummanu.sprints import SprintReader
+        view = SprintReader(self.board, data_dir=self.data_dir).show(SPRINT)
+        self.assertEqual((view["e2e"]["budget"], view["e2e"]["used"]), (3, 0))
+        self.assertIn("no more e2e", view["e2e"]["summary"])
+        self.assertIn(f"{SPRINT}/stop-1", view["e2e"]["summary"])
         self.to_green_review()
         self.assertEqual(self.tick()["status"], "blocked")
         self.add_code_card(OTHER, state="validate")
@@ -252,7 +257,7 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
             sprint_override=True, sprint_override_reason="fixture unrelated block", request_id="unrelated-block",
         )
         self.assertIsNone(e2e_state(self.reader.show(OTHER)).budget_decline)
-        self.assertTrue([event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == OTHER and event.event_class == "needs_owner"])
+        self.assertTrue([event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == OTHER and event.event_class == "notice"])
 
     def test_the_fourth_run_of_a_sprint_is_not_dispatched_and_cuts_exactly_one_decision(self) -> None:
         decision = self.spent_with_a_pending_decision()
@@ -595,7 +600,7 @@ class OutOfSprintCapTests(BudgetStageFixture, unittest.TestCase):
         self.assertBlockedAsInfrastructure(blocked, "e2e run cap reached (3)", taxonomy="other")
         self.assertEqual(self.decisions(), [])
         [bell] = [e for e in OwnerEventStore(self.board.credentials).events() if e.subject_ref == CARD_REF]
-        self.assertEqual((bell.kind, bell.event_class), ("e2e_budget_spent", "needs_owner"))
+        self.assertEqual((bell.kind, bell.event_class), ("e2e_budget_spent", "notice"))
 
 
 class SprintBudgetEntityTests(SprintFixture):

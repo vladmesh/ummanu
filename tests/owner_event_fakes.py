@@ -17,16 +17,18 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ummanu.board.owner_events import (
-    CARD_WAITS_FOR_PERSON,
+    CARD_HANDED_TO_OWNER,
     CLASSES,
     KIND_CLASS,
     KINDS,
     NEEDS_OWNER,
     NOTICE,
+    PO_CARD_ESCALATED,
     OwnerEvent,
     OwnerEventNotFound,
     OwnerEventsUnavailable,
     ReadRefused,
+    _held_refusal,
     card_holds_mark,
     class_of,
     list_order_key,
@@ -61,7 +63,9 @@ class FakeOwnerEvents:
 
     def _held(self, event: OwnerEvent) -> bool:
         card = self.cards(str(event.subject_ref)) if event.subject_ref else None
-        return bool(card) and (card_holds_mark(card) or (event.kind == CARD_WAITS_FOR_PERSON and bool(person_wait(card))))
+        return bool(event.unread and card and card.get("state") == "in_progress" and not card.get("closed")
+                    and ((event.kind == CARD_HANDED_TO_OWNER and card_holds_mark(card))
+                         or (event.kind == PO_CARD_ESCALATED and person_wait(card))))
 
     @staticmethod
     def check(kind: str, event_class: str) -> None:
@@ -105,17 +109,20 @@ class FakeOwnerEvents:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            events = self.events()
+            events = self.events(limit=max(500, len(self.rows)))
             waits = []
             for event in events:
                 card = self.cards(str(event.subject_ref)) if event.subject_ref else None
                 if event.pinned and card and card.get("sprint") and not card.get("closed") and (
-                    event.kind != CARD_WAITS_FOR_PERSON or event.held
+                    event.kind == "steward_needs_human" or event.held
                 ):
                     waits.append({"event_id": event.id, "subject_ref": event.subject_ref, "sprint_ref": card["sprint"]})
-            return {"events": [event.to_json() for event in events],
+            return {"events": [event.to_json() for event in events[:500]],
                     "unread_events": [event.to_json() for event in self.events(unread_only=True)],
-                    "unread": self.unread_count(), "human_waits": waits}
+                    "unread": self.unread_count(), "human_waits": waits,
+                    "needs_owner_count": sum(e.unread and e.event_class == NEEDS_OWNER for e in events),
+                    "notice_count": sum(e.unread and e.event_class == NOTICE for e in events),
+                    "held_count": sum(e.held for e in events)}
 
     def settle_kind(self, subject_ref: str, kind: str) -> int:
         with self.lock:
@@ -137,10 +144,7 @@ class FakeOwnerEvents:
             if row.read_at is not None:
                 return replace(row, held=held)
             if row.event_class == NEEDS_OWNER and held:
-                raise ReadRefused(
-                    f"owner event {row.id} needs the owner and stays unread until {row.subject_ref} "
-                    "leaves waiting_owner"
-                )
+                raise ReadRefused(_held_refusal(row))
             self.rows[row.id] = replace(row, read_at=self._now())
             return replace(self.rows[row.id], held=held)
 

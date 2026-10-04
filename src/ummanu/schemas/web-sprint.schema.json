@@ -660,9 +660,11 @@
                 "enum": [
                   "run",
                   "owner",
-                  "po"
+                  "po",
+                  "dependency",
+                  "observer"
                 ],
-                "description": "run: an active wait card, a code card whose e2e run has not answered, or a merged card covered by an after-merge run that has not answered or queued for the next one. owner: a card handed to the owner, or an e2e budget decision. po: a decision or operation card In progress and not handed over."
+                "description": "run: an active wait card or unanswered e2e run. owner: a current unanswered handover or unresolved PO escalation. po: a decision or operation card In progress with the PO. dependency: work waiting on another card, including a budget decision. observer: Blocked work returning to the sprint observer."
               },
               "card": {
                 "type": "string"
@@ -670,6 +672,10 @@
               "detail": {
                 "type": "string",
                 "description": "One line: the run URL, the handover reason, the budget mark, or who holds the card."
+              },
+              "holder": {
+                "type": "string",
+                "description": "The dependency card reference, when recorded, used to link to the card holding this work."
               }
             }
           }

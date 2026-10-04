@@ -826,8 +826,7 @@ def _cap_spent(
         reason = (
             f"e2e run cap reached ({cap}): this card belongs to no sprint and has dispatched "
             f"{state.dispatched} e2e runs across its candidates, so none is dispatched for `{sha[:12]}`. "
-            "It came from no PO session either, so there is nobody to hand the money decision to but the "
-            "owner: re-cut it in a sprint with an e2e budget, or through the PO, to spend more runs. "
+            "It came from no PO session either, so no PO owns this money decision. Re-cut it in a sprint with an e2e budget, or through the PO, to spend more runs. "
             "`task show` lists the runs."
         )
         owner_events.record(
@@ -915,7 +914,7 @@ def _await_decision(
             attempt_id,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-budget-blocked", ref, sha),
             reason=(
-                f"{spent_line} The decision card the owner has to answer could not be cut: "
+                f"{spent_line} The PO decision card could not be cut: "
                 f"{exc.code}: {exc.message}. Nothing was dispatched for `{sha[:12]}`."
             ),
             step=step,

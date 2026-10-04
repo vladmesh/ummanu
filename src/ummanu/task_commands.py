@@ -273,6 +273,15 @@ def add_task_subcommands(subparsers) -> None:
     reason.add_argument("--reason", help="what the owner has to decide or do")
     reason.add_argument("--reason-file")
     task_handover.set_defaults(handler=run_task_handover)
+    answer = task_subcommands.add_parser("record-owner-answer", help="PO only: record a verbatim owner conversation answer to a current handover; settles attention before completion")
+    answer.add_argument("--ref", required=True)
+    answer.add_argument("--role", required=True, choices=(Role.PO.value,))
+    answer.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    _add_data_dir_args(answer)
+    answer.add_argument("--request-id")
+    answer.add_argument("--handover-event", required=True, help="event_id returned by task handover; another epoch cannot be answered")
+    answer.add_argument("--body-file", required=True, help="verbatim non-empty owner quotation; records no new standing grant")
+    answer.set_defaults(handler=run_task_owner_answer)
     task_cancel = task_subcommands.add_parser(
         "cancel",
         help="PO, or the observer of its own sprint: cancel a pending wait card; the dispatcher delivers "
@@ -626,6 +635,12 @@ def run_task_complete(args: argparse.Namespace) -> int:
             po_session=_po_turn_session(),
         ),
     )
+
+
+def run_task_owner_answer(args: argparse.Namespace) -> int:
+    return _run_task_write(args, lambda writer, body, actor: writer.record_owner_answer(
+        role=args.role, actor=actor, reference=args.ref, handover_event=args.handover_event,
+        quotation=body, request_id=args.request_id))
 
 
 def run_task_handover(args: argparse.Namespace) -> int:

@@ -25,6 +25,7 @@ from unittest import mock
 
 from tests.po_card_fakes import OPERATION_BODY, REF, SPRINT, DispatcherFixture, card
 from tests.po_fake_store import FakePoStore
+from tests.po_handover_fakes import HandedOverFixture
 from ummanu import sprint_commands
 from ummanu.board.owner_handover import HANDED_TO_OWNER, waiting_owner
 from ummanu.board.production_rights import (
@@ -218,11 +219,7 @@ class RuleFixture(DispatcherFixture):
         return card("operation", production=production, description="Rotate the relay key.", **fields)
 
     def owner_says(self, text: str, event_id: str) -> None:
-        self.cards.card["comments"].append({"created_at": "2026-09-26T16:00:00Z", "marker": "owner", "body": f"[owner]\n{text}"})
-        self.cards.log.append(
-            {"request_id": f"req-{event_id}", "ref": REF, "kind": "commented", "event_id": event_id,
-             "payload": {"marker": "owner"}}
-        )
+        HandedOverFixture.owner_says(self, text, event_id)
 
     def handovers(self) -> list[dict[str, Any]]:
         return [event for event in self.cards.log if event["kind"] == HANDED_TO_OWNER]
@@ -388,7 +385,7 @@ class PoDecidesTests(RuleFixture):
         facts = {**submission.card, "input": OWNER_ANSWER_INPUT}
         self.assertEqual(request.fingerprint, po_store.send_fingerprint(session, submission.owner_text, facts))
         answer = self.calls()[-1]["prompt"]
-        # The owner's answer is not evaluated again: no rights section, and its line says the owner decided.
+        # The answer is delivered as quoted, without changing the sprint's recorded authority.
         self.assertEqual(answer, submission.owner_text)
         self.assertNotIn(RIGHTS_HEADING, answer)
         self.assertNotIn("checked the sprint allows it", answer)
@@ -397,7 +394,8 @@ class PoDecidesTests(RuleFixture):
             "## Why you handed it to the owner",
             why,
             "Go ahead on relay, once.",
-            "Touches production: relay. You handed the card to the owner, and the owner decided on it",
+            "Touches production: relay. Follow the quoted owner answer",
+            "Recording this answer applies no grant",
             complete_command(REF, "operation", submission.complete_request_id),
         ):
             self.assertIn(expected, answer)
@@ -422,11 +420,13 @@ class PoDecidesTests(RuleFixture):
         self.assertEqual(self.settled(submission.session_id, 2).state, po_store.COMPLETED)
         self.assertIsNone(waiting_owner(self.cards.card))
         self.assertEqual(self.handovers(), [])
-        self.assertEqual([event["kind"] for event in self.cards.log], ["claim"])
+        self.assertEqual([event["kind"] for event in self.cards.log], ["claimed"])
 
     def test_a_repeat_of_the_same_submit_queues_once_whatever_the_sprint_allows_by_then(self) -> None:
         self.start()
-        runtime = self.runtime(self.operation("relay"))
+        operation = self.operation("relay")
+        operation["description"] = "GATE hold the original input during recovery"
+        runtime = self.runtime(operation)
         real = runtime.po
         answers: list[dict[str, Any]] = []
         sprints = self.po_sprints
@@ -447,16 +447,26 @@ class PoDecidesTests(RuleFixture):
         runtime.po = LosesTheFirstAnswer()
 
         first = self.claim(runtime)
+        original = self.record().po_submission
+        self.reached_gate(original.session_id, 2)
         second = self.tick(runtime)
         self.records.clear()  # and the dispatcher's record is lost: rebuilt from the claim, same ids
         third = self.tick(runtime)
 
         self.assertEqual(
             [first["action"], second["action"], third["action"]],
-            ["po-service-unanswered", "po-card-submitted", "po-card-submitted"],
+            ["po-service-unanswered", "po-card-turn-running", "po-card-turn-running"],
         )
-        self.assertEqual([answer["repeated"] for answer in answers], [False, True, True])
+        self.assertEqual([answer["repeated"] for answer in answers], [False])
         submission = self.record().po_submission
+        self.assertEqual((submission.submit_request_id, submission.session_id),
+                         (original.submit_request_id, original.session_id))
+        # Recovery uses durable evidence without another submit. An explicit service replay of
+        # the same frozen input still proves idempotency after the production rights changed.
+        repeated = real.submit(session_id=original.session_id, text=original.text,
+            request_id=original.submit_request_id, source="dispatcher", card=original.card)
+        self.assertTrue(repeated["repeated"])
+        self.gate.touch()
         self.settled(submission.session_id, 2)
         self.assertEqual(len(FakePoStore(self.board).turns(submission.session_id)), 2)
         # The one turn carries the note it was queued with.
