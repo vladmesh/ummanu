@@ -2400,7 +2400,7 @@ answers `{session_id, created, repeated}`:
   and then, as with no recorded session, it opens at the first effort offered for the chosen CLI. A CLI
   that offers no effort is refused (`validation`) and nothing is opened. Its first input is a
   seeding message naming the sprint and why the session was opened, quoting the sprint's why-document —
-  the one `state/knowledge/decisions/*.md` of the instance repository that names the sprint ref as a whole
+  the one `state/knowledge/decisions/*.md` of the live root that names the sprint ref as a whole
   word; with none or several it says so and lists the paths — and telling the head to read `NOTES.md`
   in its workspace. The sprint gets a comment (role `po`, actor `po-service`): `the PO session <old or
   none> no longer exists; opened <new> seeded with <why-doc path | no why-document found> and NOTES.md`,

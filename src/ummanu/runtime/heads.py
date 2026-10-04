@@ -44,8 +44,8 @@ REGISTRY_ENV = "TA_HEADS_REGISTRY"
 def installed_registry_path() -> Path | None:
     """The configured installation's own snapshot, or None when there is no installation here.
 
-    Where it sits is `ummanu.head_registry`'s answer (`<data>/heads/heads.yaml`, or the legacy
-    live-root copy while the data directory has none). Whether that snapshot exists is otherwise not
+    Where it sits is `ummanu.head_registry`'s answer, `<data>/heads/heads.yaml`; a live root's own
+    `heads/heads.yaml` is never read. Whether that snapshot exists is otherwise not
     asked: a missing, unreadable or dangling snapshot is a broken installation and the load below
     fails by that path. Answering "no installation" instead would route a selected non-default
     instance off a mutable product checkout.

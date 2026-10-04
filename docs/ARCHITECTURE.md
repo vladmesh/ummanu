@@ -102,53 +102,78 @@ Dependency rules:
 ## Storage boundary
 
 ```text
-product repository     CLI, runtime, schemas, tests, generic skills
-instance repository    one private repository per installation: config + portable checkpoint
-data directory         local mutable and derived runtime data plane
-board store            live cards, sprints, products, issues and their audit
+product repository    ~/ummanu: CLI, runtime, schemas, tests, generic skills
+live root             ~/ummanu-data/instance: one installation's config and portable state; plain files, no Git
+snapshot repository   <data>/backup/instance.git: bare; the exporter's commits of the live root
+instance remote       one private repository per installation; the pusher publishes the snapshot branch there
+data directory        ~/ummanu-data: local mutable and derived runtime data plane
+board store           live cards, sprints, products, issues and their audit
 ```
 
 The product repository holds no real project bindings, credentials, cards or host-local state. No
 product path names a user or a checkout.
 
-The instance repository holds persona, project bindings, adapters and the head canon.
-`persona/AGENTS.md` there is the personal part of the interactive head's persona; see
-[The persona boundary](#the-persona-boundary).
-`state/` in it holds the recovery canon: board, runs, memory facts and knowledge documents.
-`secrets/` holds a metadata catalog and sealed values. The raw installation key and the recovery
-phrase are never stored there ([Recovery](RECOVERY.md#secrets)). The host `runtime.env` is a separate
-`0600` file, outside the export allowlist and every checkpoint and archive; a value registered in the store
-makes the file a materialised copy.
+**Live root.** The installation's own files sit in the live root, a plain directory that is never a
+Git work tree ([Recovery](RECOVERY.md#layout)):
 
-The data directory holds dispatcher state, derived exports and indexes, search
-logs, raw dumps, transcripts and artifacts. The SQLite and vector index, worktrees, terminals and
-generated host resources are derived and are not checkpointed.
+- config: `instance.yaml` (the data directory, the host ownership boundary, the sprint budget's
+  `signal` and `hard` limits, the open-sprint limit, the PO head and the offsite settings), the
+  project registry `projects/`, `adapters/`, the head canon `heads/heads.toml`, `persona/` and
+  `skills/manifest.toml`. `projects/` is the one structured registry of connected projects.
+  `persona/AGENTS.md` is the personal part of the interactive head's persona; see
+  [The persona boundary](#the-persona-boundary);
+- `state/memory` and `state/knowledge`: the curated memory canon and the knowledge documents;
+- `secrets/`: a plain metadata catalog and sealed values. The raw installation key and the recovery
+  phrase are never exported ([Recovery](RECOVERY.md#secrets)). The host `runtime.env` is a separate
+  `0600` file, outside the export allowlist and every snapshot and archive; a value registered in the
+  store makes the file a materialised copy.
+
+Each live-root path has one writer, and none of them uses Git: the memory, knowledge and secret
+writers and onboarding write files under their locks; any other config change is an operation card
+checked with `ummanu config check`. No card branch lands in the live root; a card whose project
+repository is the live root is refused at admission ([Recovery](RECOVERY.md#writers)).
+
+**Snapshot exporter.** The dispatcher tick runs `checkpoint.SnapshotExporter`, the only code that
+commits anything about the installation. Each changed window it cuts the live root's allowlisted
+files, the board and run exports and a `snapshot-manifest.json` into one commit of the bare snapshot
+repository, built with Git plumbing so the snapshot never has a work tree; the pusher publishes the
+branch to the instance remote, fast-forward only, every 30 minutes. That remote tip is the recovery
+checkpoint ([Recovery](RECOVERY.md#writers)). A live root that still has `.git` is an installation not
+yet cut over: the tick keeps the legacy commit into that work tree, and `doctor` reports it red
+(`live_root.git_work_tree`).
+
+The data directory holds dispatcher state, the board and run exports, the head-registry pair,
+onboarding drafts, derived memory exports and indexes, search logs, raw dumps, transcripts and
+artifacts. The SQLite and vector index, worktrees, terminals and generated host resources are derived
+and never exported; recovery rebuilds them from the snapshot.
 
 The live board is the PostgreSQL board store, the one implementation of `TaskReader`/`TaskWriter`.
-Its schema, transactions and migrations are in [Board store](BOARD_STORE.md). Backup components are
-normalised board and process state plus the `postgres_dump` of the store. Backup code
-does not read ORM rows. It asks the board client for normalised state and the `board-store.env`
-resolver for the owner connection; dump/restore runs in `board/postgres_recovery.py`.
+Its schema, transactions and migrations are in [Board store](BOARD_STORE.md). A sprint is a board
+entity there, written only through `ummanu sprint`; its budget is derived from the audit of linked
+cards, and knowledge keeps only its "why" document. Backup components are normalised board and
+process state plus the `postgres_dump` of the store. Backup code does not read ORM rows. It asks the
+board client for normalised state and the `board-store.env` resolver for the owner connection;
+dump/restore runs in `board/postgres_recovery.py`.
 
 Product configuration reaches an installation one way. `ummanu upgrade` generates
 `<data>/heads/heads.yaml` from the installation's head canon (its own `heads/heads.toml`, else the
 product default) and writes `<data>/heads/source.yaml` recording the canon, its owner, checkout,
 revision and snapshot digest. The pair is generated state in the data directory: neither file is
-committed or pushed, and `recover` regenerates both. A live tick reads only that installed pair,
-through `head_registry.installed_pair`, so editing a product working tree changes nothing until the
-next `upgrade`. The gap shows in `ummanu status` under `installation.head_registry`. Until a host's
-first `upgrade` writes `<data>/heads/`, readers fall back to the pair an older upgrade committed into
-the live root, and status and doctor name it ([Recovery](RECOVERY.md#fresh-install-and-recovery)).
+exported, and `recover` regenerates both. A live tick reads only that installed pair, through
+`head_registry.installed_pair`, so editing a product working tree changes nothing until the next
+`upgrade`. The gap shows in `ummanu status` under `installation.head_registry`. A live root's own
+`heads/heads.yaml` is never read; a missing `<data>/heads/heads.yaml` is an error that names `ummanu
+upgrade` ([Recovery](RECOVERY.md#fresh-install-and-recovery)).
 
-An installation is named by `--instance` or `UMMANU_INSTANCE`, the checkout by `--product-root`.
-Every other path (skill targets, shell entry points, role worktrees, runtime env file) hangs off the
-home of the account that owns the installation: the owner of the instance directory, or
-`--runtime-user`. A run as root therefore writes the paths the units name, not `/root`. Full order:
-[Operations](OPERATIONS.md#path-precedence).
+An installation is named by `--instance` or `UMMANU_INSTANCE`, else the default live root when it
+exists, the checkout by `--product-root`. Every other path (skill targets, shell entry points, role
+worktrees, runtime env file) hangs off the home of the account that owns the installation: the owner
+of the instance directory, or `--runtime-user`. A run as root therefore writes the paths the units
+name, not `/root`. Full order: [Operations](OPERATIONS.md#path-precedence).
 
-A fresh instance checkout is a depth-1, single-branch, no-tags snapshot of the remote default-branch
-tip, validated in a private stage and adopted atomically. Recovery then fetches only new history and
-fast-forwards; a checkout with local-only history is refused, never merged. Details:
+Recovery reads the remote tip: an exporter snapshot is validated against its manifest and laid out as
+the plain live root plus the snapshot repository; a checkpoint without a manifest, from before the
+cutover, takes the legacy path and becomes a shallow Git checkout. Details:
 [Operations](OPERATIONS.md#recovery) and [Recovery](RECOVERY.md#fresh-install-and-recovery). A manual
 cold archive is optional and plays no part in recovery readiness.
 
@@ -179,6 +204,13 @@ The dispatcher resolves routing, drives the worker and reviewer lifecycle, and c
 workspace, report and review state before each transition. A substantive reviewer verdict parks the
 card in Assessment with the reviewer stopped and the worker held; the merge or next round runs only on
 a tick that carries out a recorded observer decision. Mechanical outcomes resolve in Validate.
+
+Every head is interactive. A Codex profile runs its TUI on `local-pty` like a Claude one; a registry
+that still pins the retired `exec` launch mode is refused when it is loaded (`runtime.heads`), and a
+card restored from an older checkpoint loses that mode at the write boundary. The shipped registry
+puts the reviewer in the other model family from `new_card`, so a card is not reviewed by the model
+that wrote it; a fallback that would make worker and reviewer the same head leaves the card in Ready
+([Operations](OPERATIONS.md#head-readiness)).
 
 Sprint budget comes from the durable audit of linked cards, not from the observer. The dispatcher
 writes one budget event per source event. At the hard limit the sprint becomes `stopped` and a
@@ -378,8 +410,9 @@ passes the same resource-readiness gate as a card claim, uses the ordinary head-
 role environment wrapper, and gets only role-scoped environment, not the whole `runtime.env`.
 
 The observer workspace is cut from a dispatcher-owned empty repository without a remote
-(`<data>/dispatcher/observer-root/observers`, created on first use). It never gets a project
-checkout. Reconciliation neither creates
+(`<data>/dispatcher/observer-root/observers`, created on first use), as a detached worktree under
+`<data>/workspaces/observers/` (`CommandHostRuntime.observer_workspace`). An observer reads the board
+and the sprint entity and owns no branch, so it never gets a project checkout. Reconciliation neither creates
 nor deletes this repository, and `doctor` accepts its registration only at that path. Stopping ends
 the confirmed head first, then removes the git worktree.
 
@@ -439,9 +472,9 @@ deferred record.
 
 ## Memory plane
 
-Facts are markdown records under `state/memory/facts` in the instance repository. The curator writes
+Facts are markdown records under `state/memory/facts` in the live root. The curator writes
 through `ummanu memory propose/commit/supersede`, which writes only `state/memory`, as files and
-without Git, all or nothing under the shared instance-repository writer lock
+without Git, all or nothing under the shared live-root writer lock
 ([Recovery](RECOVERY.md#writers)). The butler may only `propose`; `commit` and `supersede` belong
 to the curator, ummanu and operator roles ([Protocols](PROTOCOLS.md#memory)). Other heads read
 through MCP. The NDJSON export and the SQLite/vector index in the data directory are rebuilt from the
@@ -510,8 +543,8 @@ the boundary.
   A binding's `orca_binding` is optional legacy, read only by curator routing
   ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)); new projects have none. Card placement
   never reads it.
-- Store-registered secrets reach instance Git only as encrypted envelopes. The raw installation key,
-  the recovery phrase and `runtime.env` stay out of Git. Facts, exports and diagnostics carry no
+- Store-registered secrets reach the snapshot and the instance remote only as encrypted envelopes.
+  The raw installation key, the recovery phrase and `runtime.env` are never exported. Facts, exports and diagnostics carry no
   secrets.
 - Private instance-remote and project Git go through one product-owned remote-execution boundary. HTTPS
   children clear ambient credential helpers and use explicit bootstrap input or the managed envelope;
@@ -520,9 +553,9 @@ the boundary.
 - Root-run recovery hands the instance and data roots to the installation account at one named
   ownership barrier, before that account's first secret-consuming Git child, and verifies the restored
   key is a regular `0600` file owned by it.
-- Head-registry materialisation commits locally before a fast-forward-only publish. Upgrade and
-  checkpoint stop when publication fails; only recovery continues as degraded and keeps the commit.
-  There is no reset, rebase, force-push or ambient credential fallback.
+- Head-registry materialisation writes `<data>/heads/` and makes no Git call. The snapshot pusher
+  publishes fast-forward only and stops on divergence. There is no reset, rebase, force-push or
+  ambient credential fallback.
 - Recovery isolates one binding's provisioning failure; core failures and interruption are not
   isolated. `ProjectAvailability` carries unavailable checkouts into host planning and dispatch; an
   unavailable binding gates its own worker and reviewer, never observers. The installation stays

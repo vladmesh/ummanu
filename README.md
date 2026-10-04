@@ -4,9 +4,10 @@ Portable personal appliance for running multiple AI agent heads across many proj
 VPS. The repository contains the CLI, the task and memory protocols, the dispatcher runtime, restore
 logic, schemas and generic skills.
 
-The product repository holds no installation data. Private installation configuration and the
-portable Git-backed recovery checkpoint live in a separate private instance repository; local mutable
-and derived runtime state lives in a local data directory. Install and recovery are documented in
+The product repository holds no installation data. Private installation configuration and portable
+state live in the installation's live root, a plain directory; the snapshot exporter commits it into a
+local snapshot repository and pushes that to a private instance remote, the recovery checkpoint. Local
+mutable and derived runtime state lives in a local data directory. Install and recovery are documented in
 [Recovery](docs/RECOVERY.md).
 
 ## Documentation

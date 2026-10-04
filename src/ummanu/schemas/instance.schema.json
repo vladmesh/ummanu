@@ -56,10 +56,6 @@
       "description": "Model heads bound to orchestrator roles.",
       "items": {"$ref": "#/$defs/head"}
     },
-    "policies": {
-      "type": "object",
-      "description": "Free-form installation policies rendered by reconcile."
-    },
     "sprint_budget": {
       "type": "object",
       "additionalProperties": false,

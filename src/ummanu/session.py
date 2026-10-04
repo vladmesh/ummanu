@@ -166,8 +166,8 @@ def resolve_shell_target(
     workspace = interactive_workspace.workspace_dir(data_dir)
     if not (workspace / interactive_workspace.AGENTS_FILE).is_file():
         raise SessionError(
-            f"interactive workspace {workspace} is missing; run `ummanu upgrade` to materialize it, "
-            "or pass --workspace"
+            f"interactive workspace {workspace} is missing; run `ummanu upgrade --instance LIVE_ROOT` to "
+            f"materialize it, set {INSTANCE_ENV} to select another installation, or pass --workspace"
         )
     return ShellTarget(data_dir, str(workspace))
 
