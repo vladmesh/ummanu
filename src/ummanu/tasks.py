@@ -3487,7 +3487,13 @@ class TaskWriter:
                 def finish_with_wait(entity: Any) -> None:
                     if finish is not None:
                         finish(entity)
-                    owner_events.record_person_wait(self.reader.show(reference), request_id, to=self.client)
+                    card = self.reader.show(reference)
+                    state = e2e_record.e2e_state(card)
+                    if state.budget_decline and (target != "blocked" or state.budget_decline.get("request_id") != request_id):
+                        state.budget_decline = None
+                        self.client.call("saveTaskMetadata", task_id=_task_number(card), values={e2e_record.E2E_FIELD: state.text()})
+                        card = self.reader.show(reference)
+                    owner_events.record_person_wait(card, request_id, to=self.client)
 
                 return self.board_host.transition(
                     TransitionRequest(

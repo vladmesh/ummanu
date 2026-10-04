@@ -163,7 +163,7 @@ def allow_production_command(sprint_ref: str, production: str, request_id: str) 
 
 
 def rights_note(
-    production: str, sprint_ref: str, allowed: Iterable[str] | None, *, request_id: str
+    production: str, sprint_ref: str, allowed: Iterable[str] | None, *, request_id: str, owner_decisions: Iterable[Mapping[str, Any]] = ()
 ) -> str:
     """The section the PO service adds to an operation card's input: the rule's verdict and what to do.
 
@@ -191,6 +191,14 @@ def rights_note(
             f"{RIGHTS_HEADING}\n\n"
             f"touches production {NO_PRODUCTION}: {allows}. Touch no production in this turn."
         )
+    for entry in reversed(list(owner_decisions)):
+        if entry["kind"] == "production" and entry["scope"] == production:
+            disposition = "allows" if entry["value"] else "refuses"
+            action = "Run the operation without further confirmation." if entry["value"] else "Do not touch this production. Apply this answer without asking the owner again."
+            return (f"{RIGHTS_HEADING}\n\nStanding owner decision {sprint_ref}/{entry['id']} {disposition} "
+                    f"production {production}. {action}\n\nOwner quotation:\n\n{entry['quotation']}\n\n"
+                    f"Read back with `sprint show --ref {sprint_ref}`. A later quoted owner answer is recorded "
+                    "with `sprint record-owner-decisions --role po --decisions-file <file>`.")
     allowed = list(allowed)
     line = rights_line(production, sprint_ref, allowed)
     if is_allowed(production, allowed):

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.e2e_record import e2e_state
 from ummanu.board.owner_handover import MARK_KEYS
 from ummanu.board.schema_gate import SchemaAssessment, SchemaOwed, require
 
@@ -230,6 +231,8 @@ def person_wait(card: Mapping[str, Any]) -> str | None:
         return "card is handed to the owner"
     if card.get("state") == "in_progress" and card.get("type") in {"decision", "operation"}:
         return "card is with the PO"
+    if card.get("state") == "blocked" and e2e_state(card).budget_decline:
+        return None
     if card.get("state") == "blocked" and card.get("type") != "wait":
         return "Blocked card awaits a decision"
     return None

@@ -12,6 +12,7 @@ import tempfile
 from datetime import UTC, datetime
 from typing import Any
 
+from ummanu.board import owner_decisions
 from ummanu.board.backend import record_key, sprint_reference_number
 from ummanu.board.e2e_budget import (
     DEFAULT_E2E_BUDGET,
@@ -163,7 +164,7 @@ class SqlSprintRecords:
         for values in self.client._query(
             "SELECT board_key, ref, goal, definition_of_done, product_id, status, observer, "
             "worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, allowed_productions, "
-            "e2e_budget, e2e_used, local_run_exceptions "
+            "e2e_budget, e2e_used, local_run_exceptions, owner_decisions "
             "FROM sprints "
             "WHERE board_key = ANY(%s::bigint[])",
             (keys,),
@@ -225,7 +226,7 @@ class SqlSprintRecords:
         for key in keys:
             (
                 reference, goal, dod, product, status, observer, worker, reviewer, current, source,
-                po_session, productions, e2e_budget, e2e_used, local_run_exceptions,
+                po_session, productions, e2e_budget, e2e_used, local_run_exceptions, decisions,
             ) = rows[key]
             reference = str(reference)
             values: dict[str, str] = {
@@ -266,6 +267,8 @@ class SqlSprintRecords:
             values[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps(
                 local_run_exceptions, sort_keys=True, separators=(",", ":")
             )
+            if decisions:
+                values[owner_decisions.FIELD] = json.dumps(decisions, sort_keys=True, separators=(",", ":"))
             # The e2e run budget (0023), only where it is not the default a sprint reads without it (3,
             # nothing used, no charge), as the 0016 fields: a sprint that never spent a run reads as it did.
             if int(e2e_budget) != DEFAULT_E2E_BUDGET:
@@ -319,15 +322,15 @@ class SqlSprintRecords:
         self.client._execute(
             "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, status, "
             "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, "
-            "allowed_productions, e2e_budget, e2e_used, local_run_exceptions, created_at, updated_at, closed_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s::jsonb,%s,%s,%s)",
+            "allowed_productions, e2e_budget, e2e_used, local_run_exceptions, owner_decisions, created_at, updated_at, closed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)",
             (reference, sprint_key(reference), number, meta["sprint_goal"],
              meta["sprint_definition_of_done"], meta.get("sprint_product") or None, status,
              json.dumps(observer) if observer is not None else None, worker, reviewer,
              meta.get("sprint_source_audit") or None, meta.get("sprint_po_session") or None,
              self._productions(meta.get("sprint_allowed_productions")),
              int(meta.get(SPRINT_E2E_BUDGET) or DEFAULT_E2E_BUDGET), int(meta.get(SPRINT_E2E_USED) or 0),
-             meta.get(LOCAL_RUN_EXCEPTIONS_FIELD, "[]"),
+             meta.get(LOCAL_RUN_EXCEPTIONS_FIELD, "[]"), meta.get(owner_decisions.FIELD, "[]"),
              now, now, None if status == "open" else now),
         )
         self._replace_relations(reference, meta)
@@ -460,6 +463,10 @@ class SqlSprintRecords:
         if LOCAL_RUN_EXCEPTIONS_FIELD in values:
             assignments.append("local_run_exceptions = %s::jsonb")
             params.append(values[LOCAL_RUN_EXCEPTIONS_FIELD])
+        if owner_decisions.FIELD in values:
+            owner_decisions.stored_decisions(values[owner_decisions.FIELD])
+            assignments.append("owner_decisions = %s::jsonb")
+            params.append(values[owner_decisions.FIELD])
         # The budget as a sprint is created or restored with it, and a raise, which adds in place.
         if SPRINT_E2E_BUDGET in values:
             assignments.append("e2e_budget = %s")
@@ -587,11 +594,13 @@ class SqlSprintRecords:
 
     def e2e_budget(self, reference: str) -> dict[str, Any] | None:
         """`{budget, used, charges}` of one sprint's e2e run budget, or None for no such sprint."""
-        rows = self.client._query("SELECT e2e_budget, e2e_used FROM sprints WHERE ref = %s", (reference,))
+        rows = self.client._query("SELECT e2e_budget, e2e_used, owner_decisions FROM sprints WHERE ref = %s", (reference,))
         if not rows:
             return None
-        budget, used = rows[0]
-        return {"budget": int(budget), "used": int(used), "charges": self._e2e_charges([reference]).get(reference, [])}
+        budget, used, decisions = rows[0]
+        entries = owner_decisions.stored_decisions(decisions)
+        return {"budget": int(budget), "used": int(used), "charges": self._e2e_charges([reference]).get(reference, []),
+                "owner_decisions": entries, "refusal": owner_decisions.e2e_refusal(entries)}
 
     def charge_e2e(self, reference: str, *, task_ref: str, dispatch_id: str, at: str) -> dict[str, Any]:
         """Charge one e2e run to the sprint, if its budget has one left: `{charged, budget, used, charges}`.
@@ -603,6 +612,9 @@ class SqlSprintRecords:
         rows = self.client._query(
             "UPDATE sprints SET e2e_used = e2e_used + 1 "
             "WHERE ref = %s AND e2e_used < e2e_budget "
+            "AND COALESCE((SELECT d->>'kind' FROM jsonb_array_elements(owner_decisions) "
+            "WITH ORDINALITY AS decisions(d, n) WHERE d->>'kind' IN ('e2e_grant', 'e2e_refusal') "
+            "ORDER BY n DESC LIMIT 1), '') <> 'e2e_refusal' "
             "AND NOT EXISTS (SELECT 1 FROM sprint_e2e_charges WHERE dispatch_id = %s) "
             "RETURNING e2e_budget, e2e_used",
             (reference, dispatch_id),

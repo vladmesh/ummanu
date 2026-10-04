@@ -34,7 +34,7 @@ from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
-from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.tasks import TaskError, TaskReader, TaskWriter, next_project_reference
 from ummanu.webproto.sprint_reads import _sprint_value
 
 SPRINT = "sprint:1031"
@@ -166,6 +166,94 @@ class BudgetStageFixture(E2eStageFixture):
 
 
 class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
+    def record_standing(self, identifier="stop-1", kind="e2e_refusal", value="no_more_e2e"):
+        return self.sprint_writer().record_owner_decisions(
+            role="po", actor="po", reference=SPRINT, request_id=identifier,
+            entries=[{"id": identifier, "scope": "sprint", "kind": kind, "value": value,
+                      "quotation": "No more e2e in this sprint. Keep the paid runs."}],
+        )
+
+    def test_owner_session_grant_requires_no_owner_comment_or_budget_card(self) -> None:
+        self.arrange()
+        self.record_standing("grant-session", "e2e_grant", 2)
+        self.record_standing("grant-session", "e2e_grant", 2)
+        self.assertEqual(self.budget()["budget"], 5)
+        self.assertEqual(self.decisions(), [])
+        self.assertEqual(self.writer.audit.events(SPRINT, kind="e2e_budget_raised"), [])
+        self.to_green_review()
+        self.assertEqual(self.tick()["action"], "e2e-waiting")
+
+    def test_standing_refusal_with_room_and_later_card_blocks_without_dispatch_card_or_bell(self) -> None:
+        self.arrange()
+        self.record_standing()
+        self.to_green_review()
+        self.assertEqual(self.tick()["status"], "blocked")
+        self.add_code_card(OTHER, state="validate")
+        self.assertEqual(self.stage(OTHER, _sha("2"))["status"], "blocked")
+        self.assertEqual(self.host.dispatches, [])
+        self.assertEqual(self.decisions(), [])
+        self.assertEqual(self.budget()["used"], 0)
+        for ref in (CARD_REF, OTHER):
+            shown = self.reader.show(ref)
+            self.assertEqual(shown["e2e"]["declined_by"], f"{SPRINT}/stop-1")
+            moved = [event for event in self.writer.audit.events(ref) if event.get("transition", {}).get("target") == "blocked"][-1]
+            self.assertIn("No more e2e in this sprint.", moved["reason"])
+        self.assertEqual([event for event in OwnerEventStore(self.board.credentials).events() if event.event_class == "needs_owner"], [])
+
+    def test_spent_standing_refusal_creates_no_budget_card(self) -> None:
+        self.arrange()
+        self.add_code_card(OTHER)
+        self.spend_on_other("1", "2", "3")
+        self.record_standing()
+        self.to_green_review()
+        self.assertEqual(self.tick()["status"], "blocked")
+        self.assertEqual(len(self.host.dispatches), 3)
+        self.assertEqual(self.decisions(), [])
+        self.assertEqual([event for event in OwnerEventStore(self.board.credentials).events() if event.event_class == "needs_owner"], [])
+
+    def test_pending_budget_wait_consumes_standing_refusal_and_preserves_paid_history(self) -> None:
+        decision = self.spent_with_a_pending_decision()
+        # run_stage is reached after gate validation; the pilot is already there through tick.
+        self.board.move(self.board.key_of(OTHER), "validate")
+        self.record_standing()
+        self.assertEqual(self.tick()["status"], "blocked")
+        self.assertEqual(self.stage(OTHER, _sha("4"))["status"], "blocked")
+        # The pending budget decision already occupies the next project reference.
+        late = next_project_reference(self.board, 1, "ummanu")
+        self.add_code_card(late, state="validate")
+        self.assertEqual(self.stage(late, _sha("5"))["status"], "blocked")
+        self.assertEqual([card["ref"] for card in self.decisions()], [decision])
+        self.assertEqual(self.budget()["used"], 3)
+        self.assertEqual(len(self.host.dispatches), 3)
+        self.assertEqual([event for event in OwnerEventStore(self.board.credentials).events() if event.event_class == "needs_owner"], [])
+
+    def test_paid_run_keeps_running_after_a_standing_refusal(self) -> None:
+        self.arrange()
+        self.to_green_review()
+        self.assertEqual(self.tick()["action"], "e2e-waiting")
+        history = self.budget()["charges"]
+        self.record_standing()
+        self.assertEqual(self.tick()["action"], "e2e-waiting")
+        self.assertEqual(self.budget()["charges"], history)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.decisions(), [])
+
+    def test_an_unrelated_later_block_clears_the_known_refusal_marker(self) -> None:
+        self.arrange()
+        self.add_code_card(OTHER, state="validate")
+        self.record_standing()
+        self.assertEqual(self.stage(OTHER, _sha("1"))["status"], "blocked")
+        self.writer.move(
+            role="po", actor="po", reference=OTHER, target="ready", reason="a later plan",
+            sprint_override=True, sprint_override_reason="fixture later plan", request_id="new-plan",
+        )
+        self.writer.move(
+            role="po", actor="po", reference=OTHER, target="blocked", reason="needs a fresh decision",
+            sprint_override=True, sprint_override_reason="fixture unrelated block", request_id="unrelated-block",
+        )
+        self.assertIsNone(e2e_state(self.reader.show(OTHER)).budget_decline)
+        self.assertTrue([event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == OTHER and event.event_class == "needs_owner"])
+
     def test_the_fourth_run_of_a_sprint_is_not_dispatched_and_cuts_exactly_one_decision(self) -> None:
         decision = self.spent_with_a_pending_decision()
 

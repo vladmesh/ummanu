@@ -302,6 +302,8 @@ class E2eState:
     budget_wait: BudgetWait | None = None
     after_merge: AfterMergeMark | None = None
     after_merge_runs: list[E2eRun] = field(default_factory=list)
+    # Decision identity and exact Blocked occurrence; cleared by every other transition.
+    budget_decline: dict[str, str] | None = None
 
     @property
     def dispatched(self) -> int:
@@ -329,6 +331,8 @@ class E2eState:
 
     def to_json(self) -> dict[str, Any]:
         document: dict[str, Any] = {"runs": [asdict(run) for run in self.runs]}
+        if self.budget_decline is not None:
+            document["budget_decline"] = dict(self.budget_decline)
         if self.budget_wait is not None:
             document["budget_wait"] = asdict(self.budget_wait)
         if self.after_merge is not None:
@@ -349,11 +353,17 @@ class E2eState:
         mark = AfterMergeMark.from_json(mapping.get("after_merge"))
         raw_after = mapping.get("after_merge_runs")
         after = [E2eRun.from_json(run) for run in raw_after] if isinstance(raw_after, list) else []
+        decline = mapping.get("budget_decline")
+        if not isinstance(decline, Mapping) or set(decline) != {"decision", "request_id"} or any(
+            not isinstance(value, str) or not value.strip() for value in decline.values()
+        ):
+            decline = None
         return cls(
             [run for run in parsed if run is not None],
             waiting,
             mark,
             [run for run in after if run is not None],
+            dict(decline) if decline is not None else None,
         )
 
 
@@ -386,6 +396,7 @@ def e2e_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
         and state.budget_wait is None
         and state.after_merge is None
         and not state.after_merge_runs
+        and state.budget_decline is None
     ):
         return None
     sprint = str(task.get("sprint") or "")
@@ -395,6 +406,7 @@ def e2e_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
         "runs_dispatched": state.dispatched,
         "run_cap": None if sprint else e2e_budget.card_cap(task),
         "budget": sprint or None,
+        **({"declined_by": state.budget_decline["decision"]} if state.budget_decline else {}),
         **(
             {"mark": state.budget_wait.mark, "waiting_on": state.budget_wait.decision}
             if state.budget_wait is not None

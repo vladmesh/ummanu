@@ -893,6 +893,9 @@
         },
         "local_run_exceptions": {
           "$ref": "#/$defs/local_run_exceptions"
+        },
+        "owner_decisions": {
+          "$ref": "#/$defs/owner_decisions"
         }
       },
       "allOf": [
@@ -1188,6 +1191,9 @@
                 },
                 "local_run_exceptions": {
                   "$ref": "#/$defs/local_run_exceptions"
+                },
+                "owner_decisions": {
+                  "$ref": "#/$defs/owner_decisions"
                 }
               }
             }
@@ -1946,6 +1952,9 @@
                 },
                 "local_run_exceptions": {
                   "$ref": "#/$defs/local_run_exceptions"
+                },
+                "owner_decisions": {
+                  "$ref": "#/$defs/owner_decisions"
                 }
               }
             }
@@ -2131,6 +2140,107 @@
           "rationale": {
             "type": "string",
             "minLength": 1
+          }
+        }
+      }
+    },
+    "owner_decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "scope",
+          "kind",
+          "value",
+          "quotation",
+          "recorded_by"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scope": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "production",
+              "e2e_grant",
+              "e2e_refusal",
+              "advance_consent"
+            ]
+          },
+          "value": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "integer",
+                "minimum": 1
+              },
+              {
+                "const": "no_more_e2e"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "action",
+                  "max_uses"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "max_uses": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                }
+              }
+            ]
+          },
+          "quotation": {
+            "type": "string",
+            "minLength": 1
+          },
+          "recorded_by": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "role",
+              "actor",
+              "request_id",
+              "event_id",
+              "at"
+            ],
+            "properties": {
+              "role": {
+                "const": "po"
+              },
+              "actor": {
+                "type": "string",
+                "minLength": 1
+              },
+              "request_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "event_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "at": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
           }
         }
       }

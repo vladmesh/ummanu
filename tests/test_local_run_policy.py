@@ -106,7 +106,7 @@ class LocalRunCreationTests(unittest.TestCase):
         # JSONB returns object keys in its own order. Arrays, including argv, keep their order.
         stored_entry = {key: entry[key] for key in ("argv", "project", "rationale")}
         row = (7, "sprint:7", "g", "", "ummanu", "open", {"kind": "none"},
-               None, None, None, None, None, [], 3, 0, [stored_entry])
+               None, None, None, None, None, [], 3, 0, [stored_entry], [])
         sql_client = mock.MagicMock()
         sql_client._staged.return_value = {}
         sql_client._query.side_effect = lambda query, params: (

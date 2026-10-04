@@ -495,7 +495,7 @@ class PoService:
                 f"ummanu po: {card['card_ref']} queued for the PO to decide: "
                 f"{rights_line(production, sprint.ref, sprint.allowed_productions)}"
             )
-        return rights_note(production, sprint.ref, sprint.allowed_productions, request_id=allow_id)
+        return rights_note(production, sprint.ref, sprint.allowed_productions, request_id=allow_id, owner_decisions=sprint.owner_decisions)
 
     def _reserve(
         self,

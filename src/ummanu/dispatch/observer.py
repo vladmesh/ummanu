@@ -3459,6 +3459,17 @@ def _observer_sprint_context(sprint: dict[str, Any]) -> list[str]:
     """Render all live comments in board order, then the subordinate saved resume."""
     comments = _observer_comments(sprint)
     lines = [
+        "## Standing owner decisions",
+        "",
+        "Apply these explicit entries before the saved resume. Latest production answer per project wins;",
+        "the latest e2e grant/refusal controls admission. Grants add once; a refusal stops new runs even with budget room.",
+        "Use only the latest advance consent for each action and scope, within max_uses and recorded operation uses.",
+        "Free prose grants nothing; advance consent does not increase budget or grant production permissions.",
+        "Do not ask the owner again for a covered decision or manufacture a new owner decision.",
+        "Read IDs and quotations with `sprint show`; the PO records answers with `sprint record-owner-decisions`.",
+        "",
+        json.dumps(sprint.get("owner_decisions") or [], ensure_ascii=False, indent=2),
+        "",
         "## Live sprint comments",
         "",
         "This is the complete current comment list in board order, with no timestamp cutoff. Apply",

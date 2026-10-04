@@ -580,8 +580,9 @@ class SchemaModelTests(unittest.TestCase):
         ]
 
         # 56 since `0022` added `origin_returns` with three (secretary-1792); 57 since `0023` added the
-        # sprint's e2e counts (secretary-1796); 58 since `0026` added the local-run array shape.
-        self.assertEqual(len(checks), 58, "§3.13 counts 58 CHECK constraints at the head revision")
+        # sprint's e2e counts (secretary-1796); 58 since `0026` added the local-run array shape;
+        # 59 since `0027` added the quoted owner-decision array shape.
+        self.assertEqual(len(checks), 59, "§3.13 counts 59 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -707,6 +708,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0027_sprint_owner_decisions",
                 "0026_sprint_local_runs",
                 "0025_card_waits_for_person",
                 "0024_e2e_after_merge_kind",

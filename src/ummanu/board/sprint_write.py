@@ -15,6 +15,7 @@ from typing import Any
 from ummanu.board.e2e_budget import DEFAULT_E2E_BUDGET
 from ummanu.board.local_run import LocalRunException, parse_local_run_exceptions
 from ummanu.board.models import SprintState
+from ummanu.board.owner_decisions import parse_decisions
 from ummanu.board.roles import Role
 from ummanu.board.sprint_admission import SprintAdmission
 from ummanu.board.sprint_read import SprintBudget
@@ -117,6 +118,7 @@ class SprintCreateIntent:
     e2e_budget: int = DEFAULT_E2E_BUDGET
     # Omitted at the empty default to preserve released create request identity.
     local_run_exceptions: tuple[LocalRunException, ...] = ()
+    owner_decisions: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> SprintCreateIntent:
@@ -137,6 +139,7 @@ class SprintCreateIntent:
             po_session=str(document.get("po_session")) if document.get("po_session") else None,
             allowed_productions=_strings(document.get("allowed_productions")),
             e2e_budget=int(document.get("e2e_budget", DEFAULT_E2E_BUDGET)),
+            owner_decisions=tuple(parse_decisions(document.get("owner_decisions", []))),
             local_run_exceptions=parse_local_run_exceptions(
                 document.get("local_run_exceptions", []), projects=_strings(document.get("reservations"))
             ),
@@ -158,6 +161,8 @@ class SprintCreateIntent:
             "worker": self.worker,
             "reviewer": self.reviewer,
         }
+        if self.owner_decisions:
+            document["owner_decisions"] = list(self.owner_decisions)
         if self.po_session:
             document["po_session"] = self.po_session
         if self.allowed_productions:

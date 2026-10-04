@@ -65,7 +65,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ummanu.board import e2e_budget, e2e_record, owner_events, wait_card
+from ummanu.board import e2e_budget, e2e_record, owner_events, owner_decisions, wait_card
 from ummanu.board import po_origin as origin_field
 from ummanu.board.completion_evidence import has_candidate
 from ummanu.board.e2e_record import FAILURE, REFUSED, SENT, SUCCESS, BudgetWait, E2eRun, E2eState
@@ -214,6 +214,9 @@ def run_stage(
             return E2eProceed(result, entry)
     if not str(task.get("sprint") or "") and state.dispatched >= e2e_budget.card_cap(task):
         return _cap_spent(runtime, task, record, records, payload, attempt_id, state, sha, step=step)
+    refusal = _standing_refusal(runtime, str(task.get("sprint") or ""))
+    if refusal is not None:
+        return _standing_decline(runtime, task, record, records, payload, attempt_id, state, refusal, step=step)
     started = _dispatch(runtime, task, record, attempt_id, state, declaration, sha, step=step)
     if isinstance(started, dict):
         return started
@@ -744,6 +747,28 @@ _RAISE_COMMANDS = {
 }
 
 
+def _standing_refusal(runtime: Any, sprint: str) -> dict[str, Any] | None:
+    if not sprint:
+        return None
+    current = runtime.reader.sprint_e2e_budget(sprint)
+    return current.get("refusal") if current else None
+
+
+def _standing_decline(
+    runtime: Any, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+    payload: dict[str, Any], attempt_id: str, state: E2eState, refusal: dict[str, Any], *, step: str,
+) -> dict[str, Any]:
+    sprint, ref = str(task["sprint"]), str(task["ref"])
+    decision = f"{sprint}/{refusal['id']}"
+    request_id = _attempt_request_id(record.attempt_id or attempt_id, "e2e-standing-declined", ref, decision)
+    state.budget_wait = None
+    state.budget_decline = {"decision": decision, "request_id": request_id}
+    _persist(runtime, ref, state)
+    return _block(runtime, task, record, records, payload, attempt_id, request_id=request_id,
+                  reason=owner_decisions.refusal_text(sprint, refusal), step=step,
+                  outcome="standing owner decision refuses e2e", blocked_reason="other")
+
+
 def _budget_spent(
     runtime: Any,
     task: dict[str, Any],
@@ -759,6 +784,9 @@ def _budget_spent(
 ) -> dict[str, Any]:
     """The sprint's budget has no run left: wait on the decision for this budget generation."""
     sprint = str(task.get("sprint") or "")
+    refusal = _standing_refusal(runtime, sprint)
+    if refusal is not None:
+        return _standing_decline(runtime, task, record, records, payload, attempt_id, state, refusal, step=step)
     return _await_decision(
         runtime,
         task,
@@ -1041,6 +1069,17 @@ def _decision_description(
             "",
             "## Applying the owner's answer",
             "",
+            *([
+                "For an answer from the owner conversation in the PO session, record the verbatim quotation",
+                "as an entry with a stable ID, scope sprint, kind e2e_grant (positive runs) or e2e_refusal",
+                "(value no_more_e2e) in a JSON list. No owner-role card comment is required:",
+                "",
+                f"      python3 -P -m ummanu sprint record-owner-decisions --ref {scope_ref} --role po --decisions-file <JSON> --request-id <request>",
+                "",
+                f"Read back with `sprint show --ref {scope_ref}`, then complete this card.",
+                "The genuine owner-comment commands below remain supported.",
+                "",
+            ] if scope == "sprint" else []),
             (
                 f"- `{e2e_budget.ANSWER_RAISE_LINE}`: run this with the event id of that comment (the owner's "
                 "answer input names it); the raise is the owner's N, and nothing else (`--add`, if given, has "
@@ -1073,6 +1112,9 @@ def _budget_recheck(
     waiting = state.budget_wait
     assert waiting is not None
     if waiting.scope == "sprint":
+        refusal = _standing_refusal(runtime, str(task.get("sprint") or ""))
+        if refusal is not None:
+            return _standing_decline(runtime, task, record, records, payload, attempt_id, state, refusal, step=step)
         current = runtime.reader.sprint_e2e_budget(str(task.get("sprint") or ""))
         budget = int(current["budget"]) if current else waiting.generation
         room = current is None or int(current["used"]) < budget

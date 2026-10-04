@@ -12,7 +12,11 @@ Every e2e run the dispatcher dispatches pays for stands, so runs are budgeted.
   own run records, plus every raise recorded on it: the bag field :data:`E2E_CAP_FIELD`, JSON
   `{"raises": [{add, authorized_by, decision, at}]}`, written only by `task e2e-budget`.
 
-A spent budget is a money decision. The dispatcher cuts a `decision` card for it, once per budget
+A sprint first applies quoted standing decisions (`board.owner_decisions`): the PO can record grants
+from its owner conversation directly; a sprint-wide refusal prevents new admission with any counter.
+The released genuine owner-comment grant adapter below records the same grant entry.
+
+An uncovered spent budget is a money decision. The dispatcher cuts a `decision` card for it, once per budget
 generation (:func:`decision_request_id`; the generation is the budget, or the card's cap, the runs were
 spent against), and the PO hands it to the owner. The budget is raised only on the owner's recorded
 word: `sprint e2e-budget` / `task e2e-budget` with `--authorized-by`, the event id of an owner comment

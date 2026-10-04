@@ -44,6 +44,7 @@ OWED = (
     "0024_e2e_after_merge_kind",
     "0025_card_waits_for_person",
     "0026_sprint_local_runs",
+    "0027_sprint_owner_decisions",
 )
 
 

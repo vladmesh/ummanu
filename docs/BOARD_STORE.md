@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0026` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0027` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/release_migrations.py` | the release's target bundle, its eligibility and bounded apply (§7.4) |
 | `board/schema_gate.py` | the schema gate every operational connection and doctor read (§7.4) |
@@ -183,6 +183,7 @@ CREATE TABLE sprints (
     reviewer_pin       text,
     po_session         text,                          -- the PO session it answers to (0016)
     allowed_productions text[] NOT NULL DEFAULT '{}', -- projects its operations may touch (0016)
+    owner_decisions jsonb NOT NULL DEFAULT '[]', -- quoted sprint authority (0027, J9)
     local_run_exceptions jsonb NOT NULL DEFAULT '[]', -- exact command authority at create (0026, J8)
     e2e_budget         integer NOT NULL DEFAULT 3,    -- e2e runs it may dispatch (0023)
     e2e_used           integer NOT NULL DEFAULT 0,    -- e2e runs it dispatched (0023)
@@ -196,6 +197,7 @@ CREATE TABLE sprints (
     closed_at          timestamptz,
     CONSTRAINT sprint_closed_has_time CHECK ((status = 'open') = (closed_at IS NULL)),
     CONSTRAINT sprint_e2e_counts_are_not_negative CHECK (e2e_budget >= 0 AND e2e_used >= 0),
+    CONSTRAINT sprint_owner_decisions_are_array CHECK (jsonb_typeof(owner_decisions) = 'array'),
     CONSTRAINT sprint_local_runs_are_array CHECK (jsonb_typeof(local_run_exceptions) = 'array'),
     CONSTRAINT sprint_ref_is_a_sprint_reference CHECK (ref ~ '^sprint:'),
     CONSTRAINT sprint_number_agrees_with_ref CHECK (
@@ -654,6 +656,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 | (J5) `requests.intent` | the frozen audit record compared on retry |
 | (J6) `issues.extensions` | (J3) for Issues |
 | (J7) `products.extensions` | (J3) for Products |
+| (J9) `sprints.owner_decisions` | append-only quoted entries with stable IDs and PO audit attribution; latest scoped answer wins; empty for released sprints |
 | (J8) `sprints.local_run_exceptions` | creation-only list of `{project, argv, rationale}`; exact vectors for registered, reserved projects; default `[]` |
 
 No extension bag may hold a field the schema names. Link sets, budget counters, resume fields and
@@ -741,7 +744,8 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0023_sprint_e2e_budget` | `sprints.e2e_budget` (integer, not null, default 3) and `sprints.e2e_used` (integer, not null, default 0) with `sprint_e2e_counts_are_not_negative`: every existing sprint, open ones included, loads with a budget of 3 and nothing used; `sprint_e2e_charges` (`dispatch_id` primary key, `sprint_ref` references `sprints` on delete cascade, `task_ref`, `charged_at`; index `sprint_e2e_charges_by_sprint`); `e2e_budget_spent` in `owner_event_kind_in_vocabulary` and, as a `needs_owner` kind, in `owner_event_class_follows_kind`, both restated; the downgrade restores `0021`'s two constraints and drops the table and the columns, and fails while an `e2e_budget_spent` event exists |
 | `0024_e2e_after_merge_kind` | `e2e_after_merge` in `owner_event_kind_in_vocabulary` and, as a `needs_owner` kind, in `owner_event_class_follows_kind`, both restated: an after-merge e2e run that needs the owner (secretary-1807); the after-merge records themselves are typed fields of a card's `e2e` bag field, no column; the downgrade restores `0023`'s two constraints and fails while an `e2e_after_merge` event exists |
 | `0025_card_waits_for_person` | additive widening of the owner-event vocabulary/class constraints for real sprint Blocked decisions and PO waits; backfills unresolved open sprint waits lacking an open needs_owner event, skips superseded/archived/wait cards, preserves prior rows; no column or new ledger; downgrade refuses while the added kind exists |
-| `0026_sprint_local_runs` | additive `sprints.local_run_exceptions` jsonb, not null, default `[]`, array CHECK; existing sprints gain no exceptions; released empty create intents retain request identity; ships through the automatic release migration boundary; downgrade refuses while a nonempty declaration exists (head) |
+| `0026_sprint_local_runs` | additive `sprints.local_run_exceptions` jsonb, not null, default `[]`, array CHECK; existing sprints gain no exceptions; released empty create intents retain request identity; ships through the automatic release migration boundary; downgrade refuses while a nonempty declaration exists |
+| `0027_sprint_owner_decisions` | additive quoted owner decision array, default `[]`; existing permission/counter/charge records unchanged; downgrade refuses nonempty authority (head) |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -753,7 +757,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 31 tables, 58 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
+(including `alembic_version`): 31 tables, 59 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1110,7 +1114,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0026_sprint_local_runs`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0027_sprint_owner_decisions`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

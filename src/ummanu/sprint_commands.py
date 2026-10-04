@@ -36,7 +36,7 @@ from ummanu.sprints import (
     public_current_task,
 )
 from ummanu.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
-from ummanu.tasks import TaskError
+from ummanu.tasks import TaskError, admit_role
 from ummanu.webproto.commands import (
     _EXIT_BY_CODE,
     _RUN_EXIT_BY_CODE,
@@ -82,6 +82,7 @@ def add_sprint_subcommands(subparsers) -> None:
         "--local-run-exceptions-file",
         help="JSON list of {project, argv, rationale} exceptions declared at creation; default []",
     )
+    created.add_argument("--owner-decisions-file", help="PO only: JSON list of {id, scope, kind, value, quotation}; see record-owner-decisions")
     created.add_argument("--repository", action="append", default=[])
     created.add_argument("--product", required=True, help="product id the sprint belongs to")
     created.add_argument(
@@ -216,6 +217,14 @@ def add_sprint_subcommands(subparsers) -> None:
     _add_data_dir_args(raised)
     raised.add_argument("--request-id")
     raised.set_defaults(handler=run_e2e_budget)
+    decisions = commands.add_parser("record-owner-decisions", help="PO only: append verbatim quoted owner answers; stable IDs make grants idempotent. Read back with sprint show")
+    decisions.add_argument("--ref", required=True)
+    decisions.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
+    decisions.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    decisions.add_argument("--decisions-file", required=True, help="JSON list: id, scope, kind, value, quotation. production/project/bool; e2e_grant/sprint/positive runs; e2e_refusal/sprint/no_more_e2e; advance_consent/scope/{action,max_uses}. Later answers supersede earlier answers")
+    decisions.add_argument("--request-id")
+    _add_data_dir_args(decisions)
+    decisions.set_defaults(handler=run_owner_decisions)
     sprint.set_defaults(handler=not_implemented)
 
 
@@ -448,6 +457,9 @@ def _thresholds(args: argparse.Namespace) -> dict | None:
 
 def run_create(args: argparse.Namespace) -> int:
     try:
+        standing_decisions = json.loads(_read_body(args.owner_decisions_file)) if args.owner_decisions_file else []
+        from ummanu.board.owner_decisions import parse_decisions
+        parse_decisions(standing_decisions)
         definition_of_done = _read_body(args.dod_file) if args.dod_file else args.definition_of_done
         local_run_exceptions = (
             json.loads(_read_body(args.local_run_exceptions_file)) if args.local_run_exceptions_file else []
@@ -455,7 +467,7 @@ def run_create(args: argparse.Namespace) -> int:
         if not isinstance(local_run_exceptions, list):
             raise ValueError("local_run_exceptions must be a list")  # noqa: TRY004 - uniform JSON value validation
     except ValueError as exc:
-        print(json.dumps({"error": {"code": "validation", "message": f"invalid local_run_exceptions JSON: {exc}"}}), file=os.sys.stderr)
+        print(json.dumps({"error": {"code": "validation", "message": f"invalid sprint create JSON: {exc}"}}), file=os.sys.stderr)
         return 2
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
@@ -480,8 +492,27 @@ def run_create(args: argparse.Namespace) -> int:
             allowed_productions=args.allow_production,
             e2e_budget=args.e2e_budget,
             local_run_exceptions=local_run_exceptions,
+            standing_decisions=standing_decisions,
         ),
     )
+
+
+def run_owner_decisions(args: argparse.Namespace) -> int:
+    try:
+        admit_role(args.role, args.actor or args.role, {"po"})
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
+    try:
+        from ummanu.board.owner_decisions import parse_decisions
+        entries = parse_decisions(json.loads(_read_body(args.decisions_file)))
+    except (ValueError, TaskError) as exc:
+        print(json.dumps({"error": {"code": "validation", "message": str(exc)}}), file=os.sys.stderr)
+        return 2
+    return _write(args, lambda writer: writer.record_owner_decisions(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        entries=entries, request_id=args.request_id,
+    ))
 
 
 def run_allow_production(args: argparse.Namespace) -> int:

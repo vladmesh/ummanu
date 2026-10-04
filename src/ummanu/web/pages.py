@@ -4130,6 +4130,13 @@ def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -
         [
             ("Cards", card_rows, len(listed) or None),
             ("Definition of done", dod_body, None),
+            ("Owner decisions", _rows(["ID", "Scope / kind", "Value", "Owner quotation", "Recorded by"], [
+                [escape(str(entry["id"])), escape(f"{entry['scope']} / {entry['kind']}"),
+                 escape(json.dumps(entry["value"], ensure_ascii=False)),
+                 f'<pre>{escape(entry["quotation"])}</pre>',
+                 escape(json.dumps(entry["recorded_by"], ensure_ascii=False))]
+                for entry in value.get("owner_decisions") or []
+            ]) if value.get("owner_decisions") else '<p class="empty">No quoted standing owner decisions.</p>', len(value.get("owner_decisions") or []) or None),
             ("Last resume", resume_body, None),
             ("Issues", issue_body, len(issues) or None),
         ],
