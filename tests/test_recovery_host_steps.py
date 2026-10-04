@@ -791,7 +791,7 @@ class WebFrontSitesTests(unittest.TestCase):
 
 
 class DisabledBindingExpectationTests(unittest.TestCase):
-    """P13: doctor neither requires a disabled binding's checkout nor calls one that is there unmanaged."""
+    """P13: doctor never requires a disabled binding's checkout; one that is there is matched, not unmanaged."""
 
     def test_a_disabled_binding_yields_no_missing_on_host(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -811,7 +811,8 @@ class DisabledBindingExpectationTests(unittest.TestCase):
 
         self.assertEqual(diff.missing_on_host, [])
         self.assertEqual(diff.unmanaged_on_host, [])
-        self.assertEqual(diff.matched, [str(live)])
+        # A disabled binding's checkout that is there is still the binding's own checkout.
+        self.assertEqual(diff.matched, sorted([str(live), str(present)]))
 
     def test_upgrade_s_expectations_skip_a_disabled_binding_as_recovery_does(self) -> None:
         bindings = [

@@ -19,7 +19,7 @@ import os
 import stat
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -513,7 +513,7 @@ class Expectations:
     unit_runtime: dict[str, tuple[bool, bool]] = field(default_factory=dict)
     project_error: str = ""
     runtime_data_dir: Path | None = None
-    #: Checkouts of disabled bindings: not required on the host, and not unmanaged when present.
+    #: Checkouts of disabled bindings: matched when present, never missing or unmanaged.
     dormant_projects: set[str] = field(default_factory=set)
 
 
@@ -694,12 +694,19 @@ def _diff(expected: set[str], actual: set[str]) -> KindDiff:
     )
 
 
+def _project_diff(expected: Expectations, actual: HostInventory) -> KindDiff:
+    """A disabled binding's checkout matches when present and is not missing when absent."""
+    diff = _diff(expected.projects, actual.projects - expected.dormant_projects)
+    present = expected.dormant_projects & actual.projects
+    return replace(diff, matched=sorted({*diff.matched, *present}))
+
+
 def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDiff]:
     """Compare expectations against a host inventory, one KindDiff per kind."""
     transient = (set(actual.runtime_scopes.scopes) | set(actual.runtime_scopes.disappeared)
                  if actual.runtime_scopes is not None and not actual.runtime_scopes.errors else set())
     return {
-        "projects": _diff(expected.projects, actual.projects - expected.dormant_projects),
+        "projects": _project_diff(expected, actual),
         "units": _diff(expected.units, actual.units - expected.foreign_units - transient),
     }
 
