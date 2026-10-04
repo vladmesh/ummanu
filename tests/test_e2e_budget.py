@@ -34,7 +34,7 @@ from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
-from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.tasks import TaskError, TaskReader, TaskWriter, next_project_reference
 from ummanu.webproto.sprint_reads import _sprint_value
 
 SPRINT = "sprint:1031"
@@ -218,8 +218,10 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         self.record_standing()
         self.assertEqual(self.tick()["status"], "blocked")
         self.assertEqual(self.stage(OTHER, _sha("4"))["status"], "blocked")
-        self.add_code_card("ummanu-522", state="validate")
-        self.assertEqual(self.stage("ummanu-522", _sha("5"))["status"], "blocked")
+        # The pending budget decision already occupies the next project reference.
+        late = next_project_reference(self.board, 1, "ummanu")
+        self.add_code_card(late, state="validate")
+        self.assertEqual(self.stage(late, _sha("5"))["status"], "blocked")
         self.assertEqual([card["ref"] for card in self.decisions()], [decision])
         self.assertEqual(self.budget()["used"], 3)
         self.assertEqual(len(self.host.dispatches), 3)
@@ -241,8 +243,14 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         self.add_code_card(OTHER, state="validate")
         self.record_standing()
         self.assertEqual(self.stage(OTHER, _sha("1"))["status"], "blocked")
-        self.writer.move(role="po", actor="po", reference=OTHER, target="ready", reason="a later plan", request_id="new-plan")
-        self.writer.move(role="po", actor="po", reference=OTHER, target="blocked", reason="needs a fresh decision", request_id="unrelated-block")
+        self.writer.move(
+            role="po", actor="po", reference=OTHER, target="ready", reason="a later plan",
+            sprint_override=True, sprint_override_reason="fixture later plan", request_id="new-plan",
+        )
+        self.writer.move(
+            role="po", actor="po", reference=OTHER, target="blocked", reason="needs a fresh decision",
+            sprint_override=True, sprint_override_reason="fixture unrelated block", request_id="unrelated-block",
+        )
         self.assertIsNone(e2e_state(self.reader.show(OTHER)).budget_decline)
         self.assertTrue([event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == OTHER and event.event_class == "needs_owner"])
 
