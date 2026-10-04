@@ -16,6 +16,7 @@ import io
 import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -30,9 +31,12 @@ from tests.po_handover_fakes import (
     OneCardClient,
     decision_card,
 )
+from ummanu.board.owner_events import ReadRefused
 from ummanu.board.owner_handover import (
     HANDED_TO_OWNER,
     MARK_KEYS,
+    OWNER_ANSWER,
+    attention_record,
     mark_values,
     owner_answer_event_ids,
     owner_comments_since_handover,
@@ -107,7 +111,7 @@ class HandoverTests(WriterFixture):
         )
         # The mark is written only through the three validated fields, and never by a transition.
         [(_method, params)] = [write for write in self.client.writes if write[0] == "saveTaskMetadata"]
-        self.assertEqual(set(params["values"]), set(MARK_KEYS))
+        self.assertEqual(set(params["values"]), {*MARK_KEYS, "owner_answer", "owner_escalation"})
 
     def test_a_repeat_under_the_same_id_writes_nothing_and_another_reason_is_refused(self) -> None:
         first = self.hand_over()
@@ -189,6 +193,67 @@ class HandoverTests(WriterFixture):
 
 
 class OwnerCommentTests(WriterFixture):
+    def test_both_answer_channels_settle_attention_before_card_completion(self) -> None:
+        for channel in ("comment", "conversation"):
+            with self.subTest(channel=channel):
+                self.card.clear()
+                self.card.update(decision_card())
+                self.writer.audit = MemoryAudit()
+                handover = self.hand_over(request_id=f"handover-{channel}", po_session="po-origin")
+                event = self.client.owner_events.of_kind("card_handed_to_owner")[-1]
+                self.assertTrue(event.unread)
+                quotation = " Yes, use the company card.\n"
+                if channel == "comment":
+                    result = self.writer.comment(role="owner", actor="owner", reference=REF,
+                        body=quotation, request_id=f"answer-{channel}")
+                else:
+                    result = self.writer.record_owner_answer(role="po", actor="po", reference=REF,
+                        handover_event=handover["event_id"], quotation=quotation, request_id=f"answer-{channel}")
+                self.assertIsNone(waiting_owner(self.card))
+                self.assertEqual(self.card["state"], "in_progress")
+                answer = attention_record(self.card, OWNER_ANSWER)
+                self.assertEqual(answer["quotation"], quotation)
+                self.assertEqual(answer["handover_event"], handover["event_id"])
+                self.assertEqual(answer["event_id"], result["event_id"])
+                self.assertEqual(answer["po_session"], "po-origin")
+                self.assertFalse(self.client.owner_events.rows[event.id].unread)
+                self.assertFalse(self.client.owner_events.mark_read(event.id).held)
+
+    def test_answer_replay_and_earlier_comments_cannot_answer_a_later_epoch(self) -> None:
+        self.writer.comment(role="owner", actor="owner", reference=REF, body="Earlier approval.", request_id="old-comment")
+        first = self.hand_over()
+        self.assertIsNotNone(waiting_owner(self.card))
+        fields = dict(role="po", actor="po", reference=REF, handover_event=first["event_id"],
+                      quotation="Approved.", request_id="answer-1")
+        result = self.writer.record_owner_answer(**fields)
+        self.assertTrue(self.writer.record_owner_answer(**fields)["replayed"])
+        self.assertEqual(attention_record(self.card, OWNER_ANSWER)["event_id"], result["event_id"])
+        second = self.hand_over(request_id="handover-2", reason="Which monthly plan?")
+        self.assertIsNone(attention_record(self.card, OWNER_ANSWER))
+        self.assertTrue(self.writer.record_owner_answer(**fields)["replayed"])
+        self.assertIsNotNone(waiting_owner(self.card))
+        with self.assertRaises(TaskError):
+            self.writer.record_owner_answer(**{**fields, "request_id": "stale-answer"})
+        with self.assertRaises(TaskError):
+            self.writer.record_owner_answer(**{**fields, "role": "observer", "request_id": "bad-role"})
+        with self.assertRaises(TaskError):
+            self.writer.record_owner_answer(**{**fields, "quotation": " ", "handover_event": second["event_id"], "request_id": "blank"})
+        self.assertIsNotNone(waiting_owner(self.card))
+
+    def test_released_owner_comment_recovery_uses_actual_quotation_and_epoch(self) -> None:
+        self.hand_over()
+        quote = "Approved in the released writer."
+        self.card["comments"].append({"marker": "owner", "body": "[owner]\n" + quote})
+        import hashlib
+        self.writer.audit.committed["released-comment"] = {
+            "ref": REF, "event_id": "released-event", "kind": "commented", "occurred_at": SINCE,
+            "payload": {"marker": "owner", "body_sha256": hashlib.sha256(quote.encode()).hexdigest()}}
+        answer = self.writer.accept_owner_comment(actor="dispatcher", reference=REF, event_id="released-event")
+        self.assertFalse(answer["replayed"])
+        self.assertIsNone(waiting_owner(self.card))
+        self.assertEqual(attention_record(self.card, OWNER_ANSWER)["quotation"], quote)
+        self.assertTrue(self.writer.accept_owner_comment(actor="dispatcher", reference=REF, event_id="released-event")["replayed"])
+
     def test_the_owner_comments_on_any_card_as_the_owner(self) -> None:
         for document in (decision_card(), decision_card(kind="code", state="done")):
             self.card.clear()
@@ -203,6 +268,18 @@ class OwnerCommentTests(WriterFixture):
                 self.assertEqual(self.card["comments"][-1]["marker"], "owner")
                 event = self.writer.audit.committed_event(f"owner-{document['type']}")
                 self.assertEqual((event["actor"], event["payload"]["marker"]), ({"role": "owner", "id": "owner"}, "owner"))
+
+    def test_released_blank_owner_comment_does_not_end_the_owner_turn(self) -> None:
+        import hashlib
+        self.hand_over()
+        self.card["comments"].append({"marker": "owner", "body": "[owner]\n "})
+        self.writer.audit.committed["released-comment"] = {
+            "ref": REF, "event_id": "released-blank", "kind": "commented", "occurred_at": SINCE,
+            "payload": {"marker": "owner", "body_sha256": hashlib.sha256(b" ").hexdigest()}}
+        with self.assertRaises(TaskError):
+            self.writer.accept_owner_comment(actor="dispatcher", reference=REF, event_id="released-blank")
+        self.assertIsNotNone(waiting_owner(self.card))
+        self.assertIsNone(attention_record(self.card, OWNER_ANSWER))
 
     def test_the_owner_role_is_a_comment_role_only(self) -> None:
         for call in (
@@ -245,6 +322,84 @@ class OwnerCommentTests(WriterFixture):
             (REF, "owner", REASON, "h-1", "po"),
         )
         self.assertEqual((second["reason"], second["request_id"]), (REASON, None))
+
+    def test_cli_records_conversation_quotation_as_po_for_the_named_epoch(self) -> None:
+        writer = mock.Mock()
+        writer.return_value.record_owner_answer.return_value = {"action": "owner_answer_recorded"}
+        with (tempfile.TemporaryDirectory() as tmp,
+              mock.patch("ummanu.task_commands.TaskWriter", writer),
+              mock.patch("ummanu.task_commands.card_client"),
+              contextlib.redirect_stdout(io.StringIO())):
+            body = Path(tmp) / "answer.md"
+            body.write_text("Use standing decision refusal-1.\n", encoding="utf-8")
+            code = main(["task", "record-owner-answer", "--ref", REF, "--role", "po",
+                         "--handover-event", "epoch-1", "--body-file", str(body),
+                         "--request-id", "answer-1", "--instance", tmp, "--data-dir", tmp])
+        self.assertEqual(code, 0)
+        call = writer.return_value.record_owner_answer.call_args.kwargs
+        self.assertEqual((call["role"], call["reference"], call["handover_event"], call["quotation"], call["request_id"]),
+                         ("po", REF, "epoch-1", "Use standing decision refusal-1.\n", "answer-1"))
+
+
+class EscalationTests(WriterFixture):
+    def runtime(self, state: str | None = None) -> Any:
+        self.writer.audit.committed["claim-episode"] = {"ref": REF, "kind": "card.started",
+            "event_id": "claim-epoch", "occurred_at": SINCE}
+        po = mock.Mock()
+        po.request.return_value = None if state is None else SimpleNamespace(session_id="session", seq=1)
+        po.refused.return_value = None
+        po.turn.return_value = SimpleNamespace(state=state)
+        return SimpleNamespace(reader=self.writer.reader, writer=self.writer, audit=self.writer.audit,
+                               po=po, owner="dispatcher")
+
+    def advance(self, runtime: Any, seconds: int) -> None:
+        from ummanu.dispatch.po_cards import _escalate
+        start = datetime.fromisoformat(SINCE).timestamp()
+        with mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds):
+            _escalate(runtime, self.card, SimpleNamespace(po_submission=SimpleNamespace(submit_request_id="submit-episode")))
+
+    def test_queued_deadline_is_2959_then_3000_and_restart_replay_deduplicates(self) -> None:
+        runtime = self.runtime()
+        self.advance(runtime, 1799)
+        self.assertEqual(self.client.owner_events.kinds(), [])
+        self.advance(runtime, 1800)
+        [event] = self.client.owner_events.of_kind("po_card_escalated")
+        self.assertEqual(event.event_class, "needs_owner")
+        self.assertIn("30 minutes", event.text)
+        self.assertTrue(self.client.owner_events.events()[0].held)
+        with self.assertRaises(ReadRefused):
+            self.client.owner_events.mark_read(event.id)
+        self.advance(self.runtime(), 1900)
+        self.assertEqual(len(self.client.owner_events.of_kind("po_card_escalated")), 1)
+
+    def test_execution_failure_escalates_immediately_but_owner_interruption_does_not(self) -> None:
+        self.advance(self.runtime("interrupted"), 1900)
+        self.assertEqual(self.client.owner_events.kinds(), [])
+        self.advance(self.runtime("completed"), 1900)
+        self.assertEqual(self.client.owner_events.kinds(), [])
+        self.advance(self.runtime("failed"), 1)
+        [event] = self.client.owner_events.of_kind("po_card_escalated")
+        self.assertIn("execution failed", event.text)
+
+    def test_handover_replaces_escalation_and_answer_replaces_handover(self) -> None:
+        self.advance(self.runtime(), 1800)
+        escalation = self.client.owner_events.of_kind("po_card_escalated")[0]
+        first = self.hand_over()
+        self.assertFalse(self.client.owner_events.rows[escalation.id].unread)
+        self.writer.record_owner_answer(role="po", actor="po", reference=REF,
+            handover_event=first["event_id"], quotation="Approved.", request_id="answer")
+        self.assertIsNone(waiting_owner(self.card))
+        self.assertEqual(self.client.owner_events.snapshot()["human_waits"], [])
+
+    def test_completion_between_clock_read_and_atomic_escalation_wins(self) -> None:
+        runtime = self.runtime()
+        escalate = self.writer.escalate_po_card
+        def completed(**fields):
+            self.card["state"] = "done"
+            return escalate(**fields)
+        with mock.patch.object(self.writer, "escalate_po_card", side_effect=completed):
+            self.advance(runtime, 1800)
+        self.assertEqual(self.client.owner_events.kinds(), [])
 
 
 class CompletionClearsTheMarkTests(WriterFixture):
@@ -293,6 +448,22 @@ class CompletionClearsTheMarkTests(WriterFixture):
 
 
 class OwnerAnswerDispatchTests(HandedOverFixture):
+    def test_lost_accepted_answer_submission_is_recovered_under_the_same_id(self) -> None:
+        runtime, session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-lost")
+        self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+        self.settled(session, 3)
+        stable_id = self.record().po_submission.owner_request_id
+        with (mock.patch.object(runtime.po, "request", return_value=None),
+              mock.patch.object(runtime.po, "queued", return_value=None),
+              mock.patch.object(runtime.po, "submit", wraps=runtime.po.submit) as submit):
+            self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+        self.assertEqual(submit.call_args.kwargs["request_id"], stable_id)
+        self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
+        self.assertEqual(self.tick(runtime)["action"], "po-card-owner-answered")
+        self.assertIsNone(waiting_owner(self.cards.card))
+
     """The dispatcher waits on a handed-over card, and hands each owner answer to the PO once."""
 
     def test_a_settled_turn_with_the_card_handed_over_waits_instead_of_blocking(self) -> None:
@@ -306,7 +477,7 @@ class OwnerAnswerDispatchTests(HandedOverFixture):
         self.assertIn(REASON, outcome["reason"])
         self.assertEqual(self.cards.card["state"], "in_progress")
         self.assertIn(REF, self.records)
-        self.assertEqual([event["kind"] for event in self.cards.log], ["claim", HANDED_TO_OWNER])
+        self.assertEqual([event["kind"] for event in self.cards.log], ["claimed", HANDED_TO_OWNER])
         # And it keeps waiting, tick after tick, with nothing submitted.
         self.assertEqual(self.tick(runtime)["action"], "po-card-waiting-owner")
         self.assertEqual(self.record().po_submission.owner_request_id, "")
@@ -357,13 +528,14 @@ class OwnerAnswerDispatchTests(HandedOverFixture):
             self.assertEqual(self.tick(runtime)["action"], "po-card-owner-answered")
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
 
-        # A second owner comment: one more follow-up, carrying both comments in order.
+        # A new unresolved question requires a new explicit handover epoch.
+        self.hand_over(reason="Which monthly plan?")
         self.owner_says("And cap it at the monthly plan.", "evt-owner-2")
         self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
         self.settled(session, 4)
         prompt = self.calls()[-1]["prompt"]
-        first, second = (prompt.index(text) for text in ("Use the company card", "And cap it"))
-        self.assertLess(first, second)
+        self.assertNotIn("Use the company card", prompt)
+        self.assertIn("And cap it", prompt)
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 4)
 
         # The PO completes the card: the record closes.

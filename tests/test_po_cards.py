@@ -74,7 +74,7 @@ class ClaimAndSubmitTests(DispatcherFixture):
         self.assertEqual((record.workspace, record.handle, record.head, record.review_head), ("", "", "", ""))
         self.assertFalse(record.needs_settling())
         self.assertEqual(record.state, PO_SUBMITTED)
-        self.assertEqual([event["kind"] for event in self.cards.log], ["claim"])
+        self.assertEqual([event["kind"] for event in self.cards.log], ["claimed"])
 
     def test_resolve_and_submit_carry_ids_derived_from_the_card_and_the_claim_attempt(self) -> None:
         self.start()
@@ -270,7 +270,7 @@ class SettleTests(DispatcherFixture):
 
         self.assertEqual((closed["action"], closed["state"], closed["completion"]), ("po-card-closed", "done", "recorded"))
         self.assertNotIn(REF, self.records)
-        self.assertEqual([event["kind"] for event in self.cards.log], ["claim"])
+        self.assertEqual([event["kind"] for event in self.cards.log], ["claimed"])
 
     def assert_blocked_after(self, description: str, state: str) -> None:
         self.start()
@@ -295,8 +295,15 @@ class SettleTests(DispatcherFixture):
     def test_a_completed_turn_that_left_the_card_in_progress_blocks_it(self) -> None:
         self.assert_blocked_after("An ordinary question.", po_store.COMPLETED)
 
-    def test_a_failed_turn_blocks_the_card(self) -> None:
-        self.assert_blocked_after("FAIL this turn.", po_store.FAILED)
+    def test_a_failed_turn_escalates_the_unfinished_episode(self) -> None:
+        self.start()
+        runtime = self.runtime(card(description="FAIL this turn."))
+        self.claim(runtime)
+        session = self.record().po_submission.session_id
+        self.assertEqual(self.settled(session, 2).state, po_store.FAILED)
+        self.assertEqual(self.tick(runtime)["action"], "po-card-turn-failed")
+        self.assertEqual(self.cards.card["state"], "in_progress")
+        self.assertIn("failed", self.cards.card["extensions"]["extra"]["owner_escalation"])
 
     def test_an_input_queued_behind_another_turn_waits(self) -> None:
         service = self.start()

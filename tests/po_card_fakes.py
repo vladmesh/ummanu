@@ -15,6 +15,7 @@ import stat
 import tempfile
 import threading
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -70,7 +71,7 @@ class OneCardBoard:
             assert self.card["state"] == "ready", "claim requires a Ready task"
             self.card["state"] = "in_progress"
             self.card["claim"] = {"worker": worker}
-            self.log.append({"request_id": request_id, "ref": reference, "kind": "claim", "role": role})
+            self.log.append({"request_id": request_id, "ref": reference, "kind": "claimed", "role": role, "event_id": f"evt-{request_id}", "occurred_at": datetime.now(UTC).isoformat()})
         return {"action": "claimed"}
 
     def move(
@@ -78,11 +79,18 @@ class OneCardBoard:
     ) -> dict[str, Any]:
         if self.committed_event(request_id) is None:
             self.card["state"] = target
+            self.card.get("extensions", {}).get("extra", {}).pop("owner_escalation", None)
             self.log.append(
                 {"request_id": request_id, "ref": reference, "kind": "move", "role": role, "to": target,
                  "reason": reason, **fields}
             )
         return {"action": "moved"}
+
+    def escalate_po_card(self, *, reference: str, episode: str, reason: str, **_: Any) -> None:
+        from ummanu.board.owner_handover import OWNER_ESCALATION
+        assert reference == self.card["ref"]
+        bag = self.card.setdefault("extensions", {}).setdefault("extra", {})
+        bag[OWNER_ESCALATION] = json.dumps({"episode": episode, "reason": reason})
 
     def list(self, states: set[str] | None = None, **_: Any) -> list[dict[str, Any]]:
         return [copy.deepcopy(self.card)] if not states or self.card["state"] in states else []

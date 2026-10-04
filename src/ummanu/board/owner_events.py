@@ -6,8 +6,8 @@ touches it. Producers write through :func:`record`; the web reads and marks thro
 
 **Kinds and classes.** Every kind belongs to one class, and the class is derived from the kind here
 (:data:`KIND_CLASS`), never passed by a producer. `needs_owner` is a fact only the owner can move on:
-a card the PO handed to the owner, the steward's report card that needs a human, a card whose e2e cap
-is spent with nobody but the owner to raise it. `notice` is a fact
+a current unanswered PO handover, an unresolved timed/failed PO episode, or a steward's report with
+an explicit non-empty human escalation reason. Routine Blocked, PO and e2e events are notices. `notice` is a fact
 the owner should know: a sprint closed or stopped, the budget signal, a dead head nobody relaunched, a
 failed PO turn, a red provider, a delegated card's result returned to its PO session. The database holds both vocabularies and the kind-to-class rule as
 CHECK constraints (`board/schema.py`), from the same lists.
@@ -25,8 +25,8 @@ failures escape the owner-event savepoint and roll back the enclosing card mutat
 **Stay-unread.** A `needs_owner` event whose subject card carries the `waiting_owner` mark
 (`board.owner_handover`) is never marked read by a click or by "mark all read": :meth:`mark_read`
 refuses it and :meth:`mark_all_read` takes notices only. Its `read_at` is set by :func:`settle_required_wait` when
-the card's mark clears, which `TaskWriter._reset_transition_metadata` calls in the transition's own
-transaction.
+the owner answer is recorded or the unresolved episode is replaced/ended, inside the card's
+transaction. A current unresolved escalation is held by the same rule.
 """
 
 from __future__ import annotations
@@ -39,9 +39,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.e2e_record import e2e_state
-from ummanu.board.owner_handover import MARK_KEYS
+from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.owner_handover import MARK_KEYS, OWNER_ESCALATION, attention_record, waiting_owner
 from ummanu.board.schema_gate import SchemaAssessment, SchemaOwed, require
 
 TABLE = "owner_events"
@@ -64,21 +64,20 @@ DELEGATED_CARD_SETTLED = "delegated_card_settled"
 E2E_BUDGET_SPENT = "e2e_budget_spent"
 E2E_AFTER_MERGE = "e2e_after_merge"
 CARD_WAITS_FOR_PERSON = "card_waits_for_person"
+PO_CARD_ESCALATED = "po_card_escalated"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
 #: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021, 0023 and 0024) are these two lists. A
 #: new kind joins it here and in a migration together.
 KIND_CLASS: dict[str, str] = {
-    CARD_WAITS_FOR_PERSON: NEEDS_OWNER,
+    CARD_WAITS_FOR_PERSON: NOTICE,
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
+    PO_CARD_ESCALATED: NEEDS_OWNER,
     STEWARD_NEEDS_HUMAN: NEEDS_OWNER,
-    # A card outside every sprint, with no PO session to hand the decision to, spent its per-card
-    # e2e cap and was Blocked (0023, secretary-1796): only the owner can pay for more runs.
-    E2E_BUDGET_SPENT: NEEDS_OWNER,
-    # An after-merge e2e run ended with nothing the pipeline can act on by itself (cancelled, timed
-    # out, its deadline passed, unreadable, refused), or went red with no sprint and no PO origin to
-    # own the hotfix (0024, secretary-1807).
-    E2E_AFTER_MERGE: NEEDS_OWNER,
+    # Released direct e2e notifications remain visible without claiming owner authority.
+    E2E_BUDGET_SPENT: NOTICE,
+    # Complete PO routing for uncovered e2e work is a separate cut.
+    E2E_AFTER_MERGE: NOTICE,
     SPRINT_CLOSED: NOTICE,
     SPRINT_STOPPED: NOTICE,
     BUDGET_SIGNAL: NOTICE,
@@ -163,6 +162,7 @@ class OwnerEvent:
             "unread": self.unread,
             "pinned": self.pinned,
             "held": self.held,
+            "held_reason": _held_fact(self.kind, self.text) if self.held else None,
         }
 
 
@@ -227,14 +227,11 @@ def person_wait(card: Mapping[str, Any]) -> str | None:
     """The board's actual human waits. Machine wait cards never mean a human decision."""
     if card.get("closed") or card.get("state") == "done":
         return None
-    if card_holds_mark(card) or card.get("waiting_owner"):
-        return "card is handed to the owner"
-    if card.get("state") == "in_progress" and card.get("type") in {"decision", "operation"}:
-        return "card is with the PO"
-    if card.get("state") == "blocked" and e2e_state(card).budget_decline:
-        return None
-    if card.get("state") == "blocked" and card.get("type") != "wait":
-        return "Blocked card awaits a decision"
+    if waiting_owner(card) is not None:
+        return "current handover has no recorded owner answer"
+    escalation = attention_record(card, OWNER_ESCALATION)
+    if escalation:
+        return str(escalation["reason"])
     return None
 
 
@@ -242,12 +239,13 @@ def person_wait(card: Mapping[str, Any]) -> str | None:
 
 #: A card carrying the mark, spelled once for the SQL reads and the refusal.
 _HELD = (
-    "EXISTS (SELECT 1 FROM tasks t WHERE t.task_ref = e.subject_ref "
-    f"AND ((t.extensions -> '{EXTENSION_BAG}') ?| ARRAY[{', '.join(repr(key) for key in MARK_KEYS)}] "
-    "OR (e.kind = 'card_waits_for_person' AND NOT t.archived AND "
-    "((t.state = 'blocked' AND t.task_type <> 'wait') OR "
-    "(t.state = 'in_progress' AND t.task_type IN ('decision','operation'))) "
-    "AND NOT EXISTS (SELECT 1 FROM task_supersessions u WHERE u.supersedes = t.task_ref))))"
+    "(e.read_at IS NULL AND EXISTS (SELECT 1 FROM tasks t WHERE t.task_ref = e.subject_ref "
+    "AND NOT t.archived AND t.state = 'in_progress' "
+    "AND NOT EXISTS (SELECT 1 FROM task_supersessions u WHERE u.supersedes = t.task_ref) "
+    "AND ((e.kind = 'card_handed_to_owner' "
+    "AND COALESCE(t.extensions -> 'extra' ->> 'waiting_owner', '') <> '') "
+    "OR (e.kind = 'po_card_escalated' "
+    "AND COALESCE(t.extensions -> 'extra' ->> 'owner_escalation', '') <> ''))))"
 )
 
 
@@ -330,6 +328,8 @@ class OwnerEventStore:
         with self._connection() as connection:
             document = connection.execute(
                 "SELECT jsonb_build_object('unread', (SELECT count(*) FROM owner_events WHERE read_at IS NULL), "
+                "'notice_count', (SELECT count(*) FROM owner_events WHERE read_at IS NULL AND class = 'notice'), "
+                f"'held_count', (SELECT count(*) FROM owner_events e WHERE e.read_at IS NULL AND e.class = 'needs_owner' AND {_HELD}), "
                 "'events', COALESCE((SELECT jsonb_agg(row_to_json(listed)) FROM ("
                 f"SELECT e.*, {_HELD} AS held FROM owner_events e "
                 "ORDER BY (e.\"class\" = 'needs_owner' AND e.read_at IS NULL) DESC, e.created_at DESC, e.id DESC "
@@ -345,12 +345,13 @@ class OwnerEventStore:
                 "WHERE e.read_at IS NULL AND e.\"class\" = 'needs_owner' "
                 "AND (t.sprint_ref IS NOT NULL OR s.ref IS NOT NULL) AND COALESCE(t.archived, false) = false "
                 "AND NOT EXISTS (SELECT 1 FROM task_supersessions u WHERE u.supersedes = t.task_ref) "
-                f"AND (e.kind <> 'card_waits_for_person' OR {_HELD})), '[]'::jsonb))",
+                f"AND (e.kind = 'steward_needs_human' OR {_HELD})), '[]'::jsonb))",
                 (LIST_LIMIT, LIST_LIMIT),
             ).fetchone()[0]
         for event in [*document["events"], *document["unread_events"]]:
             event["unread"] = event["read_at"] is None
             event["pinned"] = event["unread"] and event["class"] == NEEDS_OWNER
+            event["held_reason"] = _held_fact(event["kind"], event["text"]) if event["held"] else None
         return document
 
     def settle_kind(self, subject_ref: str, kind: str) -> int:
@@ -400,13 +401,14 @@ class OwnerEventStore:
             return cursor.rowcount
 
 
+def _held_fact(kind: str, text: str) -> str:
+    return ("current handover has no recorded owner answer" if kind == CARD_HANDED_TO_OWNER
+            else "PO escalation remains unresolved: " + text)
+
+
 def _held_refusal(event: OwnerEvent) -> str:
-    if event.kind == CARD_WAITS_FOR_PERSON:
-        return f"owner event {event.id} stays unread until {event.subject_ref} leaves its Blocked decision or PO wait"
-    return (
-        f"owner event {event.id} needs the owner and stays unread until {event.subject_ref} leaves "
-        "waiting_owner: the PO completes the card or the mark is cleared"
-    )
+    fact = _held_fact(event.kind, event.text)
+    return f"owner event {event.id} stays unread: {event.subject_ref}: {fact}"
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -513,18 +515,15 @@ def settle(subject_ref: str, *, to: Any) -> int:
 def record_person_wait(card: Mapping[str, Any], occurrence: str, *, to: Any) -> None:
     """Required within the card mutation, never a GET. One event per real wait episode."""
     reference = str(card.get("ref") or "")
-    reason = person_wait(card)
-    sink = _sink(to)
-    if reason is None:
-        if sink is not None:
-            settle_required_wait(reference, kind=CARD_WAITS_FOR_PERSON, to=to)
+    if card.get("closed") or card.get("state") == "done" or card.get("type") == "wait":
         return
-    # This producer supplies sprint attention. Handover and outside-sprint producers
-    # retain their own event kinds and settlement rules.
-    if not card.get("sprint") or card_holds_mark(card) or card.get("waiting_owner"):
+    if waiting_owner(card) is not None or not card.get("sprint"):
         return
-    record_required_wait(CARD_WAITS_FOR_PERSON, reference, f"{reference}: {reason}",
-                         f"{CARD_WAITS_FOR_PERSON}:{reference}:{occurrence}", to=to)
+    routine = (card.get("state") == "blocked" and not e2e_state(card).budget_decline) or (
+        card.get("state") == "in_progress" and card.get("type") in {"decision", "operation"})
+    if routine:
+        record_required_wait(CARD_WAITS_FOR_PERSON, reference, f"{reference}: with the PO/observer",
+                             f"{CARD_WAITS_FOR_PERSON}:{reference}:{occurrence}", to=to)
 
 
 @contextlib.contextmanager
@@ -542,7 +541,7 @@ def _required_wait_store(subject_ref: str, *, to: Any) -> Iterator[Any]:
 def record_required_wait(kind: str, subject_ref: str, text: str, dedup_key: str, *, to: Any) -> None:
     """Create the card's authoritative unread fact inside its mutation transaction."""
     with _required_wait_store(subject_ref, to=to) as sink:
-        if kind not in {CARD_HANDED_TO_OWNER, CARD_WAITS_FOR_PERSON} or not dedup_key.strip():
+        if kind not in {CARD_HANDED_TO_OWNER, CARD_WAITS_FOR_PERSON, PO_CARD_ESCALATED} or not dedup_key.strip():
             raise ValueError("a required card wait needs its established kind and occurrence key")
         sink.insert(kind, subject_ref, _bounded(text), dedup_key)
 
@@ -579,6 +578,7 @@ __all__ = [
     "NOTICE",
     "NOT_APPLICABLE",
     "OBSERVER_DEAD",
+    "PO_CARD_ESCALATED",
     "PO_TURN_FAILED",
     "PROVIDER_RED",
     "SPRINT_CLOSED",

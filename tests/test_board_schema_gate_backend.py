@@ -45,6 +45,7 @@ OWED = (
     "0025_card_waits_for_person",
     "0026_sprint_local_runs",
     "0027_sprint_owner_decisions",
+    "0028_owner_turns",
 )
 
 

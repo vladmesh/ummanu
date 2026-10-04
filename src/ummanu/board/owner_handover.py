@@ -1,18 +1,16 @@
-"""A `decision`/`operation` card the PO handed to the owner: the mark, and how it is read (secretary-1761).
+"""Durable owner turns on PO cards, written with card audit and owner events.
 
-`task handover --to owner` sets the mark on an In progress card the PO service executes and writes a
-`[handover:owner]` PO comment with the reason, in one transaction. The mark is three fields of the
-card's extension bag (`extensions.extra`, docs/BOARD_STORE.md §8.2), so no column and no migration:
-`waiting_owner` (when, RFC 3339 UTC), `waiting_owner_reason` and `waiting_owner_by` (the PO actor).
-Only `task handover` writes them, and a card that leaves In progress (`task complete` above all)
-clears them in the transition's own transaction.
-
-A mark is read only through :func:`waiting_owner`, which validates the three fields together: a bag
-holding some of them, or a timestamp that does not parse, is no mark at all rather than a guess.
+The released three-field waiting_owner mark remains the unanswered explicit handover.
+An answer clears it atomically and stores owner_answer (JSON text) with the handover and
+answer audit IDs, verbatim quotation, original mark, session and answer time. Delivery
+uses this record even after the initial PO turn ended. owner_escalation (JSON text) names
+an unresolved PO ownership/answer episode and its explicit reason. Transitions settle it;
+new handovers replace it. No read creates or clears these facts.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable, Mapping
 from datetime import datetime
 from typing import Any
@@ -25,6 +23,35 @@ WAITING_OWNER_BY = "waiting_owner_by"
 MARK_KEYS = (WAITING_OWNER, WAITING_OWNER_REASON, WAITING_OWNER_BY)
 #: The metadata write that removes the mark: an empty value is a removal from the bag.
 CLEAR_MARK = {key: "" for key in MARK_KEYS}
+OWNER_ANSWER = "owner_answer"
+OWNER_ESCALATION = "owner_escalation"
+OWNER_ANSWER_RECORDED = "owner_answer_recorded"
+
+
+def attention_record(task: Mapping[str, Any], key: str) -> dict[str, Any] | None:
+    """Read the board's answer or escalation; these records are written with their audit."""
+    try:
+        value = json.loads(str(_bag(task).get(key) or "null"))
+    except ValueError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def current_handover(events: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    found = None
+    for event in events:
+        if event.get("kind") == HANDED_TO_OWNER:
+            found = event
+    return found
+
+
+def po_episode(events: Iterable[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+    """Released generic claims and native card.started claims share their real audit clock."""
+    found = None
+    for event in events:
+        if event.get("kind") in {"claimed", "card.started"}:
+            found = event
+    return found
 
 #: The one recipient a card is handed to today.
 OWNER = "owner"
@@ -100,13 +127,16 @@ def owner_comments_since_handover(comments: Iterable[Mapping[str, Any]]) -> list
 def owner_answer_event_ids(events: Iterable[Mapping[str, Any]]) -> list[str]:
     """Event ids of the owner's comments after the card's latest handover, in audit order."""
     found: list[str] = []
+    handed = False
     for event in events:
         kind = str(event.get("kind") or "")
         if kind == HANDED_TO_OWNER:
             found = []
+            handed = True
             continue
         payload = event.get("payload") if isinstance(event.get("payload"), Mapping) else {}
-        if kind == "commented" and payload.get("marker") == OWNER_ROLE and event.get("event_id"):
+        if handed and ((kind == "commented" and payload.get("marker") == OWNER_ROLE)
+                       or kind == OWNER_ANSWER_RECORDED) and event.get("event_id"):
             found.append(str(event["event_id"]))
     return found
 
@@ -117,14 +147,20 @@ __all__ = [
     "HANDOVER_MARKER",
     "MARK_KEYS",
     "OWNER",
+    "OWNER_ANSWER",
+    "OWNER_ANSWER_RECORDED",
+    "OWNER_ESCALATION",
     "OWNER_ROLE",
     "WAITING_OWNER",
     "WAITING_OWNER_BY",
     "WAITING_OWNER_REASON",
+    "attention_record",
     "carries_mark_fields",
+    "current_handover",
     "mark_values",
     "owner_answer_event_ids",
     "owner_comments_since_handover",
+    "po_episode",
     "render_handover_comment",
     "waiting_owner",
 ]

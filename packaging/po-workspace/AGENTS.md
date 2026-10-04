@@ -100,12 +100,23 @@ Write what the owner has to decide or do to a file, run the command the input qu
 
     python3 -P -m ummanu task handover --ref <card> --role po --to owner --reason-file <file> --request-id <id>
 
-The card stays In progress with a visible `waiting_owner` mark, is not Blocked, and the sprint reads as
-waiting on the owner. The owner answers either here, in the sprint's session on the `/po` page, or with
-a card comment (`task comment --role owner`); a comment reaches you as a new input from the dispatcher
-with your reason and the owner's comments since the handover. Complete the card with `task complete` as
-soon as the answer settles it, which takes the mark off. If it does not settle it, say on the card what
-is still missing and end the turn; the card keeps waiting.
+The card stays In progress with a visible `waiting_owner` mark and an unanswered owner event.
+Save the returned `event_id`. When the owner answers in this conversation, record their verbatim
+quotation in a file and settle that specific handover:
+
+    python3 -P -m ummanu task record-owner-answer --ref <card> --role po --handover-event <event_id> --body-file <quotation-file> --request-id <new-id>
+
+A genuine owner card comment is the other answer path. Both clear owner attention before completion
+and deliver the recorded answer to the handover's PO session once. Continue the unfinished card and
+complete it with `task complete`. A new unresolved question requires another explicit handover with a
+new request ID; earlier answers cannot satisfy it. Referencing an already recorded standing decision
+as the answer's basis does not apply its grant again. The answer command records no grant: use
+`sprint record-owner-decisions` once for new sprint authority, with stable decision IDs.
+
+Routine PO/observer work and e2e notifications are notices. The dispatcher escalates a PO card only
+at 30 minutes without its required response, counting queued time from the recorded claim, or on
+failed execution. Owner interruption is distinct from failure. Handover and episode resolution
+settle escalation atomically.
 
 ### The e2e run budget
 

@@ -531,9 +531,9 @@ class SprintPageTests(PageFixture):
         self.assertEqual(
             [row[0] for row in rows],
             [
-                '<span class="chip chip-warn">a run</span>',
+                '<span class="chip">a run</span>',
                 '<span class="chip chip-warn">the owner</span>',
-                '<span class="chip chip-warn">the PO</span>',
+                '<span class="chip">the PO</span>',
             ],
         )
         self.assertIn('href="/tasks/ummanu-540"', rows[0][1])
@@ -587,7 +587,7 @@ class CardWaitsTests(unittest.TestCase):
                     "state": "validate",
                     "e2e": {"runs": [], "mark": "e2e: budget spent, waiting on d-1"},
                 },
-                [("owner", "d-1")],
+                [("dependency", "d-1")],
             ),
             (
                 {
@@ -605,7 +605,7 @@ class CardWaitsTests(unittest.TestCase):
                     "state": "done",
                     "e2e": {"placement": "after_merge", "mark": "e2e: budget spent, waiting on d-2"},
                 },
-                [("owner", "d-2")],
+                [("dependency", "d-2")],
             ),
             ({"ref": "d", "type": "decision", "state": "in_progress", **handed}, [("owner", "pay")]),
             ({"ref": "d", "type": "decision", "state": "in_progress"}, [("po", "with the PO")]),

@@ -1037,7 +1037,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(len(blocked), 1)
         self.assertIn("after-merge e2e red, no sprint or origin owns it", blocked[0]["reason"])
         [bell] = self.bells()
-        self.assertEqual((bell.event_class, bell.subject_ref), ("needs_owner", hotfix["ref"]))
+        self.assertEqual((bell.event_class, bell.subject_ref), ("notice", hotfix["ref"]))
 
     def test_a_replayed_red_outcome_cuts_no_second_hotfix(self) -> None:
         cards, run = self.run_to("failure")
@@ -1075,7 +1075,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
                 self.assertEqual(run.resolution, "requeued")
                 self.assertEqual(self.hotfixes(), [])
                 [bell] = self.bells()
-                self.assertEqual((bell.event_class, bell.subject_ref), ("needs_owner", cards[-1]))
+                self.assertEqual((bell.event_class, bell.subject_ref), ("notice", cards[-1]))
                 self.assertIn(conclusion, bell.text)
                 for card in cards:
                     [comment] = self.comments_on(card, "## E2E after merge — requeued")

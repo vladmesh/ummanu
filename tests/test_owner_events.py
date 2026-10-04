@@ -65,7 +65,7 @@ class EntityTests(unittest.TestCase):
             {kind for kind in KINDS if class_of(kind) == NEEDS_OWNER},
             # `e2e_budget_spent` since 0023 (secretary-1796): a card whose e2e cap only the owner can raise;
             # `e2e_after_merge` since 0024 (secretary-1807): an after-merge e2e run that needs the owner.
-            {"card_handed_to_owner", "steward_needs_human", "e2e_budget_spent", "e2e_after_merge", "card_waits_for_person"},
+            {"card_handed_to_owner", "steward_needs_human", "po_card_escalated"},
         )
         for kind in ("sprint_closed", "sprint_stopped", "budget_signal", "observer_dead", "head_dead",
                      "po_turn_failed", "provider_red", "delegated_card_settled"):
@@ -95,7 +95,7 @@ class EntityTests(unittest.TestCase):
         # it and the class rule with `e2e_budget_spent`, a `needs_owner` kind (secretary-1796); 0024 restates
         # both again with `e2e_after_merge`, a `needs_owner` kind (secretary-1807). The class vocabulary is
         # still the one 0018 created.
-        restated = importlib.import_module("ummanu.board.migrations.versions.0025_card_waits_for_person")
+        restated = importlib.import_module("ummanu.board.migrations.versions.0028_owner_turns")
         restated_source = Path(restated.__file__).read_text(encoding="utf-8")
         restated_names = {"owner_event_kind_in_vocabulary", "owner_event_class_follows_kind"}
         for name, text in checks.items():
@@ -106,7 +106,7 @@ class EntityTests(unittest.TestCase):
                 name,
             )
         self.assertEqual(revision.down_revision, "0017_po_card_kinds")
-        self.assertEqual(restated.down_revision, "0024_e2e_after_merge_kind")
+        self.assertEqual(restated.down_revision, "0027_sprint_owner_decisions")
 
     def test_the_fake_store_refuses_what_the_checks_refuse(self) -> None:
         store = FakeOwnerEvents()
@@ -199,7 +199,7 @@ class EntityTests(unittest.TestCase):
 
         store = owner_events.OwnerEventStore(SimpleNamespace(conninfo=lambda: "dbname=x"))
         with mock.patch("psycopg.connect", return_value=Connection()):
-            with self.assertRaisesRegex(OwnerEventsUnavailable, "owes 10 migration.*0018_owner_events") as raised:
+            with self.assertRaisesRegex(OwnerEventsUnavailable, "owes 11 migration.*0018_owner_events") as raised:
                 store.unread_count()
             self.assertEqual(raised.exception.code, "schema_owed")
             self.assertEqual(raised.exception.pending[0], "0018_owner_events")
@@ -592,7 +592,7 @@ class PoTurnFailedTests(HandedOverFixture):
 
         outcome = self.tick(runtime)
         self.assertEqual(outcome["action"], "po-card-owner-answer-turn-ended")
-        self.assertIn("the owner's answer reached the PO, but its turn failed", outcome["reason"])
+        self.assertIn("the recorded owner answer reached the PO, but its turn failed", outcome["reason"])
         self.assertNotIn("is with the PO", outcome["reason"])
         [event] = events.rows.values()
         self.assertEqual((event.kind, event.subject_ref, event.dedup_key), ("po_turn_failed", REF, f"po_turn_failed:{session}:3"))
@@ -662,7 +662,7 @@ class WebTests(unittest.TestCase):
         self.assertIn(f'href="/tasks/{REF}"', page)
         self.assertIn('href="/sprints/sprint%3A1"', page)
         self.assertIn('href="/po/sessions/s-9"', page)
-        self.assertIn("stays unread until", page)
+        self.assertIn("current handover has no recorded owner answer", page)
         self.assertEqual(page.count("Mark read</button>"), 3, "every unread notice has its button; the held one has none")
         self.assertIn('<meta name="viewport" content="width=device-width, initial-scale=1">', page)
 
@@ -706,12 +706,14 @@ class WebTests(unittest.TestCase):
                 response = self.post(f"/owner-events/{(closed if query else failed).id}/read", body)
                 self.assertEqual((response.status, response.headers["Location"]), (303, back))
                 response = self.post("/owner-events/read-all", body)
-                self.assertEqual((response.status, response.headers["Location"]), (303, back))
+                self.assertEqual(response.status, 303)
+                self.assertTrue(response.headers["Location"].startswith(back + ("&" if "?" in back else "?") + "marked="))
+                self.assertIn("Marked", response.body.decode())
         # A missing or unknown view returns to the unread default.
         for body in (b"", b"view=", b"view=bogus", b"view=unread"):
             with self.subTest(body=body):
                 response = self.post("/owner-events/read-all", body)
-                self.assertEqual((response.status, response.headers["Location"]), (303, "/owner-events"))
+                self.assertEqual((response.status, response.headers["Location"]), (303, "/owner-events?marked=0"))
                 response = self.post(f"/owner-events/{closed.id}/read", body)
                 self.assertEqual((response.status, response.headers["Location"]), (303, "/owner-events"))
 
@@ -803,7 +805,7 @@ class CardCommentRoleTests(unittest.TestCase):
         from ummanu.webproto.card_ops import CardOperationLayer
 
         with tempfile.TemporaryDirectory() as tmp:
-            card = {**decision_card(), "extensions": {"extra": mark_values("2026-09-26T15:00:00Z", REASON, "po")}}
+            card = decision_card()
             client = OneCardClient(card, tmp)
             layer = CardOperationLayer(tmp, data_dir=tmp, board_client=client, clock=lambda: 0.0)
             writer = TaskWriter(client, data_dir=tmp)  # type: ignore[arg-type]
@@ -814,6 +816,7 @@ class CardCommentRoleTests(unittest.TestCase):
                 mock.patch("ummanu.webproto.card_ops.TaskWriter", return_value=writer),
                 mock.patch("ummanu.tasks._task_number", return_value=1900),
             ):
+                writer.handover(role="po", actor="po", reference=REF, to="owner", reason=REASON, request_id="real-handover")
                 layer.task_comment(request_id="r-1", actor="web", reference=REF, body="Yes, pay it.")
         self.assertEqual(card["comments"][-1]["body"], "[owner]\nYes, pay it.")
         event = writer.audit.committed_event("r-1")

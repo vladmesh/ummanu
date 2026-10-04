@@ -708,6 +708,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0028_owner_turns",
                 "0027_sprint_owner_decisions",
                 "0026_sprint_local_runs",
                 "0025_card_waits_for_person",
