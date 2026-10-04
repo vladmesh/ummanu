@@ -1613,19 +1613,28 @@ class BoardStoreSchemaTests(unittest.TestCase):
             before,
         )
         self.assertEqual([tuple(row[len(before[0][0]) :]) for row in sprints], [(3, 0, [], [])])
+        # 0025 backfills the existing In progress decision; 0028 retains it as a notice.
+        [backfill] = store.events()
+        self.assertEqual((backfill.kind, backfill.event_class, backfill.subject_ref, backfill.dedup_key),
+                         ("card_waits_for_person", "notice", "ummanu-1", "card_waits_for_person:ummanu-1:0025"))
+        self.assertTrue(backfill.unread)
+        self.assertFalse(backfill.held or backfill.pinned)
         self.assertTrue(record("card_handed_to_owner", "ummanu-1", "handed", "h-1", to=store))
         self.assertFalse(record("card_handed_to_owner", "ummanu-1", "again", "h-1", to=store))
         self.assertTrue(record("sprint_closed", "sprint:5", "closed", "c-1", to=store))
         self.assertTrue(record("budget_signal", "sprint:5", "signal", "b-1", to=store))
-        self.assertEqual(store.unread_count(), 3)
+        self.assertEqual(store.unread_count(), 4)
         events = store.events()
-        self.assertEqual([event.kind for event in events], ["card_handed_to_owner", "budget_signal", "sprint_closed"])
+        self.assertEqual([event.kind for event in events],
+                         ["card_handed_to_owner", "budget_signal", "sprint_closed", "card_waits_for_person"])
+        self.assertEqual(events[-1], backfill)
         self.assertTrue(events[0].held and events[0].pinned)
         self.assertEqual(events[0].text, "handed")
 
         with self.assertRaises(ReadRefused):
             store.mark_read(events[0].id)
-        self.assertEqual(store.mark_all_read(), 2)
+        self.assertEqual(store.mark_all_read(), 3)
+        self.assertIsNotNone(next(event for event in store.events() if event.id == backfill.id).read_at)
         self.assertIsNone(store.events()[0].read_at)
         self.assertEqual(store.unread_count(), 1)
 
@@ -1645,7 +1654,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 )
             connection.rollback()
         reader = OwnerEventStore(self.credentials("read"))
-        self.assertEqual(len(reader.events()), 3)
+        self.assertEqual(len(reader.events()), 4)
         from ummanu.board.owner_events import OwnerEventsUnavailable
 
         with self.assertRaises(OwnerEventsUnavailable):
