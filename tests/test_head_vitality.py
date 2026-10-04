@@ -171,6 +171,21 @@ class PidHeartbeatTests(unittest.TestCase):
         snapshot = VitalitySnapshot.from_pid_heartbeat(status, run_id=RUN_ID, observed_at=1000.0)
         self.assertEqual(snapshot.process, ProcessState.DEAD)
 
+    def test_a_process_reaped_before_its_start_time_is_read_is_dead_not_unreadable(self) -> None:
+        """The same window one read earlier (CI, 2026-10-04): `kill(pid, 0)` answers a zombie, the
+        supervisor reaps it, and `/proc/<pid>/stat` is gone by the time the start time is read.
+        That absence is the process having ended, not a status nobody could read. Staged as above:
+        the process really is reaped, and only the signal that preceded it is simulated.
+        """
+        pid_file, proc = _write_live_heartbeat(self.directory, "reaped-early.pid")
+        proc.kill()
+        proc.wait()
+
+        with mock.patch.object(identity.os, "kill", return_value=None):
+            status = head_process_status(pid_file, expected=_heartbeat_identity())
+
+        self.assertEqual(status["state"], HEARTBEAT_DEAD, status)
+
     def test_a_missing_pid_file_is_unavailable_never_dead(self) -> None:
         status = head_process_status(os.path.join(self.directory, "never-written.pid"))
 

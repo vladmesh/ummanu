@@ -232,23 +232,27 @@ def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = N
 
     A pid that answered ``kill(pid, 0)`` is then asked what it is (:func:`_process_state`): a zombie
     and a pid reaped between the two are both ``dead``, because neither is a launch that is running.
+    So is a pid reaped before its start time is read: its `/proc/<pid>/stat` is gone, which is the
+    same absence `_process_state` calls `gone`, not an unreadable one (CI, 2026-10-04: a stopped
+    head read `dead`, was reaped, and the next read said `unreadable`).
     """
     record, failure = _read_record(pid_file)
     if failure is not None:
         return failure
     assert record is not None
     pid = int(record["pid"])
+    dead: dict[str, Any] = {
+        "known": True,
+        "alive": False,
+        "match": False,
+        "state": HEARTBEAT_DEAD,
+        "pid": pid,
+        "record": record,
+    }
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return {
-            "known": True,
-            "alive": False,
-            "match": False,
-            "state": HEARTBEAT_DEAD,
-            "pid": pid,
-            "record": record,
-        }
+        return dead
     except PermissionError:
         # A normal dispatcher head is owned by us.  Treat an uninspectable process as inconclusive:
         # a weak permission answer cannot authorize a signal or a replacement.
@@ -258,20 +262,17 @@ def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = N
     try:
         boot_matches = str(record["boot_id"]) == _boot_id()
         start_matches = str(record["proc_starttime_ticks"]) == _proc_starttime_ticks(pid)
+    except FileNotFoundError:
+        if _process_state(pid) == _PROCESS_GONE:
+            return dead
+        return _unreadable("FileNotFoundError")
     except (OSError, ValueError) as exc:
         return _unreadable(type(exc).__name__)
     state = _process_state(pid)
     if state == _PROCESS_UNREADABLE:
         return _unreadable("process-status-unreadable")
     if state in (_PROCESS_ZOMBIE, _PROCESS_GONE):
-        return {
-            "known": True,
-            "alive": False,
-            "match": False,
-            "state": HEARTBEAT_DEAD,
-            "pid": pid,
-            "record": record,
-        }
+        return dead
     if not boot_matches or not start_matches or not _record_matches_expected(record, expected):
         return {
             "known": True,
