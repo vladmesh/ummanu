@@ -646,3 +646,67 @@ class ResetCreditsTest(unittest.TestCase):
                 self.assertEqual(codex["status"], "available")
                 self.assertEqual(codex["reset_credits"]["next_expires_at"], expected)
                 self.assertEqual(codex["reset_credits"]["available"], 1)
+
+
+class InstallationCodexHomeTest(unittest.TestCase):
+    """The bar reads the Codex account the heads run on (`<data_dir>/codex-home`), not `~/.codex`.
+
+    On production `~/.codex` held a login no head refreshes any more: its live read answered 401
+    and its newest rollout was two days old, so the bar showed a stale reading while the heads'
+    own home had a current one.
+    """
+
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.codex_home = self.root / "data" / "codex-home"
+
+    def test_live_read_uses_the_installation_login(self) -> None:
+        write(self.root / ".codex/auth.json", {"tokens": {"access_token": "dead-user-login"}})
+        write(self.codex_home / "auth.json", {"tokens": {"access_token": "head-login", "account_id": "a"}})
+        seen: list[str] = []
+
+        def fetch(url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
+            seen.append(headers["Authorization"])
+            return {"rate_limit": {"primary_window": {"used_percent": 29, "limit_window_seconds": 604800}}}
+
+        layer = ProviderUsageLayer(
+            home=self.root, fetch_json=fetch, now=lambda: NOW, codex_home=lambda: self.codex_home
+        )
+        codex = layer._codex(NOW)
+        self.assertEqual(seen, ["Bearer head-login"])
+        self.assertEqual(codex["status"], "available")
+        self.assertEqual(codex["windows"][0]["name"], "weekly")
+
+    def test_fallback_scans_the_installation_sessions(self) -> None:
+        write(self.codex_home / "auth.json", {"tokens": {"access_token": "secret"}})
+        write(
+            self.codex_home / "sessions/2026/01/01/rollout-test.jsonl",
+            {
+                "timestamp": datetime.fromtimestamp(NOW - 60, UTC).isoformat(),
+                "payload": {"rate_limits": {"primary": {"used_percent": 10, "window_minutes": 300}}},
+            },
+        )
+
+        def fail(url: str, headers: dict[str, str], timeout: float) -> dict[str, object]:
+            raise OSError("offline")
+
+        layer = ProviderUsageLayer(
+            home=self.root, fetch_json=fail, now=lambda: NOW, codex_home=self.codex_home
+        )
+        codex = layer._codex(NOW)
+        self.assertEqual(codex["status"], "available")
+        self.assertEqual(codex["windows"][0]["remaining_percent"], 90.0)
+
+    def test_no_installation_login_falls_back_to_the_user_home(self) -> None:
+        layer = ProviderUsageLayer(home=self.root, codex_home=lambda: None)
+        self.assertEqual(layer.codex_dir, self.root / ".codex")
+
+    def test_installation_codex_dir_needs_a_login(self) -> None:
+        from ummanu.runtime.codex_home import installation_codex_dir
+
+        data_dir = self.root / "data"
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TA_CODEX_HOME", None)
+            self.assertIsNone(installation_codex_dir(data_dir))
+            write(self.codex_home / "auth.json", {"tokens": {"access_token": "x"}})
+            self.assertEqual(installation_codex_dir(data_dir), self.codex_home)

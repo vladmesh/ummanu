@@ -54,6 +54,20 @@ def installation_codex_home(profile: Mapping[str, Any] | None = None) -> CodexHo
     return resolve_codex_home(profile or {}, data_dir=selected_data_dir())
 
 
+def installation_codex_dir(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
+    """The CODEX_HOME this installation's heads run with as a path, or None with no login there.
+
+    `data_dir` is the one the caller serves; unnamed, it is `selected_data_dir()`. A reader of the
+    heads' Codex account (the dashboard's usage bar) takes its login and rollouts from here, not
+    from `~/.codex`, whose login no head refreshes.
+    """
+    target = Path(data_dir).expanduser() if data_dir is not None else selected_data_dir()
+    try:
+        return Path(resolve_codex_home({}, data_dir=target).path)
+    except CodexHomeLoginMissing:
+        return None
+
+
 def managed_codex_homes(data_dir: Path | None) -> tuple[Path, ...]:
     """Every CODEX_HOME an installation manages, whether or not it exists yet or holds a login.
 

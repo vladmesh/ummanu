@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import Callable
 
+from ummanu.runtime.codex_home import installation_codex_dir
 from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 from ummanu.web.provider_usage import ProviderUsageLayer
@@ -103,7 +104,9 @@ def run_web_serve(args: argparse.Namespace) -> int:
     po = PoLayer(args.instance, data_dir=args.data_dir)
     reads, doctor = health_layers(args.instance, data_dir=args.data_dir, offline=bool(args.offline))
     # One provider layer for the bar and the reset: a reset clears the cache the next render reads.
-    usage = ProviderUsageLayer()
+    # The bar reads the Codex account the heads run on: `<data_dir>/codex-home`, not `~/.codex`.
+    data_dir = args.data_dir
+    usage = ProviderUsageLayer(codex_home=lambda: installation_codex_dir(data_dir))
     owner_events = OwnerEventLayer(args.instance)
     app = WebApp(
         reads,
