@@ -4,15 +4,22 @@ One test class per defect: a role worktree whose registration outlived its direc
 fastembed cache layout (P2), Caddy for the web front (P4), a drained tick with an open sprint (P5),
 disabled project bindings (P6) and root-created directories handed to the runtime user (P11). The
 memory export after recover (P3) runs through the snapshot recovery in `tests/test_snapshot_recover.py`.
+
+The re-drill after them (ummanu-52) left three more, under the same numbering: the web-front
+Caddyfile nothing rendered on a recovered host (P12), doctor's `missing_on_host` for disabled
+bindings (P13) and the embedding model recover kept resident beside the memory service (P14).
 """
 
 from __future__ import annotations
 
 import ast
 import contextlib
+import getpass
 import io
 import os
+import resource
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,12 +30,18 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from ummanu import bootstrap, installation, upgrade
+from ummanu import bootstrap, installation, restore, upgrade
+from ummanu.config import validate_instance
 from ummanu.dispatch import commands, production
 from ummanu.dispatch.observer import DRAIN_DEFERRED_REASON, ObserverRecord, put_observers
 from ummanu.dispatch.observer_fence import REASON_DEFERRED, REASON_NO_RECORD, observer_fence
+from ummanu.host import HostInventory, build_doctor_expectations, build_expectations, inventory
 from ummanu.installation import InstallError, ProjectProvisionResult
+from ummanu.secret_store import generate_recovery_phrase, initialize_store, set_secret
 from ummanu.sprint_observer import head_choice
+from ummanu.web.app import ROUTES
+from ummanu.webfront.caddyfile import HASH_SECRET_ID, SESSION_SECRET_ID
+from ummanu.webfront.guard import unguarded_routes, upstreams
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "ummanu"
@@ -226,6 +239,13 @@ class EmbedderEnvironmentTests(unittest.TestCase):
         self.assertEqual(seen["fastembed"], "1")
 
 
+#: `host.web_front.sites`, as a line of a `host:` block.
+SITES = "  web_front:\n    sites: [https://front.example, https://198.51.100.7]\n"
+#: A bcrypt-shaped hash and a session secret long enough for the renderer; neither is a credential.
+SAMPLE_HASH = "$2a$14$" + "x" * 53
+SAMPLE_SESSION_SECRET = "fixture-session-secret-" + "x" * 32
+
+
 def _write_instance(directory: Path, host: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "instance.yaml").write_text(f"version: 1\nname: drill\n{host}", encoding="utf-8")
@@ -333,7 +353,8 @@ class WebFrontCaddyTests(unittest.TestCase):
 
     def test_prerequisites_pass_caddy_when_it_is_installed_or_not_wanted(self) -> None:
         cases = (
-            (self.instance("host:\n  unit_prefix: ummanu-\n"), True),
+            # An enabled front also needs its sites since ummanu-53 (`WebFrontSitesTests`).
+            (self.instance("host:\n  unit_prefix: ummanu-\n" + SITES), True),
             (
                 self.instance(
                     "host:\n  unit_prefix: ummanu-\n  components:\n    web-front:\n      enabled: false\n"
@@ -594,6 +615,291 @@ class RuntimeOwnershipTests(unittest.TestCase):
 
         self.assertEqual(result.outcome, "cloned", result)
         self.assertEqual(owner.call_args_list[0], mock.call(home / "projects", "dev"))
+
+
+class WebFrontSitesTests(unittest.TestCase):
+    """P12: the Caddyfile is rendered from `host.web_front.sites` before the host step starts the front."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.data = self.root / "data"
+        self.caddyfile = self.data / "webfront" / "Caddyfile"
+
+    def instance(self, *, sites: bool = True, password: bool = True) -> Path:
+        """A live root with a real secret store holding the front's hash and session secret."""
+        instance = self.root / "instance"
+        instance.mkdir()
+        (instance / "instance.yaml").write_text(
+            f"version: 1\nname: drill\ndata_dir: {self.data}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y\n"
+            "host:\n  unit_prefix: ummanu-\n" + (SITES if sites else ""),
+            encoding="utf-8",
+        )
+        initialize_store(instance, phrase=generate_recovery_phrase(), actor="test")
+        secrets = {SESSION_SECRET_ID: SAMPLE_SESSION_SECRET}
+        if password:
+            secrets[HASH_SECRET_ID] = SAMPLE_HASH
+        for secret_id, value in secrets.items():
+            set_secret(
+                instance,
+                secret_id=secret_id,
+                value=value.encode("utf-8"),
+                scope="installation",
+                purpose="web front fixture",
+                actor="test",
+            )
+        return instance
+
+    def context(self, instance: Path) -> upgrade.UpgradeContext:
+        report = validate_instance(instance)
+        self.assertTrue(report.ok, report.errors)
+        return upgrade.UpgradeContext(
+            instance_path=instance,
+            product_root=self.root / "product",
+            base_branch="main",
+            dry_run=False,
+            units=mock.Mock(),
+            report=report,
+        )
+
+    def file_state(self) -> tuple[bytes, int, int]:
+        info = self.caddyfile.stat()
+        return self.caddyfile.read_bytes(), info.st_mtime_ns, info.st_mode
+
+    def assert_guarded(self, text: str) -> None:
+        self.assertEqual(unguarded_routes(text, ROUTES), ())
+        self.assertEqual(set(upstreams(text)), {"127.0.0.1:8787"})
+        self.assertIn("https://front.example, https://198.51.100.7 {", text)
+
+    def test_the_render_runs_before_the_host_step(self) -> None:
+        self.assertLess(
+            upgrade.STEPS.index(upgrade.step_web_front_config), upgrade.STEPS.index(upgrade.step_host)
+        )
+
+    def test_install_and_recover_render_a_guarded_front_before_their_host_step(self) -> None:
+        """Through `materialize_host`, the materializer both install and recover call."""
+        instance = self.instance()
+        seen = []
+
+        def host(context: upgrade.UpgradeContext) -> upgrade.StepResult:
+            seen.append(self.caddyfile.read_text(encoding="utf-8"))
+            return upgrade.StepResult("host", "unchanged", "")
+
+        with (
+            mock.patch.object(installation, "STEPS", (upgrade.step_web_front_config, host)),
+            mock.patch.object(installation, "step_host", host),
+        ):
+            result = installation.materialize_host(
+                instance,
+                self.root / "product",
+                installation_user=getpass.getuser(),
+                before_host=lambda _: None,
+            )
+
+        self.assertEqual(
+            [(step.name, step.status) for step in result.steps],
+            [("web-front-config", "changed"), ("host", "unchanged")],
+        )
+        [text] = seen
+        self.assert_guarded(text)
+        self.assertEqual(self.caddyfile.stat().st_mode & 0o777, 0o600)
+
+    def test_a_current_front_is_not_rewritten(self) -> None:
+        context = self.context(self.instance())
+        self.assertEqual(upgrade.step_web_front_config(context).status, "changed")
+        self.assertTrue(context.web_front_config_changed)
+        before = (self.caddyfile.read_bytes(), self.caddyfile.stat().st_mtime_ns)
+
+        again = self.context(context.instance_path)
+        result = upgrade.step_web_front_config(again)
+
+        self.assertEqual(result.status, "unchanged", result.detail)
+        self.assertFalse(again.web_front_config_changed)
+        self.assertEqual((self.caddyfile.read_bytes(), self.caddyfile.stat().st_mtime_ns), before)
+
+    def test_an_upgrade_without_sites_leaves_the_existing_caddyfile_byte_unchanged(self) -> None:
+        """Production before its sites are in instance config: its rendered file keeps working."""
+        context = self.context(self.instance(sites=False))
+        self.caddyfile.parent.mkdir(parents=True)
+        self.caddyfile.write_text("# rendered by hand\nhttps://front.example {\n}\n", encoding="utf-8")
+        self.caddyfile.chmod(0o600)
+        before = self.file_state()
+
+        with mock.patch("ummanu.upgrade.state_repo.run_as_git_child") as render:
+            result = upgrade.step_web_front_config(context)
+
+        render.assert_not_called()
+        self.assertEqual(result.status, "unchanged", result.detail)
+        self.assertIn("host.web_front.sites is not set", result.detail)
+        self.assertEqual(self.file_state(), before)
+        self.assertEqual(sorted(path.name for path in self.caddyfile.parent.iterdir()), ["Caddyfile"])
+
+    def test_an_upgrade_with_neither_sites_nor_a_file_names_the_setting_and_writes_nothing(self) -> None:
+        result = upgrade.step_web_front_config(self.context(self.instance(sites=False)))
+
+        self.assertEqual(result.status, "skipped")
+        self.assertIn("host.web_front.sites", result.detail)
+        self.assertFalse(self.caddyfile.parent.exists())
+
+    def test_a_front_without_a_password_fails_and_names_set_password(self) -> None:
+        result = upgrade.step_web_front_config(self.context(self.instance(password=False)))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("ummanu web-front set-password", result.detail)
+        self.assertFalse(self.caddyfile.exists())
+
+    def test_a_disabled_front_is_not_rendered(self) -> None:
+        instance = self.instance()
+        config = instance / "instance.yaml"
+        config.write_text(
+            config.read_text(encoding="utf-8") + "  components:\n    web-front:\n      enabled: false\n",
+            encoding="utf-8",
+        )
+        result = upgrade.step_web_front_config(self.context(instance))
+
+        self.assertEqual(result.status, "skipped")
+        self.assertFalse(self.caddyfile.exists())
+
+    def test_prerequisites_refuse_an_enabled_front_without_sites_and_name_the_setting(self) -> None:
+        instance = _write_instance(self.root / "bare", "host:\n  unit_prefix: ummanu-\n")
+        with (
+            mock.patch("ummanu.installation.caddy_installed", return_value=True),
+            mock.patch("ummanu.installation.board_client"),
+            mock.patch("ummanu.installation.TaskReader"),
+            self.assertRaisesRegex(
+                InstallError,
+                r"web-front prerequisite failed: .*host\.web_front\.sites.*`ummanu web-front render",
+            ),
+        ):
+            installation.check_prerequisites(instance)
+
+    def test_the_schema_takes_https_site_addresses_only(self) -> None:
+        cases = (("[https://front.example]", True), ("[http://front.example]", False), ("[]", False))
+        for sites, valid in cases:
+            with self.subTest(sites):
+                directory = self.root / f"schema-{len(list(self.root.iterdir()))}"
+                directory.mkdir()
+                (directory / "instance.yaml").write_text(
+                    f"version: 1\nname: drill\ndata_dir: {self.data}\n"
+                    "offsite:\n  instance_remote: git@example.invalid:x/y\n"
+                    f"host:\n  unit_prefix: ummanu-\n  web_front:\n    sites: {sites}\n",
+                    encoding="utf-8",
+                )
+                self.assertEqual(validate_instance(directory).ok, valid)
+
+
+class DisabledBindingExpectationTests(unittest.TestCase):
+    """P13: doctor never requires a disabled binding's checkout; one that is there is matched, not unmanaged."""
+
+    def test_a_disabled_binding_yields_no_missing_on_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            projects = Path(temporary).resolve() / "projects"
+            live, absent, present = (projects / name for name in ("live", "retired", "parked"))
+            live.mkdir(parents=True)
+            present.mkdir()
+            bindings = [
+                {"id": "live", "repo": str(live), "enabled": True},
+                {"id": "retired", "repo": str(absent), "enabled": False},
+                {"id": "parked", "repo": str(present), "enabled": False},
+            ]
+            instance = {"host": {"projects_root": str(projects)}}
+            expected = build_doctor_expectations(instance, bindings, packaged=[])
+            # What the live collector reports: every directory under host.projects_root.
+            diff = inventory(expected, HostInventory(projects={str(live), str(present)}))["projects"]
+
+        self.assertEqual(diff.missing_on_host, [])
+        self.assertEqual(diff.unmanaged_on_host, [])
+        # A disabled binding's checkout that is there is still the binding's own checkout.
+        self.assertEqual(diff.matched, sorted([str(live), str(present)]))
+
+    def test_upgrade_s_expectations_skip_a_disabled_binding_as_recovery_does(self) -> None:
+        bindings = [
+            {"id": "live", "repo": "/srv/projects/live", "enabled": True},
+            {"id": "retired", "repo": "/srv/projects/retired", "enabled": False},
+        ]
+        expected = build_expectations(bindings, {})
+
+        self.assertEqual(expected.projects, {"live"})
+        self.assertEqual(expected.dormant_projects, {"retired"})
+
+
+def _fake_embedding_modules(record: Path, ballast: int, *, die: bool = False) -> dict[str, object]:
+    """`ummanu.memory_service` and `ummanu.memory_reindex` without fastembed.
+
+    The embedder writes the pid it was built in to `record` and holds `ballast` bytes it has touched,
+    standing in for the resident model; the rebuild writes the index file and reports parity.
+    """
+    built: list[int] = []
+
+    def build_document_embedder(model: str, cache_dir: Path, threads: int) -> object:
+        built.append(os.getpid())
+        record.write_text(str(os.getpid()), encoding="utf-8")
+        return SimpleNamespace(model=bytearray(b"\x01") * ballast)
+
+    def rebuild(canon, export, target_db, model, dim, document_embed=None, **_kwargs) -> dict:
+        assert document_embed is not None
+        if die:
+            os.kill(os.getpid(), signal.SIGKILL)
+        Path(target_db).parent.mkdir(parents=True, exist_ok=True)
+        Path(target_db).write_text("index\n", encoding="utf-8")
+        return {"parity": {"indexed": 2}}
+
+    service = SimpleNamespace(build_document_embedder=build_document_embedder, built=built)
+    return {"ummanu.memory_service": service, "ummanu.memory_reindex": SimpleNamespace(rebuild=rebuild)}
+
+
+class EmbedderReleaseTests(unittest.TestCase):
+    """P14: recover's rebuild holds the model in a child process, which is gone before the host step."""
+
+    BALLAST = 64 * 1024 * 1024
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.data = self.root / "data"
+        self.data.mkdir()
+        self.instance = self.root / "instance"
+        (self.instance / "state" / "memory" / "facts").mkdir(parents=True)
+        self.record = self.root / "embedder-pid"
+
+    def test_the_isolated_rebuild_builds_the_model_in_a_child_that_exits_with_it(self) -> None:
+        modules = _fake_embedding_modules(self.record, self.BALLAST)
+        with mock.patch.dict(sys.modules, modules):
+            count = restore.rebuild_memory_index(self.data, self.instance, isolated=True)
+        children = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024
+
+        self.assertEqual(count, 2)
+        self.assertEqual(restore.restore_state(self.data)["memory_index"], "complete")
+        self.assertTrue((self.data / "memory" / "index.sqlite").is_file())
+        # Built in another process, and never in this one: nothing here can still reference it.
+        self.assertNotEqual(int(self.record.read_text(encoding="utf-8")), os.getpid())
+        self.assertEqual(modules["ummanu.memory_service"].built, [])
+        # The child really held the stand-in model; it took that memory with it when it exited.
+        self.assertGreaterEqual(children, self.BALLAST)
+
+    def test_a_rebuild_child_the_kernel_kills_is_named_by_its_signal(self) -> None:
+        with (
+            mock.patch.dict(sys.modules, _fake_embedding_modules(self.record, 0, die=True)),
+            self.assertRaisesRegex(restore.RestoreError, "memory rebuild process was killed by signal 9"),
+        ):
+            restore.rebuild_memory_index(self.data, self.instance, isolated=True)
+        self.assertNotEqual(restore.restore_state(self.data).get("memory_index"), "complete")
+
+    def test_recover_asks_for_the_isolated_rebuild_at_every_call(self) -> None:
+        tree = ast.parse((SOURCE / "installation.py").read_text(encoding="utf-8"))
+        calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and ast.unparse(node.func) == "rebuild_memory_index"
+        ]
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            isolated = {keyword.arg: keyword.value for keyword in call.keywords}.get("isolated")
+            self.assertIsNotNone(isolated, ast.unparse(call))
+            self.assertIs(ast.literal_eval(isolated), True)
 
 
 if __name__ == "__main__":

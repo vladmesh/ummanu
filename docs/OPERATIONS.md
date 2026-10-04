@@ -2700,6 +2700,53 @@ python3 -P -m ummanu web-front render --instance INSTANCE \
 sudo systemctl restart ummanu-web-front.service
 ```
 
+### Web front sites
+
+The addresses the front answers on are instance config, `host.web_front.sites` in `instance.yaml`:
+
+```yaml
+host:
+  web_front:
+    sites:
+      - "https://HOST"
+      - "https://ADDRESS"
+      - "https://[IPV6-ADDRESS]"
+```
+
+The rendered Caddyfile is data-directory state, outside every checkpoint and snapshot, because it
+holds the hash; `instance.yaml` travels with the live root. So `install`, `recover` and `upgrade`
+render `DATA_DIR/webfront/Caddyfile` from this list in their `web-front-config` step, before the
+`host` step enables and starts the front. The step runs `ummanu web-front render` as the owner of the
+installation key (as root it crosses to that account, the way instance Git does), so the file is
+written by the account whose Caddy reads it. A file already holding the same text is left alone
+(`unchanged web-front-config: … current`); a rewrite makes the `web` step restart the pair.
+
+**Changing them.** Edit the list in `instance.yaml`, as any other instance config, then:
+
+```bash
+ummanu upgrade --instance INSTANCE --no-pull     # renders, then restarts the pair
+```
+
+`ummanu web-front render … --site …` by hand still works, but the next install, recover or upgrade
+renders the configured list again.
+
+**Without the setting.** An enabled front with no `host.web_front.sites`:
+
+- `upgrade` keeps an existing Caddyfile byte for byte and renders nothing
+  (`unchanged web-front-config: … kept as it is: host.web_front.sites is not set`); with no file
+  either, the step is `skipped` with the same advice, and the `host` step's `caddy validate` fails
+  on the missing file as it always did;
+- `install` and `recover` refuse at prerequisites (`web-front prerequisite failed: …`), naming the
+  setting and the render command, before any live write.
+
+To move an installation that rendered its file by hand onto the setting, copy the site line of the
+current file into the list (each comma-separated address becomes one entry) and run the upgrade
+above; the same addresses render the same file:
+
+```bash
+grep -E '^https://' ~/ummanu-data/webfront/Caddyfile     # e.g. https://HOST, https://ADDRESS {
+```
+
 ### Starting, updating and stopping
 
 ```bash
@@ -2712,7 +2759,7 @@ python3 -P -m ummanu status --instance INSTANCE   # both units, enabled and acti
 The front is `PartOf=ummanu-web.service`: restarting or stopping the transport does the same to the
 front. Both are `Restart=always` with a three-second delay. Units roll out through `ummanu reconcile
 apply`; the Caddyfile does not, because it holds the hash — `web-front render` writes it under
-`~/ummanu-data/webfront/`, mode 0600, untracked. `ExecStartPre` runs `caddy validate`, so a broken
+`~/ummanu-data/webfront/`, mode 0600, untracked, from the [configured sites](#web-front-sites). `ExecStartPre` runs `caddy validate`, so a broken
 render fails the start instead of taking down a running front.
 
 ### Updating the published application to `main`
@@ -2764,6 +2811,7 @@ Restart reasons, from repository-relative changed paths:
 | `bundled schemas changed` | `src/ummanu/schemas/` |
 | `a web unit file changed` | `ummanu-web.service` or the front unit |
 | `the head registry snapshot changed` | `<data>/heads/heads.yaml` regenerated |
+| `the web front configuration was rendered` | `web-front-config` rewrote `<data>/webfront/Caddyfile` |
 
 | line | meaning |
 | --- | --- |

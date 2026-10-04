@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any
 
 
+def binding_disabled(binding: dict[str, Any]) -> bool:
+    """A retired or not-yet-onboarded binding (`enabled: false`): nothing runs against it.
+
+    Recovery does not clone its checkout, and the host expectations neither require its checkout
+    nor call one that is there unmanaged. One predicate, so the two cannot disagree (ummanu-53 P13).
+    """
+    return isinstance(binding, dict) and binding.get("enabled") is False
+
+
 @dataclass(frozen=True)
 class ProjectAvailability:
     """Projects whose configured checkout cannot currently support activation."""

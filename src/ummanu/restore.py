@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import uuid
@@ -731,8 +733,15 @@ def rebuild_memory_index(
     dim: int | None = None,
     threads: int | None = None,
     runner=None,
+    isolated: bool = False,
 ) -> int:
-    """Replace the derived index from restored canon."""
+    """Replace the derived index from restored canon.
+
+    `isolated` builds the in-process embedder in a short-lived child process instead (ummanu-53
+    P14). The model is resident only while the child runs, and the host gets that memory back when
+    the child exits, so a caller that goes on to start `ummanu-memory-mcp` (recover's host step) never
+    holds a second copy of the model beside the service's own.
+    """
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     facts_dir = _memory_canon_dir(data_dir, instance_dir)
@@ -782,25 +791,75 @@ def rebuild_memory_index(
                 raise RuntimeError("memory reindex command reported failure")
             count = int(result["parity"]["indexed"])
         else:
-            from .memory_reindex import rebuild
-            from .memory_service import build_document_embedder
-
-            selected_model = model or DEFAULT_MEMORY_MODEL
-            result = rebuild(
-                facts_dir,
-                memory_dir / "export.ndjson",
-                memory_dir / "index.sqlite",
-                selected_model,
-                dim or DEFAULT_MEMORY_DIM,
-                document_embed=build_document_embedder(
-                    selected_model, memory_dir / "fastembed-cache", threads or 1
-                ),
+            build = _embedded_rebuild_in_child if isolated else _embedded_rebuild
+            count = build(
+                facts_dir, memory_dir, model or DEFAULT_MEMORY_MODEL, dim or DEFAULT_MEMORY_DIM, threads or 1
             )
-            count = int(result["parity"]["indexed"])
     except (OSError, RuntimeError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
         raise RestoreError(f"could not rebuild memory index: {exc}") from None
     _update_restore_state(data_dir, memory_index="complete", memory_index_count=count)
     return count
+
+
+def _embedded_rebuild(facts_dir: Path, memory_dir: Path, model: str, dim: int, threads: int) -> int:
+    """The rebuild with this process's own fastembed model."""
+    from .memory_reindex import rebuild
+    from .memory_service import build_document_embedder
+
+    result = rebuild(
+        facts_dir,
+        memory_dir / "export.ndjson",
+        memory_dir / "index.sqlite",
+        model,
+        dim,
+        document_embed=build_document_embedder(model, memory_dir / "fastembed-cache", threads),
+    )
+    return int(result["parity"]["indexed"])
+
+
+def _embedded_rebuild_child(sender, *arguments) -> None:
+    try:
+        sender.send(("ok", _embedded_rebuild(*arguments)))
+    except BaseException as exc:  # noqa: BLE001 - the parent re-raises it under its own name
+        sender.send(("error", f"{type(exc).__name__}: {exc}"))
+    finally:
+        sender.close()
+
+
+def _embedded_rebuild_in_child(facts_dir: Path, memory_dir: Path, model: str, dim: int, threads: int) -> int:
+    """`_embedded_rebuild` in a forked child, so the model is gone from the host once it returns.
+
+    Forked rather than spawned: the child needs no second import of the product, and it runs the
+    rebuild this process would have run, under the same configuration. The parent never imports the
+    embedding stack. A child the kernel kills (an OOM kill is exit 137) is named by its signal.
+    """
+    # A buffered line the child inherits would otherwise be written twice, once by each process.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    child = context.Process(
+        target=_embedded_rebuild_child,
+        args=(sender, facts_dir, memory_dir, model, dim, threads),
+        name="ummanu-memory-rebuild",
+    )
+    child.start()
+    sender.close()
+    try:
+        outcome = receiver.recv()
+    except EOFError:
+        outcome = None
+    finally:
+        receiver.close()
+        child.join()
+    if outcome is None:
+        code = child.exitcode
+        how = f"was killed by signal {-code}" if code is not None and code < 0 else f"exited {code}"
+        raise RuntimeError(f"the memory rebuild process {how} before it reported a result")
+    status, value = outcome
+    if status != "ok":
+        raise RuntimeError(value)
+    return int(value)
 
 
 def restore_findings(data_dir: Path) -> list[str]:

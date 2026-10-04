@@ -59,7 +59,8 @@ def _checkpoint(
         "name: recovered\n"
         f"data_dir: {data_dir}\n"
         "offsite:\n  instance_remote: placeholder\n"
-        "host:\n  unit_prefix: ummanu-\n",
+        # The front is enabled (no component opts out), so recovery needs its sites (ummanu-53 P12).
+        "host:\n  unit_prefix: ummanu-\n  web_front:\n    sites: [https://recovered.example]\n",
         encoding="utf-8",
     )
     (board / "cards.ndjson").write_text(json.dumps(CARD) + "\n", encoding="utf-8")

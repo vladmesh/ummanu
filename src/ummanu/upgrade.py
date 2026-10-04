@@ -20,6 +20,7 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import tomllib
@@ -84,9 +85,23 @@ from ummanu.runtime.paths import add_instance_argument, component_enabled, confi
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.web.health import WebProbeError, probe_web, target_from_unit
 from ummanu.web.server import LoopbackOnly
+from ummanu.webfront.commands import (
+    CONFIG_NAME as WEB_FRONT_CONFIG_NAME,
+)
+from ummanu.webfront.commands import (
+    FRONT_DIRNAME as WEB_FRONT_DIRNAME,
+)
+from ummanu.webfront.commands import (
+    SITES_SETTING as WEB_FRONT_SITES_SETTING,
+)
+from ummanu.webfront.commands import (
+    configured_sites,
+    missing_sites_message,
+)
 
 MEMORY_COMPONENT = "memory"
 WEB_COMPONENT = "web"
+WEB_FRONT_COMPONENT = "web-front"
 PO_COMPONENT = "po"
 # How long an idle PO service is given to exit and come back under `Restart=always` (RestartSec=3).
 PO_RESTART_WAIT_SECONDS = 30.0
@@ -145,6 +160,8 @@ class UpgradeContext:
     schemas_changed: bool = False
     unit_changed: bool = False
     web_unit_changed: bool = False
+    # `step_web_front_config` rewrote the front's Caddyfile; the pair restarts for it like for a unit.
+    web_front_config_changed: bool = False
     # `ummanu-po.service` was rewritten by reconcile (an update; a created unit was just started).
     po_unit_changed: bool = False
     # A regenerated head snapshot is process-local state too: `load_registry` caches per process,
@@ -1348,6 +1365,86 @@ def step_pipeline_state(context: UpgradeContext) -> StepResult:
     )
 
 
+def step_web_front_config(context: UpgradeContext) -> StepResult:
+    """Render `<data>/webfront/Caddyfile` from `host.web_front.sites`, before `step_host` starts the front.
+
+    The file is data-directory state (it carries the bcrypt hash) and is not in any checkpoint or
+    snapshot, so a recovered host had nothing for `caddy validate` to read (ummanu-53 P12). The sites
+    are instance config, which recovery brings back; the hash and session secret are in the store.
+    The render is `ummanu web-front render` itself, run as the installation key's owner the way
+    `state_repo.run_as_git_child` crosses identity: root never reads that user's key, and the file is
+    written by the account whose Caddy reads it.
+
+    An installation that has not moved its sites into instance config yet keeps the file it has,
+    byte for byte: nothing is rendered, removed or rewritten. Install and recover refuse that state
+    up front (`installation.check_prerequisites`); an upgrade over a host with no file and no sites
+    only says so, and leaves the front to `step_host` as before.
+    """
+    name = "web-front-config"
+    report = context.report
+    host = report.host if isinstance(report.host, dict) else {}
+    prefix = host.get("unit_prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return StepResult(name, "skipped", "no host.unit_prefix; this installation has no front unit")
+    unit = f"{prefix}{WEB_FRONT_COMPONENT}.service"
+    if not _process_unit_enabled(context, WEB_FRONT_COMPONENT, unit):
+        return StepResult(name, "skipped", f"{unit} is outside this installation's desired units")
+    data_dir = _data_dir(context)
+    if data_dir is None:
+        return StepResult(name, "failed", "instance data directory is unresolved")
+    path = data_dir / WEB_FRONT_DIRNAME / WEB_FRONT_CONFIG_NAME
+    sites = configured_sites(host)
+    if not sites:
+        if path.exists():
+            return StepResult(
+                name,
+                "unchanged",
+                f"{path} kept as it is: {WEB_FRONT_SITES_SETTING} is not set, so nothing renders it",
+            )
+        return StepResult(name, "skipped", missing_sites_message(context.instance_path))
+    if context.dry_run:
+        return StepResult(name, "changed", f"would render {path} for {len(sites)} site(s)")
+    argv = [
+        sys.executable, "-P", "-m", "ummanu", "web-front", "render",
+        "--instance", str(context.instance_path), "--data-dir", str(data_dir),
+    ]
+    for site in sites:
+        argv += ["--site", site]
+    try:
+        # The product this process runs, whoever the child runs as.
+        completed = state_repo.run_as_git_child(
+            context.instance_path,
+            argv,
+            label="web-front render",
+            extra_env={"PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        )
+    except state_repo.StateRepoError as exc:
+        return StepResult(name, "failed", str(exc))
+    if completed.returncode:
+        return StepResult(name, "failed", f"web-front render: {_render_failure(completed)}")
+    try:
+        rendered = json.loads(completed.stdout)
+        changed = rendered["changed"]
+    except (ValueError, TypeError, KeyError):
+        return StepResult(name, "failed", "web-front render printed no result")
+    if changed:
+        context.web_front_config_changed = True
+        return StepResult(name, "changed", f"rendered {path} for {len(sites)} site(s)")
+    return StepResult(name, "unchanged", f"{path} current for {len(sites)} site(s)")
+
+
+def _render_failure(completed: subprocess.CompletedProcess[str]) -> str:
+    """The verb's own message from its JSON error line, else its exit status."""
+    for line in reversed((completed.stderr or "").strip().splitlines()):
+        try:
+            message = json.loads(line).get("message")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(message, str) and message:
+            return message
+    return f"exit {completed.returncode}"
+
+
 def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
     assert report.data_dir is not None
@@ -2263,6 +2360,8 @@ def step_web(context: UpgradeContext) -> StepResult:
     reasons = []
     if context.web_unit_changed or planned_unit_names(context.changed_paths, name_prefix):
         reasons.append("a web unit file changed")
+    if context.web_front_config_changed:
+        reasons.append("the web front configuration was rendered")
     if context.schemas_changed:
         reasons.append("bundled schemas changed")
     if context.code_changed:
@@ -2548,6 +2647,8 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_role_skills,
     step_po_workspace_owner,
     step_po_token,
+    # Before the host step: it enables and starts the front, whose ExecStartPre validates this file.
+    step_web_front_config,
     step_host,
     step_memory,
     # Never kills a running PO turn: the service restarts itself once idle.

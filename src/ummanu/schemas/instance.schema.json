@@ -136,6 +136,20 @@
             }
           }
         },
+        "web_front": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "The web-front component's own configuration. Instance config travels with the live root and the rendered Caddyfile under the data directory does not, so install, recover and upgrade render <data>/webfront/Caddyfile from here (docs/OPERATIONS.md, 'Web front sites').",
+          "properties": {
+            "sites": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {"type": "string", "pattern": "^https://[^\\s,{}]+$"},
+              "description": "The https site addresses the front answers on, as `ummanu web-front render --site` takes them, e.g. https://host.example or https://203.0.113.7. Required when the web-front component is enabled on an installation that install or recover materializes."
+            }
+          }
+        },
         "foreign_units": {
           "type": "array",
           "items": {"type": "string", "minLength": 1, "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"},

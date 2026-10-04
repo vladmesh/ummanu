@@ -4525,7 +4525,7 @@ python3 -P -m ummanu web-front check --instance INSTANCE [--config FILE]
 | verb | what it does |
 | --- | --- |
 | `set-password` | reads a password from stdin, or generates one from `secrets`; stores the value and its `caddy hash-password` bcrypt hash as two catalog entries. A plaintext never travels through argv and nothing here prints one. |
-| `render` | reads the *hash* from the store and writes the Caddyfile, mode 0600, under `<data-dir>/webfront/`. Refuses a non-https site address, a hash that is not bcrypt, an upstream that is not loopback, and any configuration it would then have to report as leaving a route unguarded. |
+| `render` | reads the *hash* from the store and writes the Caddyfile, mode 0600, under `<data-dir>/webfront/`. Refuses a non-https site address, a hash that is not bcrypt, an upstream that is not loopback, and any configuration it would then have to report as leaving a route unguarded. A file that already holds the same text at mode 0600 is not rewritten; the answer's `changed` says which. Install, recover and upgrade run this verb with the sites of `host.web_front.sites` ([Operations](OPERATIONS.md#web-front-sites)). |
 | `check` | parses a rendered file and reports every published route it would answer without a password check, and every address it proxies to. Exit 3 when there is a finding. |
 
 The front is the only listener on a public interface; the application refuses non-loopback addresses

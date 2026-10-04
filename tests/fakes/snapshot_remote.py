@@ -133,7 +133,8 @@ def exporter_remote(
             "name: recovered\n"
             f"data_dir: {data_dir}\n"
             f"offsite:\n  instance_remote: {remote}\n"
-            "host:\n  unit_prefix: ummanu-\n"
+            # The front is enabled (no component opts out), so recovery needs its sites (ummanu-53 P12).
+            "host:\n  unit_prefix: ummanu-\n  web_front:\n    sites: [https://recovered.example]\n"
         ),
         "projects/ummanu.yaml": (
             f"id: ummanu\nrepo: {repository}\nenabled: false\nadapter: ummanu\ndefault_branch: main\n"
