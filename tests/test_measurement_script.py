@@ -581,12 +581,25 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         """
         idle, running = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
         base = self.serve(listed=((idle, False), (running, True)))
-        with mock.patch.object(measure, "WARM_REQUESTS", 2):
-            code, text = self.run_main(base)
-
-        self.assertEqual(code, measure.EXIT_MET, text)
-        self.assertIn(f"/po poll: GET /po/api/sessions/{running}", text)
-        self.assertIn(f"whose own JSON reports a running turn ({running})", text)
+        # Selection and the actual polling route are the subject here. A whole measurement's
+        # exit also depends on this host meeting the token 50 ms schedule, which is unrelated.
+        # CadenceAndLaunchTests and the verdict tests keep that separate contract intact.
+        scenario = measure.prepare(base, None)
+        self.assertEqual(scenario.poll_target, f"/po/api/sessions/{running}")
+        self.assertIn(f"whose own JSON reports a running turn ({running})", scenario.poll_explanation)
+        self.assertFalse(scenario.poll_substitute)
+        answered = threading.Event()
+        fetch = measure.fetch
+        def observe_poll(*args, **kwargs):
+            sample = fetch(*args, **kwargs)
+            if args[1] == scenario.poll_target:
+                answered.set()
+            return sample
+        with mock.patch.object(measure, "fetch", side_effect=observe_poll), measure.SessionPoll(
+                base, scenario.poll_target, scenario.cookie) as poll:
+            self.assertTrue(answered.wait(5), "the selected running session was never polled")
+        poll.check()
+        self.assertGreaterEqual(poll.successes, 1)
         polled = [path for _method, path in self.server.seen if path.startswith("/po/api/")]  # type: ignore[attr-defined]
         # The idle one was read once, to find out that it was idle, and never again.
         self.assertEqual(sum(1 for path in polled if path.endswith(idle)), 1, polled)

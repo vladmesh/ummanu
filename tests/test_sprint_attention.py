@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from types import SimpleNamespace
 from unittest import mock
 
 import psycopg
@@ -59,6 +60,54 @@ class SprintAttentionTests(SprintProtocolFixture):
         recorded = attention_record(self.writer.reader.show("ummanu-12"), OWNER_ANSWER)
         self.assertEqual(recorded["handover_event"], second["event_id"])
         self.assertEqual(recorded["quotation"], "Use provider B.")
+
+    def completed_answer_returns_to_observer(self, channel):
+        from ummanu.board.owner_handover import OWNER_ANSWER, attention_record
+        from ummanu.dispatch.po_cards import _po_record, advance_po_card, owner_answer_request_id
+        self.claim("decision")
+        first = self.handover()
+        if channel == "native":
+            self.writer.record_owner_answer(role="po", actor="po", reference="ummanu-12",
+                handover_event=first["event_id"], quotation="Choose A.\n", request_id="answer-12")
+        else:
+            self.writer.comment(role="owner", actor="owner", reference="ummanu-12",
+                                body="Choose A.\n", request_id="answer-12")
+        card = self.writer.reader.show("ummanu-12")
+        answer = attention_record(card, OWNER_ANSWER)
+        self.assert_wait(False)
+        before = self.store.events()
+        audit = self.writer.audit.events("ummanu-12")
+        po = mock.Mock()
+        po.request.return_value = SimpleNamespace(session_id="answer-session", seq=7)
+        po.turn.return_value = SimpleNamespace(session_id="answer-session", seq=7, state="completed")
+        runtime = SimpleNamespace(reader=self.writer.reader, writer=self.writer, audit=self.writer.audit,
+                                  owner="dispatcher", po=po, save_records=lambda *_: None)
+        records = {"ummanu-12": _po_record(card, "followup-fixture")}
+        result = advance_po_card(runtime, card, records, {}, "followup-fixture")
+        self.assertEqual(result["action"], "po-card-blocked")
+        self.assertIn("answer-session/7 ended completed without completing the card", result["reason"])
+        po.request.assert_called_once_with(owner_answer_request_id("ummanu-12", answer["event_id"]))
+        po.submit.assert_not_called()
+        shown = self.writer.reader.show("ummanu-12")
+        self.assertEqual(shown["state"], "blocked")
+        self.assertEqual(attention_record(shown, OWNER_ANSWER), answer)
+        self.assertIsNone(waiting_owner(shown))
+        added = [e for e in self.store.events() if e.id not in {e.id for e in before}]
+        self.assertEqual([(e.kind, e.event_class) for e in added], [("card_waits_for_person", "notice")])
+        self.assertIn("observer", added[0].text.lower())
+        self.assert_wait(False)
+        self.assertEqual(self.writer.audit.events("ummanu-12")[:len(audit)], audit)
+        for _ in range(3):
+            result = advance_po_card(runtime, self.writer.reader.show("ummanu-12"), records, {}, "restart")
+            self.assertEqual(result["action"], "po-card-closed")
+        self.assertEqual(len(self.store.events()), len(before) + 1)
+        po.submit.assert_not_called()
+
+    def test_native_answer_completed_followup_returns_neutral_blocked_notice(self):
+        self.completed_answer_returns_to_observer("native")
+
+    def test_owner_comment_completed_followup_returns_neutral_blocked_notice(self):
+        self.completed_answer_returns_to_observer("comment")
 
     def test_answer_and_escalation_failures_after_the_mark_roll_back_the_whole_sql_mutation(self):
         claimed = self.claim("decision")
@@ -496,6 +545,32 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assertEqual((unread["unread"], len(unread["events"])), (1, 1))
         self.assertEqual(unread["events"][0]["dedup_key"], "old")
         self.assert_wait(False)
+
+    def test_bulk_counts_all_steward_events_beyond_the_list_and_preserves_the_held_handover(self):
+        self.claim("decision")
+        self.handover()
+        held = next(e for e in self.store.events() if e.kind == "card_handed_to_owner")
+        with self.store._connection() as connection:
+            connection.execute(
+                "INSERT INTO owner_events (kind, class, subject_ref, text, dedup_key) "
+                "SELECT 'steward_needs_human', 'needs_owner', 'ummanu-12', 'routing decision', "
+                "'steward-' || i FROM generate_series(1,501) AS i"
+            )
+        snapshot = self.events.owner_event_list()
+        self.assertEqual(len(snapshot["events"]), 500)
+        self.assertEqual((snapshot["needs_owner_count"], snapshot["held_count"]), (502, 1))
+        result = self.events.mark_all_read()
+        self.assertEqual(result["marked"], snapshot["notice_count"])
+        self.assertEqual((result["remaining"], result["needs_owner_count"], result["held_count"]), (502, 502, 1))
+        page = self.app.handle("GET", "/owner-events", query=f"marked={result['marked']}").body.decode()
+        for text in ("502 owner-attention events remain", "1 held by an unanswered handover",
+                     "501 can be marked read individually", "No unread notices to mark"):
+            self.assertIn(text, page)
+        steward = next(e for e in self.store.events() if e.kind == "steward_needs_human")
+        self.events.mark_read(steward.id)
+        self.assertEqual(self.events.owner_event_list()["needs_owner_count"], 501)
+        with self.assertRaises(ReadRefused):
+            self.store.mark_read(held.id)
 
     def test_render_pins_one_statement_for_the_chip_and_bell_and_gets_do_not_write(self):
         self.claim("decision")

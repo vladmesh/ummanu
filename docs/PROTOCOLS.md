@@ -441,8 +441,14 @@ accidentally Block the unfinished card. A lost submission or dispatcher record r
 ID and text. Existing released owner-comment follow-ups are accepted only through their genuine
 owner audit marker, current handover order and exact quotation digest. The view never settles them.
 A refused/set-aside delivery retains its real PO return failure; failed execution escalates, while
-intentional owner interruption is distinct. Continue the work and complete the card with
-`task complete`; another owner turn requires another explicit handover.
+intentional owner interruption is distinct. A completed follow-up turn without `task complete` or a
+new unanswered handover immediately returns the unfinished card to the observer through Blocked,
+with its recorded answer still settled. Initial and answer follow-ups use one current-episode outcome
+rule: closed/superseded cards and new handovers win over turn outcomes; failed execution escalates
+immediately, and queued/running or not-yet-submitted work escalates at 30 minutes from the durable
+claim or answer time. Retries preserve that clock and submission ID. An unavailable PO read is degraded
+evidence. An interrupted follow-up retains the intentional stop; an interrupted initial turn keeps
+its existing Blocked route. Another owner turn requires another explicit handover.
 
 Recording an answer applies no standing grant. The PO may quote/reference an already recorded
 standing decision as its basis. New sprint authority goes through `sprint record-owner-decisions`
@@ -784,7 +790,8 @@ unread view. `GET /owner-events` lists the unread events, open `needs_owner` eve
 newest first, each with its class badge and a link to its subject; `?all=1` lists every event, unread
 rows highlighted. `?unread=1` from an older link, or any other value, is the unread default. A
 notice's "Mark read" posts `/owner-events/{id}/read`; "Mark all notices read" posts
-`/owner-events/read-all`; both return to the view they were pressed from, and bulk read displays the marked count and remaining held count. A board without the table lists no events, with the source `unavailable`, and
+`/owner-events/read-all`; both return to the view they were pressed from, and bulk read displays the marked notice count, all remaining needs_owner events, the held count and the
+unheld count that can be read individually (including steward escalations). A board without the table lists no events, with the source `unavailable`, and
 refuses the two writes (503). From a terminal: `ummanu owner-events list`
 ([Operations](OPERATIONS.md#owner-events)).
 

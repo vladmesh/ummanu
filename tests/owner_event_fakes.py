@@ -109,7 +109,7 @@ class FakeOwnerEvents:
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            events = self.events()
+            events = self.events(limit=max(500, len(self.rows)))
             waits = []
             for event in events:
                 card = self.cards(str(event.subject_ref)) if event.subject_ref else None
@@ -117,9 +117,10 @@ class FakeOwnerEvents:
                     event.kind == "steward_needs_human" or event.held
                 ):
                     waits.append({"event_id": event.id, "subject_ref": event.subject_ref, "sprint_ref": card["sprint"]})
-            return {"events": [event.to_json() for event in events],
+            return {"events": [event.to_json() for event in events[:500]],
                     "unread_events": [event.to_json() for event in self.events(unread_only=True)],
                     "unread": self.unread_count(), "human_waits": waits,
+                    "needs_owner_count": sum(e.unread and e.event_class == NEEDS_OWNER for e in events),
                     "notice_count": sum(e.unread and e.event_class == NOTICE for e in events),
                     "held_count": sum(e.held for e in events)}
 

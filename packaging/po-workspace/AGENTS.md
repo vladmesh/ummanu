@@ -107,8 +107,9 @@ quotation in a file and settle that specific handover:
     python3 -P -m ummanu task record-owner-answer --ref <card> --role po --handover-event <event_id> --body-file <quotation-file> --request-id <new-id>
 
 A genuine owner card comment is the other answer path. Both clear owner attention before completion
-and deliver the recorded answer to the handover's PO session once. Continue the unfinished card and
-complete it with `task complete`. A new unresolved question requires another explicit handover with a
+and deliver the recorded answer to the handover's PO session once. Complete the card with
+`task complete` in that turn. Ending the turn without completion or a new unanswered handover returns
+the unfinished card to the observer through Blocked. A new unresolved question requires another explicit handover with a
 new request ID; earlier answers cannot satisfy it. Referencing an already recorded standing decision
 as the answer's basis does not apply its grant again. The answer command records no grant: use
 `sprint record-owner-decisions` once for new sprint authority, with stable decision IDs.

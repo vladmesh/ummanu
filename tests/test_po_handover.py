@@ -357,15 +357,20 @@ class EscalationTests(WriterFixture):
         po = mock.Mock()
         po.request.return_value = None if state is None else SimpleNamespace(session_id="session", seq=1)
         po.refused.return_value = None
-        po.turn.return_value = SimpleNamespace(state=state)
+        po.queued.return_value = None
+        po.turn.return_value = SimpleNamespace(state=state, session_id="session", seq=1)
         return SimpleNamespace(reader=self.writer.reader, writer=self.writer, audit=self.writer.audit,
-                               po=po, owner="dispatcher")
+                               po=po, owner="dispatcher", save_records=lambda *_: None)
 
     def advance(self, runtime: Any, seconds: int) -> None:
-        from ummanu.dispatch.po_cards import _escalate
+        from ummanu.dispatch.po_cards import _episode_outcome
         start = datetime.fromisoformat(SINCE).timestamp()
         with mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds):
-            _escalate(runtime, self.card, SimpleNamespace(po_submission=SimpleNamespace(submit_request_id="submit-episode")))
+            # These tests isolate the escalation writer; settled-turn transitions are exercised
+            # through the full dispatcher and real SQL writer below and in test_sprint_attention.
+            with mock.patch("ummanu.dispatch.po_cards._block", return_value={}):
+                _episode_outcome(runtime, self.card, SimpleNamespace(attempt_id="attempt",
+                    po_submission=SimpleNamespace(submit_request_id="submit-episode")), {}, {})
 
     def test_queued_deadline_is_2959_then_3000_and_restart_replay_deduplicates(self) -> None:
         runtime = self.runtime()
@@ -470,7 +475,7 @@ class OwnerAnswerDispatchTests(HandedOverFixture):
             self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
         self.assertEqual(submit.call_args.kwargs["request_id"], stable_id)
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
-        self.assertEqual(self.tick(runtime)["action"], "po-card-owner-answered")
+        self.assertEqual(self.tick(runtime)["action"], PO_BLOCKED_ACTION)
         self.assertIsNone(waiting_owner(self.cards.card))
 
     """The dispatcher waits on a handed-over card, and hands each owner answer to the PO once."""
@@ -532,12 +537,8 @@ class OwnerAnswerDispatchTests(HandedOverFixture):
             self.assertIn(expected, prompt)
         self.assertNotIn("[handover:owner]", prompt)
 
-        # The follow-up turn settled and the card is still handed over: it waits, and nothing repeats.
-        for _ in range(2):
-            self.assertEqual(self.tick(runtime)["action"], "po-card-owner-answered")
-        self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
-
-        # A new unresolved question requires a new explicit handover epoch.
+        # Before the dispatcher reads the ended turn, the PO hands over a new question.
+        # The current board epoch wins over the previous turn's missing response.
         self.hand_over(reason="Which monthly plan?")
         self.owner_says("And cap it at the monthly plan.", "evt-owner-2")
         self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
@@ -570,15 +571,184 @@ class OwnerAnswerDispatchTests(HandedOverFixture):
 
         with mock.patch.object(runtime.po, "submit", side_effect=loses_the_answer):
             self.assertEqual(self.tick(runtime)["action"], "po-service-unanswered")
-            self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+            self.settled(session, 3)
+            self.assertEqual(self.tick(runtime)["action"], PO_BLOCKED_ACTION)
         self.settled(session, 3)
         self.records.clear()  # the dispatcher's state file is lost with its record
 
         rebuilt = [self.tick(runtime)["action"], self.tick(runtime)["action"], self.tick(runtime)["action"]]
 
-        self.assertEqual(rebuilt, ["po-card-submitted", "po-owner-answer-submitted", "po-card-owner-answered"])
-        self.assertEqual(seen, [owner_answer_request_id(REF, "evt-owner-1")] * 2)
+        self.assertEqual(rebuilt, ["po-card-closed"] * 3)
+        self.assertEqual(seen, [owner_answer_request_id(REF, "evt-owner-1")])
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
+
+    def test_completed_followup_after_lost_record_blocks_once_and_preserves_answer(self) -> None:
+        runtime, session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-completed")
+        self.tick(runtime)
+        self.settled(session, 3)
+        answer = attention_record(self.cards.card, OWNER_ANSWER)
+        self.records.clear()
+        with mock.patch.object(runtime.po, "submit", wraps=runtime.po.submit) as submit:
+            outcome = self.tick(runtime)
+            self.assertEqual(outcome["action"], PO_BLOCKED_ACTION)
+            self.assertIn(f"{session}/3 ended completed without completing", outcome["reason"])
+            self.assertEqual([self.tick(runtime)["action"] for _ in range(3)], ["po-card-closed"] * 3)
+            submit.assert_not_called()
+        self.assertEqual(attention_record(self.cards.card, OWNER_ANSWER), answer)
+        self.assertIsNone(waiting_owner(self.cards.card))
+        self.assertIsNone(attention_record(self.cards.card, "owner_escalation"))
+        self.assertEqual(sum(e["kind"] == "move" and e["to"] == "blocked" for e in self.cards.log), 1)
+        self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
+
+    def test_done_or_new_handover_during_followup_turn_read_wins(self) -> None:
+        for change in ("done", "handover"):
+            with self.subTest(change=change):
+                # A separate card fixture for each race, including an actual completed follow-up.
+                fixture = HandedOverFixture()
+                fixture.setUp()
+                try:
+                    runtime, session = fixture.submitted_card()
+                    fixture.hand_over()
+                    fixture.owner_says("Approved.", "evt-owner-race")
+                    fixture.tick(runtime)
+                    fixture.settled(session, 3)
+                    turn_read = runtime.po.turn
+                    def raced(*args, change=change, fixture=fixture, turn_read=turn_read):
+                        result = turn_read(*args)
+                        if change == "done":
+                            fixture.cards.complete_as_po("decision", DECISION_BODY)
+                        else:
+                            fixture.hand_over("Which monthly plan?")
+                        return result
+                    with mock.patch.object(runtime.po, "turn", side_effect=raced):
+                        outcome = fixture.tick(runtime)
+                    self.assertEqual(outcome["action"], "po-card-closed" if change == "done" else "po-card-waiting-owner")
+                    self.assertFalse(any(e["kind"] == "move" and e["to"] == "blocked" for e in fixture.cards.log))
+                finally:
+                    fixture.doCleanups()
+
+    def test_unavailable_submission_uses_durable_answer_deadline_and_stable_retry(self) -> None:
+        from ummanu.po.client import OutcomeUnknown, ServiceUnavailable
+        runtime, session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-unavailable")
+        answer = attention_record(self.cards.card, OWNER_ANSWER)
+        start = datetime.fromisoformat(answer["at"]).timestamp()
+        stable_id = owner_answer_request_id(REF, answer["event_id"])
+        with mock.patch.object(runtime.po, "submit", side_effect=[ServiceUnavailable("offline"), ServiceUnavailable("offline"),
+                                                          OutcomeUnknown("lost reply"), OutcomeUnknown("lost reply")]) as submit:
+            for seconds in (1799, 1799, 1800, 1900):
+                with mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds):
+                    self.assertEqual(self.tick(runtime)["action"], "po-service-unanswered")
+                escalation = attention_record(self.cards.card, "owner_escalation")
+                self.assertEqual(escalation is not None, seconds >= 1800)
+                if escalation:
+                    self.assertEqual(escalation["episode"], answer["event_id"])
+                self.records.clear()
+            self.assertEqual([c.kwargs["request_id"] for c in submit.call_args_list], [stable_id] * 4)
+        self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+        self.settled(session, 3)
+        self.assertEqual(self.tick(runtime)["action"], PO_BLOCKED_ACTION)
+        self.assertEqual(attention_record(self.cards.card, OWNER_ANSWER), answer)
+
+    def test_queued_and_failed_followup_share_the_durable_answer_episode(self) -> None:
+        runtime, _session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-queued")
+        answer = attention_record(self.cards.card, OWNER_ANSWER)
+        start = datetime.fromisoformat(answer["at"]).timestamp()
+        with mock.patch.object(runtime.po, "request", return_value=SimpleNamespace(session_id="followup", seq=None)):
+            for seconds in (1799, 1800):
+                with mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds):
+                    self.assertEqual(self.tick(runtime)["action"], "po-card-owner-answered")
+                self.assertEqual(attention_record(self.cards.card, "owner_escalation") is not None, seconds == 1800)
+        self.cards.card["extensions"]["extra"].pop("owner_escalation", None)
+        with mock.patch.object(runtime.po, "request", return_value=SimpleNamespace(session_id="followup", seq=4)), mock.patch.object(
+                runtime.po, "turn", return_value=SimpleNamespace(session_id="followup", seq=4, state="failed")), mock.patch(
+                "ummanu.dispatch.po_cards.time.time", return_value=start + 1):
+            self.assertEqual(self.tick(runtime)["action"], "po-card-owner-answer-turn-ended")
+        escalation = attention_record(self.cards.card, "owner_escalation")
+        self.assertEqual(escalation["episode"], answer["event_id"])
+        self.assertIn("execution failed", escalation["reason"])
+
+    def test_permanent_submission_refusal_blocks_and_retains_settled_answer(self) -> None:
+        from ummanu.po.client import ServiceRefused
+        runtime, _session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-refused")
+        answer = attention_record(self.cards.card, OWNER_ANSWER)
+        with mock.patch.object(runtime.po, "submit", side_effect=ServiceRefused("refused", "permanent refusal")):
+            self.assertEqual(self.tick(runtime)["action"], PO_BLOCKED_ACTION)
+        self.assertEqual(attention_record(self.cards.card, OWNER_ANSWER), answer)
+        self.assertIsNone(attention_record(self.cards.card, "owner_escalation"))
+
+    def test_completion_or_handover_during_permanent_submit_refusal_wins(self) -> None:
+        from ummanu.po.client import ServiceRefused
+        for change in ("done", "handover"):
+            with self.subTest(change=change):
+                fixture = HandedOverFixture()
+                fixture.setUp()
+                try:
+                    runtime, _session = fixture.submitted_card()
+                    fixture.hand_over()
+                    fixture.owner_says("Approved.", "evt-owner-refusal-race")
+                    def refused(*, change=change, fixture=fixture, **_fields):
+                        if change == "done":
+                            fixture.cards.complete_as_po("decision", DECISION_BODY)
+                        else:
+                            fixture.hand_over("Which monthly plan?")
+                        raise ServiceRefused("refused", "permanent refusal")
+                    with mock.patch.object(runtime.po, "submit", side_effect=refused):
+                        outcome = fixture.tick(runtime)
+                    self.assertEqual(outcome["action"], "po-card-closed" if change == "done" else "po-card-waiting-owner")
+                    self.assertFalse(any(e["kind"] == "move" and e["to"] == "blocked" for e in fixture.cards.log))
+                finally:
+                    fixture.doCleanups()
+
+    def test_closed_session_refuses_followup_through_the_existing_blocked_route(self) -> None:
+        from ummanu.po.store import SessionClosed
+        runtime, _session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-closed-session")
+        answer = attention_record(self.cards.card, OWNER_ANSWER)
+        with mock.patch.object(runtime.po, "submit", side_effect=SessionClosed("closed session")):
+            outcome = self.tick(runtime)
+        self.assertEqual(outcome["action"], PO_BLOCKED_ACTION)
+        self.assertIn("closed session", outcome["reason"])
+        self.assertEqual(attention_record(self.cards.card, OWNER_ANSWER), answer)
+        self.assertIsNone(attention_record(self.cards.card, "owner_escalation"))
+
+    def test_conflicting_retry_with_unavailable_store_remains_degraded(self) -> None:
+        from ummanu.po.store import PoStoreError, RequestConflict
+        runtime, _session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-conflict")
+        with mock.patch.object(runtime.po, "request", side_effect=[None, PoStoreError("unavailable")]), mock.patch.object(
+                runtime.po, "submit", side_effect=RequestConflict("conflicting retry")):
+            outcome = self.tick(runtime)
+        self.assertEqual((outcome["status"], outcome["action"]), ("degraded", "po-store-unanswered"))
+        self.assertEqual(self.cards.card["state"], "in_progress")
+        self.assertIsNone(attention_record(self.cards.card, "owner_escalation"))
+
+    def test_interrupted_followup_and_unavailable_store_do_not_claim_execution_failure(self) -> None:
+        from ummanu.po.store import PoStoreError
+        runtime, session = self.submitted_card()
+        self.hand_over()
+        self.owner_says("Approved.", "evt-owner-stop")
+        self.tick(runtime)
+        self.settled(session, 3)
+        answer = attention_record(self.cards.card, OWNER_ANSWER)
+        start = datetime.fromisoformat(answer["at"]).timestamp()
+        with mock.patch.object(runtime.po, "turn", return_value=SimpleNamespace(state="interrupted")), mock.patch(
+                "ummanu.dispatch.po_cards.time.time", return_value=start + 7200):
+            self.assertEqual(self.tick(runtime)["action"], "po-card-owner-answer-turn-ended")
+        with mock.patch.object(runtime.po, "turn", side_effect=PoStoreError("unavailable")):
+            outcome = self.tick(runtime)
+            self.assertEqual((outcome["status"], outcome["action"]), ("degraded", "po-store-unanswered"))
+        self.assertEqual(self.cards.card["state"], "in_progress")
+        self.assertIsNone(attention_record(self.cards.card, "owner_escalation"))
 
     def test_comments_before_the_handover_and_from_other_roles_are_not_the_owners_answer(self) -> None:
         comments = [
@@ -669,7 +839,7 @@ class RebuiltRecordTests(DispatcherFixture):
         runtime.sprints.comments.append("A comment that landed after the submit.")
         rebuilt = self.tick(runtime)
 
-        self.assertEqual((rebuilt["status"], rebuilt["action"]), ("ok", "po-card-submitted"))
+        self.assertEqual((rebuilt["status"], rebuilt["action"]), ("ok", "po-card-queued"))
         self.assertEqual(self.cards.card["state"], "in_progress")
         self.assertEqual([item.request_id for item in PoQueue(self.data).pending(session)], [submit_id])
         self.assertEqual(self.tick(runtime)["action"], "po-card-queued")

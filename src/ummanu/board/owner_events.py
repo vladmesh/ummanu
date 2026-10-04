@@ -328,6 +328,7 @@ class OwnerEventStore:
         with self._connection() as connection:
             document = connection.execute(
                 "SELECT jsonb_build_object('unread', (SELECT count(*) FROM owner_events WHERE read_at IS NULL), "
+                "'needs_owner_count', (SELECT count(*) FROM owner_events WHERE read_at IS NULL AND class = 'needs_owner'), "
                 "'notice_count', (SELECT count(*) FROM owner_events WHERE read_at IS NULL AND class = 'notice'), "
                 f"'held_count', (SELECT count(*) FROM owner_events e WHERE e.read_at IS NULL AND e.class = 'needs_owner' AND {_HELD}), "
                 "'events', COALESCE((SELECT jsonb_agg(row_to_json(listed)) FROM ("

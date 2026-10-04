@@ -1907,7 +1907,7 @@ def owner_events(document: dict[str, Any]) -> str:
         )
     all_mark = ' aria-current="true"' if not unread_only else ""
     unread_mark = ' aria-current="true"' if unread_only else ""
-    disabled = ' disabled title="No unread notices to mark; unresolved owner turns need an answer"' if not document.get("notice_count", 0) else ""
+    disabled = ' disabled title="No unread notices to mark; bulk read marks notices only"' if not document.get("notice_count", 0) else ""
     actions = (
         '<div class="owner-events-actions">'
         f'<div class="filters"><a href="/owner-events"{unread_mark}>Unread</a>'
@@ -1915,6 +1915,9 @@ def owner_events(document: dict[str, Any]) -> str:
         f'<form method="post" action="/owner-events/read-all">{back}'
         f'<button type="submit" class="quiet"{disabled}>Mark all notices read</button></form></div>'
     )
+    actions += '<p>Bulk read marks notices only. Other events can be marked read individually unless held.</p>'
+    if not document.get("notice_count", 0):
+        actions += '<p>No unread notices to mark.</p>'
     listing = _section(
         document.get("source"),
         events,

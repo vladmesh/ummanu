@@ -1095,6 +1095,13 @@ class RecoveryProgressTests(ServiceFixture):
                     text = "complete" if action == "completion" else "GATE stop"
                     service.submit(session_id=session_id, text=text, request_id=f"input-{action}")
                     if action == "stop":
+                        # Submission can still be queued while the service's drain holds its lock.
+                        # Stop the launched, scoped process so this case reaches the injected
+                        # cleanup failure rather than the legitimate no-running-turn result.
+                        self.reached_gate(session_id, 1)
+                        eventually(lambda: ScopedHeadLifecycle.from_run_dir(
+                            service.runner._scope_dir(session_id, 1)) is not None,
+                            "the running turn's cleanup scope was not persisted")
                         with self.assertRaises(MemoryScopeError):
                             service.stop_turn(session_id=session_id, seq=1)
                     eventually(attempted.is_set, "cleanup was not attempted")

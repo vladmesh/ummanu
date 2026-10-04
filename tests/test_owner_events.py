@@ -592,7 +592,7 @@ class PoTurnFailedTests(HandedOverFixture):
 
         outcome = self.tick(runtime)
         self.assertEqual(outcome["action"], "po-card-owner-answer-turn-ended")
-        self.assertIn("the recorded owner answer reached the PO, but its turn failed", outcome["reason"])
+        self.assertIn("PO execution failed; unresolved episode escalated", outcome["reason"])
         self.assertNotIn("is with the PO", outcome["reason"])
         [event] = events.rows.values()
         self.assertEqual((event.kind, event.subject_ref, event.dedup_key), ("po_turn_failed", REF, f"po_turn_failed:{session}:3"))
@@ -732,6 +732,46 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.post("/owner-events/read-all", b"other=1").status, 400)
         # The old filter field is no longer part of the form.
         self.assertEqual(self.post("/owner-events/read-all", b"unread=1").status, 400)
+
+    def test_bulk_feedback_accounts_for_unheld_steward_with_no_notices(self) -> None:
+        self.store.rows.clear()
+        record("steward_needs_human", REF, "Steward needs a routing decision", "steward", to=self.store)
+        [steward] = self.store.events()
+        page = self.get("/owner-events")
+        self.assertIn("No unread notices to mark.", page)
+        self.assertIn("Bulk read marks notices only.", page)
+        self.assertIn('disabled title="No unread notices', page)
+        self.assertIn(f'action="/owner-events/{steward.id}/read"', page)
+        result = self.layer.mark_all_read()
+        self.assertEqual((result["marked"], result["needs_owner_count"], result["held_count"]), (0, 1, 0))
+        response = self.post("/owner-events/read-all")
+        self.assertIn("1 owner-attention events remain", response.body.decode())
+        self.assertIn("1 can be marked read individually", self.get("/owner-events", "marked=0"))
+        self.assertEqual(self.post(f"/owner-events/{steward.id}/read").status, 303)
+        self.assertEqual(self.layer.unread_count()["count"], 0)
+
+    def test_snapshot_counts_all_needs_owner_beyond_the_bounded_event_list(self) -> None:
+        for index in range(501):
+            record("steward_needs_human", REF, "Steward needs a routing decision", f"steward-{index}", to=self.store)
+        document = self.layer.owner_event_list()
+        self.assertEqual(len(document["events"]), 500)
+        self.assertEqual((document["unread"], document["notice_count"], document["needs_owner_count"], document["held_count"]), (505, 3, 502, 1))
+        result = self.layer.mark_all_read()
+        self.assertEqual((result["marked"], result["remaining"], result["needs_owner_count"], result["held_count"]), (3, 502, 502, 1))
+
+    def test_bulk_feedback_distinguishes_held_and_unheld_needs_owner(self) -> None:
+        record("steward_needs_human", REF, "Steward needs a routing decision", "steward", to=self.store)
+        result = self.layer.mark_all_read()
+        self.assertEqual((result["marked"], result["remaining"], result["needs_owner_count"], result["held_count"]), (3, 2, 2, 1))
+        document = self.layer.owner_event_list()
+        self.assertEqual((document["notice_count"], document["needs_owner_count"], document["held_count"]), (0, 2, 1))
+        page = self.get("/owner-events", "marked=3")
+        for text in ("Marked 3 notices read", "2 owner-attention events remain", "1 held by an unanswered handover", "1 can be marked read individually", "current handover has no recorded owner answer"):
+            self.assertIn(text, page)
+        held = self.store.of_kind("card_handed_to_owner")[0]
+        steward = self.store.of_kind("steward_needs_human")[0]
+        self.assertEqual(self.post(f"/owner-events/{held.id}/read").status, 409)
+        self.assertEqual(self.post(f"/owner-events/{steward.id}/read").status, 303)
 
     def test_the_bell_leads_to_the_unread_view_in_every_state(self) -> None:
         def bell_href() -> str:

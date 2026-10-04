@@ -197,9 +197,9 @@ class RepeatTests(DispatcherFixture):
         first = self.claim(runtime)
         second = self.tick(runtime)
 
-        self.assertEqual((first["action"], second["action"]), ("po-service-unanswered", "po-card-submitted"))
+        self.assertEqual((first["action"], second["action"]), ("po-service-unanswered", "po-card-queued"))
         self.assertEqual(len(set(channel.ids)), 1)
-        self.assertEqual(len(channel.ids), 2)
+        self.assertEqual(len(channel.ids), 1, "durable queue evidence recovers the accepted submit without replay")
         [session] = self.session_ids()
         self.settled(session, 2)
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 2)
@@ -229,7 +229,7 @@ class RepeatTests(DispatcherFixture):
         again = self.tick(runtime)
 
         rebuilt = self.record().po_submission
-        self.assertEqual(again["action"], "po-card-submitted")
+        self.assertIn(again["action"], {"po-card-queued", "po-card-turn-running"})
         self.assertEqual(
             (rebuilt.session_request_id, rebuilt.submit_request_id, rebuilt.session_id),
             (before.session_request_id, before.submit_request_id, before.session_id),
@@ -237,6 +237,19 @@ class RepeatTests(DispatcherFixture):
         [session] = self.session_ids()
         self.settled(session, 2)
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 2)
+
+    def test_a_submitted_card_with_lost_delivery_evidence_retries_its_frozen_input(self) -> None:
+        self.start()
+        runtime = self.runtime(card())
+        self.claim(runtime)
+        before = self.record().po_submission
+        with mock.patch.object(runtime.po, "request", return_value=None), mock.patch.object(
+                runtime.po, "queued", return_value=None), mock.patch.object(runtime.po, "submit", wraps=runtime.po.submit) as submit:
+            self.assertEqual(self.tick(runtime)["action"], "po-card-submitted")
+        self.assertEqual((submit.call_args.kwargs["request_id"], submit.call_args.kwargs["text"]),
+                         (before.submit_request_id, before.text))
+        self.settled(before.session_id, 2)
+        self.assertEqual(len(FakePoStore(self.board).turns(before.session_id)), 2)
 
     def test_a_refused_resolve_blocks_the_card(self) -> None:
         self.po_sprints = FakeSprints({SPRINT: None}, status={SPRINT: "closed"})

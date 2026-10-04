@@ -424,7 +424,9 @@ class PoDecidesTests(RuleFixture):
 
     def test_a_repeat_of_the_same_submit_queues_once_whatever_the_sprint_allows_by_then(self) -> None:
         self.start()
-        runtime = self.runtime(self.operation("relay"))
+        operation = self.operation("relay")
+        operation["description"] = "GATE hold the original input during recovery"
+        runtime = self.runtime(operation)
         real = runtime.po
         answers: list[dict[str, Any]] = []
         sprints = self.po_sprints
@@ -445,16 +447,26 @@ class PoDecidesTests(RuleFixture):
         runtime.po = LosesTheFirstAnswer()
 
         first = self.claim(runtime)
+        original = self.record().po_submission
+        self.reached_gate(original.session_id, 2)
         second = self.tick(runtime)
         self.records.clear()  # and the dispatcher's record is lost: rebuilt from the claim, same ids
         third = self.tick(runtime)
 
         self.assertEqual(
             [first["action"], second["action"], third["action"]],
-            ["po-service-unanswered", "po-card-submitted", "po-card-submitted"],
+            ["po-service-unanswered", "po-card-turn-running", "po-card-turn-running"],
         )
-        self.assertEqual([answer["repeated"] for answer in answers], [False, True, True])
+        self.assertEqual([answer["repeated"] for answer in answers], [False])
         submission = self.record().po_submission
+        self.assertEqual((submission.submit_request_id, submission.session_id),
+                         (original.submit_request_id, original.session_id))
+        # Recovery uses durable evidence without another submit. An explicit service replay of
+        # the same frozen input still proves idempotency after the production rights changed.
+        repeated = real.submit(session_id=original.session_id, text=original.text,
+            request_id=original.submit_request_id, source="dispatcher", card=original.card)
+        self.assertTrue(repeated["repeated"])
+        self.gate.touch()
         self.settled(submission.session_id, 2)
         self.assertEqual(len(FakePoStore(self.board).turns(submission.session_id)), 2)
         # The one turn carries the note it was queued with.
