@@ -281,6 +281,15 @@ class OwnerCommentTests(WriterFixture):
         self.assertIsNotNone(waiting_owner(self.card))
         self.assertIsNone(attention_record(self.card, OWNER_ANSWER))
 
+    def test_blank_owner_comment_does_not_prevent_a_native_conversation_answer(self) -> None:
+        handover = self.hand_over()
+        self.writer.comment(role="owner", actor="owner", reference=REF, body=" ", request_id="blank-comment")
+        self.assertIsNotNone(waiting_owner(self.card))
+        self.writer.record_owner_answer(role="po", actor="po", reference=REF,
+            handover_event=handover["event_id"], quotation="Use existing refusal-1.", request_id="real-answer")
+        self.assertIsNone(waiting_owner(self.card))
+        self.assertEqual(attention_record(self.card, OWNER_ANSWER)["quotation"], "Use existing refusal-1.")
+
     def test_the_owner_role_is_a_comment_role_only(self) -> None:
         for call in (
             lambda: self.writer.move(role="owner", actor="owner", reference=REF, target="done", reason="x"),

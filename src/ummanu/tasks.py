@@ -1916,7 +1916,9 @@ class TaskWriter:
     def _store_owner_answer(self, task: dict[str, Any], handover: Any, quotation: str, occurrence: Any,
                             *, comments: Any = None) -> None:
         mark = waiting_owner(task)
-        if (not quotation.strip() or mark is None or occurrence is None or task.get("state") != "in_progress"
+        if not quotation.strip():
+            raise TaskError("empty_owner_answer", "empty owner comment is not an answer", 2)
+        if (mark is None or occurrence is None or task.get("state") != "in_progress"
                 or task.get("closed") or self._card_superseded(task["ref"])):
             raise TaskError("validation", "answer requires a current unanswered handover", 2)
         if (handover.get("payload") or {}).get("waiting_owner") != mark["since"]:
@@ -1945,7 +1947,8 @@ class TaskWriter:
         def mutation(task: dict[str, Any]) -> None:
             events = self.audit.events(reference)
             handover = current_handover(events)
-            if owner_answer_event_ids(events):
+            if owner_answer_event_ids(events) and any(comment["body"].strip() for comment in
+                    owner_comments_since_handover(task.get("comments") or [])):
                 raise TaskError("validation", "this handover already has an owner answer; accept that comment before a new handover", 2)
             if (task.get("closed") or task.get("state") != "in_progress" or handover is None
                     or handover["event_id"] != handover_event):

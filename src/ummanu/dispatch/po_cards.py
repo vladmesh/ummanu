@@ -811,10 +811,17 @@ def _await_owner(
     if answer is None:
         try:
             answered = owner_answer_event_ids(runtime.audit.events(ref))
-            if answered:
-                runtime.writer.accept_owner_comment(actor=runtime.owner, reference=ref, event_id=answered[-1])
+            from ummanu.tasks import TaskError
+            for event_id in reversed(answered):
+                try:
+                    runtime.writer.accept_owner_comment(actor=runtime.owner, reference=ref, event_id=event_id)
+                except TaskError as exc:
+                    if exc.code == "empty_owner_answer":
+                        continue
+                    raise
                 task = runtime.reader.show(ref)
                 answer = attention_record(task, OWNER_ANSWER)
+                break
         except Exception as exc:  # noqa: BLE001 - recovery is retried, never guessed by a read
             return {**_waiting(record, ref, "po-owner-answer-unread", f"owner answer recovery unavailable: {exc}"),
                     "status": "degraded"}
