@@ -35,6 +35,7 @@ from ummanu._fsutil import (
     write_ndjson as _write_ndjson,
 )
 from ummanu.board.backend import CARD, SPRINT, board_client
+from ummanu.board.owner_decisions import stored_decisions
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.config import validate
 from ummanu.memory_journal import export_memory_snapshot
@@ -311,6 +312,9 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         # them stays byte-identical to the record this export always wrote.
         **({"po_session": str(sprint["po_session"])} if sprint.get("po_session") else {}),
         **({"local_run_exceptions": local_run_exceptions} if local_run_exceptions else {}),
+        **({"owner_decisions": stored_decisions(sprint["owner_decisions"])} if sprint.get("owner_decisions") else {}),
+        **({"e2e": {key: sprint["e2e"][key] for key in ("budget", "used", "charges")}}
+           if sprint.get("e2e") and (sprint["e2e"]["budget"] != 3 or sprint["e2e"]["used"] or sprint["e2e"]["charges"]) else {}),
         **(
             {"allowed_productions": [str(project) for project in sprint["allowed_productions"]]}
             if sprint.get("allowed_productions")

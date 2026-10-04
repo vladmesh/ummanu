@@ -40,6 +40,7 @@ from ummanu.board.legacy_codec import (
     positive_int as _positive_int,
 )
 from ummanu.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions
+from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
 from ummanu.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
@@ -534,6 +535,8 @@ SPRINT_PARITY_FIELDS = (
     "po_session",
     "allowed_productions",
     "local_run_exceptions",
+    "owner_decisions",
+    "e2e",
 )
 
 
@@ -640,6 +643,8 @@ def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
     """The exported sprint contract, without what a rewrite cannot reproduce."""
     core: dict[str, Any] = {field: sprint.get(field, _ABSENT) for field in SPRINT_PARITY_FIELDS}
     core["local_run_exceptions"] = sprint.get("local_run_exceptions", [])
+    core["owner_decisions"] = sprint.get("owner_decisions", [])
+    core["e2e"] = sprint.get("e2e", {"budget": 3, "used": 0, "charges": []})
     core["comments"] = [
         str(comment.get("text") or "") for comment in sprint.get("comments", []) if isinstance(comment, dict)
     ]
@@ -704,6 +709,7 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
             if sprint.get("allowed_productions")
             else {}
         ),
+        OWNER_DECISIONS_FIELD: json.dumps(sprint.get("owner_decisions", []), sort_keys=True, separators=(",", ":")),
         # The e2e run budget as exported (secretary-1796); an export without it restores the default.
         **(
             {
@@ -984,6 +990,15 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             parse_local_run_exceptions(sprint.get("local_run_exceptions", []), projects=sprint.get("reservations", []))
         except ValueError as exc:
             raise RestoreError(f"normalized sprint export has invalid local_run_exceptions: {exc}") from None
+        try:
+            stored_decisions(sprint.get("owner_decisions", []))
+        except (ValueError, TypeError, KeyError) as exc:
+            raise RestoreError(f"normalized sprint export has invalid owner_decisions: {exc}") from None
+        e2e = sprint.get("e2e", {"budget": 3, "used": 0, "charges": []})
+        if (not isinstance(e2e, dict) or set(e2e) != {"budget", "used", "charges"}
+                or any(type(e2e[key]) is not int or not 0 <= e2e[key] <= 2_147_483_647 for key in ("budget", "used"))
+                or not isinstance(e2e["charges"], list)):
+            raise RestoreError("normalized sprint export has invalid e2e budget/counters/charges")
         budget = sprint.get("budget")
         if (
             not isinstance(budget, dict)

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ummanu.board import e2e_budget as sprint_e2e
-from ummanu.board import owner_events
+from ummanu.board import owner_events, owner_decisions
 from ummanu.board.backend import (
     BoardIdentityError,
     entity_id,
@@ -125,6 +125,7 @@ SPRINT_METADATA = {
     PO_SESSION_FIELD,
     ALLOWED_PRODUCTIONS_FIELD,
     LOCAL_RUN_EXCEPTIONS_FIELD,
+    owner_decisions.FIELD,
     sprint_e2e.SPRINT_E2E_BUDGET,
     sprint_e2e.SPRINT_E2E_USED,
     sprint_e2e.SPRINT_E2E_CHARGES,
@@ -677,7 +678,12 @@ class SprintReader:
             )
         except ValueError as exc:
             raise TaskError("backend_error", f"malformed sprint local_run_exceptions: {exc}", 1) from None
+        try:
+            decisions = owner_decisions.stored_decisions(meta.get(owner_decisions.FIELD))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise TaskError("backend_error", f"malformed sprint owner_decisions: {exc}", 1) from None
         result: dict[str, Any] = {
+            "owner_decisions": decisions,
             "id": entity_id("sprint", task_id),
             "ref": _text(raw.get("reference")),
             "goal": meta.get("sprint_goal", ""),
@@ -690,7 +696,7 @@ class SprintReader:
             "executors": stored_executors(meta),
             # Null and empty for a sprint opened before either was recorded, never inferred.
             "po_session": meta.get(PO_SESSION_FIELD) or None,
-            "allowed_productions": _json_list(meta.get(ALLOWED_PRODUCTIONS_FIELD)),
+            "allowed_productions": owner_decisions.productions(_json_list(meta.get(ALLOWED_PRODUCTIONS_FIELD)), decisions),
             "local_run_exceptions": local_run_exceptions,
             # The e2e run budget (0023): `e2e: <used> of <budget>`, and the cards that spent the runs.
             "e2e": sprint_e2e.sprint_budget(meta),
@@ -827,6 +833,7 @@ class SprintReader:
             # The PO session this sprint answers to and the productions it may touch.
             "po_session": sprint.get("po_session"),
             "allowed_productions": list(sprint.get("allowed_productions") or []),
+            "owner_decisions": list(sprint.get("owner_decisions") or []),
             "local_run_exceptions": sprint.get("local_run_exceptions", []),
             # The e2e run budget: runs used of the budget, and the cards that spent them.
             "e2e": sprint.get("e2e") or sprint_e2e.sprint_budget({}),
@@ -1043,6 +1050,7 @@ class SprintWriter:
         allowed_productions: list[str] | None = None,
         e2e_budget: int | None = None,
         local_run_exceptions: list[dict[str, Any]] | None = None,
+        standing_decisions: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
@@ -1063,6 +1071,7 @@ class SprintWriter:
             allowed_productions=allowed_productions or [],
             e2e_budget=e2e_budget,
             local_run_exceptions=local_run_exceptions,
+            standing_decisions=standing_decisions,
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
@@ -1170,6 +1179,7 @@ class SprintWriter:
         allowed_productions: list[str] | None = None,
         e2e_budget: int | None = None,
         local_run_exceptions: list[dict[str, Any]] | None = None,
+        standing_decisions: list[dict[str, Any]] | None = None,
     ) -> SprintCreateIntent:
         """The normalized request, which is both the replay key and the repair recipe.
 
@@ -1207,6 +1217,11 @@ class SprintWriter:
             )
         except ValueError as exc:
             raise TaskError("validation", str(exc), 2) from None
+        decisions = self._decision_inputs([] if standing_decisions is None else standing_decisions)
+        if decisions and role != "po":
+            raise TaskError("authorization_refused", "only the PO records quoted owner decisions", 3)
+        if e2e_budget + sum(entry["value"] for entry in decisions if entry["kind"] == "e2e_grant") > 2_147_483_647:
+            raise TaskError("validation", "e2e budget exceeds the supported finite counter", 2)
         return SprintCreateIntent(
             role=Role(role),
             actor=actor,
@@ -1229,6 +1244,7 @@ class SprintWriter:
             allowed_productions=self._productions_intent(allowed_productions or []),
             e2e_budget=e2e_budget,
             local_run_exceptions=exceptions,
+            owner_decisions=tuple(decisions),
         )
 
     @staticmethod
@@ -1484,7 +1500,7 @@ class SprintWriter:
         event["backend"]["task_id"] = task_id
         progress["task_id"] = task_id
         self.transactions.save(document)
-        self._ensure_metadata(document, task_id, self._create_values(intent), step="fields")
+        self._ensure_metadata(document, task_id, self._create_values(intent, event=event), step="fields")
         # Write the reference last to publish an atomically admitted sprint.
         if str(row.get("reference") or "") != created_ref:
             progress["reference_started"] = True
@@ -1606,7 +1622,7 @@ class SprintWriter:
             raise TaskError("backend_error", "the created sprint row was not found", 1)
         return row
 
-    def _create_values(self, intent: SprintCreateIntent) -> dict[str, str]:
+    def _create_values(self, intent: SprintCreateIntent, *, event: dict[str, Any] | None = None) -> dict[str, str]:
         values = {
             "sprint_goal": intent.goal,
             "sprint_definition_of_done": intent.definition_of_done,
@@ -1643,6 +1659,12 @@ class SprintWriter:
                 [entry.to_document() for entry in intent.local_run_exceptions],
                 sort_keys=True, separators=(",", ":"),
             )
+        if intent.owner_decisions:
+            assert event is not None
+            entries = list(intent.owner_decisions)
+            values[owner_decisions.FIELD] = json.dumps(owner_decisions.attributed(entries, event), sort_keys=True, separators=(",", ":"))
+            values[ALLOWED_PRODUCTIONS_FIELD] = json.dumps(owner_decisions.productions(list(intent.allowed_productions), entries), separators=(",", ":"))
+            values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget + sum(entry["value"] for entry in entries if entry["kind"] == "e2e_grant"))
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent.product:
@@ -1961,6 +1983,11 @@ class SprintWriter:
             if status != SprintState.OPEN.value:
                 raise TaskError("closed", f"sprint {reference} is {status}; it allows no new production", 3)
             allowed = [str(item) for item in sprint.get("allowed_productions") or []]
+            for entry in reversed(sprint.get("owner_decisions") or []):
+                if entry["kind"] == "production" and entry["scope"] == project:
+                    if not entry["value"]:
+                        raise TaskError("authorization_refused", f"standing owner decision {entry['id']} refuses this production; record a later quoted answer", 3)
+                    break
             if project in allowed:
                 return {"action": "already_allowed", "sprint": sprint, "event_id": None}
 
@@ -1980,6 +2007,80 @@ class SprintWriter:
             {"project": project, "reason": reason},
             mutation,
         )
+
+    def _decision_inputs(self, entries: Any) -> list[dict[str, Any]]:
+        try:
+            parsed = owner_decisions.parse_decisions(entries)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        if any(entry["id"].startswith("owner-comment:") for entry in parsed):
+            raise TaskError("validation", "owner-comment: IDs are reserved for the genuine owner-comment adapter", 2)
+        projects = {entry["scope"] for entry in parsed if entry["kind"] == "production" or entry["scope"] != "sprint"}
+        if projects:
+            if self.instance is None:
+                raise TaskError("validation", "owner decision project scopes need --instance", 2)
+            from ummanu.product_issues import registered_projects
+
+            unknown = projects - registered_projects(self.instance)
+            if unknown:
+                raise TaskError("validation", "unknown owner decision project scopes: " + ", ".join(sorted(unknown)), 2)
+        return parsed
+
+    def record_owner_decisions(
+        self, *, role: str, actor: str, reference: str, entries: list[dict[str, Any]],
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._role(role, {"po"}, actor=actor)
+        parsed = self._decision_inputs(entries)
+        if not parsed:
+            raise TaskError("validation", "record-owner-decisions needs at least one entry", 2)
+        return self._record_owner_decisions_atomic(
+            role=role, actor=actor, reference=reference, entries=parsed,
+            request_id=request_id or str(uuid.uuid4()),
+        )
+
+    @_sql_atomic
+    def _record_owner_decisions_atomic(
+        self, *, role: str, actor: str, reference: str, entries: list[dict[str, Any]], request_id: str,
+    ) -> dict[str, Any]:
+        # Lock the same row charging updates before reading and projecting the new decisions.
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        payload = {"entries": entries}
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            if (known.get("kind"), known.get("ref"), known.get("payload")) != (
+                "owner_decisions_recorded", reference, payload,
+            ):
+                raise TaskError("validation", "request id already belongs to another sprint write", 2)
+            return self._write("owner_decisions_recorded", role, actor, reference, request_id, payload, lambda _: None)
+        sprint = self.reader.show(reference)
+        existing = list(sprint.get("owner_decisions") or [])
+        by_id = {entry["id"]: entry for entry in existing}
+        added = []
+        for entry in entries:
+            if entry["id"] in by_id:
+                if owner_decisions.input_entry(by_id[entry["id"]]) != entry:
+                    raise TaskError("validation", f"owner decision {entry['id']} already has different content", 2)
+            else:
+                added.append(entry)
+        if not added:
+            return self._write("owner_decisions_recorded", role, actor, reference, request_id, payload, lambda _: None)
+        grant = sum(entry["value"] for entry in added if entry["kind"] == "e2e_grant")
+        if int(sprint["e2e"]["budget"]) + grant > 2_147_483_647:
+            raise TaskError("validation", "e2e budget exceeds the supported finite counter", 2)
+
+        def mutation(snapshot: SprintWriteSnapshot) -> None:
+            event = self.audit.pending_event(request_id)
+            assert event is not None
+            values = {
+                owner_decisions.FIELD: json.dumps([*existing, *owner_decisions.attributed(added, event)], sort_keys=True, separators=(",", ":")),
+                ALLOWED_PRODUCTIONS_FIELD: json.dumps(owner_decisions.productions(list(sprint.get("allowed_productions") or []), added), separators=(",", ":")),
+            }
+            if grant:
+                values[sprint_e2e.SPRINT_E2E_BUDGET_ADD] = str(grant)
+            self.client.call("saveTaskMetadata", task_id=_sprint_number(snapshot), values=values)
+
+        return self._write("owner_decisions_recorded", role, actor, reference, request_id, payload, mutation)
 
     def raise_e2e_budget(
         self,
@@ -2029,6 +2130,7 @@ class SprintWriter:
         decision: str,
         request_id: str,
     ) -> dict[str, Any]:
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
         identity = (sprint_e2e.SPRINT_BUDGET_RAISED, reference, add, authorized_by)
         known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
         if known is not None:
@@ -2041,6 +2143,8 @@ class SprintWriter:
                     2,
                 )
         else:
+            if any(entry["id"] == f"owner-comment:{authorized_by}" for entry in self.reader.show(reference).get("owner_decisions") or []):
+                raise TaskError("authorization_refused", f"the owner's comment {authorized_by} already has a grant entry; each answer raises once", 3)
             for event in self.audit.events(reference, kind=sprint_e2e.SPRINT_BUDGET_RAISED):
                 payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
                 if payload.get("authorized_by") == authorized_by:
@@ -2052,10 +2156,20 @@ class SprintWriter:
                     )
 
         def mutation(sprint: SprintWriteSnapshot) -> None:
+            current = self.reader.show(reference)
+            if int(current["e2e"]["budget"]) + add > 2_147_483_647:
+                raise TaskError("validation", "e2e budget exceeds the supported finite counter", 2)
+            authorizing = self.audit.committed_event(self.audit.event_id_owner(authorized_by))
+            body = sprint_e2e._comment_body(TaskReader(self.client), decision, authorizing["payload"]["body_sha256"])
+            if body is None:
+                raise TaskError("authorization_refused", "the authorizing owner quotation is no longer readable", 3)
+            entry = {"id": f"owner-comment:{authorized_by}", "kind": "e2e_grant", "scope": "sprint", "value": add, "quotation": body}
+            recorded = owner_decisions.attributed([entry], self.audit.pending_event(request_id))
             self.client.call(
                 "saveTaskMetadata",
                 task_id=_sprint_number(sprint),
-                values={sprint_e2e.SPRINT_E2E_BUDGET_ADD: str(add)},
+                values={sprint_e2e.SPRINT_E2E_BUDGET_ADD: str(add),
+                        owner_decisions.FIELD: json.dumps([*(current.get("owner_decisions") or []), *recorded], sort_keys=True, separators=(",", ":"))},
             )
 
         return self._write(
@@ -3393,6 +3507,7 @@ class SprintWriter:
             "current_task_set",
             "e2e_budget_raised",
             "production_allowed",
+            "owner_decisions_recorded",
             "resume_recorded",
         }:
             raise TaskError("closed", "sprint is closed", 3)

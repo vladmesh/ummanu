@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import unittest
 from unittest import mock
@@ -20,6 +21,74 @@ from ummanu.tasks import TaskError
 
 
 class SprintPoChannelBackendTests(SprintFixture):
+    def decision(self, identifier="grant-1", kind="e2e_grant", value=2, scope="sprint"):
+        return {"id": identifier, "scope": scope, "kind": kind, "value": value,
+                "quotation": "  Two more e2e runs.\nOnly this sprint.  "}
+
+    def test_quoted_create_append_and_sql_readback_apply_grants_once_and_supersede(self) -> None:
+        production = self.decision("prod-1", "production", True, "ummanu")
+        grant = self.decision()
+        created = self._create(goal="quoted", reference="sprint:7", standing_decisions=[production, grant], request_id="quoted-create")
+        entries = created["sprint"]["owner_decisions"]
+        self.assertEqual([entry["id"] for entry in entries], ["prod-1", "grant-1"])
+        self.assertEqual(entries[1]["quotation"], grant["quotation"])
+        self.assertEqual(entries[1]["recorded_by"]["event_id"], created["event_id"])
+        self.assertEqual(created["sprint"]["e2e"]["budget"], 5)
+        self.assertEqual(created["sprint"]["allowed_productions"], ["ummanu"])
+        self.assertEqual(self._create(goal="quoted", reference="sprint:7", standing_decisions=[production, grant], request_id="quoted-create")["event_id"], created["event_id"])
+        self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[grant], request_id="same-grant")
+        deny = self.decision("deny-prod", "production", False, "ummanu")
+        stop = self.decision("stop-1", "e2e_refusal", "no_more_e2e")
+        result = self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[deny, stop], request_id="stop")
+        self.assertEqual(result["sprint"]["allowed_productions"], [])
+        self.assertEqual(result["sprint"]["e2e"]["budget"], 5)
+        self.assertEqual(self.client.call("getSprintE2eBudget", sprint_ref="sprint:7")["refusal"]["id"], "stop-1")
+        charge = self.client.call("chargeSprintE2e", sprint_ref="sprint:7", task_ref="ummanu-1", dispatch_id="refused", at="2026-10-04T00:00:00Z")
+        self.assertFalse(charge["charged"])
+        self.assertEqual(charge["used"], 0)
+        self.assertEqual(charge["charges"], [])
+        with self.assertRaises(TaskError):
+            self.writer.allow_production(role="po", actor="po", reference="sprint:7", project="ummanu", reason="own judgement", request_id="bypass")
+        resumed = self.decision("grant-2", value=1)
+        result = self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[resumed], request_id="resume")
+        again = self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[resumed], request_id="resume")
+        self.assertEqual(again["event_id"], result["event_id"])
+        self.assertIsNone(self.client.call("getSprintE2eBudget", sprint_ref="sprint:7")["refusal"])
+        self.assertEqual(self.sprint("sprint:7")["e2e"]["budget"], 6)
+        self.assertEqual(self.client._query("SELECT owner_decisions FROM sprints WHERE ref='sprint:7'")[0][0], result["sprint"]["owner_decisions"])
+
+    def test_invalid_quoted_batches_and_roles_write_no_partial_state(self) -> None:
+        self._create(goal="quoted", reference="sprint:7")
+        before = self.client._query("SELECT allowed_productions,e2e_budget,owner_decisions FROM sprints")
+        invalid = [dict(self.decision(), quotation=""), dict(self.decision(), value=-1),
+                   self.decision("prod", "production", True, "unknown-project"), dict(self.decision(), value=True)]
+        for entry in invalid:
+            with self.subTest(entry=entry), self.assertRaises(TaskError):
+                self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[self.decision("valid"), entry], request_id="bad-batch")
+            self.assertEqual(self.client._query("SELECT allowed_productions,e2e_budget,owner_decisions FROM sprints"), before)
+        for role, actor in [("observer", "observer"), ("dispatcher", "dispatcher"), ("po", "observer")]:
+            with self.subTest(role=role), self.assertRaises(TaskError):
+                self.writer.record_owner_decisions(role=role, actor=actor, reference="sprint:7", entries=[self.decision()], request_id="bad-role")
+        self.assertEqual(self.client._query("SELECT allowed_productions,e2e_budget,owner_decisions FROM sprints"), before)
+        self.assertEqual(self.writer.audit.events("sprint:7", kind="owner_decisions_recorded"), [])
+
+    def test_invalid_create_decisions_leave_no_sprint_or_audit_record(self) -> None:
+        for entry in [dict(self.decision(), quotation=""), dict(self.decision(), value=True),
+                      self.decision("prod", "production", True, "unknown-project")]:
+            with self.subTest(entry=entry), self.assertRaises(TaskError):
+                self._create(goal="invalid", reference="sprint:7", standing_decisions=[entry], request_id="invalid-create")
+            self.assert_nothing_was_written()
+
+    def test_reused_ids_or_requests_cannot_change_content_or_spend_a_grant_again(self) -> None:
+        self._create(goal="quoted", reference="sprint:7")
+        self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[self.decision()], request_id="grant")
+        self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[self.decision()], request_id="another-request")
+        for request in ("grant", "new-request"):
+            with self.subTest(request=request), self.assertRaises(TaskError):
+                self.writer.record_owner_decisions(role="po", actor="po", reference="sprint:7", entries=[self.decision(value=3)], request_id=request)
+        self.assertEqual(self.sprint("sprint:7")["e2e"]["budget"], 5)
+        self.assertEqual(len(self.sprint("sprint:7")["owner_decisions"]), 1)
+
     def add_session(self, session_id: str, state: str = "open") -> None:
         with self.client.transaction():
             self.client._execute(

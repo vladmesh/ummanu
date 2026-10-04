@@ -106,6 +106,22 @@ class CreateCommandTests(unittest.TestCase):
     def test_the_flag_is_recorded(self) -> None:
         self.assertEqual(self.create("--po-session", "s-flag")["po_session"], "s-flag")
 
+    def test_create_passes_quoted_owner_decisions_and_the_append_command_reads_the_same_format(self) -> None:
+        entries = [{"id": "owner-1", "scope": "sprint", "kind": "e2e_grant", "value": 2, "quotation": "Two more runs."}]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.json"
+            path.write_text(json.dumps(entries), encoding="utf-8")
+            self.assertEqual(self.create("--owner-decisions-file", str(path))["standing_decisions"], entries)
+            captured = {}
+            class Writer:
+                def record_owner_decisions(self, **kwargs):
+                    captured.update(kwargs)
+                    return {}
+            with mock.patch.object(sprint_commands, "_write", side_effect=lambda _args, operation: (operation(Writer()), 0)[1]):
+                self.assertEqual(main(["sprint", "record-owner-decisions", "--ref", "sprint:7", "--role", "po", "--decisions-file", str(path), "--request-id", "r"]), 0)
+            self.assertEqual(captured["entries"], entries)
+            self.assertEqual(captured["request_id"], "r")
+
     def test_local_run_exceptions_json_file_and_default_reach_writer(self) -> None:
         entries = [{"project": "ummanu", "argv": ["docker", "run", "two words", ""], "rationale": "owner's probe"}]
         with tempfile.TemporaryDirectory() as tmp:
@@ -308,6 +324,7 @@ class SqlAdapterTests(unittest.TestCase):
                 3,
                 0,
                 [],  # creation-only local-run exceptions (0026)
+                [],  # quoted standing owner decisions (0027)
             )
             self.executed: list[tuple[str, tuple]] = []
 

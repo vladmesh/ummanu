@@ -69,7 +69,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from ummanu.board import e2e_budget, e2e_record, owner_events, wait_card
+from ummanu.board import e2e_budget, e2e_record, owner_events, owner_decisions, wait_card
 from ummanu.board import po_origin as origin_field
 from ummanu.board.e2e_record import (
     AFTER_MERGE,
@@ -285,6 +285,9 @@ def _progress(
             outcomes.append(settled)
         if not done:
             return outcomes
+    declined = _standing_declines(runtime, payload, records, project, queue)
+    if declined is not None:
+        outcomes.append(declined)
     if queue["budget_waits"]:
         held = _budget_recheck(runtime, payload, records, project, queue)
         if held is not None:
@@ -1048,6 +1051,13 @@ def _budget_spent(
     ]
     waits: list[dict[str, Any]] = []
     if sprint:
+        refusal = charged.get("refusal")
+        if refusal is not None:
+            text = owner_decisions.refusal_text(sprint, refusal)
+            for ref in by_ref:
+                _decline(runtime, queue, ref, text, decision=f"{sprint}/{refusal['id']}")
+            runtime.save_records(payload, records)
+            return _outcome(project, "e2e-after-merge-declined", covered=list(by_ref), reason=text)
         budget = int(charged.get("budget") or 0)
         decision = _decision_card(
             runtime,
@@ -1297,6 +1307,34 @@ def _decline_all(
         _decline(runtime, queue, ref, text, decision="")
     runtime.save_records(payload, records)
     return _outcome(project, "e2e-after-merge-declined", covered=refs, reason=text)
+
+
+def _standing_declines(
+    runtime: Any, payload: dict[str, Any], records: dict[str, Any], project: str, queue: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Decline pending cards before joining/creating a decision or picking a batch. Paid runs settle first."""
+    budgets: dict[str, Any] = {}
+    declined = []
+    for entry in list(queue["pending"]):
+        ref = str(entry["ref"])
+        sprint = str(runtime.reader.show(ref).get("sprint") or "")
+        if not sprint:
+            continue
+        if sprint not in budgets:
+            budgets[sprint] = runtime.reader.sprint_e2e_budget(sprint)
+        refusal = (budgets[sprint] or {}).get("refusal")
+        if refusal is not None:
+            _decline(runtime, queue, ref, owner_decisions.refusal_text(sprint, refusal),
+                     decision=f"{sprint}/{refusal['id']}")
+            declined.append(ref)
+    if not declined:
+        return None
+    for wait in list(queue["budget_waits"]):
+        wait["cards"] = [ref for ref in wait.get("cards") or [] if ref not in declined]
+        if not wait["cards"]:
+            queue["budget_waits"].remove(wait)
+    runtime.save_records(payload, records)
+    return _outcome(project, "e2e-after-merge-declined", covered=declined)
 
 
 def _budget_recheck(

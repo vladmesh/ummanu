@@ -264,3 +264,4 @@ unit tests/test_resource_probe.py
 unit tests/test_memory_canon.py
 unit tests/test_live_root_writers.py
 unit tests/test_default_live_root.py
+unit tests/test_owner_decisions.py

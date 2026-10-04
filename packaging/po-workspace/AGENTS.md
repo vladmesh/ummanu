@@ -109,19 +109,14 @@ is still missing and end the turn; the card keeps waiting.
 
 ### The e2e run budget
 
-Every e2e run pays for stands, so a sprint has an e2e run budget (`sprint create --e2e-budget N`,
-default 3). When it is spent, the dispatcher cuts a decision card `E2E budget spent: ...`: that is a
-money decision. Hand it to the owner, quoting the two answer lines the owner comments with (exactly
-one of them): `e2e budget: raise <N>` or `e2e budget: no`. Never raise the budget on your own. When
-the owner's comment says `e2e budget: raise <N>`, apply it, naming that comment (its event id is in
-the input that carries the answer); the raise is the owner's N, so pass no other `--add`. Then complete
-the card:
+Every e2e run pays for stands. A sprint has a budget (`sprint create --e2e-budget N`, default 3).
+Apply the standing owner decisions first. Record a quoted grant or sprint-wide refusal through
+`sprint record-owner-decisions` as described below, including answers from this owner conversation.
+An uncovered spent budget creates a PO decision card; hand it to the owner if an answer is still
+needed. A genuine owner comment can still grant runs via `sprint e2e-budget --authorized-by <event>`
+when its single answer line is `e2e budget: raise <N>`. For a card outside every sprint, retain
+`task e2e-budget` with that authenticated comment path. Never raise money on your own authority.
 
-    python3 -P -m ummanu sprint e2e-budget --ref <sprint> --role po --authorized-by <event id>
-
-For a card outside every sprint the card's body names `task e2e-budget --ref <card>` instead. A comment
-without exactly one answer line is refused: ask the owner for it. When the owner says
-`e2e budget: no`, complete the card without a raise: the cards waiting on it are Blocked with your text.
 
 ## Memory
 
@@ -140,3 +135,29 @@ discussed before, search it.
 `NOTES.md` in this directory is yours: install and upgrade create it once and never touch it again.
 Keep there what should survive between sessions on this host and does not belong in memory or on the
 board. Read it at the start of a session.
+
+
+## Quoted standing owner decisions
+
+Read `python3 -P -m ummanu sprint show --ref sprint:<ID>` before applying sprint authority.
+The PO can supply `--owner-decisions-file <JSON>` at `sprint create`, or record a later
+owner answer from its conversation directly, without an owner-role comment:
+
+    python3 -P -m ummanu sprint record-owner-decisions --ref sprint:<ID> --role po --decisions-file <JSON> --request-id <request>
+
+The file is a list of `{id, scope, kind, value, quotation}`. Preserve the owner's nonempty
+quotation verbatim and reuse the entry ID on retries. Kinds: `production` with registered
+project scope and boolean value; `e2e_grant` with scope `sprint` and positive runs;
+`e2e_refusal` with scope `sprint` and value `no_more_e2e`; `advance_consent` with sprint/project
+scope and value `{action, max_uses}`. Later scoped answers supersede earlier ones; grants add
+once. Apply covered answers without asking again. Advance consents grant only the explicit
+action and finite uses, accounted against recorded operations; they never imply money or
+production permission. `sprint show` and the native sprint page carry IDs, quotations and
+attribution. See docs/PROTOCOLS.md, Standing owner decisions on a sprint.
+
+A sprint e2e answer in the owner conversation is recorded through this list. A refusal stops
+new dispatches even with budget room and applies to pending and later cards. Complete any
+existing budget decision card after recording the answer. The genuine owner-comment grant
+command `sprint e2e-budget --authorized-by <event>` remains supported and records the same
+grant entry; outside a sprint, use the existing `task e2e-budget` path. Never manufacture an
+owner quotation or a grant from the sprint specification.

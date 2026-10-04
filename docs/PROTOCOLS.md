@@ -1592,7 +1592,9 @@ second decision is cut. Each tick the stage re-checks a waiting card first, with
   card's code, so no worker round is charged;
 - otherwise it keeps waiting.
 
-**The owner's answer.** The owner answers on the decision card with a comment (`task comment --role
+**The released owner-comment answer.** A sprint also accepts a quoted answer from the PO
+conversation through [Standing owner decisions on a sprint](#standing-owner-decisions-on-a-sprint),
+without a card comment. The released comment adapter works as follows: the owner answers on the decision card with a comment (`task comment --role
 owner`) holding exactly one answer line, parsed in one place (`e2e_budget.owner_answer`):
 
 ```text
@@ -1604,7 +1606,7 @@ e2e budget: no
 the rest of the comment is free prose. A comment with neither line, with both, or with two raise lines
 answers nothing. An `e2e budget: no` comment moves nothing by itself: the PO completes the decision card.
 
-**Raising the budget.** Only on the owner's recorded word, and by the owner's recorded number:
+**The released owner-comment grant adapter.** Only on the owner's recorded word, and by the owner's recorded number:
 
 ```bash
 python3 -P -m ummanu sprint e2e-budget --ref <sprint> --role po --authorized-by <event id> [--add <N>]
@@ -2159,6 +2161,7 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `e2e_budget_raised` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
 | `production_allowed` | `refused` — `closed`, exit status `3` |
+| `owner_decisions_recorded` | `refused` — `closed`, exit status `3` |
 | `restored` | `accepted` |
 | `resume_recorded` | `refused` — `closed`, exit status `3` |
 
@@ -4624,3 +4627,63 @@ A Card row's integer protocol address is its database-backed `board_key`, not th
 suffix of its public reference. Public refs and `(project_id, task_number)` stay stable and
 project-local. Card keys occupy `[1,2000000000)`; Sprint, Product and Issue dispatch keep the disjoint
 ranges above it. Reference updates preserve the Card key.
+
+
+## Standing owner decisions on a sprint
+
+The PO records verbatim owner answers at creation with `sprint create --role po
+--owner-decisions-file <JSON>`, or later with `sprint record-owner-decisions --ref sprint:<ID>
+--role po --decisions-file <JSON> --request-id <request>`. Read the addressable list with
+`sprint show --ref sprint:<ID>` or the sprint page's Owner decisions tab. The JSON is a list:
+
+```json
+[
+  {"id":"production-1","scope":"ummanu","kind":"production","value":true,"quotation":"You may deploy ummanu."},
+  {"id":"grant-1","scope":"sprint","kind":"e2e_grant","value":2,"quotation":"Two more e2e runs."},
+  {"id":"stop-1","scope":"sprint","kind":"e2e_refusal","value":"no_more_e2e","quotation":"No more e2e in this sprint."},
+  {"id":"consent-1","scope":"ummanu","kind":"advance_consent","value":{"action":"restart the service","max_uses":1},"quotation":"You may restart it once."}
+]
+```
+
+Each entry has a nonempty quotation and immutable ID, scope, kind and value. The PO assigns an
+ID to each distinct owner answer and keeps it on retries, including retries under another request
+ID. Existing IDs with identical content add no authority or budget; different content is refused.
+A new request ID for an already recorded entry is audited without applying it again. Repeating a
+request with different content is refused. Observer, dispatcher and steward cannot record these
+entries; role-masquerade admission still applies. Project scopes must be registered. Validation
+of the whole list precedes any write. IDs starting `owner-comment:` belong to the genuine
+owner-comment adapter and cannot be supplied to this command.
+
+Array append order is precedence, including within a creation batch, independent of timestamps.
+The last production decision for a project allows or refuses it. Every e2e grant adds its finite
+runs once; the last e2e grant/refusal controls new admission. A later grant supersedes refusal;
+a later refusal prevents new runs even with unused numerical budget. Previous paid runs and
+charges remain. Advance consents name only an action, scope and finite maximum number of uses.
+They are explicit bounds for the PO/observer, never inferred from prose, and do not authorize
+automatic budget raises or production permissions. A later consent for the same action and scope
+supersedes the earlier bound; count uses from the sprint's recorded operations before acting.
+
+Writes atomically store the list with PO actor, request ID, event ID and time, and project onto
+released `allowed_productions` and e2e budget interfaces. Revision 0027 adds an empty array;
+it fabricates no quotation from permissions, counters, charges or old audit events. Normalized
+checkpoint/export restores the entries and their attribution, budget, counters and charges.
+
+Compatibility has real callers: `sprint allow-production` is used by released PO instructions
+and the production-rights input; it retains existing allowances but cannot override an explicit
+quoted refusal. Released dispatcher budget cards and PO inputs use `sprint e2e-budget
+--authorized-by <owner-comment event>`. That authenticated adapter keeps its audited raise event
+and appends the same kind of grant record, using the actual owner-comment body as quotation.
+Previously applied owner comments remain spent, proved by released `e2e_budget_raised` events.
+No historical event is converted into invented consent. Card-cap grants outside sprints retain
+their existing genuine owner-comment path. Released `task complete` budget decisions are consumed
+by the two dispatcher budget-recheck functions for their existing generation waits. Completion
+prose is not converted into a quoted sprint-wide refusal; record that answer through the new list.
+
+A covered e2e refusal creates no budget decision card, joins none, and asks nobody again.
+Before merge it uses Blocked with decision ID and quotation; its persisted `e2e.budget_decline`
+names that exact transition request. The generic person-wait hook suppresses the resulting
+needs_owner event and read-side human wait. Every different transition clears the marker.
+After merge it uses the existing declined mark and comment, which emit no owner notification.
+Paid runs settle before admission is reconsidered. Pending waits and later arriving cards both
+consult the same standing answer. Without a standing answer the released PO budget-card route
+remains; it grants no runs automatically.

@@ -64,7 +64,8 @@ Instructions, answers, reversed decisions and "add this urgent thing" all arrive
 sprint entity. Before `task create`, before `task decide`, and before the post-Done next-cut or close
 decision, run live `sprint show` and read its complete comments list in board order. Do not use a
 timestamp cutoff: a PO/owner decision may have arrived between an earlier read and a delivery
-acknowledgement. Apply every applicable owner decision before the saved resume or `next_safe_step`;
+acknowledgement. Read `owner_decisions`, with its entry IDs, quotations and audit attribution. Apply these standing
+answers before the saved resume or `next_safe_step`, then read applicable live comments;
 when one changes the plan, reflect it in the resume written for this turn. A direct message to the
 head is not a way to change the work.
 
@@ -508,3 +509,11 @@ In every case, durable state first: a resume entry with the evidence, the exact 
 current refs and a safe next step. A question the PO can answer is a `decision` card, not a stop (see
 [Asking the PO](#asking-the-po-a-decision-or-an-operation-card)). Do not present an intermediate stop as
 a goal reached.
+
+
+Standing owner decisions are recorded only by the PO with `sprint record-owner-decisions
+--role po --decisions-file <JSON>`, or `sprint create --owner-decisions-file <JSON>`. Do not
+manufacture entries or ask for an answer already covered. Latest scoped answers win; each
+finite e2e grant adds once, and a later `no_more_e2e` refusal stops new dispatches even with
+budget room. Advance consent covers only its explicit action, scope and maximum uses;
+check recorded operations before using it. It implies no additional money or production right.

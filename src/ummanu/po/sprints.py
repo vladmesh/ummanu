@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Any
 
 # The role and actor of what the resolver writes on a sprint: its comment and its session record.
 RESOLVER_ROLE = "po"
@@ -35,6 +35,7 @@ class SprintRecord:
     po_session: str | None
     # The productions its operation cards may touch (`sprint create --allow-production`).
     allowed_productions: tuple[str, ...] = ()
+    owner_decisions: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ class BoardSprintSessions:
             str(document.get("status") or ""),
             document.get("po_session") or None,
             tuple(str(project) for project in document.get("allowed_productions") or ()),
+            tuple(document.get("owner_decisions") or ()),
         )
 
     def why_documents(self, sprint_ref: str) -> list[WhyDocument]:

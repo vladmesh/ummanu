@@ -107,6 +107,27 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
     def test_sprint_comments_have_only_the_shared_restore_representation(self) -> None:
         self.assertFalse(hasattr(SprintWriter, "restore_comment"))
 
+    def test_quoted_owner_decisions_and_paid_budget_roundtrip_without_reapplying_grants(self) -> None:
+        from ummanu.board.owner_decisions import attributed
+
+        path = self.target_data / "board" / "sprints.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        entries = attributed([
+            {"id": "grant", "kind": "e2e_grant", "scope": "sprint", "value": 2, "quotation": "Two more runs."},
+            {"id": "stop", "kind": "e2e_refusal", "scope": "sprint", "value": "no_more_e2e", "quotation": "No more e2e."},
+        ], {"actor": {"role": "po", "id": "po"}, "event_id": "evt_source", "request_id": "source",
+            "occurred_at": "2026-10-04T00:00:00Z"})
+        e2e = {"budget": 5, "used": 1, "charges": [{"card": "ummanu-13", "dispatch_id": "paid", "at": "2026-10-04T00:00:00Z"}]}
+        payload["sprints"][0].update(owner_decisions=entries, e2e=e2e)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        client, _count = self._restore()
+        live = SprintReader(client, data_dir=self.target_data).show(self.ref)
+        self.assertEqual(live["owner_decisions"], entries)
+        self.assertEqual(normalize_sprint_entity(live)["e2e"], e2e)
+        self.assertEqual(client.call("getSprintE2eBudget", sprint_ref=self.ref)["refusal"]["id"], "stop")
+        self._restore(client)
+        self.assertEqual(normalize_sprint_entity(SprintReader(client).show(self.ref))["e2e"], e2e)
+
     def test_local_run_vectors_restore_export_and_replay_with_parity(self) -> None:
         entries = [{"project": "ummanu", "argv": ["python3", "-m", "tests.probe", "two words", ""], "rationale": "owner's exact probe"}]
         path = self.target_data / "board" / "sprints.json"

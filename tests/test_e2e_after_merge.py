@@ -31,7 +31,7 @@ from ummanu.dispatch.post_merge import reconcile_post_merge_watches, watches
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import new_attempt_id, now_rfc3339
 from ummanu.dispatch.types import HostError
-from ummanu.sprints import SprintReader
+from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, is_significant_card_event
 
 SPRINT = "sprint:1031"
@@ -673,6 +673,60 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
 
 
 class BudgetTests(AfterMergeFixture, unittest.TestCase):
+    def standing_refusal(self) -> None:
+        SprintWriter(self.board, data_dir=self.data_dir).record_owner_decisions(
+            role="po", actor="po", reference=SPRINT, request_id="no-more-after-merge",
+            entries=[{"id": "stop-am", "scope": "sprint", "kind": "e2e_refusal", "value": "no_more_e2e",
+                      "quotation": "No more e2e in this sprint. Preserve paid runs."}],
+        )
+
+    def assert_standing_declined(self, cards) -> None:
+        for card in cards:
+            self.assertEqual(self.mark(card)["state"], "declined")
+            self.assertEqual(self.mark(card)["decision"], f"{SPRINT}/stop-am")
+            self.assertTrue(self.comments_on(card, "No more e2e in this sprint."))
+        self.assertEqual([event for event in OwnerEventStore(self.board.credentials).events() if event.event_class == "needs_owner"], [])
+
+    def test_standing_refusal_with_remaining_budget_and_later_card_dispatches_nothing(self) -> None:
+        self.standing_refusal()
+        cards = self.three_merged_in_one_run()
+        self.am_tick()
+        self.assert_standing_declined(cards)
+        late = self.done_card()
+        self.on_main(_sha("d"))
+        self.merge(late, _sha("d"))
+        self.am_tick()
+        self.assert_standing_declined([late])
+        self.assertEqual(self.host.dispatches, [])
+        self.assertEqual(self.sprint_budget()["used"], 0)
+        self.assertEqual([card for card in self.reader.list() if card.get("type") == "decision"], [])
+
+    def test_standing_refusal_at_spent_budget_creates_no_decision(self) -> None:
+        self.spend_sprint(3)
+        self.standing_refusal()
+        cards = self.three_merged_in_one_run()
+        self.am_tick()
+        self.assert_standing_declined(cards)
+        self.assertEqual(self.host.dispatches, [])
+        self.assertEqual(self.sprint_budget()["used"], 3)
+        self.assertEqual([card for card in self.reader.list() if card.get("type") == "decision"], [])
+
+    def test_pending_after_merge_budget_wait_consumes_refusal_without_joining_late_card(self) -> None:
+        self.spend_sprint(3)
+        cards = self.three_merged_in_one_run()
+        self.assertEqual(self.am_tick()[0]["action"], "e2e-after-merge-budget-waiting")
+        [decision] = [card for card in self.reader.list() if card.get("type") == "decision"]
+        self.standing_refusal()
+        late = self.done_card()
+        self.on_main(_sha("d"))
+        self.merge(late, _sha("d"))
+        self.am_tick()
+        self.assert_standing_declined([*cards, late])
+        self.assertEqual(self.queue()["budget_waits"], [])
+        self.assertEqual(self.host.dispatches, [])
+        self.assertEqual([card["ref"] for card in self.reader.list() if card.get("type") == "decision"], [decision["ref"]])
+        self.assertEqual(self.comments_on(decision["ref"], f"{late} ("), [])
+
     def sprint_budget(self) -> dict[str, Any]:
         return self.reader.sprint_e2e_budget(SPRINT) or {}
 
