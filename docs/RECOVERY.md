@@ -1,15 +1,19 @@
 # Git-centric recovery
 
-The private instance Git repository is the recovery contract. It holds configuration and portable
-state. Moving to a new machine needs the product, access to that repository, and the credentials it
-does not hold. No bundle or object-store transport is part of the main path.
+The private instance remote is the recovery contract. Its branch tip is a snapshot of the
+installation: the configuration and portable state the snapshot exporter cut from the live root,
+plus a manifest. Moving to a new machine needs the product, access to that remote, the recovery
+phrase and the credentials the snapshot does not hold. No bundle or object-store transport is part
+of the main path.
 
 ## Topology
 
 ```text
 product repository    public template: product, CLI, runtime, schemas, generic skills
-instance repository   one private repository per owner: config + state/
-host runtime          local runtime, rebuilt from the checkpoint; not canonical
+live root             one installation's config and portable state; a plain directory, no Git
+snapshot repository   bare and local; the exporter's commits of the live root, the only commit target
+instance remote       one private repository per owner; the pusher publishes the snapshot branch there
+data directory        local runtime data plane, rebuilt from the snapshot; not canonical
 ```
 
 ## Names on the host
@@ -21,7 +25,9 @@ A recovery recreates these names; nothing reads an older spelling of them.
 | Product checkout and venv | `~/ummanu`, `~/ummanu/.venv` (console scripts `ummanu`, `ummanu-memory-*`) |
 | Data plane | `~/ummanu-data` unless `instance.yaml` `data_dir` says otherwise |
 | Live root | `~/ummanu-data/instance`, a plain directory with no `.git`; the default of `--instance` and `UMMANU_INSTANCE` (`runtime.paths.default_instance_path`) |
-| Instance repository | the private remote keeps its name; it is the snapshot exporter's target, not a checkout the live root runs from |
+| Snapshot repository | `<data>/backup/instance.git` unless `offsite.snapshot_repo` says otherwise; bare, branch `main`, written only by the exporter (and by a recovery that lays it out) |
+| Instance remote | `offsite.instance_remote`; the private remote keeps its name. The pusher publishes the snapshot branch to it; nothing runs from a checkout of it |
+| Old live root | `~/secretary-instance`, the instance repository's work tree the live root was before the cutover. A cut-over host keeps it read-only (`chmod -R a-w`) for rollback and reference; nothing reads or writes it, and `live_root.old_path` (below) flags anything that still names it |
 | systemd units | `ummanu-*` from `packaging/systemd/` (`host.unit_prefix: ummanu-`), e.g. `ummanu-dispatcher-production.timer`, `ummanu-po.service`, `ummanu-instance-maintenance.timer` |
 | Role worktrees | `~/orca/workspaces/ummanu/<role>` |
 | Environment | `UMMANU_INSTANCE`, `UMMANU_DATA_DIR`, `UMMANU_REPO`, `UMMANU_RUNTIME_ENV_FILE`, and every other `UMMANU_*` key |
@@ -31,11 +37,14 @@ A recovery recreates these names; nothing reads an older spelling of them.
 An installation from before the product rename is moved onto these names once, by the transition in
 `docs/RENAME.md` ยงT3; archives taken before it restore only with the pre-transition code.
 
-A command given neither `--instance` nor `UMMANU_INSTANCE` uses the default live root and refuses,
-naming the path, when that directory does not exist; it never creates it. Only `install`, `recover`
-and `bootstrap`, with their explicit target, bring a live root into being.
+**Default and refusal.** A command given neither `--instance` nor `UMMANU_INSTANCE` uses the default
+live root and refuses, naming the path, when that directory does not exist
+(`runtime.paths.resolve_instance_path`, `MissingDefaultInstance`); it never creates it. Only
+`install`, `recover` and `bootstrap`, with their explicit target, bring a live root into being.
+Packaged units and dispatcher-launched heads set `UMMANU_INSTANCE` explicitly.
 
-`ummanu doctor` reports two red findings for a live root still in its old shape:
+**Doctor findings.** `ummanu doctor` reports two red findings for a live root still in its old shape
+(`infra.live_root_findings`):
 
 - `live_root.git_work_tree`: the configured live root holds `.git`;
 - `live_root.old_path`: an installed `ummanu-*` unit file, the live root's `runtime.env`, or the role
@@ -43,33 +52,32 @@ and `bootstrap`, with their explicit target, bring a live root into being.
   `TA_RUNTIME_ENV_FILE`) names the old live-root path, `~/secretary-instance` (the spelling lives
   only in `ummanu.transition.names`).
 
-Both are expected to be red on an installation that has not been cut over yet: its live root is
-still the instance repository's work tree and its units name it. The cutover moves the live root to
-`~/ummanu-data/instance` and re-renders the units; both findings clear then. The installation head
-registry is read only from `<data>/heads/`; a missing `<data>/heads/heads.yaml` is an error that
-names `ummanu upgrade`, which generates it.
+A cut-over installation has neither. An installation that has not been cut over has both by design:
+its live root is still the instance repository's work tree, and its units name it. The cutover
+(final legacy checkpoint and push, a copy of the live root without `.git`, the
+[seed](#writers), `upgrade --instance` onto the new root) clears both.
 
-The private repository is the only Git canon for the data plane: one remote, one HEAD, one RPO.
+The instance remote is the only Git canon for the data plane: one remote, one branch, one RPO.
 
 ## Source of truth
 
-The selected board backend (PostgreSQL in production) is the operational store. The remote Git HEAD
-is the last confirmed recovery checkpoint. Between commits, live state runs ahead of the checkpoint by
-the RPO; that gap is expected.
+The selected board backend (PostgreSQL in production) is the operational store. The remote branch
+tip is the last confirmed recovery checkpoint. Between commits, live state runs ahead of the
+checkpoint by the RPO; that gap is expected.
 
 ## What the checkpoint contains
 
 The canon is the normalised minimum needed to resume work:
 
-- instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, and `heads/heads.toml`,
-  this installation's heads canon when it has one. The generated `heads.yaml` snapshot and its
+- instance config: `instance.yaml`, `persona/`, `projects/`, `adapters/`, `skills/manifest.toml` and
+  `heads/heads.toml`, this installation's heads canon when it has one. The generated `heads.yaml` snapshot and its
   `source.yaml` pin are not canon: they live in `<data>/heads/`, and `upgrade` and `recover`
   regenerate them from the canon (see [Fresh install and recovery](#fresh-install-and-recovery));
 - board export: the logical files `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `audit.ndjson`,
   `export.json` and the analytics seal `analytics-manifest.json`, stored in `state/board` in the
-  split layout (see [Layout](#layout));
+  split layout (see [Board checkpoint layout](#board-checkpoint-layout));
 - run and audit state: `state/runs/runs.ndjson`, `claims.json`, `watermarks.json`, `export.json`;
-- memory facts: `state/memory/facts/**`;
+- memory facts and pack ledgers: `state/memory/facts/**`, `state/memory/packs/*.json`;
 - knowledge documents: `state/knowledge/**` (free-form markdown, see
   [Architecture](ARCHITECTURE.md#knowledge-planes));
 - the secret store under `secrets/` (see [Secrets](#secrets)).
@@ -110,63 +118,75 @@ Outside the canon, rebuilt or kept in an optional cold archive:
 
 ## Layout
 
+The live root is a plain directory. It is not a Git work tree, and nothing commits in it; each path
+has one writer ([Writers](#writers)):
+
 ```text
-<private repository>/
-  instance.yaml, persona/, projects/, adapters/, heads/heads.toml     config, committed by the operator
-  state/                                                             state, committed by the auto-writer
-    board/   layout.json, export.json, analytics-manifest.json,
-             cards/NNNN/NNNNNNNN.json, sprints/NNNN/NNNNNNNN.json      one record per file
-             audit/NNNN/NNNNNNNN.ndjson, events/NNNN/NNNNNNNN.ndjson   immutable segments
-    runs/    runs.ndjson, claims.json, watermarks.json, export.json
-    memory/facts/**
-    knowledge/**   brainstorms, decision logs, incident write-ups
-  secrets/                                                           secret store
-    catalog.yaml, installation-key.json, values/<id>.enc.json
+<live root>/                                 ~/ummanu-data/instance by default
+  instance.yaml, heads/heads.toml, persona/**,
+  skills/manifest.toml                       config: an operation card plus `ummanu config check`
+  projects/<id>.yaml, adapters/<id>.yaml     config: onboarding (project add, provision-apply, gate)
+  state/
+    memory/facts/**, memory/packs/*.json     memory writer
+    knowledge/**                             knowledge writer: brainstorms, decision logs, incident write-ups
+  secrets/
+    catalog.yaml, installation-key.json,
+    values/<id>.enc.json                     secret writer
+    installation.key                         raw installation key, 0600, host-local
+  runtime.env, board-store.env               host-local, 0600
+  .ummanu-state-writer.lock                  the shared writer lock, host-local
 ```
 
-`secrets/installation.key` is the raw installation key, mode `0600`, outside the checkpoint: the
-export allowlist does not match it (see [Local-file exclusion](#local-file-exclusion)).
+The board and the run journals are not in the live root. The tick exports them from the backend into
+the data directory, and every cut takes `state/board` and `state/runs` from that export, never from
+the live root.
 
-What the installation generates is not in this layout. It lives in the data directory and is never
-committed: `<data>/heads/heads.yaml` and `<data>/heads/source.yaml` (the head-registry pair),
-`<data>/onboarding/{adapter-drafts,provision-runs,gate-runs,compatibility-manifests}/` and
-`<data>/locks/onboarding/`. Copies of these an older version left in the live root (`heads/heads.yaml`,
+Host-local files are the ones the export allowlist does not match: `secrets/installation.key`,
+`runtime.env`, `board-store.env`, the writer lock, a bootstrap stamp
+([Local-file exclusion](#local-file-exclusion)).
+
+What the installation generates lives in the data directory and is never exported:
+`<data>/heads/heads.yaml` and `<data>/heads/source.yaml` (the head-registry pair, written by `upgrade`
+and `recover`), `<data>/onboarding/{adapter-drafts,provision-runs,gate-runs,compatibility-manifests}/`
+and `<data>/locks/onboarding/`. Copies an older version left in the live root (`heads/heads.yaml`,
 `heads/source.yaml`, `adapter-drafts/`, `gate-runs/`, `provision-runs/`, `compatibility-manifests/`,
-`.locks/`) are not read, apart from the head-registry fallback described in
-[Fresh install and recovery](#fresh-install-and-recovery). `policies/` is dead configuration that no
-code reads.
+`.locks/`) are never read. `policies/` is dead configuration that no code reads; the cutover leaves it
+out of the live root.
 
 ### Snapshot repository
 
-A live root that is not a Git work tree is backed up by the snapshot exporter instead of the tick
-writer (see [Writers](#writers)). Its target is a **bare** repository, `offsite.snapshot_repo` in
-`instance.yaml` (a relative value is rooted at the data directory), by default
-`<data_dir>/backup/instance.git`, branch `main`. The exporter is the only code that builds a commit
-there. The snapshot tree keeps the live root's relative paths, so it is the layout above plus one
-file:
+The snapshot repository is the exporter's derived artifact, not a working tree: a **bare**
+repository at `offsite.snapshot_repo` in `instance.yaml` (a relative value is rooted at the data
+directory), by default `<data_dir>/backup/instance.git`, branch `main`. The exporter is the only code
+that builds a commit there, and the pusher publishes that branch to `offsite.instance_remote`. The
+snapshot tree keeps the live root's relative paths:
 
 ```text
-<snapshot repository>/
+<snapshot tree>/
   snapshot-manifest.json   format "ummanu.instance-snapshot", version 1, product_revision,
                            board_schema_head, files: {path: sha256} of every other file
   instance.yaml, projects/*.yaml, adapters/*.yaml, heads/heads.toml, persona/**,
   skills/manifest.toml, secrets/catalog.yaml, secrets/installation-key.json,
   secrets/values/*.enc.json, state/knowledge/**, state/memory/**     the export allowlist
-  state/board/, state/runs/                                           from the export, as above
+  state/board/   layout.json, export.json, analytics-manifest.json,
+                 cards/NNNN/NNNNNNNN.json, sprints/NNNN/NNNNNNNN.json      one record per file
+                 audit/NNNN/NNNNNNNN.ndjson, events/NNNN/NNNNNNNN.ndjson   immutable segments
+  state/runs/    runs.ndjson, claims.json, watermarks.json, export.json
 ```
 
-The export allowlist is `checkpoint.SNAPSHOT_ALLOWLIST`, a closed set: `*` matches inside one path
-segment and a trailing `**` everything below a directory. Nothing else in the live root is
-exported: not `heads/heads.yaml` or `heads/source.yaml`, `policies/`, `tests/`, `README.md`,
-`CONTEXT.md`, `.gitignore`, onboarding, gate, provision and compatibility directories, `.locks/`,
-`state/checks/`, the live root's own `state/board` and `state/runs`, and never
-`secrets/installation.key`, `runtime.env` or `board-store.env`. The manifest holds no clock value,
-so an unchanged state yields an unchanged manifest; a new product revision or board schema head is a
-change.
+The export allowlist is `checkpoint.SNAPSHOT_ALLOWLIST` (kept in `infra.export_allowlist`), a closed
+set: `*` matches inside one path segment and a trailing `**` everything below a directory. Nothing
+else in the live root is exported: not `heads/heads.yaml` or `heads/source.yaml`, `policies/`,
+`tests/`, `README.md`, `CONTEXT.md`, `.gitignore`, onboarding, gate, provision and compatibility
+directories, `.locks/`, `state/checks/`, the live root's own `state/board` and `state/runs`, the
+writers' undo and swap areas, and never `secrets/installation.key`, `runtime.env` or
+`board-store.env`. The manifest holds no clock value, so an unchanged state yields an unchanged
+manifest; a new product revision or board schema head is a change.
 
-For the same live state the exporter's tree equals the tracked tree of a legacy checkpoint on these
-paths (same paths, same blob ids, the board's segments included); the manifest is the only extra
-file.
+A tree a legacy checkpoint committed (the instance repository's work tree, before the cutover) has the
+same paths and blob ids for the same live state, the board's segments included; the manifest is the
+only extra file, and the one a recovery tells the two shapes apart by
+([Two remote shapes](#two-remote-shapes)).
 
 **Takeover marker.** `refs/ummanu/snapshot-base` (`checkpoint.SNAPSHOT_BASE_REF`) names a blob of
 one line: the parent of the exporter's first commit on this branch (a seeded legacy tip), or `root`
@@ -176,17 +196,18 @@ seeded). Apart from the exporter, only a snapshot recovery writes it: it points 
 tip (see [Snapshot recovery](#snapshot-recovery)). It is a local ref and is not pushed.
 
 **Doctor `snapshot.foreign_commit` (red).** For every commit in `<base>..<tip>` of the snapshot
-branch (the whole branch when the base is `root`), doctor checks the exporter's author and committer
-identity, the subject prefix, exactly one parent (the exporter's root commit: none) and a
-`snapshot-manifest.json` in its tree. For the tip it also checks that the manifest lists exactly the
-tree's other files and that every per-file digest matches the blob. Any failure is one red finding
-naming the commits and why. So is a marker that no longer names an ancestor of the tip, and exporter
-commits without any marker (a repository the exporter wrote before the marker existed: recreate it
-or reseed it). In legacy mode, and while there is no snapshot repository, the finding is absent.
+branch (the whole branch when the base is `root`), doctor (`checkpoint.snapshot_foreign_commits`)
+checks the exporter's author and committer identity, the subject prefix, exactly one parent (the
+exporter's root commit: none) and a `snapshot-manifest.json` in its tree. For the tip it also checks
+that the manifest lists exactly the tree's other files and that every per-file digest matches the
+blob. Any failure is one red finding naming the commits and why. So is a marker that no longer names
+an ancestor of the tip, and exporter commits without any marker (a repository the exporter wrote
+before the marker existed: recreate it or reseed it). On a live root that is still a work tree, and
+while there is no snapshot repository, the finding is absent.
 
 ### Board checkpoint layout
 
-The local export in the data directory stays flat. Only the copy committed into `state/board` is
+The local export in the data directory stays flat. Only the copy a cut stages into `state/board` is
 split, so a checkpoint's Git cost follows what changed instead of the size of the board
 (secretary-1656):
 
@@ -208,66 +229,65 @@ checkpoint after the upgrade converts a flat checkpoint in place: it writes the 
 removes the flat files in the same commit. Earlier commits keep their flat files; history is never
 rewritten.
 
-Memory facts are stored flat in this repository; the memory writer writes `commit`/`supersede`
-into it as files, without Git, and the tick commits them ([Writers](#writers)).
+Memory facts are stored flat in the live root's `state/memory/facts`; the memory writer writes
+`commit`/`supersede` there as files, without Git, and the next cut carries them ([Writers](#writers)).
 `state/memory/facts` is the only canon for every derived form of memory, so the instance directory
 is a required argument on the export and index-rebuild paths: a missing argument fails instead of
 pointing the export at another installation's memory.
 
 ## Cadence and RPO
 
-- The dispatcher ticks every 60 s. The periodic board/run checkpoint prepares at most once per
-  five-minute cadence window; if the hash of normalised `state/` did not change, it makes no commit.
+- The dispatcher ticks every 60 s. The exporter prepares a cut at most once per five-minute cadence
+  window; a cut whose tree equals the tip's makes no commit.
 - A remote push is attempted in its own 30-minute window, fast-forward only. A due push window forces
   one fresh, verified preparation in that tick before pushing.
-- Durable RPO on machine loss is 30 minutes. Local commits give fine-grained history and local
-  rollback but do not survive the machine.
+- Durable RPO on machine loss is 30 minutes. Commits in the local snapshot repository give
+  fine-grained history but do not survive the machine.
 
-The pusher publishes only when the remote tip is an ancestor of local `HEAD`; otherwise it records the
-failure or divergence for the next window or operator action.
+The pusher publishes only when the remote tip is an ancestor of the snapshot branch's tip; otherwise
+it records the failure or divergence for the next window or operator action.
 
 ## Writers
 
-Five writers touch the live root, each with its own paths. Only the tick makes Git commits; the
-other four write files and start no Git child:
+The live root has no Git. Every writer of it writes files only and starts no Git child; the snapshot
+exporter is the only code that commits, and only into the snapshot repository:
 
-- tick writer: `state/board`, `state/runs` (and, in legacy mode, the files the Git-free writers
-  leave uncommitted; below), at the cadence above, under the tick lock;
-- memory writer: `state/memory`, on `commit`/`supersede` and the memory pack of `upgrade`; it writes
-  files only and makes no Git call (below);
-- knowledge writer: `state/knowledge`, on `ummanu knowledge write`, the sprint-close closeout and the
-  dispatcher's research-report transfer; it writes files only and makes no Git call (below);
-- secret writer: `secrets/`, on `secret init/set/import/remove`, `secret checkpoint-github set` and
-  every re-encryption of a value (`list` and `materialize` write no store file); it writes files
-  only and makes no Git call (below).
-- onboarding writer: `projects/<id>.yaml` and `adapters/<id>.yaml`, on `project add`,
-  `provision-apply` and `gate`; each stage replaces its files atomically and makes no Git call. Its
-  drafts, provision runs and gate receipts live in `<data>/onboarding/` and are never exported.
-  Nobody commits a registration: the next exporter window carries it. While the live root is still a
-  work tree, the legacy tick leaves config paths alone (below), so a registration made then reaches
-  the remote with the first exporter cut after the cutover, which copies the whole allowlist.
+| Writer | Writes | When | Lock |
+|---|---|---|---|
+| snapshot exporter (`checkpoint.SnapshotExporter`, picked by `checkpoint.tick_checkpoint_writer`) | the snapshot repository's `main`; reads the live root, never writes it | the dispatcher tick, at the [cadence](#cadence-and-rpo) | the tick lock, then the shared writer lock |
+| memory writer (`memory_write`, `memory.canon`) | `state/memory` | `memory commit`/`supersede`, the memory pack of `upgrade` | `<data>/memory/.write.lock`, then the shared writer lock |
+| knowledge writer (`knowledge_write`) | `state/knowledge` | `knowledge write`, the sprint-close closeout, the dispatcher's research-report transfer | the shared writer lock |
+| secret writer (`secret_store`) | `secrets/` | `secret init/set/import/remove`, `secret checkpoint-github set`, every re-encryption of a value (`list` and `materialize` write no store file) | the shared writer lock |
+| onboarding (`onboarding`, `provision`, `gate`) | `projects/<id>.yaml`, `adapters/<id>.yaml`; drafts, provision runs and gate receipts in `<data>/onboarding/` | `project add`, `provision-apply`, `gate` | `<data>/locks/onboarding/<id>.lock` |
+| config edit | the other config files ([Layout](#layout)) | an operation card, then `ummanu config check` | none |
 
-No card lands in the live root. The dispatcher's instance-repository landing (a card branch merged
-into the live checkout) is gone; a card whose project repository resolves to the live root is
-refused at admission, naming it. Configuration changes through an operation card checked with
-`ummanu config check` ([Operations](OPERATIONS.md#changing-installation-config)).
+The shared writer lock is `state_repo.state_repo_lock`, the file `.ummanu-state-writer.lock` beside the
+tree. Whoever holds it sees no other writer's half-written file, so a cut never copies half a fact,
+document or store transaction.
 
-The head-registry pair is not a live-root path: `ummanu upgrade` and `recover` write `heads.yaml` and
-`source.yaml` into `<data>/heads/` and make no Git call for them.
+**Config.** Nothing commits config. A change is an operation card executed in place, checked with
+`ummanu config check --instance LIVE_ROOT` (schema validation and the old-name guard, without Git;
+[Operations](OPERATIONS.md#changing-installation-config)), and the next exporter window carries it.
+Onboarding replaces each stage's files atomically and has no commit step either; a registration
+reaches the remote with the next cut.
 
-No writer maintains `.gitignore` any more: what leaves the host is decided by the export allowlist
+**No card lands in the live root.** The live root is configuration, not a code project: a card whose
+project repository resolves to the live root is refused at admission, naming it
+(`dispatch.host`), and a release refuses it again.
+
+**Generated state.** The head-registry pair is not a live-root path: `ummanu upgrade` and `recover`
+write `heads.yaml` and `source.yaml` into `<data>/heads/` and make no Git call for them. No writer
+maintains `.gitignore`: what leaves the host is decided by the export allowlist
 ([Local-file exclusion](#local-file-exclusion)).
 
-Which periodic writer runs is decided by the live root. While it is a Git work tree (it has a
-`.git`), the tick keeps the commit and push above unchanged. When it is not, the tick runs the
-**snapshot exporter** instead, and the same pusher publishes the snapshot repository (below). Per
-window, under the same shared repository lock (which sits beside the tree as
-`.ummanu-state-writer.lock` when there is no `.git`), the exporter:
+### The exporter
+
+Per window, under the tick lock and the shared writer lock, the exporter:
 
 1. reads the tip of the snapshot branch, the base of the compare-and-swap below;
 2. passes the [validation gate](#validation-gate) and stages `state/board` and `state/runs` from the
-   export exactly as the tick writer does, the run-history check against the tip's `runs.ndjson`;
-   the board's log segments continue the tip's;
+   export, the run-history check against the tip's `runs.ndjson`; the board's log segments continue
+   the tip's;
 3. copies the export allowlist byte for byte from the live root. A symlink or any non-regular file
    at an allowlisted path, or on the way to one, blocks the window by its path; nothing is followed;
 4. writes `snapshot-manifest.json`;
@@ -287,20 +307,19 @@ snapshot. The repository is created and initialised bare when absent; a non-empt
 that is not a bare repository blocks the window.
 
 `ummanu data snapshot --instance INSTANCE --snapshot-repo PATH [--data-dir DIR] [--state-dir DIR]`
-runs one exporter window into an explicit repository whatever the live root is, including a live
-root that is still a work tree, whose repository it never uses (it takes only the writer lock). It
-prints the result as JSON, exits 0 on `committed` or `unchanged`, and never pushes. It is what the
-stand comparison and the cutover use.
+runs one exporter window into an explicit repository. It takes only the writer lock and never uses a
+`.git` the live root may still have. It prints the result as JSON, exits 0 on `committed` or
+`unchanged`, and never pushes. The stand comparison and the cutover use it.
 
-**Push.** In exporter mode the tick's `CheckpointPusher` publishes `refs/heads/main` of the snapshot
-repository instead of the live root's `HEAD`, with everything else unchanged: the 30-minute window,
-the fresh preparation a due window forces, fast-forward only, the `diverged` stop on a remote tip
-the snapshot history does not contain, the managed GitHub credential from the live root's secret
-store, the shared lock, and the push state and doctor rows (which then read the snapshot repository
-and name it as `snapshot repository:`). Before each attempt the pusher sets the snapshot
-repository's `origin` URL from `offsite.instance_remote` when it differs, so a changed value
-re-points the next push. No `offsite.instance_remote`, no snapshot repository, or no commit yet is a
-`skipped` push with that reason.
+**Push.** The tick's `CheckpointPusher` (`checkpoint.tick_checkpoint_pusher`) publishes
+`refs/heads/main` of the snapshot repository: the 30-minute window, the fresh preparation a due
+window forces, fast-forward only, the `diverged` stop on a remote tip the snapshot history does not
+contain, the managed GitHub credential from the live root's secret store, and the shared lock. The
+push state and doctor rows read the snapshot repository and name it as `snapshot repository:`.
+Before each attempt the pusher sets the snapshot repository's `origin` URL from
+`offsite.instance_remote` when it differs, so a changed value re-points the next push. No
+`offsite.instance_remote`, no snapshot repository, or no commit yet is a `skipped` push with that
+reason.
 
 **Cutover seed.** `ummanu data snapshot --instance LIVE_ROOT --snapshot-repo PATH --seed-from
 LEGACY_INSTANCE_DIR` runs no window. It fetches the legacy work tree's checked-out branch tip at
@@ -313,34 +332,35 @@ refused (`blocked`, exit 1). The next window commits with the legacy tip as its 
 the marker. The runbook order is: final legacy checkpoint and push, seed, switch the live root. The
 first exporter push is then a fast-forward of the remote branch.
 
+### Git-free writers
+
 **Memory writer.** The canon is the files under `state/memory/facts` (and the pack ledgers under
-`state/memory/packs`) of the live root, whether or not the live root is a Git work tree. `memory
-commit`, `memory supersede` and the memory pack write it without Git: under the memory lock
-(`<data>/memory/.write.lock`) and the shared repository lock, each write first records the prior
-state of every path it is about to replace or remove in the **undo area** `<data>/memory/.undo`
-(a copy of the old bytes and mode, or "absent"), then replaces each file atomically or removes it,
-then retires the undo area with one rename. A failure inside the write restores exactly the recorded
-set, so the canon is byte-identical to before; an undo area a crashed writer left behind is restored
-by the next writer (or `data export-memory`) under the same locks before it proceeds. The undo area
-is outside `state/memory`, so it is never in the export allowlist, never in the canon and never in
-a commit; `memory verify` reports one that is left behind. Where a commit id used to be, the writer
-result (`commit`), the export manifest (`source.head`, `journal.commit`) and the pack result carry
-the **content revision**: `sha256:` over the sorted fact ids, each with the sha256 of its file's
-bytes (`memory.canon.content_revision`). The same canon gives the same revision, and any changed
-byte changes it. `memory verify` compares the canon, `export.ndjson` and `index.sqlite` by fact id
-set and per-fact content hash and names every missing, extra or changed id, not their counts. The
-memory service reads the canon files when no export is present.
+`state/memory/packs`) of the live root. `memory commit`, `memory supersede` and the memory pack
+write it under the memory lock and the shared writer lock. Each write first records the prior state
+of every path it is about to replace or remove in the **undo area** `<data>/memory/.undo` (a copy of
+the old bytes and mode, or "absent"), then replaces each file atomically or removes it, then retires
+the undo area with one rename. A failure inside the write restores exactly the recorded set, so the
+canon is byte-identical to before; an undo area a crashed writer left behind is restored by the
+next writer (or `data export-memory`) under the same locks before it proceeds. The undo area is
+outside `state/memory`, so it is never exported; `memory verify` reports one that is left behind.
+Where a commit id used to be, the writer result (`commit`), the export manifest (`source.head`,
+`journal.commit`) and the pack result carry the **content revision**: `sha256:` over the sorted fact
+ids, each with the sha256 of its file's bytes (`memory.canon.content_revision`). The same canon gives
+the same revision, and any changed byte changes it. `memory verify` compares the canon,
+`export.ndjson` and `index.sqlite` by fact id set and per-fact content hash and names every missing,
+extra or changed id, not their counts. The memory service reads the canon files when no export is
+present.
 
 **Knowledge writer.** `knowledge write --file` replaces one document under `state/knowledge` with one
 atomic rename; `--dir` swaps one directory in whole through `state/.knowledge-swap` (outside the
-allowlist and every pathspec below). A failure at any step puts the previous directory back and
-removes any parent the write created, so `state/knowledge` is byte-identical to before; a swap a
-crashed writer left behind is finished by the next writer under the lock. Content equal to what is on
-disk writes nothing. Where a commit id used to be, the result (`commit`), the sprint-close closeout
-step and the plan's `mark_written` carry the **content revision** of what was written: `sha256:` over
-the sorted paths below `state/knowledge`, each with the sha256 of its bytes
-(`_fsutil.content_revision`, the memory writer's formula). The same content gives the same revision.
-A close whose plan was staged with a Git commit id before this change keeps that value and completes.
+allowlist). A failure at any step puts the previous directory back and removes any parent the write
+created, so `state/knowledge` is byte-identical to before; a swap a crashed writer left behind is
+finished by the next writer under the lock. Content equal to what is on disk writes nothing. Where a
+commit id used to be, the result (`commit`), the sprint-close closeout step and the plan's
+`mark_written` carry the **content revision** of what was written: `sha256:` over the sorted paths
+below `state/knowledge`, each with the sha256 of its bytes (`_fsutil.content_revision`, the memory
+writer's formula). The same content gives the same revision. A close whose plan was staged with a Git
+commit id before this change keeps that value and completes.
 
 **Secret writer.** Every store write holds the shared lock and runs as one undo-guarded transaction
 over `secrets/` (the memory canon's transaction, its undo area in `secrets/.undo`): the prior bytes
@@ -353,29 +373,16 @@ nothing. Results carry the store's content revision in `commit`: the same formul
 store files (`secrets/catalog.yaml`, `secrets/installation-key.json`, `secrets/values/*.enc.json`;
 `secret_store.store_revision`), never over `installation.key`.
 
-Because the memory, knowledge and secret writers no longer commit, the **legacy** tick (live root is
-a work tree) stages and commits their files in the same commit as `state/board` and `state/runs`
-(`checkpoint.LEGACY_LIVE_PATHS`), with these added pathspecs and no others:
+### Before the cutover
 
-```text
-state/memory
-state/knowledge
-secrets/catalog.yaml
-secrets/installation-key.json
-:(glob)secrets/values/*.enc.json
-```
-
-Each is staged only when it names a file on disk or in the index, so a removed file is committed as a
-removal and a live root without a store commits as before. `secrets/installation.key` and the undo
-area match none of them and are never staged, whatever `.gitignore` says. Before anything is staged,
-every file on disk under these pathspecs passes the same redaction scan as the rest of the cut; a
-hit blocks the tick by path. Config and every other path stay out of that commit. In exporter mode
-the allowlisted paths reach the next cut as before.
-
-Pathspecs do not overlap, and nobody uses `git add -A`, so uncommitted manual config edits are left
-alone. Every writer holds the shared repository lock while it writes, stages or commits. Everything
-reaches Git through the tick's commit or cut, and the next push carries it out. Explicit checkpoint users (install, recover) are also
-synchronous and bypass the periodic cadence.
+A live root that still has `.git` (an installation not cut over yet, red `live_root.git_work_tree`)
+keeps the legacy tick: `checkpoint.CheckpointWriter` commits `state/board` and `state/runs` into the
+work tree and, because the Git-free writers no longer commit, stages their files in the same commit
+(`checkpoint.LEGACY_LIVE_PATHS`: `state/memory`, `state/knowledge` and the three exported secret-store
+paths); the pusher publishes the work tree's branch. The dispatcher once also landed card branches
+in that work tree (the instance-repository landing, retired in ummanu-32); that path is gone. A reader
+of history from before the cutover finds these commits without a `snapshot-manifest.json`, and the
+config commits operators and landed cards made beside them.
 
 ### Local-file exclusion
 
@@ -411,8 +418,9 @@ live run journals. Backend audit ownership is in [Board store](BOARD_STORE.md) ย
 
 ## Local Git packing controls
 
-Install, recover and upgrade idempotently set, with `git -C INSTANCE config --local --replace-all`,
-only these settings in the private instance repository (never global config, never a project repo):
+These controls belong to a live root that is still a Git work tree, an installation before the
+cutover. There, install, recover and upgrade idempotently set, with `git -C INSTANCE config --local
+--replace-all`, only these settings in that repository (never global config, never a project repo):
 
 ```
 pack.threads=1
@@ -424,7 +432,8 @@ maintenance.auto=false
 
 `doctor` names missing, drifted or duplicate values with the exact remediation. To roll back, run
 `git -C INSTANCE config --local --unset-all` for each key. These settings constrain packing; they are
-not a hard memory limit.
+not a hard memory limit. On a plain live root `upgrade`'s `instance-packing` step reports `skipped`
+and doctor checks nothing; the bare snapshot repository gets none of these settings.
 
 `gc.auto=0` and `maintenance.auto=false` stop every `git commit` from starting Git's implicit
 `gc --auto`, which would otherwise pack the repository inside whichever checkpoint tick first crosses
@@ -436,7 +445,9 @@ two ref-writing parts of `gc` (`pack-refs`, reflog expiry) are switched off for 
 expired as a separate step under the state-repo lock, the only moment a checkpoint can wait on
 maintenance, bounded at 60 seconds. `ummanu status` lists the timer under `host.schedules` with
 `last_trigger`, and the service under `host.units` reads `failed` after a failed run; the run's
-before/after object counts are in its journal.
+before/after object counts are in its journal. The command packs the live root's repository and
+requires one (`infra.instance_maintenance.run`): on a plain live root it exits 1 with `instance repo
+is not a git repository` before the Docker cleanup below runs.
 
 The same maintenance command also inventories only containers carrying `ummanu.test-board`
 with a valid owner PID. It removes one by full ID only after two label checks and two definitive
@@ -450,7 +461,7 @@ does not widen any subsequent deletion scope.
 
 ## Validation gate
 
-Before each tick commit the snapshot passes a fail-closed check. If any item fails, the tick skips the
+Before each cut the state passes a fail-closed check. If any item fails, the tick skips the
 checkpoint, records the reason in status and retries next tick:
 
 - task audit is settled with no pending board mutation. The audit is the one the card client names
@@ -460,10 +471,9 @@ checkpoint, records the reason in status and retries next tick:
   `export.json` match the line counts, the generated `cards.json`/`cards.ndjson` pair is identical and
   card references are unique, all before local export or canonical files are replaced;
 - memory staging is empty;
-- the secret scan of `state/` is clean, in legacy mode with every file the tick commits beside board
-  and runs (`state/memory`, `state/knowledge` and the exported secret-store files; for the snapshot
-  exporter: of every file of the cut). The memory and knowledge writers run the same scan over their
-  own text before writing.
+- the secret scan is clean over every file of the cut, the manifest included (on a live root not yet
+  cut over: over `state/` and every file the legacy tick commits beside board and runs). The memory
+  and knowledge writers run the same scan over their own text before writing.
 
 ### Analytics checkpoint seal v2
 
@@ -503,11 +513,18 @@ installation secrets. `board-store.env` is local connection material that bootst
 not restored from the secret store. Forge access and interactive head logins stay in the operator's password manager; the product
 never copies them to the host.
 
-The secret store (`ummanu/secret_store.py`, `secrets/`) is a recoverable canon in the same
-repository: a metadata catalog and versioned encrypted envelopes, exported (in legacy mode committed
-by the tick) and pushed with the checkpoint. The repository never contains the raw installation key
-(`secrets/installation.key`, not matched by the export allowlist, `0600`) or the recovery phrase, which `secret init` shows once and the product stores
-nowhere. With the phrase the key is rebuilt and values return byte for byte; without it `recover`
+The secret store (`ummanu/secret_store.py`, `secrets/` in the live root) is recoverable canon,
+exported in every cut and pushed with it:
+
+- `secrets/values/<id>.enc.json`: one versioned encrypted envelope per secret;
+- `secrets/catalog.yaml`: plain metadata (id, scope, purpose, materialisation target). It is plain
+  on purpose: a recovery without the phrase still lists what stayed locked or missing;
+- `secrets/installation-key.json`: the public KDF parameters and a verifier, no key material.
+
+The snapshot never contains the raw installation key (`secrets/installation.key`, `0600`, not
+matched by the export allowlist, so it exists only on its host) or the recovery phrase, which
+`secret init` shows once and the product stores nowhere. Documentation never reads or repeats a
+secret's value. With the phrase the key is rebuilt and values return byte for byte; without it `recover`
 prints a locked/missing report and writes nothing. Losing the phrase means reissuing secrets, not
 losing the installation. Command contracts are in [Protocols](PROTOCOLS.md#secrets).
 
@@ -540,10 +557,10 @@ are in [Operations](OPERATIONS.md#checkpoint-and-project-github-access). For rec
 - Ummanu copies it into a mode-`0600` operation-scoped capability owned by the installation-user
   Git child and removes it on success or failure. It is not retained and is not an ongoing checkpoint
   source.
-- A rerun fetches the existing checkout with the supplied bootstrap credential, or else the unlocked
-  managed credential. With neither, recovery stops before contacting the remote. Ambient Git helpers
-  are never used for `github.com` HTTPS; other HTTPS hosts are refused; local/file remotes are plain
-  Git; SSH is explicit manual bypass.
+- A rerun fetches into the existing snapshot repository (or legacy checkout) with the supplied
+  bootstrap credential, or else the unlocked managed credential. With neither, recovery stops before
+  contacting the remote. Ambient Git helpers are never used for `github.com` HTTPS; other HTTPS hosts
+  are refused; local/file remotes are plain Git; SSH is explicit manual bypass.
 - Under `sudo`, credential readiness is evaluated by the installation-user Git child, not by root.
 
 For a pre-recovery inventory read `status.recovery` or text `doctor`. Rows come from the installed
@@ -613,28 +630,20 @@ database untouched; repair or recreate only the target before retrying.
 
 ## Fresh install and recovery
 
-Install the product with the memory extra. On Ubuntu 24.04, `ummanu bootstrap` installs Docker
-and Compose from the distribution and provisions, migrates and role-verifies the PostgreSQL board
-store, with no recovery phrase or manual board credentials. When the instance enables the web-front
-component (a `host.unit_prefix`, `host.components.web-front` not disabled, the unit not in
-`host.foreign_units`), bootstrap also installs the distribution's `caddy`, which
-`ummanu-web-front.service` runs as `/usr/bin/caddy`; it masks `caddy.service` first, so the package
-never starts an unconfigured listener. Heads run on local-pty, which ships
-with the product; before A20 step 9 bootstrap also installed Orca, the session manager heads then ran
-in, and its X server. `ummanu install` installs no
-runtime and checks that the board store is reachable before changing live state. With the web front
-enabled it also refuses up front, naming caddy, when `/usr/bin/caddy` is absent; without that check
-the front crash-looped (203/EXEC) and recovery failed only at materializer verify.
+A clean host is recovered with two commands, `bootstrap` then `recover`, whatever the remote's
+[shape](#two-remote-shapes). The code is `bootstrap.bootstrap` and `installation.install` (`recover`
+is `install` with `--recover`).
 
-**Web-front sites.** The front's Caddyfile (`<data>/webfront/Caddyfile`) holds the password hash, so
-it is data-directory state that neither a checkpoint nor a snapshot carries. What survives is
-instance config: the https addresses the front answers on are `host.web_front.sites` in
-`instance.yaml` ([Operations](OPERATIONS.md#web-front-sites)). `install` and `recover` render the file
-from that list and the secret store's hash and session secret, through `ummanu web-front render` run
-as the key's owner, before the host step enables `ummanu-web-front.service` (whose `ExecStartPre` is
-`caddy validate` on that file). With the front enabled and no sites configured they refuse at
-prerequisites, naming `host.web_front.sites` and `ummanu web-front render`, before any live write; a
-recovered host never fails later at `materializer host: start ummanu-web-front.service`.
+```bash
+python3 -m pip install '.[memory]'
+sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER
+sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+  --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
+```
+
+`INSTANCE` is the live root to create, by default `~/ummanu-data/instance`. Heads run on local-pty,
+which ships with the product; no session manager is installed. A new installation runs `sudo ummanu
+install` with the same arguments instead of `recover` ([Guards](#bootstrap)).
 
 **Memory.** A host needs at least **4 GB of RAM** (8 GB recommended; production runs 8 GB with 6 GB
 of swap). The embedding model is about 1.5-1.7 GB resident in the one process that holds it. Recover
@@ -643,84 +652,75 @@ step starts `ummanu-memory-mcp`, so the model is resident in one process at a ti
 and the memory service together (re-drill 3 on a 4 GB host without swap was OOM-killed when it was).
 On a host near the minimum, keep 2-4 GB of swap for the board store, the web and the heads.
 
-```bash
-python3 -m pip install '.[memory]'
-sudo ummanu bootstrap \
-  --instance-remote git@github.com:OWNER/secretary-instance.git \
-  --instance-dir INSTANCE \
-  --installation-user INSTALL_USER
+### Bootstrap
 
-sudo ummanu install \
-  --instance-remote git@github.com:OWNER/secretary-instance.git \
-  --instance-dir INSTANCE \
-  --installation-user INSTALL_USER
-```
+`sudo ummanu bootstrap` runs as root on Ubuntu 24.04 only (a `--dry-run` excepted) and is safe to
+rerun. In order:
 
-Fresh install refuses an existing installation user or checkout and names the choice: `--recover`
-for the same installation, or the separate adopt workflow for a live host. Recover does not overwrite
-a dirty checkout, a different remote, an arbitrary non-empty data target or an unowned host resource.
+1. ensures `--installation-user`, reusing an existing one;
+2. runs recovery's own clone step: an exporter snapshot is laid out as the plain live root and the
+   snapshot repository with its takeover marker, exactly as `recover` lays them out
+   ([Snapshot recovery](#snapshot-recovery) steps 1-7; the data directory is laid out when the
+   repository or the live root is in it); a legacy checkpoint is cloned as a Git checkout
+   ([Checkout](#checkout));
+3. writes the stamp `.ummanu-bootstrap` into the live root. The allowlist does not match it, so it is
+   host-local; in a legacy checkout it and `/runtime.env` are also added to `.git/info/exclude`;
+4. installs Docker and Compose v2 from the distribution when absent. When the instance enables the
+   web-front component (`installation.web_front_wanted`: a `host.unit_prefix`,
+   `host.components.web-front` not disabled, the unit not in `host.foreign_units`), it also installs
+   the distribution's `caddy`, which `ummanu-web-front.service` runs as `/usr/bin/caddy`. It masks
+   `caddy.service` before the package exists, so the package never starts an unconfigured listener
+   and the front unit is the only Caddy that runs;
+5. provisions, migrates and role-verifies the PostgreSQL board store, with no recovery phrase or
+   manual board credentials; `board-store.env` (0600) is written into the live root;
+6. hands the live root, and for a snapshot the data directory, to `--installation-user`.
 
-On a clean host, recovery bootstraps and then runs `recover` instead of `install`:
+**Guards.** `install` and `recover` install no runtime. Before any live write they check that the
+board store is reachable and, with the web front enabled, refuse naming caddy when `/usr/bin/caddy` is
+absent (without that check the front crash-looped with 203/EXEC and recovery failed only at
+materializer verify), and refuse naming `host.web_front.sites` and `ummanu web-front render` when no
+sites are configured (`installation.check_prerequisites`). A fresh `install` refuses an existing
+installation user or checkout and names the choice: `--recover` for the same installation, or the
+separate adopt workflow for a live host. The first `install` of a bootstrapped target is the one
+exception: it runs the [sequence](#sequence), removes `.ummanu-bootstrap` at the end, and after that
+`install` refuses the target and names `--recover`.
 
-```bash
-sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
-  --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
-```
-
-The clean-host sequence is the same two commands for both [remote shapes](#two-remote-shapes);
-only what `bootstrap` leaves in `INSTANCE` differs:
-
-| Step | Legacy remote (tip without a manifest) | Snapshot remote (tip with `snapshot-manifest.json`) |
-| --- | --- | --- |
-| 1. `sudo ummanu bootstrap ...` | clones a Git checkout ([Checkout](#checkout)), writes `.ummanu-bootstrap` and adds it and `/runtime.env` to `.git/info/exclude` | lays out the plain live root and the snapshot repository with its takeover marker ([Snapshot recovery](#snapshot-recovery) steps 1-7; the data directory is laid out when the repository or the live root is in it), writes `.ummanu-bootstrap`; no `.git` is written |
-| 2. same run | provisions, migrates and role-verifies the board store; `board-store.env` (0600) in `INSTANCE`; everything handed to `--installation-user` | the same; the data directory is handed over too |
-| 3. `sudo ummanu recover ... --recovery-phrase-file PHRASE_FILE` | fetches and fast-forwards the checkout, then runs the [sequence](#sequence) | finds the live root of the same tip (the stamp and `board-store.env` are host-local, not a divergence) and the repository at the tip, so nothing is cloned again; then runs the [sequence](#sequence) on the extracted tree: phrase, checkpoint, heads in `<data>/heads/`, board and sprint parity, memory reindex, the exporter on the first tick |
-
-For a snapshot remote this is the documented flow: `bootstrap`, then `recover` with the phrase. A
-rerun of either is idempotent: the same tip, no second board import, the store credentials kept.
-A plain `install` instead of `recover` after `bootstrap` takes the same path for both shapes: it is
-the bootstrapped target's first install, runs the same sequence and removes `.ummanu-bootstrap` at
-the end; after that, `install` refuses the target and names `--recover`.
+**Web-front sites.** The front's Caddyfile (`<data>/webfront/Caddyfile`) holds the password hash, so
+it is data-directory state that no snapshot carries. What survives is instance config: the https
+addresses the front answers on are `host.web_front.sites` in `instance.yaml`
+([Operations](OPERATIONS.md#web-front-sites)). The materializer's `web-front-config` step
+(`upgrade.step_web_front_config`) renders the file from that list and the secret store's hash and
+session secret, through `ummanu web-front render` run as the key's owner, before the host step
+enables `ummanu-web-front.service` (whose `ExecStartPre` is `caddy validate` on that file).
 
 ### Two remote shapes
 
 `recover` and `bootstrap` read the remote tip before they decide how to clone, whenever the
 `--instance-dir` target is not a Git work tree (absent, empty, or a live root an earlier snapshot
-recovery or bootstrap laid out); the first `install` of a bootstrapped live root reads it too. It is
-one decision and one clone step for all three commands. It clones the default branch depth 1, bare,
-into a private sibling staging directory and looks for `snapshot-manifest.json` at the root of the
-tip's tree:
+recovery or bootstrap laid out); the first `install` of a bootstrapped live root reads it too
+(`installation._reads_remote_shape`). It is one decision and one clone step for all three commands.
+It clones the default branch depth 1, bare, into a private sibling staging directory and looks for
+`snapshot-manifest.json` at the root of the tip's tree:
 
 - **With a manifest** the tip is an exporter snapshot, and recovery takes the
-  [snapshot path](#snapshot-recovery).
-- **Without one** the tip is a legacy checkpoint. The staging is removed and recovery takes the
-  [checkout path](#checkout) below, unchanged. That path stays for every checkpoint without a
-  manifest.
+  [snapshot path](#snapshot-recovery) (`installation._snapshot_checkout`).
+- **Without one** the tip is a legacy checkpoint, a commit of the instance repository's work tree from
+  before the cutover. The staging is removed and recovery takes the [checkout path](#checkout). That
+  path stays for every checkpoint without a manifest.
 
 A target that is already a Git work tree, a fresh `install` and a `--dry-run` against an absent
-target (of `recover` or `bootstrap`) do not read the shape and take the checkout path, as before.
+target do not read the shape and take the checkout path.
 
-### Checkout
+What `bootstrap` leaves and what `recover` then does, per shape:
 
-The clone takes only the current default-branch checkpoint: depth 1, one branch, no tags. Git clones
-into a private sibling staging directory; recovery verifies origin, branch, upstream, exact tip and
-shallow boundary, then atomically adopts the requested path. A timeout or interruption kills the
-clone's whole process group, removes the credential capability and staging directory, and leaves an
-absent or empty target as it was.
+| | Snapshot remote (tip with `snapshot-manifest.json`) | Legacy remote (tip without one) |
+| --- | --- | --- |
+| `bootstrap` | the plain live root with no `.git`, the snapshot repository at the tip with its marker, the data directory laid out, the stamp | a shallow Git checkout as the live root, the stamp |
+| `recover` | finds the live root of the same tip (the stamp and `board-store.env` are host-local, not a divergence) and the repository at the tip, so nothing is cloned again; runs the [sequence](#sequence) on the extracted tree | fetches and fast-forwards the checkout; runs the [sequence](#sequence) on it |
+| first tick | the live root is not a work tree, so the exporter commits on top of the recovered tip and the pusher publishes it | the live root is a work tree: the legacy tick, with both `live_root.*` findings red until the cutover |
 
-Later recovery of that checkout fetches the tracked branch without tags and merges `@{u}` with
-`--ff-only`; the checkout stays shallow. An unchanged tip is a no-op. Recovery never shallows, resets
-or replaces an existing checkout and never unshallows one.
-
-A non-empty target that is not a valid instance repository is refused, not overwritten. Inspect and
-preserve it, then remove it outside Ummanu or choose a fresh `--instance-dir`. A dirty checkout,
-different origin, invalid repository or unsupported non-fast-forward is also left untouched and
-refused. A clean tree alone never proves product ownership.
-
-`runtime.env` and `board-store.env` are outside the export allowlist and are never committed. An
-untracked file the allowlist does not match (`secrets/installation.key`, `runtime.env`,
-`board-store.env`) is host-local and does not count as a local change of the checkout; every other
-change, tracked or untracked, does.
+A rerun of either command is idempotent: the same tip, no second board import, the store credentials
+kept.
 
 ### Snapshot recovery
 
@@ -736,17 +736,19 @@ nothing outside its staging until the checks have passed:
    the way: every file except the manifest must be listed with a matching digest, and nothing may be
    listed that the tree lacks. The manifest's `board_schema_head` must be in this product's migration
    lineage; a newer (or unknown) head is refused naming both heads.
-3. **Locations.** The extracted `instance.yaml` names the data directory (a relative value is rooted
+3. **Layout.** The extracted `instance.yaml` names the data directory (a relative value is rooted
    at the live root) and `offsite.snapshot_repo`, resolved as the exporter resolves it, by default
-   `<data>/backup/instance.git`. One layout check runs before anything is written. It accepts
-   exactly two shapes, and the snapshot repository lies outside the live root in both:
+   `<data>/backup/instance.git` (`config.recovered_instance_locations`). One layout check runs before
+   anything is written (`installation._snapshot_layout`). It accepts exactly two shapes, and the
+   snapshot repository lies outside the live root in both:
    - (a) the live root and the data directory are disjoint, neither containing the other;
-   - (b) the live root is a direct child of the data directory, `<data>/<name>` (`data_dir: ..`).
+   - (b) the live root is a direct child of the data directory, `<data>/<name>` (the default
+     `~/ummanu-data/instance`, or `data_dir: ..`).
    Every other layout is refused with a message naming the paths. A non-empty data directory
    ummanu did not lay out is refused too. In shape (b), only the live root entry itself and the
    staging recovery created beside it are not counted as data-directory contents.
-4. **Live root rule.** The `--instance-dir` must be absent, empty, or already the live root of this
-   same tip: every exported path the tree's, byte for byte and with its executable bit, and no
+4. **Empty or same tip.** The `--instance-dir` must be absent, empty, or already the live root of
+   this same tip: every exported path the tree's, byte for byte and with its executable bit, and no
    exported path extra. A file the allowlist does not match (`secrets/installation.key`,
    `runtime.env`, `board-store.env`, a bootstrap stamp) is the host's own and does not count. Any
    other non-empty live root is refused and nothing in it is overwritten.
@@ -761,81 +763,104 @@ nothing outside its staging until the checks have passed:
    root has no `.git`, no `state/board`, no `state/runs` and no manifest. Host-local files come only
    from bootstrap, the recovery phrase and the secret store, never from the tree.
 
-The rest of the [sequence](#sequence) then runs on the plain live root. `state/board` and
-`state/runs` are read from the extracted tree, not from the live root; the recovery identity hashes
-them from there and the memory facts from the live root. On the first tick the live root is not a
-work tree, so the exporter commits on top of the recovered tip and the pusher publishes it. `ummanu
-upgrade`'s instance packing step skips a live root that is not a work tree.
+The [sequence](#sequence) then runs on the plain live root. `state/board` and `state/runs` are read
+from the extracted tree, not from the live root; the recovery identity hashes them from there and the
+memory facts from the live root. `ummanu upgrade`'s `instance-packing` step skips a live root that is
+not a work tree.
+
+### Checkout
+
+The legacy path. The clone takes only the current default-branch checkpoint: depth 1, one branch, no
+tags. Git clones into a private sibling staging directory; recovery verifies origin, branch,
+upstream, exact tip and shallow boundary, then atomically adopts the requested path. A timeout or
+interruption kills the clone's whole process group, removes the credential capability and staging
+directory, and leaves an absent or empty target as it was.
+
+Later recovery of that checkout fetches the tracked branch without tags and merges `@{u}` with
+`--ff-only`; the checkout stays shallow. An unchanged tip is a no-op. Recovery never shallows, resets
+or replaces an existing checkout and never unshallows one.
+
+A non-empty target that is not a valid instance repository is refused, not overwritten. Inspect and
+preserve it, then remove it outside Ummanu or choose a fresh `--instance-dir`. A dirty checkout,
+different origin, invalid repository or unsupported non-fast-forward is also left untouched and
+refused. A clean tree alone never proves product ownership. An untracked file the allowlist does not
+match (`secrets/installation.key`, `runtime.env`, `board-store.env`) is host-local and does not count
+as a local change of the checkout; every other change, tracked or untracked, does.
+
+A recovered checkout is a live root in the old shape; it moves to a plain live root with the same
+cutover as any legacy installation ([Names on the host](#names-on-the-host)).
 
 ### Sequence
 
-`recover` runs one sequence:
+After the clone step, `recover` (`installation.install`) runs one sequence:
 
-1. Opens the secret store, if present, before reading `runtime.env`. With `--recovery-phrase-file`,
-   `--recovery-phrase-stdin`, or a TTY prompt when the key is not on disk, it rebuilds the installation
-   key and materialises values into the files the catalog names, `runtime.env` and every file target,
-   one in the data directory included (`<data>/webfront/owner-password.env`). Before it writes, a file
-   target already present in a data directory ummanu has not laid out (no data manifest) is refused
-   by path and no secret is written; in a laid-out one it is refreshed. Without the phrase it writes
-   nothing, reports locked/missing, and `runtime.env` stays as it is.
-2. Crosses the recovery ownership barrier: the instance checkout, secrets, locks and declared data root
-   are handed to `--installation-user` before that user's Git or remote child can consume a restored
-   key. A present key must be a regular non-symlink mode-`0600` file owned by that user.
-3. Checks the remote and checkout, materialised credentials, board reachability and, when the web
-   front is enabled, `/usr/bin/caddy` and `host.web_front.sites`. No session manager is required.
-4. Materialises `state/board` and `state/runs` (from the checkout, or from the extracted snapshot
-   tree) into a new local data plane, builds derived JSON from the NDJSON and verifies counters
-   before any live write. The data target must be empty or laid out by ummanu: the files step 1
-   created there, at paths absent before it ran, are this run's own and do not count, and every
-   other entry of a data target ummanu did not lay out (a foreign file beside or inside one of them
-   included) is refused by name.
-   On a legacy remote this is where the data directory is laid out; a snapshot remote's bootstrap or
-   clone step laid it out already.
-5. Generates the installed head snapshot and source pin into `<data>/heads/` with upgrade's own
-   head-registry step, from the canon (the live root's `heads/heads.toml`, else the product default).
-   The board import needs it: it validates every open sprint's observer head against this pair, and a
-   clean host has none until this step. It is idempotent and runs on every retry.
-6. Idempotently imports the board and rebuilds the memory index from `state/memory/facts` (see
-   [Board import](#board-import)) in a child process that takes the embedding model with it when it
-   exits (one killed by the kernel is reported by its signal), then publishes the memory export (`<data>/memory/export.ndjson`,
-   `export.json`, `manifest.json`) from the same facts and hands it to `--installation-user`, so
-   `ummanu memory verify` is `ok` right after recovery. The pack step later finds the restored ledger
-   current and writes nothing, so this is the export's only writer on a recovered host. A retry past a
-   completed rebuild keeps the index and still publishes an export that is missing.
-7. Attempts every missing project checkout from the registry through the same remote-execution
-   boundary as the instance checkout, and creates the non-secret managed runtime-home files for agent
-   CLIs. A binding with `enabled: false` (retired, or not yet onboarded) is not cloned: its row has
-   outcome `disabled` and does not count as unavailable. A parent directory recovery creates for a
-   checkout (`~/projects`) is handed to `--installation-user`. Provider authentication stays manual.
-8. Runs the pre-host materialiser. Its head-registry step finds the pair step 5 wrote current
-   (whether the checkpoint is a legacy one that still tracks `heads/heads.yaml` or an exporter cut
-   that has none, the pair is generated, never read from the remote); it commits and publishes
-   nothing. It then synchronises role skills and recreates role worktrees (owned by
-   `--installation-user` under `sudo`, the skill roots and the directories above them in the home or
-   data directory included). A role worktree still registered in the product's Git whose directory is
-   gone (a lost workspace root, a host rebuilt from a backup) is added again over that registration; a
-   locked one is refused, and the step reports git's `fatal:` line. Its `web-front-config` step
-   renders `<data>/webfront/Caddyfile` from `host.web_front.sites` (see above); a file already
-   current is not rewritten.
-9. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
-   installed or started.
-10. Applies host units, performs any required memory recovery and
-   verifies restore status. Dispatch refuses an unavailable binding before starting
-   its worker, reviewer or project worktree. Observers use the dedicated observer repository and are
-    unaffected by unavailable reserved projects. Heads are connected afterwards as a separate step.
-11. Re-enters the ownership barrier on every partial or successful exit, handing root-created instance
-    Git locks, recovery progress and restored dispatcher run-state to the installation user. A cleanup
-    error is reported separately and does not replace an earlier failure.
+1. **Phrase.** Opens the secret store, if present, before reading `runtime.env`. With
+   `--recovery-phrase-file`, `--recovery-phrase-stdin`, or a TTY prompt when the key is not on disk,
+   it rebuilds the installation key and materialises values into the files the catalog names,
+   `runtime.env` and every file target, one in the data directory included
+   (`<data>/webfront/owner-password.env`). Before it writes, a file target already present in a data
+   directory ummanu has not laid out (no data manifest) is refused by path and no secret is written;
+   in a laid-out one it is refreshed. Without the phrase it writes nothing, reports locked/missing,
+   and `runtime.env` stays as it is.
+2. **Ownership barrier.** The live root, secrets, locks and declared data root are handed to
+   `--installation-user` before that user's Git or remote child can consume a restored key. A
+   present key must be a regular non-symlink mode-`0600` file owned by that user.
+3. **Prerequisites.** Board reachability and, with the web front enabled, `/usr/bin/caddy` and
+   `host.web_front.sites` ([Guards](#bootstrap)).
+4. **Checkpoint.** Materialises `state/board` and `state/runs` (from the extracted snapshot tree, or
+   from the checkout) into a new local data plane, builds derived JSON from the NDJSON and verifies
+   counters before any live write (`installation.materialize_checkpoint`). The data target must be
+   empty or laid out by ummanu: the files phase 1 created there, at paths absent before it ran, are
+   this run's own and do not count, and every other entry of a data target ummanu did not lay out (a
+   foreign file beside or inside one of them included) is refused by name. A legacy remote lays the
+   data directory out here; a snapshot remote's clone step laid it out already.
+5. **Head registry.** Generates the installed head snapshot and source pin into `<data>/heads/` with
+   upgrade's own head-registry step, from the canon (the live root's `heads/heads.toml`, else the
+   product default; `installation.materialize_head_registry`). The board import needs it: it
+   validates every open sprint's observer head against this pair, and a clean host has none until
+   this phase. It is idempotent and runs on every retry.
+6. **Board.** Imports the board in foreign-key order, with card and sprint parity
+   (`restore.import_normalized_board`, [Board import](#board-import)).
+7. **Memory.** Rebuilds the memory index from `state/memory/facts` in a child process that takes the
+   embedding model with it when it exits (`restore.rebuild_memory_index(..., isolated=True)`; one
+   killed by the kernel is reported by its signal). Recover then publishes the memory export
+   (`<data>/memory/export.ndjson`, `export.json`, `manifest.json`) from the same facts and hands it to
+   `--installation-user` (`installation._publish_recovered_memory_export`), so `ummanu memory verify`
+   is `ok` right after recovery. The pack step later finds the restored ledger current and writes
+   nothing, so this is the export's only writer on a recovered host. A retry past a completed rebuild
+   keeps the index and still publishes an export that is missing.
+8. **Projects.** Attempts every missing project checkout from the registry through the same
+   remote-execution boundary as the instance remote, and creates the non-secret managed runtime-home
+   files for agent CLIs. A binding with `enabled: false` (retired, or not yet onboarded) is not
+   cloned: its row has outcome `disabled` and does not count as unavailable. A parent directory
+   recovery creates for a checkout (`~/projects`) is handed to `--installation-user`. Provider
+   authentication stays manual.
+9. **Materializer up to the host step** (`installation.materialize_host`, the `upgrade.STEPS`
+   before `host`). Its head-registry step finds the pair phase 5 wrote current (the pair is
+   generated, never read from the remote); `instance-packing` is skipped on a plain live root. It
+   synchronises role skills and recreates role worktrees (owned by `--installation-user` under
+   `sudo`, the skill roots and the directories above them in the home or data directory included). A
+   role worktree still registered in the product's Git whose directory is gone (a lost workspace
+   root, a host rebuilt from a backup) is added again over that registration; a locked one is
+   refused, and the step reports git's `fatal:` line. Its **web-front config** step renders
+   `<data>/webfront/Caddyfile` from `host.web_front.sites`; a file already current is not rewritten.
+10. **Pipeline journal.** Rebuilds the pipeline worktree's live run journal from the checkpoint
+    (`installation.materialize_pipeline_state`), before any dispatcher unit is installed or started.
+11. **Host.** Applies host units, starts the memory service, the PO and the web, and verifies
+    restore status. Dispatch refuses an unavailable binding before starting its worker, reviewer or
+    project worktree. Observers use the dedicated observer repository and are unaffected by
+    unavailable reserved projects. Heads are connected afterwards as a separate step.
+12. **Ownership again.** Re-enters the ownership barrier on every partial or successful exit, handing
+    root-created locks, recovery progress and restored dispatcher run-state to the installation
+    user. A cleanup error is reported separately and does not replace an earlier failure.
 
 `<data>/heads/source.yaml` is provenance for the installed heads snapshot and supports the read-only
 host-packaging lookup. The product root to materialise comes from `--product-root` or the
-configured/default root, not from the pin.
-
-**No live-root fallback.** Before this layout, `ummanu upgrade` committed the pair into the live
-root's `heads/`. Every reader of the pair (the dispatcher catalog, `task --codex-mode`, the PO
-runner, web sprint reads, status, doctor and upgrade) now reads `<data>/heads/` only; a live root's
-own `heads/heads.yaml` is never consulted. A missing `<data>/heads/heads.yaml` is an error naming
-`ummanu upgrade`, which (like `recover`) generates the pair.
+configured/default root, not from the pin. Every reader of the pair (the dispatcher catalog,
+`task --codex-mode`, the PO runner, web sprint reads, status, doctor and upgrade) reads
+`<data>/heads/` only; a live root's own `heads/heads.yaml` is never consulted. A missing
+`<data>/heads/heads.yaml` is an error naming `ummanu upgrade`, which (like `recover`) generates the
+pair.
 
 `ummanu recover --dry-run` checks checkout, credentials, runtime prerequisites and checkpoint
 integrity and prints steps as `would-change`. It writes no data plane, does not touch the board and
@@ -915,9 +940,10 @@ and retryability. If any row fails, recovery still completes safe host finalisat
 handoff, then exits non-zero with `status: degraded`. Invalid global configuration, board/sprint
 parity, memory corruption, unsafe host materialisation and operator interruption stay fatal.
 
-Recovery merges nothing into a reused checkout: it is fast-forwarded or refused. A checkout with
-local-only history (an operator commit, or a head-registry checkpoint an older recovery kept) is
-refused with both tips preserved; nothing is reset, rebased, merged or force-pushed.
+Recovery merges nothing into a reused snapshot repository or checkout: it is fast-forwarded or
+refused. One with local-only history (a snapshot tip the remote does not extend; in a legacy checkout
+an operator commit, or a head-registry checkpoint an older recovery kept) is refused with both tips
+preserved; nothing is reset, rebased, merged or force-pushed.
 
 ### Retry
 

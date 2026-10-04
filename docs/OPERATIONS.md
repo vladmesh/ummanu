@@ -150,8 +150,8 @@ inventory is kept.
 
 ## Checkpoint writer
 
-The tick writer, its cadence, pathspecs and validation gate are in [Recovery](RECOVERY.md#writers).
-Operationally: card reconciliation runs every one-minute tick, while checkpoint export and Git work
+The snapshot exporter, its cadence and validation gate are in [Recovery](RECOVERY.md#writers).
+Operationally: card reconciliation runs every one-minute tick, while checkpoint export and the cut
 run at most once per five-minute window (a due push forces a fresh preparation). The gate is
 fail-closed: pending task audit, an `export.json` counter mismatch or a detected secret blocks the
 commit, the reason goes into the dispatcher's checkpoint state, and the next tick retries.
@@ -1950,15 +1950,14 @@ The push runs every 30 minutes, fast-forward only, never forced. Contract in
 [Recovery](RECOVERY.md#failure-and-divergence). A push failure does not stop work; the next window
 retries.
 
-`remote diverged` stops the push and raises the alarm. No card publishes to the instance remote any
-more, so a remote holding history the local checkout lacks was pushed from elsewhere; merge it by hand:
-
-```bash
-git -C INSTANCE fetch origin
-git -C INSTANCE merge --no-edit FETCH_HEAD   # or rebase, as appropriate
-```
-
-Once the remote is an ancestor of local HEAD, the next tick pushes and the alarm clears.
+`remote diverged` stops the push and raises the alarm. Only the pusher publishes to the instance
+remote, so a remote holding history the snapshot branch lacks was pushed from elsewhere. Do not merge
+it into the snapshot repository: it is bare, and only the exporter commits there (any other commit is
+a red `snapshot.foreign_commit`). Preserve both tips, find out who pushed, and decide with the owner;
+never force-push or rewrite history. Once the remote tip is an ancestor of the snapshot branch again,
+the next window pushes and the alarm clears. On an installation not yet cut over, whose live root is
+still a work tree, merge the remote commits into that checkout by hand (`git -C INSTANCE fetch
+origin`, then `git -C INSTANCE merge --no-edit FETCH_HEAD`).
 
 `dispatcher production-observe` (`checkpoint`) and `doctor` show last commit, last push, lag in commits
 and minutes (age of the oldest unpushed commit), blocked-gate reason and divergence. `doctor` raises a
@@ -3058,7 +3057,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
 | `interactive-workspace` | compose `DATA_DIR/interactive/AGENTS.md` from the product's shared part and the live root's `persona/AGENTS.md`, write `CLAUDE.md`, hand the tree to the runtime user ([The interactive head](#the-interactive-head-and-its-workspace)) |
 | `head-registry` | generate `<data>/heads/heads.yaml` and `<data>/heads/source.yaml` from the canon; no Git call |
-| `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `ummanu-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
+| `instance-packing` | on a live root that is still a Git work tree, keep its local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); `skipped` on a plain live root ([Recovery](RECOVERY.md#local-git-packing-controls)) |
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
 | `role-skills` | `role_skills sync` into shell skill directories |
 | `host` | `reconcile apply`: units from `packaging/systemd` |
@@ -3123,7 +3122,7 @@ No absolute product path is shipped. First hit wins:
 | a skill's command link | `UMMANU_BIN_DIR`, else `<owner home>/bin` |
 | a role worktree | `TA_WORKSPACES_ROOT`, else `<owner home>/orca/workspaces` |
 | the role runtime env file | `UMMANU_RUNTIME_ENV_FILE`, else `TA_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
-| the head registry a tick reads | `TA_HEADS_REGISTRY`, else the selected instance's `<data>/heads/heads.yaml` (the live root's legacy `heads/heads.yaml` while that is absent), else the running checkout's default |
+| the head registry a tick reads | `TA_HEADS_REGISTRY`, else the selected instance's `<data>/heads/heads.yaml` (a missing one is an error naming `ummanu upgrade`), else, with no instance selected, the running checkout's default |
 
 `~` in a shipped manifest and `$HOME` in a shipped entry point mean the installation owner's home, resolved
 once per upgrade, so a repair run as root writes under the owner rather than `/root`. Skill sources resolve
@@ -3138,10 +3137,9 @@ checkout, revision, snapshot digest); a stale or incomplete pair fails before ro
 upgrade` (and `recover`) writes that pair, as generated state in the data directory that is never
 committed or pushed, so editing a product checkout's canon does not affect a running installation.
 
-On a host that runs this code but has not yet run `ummanu upgrade`, `<data>/heads/heads.yaml` is absent
-and every reader falls back to the live root's legacy `heads/heads.yaml` and `heads/source.yaml`;
-`ummanu status` and `doctor` print `head registry source: legacy <path>` while it does. The next
-upgrade ends it ([Recovery](RECOVERY.md#fresh-install-and-recovery)).
+A live root's own `heads/heads.yaml` and `heads/source.yaml` are never read. When
+`<data>/heads/heads.yaml` is absent, every reader fails with an error that names `ummanu upgrade
+--instance LIVE_ROOT`, which generates the pair ([Recovery](RECOVERY.md#fresh-install-and-recovery)).
 
 An installation owns its registry by keeping `heads/heads.toml`; otherwise it materialises from the
 product's small shipped default (a Claude and an OpenAI subscription, cross-family fallbacks, one default

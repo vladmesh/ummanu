@@ -4,7 +4,7 @@ Technical reference for the board store: schema, client construction, transactio
 migrations, identifiers and store configuration.
 
 The installation serves Products, Issues, Sprints and Cards from PostgreSQL; it is the only board
-backend. The history of the board that preceded it is archived in the instance repository at
+backend. The history of the board that preceded it is archived in the live root's knowledge at
 `state/knowledge/reports/secretary-1674/report.md`.
 
 Related documents:
@@ -662,8 +662,8 @@ close decisions are relational.
 ### 3.11 Not in this schema
 
 Agent runtime and head processes; the head registry (`<data>/heads/heads.yaml`, `source.yaml`);
-memory facts and the vector index; personas, adapters, policies; secrets; provider sessions,
-quotas and credentials; run journals (`state/runs/**`); transcripts
+memory facts and the vector index; personas and adapters; secrets; provider sessions,
+quotas and credentials; run journals (`state/pipeline/`, exported as `state/runs/**`); transcripts
 and artifacts; knowledge documents.
 
 ### 3.12 Closed vocabularies
@@ -975,17 +975,29 @@ The normalized entity identity (§2.2) is a process property, not data.
 
 ### 6.2 Canonical in files and git snapshots
 
+What PostgreSQL does not own is canonical as files in the live root, a plain directory with no Git
+([Recovery](RECOVERY.md#layout)). Each path has one writer, and none of them commits
+([Recovery](RECOVERY.md#writers)):
+
 | Data | Location | Writer |
 |---|---|---|
-| project/repository bindings | `<instance>/projects/*.yaml` | operator |
-| adapters, personas, heads canon | `<instance>/adapters/`, `persona/`, `heads/heads.toml` | operator |
+| project/repository bindings, adapters | `<instance>/projects/*.yaml`, `<instance>/adapters/*.yaml` | onboarding (`project add`, `provision-apply`, `gate`); otherwise an operation card plus `config check` |
+| instance config, personas, heads canon, skill manifest | `<instance>/instance.yaml`, `persona/`, `heads/heads.toml`, `skills/manifest.toml` | an operation card plus `config check` |
 | secrets | `<instance>/secrets/**` | secret store |
-| memory facts | `<instance>/state/memory/facts/**` | memory writer |
+| memory facts and pack ledgers | `<instance>/state/memory/**` | memory writer |
 | knowledge, incl. sprint closeouts | `<instance>/state/knowledge/**` | knowledge writer |
-| run journals, claims, watermarks | `<instance>/state/runs/**` | tick writer |
-| board export | `<instance>/state/board/**` | tick writer, generated from the store |
-| runtime config | `instance.yaml`, `runtime.env`, `board-store.env` | operator / bootstrap / reconcile |
-| transcripts, artifacts, backups, vector index | `<data>/**` | derived |
+| host-local material | `<instance>/runtime.env`, `board-store.env`, `secrets/installation.key` | secret materialisation / bootstrap; never exported |
+
+Board, sprint and run state is not a live-root file. Its canon is PostgreSQL (§6.1) and the pipeline
+role worktree's run journals (`state/pipeline/`); the tick exports both into the data directory
+(`<data>/board`, `<data>/runs`, §6.3). Transcripts, artifacts, backups, the vector index, the
+head-registry pair and onboarding drafts are derived data-directory state.
+
+The git snapshot is not a working tree and nobody edits it. It is a derived artifact of the snapshot
+exporter: each window commits one cut into the bare repository `<data>/backup/instance.git`
+(`offsite.snapshot_repo`), made of the live root's allowlisted files, `state/board` and `state/runs`
+staged from the exports, and `snapshot-manifest.json`. The pusher publishes that branch to the
+instance remote, and recovery reads it back ([Recovery](RECOVERY.md#snapshot-repository)).
 
 ### 6.3 Exports
 
@@ -1130,8 +1142,8 @@ kind is refused.
   ordinary ticks, including after restart, retry it before another activation or record removal.
   Only after the operation commits does the release write its canonical reason naming the operation,
   durably Block the source, and remove the release record. Request-id replay uses the persisted facts
-  and description, even if the remote ref moves. Other projects' checkouts and the instance repository keep
-  their plain fast-forward.
+  and description, even if the remote ref moves. Other projects' checkouts keep their plain
+  fast-forward.
 - **Release eligibility (for revision authors):** the release applies a revision unattended only if
   it declares, at module level, `release_safety = "additive"`: the previous release keeps working
   against the migrated store, because the revision only adds tables, nullable or defaulted

@@ -13,8 +13,6 @@ heads:
     model: example-worker-model
   - role: reviewer
     model: example-reviewer-model
-policies:
-  default_code_concurrency: 1
 host:
   projects_root: /srv/projects
   unit_prefix: ummanu-

@@ -427,6 +427,15 @@ class ShellTests(Fixture):
         self.assertIn("ummanu upgrade", err)
         self.assertFalse(self.workspace.exists(), "the shell must not materialize the workspace")
 
+    def test_a_missing_workspace_names_how_to_select_the_installation(self) -> None:
+        """The workspace hangs off the selected installation, so the refusal says how to select one."""
+        code, _out, err = self.shell()
+
+        self.assertEqual(code, 2)
+        self.assertIn("ummanu upgrade --instance LIVE_ROOT", err)
+        self.assertIn("UMMANU_INSTANCE", err)
+        self.assertIn("--workspace", err)
+
     def test_the_launch_runs_in_the_workspace(self) -> None:
         self.run_step()
         with (
