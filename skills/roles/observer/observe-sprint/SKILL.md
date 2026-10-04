@@ -64,8 +64,8 @@ Instructions, answers, reversed decisions and "add this urgent thing" all arrive
 sprint entity. Before `task create`, before `task decide`, and before the post-Done next-cut or close
 decision, run live `sprint show` and read its complete comments list in board order. Do not use a
 timestamp cutoff: a PO/owner decision may have arrived between an earlier read and a delivery
-acknowledgement. Read `owner_decisions`, with its entry IDs, quotations and audit attribution. Apply these standing
-answers before the saved resume or `next_safe_step`, then read applicable live comments;
+acknowledgement. Read `owner_decisions`, with its entry IDs, quotations and audit attribution.
+Apply every applicable owner decision before the saved resume or `next_safe_step`;
 when one changes the plan, reflect it in the resume written for this turn. A direct message to the
 head is not a way to change the work.
 
