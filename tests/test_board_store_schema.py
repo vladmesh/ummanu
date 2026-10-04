@@ -1590,6 +1590,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.sprint(connection, "sprint:5", 5)
         mark = '{"extra": {"waiting_owner": "2026-09-26T15:00:00Z", "waiting_owner_reason": "pay", "waiting_owner_by": "po"}}'
         self.card(connection, "ummanu-1", sprint="sprint:5", task_type="decision", extensions=mark)
+        connection.exec_driver_sql("UPDATE tasks SET state = 'in_progress' WHERE task_ref = 'ummanu-1'")
         self.card(connection, "ummanu-2", task_type="code")
         connection.commit()
         before = (

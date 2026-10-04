@@ -318,19 +318,23 @@ class SprintStatusWaitingOnTests(SprintProtocolFixture):
                 ("run", "ummanu-541"),
                 ("owner", "ummanu-542"),
                 ("run", "ummanu-543"),
-                ("owner", "ummanu-543"),
+                ("dependency", "ummanu-543"),
                 ("po", "ummanu-544"),
             },
         )
         for entry in waiting_on:
-            self.assertEqual(set(entry), {"kind", "card", "detail"})
+            expected = {"kind", "card", "detail"}
+            if entry["kind"] == "dependency":
+                expected.add("holder")
+                self.assertEqual(entry["holder"], "ummanu-599")
+            self.assertEqual(set(entry), expected)
             self.assertTrue(entry["detail"] and "\n" not in entry["detail"])
         detail = {(entry["kind"], entry["card"]): entry["detail"] for entry in waiting_on}
         self.assertIn(RUN_URL, detail[("run", "ummanu-540")])
         self.assertIn("deadline", detail[("run", "ummanu-540")])
         self.assertIn(RUN_URL, detail[("run", "ummanu-541")])
         self.assertIn("payment card", detail[("owner", "ummanu-542")])
-        self.assertIn("ummanu-599", detail[("owner", "ummanu-543")])
+        self.assertIn("ummanu-599", detail[("dependency", "ummanu-543")])
         self.assertIn("with the PO", detail[("po", "ummanu-544")])
 
     def _merged(self, key: int, ref: str, sprint: str, mark: dict, carried: list | None = None) -> None:

@@ -7,6 +7,7 @@ from unittest import mock
 
 import psycopg
 
+from tests.observer_identity import as_observer
 from tests.web_fakes import Recording, system_snapshot
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
 from ummanu.board.owner_events import OwnerEventStore, OwnerEventsUnavailable, ReadRefused, record
@@ -112,17 +113,26 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assert_wait(False)
 
     def test_supported_successor_settles_predecessor_and_refuses_late_escalation(self):
+        sprint_row = next(row for row in self.sprint_rows() if row["reference"] == "sprint:1")
+        self.board.save_metadata(int(sprint_row["id"]), sprint_reservations='["ummanu"]')
         claim = self.claim("decision")
         self.handover()
         self.assert_wait(True)
         def successor():
-            return self.writer.create(role="observer", actor="observer", project="ummanu",
-                task_type="code", title="Replace the old episode", sprint="sprint:1",
-                seed_ref="pipeline/ummanu-12", supersedes="ummanu-12", request_id="successor-12")
+            with as_observer("sprint:1"):
+                return self.writer.create(role="observer", actor="observer", project="ummanu",
+                    task_type="code", title="Replace the old episode", sprint="sprint:1",
+                    seed_ref="pipeline/ummanu-12", supersedes="ummanu-12", request_id="successor-12")
+        cards_before = self.writer.reader.list()
         self.assert_event_timeout_rolls_back(successor, "successor-12", row_lock=True)
+        self.assertEqual(self.writer.reader.list(), cards_before)
         self.assert_wait(True)
         created = successor()
         self.assertFalse(created["replayed"])
+        replacement = self.writer.reader.show(created["task"]["ref"])
+        self.assertNotEqual(replacement["ref"], "ummanu-12")
+        self.assertEqual(replacement["state"], "ready")
+        self.assertEqual(replacement["workspace"]["supersedes"], "ummanu-12")
         self.assert_committed_replay(successor)
         self.assertIsNone(waiting_owner(self.writer.reader.show("ummanu-12")))
         self.assert_wait(False)
@@ -489,6 +499,8 @@ class SprintAttentionTests(SprintProtocolFixture):
 
     def test_render_pins_one_statement_for_the_chip_and_bell_and_gets_do_not_write(self):
         self.claim("decision")
+        self.assertEqual(self.store.mark_all_read(), 1)
+        self.handover()
         snapshot = self.store.snapshot
         calls = []
 
@@ -505,7 +517,9 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assertIn("attention required", page)
         self.assertIn('<span class="bell-count">1</span>', page)
         self.assert_wait(False)
-        self.assertEqual(len(self.store.events()), 1)
+        self.assertEqual({event.kind for event in self.store.events()},
+                         {"card_waits_for_person", "card_handed_to_owner"})
+        self.assertTrue(all(event.read_at is not None for event in self.store.events()))
 
 
 if __name__ == "__main__":
