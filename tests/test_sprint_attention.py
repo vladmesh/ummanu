@@ -551,13 +551,17 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.handover()
         held = next(e for e in self.store.events() if e.kind == "card_handed_to_owner")
         with self.store._connection() as connection:
+            # Keep the held handover outside the newest 500 rows while counting it.
             connection.execute(
-                "INSERT INTO owner_events (kind, class, subject_ref, text, dedup_key) "
+                "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
                 "SELECT 'steward_needs_human', 'needs_owner', 'ummanu-12', 'routing decision', "
+                "now() + interval '1 hour' + i * interval '1 second', "
                 "'steward-' || i FROM generate_series(1,501) AS i"
             )
         snapshot = self.events.owner_event_list()
         self.assertEqual(len(snapshot["events"]), 500)
+        self.assertEqual({e["kind"] for e in snapshot["events"]}, {"steward_needs_human"})
+        self.assertNotIn(held.id, {e["id"] for e in snapshot["events"]})
         self.assertEqual((snapshot["needs_owner_count"], snapshot["held_count"]), (502, 1))
         result = self.events.mark_all_read()
         self.assertEqual(result["marked"], snapshot["notice_count"])
@@ -568,7 +572,8 @@ class SprintAttentionTests(SprintProtocolFixture):
             self.assertIn(text, page)
         steward = next(e for e in self.store.events() if e.kind == "steward_needs_human")
         self.events.mark_read(steward.id)
-        self.assertEqual(self.events.owner_event_list()["needs_owner_count"], 501)
+        after = self.events.owner_event_list()
+        self.assertEqual((after["needs_owner_count"], after["held_count"]), (501, 1))
         with self.assertRaises(ReadRefused):
             self.store.mark_read(held.id)
 
