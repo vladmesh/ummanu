@@ -722,7 +722,7 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
         self.merge(late, _sha("d"))
         self.am_tick()
         self.assert_standing_declined([*cards, late])
-        self.assertEqual(self.queue()["budget_waits"], [])
+        self.assertEqual(self.queue(), {}, "the fully declined queue has no remaining work or waits")
         self.assertEqual(self.host.dispatches, [])
         self.assertEqual([card["ref"] for card in self.reader.list() if card.get("type") == "decision"], [decision["ref"]])
         self.assertEqual(self.comments_on(decision["ref"], f"{late} ("), [])

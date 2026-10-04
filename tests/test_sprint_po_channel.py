@@ -118,7 +118,7 @@ class CreateCommandTests(unittest.TestCase):
                     captured.update(kwargs)
                     return {}
             with mock.patch.object(sprint_commands, "_write", side_effect=lambda _args, operation: (operation(Writer()), 0)[1]):
-                self.assertEqual(main(["sprint", "record-owner-decisions", "--ref", "sprint:7", "--role", "po", "--decisions-file", str(path), "--request-id", "r"]), 0)
+                self.assertEqual(main(["sprint", "record-owner-decisions", "--instance", "/nowhere", "--ref", "sprint:7", "--role", "po", "--decisions-file", str(path), "--request-id", "r"]), 0)
             self.assertEqual(captured["entries"], entries)
             self.assertEqual(captured["request_id"], "r")
 

@@ -188,7 +188,7 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         self.record_standing()
         self.to_green_review()
         self.assertEqual(self.tick()["status"], "blocked")
-        self.add_code_card(OTHER)
+        self.add_code_card(OTHER, state="validate")
         self.assertEqual(self.stage(OTHER, _sha("2"))["status"], "blocked")
         self.assertEqual(self.host.dispatches, [])
         self.assertEqual(self.decisions(), [])
@@ -213,10 +213,12 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
 
     def test_pending_budget_wait_consumes_standing_refusal_and_preserves_paid_history(self) -> None:
         decision = self.spent_with_a_pending_decision()
+        # run_stage is reached after gate validation; the pilot is already there through tick.
+        self.board.move(self.board.key_of(OTHER), "validate")
         self.record_standing()
         self.assertEqual(self.tick()["status"], "blocked")
         self.assertEqual(self.stage(OTHER, _sha("4"))["status"], "blocked")
-        self.add_code_card("ummanu-522")
+        self.add_code_card("ummanu-522", state="validate")
         self.assertEqual(self.stage("ummanu-522", _sha("5"))["status"], "blocked")
         self.assertEqual([card["ref"] for card in self.decisions()], [decision])
         self.assertEqual(self.budget()["used"], 3)
@@ -236,7 +238,7 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
 
     def test_an_unrelated_later_block_clears_the_known_refusal_marker(self) -> None:
         self.arrange()
-        self.add_code_card(OTHER)
+        self.add_code_card(OTHER, state="validate")
         self.record_standing()
         self.assertEqual(self.stage(OTHER, _sha("1"))["status"], "blocked")
         self.writer.move(role="po", actor="po", reference=OTHER, target="ready", reason="a later plan", request_id="new-plan")
