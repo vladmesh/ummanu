@@ -32,7 +32,7 @@ from ummanu.infra.systemd import (
 from ummanu.infra.systemd import (
     CommandResult as _CmdResult,
 )
-from ummanu.projects.availability import ProjectAvailability
+from ummanu.projects.availability import ProjectAvailability, binding_disabled
 from ummanu.runtime.local_pty_head import runtime_scope_inventory
 from ummanu.runtime.paths import component_enabled, configured_product_root, default_instance_path
 
@@ -513,6 +513,8 @@ class Expectations:
     unit_runtime: dict[str, tuple[bool, bool]] = field(default_factory=dict)
     project_error: str = ""
     runtime_data_dir: Path | None = None
+    #: Checkouts of disabled bindings: not required on the host, and not unmanaged when present.
+    dormant_projects: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -562,15 +564,24 @@ def build_expectations(
 ) -> Expectations:
     """Derive expected resource names from bindings and the instance ``host`` block."""
     host = host if isinstance(host, dict) else {}
+    bindings = list(bindings)
     projects = {
         name
         for binding in bindings
-        if availability.allows(str(binding.get("id") or ""))
+        if availability.allows(str(binding.get("id") or "")) and not binding_disabled(binding)
+        for name in (_project_name(binding),)
+        if name
+    }
+    dormant = {
+        name
+        for binding in bindings
+        if binding_disabled(binding)
         for name in (_project_name(binding),)
         if name
     }
     return Expectations(
         projects=projects,
+        dormant_projects=dormant - projects,
         units=set(_str_list(host.get("units"))),
         unit_prefix=host.get("unit_prefix", "") if isinstance(host.get("unit_prefix"), str) else "",
         projects_root=host.get("projects_root", "") if isinstance(host.get("projects_root"), str) else "",
@@ -610,12 +621,13 @@ def build_doctor_expectations(
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     host = host if isinstance(host, dict) else {}
     projects: set[str] = set()
+    dormant: set[str] = set()
     project_error = ""
     for binding in bindings:
         if not isinstance(binding, dict) or not isinstance(binding.get("repo"), str):
             continue
         try:
-            projects.add(_normalized_repo_path(binding["repo"]))
+            (dormant if binding_disabled(binding) else projects).add(_normalized_repo_path(binding["repo"]))
         except (OSError, RuntimeError):
             # A symlink loop or unreadable binding path is not evidence that the
             # checkout is absent. Leave this kind unavailable for doctor.
@@ -635,6 +647,7 @@ def build_doctor_expectations(
         unit_runtime=unit_runtime_expectations(desired, packaged),
         project_error=project_error,
         runtime_data_dir=data_dir,
+        dormant_projects=dormant - projects,
     )
 
 
@@ -686,7 +699,7 @@ def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDi
     transient = (set(actual.runtime_scopes.scopes) | set(actual.runtime_scopes.disappeared)
                  if actual.runtime_scopes is not None and not actual.runtime_scopes.errors else set())
     return {
-        "projects": _diff(expected.projects, actual.projects),
+        "projects": _diff(expected.projects, actual.projects - expected.dormant_projects),
         "units": _diff(expected.units, actual.units - expected.foreign_units - transient),
     }
 

@@ -75,7 +75,7 @@ from ummanu.memory.client_config import (
     seed_codex_home,
 )
 from ummanu.memory_journal import export_memory_snapshot
-from ummanu.projects.availability import ProjectAvailability
+from ummanu.projects.availability import ProjectAvailability, binding_disabled
 from ummanu.restore import (
     RestoreError,
     import_normalized_board,
@@ -118,6 +118,7 @@ from ummanu.upgrade import (
     step_pipeline_state,
     workspaces_root,
 )
+from ummanu.webfront.commands import configured_sites, missing_sites_message
 
 CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")
 CHECKPOINT_RUNS = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
@@ -965,6 +966,16 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
+def _instance_host(instance_dir: Path) -> dict[str, Any] | None:
+    """The `host` block of `instance.yaml`; None when the file cannot be read or has none."""
+    try:
+        instance = load_config(Path(instance_dir) / "instance.yaml")
+    except ConfigError:
+        return None
+    host = instance.get("host") if isinstance(instance, dict) else None
+    return host if isinstance(host, dict) else None
+
+
 def web_front_wanted(instance_dir: Path) -> bool:
     """Whether this installation's desired units include `<prefix>web-front.service`.
 
@@ -972,12 +983,8 @@ def web_front_wanted(instance_dir: Path) -> bool:
     component, and not when the installation declares the name foreign. An instance that cannot be
     read wants nothing here; the install refuses it on its own terms.
     """
-    try:
-        instance = load_config(Path(instance_dir) / "instance.yaml")
-    except ConfigError:
-        return False
-    host = instance.get("host") if isinstance(instance, dict) else None
-    if not isinstance(host, dict):
+    host = _instance_host(instance_dir)
+    if host is None:
         return False
     prefix = host.get("unit_prefix")
     if not isinstance(prefix, str) or not prefix:
@@ -1004,6 +1011,10 @@ def check_prerequisites(instance_dir: Path) -> None:
             f"caddy prerequisite failed: the web-front component is enabled and {CADDY_BINARY} is "
             "absent; install the distribution's caddy (`ummanu bootstrap` does) or disable the component"
         )
+    # The rendered Caddyfile is data-dir state no checkpoint carries; the materializer renders it from
+    # instance config (`upgrade.step_web_front_config`), so without sites there the front cannot start.
+    if web_front_wanted(instance_dir) and not configured_sites(_instance_host(instance_dir)):
+        raise InstallError(f"web-front prerequisite failed: {missing_sites_message(instance_dir)}")
 
 
 def _valid_existing_layout(data_dir: Path) -> bool:
@@ -1468,7 +1479,7 @@ def _provision_project_checkout(
         if isinstance(project_id, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", project_id)
         else f"binding-{index + 1}"
     )
-    if binding.get("enabled") is False:
+    if binding_disabled(binding):
         # A retired or not-yet-onboarded project: nothing runs against it, so nothing is cloned for
         # it, and its absence is not an unavailable checkout.
         return ProjectProvisionResult(
@@ -1868,7 +1879,9 @@ def _restore_without_credentials(
         result.add("memory", *_unchanged_memory_step(data_dir, target, args.installation_user))
     else:
         _write_recovery_progress(progress_path, identity, memory="started")
-        count = rebuild_memory_index(data_dir, target, threads=threads if isinstance(threads, int) else None)
+        count = rebuild_memory_index(
+            data_dir, target, threads=threads if isinstance(threads, int) else None, isolated=True
+        )
         _publish_recovered_memory_export(data_dir, target, args.installation_user)
         result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
         _write_recovery_progress(progress_path, identity, memory="complete")
@@ -2134,8 +2147,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                     _write_recovery_progress(progress_path, identity, memory="complete")
             else:
                 _write_recovery_progress(progress_path, identity, memory="started")
+                # In a child process: the host step starts `ummanu-memory-mcp`, and this process must
+                # not still hold its own copy of the embedding model beside it (ummanu-53 P14).
                 count = rebuild_memory_index(
-                    data_dir, target, threads=threads if isinstance(threads, int) else None
+                    data_dir, target, threads=threads if isinstance(threads, int) else None, isolated=True
                 )
                 _publish_recovered_memory_export(data_dir, target, args.installation_user)
                 result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
