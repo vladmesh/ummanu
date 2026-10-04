@@ -636,10 +636,16 @@ is `install` with `--recover`).
 
 ```bash
 python3 -m pip install '.[memory]'
-sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER
+sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+  --bootstrap-credential-file TOKEN_FILE
 sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
   --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
 ```
+
+Both commands clone a private remote, so both take the same external
+[bootstrap credential](#github-checkpoint-credential) (`--bootstrap-credential-file` or
+`--bootstrap-credential-stdin`), checked the same way before the clone, with its operation copy
+removed on success or failure; a local/file remote needs none.
 
 `INSTANCE` is the live root to create, by default `~/ummanu-data/instance`. Heads run on local-pty,
 which ships with the product; no session manager is installed. A new installation runs `sudo ummanu
@@ -657,7 +663,8 @@ On a host near the minimum, keep 2-4 GB of swap for the board store, the web and
 `sudo ummanu bootstrap` runs as root on Ubuntu 24.04 only (a `--dry-run` excepted) and is safe to
 rerun. In order:
 
-1. ensures `--installation-user`, reusing an existing one;
+1. checks the bootstrap credential, when one is given, before anything else changes, and ensures
+   `--installation-user`, reusing an existing one;
 2. runs recovery's own clone step: an exporter snapshot is laid out as the plain live root and the
    snapshot repository with its takeover marker, exactly as `recover` lays them out
    ([Snapshot recovery](#snapshot-recovery) steps 1-7; the data directory is laid out when the

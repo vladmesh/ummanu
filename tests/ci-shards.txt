@@ -39,6 +39,7 @@ integration-board tests/test_po_runner.py
 integration-board tests/test_web_po_operations.py
 integration-board tests/test_product_issues_sql_backend.py
 packaging tests/test_bootstrap.py
+unit tests/test_bootstrap_credential.py
 packaging tests/test_automations_live_window.py
 unit tests/test_broad_check.py
 unit tests/test_broad_suite.py
