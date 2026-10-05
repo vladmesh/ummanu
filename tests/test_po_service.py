@@ -1183,22 +1183,27 @@ class RecoveryProgressTests(ServiceFixture):
             FakePoStore(self.board), self.data, executables={"claude": str(self.root / "missing")},
             turn_launcher=unscoped_test_launch,
         )
-        real_finish = FakePoStore.finish_turn
+        real_finish = runner.store.finish_turn
         calls = []
 
-        def finish(store, *args, **kwargs):
+        def finish(*args, **kwargs):
             calls.append(args)
             if len(calls) == 1:
                 raise po_store.PoStoreError("the store is away")
-            return real_finish(store, *args, **kwargs)
+            return real_finish(*args, **kwargs)
 
-        with mock.patch.object(FakePoStore, "finish_turn", finish):
+        # The crashed service's waiter may still attempt its own terminal write.
+        # Only this recovery runner's launch-failure write loses its reply; the
+        # old store must not consume the injected failure by thread scheduling.
+        with mock.patch.object(runner.store, "finish_turn", finish):
             runner.recover(rerun=True)
             self.assertEqual(
                 [t.seq for t in runner.orphaned_turns()], [1], "left running, reported as orphaned"
             )
             runner.recover(rerun=True)
 
+        self.assertEqual([(args[0], args[1], args[2]) for args in calls],
+                         [(session_id, 1, po_store.FAILED)] * 2)
         turn = self.turns(session_id)[0]
         self.assertEqual(turn.state, po_store.FAILED)
         self.assertIn("the re-run did not start", turn.reason)
