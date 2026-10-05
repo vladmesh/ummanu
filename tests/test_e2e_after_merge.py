@@ -1606,6 +1606,10 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
     def hotfix_neutral_repair(self, mode, *, remerged=False, correction="decline"):
         if remerged:
             cards, original = self.released_red_without_operation()
+            # Newer green merges are independent pending work. Hold their paid
+            # admission while measuring repair of the original hotfix route,
+            # as the existing all-remerged disposition fixtures do.
+            self.enterContext(mock.patch.object(e2e_after_merge, "_start", return_value=None))
             self.am_tick(self._runtime())
             original = self.run_of(cards[-1])
         else:
