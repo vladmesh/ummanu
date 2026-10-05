@@ -83,7 +83,8 @@ SELECT
 #: `UNIQUE` (its partial index is not unique). `0023` adds one `CHECK` on `sprints` (the e2e counts are
 #: not negative), `sprint_e2e_charges` (one foreign key, one primary key) and restates the two
 #: owner-event CHECKs, one for one. `0026` adds the local-run array CHECK; `0027` adds the owner-decision array CHECK.
-DOCUMENTED_COUNTS = (31, 59, 45, 31, 19, 5)
+#: `0029` adds the optional PO-request object CHECK on `sprint_resumes`.
+DOCUMENTED_COUNTS = (31, 60, 45, 31, 19, 5)
 
 #: Every revision this build ships, oldest first: what an empty database owes.
 REVISIONS = (

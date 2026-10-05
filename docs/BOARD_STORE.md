@@ -80,7 +80,7 @@ keys cannot cross kinds.
 Conventions: `text` identifiers, `timestamptz` times, surrogate `bigint` keys only where a row has
 no natural key. Every reference between entities is a foreign key; a reference meaningful only
 within one sprint is a composite foreign key carrying the sprint (§3.3, §3.4, §3.8). Closed
-vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in eight columns (§3.10).
+vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in ten columns (§3.10).
 
 The DDL is grouped by entity. Forward and mutual references are added with `ALTER TABLE` after both
 tables exist (§3.13). `board/schema.py` is authoritative; the DDL below mirrors it.
@@ -647,7 +647,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 - One advisory lock (`ummanu.board.requests`) serializes separate claims outside a transaction;
   the per-card marker lock is also an advisory lock.
 
-### 3.10 The eight `jsonb` columns
+### 3.10 The ten `jsonb` columns
 
 | Column | Content |
 |---|---|

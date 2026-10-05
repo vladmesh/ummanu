@@ -272,10 +272,11 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         self.assertIn("The e2e run budget of sprint:1031 is spent: 3 of 3 runs.", body)
         self.assertIn(f"https://github.com/{REPO}/actions/runs/", body)
         self.assertIn("(failure: red)", body)
-        self.assertIn("Raise the e2e budget of sprint:1031 by N runs, or no?", body)
-        self.assertIn("task handover", body)
+        self.assertIn("Disposition for sprint:1031: apply existing authority or decline further runs.", body)
+        self.assertIn("Only a new uncovered owner decision calls for explicit `task handover --to owner`", body)
+        self.assertIn("this question grants no money", body)
         self.assertIn("sprint e2e-budget --ref sprint:1031 --role po --authorized-by <event id>", body)
-        # The two exact answer lines the owner is asked for.
+        # The released genuine owner-comment answers remain supported after explicit handover.
         self.assertIn("\n    e2e budget: raise <N>\n    e2e budget: no\n", body)
         [joined] = [c["body"] for c in shown["comments"] if OTHER in c["body"]]
         self.assertIn("joins this decision", joined)

@@ -35,7 +35,7 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
     def setUp(self):
         super().setUp()
         self.ref = self._create(goal="PO card channel", reference="sprint:7")["sprint"]["ref"]
-        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name, instance=self.instance)
+        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)
 
     def card(self, kind="decision", **fields):
         return self.tasks.create(role="observer", actor="observer", project="ummanu", task_type=kind,
@@ -180,7 +180,7 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
 class StandalonePoExecutionBackendTests(SprintFixture):
     def setUp(self):
         super().setUp()
-        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name, instance=self.instance)
+        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)
         self.reader = TaskReader(self.client)
         self.request = "dispatcher-e2e-cap-ummanu-12-3"
         self.fields = dict(role="dispatcher", actor="dispatcher", project="ummanu", task_type="decision",
@@ -222,11 +222,12 @@ class StandalonePoExecutionBackendTests(SprintFixture):
         self.assertEqual(OwnerEventStore(self.client.credentials).events(), [])
 
     def test_generic_outside_sprint_creation_and_unrelated_operation_are_still_refused(self):
+        before = self.client.card_count()
         for fields in ({"po_execution": None}, {"role": "po", "actor": "po"},
                        {"request_id": "generic-request"}, {"task_type": "operation"}):
             with self.subTest(fields=fields), self.assertRaises(TaskError):
                 self.tasks.create(**{**self.fields, **fields})
-        self.assertEqual(self.client.card_count(), 1)
+        self.assertEqual(self.client.card_count(), before)
 
     def test_unowned_question_native_service_submission_restart_and_completion(self):
         data = Path(self.tmp.name)
