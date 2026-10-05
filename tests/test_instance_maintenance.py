@@ -60,13 +60,51 @@ def _instance_repo(root: Path) -> Path:
     return instance
 
 
-def _cross_the_auto_gc_threshold(instance: Path) -> None:
+def _plain_live_root(root: Path) -> tuple[Path, Path]:
+    """A live root without `.git` (the exporter layout) and the bare snapshot repository it names."""
+    live = root / "instance"
+    live.mkdir()
+    data_dir = root / "ummanu-data"
+    snapshot = data_dir / "backup" / "snapshot.git"
+    (live / "instance.yaml").write_text(
+        "version: 1\n"
+        "name: test-home\n"
+        f"data_dir: {data_dir}\n"
+        "offsite:\n"
+        "  instance_remote: git@example.invalid:owner/instance.git\n"
+        f"  snapshot_repo: {snapshot}\n",
+        encoding="utf-8",
+    )
+    return live, snapshot
+
+
+def _bare_snapshot(snapshot: Path) -> None:
+    snapshot.mkdir(parents=True)
+    _git(snapshot, "init", "--quiet", "--bare", "--initial-branch", "main")
+    _git(snapshot, "config", "gc.autoDetach", "false")
+    # One reachable cut, as the exporter commits it with plumbing: gc packs reachable objects.
+    blob = subprocess.run(
+        ["git", "--git-dir", str(snapshot), "hash-object", "-w", "--stdin"],
+        input="cut\n", check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "--git-dir", str(snapshot), "mktree"],
+        input=f"100644 blob {blob}\tsnapshot-manifest.json\n", check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    commit = _git(
+        snapshot, "-c", "user.name=exporter", "-c", "user.email=exporter@example.invalid",
+        "commit-tree", tree, "-m", "cut",
+    ).strip()
+    _git(snapshot, "update-ref", "refs/heads/main", commit)
+
+
+def _cross_the_auto_gc_threshold(instance: Path, objects: Path | None = None) -> None:
     """Write loose objects until Git's `gc --auto` estimate passes the stock 6,700.
 
     Git estimates the loose count from the `objects/17` fan-out directory alone, so only blobs
     landing there are written: 28 of them read as more than 6,700 objects.
     """
-    target = instance / ".git" / "objects" / "17"
+    target = (objects or instance / ".git" / "objects") / "17"
     target.mkdir(parents=True, exist_ok=True)
     written = 0
     index = 0
@@ -188,6 +226,48 @@ class MaintenanceRunTests(_WithoutSuiteGitConfig):
 
         self.assertEqual(result["packs"], {"before": 0, "after": 0})
         self.assertEqual(result["loose_objects"]["before"], result["loose_objects"]["after"])
+
+    def test_a_plain_live_root_packs_the_exporters_snapshot_repository(self):
+        # Since the exporter cutover the live root has no `.git`; the bare snapshot repository is
+        # where checkpoints accumulate objects, so that is what the timer packs.
+        with tempfile.TemporaryDirectory() as tmp:
+            live, snapshot = _plain_live_root(Path(tmp))
+            _bare_snapshot(snapshot)
+            _cross_the_auto_gc_threshold(snapshot, objects=snapshot / "objects")
+
+            result = instance_maintenance.run(live)
+
+            self.assertFalse((live / ".git").exists())
+            self.assertEqual(result["instance"], str(live.resolve()))
+            self.assertEqual(result["repository"], str(snapshot.resolve()))
+            self.assertGreaterEqual(result["loose_objects"]["before"], 40)
+            self.assertLess(result["loose_objects"]["after"], result["loose_objects"]["before"])
+            self.assertGreaterEqual(result["packs"]["after"], 1)
+
+    def test_a_plain_live_root_before_the_first_cut_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live, snapshot = _plain_live_root(Path(tmp))
+
+            result = instance_maintenance.run(live)
+
+            self.assertEqual(result["skipped"], "snapshot repository absent")
+            self.assertFalse(snapshot.exists())
+            self.assertFalse((live / ".git").exists())
+
+    def test_the_cli_succeeds_on_a_plain_live_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            live, snapshot = _plain_live_root(Path(tmp))
+            _bare_snapshot(snapshot)
+            output = io.StringIO()
+            clean = {"containers": {}, "anonymous_volumes": {}, "build_cache": {}, "findings": []}
+            with mock.patch.object(instance_maintenance, "cleanup_docker", return_value=clean), \
+                    contextlib.redirect_stdout(output):
+                code = main(["instance-maintenance", "--instance", str(live)])
+
+        self.assertEqual(code, 0, output.getvalue())
+        report = json.loads(output.getvalue())
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["repository"], str(snapshot.resolve()))
 
     def test_packing_runs_outside_the_state_repo_lock_and_touches_no_ref(self):
         held = {"lock": False}
