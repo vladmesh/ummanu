@@ -112,6 +112,22 @@ class FakePoStore:
                 None,
             )
 
+    def bind_sprint_session_request(self, request_id: str, sprint_ref: str, session_id: str) -> None:
+        from ummanu.po.store import sprint_session_fingerprint, SPRINT_SESSION
+        board = self._open()
+        fingerprint = sprint_session_fingerprint(sprint_ref)
+        with board.lock:
+            known = self._known(board, request_id, SPRINT_SESSION, fingerprint)
+            if known is not None:
+                if known.session_id != session_id:
+                    raise RequestConflict("sprint resolve already names another session")
+                return
+            if session_id not in board.sessions:
+                raise SessionNotFound(f"there is no PO session {session_id}")
+            board.requests[request_id] = PoRequest(
+                request_id, SPRINT_SESSION, fingerprint, session_id, None, board.now()
+            )
+
     def _known(self, board: FakeBoard, request_id: str | None, operation: str, fingerprint: str):
         if request_id is None or request_id not in board.requests:
             return None
@@ -192,10 +208,12 @@ class FakePoStore:
                 if session.state != state:
                     continue
                 first = next(
-                    (e.text for e in board.feed if e.session_id == session.session_id and e.role == OWNER),
+                    (e for e in board.feed if e.session_id == session.session_id and e.role == OWNER),
                     None,
                 )
-                found.append(replace(session, first_message=first, last_activity_at=session.created_at))
+                found.append(replace(session, first_message=first.text if first else None,
+                                     first_message_metadata=first.metadata if first else None,
+                                     last_activity_at=session.created_at))
             return found
 
     def session_count(self, state: str) -> int:

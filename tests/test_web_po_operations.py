@@ -728,6 +728,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual([item["session_id"] for item in document["sessions"]], ["a", "c", "d", "b"])
         first = document["sessions"][0]
         self.assertEqual(first["first_message"], "the owner's first")
+        self.assertIsNone(first["first_message_metadata"], "historical inputs carry no service metadata")
         self.assertEqual(first["last_activity_at"], by_id["a"].last_activity_at.isoformat())
         self.assertEqual(first["created_at"], by_id["a"].created_at.isoformat())
         self.assertEqual(
@@ -745,6 +746,7 @@ class PoWebOperationTests(unittest.TestCase):
                 "resolved_model",
                 "running",
                 "first_message",
+                "first_message_metadata",
                 "last_activity_at",
             },
         )

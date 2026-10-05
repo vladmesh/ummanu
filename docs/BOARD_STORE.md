@@ -1312,7 +1312,10 @@ are frozen together in the durable queue. Claiming the request copies metadata
 into `po_feed` in the same transaction as the turn and request id. Rendering and
 refusals before acceptance consume nothing; a retry finds the existing queue or
 request before reading new context. A fresh session has its own boundary. A shorter native history is refused rather than skipping evidence. No
-context rollover or separate delivery store is introduced.
+separate delivery store is introduced. Sprint context rollover uses a new actual session with its own
+accepted position; predecessor positions and frozen request targets remain unchanged. Canonical
+sprint/predecessor rollover IDs and caller bindings reuse `po_requests.po_sprint_session`; transition
+measurement, threshold and seed pointers reuse the first service input's queue/feed metadata.
 
 `metadata.source` explicitly classifies `dispatcher` and `po-service` inputs.
 `metadata.summary` is visible on `/po`; the complete accepted prompt, including

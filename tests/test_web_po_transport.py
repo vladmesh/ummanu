@@ -339,7 +339,9 @@ class PoRequestIdCoverageTests(PoGateFixture):
                 "po_requests": {"_record_request"},
             },
         )
-        self.assertEqual(recorders, {"claim_session", "claim_turn"})
+        # Rollover callers bind to the canonical successor in the same native
+        # request transaction; this adds no alternate session/turn writer.
+        self.assertEqual(recorders, {"claim_session", "claim_turn", "bind_sprint_session_request"})
         others = [
             str(path.relative_to(root))
             for path in (root / "src").rglob("*.py")

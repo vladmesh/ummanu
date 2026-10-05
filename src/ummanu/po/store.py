@@ -110,6 +110,8 @@ class Session:
     last_activity_at: datetime | None = None
     # The model the session's latest turn that reported one ran, filled by the two session reads.
     resolved_model: str | None = None
+    # Earliest owner input's native display metadata, filled only by sessions().
+    first_message_metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -260,6 +262,21 @@ class PoStore:
             ).fetchone()
         return str(row[0]) if row is not None else None
 
+    def bind_sprint_session_request(self, request_id: str, sprint_ref: str, session_id: str) -> None:
+        """Bind a caller to the resolver's canonical successor using the released request vocabulary."""
+        fingerprint = sprint_session_fingerprint(sprint_ref)
+        with self._transaction() as connection:
+            known = self._known_request(connection, request_id, SPRINT_SESSION, fingerprint)
+            if known is not None:
+                if known[0] != session_id:
+                    raise RequestConflict("sprint resolve already names another session")
+                return
+            if connection.execute(
+                "SELECT session_id FROM po_sessions WHERE session_id = %s", (session_id,)
+            ).fetchone() is None:
+                raise SessionNotFound(f"there is no PO session {session_id}")
+            self._record_request(connection, request_id, SPRINT_SESSION, fingerprint, session_id, None)
+
     @staticmethod
     def _known_request(
         connection: Any, request_id: str, operation: str, fingerprint: str
@@ -369,13 +386,13 @@ class PoStore:
         with self._transaction() as connection:
             rows = connection.execute(
                 f"SELECT {columns}, o.text, GREATEST(s.created_at, t.at, f.at) AS last_activity_at, "
-                f"{_RESOLVED_MODEL} "
+                f"{_RESOLVED_MODEL}, o.metadata "
                 "FROM po_sessions s "
                 "LEFT JOIN (SELECT session_id, max(GREATEST(started_at, finished_at)) AS at "
                 "FROM po_turns GROUP BY session_id) t ON t.session_id = s.session_id "
                 "LEFT JOIN (SELECT session_id, max(created_at) AS at "
                 "FROM po_feed GROUP BY session_id) f ON f.session_id = s.session_id "
-                "LEFT JOIN (SELECT DISTINCT ON (session_id) session_id, text FROM po_feed "
+                "LEFT JOIN (SELECT DISTINCT ON (session_id) session_id, text, metadata FROM po_feed "
                 "WHERE role = %s ORDER BY session_id, entry_id) o ON o.session_id = s.session_id "
                 "WHERE s.state = %s "
                 "ORDER BY last_activity_at DESC, s.created_at DESC, s.session_id",

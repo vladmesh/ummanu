@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
+from tests.sql_backend_fixtures import PostgresBoard
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
 from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, REQUEST_PO_NOTES, NEUTRAL_PO_NOTES
 from ummanu.board.owner_events import OwnerEventStore
@@ -27,7 +28,9 @@ from ummanu.dispatch.po_cards import ServicePoChannel, advance_po_card, claim_po
 from ummanu.dispatch.state import new_attempt_id
 from ummanu.po.runner import PoRunner
 from ummanu.po.service import PoService, listening
-from ummanu.po.store import COMPLETED, PoStore
+from ummanu.po.sprints import BoardSprintSessions
+from ummanu.po.context_budget import rollover_request_id
+from ummanu.po.store import COMPLETED, PoStore, RequestConflict
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
@@ -371,6 +374,84 @@ class StandalonePoExecutionBackendTests(SprintFixture):
 
 
 class SprintPoChannelBackendTests(SprintFixture):
+    def test_context_rollover_native_store_adapter_seed_audit_and_restart(self):
+        # Use the supported app role for PO session/request/feed writes and the
+        # integration-board fixture's normal sprint writer and complete cleanup.
+        credentials = PostgresBoard.shared().config(self.client.credentials.dbname).for_role("app")
+        store = PoStore(credentials)
+        data = Path(self.tmp.name) / "po-data"
+        runner = PoRunner(store, data, turn_launcher=unscoped_test_launch)
+        old, _ = runner.create_session_request("claude", "opus", "create-old", "high")
+        ref = "sprint:rollover"
+        decision = self.decision("stop", "e2e_refusal", "no_more_e2e")
+        decision["quotation"] = "No further e2e runs.\nВладелец сказал нет."
+        created = self._create(goal="bounded PO", reference=ref, po_session=old.session_id)
+        # Append through the native PO writer. A refusal-only create asks the
+        # legacy metadata proof to retain empty productions and the default e2e
+        # budget, which its SQL readback deliberately omits.
+        recorded = self.writer.record_owner_decisions(role="po", actor="po", reference=ref,
+                                                     entries=[decision], request_id="standing-refusal")
+        self.assertEqual(recorded["sprint"]["e2e"]["budget"], created["sprint"]["e2e"]["budget"])
+        self.assertEqual(recorded["sprint"]["allowed_productions"], [])
+        self.assertEqual(self.client.call("getSprintE2eBudget", sprint_ref=ref)["refusal"]["id"], decision["id"])
+        entry = {"selected_step": "Latest durable summary", "selected_why": "Native evidence",
+                 "rejected_alternatives": "none", "current_task": "none", "dod_state": "pending",
+                 "next_safe_step": "Read the current sprint"}
+        self.writer.resume(role="po", actor="po", reference=ref, entry=entry, request_id="summary")
+        turn, _ = store.claim_turn(old.session_id, "界" * 90000, lambda seq: "/unused", request_id="history")
+        store.complete_turn(old.session_id, turn.seq, "Latest predecessor answer")
+        original_feed = store.feed(old.session_id)
+        canonical = rollover_request_id(ref, old.session_id)
+        adapter = BoardSprintSessions(self.instance, data)
+        service = PoService(runner, instance=self.instance, sprints=adapter)
+        # Stop after the real native comment committed, before the session record.
+        with mock.patch("ummanu.board.backend.board_client", return_value=self.client), mock.patch.object(service, "pump"):
+            record = adapter.sprint(ref)
+            self.assertEqual(record.resume["selected_step"], entry["selected_step"])
+            self.assertEqual(record.owner_decisions[0]["quotation"], decision["quotation"])
+            with mock.patch.object(adapter, "record_po_session", side_effect=RuntimeError("record unavailable")):
+                failed = service.handle({"op": "sprint_session", "sprint_ref": ref, "request_id": "caller-a"})
+            self.assertEqual(failed["error"]["code"], "outcome_unknown")
+            new = store.request(canonical).session_id
+            [seed] = service.queue.pending(new)
+            self.assertIn(decision["quotation"], seed.text)
+            self.assertIn("Latest durable summary", seed.text)
+            self.assertIn("Latest predecessor answer", seed.text)
+            self.assertEqual(adapter.sprint(ref).po_session, old.session_id)
+            # Fresh resolver over the same SQL records and durable queue.
+            restarted = PoService(PoRunner(store, data, turn_launcher=unscoped_test_launch),
+                                  instance=self.instance, sprints=adapter)
+            with mock.patch.object(restarted, "pump"):
+                other = restarted.sprint_session(sprint_ref=ref, request_id="caller-b")
+                replay = restarted.sprint_session(sprint_ref=ref, request_id="caller-a")
+            self.assertEqual((other["session_id"], replay["session_id"]), (new, new))
+            self.assertEqual(adapter.sprint(ref).po_session, new)
+            self.assertEqual(restarted.queue.pending(new), [seed])
+            self.assertEqual(store.feed(old.session_id), original_feed)
+            self.assertEqual(store.session(old.session_id).state, "open")
+            events = self._events()
+            self.assertEqual(len([event for event in events if event["request_id"] == canonical + ":comment"]), 1)
+            self.assertEqual(len([event for event in events if event["request_id"] == canonical + ":record"]), 1)
+            rows = self.client._query("SELECT request_id, session_id FROM po_requests WHERE request_id IN (%s, %s, %s)",
+                                      (canonical, "caller-a", "caller-b"))
+            self.assertEqual(dict(rows), {canonical: new, "caller-a": new, "caller-b": new})
+            # The first seed's native claim preserves its transition metadata once.
+            claimed, created = store.claim_turn(new, seed.text, lambda seq: "/unused", request_id=seed.request_id,
+                                                metadata=seed.metadata)
+            self.assertTrue(created)
+            restarted.queue.remove(seed)
+            store.complete_turn(new, claimed.seq, "Seed read")
+            _, created = store.claim_turn(new, seed.text, lambda seq: "/unused", request_id=seed.request_id,
+                                         metadata=seed.metadata)
+            self.assertFalse(created)
+            self.assertEqual(len(store.feed(new)), 2)
+            self.assertEqual(store.feed(new)[0].metadata, seed.metadata)
+            listed = next(session for session in store.sessions() if session.session_id == new)
+            self.assertEqual(listed.first_message_metadata, seed.metadata)
+            with self.assertRaises(RequestConflict):
+                store.bind_sprint_session_request("caller-a", "sprint:other", new)
+            self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(credentials).events()))
+
     def decision(self, identifier="grant-1", kind="e2e_grant", value=2, scope="sprint"):
         return {"id": identifier, "scope": scope, "kind": kind, "value": value,
                 "quotation": "  Two more e2e runs.\nOnly this sprint.  "}

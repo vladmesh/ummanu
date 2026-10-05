@@ -27,6 +27,7 @@ from ummanu.po.models import (
     require_explicit_effort,
 )
 from ummanu.po.queue import PoQueue, QueueError
+from ummanu.po.context_budget import CONTEXT_METRIC, context_budget_bytes, conversation_bytes
 from ummanu.po.store import (
     OWNER,
     RUNNING,
@@ -105,6 +106,7 @@ class PoLayer(ProtocolBoundary):
             {
                 **_session(session, running=session.session_id in busy),
                 "first_message": session.first_message,
+                "first_message_metadata": session.first_message_metadata,
                 "last_activity_at": _time(session.last_activity_at),
             }
             for session in sessions
@@ -129,6 +131,10 @@ class PoLayer(ProtocolBoundary):
         turns = self._store(lambda: store.turns(session_id))
         feed = self._store(lambda: store.feed(session_id))
         running = next((turn for turn in turns if turn.state == RUNNING), None)
+        try:
+            threshold = context_budget_bytes(None if self._models is not None else self._instance_config())
+        except ValueError as exc:
+            raise RuntimeUnavailable(str(exc)) from None
         return {
             "kind": "po_session",
             "session": _session(session, running=running is not None),
@@ -139,6 +145,8 @@ class PoLayer(ProtocolBoundary):
             "last_turn": _turn(turns[-1]) if turns else None,
             "queued": self._queued(session_id),
             "efforts": self._offered_efforts(),
+            "context_budget": {"measured_bytes": conversation_bytes(feed),
+                               "threshold_bytes": threshold, "metric": CONTEXT_METRIC},
         }
 
     def po_session_titles(self, session_ids: Iterable[str]) -> dict[str, Any]:
