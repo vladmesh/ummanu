@@ -2449,7 +2449,7 @@ The bar also carries a doctor lamp, at its left, on every page. Its state follow
 - **yellow** — it runs, but somebody should look. Any of `pipeline.paused`,
   `dispatcher.divergences_open`, `host.inventory_unreadable`,
   `memory.index_missing`. A problem whose code nobody has classified is yellow too — never green.
-- **green** — health was read, and it reports no problem at all.
+- **green** — health was read, and it reports no unaccepted problem.
 - **unknown**: recorded doctor is not yet collected and status reports no problems. This initial
   state uses a neutral grey lamp. A real status finding still makes it yellow or red.
 
@@ -2469,12 +2469,53 @@ Refreshing the lamp combines status health with the latest recorded real doctor 
 dashboard's attention banner, Installation panel, lamp and `/doctor` share `DoctorLayer`'s one-minute
 cache over `ReadLayer.health_snapshot`: `collect_status` with no sprints or panel probes, plus a local
 read of `DATA_DIR/doctor/latest.json`. Page reads never launch doctor, provider or SSH probes. Status
-severity remains unchanged; any doctor finding, including an unknown future code, makes the lamp
+severity remains unchanged; any unaccepted doctor finding, including an unknown future code, makes the lamp
 non-green. Both sources retain their problems. `/doctor` shows finding code/message and identity/details,
 doctor run/completion/exit and the web reading time separately; lamp hover text includes doctor run time.
 Malformed, unreadable, stale, wrong-installation, wrong-mode and failed records remain explicit red
 doctor problems. Missing first results and an ordinary first collection say `unknown / not yet
 collected`, with no `health.unreadable` finding. A process built without the layer remains red.
+
+#### Known doctor findings and foreign project directories
+
+Edit the selected installation's `instance.yaml` through the normal instance configuration
+workflow. Obtain the current complete row from `ummanu doctor --instance INSTANCE --json` under
+`findings`, then copy that object as `finding` and give its acceptance a nonblank reason. For example,
+if doctor emits `{"code": "restore_problem", "message": "memory index has not been rebuilt"}`:
+
+```yaml
+doctor:
+  accepted_findings:
+    - finding:
+        code: restore_problem
+        message: memory index has not been rebuilt
+      reason: Rebuild is scheduled during the maintenance window.
+host:
+  projects_root: /srv/projects
+  foreign_projects:
+    - unrelated-checkout
+```
+
+Copy every field and value, including severity, target and measurements when present. For an
+already accepted JSON row, omit only the added `accepted` and `acceptance_reason` fields. Object key
+order does not matter; changed content or another target with the same code requires explicit
+acceptance again. There are no code selectors, wildcards, regular expressions or prose matching.
+Acceptance belongs to this instance. Remove its entry to restore ordinary classification on the
+next doctor collection. Checks still run, and accepted rows remain visible with their reason in
+text, JSON, the dashboard Installation panel and the doctor page. Only unaccepted doctor rows
+affect the lamp; status faults and unavailable, failed, stale, wrong-installation, wrong-mode or
+stuck diagnostic reads retain their normal classification.
+
+Foreign projects are literal immediate child directory names, not registry IDs or paths. Empty
+or whitespace-only names, `.`, `..`, separators, absolute paths and wildcard syntax are refused.
+Doctor excludes present foreign paths from unmanaged-project findings. It does not require absent
+foreign children, and a registered project with the same path still receives its normal
+missing/present checks. This declaration does not create ownership or authorize cleanup.
+
+The periodic recording below picks up configuration edits on its next collection. The shared web
+cache then refreshes within one minute; refreshing a page alone does not run doctor. To collect
+immediately, use the supported `ummanu doctor-record --instance INSTANCE` command. A direct
+`ummanu doctor` run displays the new disposition but does not publish the lamp's recorded result.
 
 #### Periodic doctor recording
 

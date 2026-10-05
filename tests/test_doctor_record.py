@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import io
 import json
 import os
 import select
@@ -14,9 +16,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 from ummanu import cli, status
 from ummanu.cli import main
+from ummanu.config import validate, validate_instance
+from ummanu.host import FixtureHostSource, LiveHostSource, build_doctor_expectations, inventory
 from ummanu.infra import doctor_record as records
+from ummanu.infra.doctor_findings import accepted, active_findings, apply_acceptance
 from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 
 
@@ -42,6 +49,76 @@ class RootDiskFindingTests(unittest.TestCase):
             self.assertIsNone(status.disk_free_bytes(Path("/configured/data")))
 
 
+class DoctorDeclarationTests(unittest.TestCase):
+    def test_exact_acceptance_preserves_raw_rows_and_matches_key_order(self):
+        raw = {"code": "root_disk_low", "message": "low", "target": "one", "severity": "red",
+               "measurement": {"bytes": 10, "limit": 20}}
+        declaration = {"finding": dict(reversed(list(raw.items()))), "reason": "Temporary capacity limit"}
+        instance = {"doctor": {"accepted_findings": [declaration]}}
+        rows = [raw, {**raw, "target": "two"}, {**raw, "message": "lower"},
+                {**raw, "severity": "yellow"}, {**raw, "measurement": {"bytes": 9, "limit": 20}}]
+        result = apply_acceptance(rows, instance)
+        self.assertTrue(accepted(result[0]))
+        self.assertEqual(result[0]["acceptance_reason"], declaration["reason"])
+        self.assertEqual(active_findings(result), rows[1:])
+        self.assertNotIn("accepted", raw)
+        self.assertEqual(apply_acceptance(rows, {}), rows)
+        self.assertEqual(active_findings(apply_acceptance([raw], instance)), [])
+        self.assertEqual(apply_acceptance(rows, {"doctor": {"accepted_findings": []}}), rows)
+
+    def test_instance_schema_refuses_malformed_declarations(self):
+        base = {"version": 1, "name": "test", "data_dir": "/tmp/data",
+                "offsite": {"instance_remote": "https://example.invalid/repo"}}
+        valid = {**base, "doctor": {"accepted_findings": [{"finding": {"code": "known", "name": "a"},
+                                                        "reason": "Reviewed"}]},
+                 "host": {"projects_root": "/tmp/projects", "foreign_projects": ["other", "other.git"]}}
+        self.assertEqual(validate(valid, "instance", "instance.yaml"), [])
+        self.assertEqual(validate(base, "instance", "instance.yaml"), [])
+        for entry in ({}, {"finding": {}, "reason": "why"}, {"finding": {"code": ""}, "reason": "why"},
+                      {"finding": {"code": "  "}, "reason": "why"},
+                      {"finding": {"code": "known"}, "reason": ""},
+                      {"finding": {"code": "known"}, "reason": " \n\t"},
+                      {"finding": {"code": "known"}, "reason": None},
+                      {"finding": {"code": "known", "accepted": True}, "reason": "why"},
+                      {"finding": {"code": "known", "acceptance_reason": "old"}, "reason": "why"},
+                      {"code": "known", "reason": "why"}, {"finding": "known", "reason": "why"}):
+            with self.subTest(entry=entry):
+                self.assertTrue(validate({**base, "doctor": {"accepted_findings": [entry]}}, "instance", "instance.yaml"))
+        for name in ("", " ", ".", "..", "/absolute", "a/b", "a\\b", "*", "a?", "[ab]", "a\x00b"):
+            with self.subTest(name=name):
+                self.assertTrue(validate({**base, "host": {"projects_root": "/tmp/projects", "foreign_projects": [name]}}, "instance", "instance.yaml"))
+        for host in ({"foreign_projects": ["other"]}, {"foreign_projects": "other"},
+                     {"projects_root": "/tmp", "foreign_projects": [1]}):
+            self.assertTrue(validate({**base, "host": host}, "instance", "instance.yaml"))
+
+    def test_foreign_projects_use_real_collection_and_normalized_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            projects = root / "projects"
+            projects.mkdir()
+            for name in ("registered", "foreign", "extra"):
+                (projects / name).mkdir()
+            instance = {"host": {"projects_root": str(projects / ".." / "projects"),
+                                 "foreign_projects": ["foreign", "absent", "registered"]}}
+            bindings = [{"id": "registry-id", "repo": str(projects / "registered" / ".." / "registered")}]
+            expected = build_doctor_expectations(instance, bindings, packaged=[])
+            self.assertEqual(expected.projects, {str(projects / "registered")})
+            self.assertEqual(expected.foreign_projects, {str(projects / name) for name in ("foreign", "absent", "registered")})
+            for source in (FixtureHostSource(root), LiveHostSource()):
+                with self.subTest(source=type(source).__name__):
+                    collected = source.collect(expected)
+                    self.assertEqual(collected.errors, {})
+                    diff = inventory(expected, collected.inventory)["projects"]
+                    self.assertEqual(diff.matched, [str(projects / "registered")])
+                    self.assertEqual(diff.missing_on_host, [])
+                    self.assertEqual(diff.unmanaged_on_host, [str(projects / "extra")])
+            (projects / "registered").rmdir()
+            for source in (FixtureHostSource(root), LiveHostSource()):
+                diff = inventory(expected, source.collect(expected).inventory)["projects"]
+                self.assertEqual(diff.missing_on_host, [str(projects / "registered")])
+                self.assertEqual(diff.unmanaged_on_host, [str(projects / "extra")])
+
+
 class DoctorRecordTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -63,6 +140,123 @@ class DoctorRecordTests(unittest.TestCase):
 
     def document(self):
         return json.loads(self.path.read_text())
+
+    def configure_acceptance(self, findings):
+        path = self.instance / "instance.yaml"
+        config = yaml.safe_load(path.read_text())
+        config["doctor"] = {"accepted_findings": [{"finding": row, "reason": "Reviewed fixture condition"}
+                                                  for row in findings]}
+        path.write_text(yaml.safe_dump(config))
+
+    def native_doctor(self, *, structured=True):
+        out = io.StringIO()
+        command = ["doctor", "--instance", str(self.instance), "--dry-run", "--offline"]
+        with contextlib.redirect_stdout(out):
+            code = main([*command, "--json"] if structured else command)
+        return code, json.loads(out.getvalue()) if structured else out.getvalue()
+
+    def seed_doctor_findings(self):
+        (self.data / "restore-state.json").write_text(json.dumps({"board_parity": "failed",
+                                                                "memory_index": "pending", "reconcile": "pending"}))
+
+    def test_native_text_json_acceptance_is_local_and_refreshes_on_removal(self):
+        self.seed_doctor_findings()
+        code, initial = self.native_doctor()
+        self.assertEqual(code, 1)
+        self.assertTrue(initial["findings"])
+        self.configure_acceptance(initial["findings"])
+        self.assertTrue(validate_instance(self.instance).ok)
+        code, all_accepted = self.native_doctor()
+        self.assertEqual(code, 0, all_accepted)
+        self.assertTrue(all_accepted["ok"])
+        self.assertEqual(len(all_accepted["findings"]), len(initial["findings"]))
+        self.assertTrue(all(accepted(row) for row in all_accepted["findings"]))
+        code, text = self.native_doctor(structured=False)
+        self.assertEqual(code, 0, text)
+        self.assertIn("accepted finding:", text)
+        self.assertIn("reason: Reviewed fixture condition", text)
+        self.assertIn("status: ok", text)
+        self.configure_acceptance(initial["findings"][1:])
+        code, mixed = self.native_doctor()
+        self.assertEqual(code, 1)
+        self.assertFalse(mixed["ok"])
+        self.assertEqual(active_findings(mixed["findings"]), initial["findings"][:1])
+        code, text = self.native_doctor(structured=False)
+        self.assertEqual(code, 1)
+        self.assertIn("status: findings", text)
+        for changed in ({**initial["findings"][0], "message": "changed content"},
+                        {**initial["findings"][0], "target": "another target"}):
+            self.configure_acceptance([changed, *initial["findings"][1:]])
+            code, payload = self.native_doctor()
+            self.assertEqual(code, 1)
+            self.assertEqual(active_findings(payload["findings"]), initial["findings"][:1])
+        self.configure_acceptance([])
+        self.assertEqual(self.native_doctor()[1]["findings"], initial["findings"])
+        other = self.root / "other-instance"
+        other.mkdir()
+        (other / "instance.yaml").write_text((self.instance / "instance.yaml").read_text())
+        self.configure_acceptance(initial["findings"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["doctor", "--instance", str(other), "--dry-run", "--offline", "--json"]), 1)
+
+    def test_native_record_publication_reads_all_accepted_and_mixed_reports(self):
+        self.seed_doctor_findings()
+        command = [sys.executable, "-P", "-m", "ummanu", "doctor", "--instance", str(self.instance), "--offline", "--json"]
+        code, initial = records.collect(command)
+        self.assertEqual(code, 1)
+        for rows, expected_code in ((initial["findings"], 0), (initial["findings"][1:], 1)):
+            with self.subTest(code=expected_code):
+                self.configure_acceptance(rows)
+                self.assertEqual(records.record(self.instance, offline=True), 0)
+                completed = self.document()["completed"]
+                self.assertEqual(completed["exit_code"], expected_code, completed)
+                self.assertEqual(completed["outcome"], "result")
+                records.validate_result(completed["result"], expected_code)
+                reading = records.read_latest(self.instance, self.data, now=time.time(), offline=True)
+                self.assertEqual(reading["state"], "available")
+                self.assertEqual(reading["findings"], completed["result"]["findings"])
+                self.assertTrue(any(accepted(row) for row in reading["findings"]))
+
+    def test_result_validator_keeps_released_findings_active_and_refuses_bad_annotations(self):
+        row = {"code": "known"}
+        for findings, code in (([row], 1), ([{**row, "accepted": True, "acceptance_reason": "why"}], 0),
+                               ([row, {**row, "accepted": True, "acceptance_reason": "why"}], 1)):
+            records.validate_result({"schema_version": 1, "ok": code == 0, "findings": findings}, code)
+        for annotation in ({"accepted": True}, {"accepted": "true", "acceptance_reason": "why"},
+                           {"accepted": True, "acceptance_reason": "  "}, {"acceptance_reason": "why"}):
+            with self.subTest(annotation=annotation), self.assertRaises(ValueError):
+                records.validate_result({"schema_version": 1, "ok": True, "findings": [{**row, **annotation}]}, 0)
+
+    def test_bad_acceptance_is_a_native_config_error(self):
+        path = self.instance / "instance.yaml"
+        path.write_text(path.read_text() + "doctor:\n  accepted_findings:\n    - finding: {code: known}\n      reason: '  '\n")
+        self.assertFalse(validate_instance(self.instance).ok)
+        code, payload = self.native_doctor()
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertTrue(all(row["code"] == "config_invalid" for row in payload["findings"]))
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["doctor", "--instance", str(self.instance), "--offline", "--json"]), 2)
+
+    def test_native_acceptance_preserves_diagnostic_unavailability(self):
+        command = ["doctor", "--instance", str(self.instance), "--host-fixture", str(self.root / "missing-host")]
+        def run(structured):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), mock.patch.object(cli, "disk_free_bytes", return_value=ROOT_FREE_MIN_BYTES):
+                code = main([*command, "--json"] if structured else command)
+            return code, json.loads(out.getvalue()) if structured else out.getvalue()
+        code, payload = run(True)
+        self.assertEqual(code, 2)
+        self.configure_acceptance(payload["findings"])
+        code, payload = run(True)
+        self.assertEqual(code, 2)
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(all(accepted(row) for row in payload["findings"]))
+        records.validate_result(payload, code)
+        code, text = run(False)
+        self.assertEqual(code, 2)
+        self.assertIn("accepted finding:", text)
+        self.assertIn("status: host inventory incomplete", text)
 
     def baseline(self, *, code=1, findings=None, started=1_800_000_000 - 10, mode="live"):
         if findings is None:
@@ -399,6 +593,71 @@ class DoctorRecordTests(unittest.TestCase):
         after = self.assert_web_state(app, doctor, "red", codes=["unit.failed"])
         self.assertIsNone(after["doctor"]["collecting"])
         self.assertEqual(self.web_count, 3)
+
+    def test_accepted_rows_are_visible_neutral_and_share_dashboard_lamp_cache(self):
+        from ummanu.web.doctor import CACHE_SECONDS
+        app, doctor = self.web_fixture()
+        raw = {"code": "unit.failed", "message": "a.service is failed", "name": "a.service"}
+        row = {**raw, "accepted": True, "acceptance_reason": "Reviewed fixture condition"}
+        for findings, code, colour in (([row], 0, "green"), ([row, {**raw, "name": "b.service"}], 1, "red")):
+            with self.subTest(code=code):
+                result = {"schema_version": 1, "ok": code == 0, "findings": findings}
+                records.validate_result(result, code)
+                with mock.patch.object(records.time, "time", return_value=self.web_clock), \
+                     mock.patch.object(records, "collect", return_value=(code, result)):
+                    self.assertEqual(records.record(self.instance), 0)
+                doctor._cached = None
+                document = self.assert_web_state(app, doctor, colour, codes=[item["code"] for item in findings])
+                self.assertEqual(document["problems"][0]["severity"], "neutral")
+                health = doctor.health_snapshot()["health"]["combined"]
+                self.assertEqual(health["problems"], [item["message"] for item in findings if not accepted(item)])
+                count = self.web_count
+                for route in ("/", "/doctor"):
+                    page = app.handle("GET", route).body.decode()
+                    self.assertIn("accepted: Reviewed fixture condition", page)
+                    self.assertIn("a.service", page)
+                    if route == "/doctor":
+                        self.assertIn("Accepted findings", page)
+                    if code == 0:
+                        self.assertNotIn("Needs attention", page)
+                self.assertEqual(self.web_count, count)
+                # A recorded configuration refresh changes disposition only after the shared cache expires.
+                with mock.patch.object(records.time, "time", return_value=self.web_clock), \
+                     mock.patch.object(records, "collect", return_value=(1, {"schema_version": 1, "ok": False, "findings": [raw]})):
+                    self.assertEqual(records.record(self.instance), 0)
+                self.assertEqual(doctor.doctor_snapshot(), document)
+                self.web_clock += CACHE_SECONDS + 1
+                self.assert_web_state(app, doctor, "red", codes=["unit.failed"])
+
+    def test_acceptance_cannot_hide_status_or_diagnostic_failure_states(self):
+        app, doctor = self.web_fixture()
+        row = {"code": "unit.failed", "message": "a.service is failed", "accepted": True, "acceptance_reason": "why"}
+        document = self.baseline(code=0, findings=[row], started=self.web_clock - 10)
+        document["result"]["ok"] = True
+        records.publish(self.path, document)
+        self.web_status = {"host": {"units": [{"name": "b.service", "kind": "service", "present": True, "active": "failed"}]}}
+        self.assert_web_state(app, doctor, "red", codes=["unit.failed", "unit.failed"])
+        self.web_status = {"dispatcher": {"pause": {"paused": True, "mode": "drain"}}}
+        doctor._cached = None
+        self.assert_web_state(app, doctor, "yellow", codes=["pipeline.paused", "unit.failed"])
+        self.web_status = {}
+        for state, change in (("unavailable", {"outcome": "unavailable", "exit_code": 2}),
+                              ("failed", {"outcome": "failed", "exit_code": None, "result": None}),
+                              ("stale", {"run_at": records.utc(self.web_clock - 181), "completed_at": records.utc(self.web_clock - 180)}),
+                              ("wrong_mode", {"mode": "offline"}),
+                              ("wrong_installation", {"installation": {"instance": "other", "data_dir": "other"}})):
+            with self.subTest(state=state):
+                records.publish(self.path, {**document, **change})
+                doctor._cached = None
+                reading = doctor.doctor_snapshot()
+                self.assertEqual(reading["doctor"]["state"], state)
+                self.assertEqual(reading["colour"], "red")
+                self.assertIn("health.unreadable", [item["code"] for item in reading["problems"]])
+        # Collection must start after completion; use a fresh accepted predecessor.
+        prior = {**document, "run_at": records.utc(self.web_clock - 100), "completed_at": records.utc(self.web_clock - 99)}
+        records.publish(self.path, self.envelope(prior, {"run_at": records.utc(self.web_clock - 61), "mode": "live"}))
+        doctor._cached = None
+        self.assert_web_state(app, doctor, "red", codes=["unit.failed", "doctor.collection_stuck"])
 
     def test_stuck_collection_is_a_separate_finding_at_the_injected_clock_boundary(self):
         app, doctor = self.web_fixture()

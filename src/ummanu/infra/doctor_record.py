@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.config import validate_instance
+from ummanu.infra.doctor_findings import accepted, active_findings
 
 RESULT_PATH = Path("doctor/latest.json")
 FRESH_SECONDS = 180
@@ -105,7 +106,11 @@ def validate_result(payload: Any, code: Any) -> None:
     findings = payload["findings"]
     if any(not isinstance(item, dict) or not isinstance(item.get("code"), str) or not item["code"] for item in findings):
         raise ValueError("invalid doctor finding")
-    if payload["ok"] != (not findings) or (code == 0 and findings) or (code == 1 and not findings):
+    for finding in findings:
+        if ("accepted" in finding or "acceptance_reason" in finding) and not accepted(finding):
+            raise ValueError("invalid doctor acceptance annotation")
+    active = active_findings(findings)
+    if payload["ok"] != (not active) or (code == 0 and active) or (code == 1 and not active):
         raise ValueError("doctor exit and findings disagree")
 
 

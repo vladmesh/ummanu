@@ -515,6 +515,8 @@ class Expectations:
     runtime_data_dir: Path | None = None
     #: Checkouts of disabled bindings: matched when present, never missing or unmanaged.
     dormant_projects: set[str] = field(default_factory=set)
+    #: Normalized foreign children: excluded only from unmanaged-project parity.
+    foreign_projects: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -622,7 +624,13 @@ def build_doctor_expectations(
     host = host if isinstance(host, dict) else {}
     projects: set[str] = set()
     dormant: set[str] = set()
+    foreign: set[str] = set()
     project_error = ""
+    for name in _str_list(host.get("foreign_projects")):
+        try:
+            foreign.add(_normalized_repo_path(str(Path(host["projects_root"]).expanduser() / name)))
+        except (OSError, RuntimeError):
+            project_error = "foreign project checkout path could not be normalized"
     for binding in bindings:
         if not isinstance(binding, dict) or not isinstance(binding.get("repo"), str):
             continue
@@ -648,6 +656,7 @@ def build_doctor_expectations(
         project_error=project_error,
         runtime_data_dir=data_dir,
         dormant_projects=dormant - projects,
+        foreign_projects=foreign,
     )
 
 
@@ -698,7 +707,8 @@ def _project_diff(expected: Expectations, actual: HostInventory) -> KindDiff:
     """A disabled binding's checkout matches when present and is not missing when absent."""
     diff = _diff(expected.projects, actual.projects - expected.dormant_projects)
     present = expected.dormant_projects & actual.projects
-    return replace(diff, matched=sorted({*diff.matched, *present}))
+    return replace(diff, matched=sorted({*diff.matched, *present}),
+                   unmanaged_on_host=sorted(set(diff.unmanaged_on_host) - expected.foreign_projects))
 
 
 def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDiff]:

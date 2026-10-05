@@ -65,6 +65,7 @@ from ummanu.host import (
 )
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from ummanu.host_commands import add_reconcile_subcommands
+from ummanu.infra.doctor_findings import accepted, active_findings, apply_acceptance
 from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
 from ummanu.installation import add_install_commands
@@ -632,14 +633,20 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"{finding['agent']}: {finding['message']}")
         elif str(finding["code"]).startswith("live_root."):
             print(f"{finding['code']}: {finding['message']}")
+        if accepted(finding):
+            raw = {key: value for key, value in finding.items()
+                   if key not in {"accepted", "acceptance_reason"}}
+            print(f"accepted finding: {json.dumps(raw, sort_keys=True)}")
+            print(f"  reason: {finding['acceptance_reason']}")
 
     print("host changes: none")
     if inspection.unavailable:
         # A kind could not be inspected, so this is not a clean "all matched".
         print("status: host inventory incomplete")
         return 2
-    if inspection.findings:
-        warning_only = all(finding["code"] == "config_warning" for finding in inspection.findings)
+    active = active_findings(inspection.findings)
+    if active:
+        warning_only = all(finding["code"] == "config_warning" for finding in active)
         print("status: warnings" if warning_only else "status: findings")
         return 1
     print("status: ok")
@@ -817,7 +824,7 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
     )
     payload = {
         "schema_version": 1,
-        "ok": not inspection.findings,
+        "ok": not active_findings(inspection.findings),
         "findings": inspection.findings,
         "board_schema": inspection.board_schema,
         "status": snapshot,
@@ -826,7 +833,7 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
     print(json.dumps(payload, sort_keys=True))
     if inspection.unavailable:
         return 2
-    return 1 if inspection.findings else 0
+    return 1 if active_findings(inspection.findings) else 0
 
 
 def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspection:
@@ -918,7 +925,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
     return DoctorInspection(
-        findings,
+        apply_acceptance(findings, getattr(report, "instance", {})),
         unavailable,
         restore,
         dispatcher,

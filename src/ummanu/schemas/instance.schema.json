@@ -95,6 +95,30 @@
         }
       }
     },
+    "doctor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accepted_findings": {
+          "type": "array",
+          "description": "Exact raw doctor JSON findings accepted locally with a reason; annotations are added only after matching.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["finding", "reason"],
+            "properties": {
+              "finding": {
+                "type": "object",
+                "required": ["code"],
+                "properties": {"code": {"type": "string", "minLength": 1, "pattern": "\\S"}},
+                "not": {"anyOf": [{"required": ["accepted"]}, {"required": ["acceptance_reason"]}]}
+              },
+              "reason": {"type": "string", "minLength": 1, "pattern": "\\S"}
+            }
+          }
+        }
+      }
+    },
     "host": {
       "type": "object",
       "additionalProperties": false,
@@ -104,6 +128,12 @@
           "type": "string",
           "minLength": 1,
           "description": "Directory on the host that holds project repos, enumerated to find repos not described here."
+        },
+        "foreign_projects": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": "^(?!\\.{1,2}$)[^/\\\\*?\\[\\]\\u0000]+$", "allOf": [{"pattern": "\\S"}]},
+          "description": "Immediate child directory names under projects_root owned elsewhere. Doctor excludes their normalized paths only from unmanaged parity; registered projects still remain required."
         },
         "unit_prefix": {
           "type": "string",
@@ -177,8 +207,10 @@
           "description": "Maximum ONNX Runtime inference threads for the memory embedding model. Defaults to 1 so one memory request does not monopolize the host."
         }
       },
-      "if": {"properties": {"units": {"type": "array", "minItems": 1}}, "required": ["units"]},
-      "then": {"required": ["unit_prefix"]}
+      "allOf": [
+        {"if": {"properties": {"units": {"type": "array", "minItems": 1}}, "required": ["units"]}, "then": {"required": ["unit_prefix"]}},
+        {"if": {"properties": {"foreign_projects": {"type": "array", "minItems": 1}}, "required": ["foreign_projects"]}, "then": {"required": ["projects_root"]}}
+      ]
     }
   },
   "$defs": {
