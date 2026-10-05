@@ -445,9 +445,13 @@ two ref-writing parts of `gc` (`pack-refs`, reflog expiry) are switched off for 
 expired as a separate step under the state-repo lock, the only moment a checkpoint can wait on
 maintenance, bounded at 60 seconds. `ummanu status` lists the timer under `host.schedules` with
 `last_trigger`, and the service under `host.units` reads `failed` after a failed run; the run's
-before/after object counts are in its journal. The command packs the live root's repository and
-requires one (`infra.instance_maintenance.run`): on a plain live root it exits 1 with `instance repo
-is not a git repository` before the Docker cleanup below runs.
+before/after object counts are in its journal. The command packs the live root's repository while
+the live root is a work tree; on a plain live root it packs the exporter's bare snapshot repository
+(`offsite.snapshot_repo`) instead, with the same overrides and the reflog step under the live root's
+state-repo lock (`infra.instance_maintenance.run`), and reports which one under `repository`. Before
+the exporter's first cut there is no snapshot repository and the step reports `skipped`. A live root
+that is neither a work tree nor a valid `instance.yaml` exits 1 with `instance repo is not a git
+repository` before the Docker cleanup below runs.
 
 The same maintenance command also inventories only containers carrying `ummanu.test-board`
 with a valid owner PID. It removes one by full ID only after two label checks and two definitive
