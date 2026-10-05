@@ -315,7 +315,8 @@ class PoService:
     def _hand_over(self, item: QueuedInput) -> None:
         """One input becomes its turn, then leaves the queue; the claim's request id makes a repeat harmless."""
         try:
-            self.runner.send_request(item.session_id, item.text, item.request_id, card=item.card, note=item.note)
+            self.runner.send_request(item.session_id, item.text, item.request_id, card=item.card,
+                                     note=item.note, metadata=item.metadata)
         except TurnInProgress:
             return
         except (SessionNotFound, SessionClosed, RequestConflict) as exc:
@@ -428,9 +429,14 @@ class PoService:
             if session.state == SESSION_CLOSED:
                 raise SessionClosed(f"PO session {session_id} is closed; open a new session to continue")
             note = self._production_rule(card, request_id) if source == DISPATCHER_SOURCE else None
+            metadata = None
+            if source == DISPATCHER_SOURCE:
+                metadata, comments = self._input_context(session_id, card)
+                note = "\n\n".join(part for part in (comments, note) if part) or None
             self._accepting()
             self.queue.put(
-                session_id=session_id, text=text, request_id=request_id, source=source, card=card, note=note
+                session_id=session_id, text=text, request_id=request_id, source=source, card=card,
+                note=note, metadata=metadata
             )
             self._accepted(
                 {"session_id": session_id, "queued": True, "seq": None, "state": None, "repeated": False}
@@ -438,6 +444,39 @@ class PoService:
             # Best effort from here: the answer above stands if the hand-over or the lookup fails.
             self.pump()
             return {**self._sent(session_id, request_id), "repeated": False}
+
+    def _input_context(self, session_id: str, card: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        """Select the delta before accepting, under the same serialized submit lock.
+
+        The queued note freezes the selected bytes. Its metadata moves atomically
+        into the feed at claim; a crash in between leaves both with the same end.
+        Refusals before queue.put establish no boundary. Old frozen facts have
+        no delivery flag and neither consume nor reformat their comments.
+        """
+        from ummanu.po.input_context import comment_position, comments_note
+
+        metadata = {"source": DISPATCHER_SOURCE,
+                    "summary": card.get("display_summary") or f"{card['card_ref']} ({card['kind']})"}
+        if "deliver_sprint_comments" in card and type(card["deliver_sprint_comments"]) is not bool:
+            raise Refused("validation", "deliver_sprint_comments is an explicit boolean")
+        if card.get("deliver_sprint_comments") is not True:
+            return metadata, ""
+        sprint_ref = card["sprint_ref"]
+        if not sprint_ref:
+            raise Refused("validation", "deliver_sprint_comments requires a sprint_ref")
+        sprint = self._sprint_sessions().sprint(sprint_ref)
+        if sprint is None:
+            raise Refused("unavailable", f"sprint {sprint_ref} cannot be read for its comments")
+        comments = list(sprint.comments)
+        delivered = [entry.metadata for entry in self.store.feed(session_id)]
+        delivered += [item.metadata for item in self.queue.pending(session_id)]
+        start = max((comment_position(value, sprint_ref) for value in delivered), default=0)
+        if len(comments) < start:
+            raise Refused("unavailable", f"sprint {sprint_ref} comment history is shorter than its accepted position")
+        metadata.update(sprint_ref=sprint_ref, comment_position=len(comments))
+        if card.get("input") == OWNER_ANSWER_INPUT and start == len(comments):
+            return metadata, ""
+        return metadata, comments_note(sprint_ref, comments, start)
 
     def _production_rule(self, card: dict[str, Any] | None, request_id: str) -> str | None:
         """The one place production rights are evaluated: the note an operation card's input is queued with.
@@ -635,6 +674,7 @@ class PoService:
                 text=seed_message(sprint.ref, sprint.po_session, why, documents),
                 request_id=seed_id,
                 source=SERVICE_SOURCE,
+                metadata={"source": SERVICE_SOURCE, "summary": f"Sprint session context for {sprint.ref}"},
             )
         sprints.comment(
             sprint.ref,

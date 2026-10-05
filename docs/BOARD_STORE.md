@@ -80,7 +80,7 @@ keys cannot cross kinds.
 Conventions: `text` identifiers, `timestamptz` times, surrogate `bigint` keys only where a row has
 no natural key. Every reference between entities is a foreign key; a reference meaningful only
 within one sprint is a composite foreign key carrying the sprint (§3.3, §3.4, §3.8). Closed
-vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in ten columns (§3.10).
+vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in eleven columns (§3.10).
 
 The DDL is grouped by entity. Forward and mutual references are added with `ALTER TABLE` after both
 tables exist (§3.13). `board/schema.py` is authoritative; the DDL below mirrors it.
@@ -647,7 +647,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 - One advisory lock (`ummanu.board.requests`) serializes separate claims outside a transaction;
   the per-card marker lock is also an advisory lock.
 
-### 3.10 The ten `jsonb` columns
+### 3.10 The eleven `jsonb` columns
 
 | Column | Content |
 |---|---|
@@ -659,6 +659,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 | (J6) `issues.extensions` | (J3) for Issues |
 | (J7) `products.extensions` | (J3) for Products |
 | (J9) `sprints.owner_decisions` | append-only quoted entries with stable IDs and PO audit attribution; latest scoped answer wins; empty for released sprints |
+| (J11) `po_feed.metadata` | optional native input source, visible summary, sprint ref and delivered comment position; NULL for historical expanded text |
 | (J10) `sprint_resumes.po_request` | optional `{card, action}` identifying a board-owned PO wait; admission locks and validates the actual card, not references extracted from prose; NULL for released resumes |
 | (J8) `sprints.local_run_exceptions` | creation-only list of `{project, argv, rationale}`; exact vectors for registered, reserved projects; default `[]` |
 
@@ -751,6 +752,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0027_sprint_owner_decisions` | additive quoted owner decision array, default `[]`; existing permission/counter/charge records unchanged; downgrade refuses nonempty authority |
 | `0028_owner_turns` | reclassifies released `card_waits_for_person`, `e2e_budget_spent`, `e2e_after_merge` rows as notices, preserving IDs, quotations, dedup keys and read history; adds `po_card_escalated` with matching current kind/class constraints. The `owner_event_routine_notice` trigger normalizes actual 0023/0024/0025 producers' obsolete class during release activation, so their real occurrences remain notices. Downgrade refuses while any changed kind exists rather than fabricate old attention. No new table or column. |
 | `0029_po_channel` | nullable typed PO wait on `sprint_resumes`, object CHECK; released six-field resumes, delivery cursors and audit are unchanged. Task PO execution assignment and per-run disposition use existing extension bags. Downgrade refuses while a typed PO wait exists. |
+| `0030_po_input_context` | nullable object metadata on `po_feed`; accepted queue context is copied with turn claim; historical bytes are unchanged; downgrade refuses to lose recorded delivery positions |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -762,7 +764,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 31 tables, 60 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
+(including `alembic_version`): 31 tables, 61 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1119,7 +1121,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0029_po_channel`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0030_po_input_context`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1290,3 +1292,33 @@ Card mutations and their required owner-event creation/settlement share the SQL 
 Released three-field handovers remain valid. The dispatcher accepts an existing released owner
 comment only by its owner audit marker, current handover order and exact body digest, then delivers
 the durable answer through the existing deterministic PO submission ID. No answer is synthesized.
+
+
+### PO input context (0030)
+
+New decision/operation submissions carry an explicit `deliver_sprint_comments`
+flag beside frozen card facts and a bounded `display_summary`. The PO service
+also carries these fields into new owner-answer follow-ups from the frozen
+initial facts; released follow-ups retain their original request bytes.
+The service
+reads the native sprint at acceptance, under its existing submit lock. It selects
+comments after the maximum accepted position for that actual session and sprint
+from pending queue metadata and claimed feed metadata. Board order, including
+same-time occurrences, defines the position; dates and prose are never cursors.
+The native sprint comment list is append-only in this delivery contract.
+
+The selected comment excerpts and the service's original production-rights note
+are frozen together in the durable queue. Claiming the request copies metadata
+into `po_feed` in the same transaction as the turn and request id. Rendering and
+refusals before acceptance consume nothing; a retry finds the existing queue or
+request before reading new context. A fresh session has its own boundary. A shorter native history is refused rather than skipping evidence. No
+context rollover or separate delivery store is introduced.
+
+`metadata.source` explicitly classifies `dispatcher` and `po-service` inputs.
+`metadata.summary` is visible on `/po`; the complete accepted prompt, including
+instructions, comments, rights and native full-text pointers, is in a closed HTML
+`details` element. Owner text stays ordinary text. Released queue records and
+historical feed entries without metadata remain readable and expanded; their
+original text is never guessed into a new format or migrated. Their missing
+comment position starts the first new flagged delivery at zero. Full engine
+backup/export carries this board column; normalized card export is unchanged.

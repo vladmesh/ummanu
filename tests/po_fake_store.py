@@ -221,6 +221,7 @@ class FakePoStore:
         request_id: str | None = None,
         card: Any = None,
         prompt: str | None = None,
+        metadata: Any = None,
     ) -> tuple[Turn, bool]:
         board = self._open()
         with board.lock:
@@ -238,7 +239,7 @@ class FakePoStore:
             turn = Turn(session_id, seq, board.now(), None, RUNNING, str(stdout_path(seq)), None, None, None)
             board.turns[(session_id, seq)] = turn
             board.feed.append(
-                FeedEntry(len(board.feed) + 1, session_id, seq, OWNER, text if prompt is None else prompt, board.now())
+                FeedEntry(len(board.feed) + 1, session_id, seq, OWNER, text if prompt is None else prompt, board.now(), metadata)
             )
             if request_id is not None:
                 board.requests[request_id] = PoRequest(

@@ -135,6 +135,8 @@ class FeedEntry:
     role: str
     text: str
     created_at: datetime
+    # NULL for released inputs and agent answers; new service inputs retain queue classification.
+    metadata: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -156,7 +158,7 @@ _RESOLVED_MODEL = (
     "(SELECT r.resolved_model FROM po_turns r WHERE r.session_id = s.session_id "
     "AND r.resolved_model IS NOT NULL ORDER BY r.seq DESC LIMIT 1)"
 )
-_FEED_COLUMNS = "entry_id, session_id, turn_seq, role, text, created_at"
+_FEED_COLUMNS = "entry_id, session_id, turn_seq, role, text, created_at, metadata"
 _REQUEST_COLUMNS = "request_id, operation, fingerprint, session_id, seq, created_at"
 
 
@@ -457,6 +459,7 @@ class PoStore:
         request_id: str | None = None,
         card: Mapping[str, Any] | None = None,
         prompt: str | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> tuple[Turn, bool]:
         """The new turn, or the one `request_id` already started; the flag is True when this call did.
 
@@ -502,9 +505,10 @@ class PoStore:
                 (session_id, seq, RUNNING, str(stdout_path(seq))),
             ).fetchone()
             connection.execute(
-                "INSERT INTO po_feed (session_id, turn_seq, role, text, created_at) "
-                "VALUES (%s, %s, %s, %s, now())",
-                (session_id, seq, OWNER, text if prompt is None else prompt),
+                "INSERT INTO po_feed (session_id, turn_seq, role, text, created_at, metadata) "
+                "VALUES (%s, %s, %s, %s, now(), %s::jsonb)",
+                (session_id, seq, OWNER, text if prompt is None else prompt,
+                 json.dumps(dict(metadata)) if metadata is not None else None),
             )
             if request_id is not None:
                 self._record_request(connection, request_id, SEND, fingerprint, session_id, seq)

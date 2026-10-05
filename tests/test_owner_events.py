@@ -199,7 +199,7 @@ class EntityTests(unittest.TestCase):
 
         store = owner_events.OwnerEventStore(SimpleNamespace(conninfo=lambda: "dbname=x"))
         with mock.patch("psycopg.connect", return_value=Connection()):
-            with self.assertRaisesRegex(OwnerEventsUnavailable, "owes 12 migration.*0018_owner_events") as raised:
+            with self.assertRaisesRegex(OwnerEventsUnavailable, "owes 13 migration.*0018_owner_events") as raised:
                 store.unread_count()
             self.assertEqual(raised.exception.code, "schema_owed")
             self.assertEqual(raised.exception.pending[0], "0018_owner_events")

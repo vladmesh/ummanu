@@ -72,6 +72,31 @@ def alive(pid: int) -> bool:
 
 
 class PoRunnerTests(unittest.TestCase):
+    def test_native_feed_metadata_commits_with_claim_and_replay_keeps_original_text(self):
+        from ummanu.po.store import RequestConflict
+
+        session = self.runner.create_session("claude", "opus", effort="high")
+        metadata = {"source": "dispatcher", "summary": "Which cut?",
+                    "sprint_ref": "sprint:50", "comment_position": 50}
+        facts = {"card_ref": "ummanu-50", "kind": "decision", "sprint_ref": "sprint:50",
+                 "touches_production": None, "input": "card", "deliver_sprint_comments": True}
+        turn, created = self.runner.send_request(session.session_id, "Which cut?", "native-input",
+                                                  card=facts, note="frozen comments", metadata=metadata)
+        self.assertTrue(created)
+        self.settle(session.session_id, turn.seq)
+        feed = PoStore(self.store.credentials).feed(session.session_id)
+        self.assertEqual(feed[0].metadata, metadata)
+        self.assertEqual(feed[0].text, "Which cut?\n\nfrozen comments\n")
+        self.assertIsNone(feed[1].metadata)
+        replay, created = self.runner.send_request(session.session_id, "Which cut?", "native-input",
+                                                    card=facts, note="changed", metadata={"source": "web"})
+        self.assertFalse(created)
+        self.assertEqual(replay.seq, turn.seq)
+        self.assertEqual(self.store.feed(session.session_id), feed)
+        with self.assertRaises(RequestConflict):
+            self.runner.send_request(session.session_id, "Changed", "native-input", card=facts)
+        self.assertEqual(self.store.feed(session.session_id), feed)
+
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

@@ -263,7 +263,8 @@ class AllowedTests(RuleFixture):
 
         facts = {"card_ref": REF, "kind": "operation", "touches_production": "relay", "sprint_ref": SPRINT,
                  "input": CARD_INPUT}
-        self.assertEqual(submission.card, facts)
+        self.assertEqual({key: submission.card[key] for key in facts}, facts)
+        facts = submission.card
         session = submission.session_id
         self.assertEqual(self.settled(session, 2).state, po_store.COMPLETED)
         request = FakePoStore(self.board).request(submission.submit_request_id)
@@ -299,12 +300,13 @@ class AllowedTests(RuleFixture):
         submission, prompt = self.card_turn(runtime)
 
         self.assertEqual(
-            submission.card,
+            {key: submission.card[key] for key in ("card_ref", "kind", "touches_production", "sprint_ref", "input")},
             {"card_ref": REF, "kind": "decision", "touches_production": None, "sprint_ref": SPRINT,
              "input": CARD_INPUT},
         )
         self.assertNotIn(RIGHTS_HEADING, prompt)
-        self.assertEqual(prompt, submission.text)
+        self.assertTrue(prompt.startswith(submission.text.rstrip()))
+        self.assertIn("This decision input grants no production permission.", prompt)
         self.assertEqual(self.handovers(), [])
 
     def test_the_facts_survive_the_dispatcher_record(self) -> None:
@@ -382,7 +384,11 @@ class PoDecidesTests(RuleFixture):
         self.assertEqual(self.settled(session, 3).state, po_store.COMPLETED)
         submission = self.record().po_submission
         request = FakePoStore(self.board).request(request_id)
-        facts = {**submission.card, "input": OWNER_ANSWER_INPUT}
+        facts = {key: submission.card[key] for key in
+                 ("card_ref", "kind", "touches_production", "sprint_ref", "input")}
+        facts["input"] = OWNER_ANSWER_INPUT
+        facts["display_summary"] = "Owner answer for " + submission.card["display_summary"]
+        facts["deliver_sprint_comments"] = True
         self.assertEqual(request.fingerprint, po_store.send_fingerprint(session, submission.owner_text, facts))
         answer = self.calls()[-1]["prompt"]
         # The answer is delivered as quoted, without changing the sprint's recorded authority.

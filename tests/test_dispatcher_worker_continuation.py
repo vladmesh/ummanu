@@ -144,6 +144,47 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.assertIsNone(self.recover("report:done"))
         self.assertEqual(self.runtime.mock_calls, [])
 
+    def test_recovered_observer_rework_moves_with_pointer_and_preserves_worker_instruction(self):
+        self.runtime.audit.events.return_value = []
+        body = "Repair the canonical defect and preserve its evidence."
+        self.record.worker_continuation.begin_red_transition(
+            "review", 0, f"Observer decision: rework. {body}", "red", "rework",
+            reserved_generation=4, decision_body=body,
+            decision_protocol_prerequisites=("repair-contract",))
+        # A released pending transition may still carry the redundant move body.
+        self.record = DispatcherRecord.from_json(self.record.to_json())
+        self.records["sample-1"] = self.record
+        with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={"action": "delivered"}):
+            self.assertEqual(self.complete()["action"], "delivered")
+        move = self.accounting.terminal_effect.call_args.kwargs
+        self.assertEqual(move["decision"], "rework")
+        self.assertIn("[decision:rework]", move["reason"])
+        self.assertIn("task show --ref sample-1", move["reason"])
+        self.assertNotIn(body, move["reason"])
+        self.assertEqual(self.record.report_decision, body)
+        self.assertEqual(self.record.report_protocol_prerequisites, ("repair-contract",))
+
+    def test_release_and_reslice_routing_keep_only_the_canonical_pointer(self):
+        from ummanu.dispatch import assessment_decision, release_lifecycle
+
+        self.runtime.audit.events.return_value = []
+        self.task["type"] = "research"
+        body = "Canonical observer reasoning that remains on the card."
+        with (mock.patch.object(release_lifecycle, "transfer_research_report", return_value=None),
+              mock.patch.object(release_lifecycle, "release_effect", return_value={"action": "released"}) as effect):
+            release_lifecycle.release_parked(self.runtime, self.task, self.record, self.records,
+                                             self.payload, "tick", reason=body)
+        reason = effect.call_args.kwargs["move_reason"]
+        self.assertIn("[decision:release]", reason)
+        self.assertNotIn(body, reason)
+        with mock.patch.object(assessment_decision, "attempt_accounting", self.accounting):
+            assessment_decision.reslice_parked(self.runtime, self.task, self.record, self.records,
+                                               self.payload, "tick", reason=body)
+        move = self.accounting.terminal_effect.call_args.kwargs
+        self.assertEqual((move["decision"], move["target"]), ("reslice", "blocked"))
+        self.assertIn("[decision:reslice]", move["reason"])
+        self.assertNotIn(body, move["reason"])
+
     def test_failed_red_intent_save_prevents_board_and_host_effects(self) -> None:
         self.runtime.save_records.side_effect = OSError("state unavailable")
         with self.assertRaisesRegex(OSError, "state unavailable"):

@@ -17,6 +17,7 @@ from ummanu.dispatch import attempt_accounting, e2e_stage, post_merge, release_a
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.helpers import scrub_host_output
 from ummanu.dispatch.production_checkout import ProductionActivationRefused
+from ummanu.dispatch.decision_pointer import decision_pointer
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
 from ummanu.dispatch.types import GateTransportError, HostError, MergeLanding
@@ -239,7 +240,7 @@ def release_parked(
             payload,
             attempt_id,
             step="assessment",
-            move_reason=f"Observer decision: release. {reason}".strip(),
+            move_reason=decision_pointer(runtime, task, "release"),
             decision="release",
             verdict=released_verdict(record),
         )
@@ -286,7 +287,7 @@ def release_parked(
         payload,
         attempt_id,
         step="assessment",
-        move_reason=f"Observer decision: release. {reason}".strip(),
+        move_reason=decision_pointer(runtime, task, "release"),
         decision="release",
         verdict=released_verdict(record),
     )

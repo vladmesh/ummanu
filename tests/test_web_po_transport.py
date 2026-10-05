@@ -45,6 +45,36 @@ ANY_FORM = urlencode(
 )
 
 
+class ServiceInputDisplayTests(unittest.TestCase):
+    def test_explicit_queued_and_feed_inputs_are_closed_and_escaped_with_full_text(self):
+        entry = {"role": "owner", "turn_seq": 1, "text": "<script>rights & comments; task show --ref ummanu-50</script>",
+                 "metadata": {"source": "dispatcher", "summary": "Question <one>"}}
+        for render in (pages._po_entry, pages._po_queued_entry):
+            for source in ("dispatcher", "po-service"):
+                entry["metadata"]["source"] = source
+                shown = render(entry)
+                self.assertIn('<details class="po-service-input">', shown)
+                self.assertNotIn(" open", shown)
+                self.assertLess(shown.index("Question &lt;one&gt;"), shown.index("<details"))
+                self.assertIn("rights &amp; comments; task show --ref ummanu-50", shown)
+                self.assertNotIn("<script>", shown)
+                self.assertIn(source + " ·", shown)
+
+    def test_owner_and_historical_text_are_never_classified_from_prose(self):
+        entry = {"role": "owner", "turn_seq": 1,
+                 "source": "dispatcher", "text": "The dispatcher hands you this card. ## Production rights"}
+        for render in (pages._po_entry, pages._po_queued_entry):
+            for metadata in (None, {"source": "web"}):
+                entry["metadata"] = metadata
+                shown = render(entry)
+                self.assertNotIn("<details", shown)
+                self.assertIn(entry["text"], shown)
+                self.assertIn("owner ·", shown)
+        entry.update(role="agent", text="## Answer\nYes", metadata={"source": "dispatcher"})
+        self.assertIn('<div class="md">', pages._po_entry(entry))
+        self.assertNotIn("<details", pages._po_entry(entry))
+
+
 def concrete(pattern: str) -> str:
     return pattern.replace("{session}", "s-1")
 

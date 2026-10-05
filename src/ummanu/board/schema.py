@@ -900,8 +900,10 @@ class PoFeedEntry(Base):
     role = sa.Column(sa.Text, nullable=False)
     text = sa.Column(sa.Text, nullable=False)
     created_at = sa.Column(TIMESTAMPTZ, nullable=False)
+    input_metadata = sa.Column("metadata", JSONB, nullable=True)
 
     __table_args__ = (
+        sa.CheckConstraint("metadata IS NULL OR jsonb_typeof(metadata) = 'object'", name="po_feed_metadata_is_object"),
         sa.CheckConstraint("role IN ('owner','agent')", name="po_feed_role_in_vocabulary"),
         sa.ForeignKeyConstraint(
             ["session_id", "turn_seq"],
@@ -1031,6 +1033,7 @@ PASSWORD_PARAMETERS = ("app_password", "read_password")
 
 #: The columns §3.10 declares `jsonb`, and the only ones in the schema.
 JSONB_COLUMNS = (
+    ("po_feed", "metadata"),
     ("sprint_resumes", "po_request"),
     ("sprints", "owner_decisions"),
     ("sprints", "local_run_exceptions"),

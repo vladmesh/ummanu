@@ -11,6 +11,7 @@ from ummanu.board.protocol_artifacts import (
 from ummanu.dispatch import release_lifecycle
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.helpers import _last_marker_body
+from ummanu.dispatch.decision_pointer import decision_pointer
 from ummanu.dispatch.review_verdict import complete_park as _complete_park
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from ummanu.dispatch.types import STOPPED_BY_REVIEW_VERDICT, HostError
@@ -196,7 +197,7 @@ def rework_parked(
         payload,
         attempt_id,
         phase="review",
-        move_reason=f"Observer decision: rework. {reason}".strip(),
+        move_reason=decision_pointer(runtime, task, "rework"),
         verdict_outcome="red",
         decision="rework",
         decision_body=reason,
@@ -229,7 +230,7 @@ def reslice_parked(
         task,
         record,
         target="blocked",
-        reason=f"Observer decision: reslice. {reason}".strip(),
+        reason=decision_pointer(runtime, task, "reslice"),
         decision="reslice",
         request_id=_attempt_request_id(
             record.attempt_id or attempt_id, "assessment-reslice", ref

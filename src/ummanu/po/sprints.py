@@ -36,6 +36,7 @@ class SprintRecord:
     # The productions its operation cards may touch (`sprint create --allow-production`).
     allowed_productions: tuple[str, ...] = ()
     owner_decisions: tuple[dict[str, Any], ...] = ()
+    comments: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -153,6 +154,7 @@ class BoardSprintSessions:
             document.get("po_session") or None,
             tuple(str(project) for project in document.get("allowed_productions") or ()),
             tuple(document.get("owner_decisions") or ()),
+            tuple(document.get("comments") or ()),
         )
 
     def why_documents(self, sprint_ref: str) -> list[WhyDocument]:

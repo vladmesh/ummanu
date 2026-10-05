@@ -613,6 +613,7 @@ class PoRunner:
         *,
         card: dict[str, Any] | None = None,
         note: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> tuple[Turn, bool]:
         """`send` under a form's request id; the flag says whether this call started the turn.
 
@@ -623,7 +624,7 @@ class PoRunner:
         service's own section after the text (an operation card's production rights): the prompt and
         the feed carry it, the id does not bind it.
         """
-        return self._send(session_id, text, request_id, card, note)
+        return self._send(session_id, text, request_id, card, note, metadata)
 
     def _send(
         self,
@@ -632,6 +633,7 @@ class PoRunner:
         request_id: str | None,
         card: dict[str, Any] | None = None,
         note: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> tuple[Turn, bool]:
         if not text.strip():
             raise RunnerError("an empty message starts no turn")
@@ -644,6 +646,7 @@ class PoRunner:
                 request_id=request_id,
                 card=card,
                 prompt=prompt,
+                metadata=metadata,
             )
             if not created:
                 return turn, False

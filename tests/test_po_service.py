@@ -221,6 +221,127 @@ class ServiceFixture(unittest.TestCase):
         return [item.text for item in PoQueue(self.data).pending()]
 
 
+class CommentDeliveryTests(ServiceFixture):
+    def facts(self, count: int, *, sprint: str = "sprint:50") -> dict:
+        from dataclasses import replace
+        from ummanu.board.production_rights import card_facts
+
+        row = self.sprints.records.get(sprint, SprintRecord(sprint, "open", None))
+        self.sprints.records[sprint] = replace(row, comments=tuple(
+            {"created_at": "2026-10-05T10:00:00Z", "body": f"comment-{index:03d}"}
+            for index in range(count)))
+        facts = card_facts(card_ref="ummanu-50", kind="decision", touches_production=None,
+                           sprint_ref=sprint)
+        facts.update(display_summary="Which cut ships?", deliver_sprint_comments=True)
+        return facts
+
+    def input_text(self, service, session_id, request_id):
+        queued = service.queue.find(request_id)
+        if queued is not None:
+            return queued.note or "", queued.metadata
+        request = service.store.request(request_id)
+        entry = next(entry for entry in service.store.feed(session_id)
+                     if entry.turn_seq == request.seq and entry.role == po_store.OWNER)
+        return entry.text, entry.metadata
+
+    def test_fifty_comments_delta_survives_lost_ack_restart_and_claim(self) -> None:
+        self.sprints = FakeSprints({"sprint:50": None})
+        service = self.service(run=False, sprints=self.sprints)
+        session = self.session(service)
+        facts = self.facts(50)
+        original_put = service.queue.put
+
+        def lost_ack(**fields):
+            original_put(**fields)
+            raise QueueError("lost acknowledgement after durable queue write")
+
+        with mock.patch.object(service, "pump"), mock.patch.object(service.queue, "put", side_effect=lost_ack):
+            answer = service.handle(dict(op="submit", session_id=session, text="Which cut ships?",
+                                         request_id="first-50", source="dispatcher", card=facts))
+        self.assertEqual(answer["error"]["code"], "outcome_unknown")
+        queued = service.queue.find("first-50")
+        self.assertEqual(queued.metadata["comment_position"], 50)
+        positions = [queued.note.index(f"comment-{index:03d}") for index in range(50)]
+        self.assertEqual(positions, sorted(positions))
+        frozen = queued.document()
+        self.crash(service)
+        restarted = self.service(run=False, sprints=self.sprints)
+        replay = restarted.submit(session_id=session, text="Which cut ships?", request_id="first-50",
+                                  source="dispatcher", card=facts)
+        self.assertTrue(replay["repeated"])
+        self.settled(session, 1)
+        text, metadata = self.input_text(restarted, session, "first-50")
+        self.assertEqual(metadata, frozen["metadata"])
+        self.assertEqual(text, f"Which cut ships?\n\n{frozen['note'].strip()}\n")
+        self.assertEqual(len(self.turns(session)), 1)
+
+        restarted.submit(session_id=session, text="Next cut?", request_id="next-52",
+                         source="dispatcher", card=self.facts(52))
+        self.settled(session, 2)
+        text, metadata = self.input_text(restarted, session, "next-52")
+        self.assertNotIn("comment-049", text)
+        self.assertIn("comment-050", text)
+        self.assertLess(text.index("comment-050"), text.index("comment-051"))
+        self.assertEqual(metadata["comment_position"], 52)
+
+        other = self.session(restarted)
+        restarted.submit(session_id=other, text="Fresh session", request_id="other-52",
+                         source="dispatcher", card=self.facts(52))
+        text, metadata = self.input_text(restarted, other, "other-52")
+        self.assertIn("comment-000", text)
+        self.assertIn("comment-051", text)
+        restarted.submit(session_id=session, text="Other sprint", request_id="other-sprint",
+                         source="dispatcher", card=self.facts(50, sprint="sprint:other"))
+        text, metadata = self.input_text(restarted, session, "other-sprint")
+        self.assertIn("comment-000", text)
+
+    def test_refusal_and_rendering_do_not_consume_comments_and_pending_acceptance_does(self) -> None:
+        from tests.po_card_fakes import card
+        from ummanu.web import pages
+        from ummanu.dispatch.po_cards import _po_record, render_po_card_input
+
+        self.sprints = FakeSprints({"sprint:50": None})
+        service = self.service(run=False, sprints=self.sprints)
+        session = self.session(service)
+        task = card()
+        self.facts(50)
+        render_po_card_input(task, {"comments": list(self.sprints.records["sprint:50"].comments)},
+                             _po_record(task, "render-only").po_submission)
+        refused = service.handle(dict(op="submit", session_id=session, text="Refused", request_id="refused",
+                                      source="dispatcher", card={**self.facts(50), "kind": "operation"}))
+        self.assertFalse(refused["ok"])
+        self.assertEqual(refused["error"]["code"], "unavailable")
+        self.assertIsNone(service.queue.find("refused"))
+        self.assertIsNone(service.store.request("refused"))
+        with mock.patch.object(service, "pump"):
+            service.submit(session_id=session, text="First", request_id="accepted", source="dispatcher",
+                           card=self.facts(50))
+            service.submit(session_id=session, text="Next", request_id="accepted-next", source="dispatcher",
+                           card=self.facts(52))
+        first = service.queue.find("accepted")
+        second = service.queue.find("accepted-next")
+        self.assertIn("comment-000", first.note)
+        self.assertIn("comment-049", first.note)
+        self.assertNotIn("comment-049", second.note)
+        self.assertIn("comment-050", second.note)
+        layer = PoLayer(self.root, data_dir=self.data, store=service.store, models=MODELS)
+        pending = layer.po_session(session)["queued"]
+        self.assertEqual(pending[0]["metadata"], first.metadata)
+        self.assertIn("comment-049", pending[0]["text"])
+        self.assertIn('<details class="po-service-input">',
+                      pages._po_queued_entry(pending[0]))
+        replay = service.submit(session_id=session, text="First", request_id="accepted", source="dispatcher",
+                                card=self.facts(52))
+        self.assertTrue(replay["repeated"])
+        self.assertEqual(len(self.turns(session)), 0)
+        self.assertEqual([item.request_id for item in service.queue.pending(session)],
+                         ["accepted", "accepted-next"])
+        service.pump()
+        accepted = next(entry for entry in layer.po_session(session)["feed"] if entry["role"] == "owner")
+        self.assertEqual(accepted["metadata"], first.metadata)
+        self.assertIn("comment-049", accepted["text"])
+
+
 class QueueOrderTests(ServiceFixture):
     def test_two_inputs_for_one_session_run_one_after_the_other_never_together(self) -> None:
         service = self.service()
