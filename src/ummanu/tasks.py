@@ -2602,6 +2602,36 @@ class TaskWriter:
             )
             return charge
 
+    def record_after_merge_projection(self, *, role: str, actor: str, reference: str,
+                                       expected: e2e_record.AfterMergeMark | None,
+                                       proposed: e2e_record.AfterMergeMark,
+                                       published_merge: bool = False) -> e2e_record.E2eState | None:
+        """Compare the current obligation before publishing a queue/budget mark.
+
+        No run records or charges are replaced by a stale queue snapshot.
+        """
+        from ummanu.board.e2e_disposition import source_obligation
+
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        with ownership_lock(self.data_dir), self._mutation():
+            self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
+            task = self.reader.show(reference)
+            current = e2e_record.e2e_state(task)
+            if (not source_obligation(task, superseded=self._card_superseded(reference))
+                    or current.after_merge != expected):
+                return None
+            if published_merge:
+                fact = next((fact for event in reversed(self.audit.events(reference))
+                             if (fact := post_merge_ci_fact(event)) is not None), None)
+                if fact is None:
+                    raise TaskError("backend_error", "Queued merge has no readable committed post-merge CI", 1)
+                if fact.get("result") != "green" or fact.get("merge_sha") != proposed.merge_sha:
+                    return None
+            current.after_merge = proposed
+            self.client.call("saveTaskMetadata", task_id=_task_number(task),
+                             values={e2e_record.E2E_FIELD: current.text()})
+            return current
+
     def record_after_merge_intent(
         self,
         *,
@@ -2611,6 +2641,7 @@ class TaskWriter:
         sprint: str,
         dispatch_id: str,
         carrier: str,
+        expected: dict[str, e2e_record.AfterMergeMark | None] | None = None,
     ) -> dict[str, Any]:
         """Write an after-merge e2e run's intent on every card it covers, charged first (secretary-1807).
 
@@ -2624,20 +2655,35 @@ class TaskWriter:
         self._role(role, {Role.DISPATCHER}, actor=actor)
         if carrier not in states:
             raise TaskError("validation", f"the carrier {carrier} is not among the covered cards", 2)
+        from ummanu.board.e2e_disposition import pending_mark
+
         tasks = {reference: self.reader.show(reference) for reference in states}
         for reference, task in tasks.items():
             if str(task.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
                 raise TaskError("validation", f"{reference} is not a code card; it carries no e2e runs", 2)
-        with self._mutation():
+        with ownership_lock(self.data_dir), self._mutation():
             for reference in sorted(states):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             tasks = {reference: self.reader.show(reference) for reference in states}
             for reference, task in tasks.items():
                 proposed = e2e_record.E2eState.from_json(json.loads(states[reference])).after_merge
                 mark = e2e_record.e2e_state(task).after_merge
-                if (proposed is None or mark is None or mark.merge_sha != proposed.merge_sha
-                        or mark.state not in {e2e_record.AM_PENDING, e2e_record.AM_BUDGET_WAIT}):
+                if (proposed is None or not pending_mark(task,
+                        superseded=self._card_superseded(reference), merge_sha=proposed.merge_sha)
+                        or (expected is not None and mark != expected.get(reference))):
                     return {"charged": False, "stale": True}
+            offered = {ref: e2e_record.E2eState.from_json(json.loads(value)) for ref, value in states.items()}
+            new_run = offered[carrier].after_merge_run(dispatch_id)
+            if (new_run is None or new_run.placement != e2e_record.AFTER_MERGE
+                    or new_run.sha != offered[carrier].after_merge.merge_sha
+                    or {item["ref"] for item in new_run.covered} != set(states)
+                    or len(new_run.covered) != len(states)
+                    or any(item["merge_sha"] != offered[item["ref"]].after_merge.merge_sha for item in new_run.covered)
+                    or any(state.after_merge.dispatch_id != dispatch_id or state.after_merge.carrier != carrier
+                           for state in offered.values())
+                    or new_run.charged_to != (sprint or "cards")
+                    or (sprint and tasks[carrier].get("sprint") != sprint)):
+                raise TaskError("validation", "after-merge intent must bind the actual carrier/covered merges and payer", 2)
             charge: dict[str, Any] = {"charged": True}
             if sprint:
                 charge = self.client.call(
@@ -2657,9 +2703,14 @@ class TaskWriter:
                 ]
                 if spent:
                     return {"charged": False, "spent": spent}
-            for reference, text in states.items():
+            for reference, proposed in offered.items():
+                current = e2e_record.e2e_state(tasks[reference])
+                proposed.after_merge.charged = [*current.after_merge.charged, *([] if sprint else [dispatch_id])]
+                current.after_merge = proposed.after_merge
+                if reference == carrier:
+                    current.after_merge_runs.append(new_run)
                 self.client.call(
-                    "saveTaskMetadata", task_id=_task_number(tasks[reference]), values={e2e_record.E2E_FIELD: text}
+                    "saveTaskMetadata", task_id=_task_number(tasks[reference]), values={e2e_record.E2E_FIELD: current.text()}
                 )
             return charge
 
@@ -2667,7 +2718,7 @@ class TaskWriter:
                                run: e2e_record.E2eRun) -> e2e_record.E2eState:
         """Update this run under the carrier lock, retaining newer marks and other runs."""
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with self._mutation():
+        with ownership_lock(self.data_dir), self._mutation():
             self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             task = self.reader.show(reference)
             current = e2e_record.e2e_state(task)
@@ -2698,20 +2749,27 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import owns_mark
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with self._mutation():
-            for ref in sorted({reference, carrier}):
+        with ownership_lock(self.data_dir), self._mutation():
+            refs = {reference, carrier} | ({run.hotfix} if run.hotfix else set()) | ({run.disposition} if run.disposition else set())
+            for ref in sorted(refs):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (ref,))
             task = self.reader.show(reference)
             current = e2e_record.e2e_state(task)
             carried = e2e_record.e2e_state(self.reader.show(carrier))
             stored = carried.after_merge_run(run.dispatch_id)
             covered = next((item for item in run.covered if item["ref"] == reference), None)
-            latest = next((candidate for candidate in reversed(carried.after_merge_runs)
-                           if covered in candidate.covered), None) if covered else None
             if (covered and stored and stored.sha == run.sha and stored.covered == run.covered
-                    and owns_mark(current.after_merge, run=stored, carrier=carrier, covered=covered)
-                    and (current.after_merge.dispatch_id or latest is stored)
+                    and owns_mark(current.after_merge, run=stored, carrier=carrier, covered=covered,
+                                  task=task, superseded=self._card_superseded(reference),
+                                  runs=carried.after_merge_runs)
                     and not stored.disposition_result):
+                if (changes.get("hotfix", stored.hotfix) != stored.hotfix
+                        or changes.get("decision", stored.disposition) != stored.disposition):
+                    raise TaskError("validation", "mark holder must belong to the actual carrier run", 2)
+                if stored.hotfix:
+                    if stored.hotfix not in refs:
+                        raise TaskError("backend_error", "hotfix changed during mark admission", 1)
+                    self._after_merge_hotfix_obligation(self.reader.show(carrier), stored)
                 for name, value in changes.items():
                     setattr(current.after_merge, name, value)
                 self.client.call("saveTaskMetadata", task_id=_task_number(task),
@@ -2730,36 +2788,62 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import owns_mark
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        # Native creates take the ownership lock before their SQL transaction.
-        # Keep that order while checking sources and recovering/creating a holder.
         with ownership_lock(self.data_dir), self._mutation():
-            for ref in sorted({carrier, *(item["ref"] for item in run.covered)}):
+            # All nested native creates use this same ownership lock first.
+            # Read only identity before locks; actual evidence is reread below.
+            initial = e2e_record.e2e_state(self.reader.show(carrier)).after_merge_run(run.dispatch_id)
+            refs = {carrier, *(item["ref"] for item in run.covered)}
+            known = self.audit.committed_event(execution_field.DISPOSITION_PREFIX + run.dispatch_id)
+            if known and known.get("ref"):
+                refs.add(known["ref"])
+            if initial and initial.disposition:
+                refs.add(initial.disposition)
+            if initial and initial.hotfix:
+                refs.add(initial.hotfix)
+            for ref in sorted(refs):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (ref,))
             carrier_task = self.reader.show(carrier)
             carried = e2e_record.e2e_state(carrier_task)
             stored = carried.after_merge_run(run.dispatch_id)
-            if stored is None or stored.sha != run.sha or stored.covered != run.covered:
+            if (stored is None or stored.sha != run.sha or stored.covered != run.covered
+                    or stored.hotfix != (initial.hotfix if initial else "")):
                 raise TaskError("validation", "disposition must belong to the actual carrier/run", 2)
+            if stored.disposition_result and stored.disposition_result.get("status") == "settled":
+                yield False
+                return
+            known = self.audit.committed_event(execution_field.DISPOSITION_PREFIX + run.dispatch_id)
+            if known:
+                if (known.get("kind") != "created" or known.get("outcome") != "success"
+                        or (known.get("actor") or {}).get("role") != "dispatcher"
+                        or known.get("ref") not in refs
+                        or (stored.disposition and known.get("ref") != stored.disposition)):
+                    raise TaskError("backend_error", "Disposition create authority changed during admission", 1)
+                operation = self.reader.show(known["ref"])
+                if operation.get("type") != "operation" or operation.get("project") != carrier_task.get("project"):
+                    raise TaskError("validation", "Disposition create is not this project's operation", 2)
             owned = False
-            for item in run.covered:
-                try:
-                    task = self.reader.show(item["ref"])
-                except TaskError as exc:
-                    if exc.code != "not_found":
-                        raise
-                    continue
-                mark = e2e_record.e2e_state(task).after_merge
-                if (mark is None or task.get("closed") or task.get("type") != "code"
-                        or task.get("project") != carrier_task.get("project")
-                        or self._card_superseded(item["ref"])
-                        or not owns_mark(mark, run=run, carrier=carrier, covered=item)
-                        or mark.state == e2e_record.AM_DECLINED):
-                    continue
-                latest = next((candidate for candidate in reversed(carried.after_merge_runs)
-                               if item in candidate.covered), None)
-                if mark.dispatch_id or latest is stored:
-                    owned = True
+            for item in stored.covered:
+                task = self.reader.show(item["ref"])
+                if task.get("project") != carrier_task.get("project"):
+                    raise TaskError("validation", "disposition source is foreign", 2)
+                owned |= owns_mark(e2e_record.e2e_state(task).after_merge, run=stored,
+                    carrier=carrier, covered=item, task=task,
+                    superseded=self._card_superseded(item["ref"]), runs=carried.after_merge_runs)
+            # The run, not a caller's guessed hotfix, binds released create authority.
+            if stored.hotfix:
+                owned |= self._after_merge_hotfix_obligation(carrier_task, stored)
+            run.hotfix, run.disposition = stored.hotfix, stored.disposition
             yield owned
+
+    def _after_merge_hotfix_obligation(self, carrier: dict[str, Any], run: e2e_record.E2eRun) -> bool:
+        from ummanu.board.e2e_disposition import hotfix_obligation
+
+        try:
+            return hotfix_obligation(self.reader.show(run.hotfix), run=run,
+                project=carrier["project"], superseded=self._card_superseded(run.hotfix),
+                created=self.audit.committed_event(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX + run.dispatch_id))
+        except ValueError as exc:
+            raise TaskError("backend_error", str(exc), 1) from None
 
     def reconcile_after_merge_disposition(self, *, role: str, actor: str, carrier: str,
                                           dispatch_id: str) -> dict[str, Any]:
@@ -2785,6 +2869,8 @@ class TaskWriter:
                 or (created.get("actor") or {}).get("role") != "dispatcher"):
             raise TaskError("validation", "disposition operation has no matching committed run create", 2)
         refs = {carrier, initial.disposition, *(item["ref"] for item in initial.covered)}
+        if initial.hotfix:
+            refs.add(initial.hotfix)
         # Lock a possible follow-up along with the operation, then read it again
         # under the lock. Malformed completion cannot authorize a guessed holder.
         from ummanu.board.completion_evidence import E2E_DISPOSITION_SECTION, po_completion_record
@@ -2796,7 +2882,7 @@ class TaskWriter:
         except (ValueError, TaskError) as exc:
             if isinstance(exc, TaskError) and exc.code != "not_found":
                 raise
-        with self._mutation():
+        with ownership_lock(self.data_dir), self._mutation():
             for reference in sorted(refs):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             tasks, missing = {}, []
@@ -2811,6 +2897,13 @@ class TaskWriter:
             run = current[carrier].after_merge_run(dispatch_id)
             if run is None or run.disposition != initial.disposition or run.covered != initial.covered or run.sha != initial.sha:
                 raise TaskError("validation", "disposition run identity changed", 2)
+            created = self.audit.committed_event(execution_field.DISPOSITION_PREFIX + dispatch_id)
+            if (not created or created.get("kind") != "created" or created.get("outcome") != "success"
+                    or created.get("ref") != run.disposition
+                    or (created.get("actor") or {}).get("role") != "dispatcher"):
+                raise TaskError("validation", "disposition operation has no matching committed run create", 2)
+            if run.hotfix != initial.hotfix:
+                raise TaskError("backend_error", "hotfix identity changed during admission", 1)
             if any(task.get("project") != tasks[carrier].get("project") or task.get("type") != "code" for task in tasks.values()):
                 raise TaskError("validation", "disposition sources must be actual project code cards", 2)
             if run.disposition_result and run.disposition_result.get("status") == "settled":
@@ -2836,6 +2929,7 @@ class TaskWriter:
                         sessions.add((event.get("payload") or {}).get("po_session"))
                 return {**value, "_po_sessions": sessions - {None, ""}}
 
+            hotfix_owned = self._after_merge_hotfix_obligation(tasks[carrier], run) if run.hotfix else False
             try:
                 if missing:
                     raise TaskError("not_found", "Covered source(s): " + ", ".join(sorted(missing)), 2)
@@ -2846,6 +2940,9 @@ class TaskWriter:
                     events=self.audit.events(run.disposition), read=read_locked,
                     sprint=read_sprint,
                     superseded=self._card_superseded)
+                if hotfix_owned and effect["action"] == "retry":
+                    effect = {"status": "neutral", "action": "", "holder": "",
+                        "reason": "Unowned hotfix needs planned follow_up or explicit decline to resolve its return route"}
             except TaskError as exc:
                 if exc.code != "not_found":
                     raise
@@ -2858,14 +2955,11 @@ class TaskWriter:
                 if item["ref"] not in current:
                     continue
                 mark = current[item["ref"]].after_merge
-                if (run.disposition_result == receipt or self._card_superseded(item["ref"])
-                        or not owns_mark(mark, run=run, carrier=carrier, covered=item)):
+                if (run.disposition_result == receipt
+                        or not owns_mark(mark, run=run, carrier=carrier, covered=item, task=tasks[item["ref"]],
+                                        superseded=self._card_superseded(item["ref"]),
+                                        runs=current[carrier].after_merge_runs)):
                     continue
-                if not mark.dispatch_id:
-                    latest = next((candidate for candidate in reversed(current[carrier].after_merge_runs)
-                                   if item in candidate.covered), None)
-                    if latest is not run:
-                        continue
                 # A spent budget or newer holder/run is already an independent
                 # obligation and was excluded by owns_mark above.
                 mark.decision = run.disposition
@@ -2877,6 +2971,21 @@ class TaskWriter:
                               else e2e_record.AM_RED if run.resolution == e2e_record.AM_RED and effect["status"] == "waiting"
                               else e2e_record.AM_BLOCKED)
                 linked.append(item["ref"])
+            if hotfix_owned and changed:
+                hotfix = read_locked(run.hotfix)
+                hotfix_state = e2e_record.e2e_state(hotfix)
+                hotfix_state.hotfix_route = e2e_record.HotfixRoute(carrier, dispatch_id, receipt)
+                self.client.call("saveTaskMetadata", task_id=_task_number(hotfix),
+                                 values={"blocked_by": effect["holder"], e2e_record.E2E_FIELD: hotfix_state.text()})
+                # This native publication is in the receipt transaction: a failed
+                # comment or metadata write rolls back the whole disposition.
+                self.comment(role="dispatcher", actor=actor, reference=run.hotfix,
+                    body=f"PO operation {run.disposition}: {effect['status']}; {effect['reason']}. "
+                         + (f"Return-route holder: {effect['holder']}." if effect["holder"]
+                            else "No live return-route holder; " + ("explicit terminal disposition recorded."
+                                if effect["status"] == "settled" else "PO must repair the same operation.")),
+                    request_id="dispatcher-e2e-am-hotfix-disposition-" + dispatch_id + "-"
+                        + hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()[:16])
             run.disposition_result = receipt
             for ref in {carrier, *linked}:
                 self.client.call("saveTaskMetadata", task_id=_task_number(tasks[ref]),

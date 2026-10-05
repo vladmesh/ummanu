@@ -26,11 +26,30 @@ def safe_retry(run: e2e_record.E2eRun) -> bool:
     )
 
 
+def source_obligation(task: Mapping[str, Any], *, superseded: bool) -> bool:
+    """Retention is visibility, not disposition of a code card's e2e obligation."""
+    return task.get("type", "code") == "code" and not superseded
+
+
+def pending_mark(task: Mapping[str, Any], *, superseded: bool,
+                 merge_sha: str | None = None) -> bool:
+    mark = e2e_record.e2e_state(task).after_merge
+    return bool(source_obligation(task, superseded=superseded) and mark
+                and mark.state in {e2e_record.AM_PENDING, e2e_record.AM_BUDGET_WAIT}
+                and (merge_sha is None or mark.merge_sha == merge_sha))
+
+
 def owns_mark(mark: e2e_record.AfterMergeMark | None, *, run: e2e_record.E2eRun,
-              carrier: str, covered: Mapping[str, str]) -> bool:
+              carrier: str, covered: Mapping[str, str], task: Mapping[str, Any] | None = None,
+              superseded: bool = False, runs: list[e2e_record.E2eRun] | None = None) -> bool:
     """Current merge/run/holder wins over old recovery, including released 0024 marks."""
-    if mark is None or mark.merge_sha != covered["merge_sha"] or mark.carrier != carrier:
+    if (superseded or (task is not None and not source_obligation(task, superseded=superseded))
+            or mark is None or mark.merge_sha != covered["merge_sha"] or mark.carrier != carrier):
         return False
+    if not mark.dispatch_id and runs is not None:
+        latest = next((candidate for candidate in reversed(runs) if covered in candidate.covered), None)
+        if latest is not run:
+            return False
     if mark.dispatch_id and mark.dispatch_id != run.dispatch_id:
         return False
     if mark.decision and mark.decision != run.disposition:
@@ -38,7 +57,27 @@ def owns_mark(mark: e2e_record.AfterMergeMark | None, *, run: e2e_record.E2eRun,
     if mark.holder not in (None, "", run.disposition, (run.disposition_result or {}).get("holder")):
         return False
     return mark.state in {e2e_record.AM_COVERED, e2e_record.AM_BLOCKED, e2e_record.AM_RED,
-                          e2e_record.AM_PENDING, e2e_record.AM_DECLINED}
+                          e2e_record.AM_PENDING}
+
+
+def hotfix_obligation(task: Mapping[str, Any], *, run: e2e_record.E2eRun,
+                      project: str, created: Mapping[str, Any] | None,
+                      superseded: bool) -> bool:
+    """An actual released hotfix is independent of its covered source marks.
+
+    The caller reads create authority under the same locks as run/card evidence.
+    Missing or inconsistent authority is degraded, never a terminal conclusion.
+    """
+    if (not created or created.get("kind") != "created" or created.get("outcome") != "success"
+            or created.get("ref") != run.hotfix or (created.get("actor") or {}).get("role") != "dispatcher"
+            or task.get("ref") != run.hotfix or task.get("type") != "code"
+            or task.get("project") != project):
+        raise ValueError("Hotfix lacks matching committed dispatcher create/run identity")
+    receipt = run.disposition_result or {}
+    return bool(not superseded and not task.get("closed") and task.get("state") == "blocked"
+                and not task.get("sprint") and po_origin.po_origin(task) is None
+                and task.get("blocked_by") in (None, "", run.disposition, receipt.get("holder"))
+                and receipt.get("status") != "settled")
 
 
 def completion_identity(operation: str, carrier: str, run: e2e_record.E2eRun) -> dict[str, Any]:
@@ -76,7 +115,8 @@ def disposition_effect(*, operation: dict[str, Any], carrier: str, run: e2e_reco
     def neutral(why: str) -> dict[str, str]:
         return {"status": "neutral", "action": "", "holder": "",
                 "reason": why + ". PO must repair the disposition/route and record a bound native completion"}
-    if operation.get("type") != "operation" or operation.get("closed") or superseded(ref):
+    if (operation.get("type") != "operation" or superseded(ref)
+            or (operation.get("closed") and operation.get("state") != "done")):
         return neutral("Disposition operation is missing, closed or superseded; PO must repair its route")
     if operation.get("state") in {"ready", "in_progress", "blocked"}:
         return {"status": "waiting", "action": "", "holder": ref, "reason": "PO disposition is unresolved"}
@@ -119,7 +159,7 @@ def disposition_effect(*, operation: dict[str, Any], carrier: str, run: e2e_reco
               "reason": outcome["evidence"], "completion": str(completed.get("event_id") or completed["request_id"])}
     if outcome["action"] == "follow_up":
         holder = read(outcome["holder"])
-        if (holder.get("closed") or superseded(outcome["holder"])
+        if ((holder.get("closed") and holder.get("state") != "done") or superseded(outcome["holder"])
                 or holder.get("project") != operation.get("project")
                 or holder.get("type") not in {"code", "infra", "research", "decision", "operation"}):
             return neutral("Follow-up holder is closed, superseded, foreign or not real planned work")

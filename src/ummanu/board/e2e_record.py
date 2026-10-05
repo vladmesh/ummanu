@@ -307,6 +307,31 @@ class AfterMergeMark:
 
 
 @dataclass
+class HotfixRoute:
+    """The actual hotfix's copy of its carrier's native disposition receipt."""
+
+    carrier: str
+    run: str
+    result: dict[str, str]
+
+    @classmethod
+    def from_json(cls, value: Any) -> HotfixRoute | None:
+        if not isinstance(value, Mapping) or set(value) != {"carrier", "run", "result"}:
+            return None
+        result = value.get("result")
+        if (not all(isinstance(value.get(key), str) and value[key] for key in ("carrier", "run"))
+                or not isinstance(result, Mapping)
+                or not {"operation", "status", "action", "holder", "reason"} <= set(result)
+                or set(result) - {"operation", "status", "action", "holder", "reason", "completion"}
+                or any(not isinstance(item, str) for item in result.values())
+                or result.get("status") not in {"waiting", "neutral", "follow_up", "settled"}
+                or result.get("action") not in {"", "retry", "decline", "follow_up"}
+                or not result.get("operation") or not result.get("reason")):
+            return None
+        return cls(value["carrier"], value["run"], dict(result))
+
+
+@dataclass
 class E2eState:
     """Every run record of one card, as its `e2e` field holds them."""
 
@@ -316,6 +341,7 @@ class E2eState:
     after_merge_runs: list[E2eRun] = field(default_factory=list)
     # Decision identity and exact Blocked occurrence; cleared by every other transition.
     budget_decline: dict[str, str] | None = None
+    hotfix_route: HotfixRoute | None = None
 
     @property
     def dispatched(self) -> int:
@@ -345,6 +371,8 @@ class E2eState:
         document: dict[str, Any] = {"runs": [asdict(run) for run in self.runs]}
         if self.budget_decline is not None:
             document["budget_decline"] = dict(self.budget_decline)
+        if self.hotfix_route is not None:
+            document["hotfix_route"] = asdict(self.hotfix_route)
         if self.budget_wait is not None:
             document["budget_wait"] = asdict(self.budget_wait)
         if self.after_merge is not None:
@@ -376,6 +404,7 @@ class E2eState:
             mark,
             [run for run in after if run is not None],
             dict(decline) if decline is not None else None,
+            HotfixRoute.from_json(mapping.get("hotfix_route")),
         )
 
 
@@ -409,6 +438,7 @@ def e2e_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
         and state.after_merge is None
         and not state.after_merge_runs
         and state.budget_decline is None
+        and state.hotfix_route is None
     ):
         return None
     sprint = str(task.get("sprint") or "")
@@ -418,6 +448,7 @@ def e2e_view(task: Mapping[str, Any]) -> dict[str, Any] | None:
         "runs_dispatched": state.dispatched,
         "run_cap": None if sprint else e2e_budget.card_cap(task),
         "budget": sprint or None,
+        **({"hotfix_route": asdict(state.hotfix_route)} if state.hotfix_route else {}),
         **({"declined_by": state.budget_decline["decision"]} if state.budget_decline else {}),
         **(
             {"mark": state.budget_wait.mark, "waiting_on": state.budget_wait.decision}

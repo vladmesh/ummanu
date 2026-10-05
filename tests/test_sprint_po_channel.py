@@ -16,7 +16,7 @@ from typing import Any
 from unittest import mock
 
 from tests.po_fake_store import FakePoStore
-from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, REQUEST_PO_NOTES, NEUTRAL_PO_NOTES
 from ummanu import sprint_commands
 from ummanu.board.po_channel import requests_po
 from ummanu.board.sprint_read import RESUME_FIELDS, SprintResume
@@ -53,22 +53,12 @@ PRE_0016_META = {
 
 class ObserverRequestAdmissionTests(unittest.TestCase):
     def test_direct_requests_and_waits_in_both_languages(self):
-        for body in ("[observer:request] Assign the route", "Please ask PO to approve the route.",
-                     "PO, please decide.", "Wait for the PO decision.", "We need PO to assign this.",
-                     "Need a decision from PO.", "Прошу ПО назначить маршрут.", "Ждём решения ПО.",
-                     "Нужно решение ПО.", "ПО должен выбрать маршрут.", "Следующий шаг: ждать ответа ПО.",
-                     "Need PO.", "Wait for PO's approval.", "PO must decide.", "PO to approve.",
-                     "Request PO answer.", "Need Product Owner to resolve this.",
-                     "Ждём ПО ответ.", "Прошу ПО решить вопрос.", "ПО, назначь маршрут."):
+        for body in REQUEST_PO_NOTES:
             with self.subTest(body=body):
                 self.assertTrue(requests_po(body))
 
     def test_notes_negation_quotations_and_future_implementation_are_not_requests(self):
-        for body in ("No PO action is needed.", "Do not ask PO to decide.", "Не ждём решения ПО.",
-                     'Evidence: "Wait for PO decision."', '> [observer:request] historical request',
-                     "```\nPO, decide now.\n```", "Implement PO routing in the next code card.",
-                     "Future implementation will validate PO decisions.", "Recorded PO decision is quoted on the card.",
-                     "Будущая реализация проверяет решения ПО.", "Note: PO session is recorded."):
+        for body in NEUTRAL_PO_NOTES:
             with self.subTest(body=body):
                 self.assertFalse(requests_po(body))
 

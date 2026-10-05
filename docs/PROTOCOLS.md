@@ -1691,7 +1691,7 @@ marked on the board for that merge SHA is not queued again), so a replay after a
 two queues the card once. The
 pending sets live in the dispatcher's production state (`e2e_after_merge`, one queue per project:
 `pending`, the `run` in flight, `budget_waits`, `cleanup`), beside the post-merge watches; `production
-observe` lists them. Each queued card is marked on the board too (below).
+observe` lists them. Each new pending mark commits against the latest native green post-merge CI fact before its queue projection; released unmarked queues use the same admission below.
 
 **One run in flight per project, coalesced.** Each tick, after the post-merge watches, every project's
 queue advances on its own (`reconcile_after_merge`); one project never waits on another. While a project
@@ -1706,9 +1706,13 @@ has a run in flight its pending cards wait. When it has none and the set is not 
   id `<carrier>-e2e-am-<n>-<random>`) lives on the newest covered card, the *carrier*, in its `e2e` field
   under `after_merge_runs`, with `covered` (`{ref, merge_sha}` each), the branch, and what paid for it;
   every covered card's mark says `covered` with that dispatch id. All of it is one write,
-  `TaskWriter.record_after_merge_intent`, in the transaction that charges the run. The production state
-  names the run in flight before that write, so a dispatcher that dies in between finds no intent on the
-  carrier and puts the cards back, with nothing charged and nothing dispatched.
+  `TaskWriter.record_after_merge_intent`, in the transaction that charges the run. It rereads the
+  actual pending marks and supersession under the ownership lock then sorted source locks, preserves
+  existing run/charge records, and refuses stale snapshots without a charge. The production state
+  names the run in flight after that write. If its projection save is lost, recovery discovers the
+  carrier's committed intent without another charge or POST; an unconfirmed prior effect uses the
+  ordinary PO disposition. Released queue-only runs with no intent still return their cards to pending,
+  with nothing charged or dispatched.
 
 **Exact SHA, on a branch the dispatcher owns.** `workflow_dispatch` takes a branch or a tag, not a SHA,
 and `main` may have moved past the target. The dispatcher creates the branch `pipeline-e2e/<dispatch
@@ -4728,27 +4732,42 @@ Sentence boundaries are line breaks and `. ! ? ;`. Block quotations, fenced code
 backtick/double-quote/guillemet quotations are evidence; negated sentences and future implementation
 mentions do not start the request grammar. This bounded grammar is not a classifier of every PO
 mention. Other request wording must use the explicit marker or typed wait representation.
-The role is positively established by its following syntax, with no component-noun denylist:
+Request context establishes the role before any ambiguity restriction:
 
-- English `PO`/`Product Owner` must end the sentence, precede `,`/`:`, precede a request
-  object (`decision`, `answer`, `action`, `approval`), or precede a supported verb, optionally
-  framed by `to`, `must`, `need/needs to`, or `please`. The exact verbs are `decide`, `choose`,
-  `assign`, `approve`, `answer`, `act`, `resolve`, `confirm`, `review`.
-  Possessive `PO's` is recognized only before one of those four request objects.
-- Cyrillic `ПО` is uppercase and case-sensitive; lowercase `по` is always a preposition.
-  It must end the sentence, precede `,`/`:`, precede `решение/решения`, `ответ/ответа`,
-  `действие/действия`, `согласование/согласования`, or precede a supported verb,
-  optionally framed by `должен`, `нужно`, or `прошу`. Exact verb forms are
-  `выбрать/выбери/выберите/выбрал`, `назначить/назначь/назначьте/назначил`,
+- A request object before the role (`decision/answer/action/approval from/by/of
+  [the] PO`, or `решение/решения/ответ/ответа/действие/действия/согласование/согласования
+  [от] ПО`) names the addressee. Complements after PO do not change that, including
+  `Need a decision from PO on the route` and `Ждём ответа ПО на вопрос`.
+- `ask/request/need/await/wait/waiting for/on [a/an/the] PO to/must/need/needs to/please
+  <word>` and direct `PO to/must/need/needs to/please <word>` establish the actor.
+  Action words are unrestricted within these explicit frames: `Ask PO to pick the
+  route` and `PO must improve telemetry next` are requests. `Ask PO for [a/an/the]
+  decision/answer/action/approval` is also a request, with the object boundary below.
+- Russian actor frames `ПО должен/должна/нужно/прошу <word>` and `нужно/требуется,
+  чтобы ПО <word>` likewise need no action-word vocabulary. After a request/wait
+  prefix, an infinitive ending in `ть/ти/чь` or a supported direct verb establishes
+  the actor, e.g. `Прошу ПО перепроверить ограничения`. Cyrillic `ПО` is uppercase
+  and case-sensitive; lowercase `по` is always a preposition.
+- Ambiguous objects after the role, including possessive `PO's`, must end the
+  sentence, precede address punctuation, or start a complement with English
+  `for/on/about/from/by/of/to/regarding` or Russian `по/на/о/об/для/от`.
+  A following bare noun is a component phrase, not a bounded request object.
+  Thus `Need PO answer delivery fix`, `Need PO approval flow rework` and
+  `Wait for PO decision card ummanu-80 to merge` are ordinary notes. Bare direct
+  English `PO answer/review` requires end/address or a complement introduced by
+  `the/a/an/this/that/for/on/about`; `PO review fix ummanu-80 is in CI` and
+  `PO answer delivery is fixed` remain notes.
+- Bare direct English verbs `decide/choose/assign/approve/act/resolve/confirm`
+  and Russian `выбрать/выбери/выберите/выбрал`, `назначить/назначь/назначьте/назначил`,
   `решить/реши/решите/решил`, `ответить/ответь/ответьте/ответил`,
-  `согласовать/согласуй/согласуйте/согласовал`, `подтвердить/подтверди/подтвердите/подтвердил`.
-- Any other following word defaults to a component modifier, including unlisted words,
-  plurals and translations. Hyphenated/word-attached role tokens are also modifiers.
-  Thus `Need PO context rollover`, `Wait for PO turns to drain`, `Need PO telemetry repair`
-  and `Ждём ПО телеметрию` remain ordinary code-card notes without `po_request`.
+  `согласовать/согласуй/согласуйте/согласовал`,
+  `подтвердить/подтверди/подтвердите/подтвердил` are supported request forms.
+- An otherwise bare role after a request/wait prefix must end the sentence or
+  precede address punctuation. Hyphenated/word-attached role tokens are modifiers.
+  Unlisted component nouns, plurals and translations require no denylist:
+  `Need PO context rollover`, `Wait for PO turns to drain`, `Need PO telemetry repair`
+  and `Ждём ПО телеметрию` remain code-card notes without `po_request`.
 
-These positive continuations are required in every request frame, including requests for
-an object from the role. A role-prefixed noun alone does not infer a request.
 `The PO must decide`, `Awaiting PO decision` and `Let the PO decide` are outside this
 finite grammar: use `[observer:request]` or a typed `po_request` for these wordings.
 
@@ -4821,7 +4840,8 @@ Native `task complete --kind operation --body-file ...` preserves an optional
 - `follow_up`: additionally requires `holder`, a separate actual planned code/infra/
   research/decision/operation card in an open supported sprint or from a genuine PO
   turn, in this project. Dependents wait on that live card. Its Done settles the
-  original disposition; missing, closed, superseded or unrouted work becomes neutral.
+  original disposition; missing, superseded or unrouted work becomes neutral.
+  Native Done retention does not invalidate a completed operation/follow-up.
 
 Only the native atomic PO In progress -> Done completion with the matching rendered
 record and an actual session in the supported execution route is consumed. Extra
@@ -4840,8 +4860,9 @@ Ready/In progress again restores the operation as the live holder; corrected com
 then reaches the same consumer. Old charges, run evidence and both completion events
 remain historical. Nothing spends again until current ordinary admission succeeds.
 
-Reconciliation reads authoritative completion and current covered marks under sorted
-card row locks, preserving newer merge/run/holder state. Receipt and marks commit in
+Reconciliation takes the existing ownership lock before sorted operation/carrier/
+source/hotfix/follow-up row locks, then rereads run identity, committed create,
+completion, supersession and current covered marks, preserving newer merge/run/holder state. Receipt and marks commit in
 one transaction before queue projection saves and publication. `disposition_result`
 on the existing e2e run holds the receipt; `after_merge.holder` distinguishes a live
 obligation from the historical `decision` link. Omitted/null holder reads the released
@@ -4851,8 +4872,33 @@ of released records. Terminal receipts apply once. Pending marks rebuild deleted
 and current ancestry chooses the target; neither restart nor a lost queue save repeats
 completion, enqueue, charge or dispatch. Per-item degraded reads leave durable evidence
 intact and do not starve other carriers. Production/live validation remains DoD9.
-Before creating or recovering an operation, the writer locks carrier/covered rows and
-applies that same `owns_mark` rule and latest-run precedence to actual unresolved marks.
-No current obligation means no new/linking PO question; historical evidence and cleanup
-remain. Mixed old/new marks produce one holder only for the still-owned obligations.
+Before creating or recovering an operation, the writer applies the same
+`board/e2e_disposition.py` source/pending/`owns_mark` rule under those locks.
+Retention closure alone never ends an unresolved paid, pending or budget-wait
+obligation. Actual supersession, current merge/run/holder replacement, decline or
+native terminal disposition does. Missing/unreadable evidence degrades rather than
+pretending the question was answered. The existing complete board snapshot read
+includes retained sources/carriers; released0024 hotfix create audit also discovers
+its actual carrier. No retention exemption or new recovery index is needed.
+
+An actual open, unowned Blocked hotfix is an independent return-route obligation:
+its committed dispatcher create must bind this run/hotfix. Even all-newer source
+marks leave that question needing its one PO operation. Historical red runs with
+neither current sources nor unresolved hotfix create no operation or fresh hotfix.
+Creation and run linkage commit before queue projection, preserving released
+committed-create-before-link recovery by the same stable request ID.
+
+For this unowned hotfix, a native `follow_up` names supported planned work, and
+native `decline` records the terminal route disposition; `retry` alone cannot answer
+its route question. The consumer atomically copies its bound receipt to the actual
+hotfix's `e2e.hotfix_route` (`carrier`, `run`, `result`) and maintains its native
+`blocked_by` dependency, with a dispatcher audit/comment naming the outcome.
+The public e2e view shows that receipt and the single live route holder. Terminal
+or neutral receipts have no Done-holder wait, and terminal receipts suppress the
+otherwise generic Blocked-to-observer wait for this answered route. The code card
+remains Blocked for its historical code state; no dispatcher impersonates PO or
+fabricates a code completion. Follow-up Done clears its dependency and settles
+both receipts, including retained Done follow-up. Receipt/marks/hotfix publication
+fail together, and repeated ticks/native completion/restarts do not ask or spend
+again. Bare/malformed completion remains neutral with PO repair of the same operation.
 Superseded pending work cannot be revived by a retained or deleted-queue projection.

@@ -65,11 +65,11 @@ import hashlib
 import json
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import timedelta
 from typing import Any
 
-from ummanu.board import e2e_budget, e2e_record, owner_decisions, owner_events, po_execution, wait_card
+from ummanu.board import e2e_budget, e2e_disposition, e2e_record, owner_decisions, owner_events, po_execution, wait_card
 from ummanu.board import po_origin as origin_field
 from ummanu.board.e2e_record import (
     AFTER_MERGE,
@@ -205,13 +205,24 @@ def enqueue(runtime: Any, payload: dict[str, Any], watch: dict[str, Any]) -> Enq
         return Enqueued(True)
     queue = _queue(payload, project)
     run = queue.get("run") or {}
-    known = {str(entry.get("ref")) for entry in queue["pending"]} | {
-        str(entry.get("ref")) for entry in run.get("entries") or []
+    known = {(str(entry.get("ref")), str(entry.get("merge_sha"))) for entry in queue["pending"]} | {
+        (str(entry.get("ref")), str(entry.get("merge_sha"))) for entry in run.get("entries") or []
     }
-    if ref in known:
+    if (ref, merge_sha) in known:
         return Enqueued(True)
     try:
-        mark = e2e_record.e2e_state(runtime.reader.show(ref)).after_merge
+        task = runtime.reader.show(ref)
+        if not e2e_disposition.source_obligation(task, superseded=runtime.writer._card_superseded(ref)):
+            return Enqueued(True)
+        mark = e2e_record.e2e_state(task).after_merge
+        if mark is not None and mark.merge_sha == merge_sha:
+            return Enqueued(True)
+        proposed = AfterMergeMark(merge_sha=merge_sha, state=AM_PENDING,
+                                 charged=list(mark.charged) if mark else [])
+        if runtime.writer.record_after_merge_projection(role="dispatcher", actor=runtime.owner,
+                reference=ref, expected=mark, proposed=proposed, published_merge=True) is None:
+            return Enqueued(False, _outcome(project, "e2e-after-merge-not-queued", ref=ref,
+                status="degraded", reason="Merge ownership changed during pending admission; keep the watch"))
     except TaskError as exc:
         return Enqueued(
             False,
@@ -223,8 +234,7 @@ def enqueue(runtime: Any, payload: dict[str, Any], watch: dict[str, Any]) -> Enq
                 reason=f"the card cannot be read: {exc.code}: {exc.message}; the post-merge watch is kept",
             ),
         )
-    if mark is not None and mark.merge_sha == merge_sha:
-        return Enqueued(True)
+    queue["pending"] = [entry for entry in queue["pending"] if entry["ref"] != ref]
     queue["pending"].append(
         {
             "ref": ref,
@@ -233,7 +243,7 @@ def enqueue(runtime: Any, payload: dict[str, Any], watch: dict[str, Any]) -> Enq
             "merged_at": float(watch.get("started_at") or time.time()),
             "repo": str(watch.get("repo") or ""),
             "base": str(watch.get("base") or ""),
-            "marked": False,
+            "marked": True,
         }
     )
     return Enqueued(True, _outcome(project, "e2e-after-merge-queued", ref=ref, merge_sha=merge_sha))
@@ -247,10 +257,14 @@ def reconcile_after_merge(
     # The board, including drained queues, is authoritative. Isolate each carrier:
     # one unreadable released run must not starve any other disposition.
     try:
-        cards = runtime.reader.list()
+        cards = list(runtime.reader.restore_snapshot().values())
     except (TaskError, ValueError, TypeError, KeyError) as exc:
         cards = []
         outcomes.append(_outcome("", "e2e-after-merge-route-unread", status="degraded", reason=str(exc)))
+        try:
+            cards = runtime.reader.list()
+        except (TaskError, ValueError, TypeError, KeyError) as active_exc:
+            outcomes.append(_outcome("", "e2e-after-merge-route-unread", status="degraded", reason=str(active_exc)))
     # Released 0024 hotfix creates can name a carrier outside the active listing.
     carriers = {card["ref"] for card in cards if e2e_record.e2e_state(card).after_merge_runs}
     for hotfix in cards:
@@ -345,32 +359,31 @@ def _mark_queued(
     """Every newly queued card shows it is pending; a card that is not a code card leaves the queue."""
     changed = False
     for entry in list(queue["pending"]):
-        if runtime.writer._card_superseded(str(entry["ref"])):
-            queue["pending"].remove(entry)
-            changed = True
-            continue
+        task = runtime.reader.show(str(entry["ref"]))
+        superseded = runtime.writer._card_superseded(task["ref"])
         if entry.get("marked"):
-            # A crash may lose the queue save after the durable disposition link.
-            previous = e2e_record.e2e_state(runtime.reader.show(str(entry["ref"]))).after_merge
-            if previous is not None and (previous.merge_sha != entry["merge_sha"]
-                                         or previous.state not in {AM_PENDING, AM_BUDGET_WAIT}):
+            if (e2e_disposition.source_obligation(task, superseded=superseded)
+                    and e2e_record.e2e_state(task).after_merge is None):
+                raise TaskError("backend_error", "Queued obligation has no readable committed mark", 1)
+            if not e2e_disposition.pending_mark(task, superseded=superseded, merge_sha=entry["merge_sha"]):
                 queue["pending"].remove(entry)
                 changed = True
             continue
-        task = runtime.reader.show(str(entry["ref"]))
-        if str(task.get("type") or "code") != "code":
-            queue["pending"].remove(entry)
-            changed = True
-            continue
         state = e2e_record.e2e_state(task)
         previous = state.after_merge
-        state.after_merge = AfterMergeMark(
-            merge_sha=str(entry["merge_sha"]),
-            state=AM_PENDING,
-            charged=list(previous.charged) if previous is not None else [],
-        )
-        _persist(runtime, str(entry["ref"]), state)
-        entry["marked"] = True
+        # The released native post-merge CI event binds a new merge. Read it again
+        # under the writer's locks; a queue alone cannot replace a current merge.
+        if previous and previous.merge_sha == entry["merge_sha"]:
+            admitted = e2e_disposition.pending_mark(task, superseded=superseded, merge_sha=entry["merge_sha"])
+        else:
+            proposed = AfterMergeMark(merge_sha=str(entry["merge_sha"]), state=AM_PENDING,
+                charged=list(previous.charged) if previous else [])
+            admitted = runtime.writer.record_after_merge_projection(role="dispatcher", actor=runtime.owner,
+                reference=task["ref"], expected=previous, proposed=proposed, published_merge=True) is not None
+        if admitted:
+            entry["marked"] = True
+        else:
+            queue["pending"].remove(entry)
         changed = True
     if changed:
         runtime.save_records(payload, records)
@@ -400,10 +413,7 @@ def _reconcile_disposition(runtime: Any, payload: dict[str, Any], records: dict[
             runtime.save_records(payload, records)
     if not run.disposition:
         if run.resolution == AM_RED and run.hotfix:
-            hotfix = runtime.reader.show(run.hotfix)
-            if (not hotfix.get("sprint") and origin_field.po_origin(hotfix) is None
-                    and hotfix.get("state") != "done" and not hotfix.get("closed")):
-                _red(runtime, project, carrier_ref, state, run)
+            _red(runtime, project, carrier_ref, state, run)
         elif (run.acted or run.closing or run.result) and run.resolution in {AM_REQUEUED, AM_BLOCKED} and not _safe_retry(run):
             run.disposition = _disposition(runtime, project, carrier_ref, run,
                 "Resolve the unconfirmed after-merge result before any further paid run. "
@@ -442,8 +452,8 @@ def _recover_pending(runtime: Any, payload: dict[str, Any], records: dict[str, A
         try:
             task = runtime.reader.show(card["ref"])
             mark = e2e_record.e2e_state(task).after_merge
-            if (mark is None or mark.state not in {AM_PENDING, AM_BUDGET_WAIT} or task.get("closed")
-                    or runtime.writer._card_superseded(task["ref"])):
+            if not e2e_disposition.pending_mark(task,
+                    superseded=runtime.writer._card_superseded(task["ref"])):
                 continue
             project = str(task["project"])
             queue = _queue(payload, project)
@@ -516,11 +526,14 @@ def _remark(runtime: Any, ref: str, carrier_ref: str, carrier_state: E2eState,
         state = carrier_state
     else:
         state = e2e_record.e2e_state(runtime.reader.show(ref))
-    mark = state.after_merge or AfterMergeMark(merge_sha=str(changes.get("merge_sha") or ""))
+    expected = state.after_merge
+    mark = AfterMergeMark(**asdict(expected)) if expected else AfterMergeMark(merge_sha=str(changes.get("merge_sha") or ""))
     for name, value in changes.items():
         setattr(mark, name, value)
-    state.after_merge = mark
-    _persist(runtime, ref, state)
+    current = runtime.writer.record_after_merge_projection(role="dispatcher", actor=runtime.owner,
+        reference=ref, expected=expected, proposed=mark)
+    if current is not None:
+        state.after_merge = current.after_merge
 
 
 def _sprint_open(runtime: Any, sprint: str) -> bool:
@@ -599,6 +612,7 @@ def _start(
     carrier_ref = str(target["ref"])
     tasks = {str(entry["ref"]): runtime.reader.show(str(entry["ref"])) for entry in covered}
     states = {ref: e2e_record.e2e_state(task) for ref, task in tasks.items()}
+    expected = {ref: state.after_merge for ref, state in states.items()}
     carrier_state = states[carrier_ref]
     sprint = str(tasks[carrier_ref].get("sprint") or "")
     sprint = sprint if _sprint_open(runtime, sprint) else ""
@@ -632,28 +646,26 @@ def _start(
             charged=charged if sprint else [*charged, dispatch_id],
         )
     carrier_state.after_merge_runs.append(run)
-    # The run is in flight in the production state before its intent is on the board: a dispatcher
-    # that dies in between finds no intent on the carrier and puts the cards back.
-    queue["run"] = {"carrier": carrier_ref, "dispatch_id": dispatch_id, "sha": sha, "entries": covered}
-    queue["pending"] = [entry for entry in queue["pending"] if entry not in covered]
-    runtime.save_records(payload, records)
+    # Board intent/charge are authoritative. A lost projection save is recovered
+    # from the actual carrier run; it cannot manufacture a paid queue-only run.
     charged = runtime.writer.record_after_merge_intent(
         role="dispatcher",
         actor=runtime.owner,
         states={ref: state.text() for ref, state in states.items()},
+        expected=expected,
         sprint=sprint,
         dispatch_id=dispatch_id,
         carrier=carrier_ref,
     )
     if not charged.get("charged"):
-        queue["pending"] = [*covered, *queue["pending"]]
-        queue["run"] = None
-        runtime.save_records(payload, records)
         if charged.get("stale"):
             _mark_queued(runtime, payload, records, queue)
             return _outcome(project, "e2e-after-merge-admission-changed", status="degraded",
                             reason="Covered marks changed before atomic intent; no run was charged or dispatched")
         return _budget_spent(runtime, payload, records, project, queue, tasks, covered, sprint, charged)
+    queue["run"] = {"carrier": carrier_ref, "dispatch_id": dispatch_id, "sha": sha, "entries": covered}
+    queue["pending"] = [entry for entry in queue["pending"] if entry not in covered]
+    runtime.save_records(payload, records)
     _push_and_dispatch(runtime, carrier_ref, carrier_state, run, declaration)
     settled, _done = _settle(runtime, payload, records, project, queue)
     return settled or _outcome(project, "e2e-after-merge-dispatching", ref=carrier_ref, sha=sha)
@@ -1049,22 +1061,24 @@ def _hotfix_description(run: E2eRun, summary: str, log: str) -> str:
 
 def _red(runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2eRun) -> None:
     """One `code` hotfix card per run, then each covered card names it."""
-    if not run.hotfix:
-        run.hotfix = _hotfix(runtime, project, carrier_ref, run)
-        _persist_run(runtime, carrier_ref, state, run)
-    hotfix = runtime.reader.show(run.hotfix)
-    if (not hotfix.get("sprint") and origin_field.po_origin(hotfix) is None
-            and hotfix.get("state") != "done" and not hotfix.get("closed")):
-        run.disposition = _disposition(runtime, project, carrier_ref, run,
-            f"Assign the return route and disposition of unowned hotfix {run.hotfix}. "
-            "Inspect the run evidence, then create planned follow-up work through an appropriate "
-            "open sprint or a real PO turn, or document why no correction is needed. "
-            "Do not fabricate a PO origin or rewrite a closed sprint.")
-        _persist_run(runtime, carrier_ref, state, run)
-        if run.disposition:
-            runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=run.hotfix,
-                body=f"PO operation {run.disposition} owns this hotfix's return-route assignment and disposition.",
-                request_id=stage_request_id("e2e-am-hotfix-route", run.dispatch_id))
+    with runtime.writer.after_merge_disposition_admission(role="dispatcher", actor=runtime.owner,
+                                                        carrier=carrier_ref, run=run) as owned:
+        if not owned:
+            return
+        if not run.hotfix:
+            run.hotfix = _hotfix(runtime, project, carrier_ref, run)
+            _persist_run(runtime, carrier_ref, state, run)
+        if runtime.writer._after_merge_hotfix_obligation(runtime.reader.show(carrier_ref), run):
+            run.disposition = _disposition(runtime, project, carrier_ref, run,
+                f"Assign the return route and disposition of unowned hotfix {run.hotfix}. "
+                "Inspect the run evidence, then create planned follow-up work through an appropriate "
+                "open sprint or a real PO turn, or document why no correction is needed. "
+                "Do not fabricate a PO origin or rewrite a closed sprint.")
+            _persist_run(runtime, carrier_ref, state, run)
+            if run.disposition:
+                runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=run.hotfix,
+                    body=f"PO operation {run.disposition} owns this hotfix's return-route assignment and disposition.",
+                    request_id=stage_request_id("e2e-am-hotfix-route", run.dispatch_id))
     for item in run.covered:
         runtime.writer.comment(
             role="dispatcher",
@@ -1140,7 +1154,10 @@ def _disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRun, acti
                                                         carrier=carrier_ref, run=run) as owned:
         if not owned:
             return ""
-        return _create_disposition(runtime, project, carrier_ref, run, action)
+        run.disposition = _create_disposition(runtime, project, carrier_ref, run, action)
+        runtime.writer.record_after_merge_run(role="dispatcher", actor=runtime.owner,
+            reference=carrier_ref, run=run)
+        return run.disposition
 
 
 def _create_disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRun, action: str) -> str:

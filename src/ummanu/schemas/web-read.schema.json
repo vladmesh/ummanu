@@ -251,6 +251,15 @@
     "task_e2e": {
       "type": ["object", "null"],
       "properties": {
+        "hotfix_route": {
+          "type": "object", "additionalProperties": false,
+          "required": ["carrier", "run", "result"],
+          "properties": {
+            "carrier": {"type": "string", "minLength": 1},
+            "run": {"type": "string", "minLength": 1},
+            "result": {"$ref": "#/$defs/e2e_disposition_result"}
+          }
+        },
         "waiting_on": {"type": "string", "minLength": 1},
         "after_merge_runs": {
           "type": "array",

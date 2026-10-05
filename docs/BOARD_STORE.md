@@ -1236,9 +1236,16 @@ After-merge runs additionally hold an optional `disposition_result` receipt of n
 PO completion. Covered marks' optional `holder` is the live obligation, distinct from
 their historical `decision` link; absent/null preserves released readback and empty
 means no active holder. Both use the same e2e extension text and normalized metadata.
-Reconciliation locks the operation/carrier/sources/follow-up and commits receipt plus
-marks together, then reconstructs queue projections. No new table, authority grant,
-origin backfill or released-bag migration is needed; 0029 leaves those bags untouched.
+The actual hotfix's optional `e2e.hotfix_route` is the typed `{carrier, run, result}`
+copy of that receipt, with native `blocked_by` holding its live operation/follow-up.
+Its public schema and normalized metadata preserve this same text. Reconciliation
+takes the ownership lock then sorted operation/carrier/source/hotfix/follow-up rows
+and commits receipt, marks, hotfix dependency and audit/comment together, then
+reconstructs queue projections. Retention is not terminal disposition evidence;
+complete supported board reads retain unresolved sources and carrier records. No new table, authority grant,
+origin backfill or released-bag migration is needed; 0029 leaves those bags untouched,
+including absent hotfix_route. It does not invent terminal route authority, and native
+downgrade refuses existing hotfix route receipts rather than letting older consumers forget them.
 
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that

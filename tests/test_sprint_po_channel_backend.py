@@ -18,7 +18,7 @@ from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
-from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, REQUEST_PO_NOTES, NEUTRAL_PO_NOTES
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_execution import assignment, create_assignment
 from ummanu.board.sql_cards import SqlCardClient
@@ -63,8 +63,7 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
         self.assertTrue(self.writer.audit.events(self.ref, kind="po_channel_denied"))
 
     def test_request_comment_refusal_is_audited_without_consuming_corrected_retry(self):
-        for index, body in enumerate(("[observer:request] Assign the route", "PO, please decide.",
-                                     "Прошу ПО выбрать маршрут.", "Ждём решения ПО.")):
+        for index, body in enumerate(REQUEST_PO_NOTES):
             request = f"request-{index}"
             operation = lambda body=body, request=request: self.writer.comment(role="observer", actor="observer", reference=self.ref,
                 body=body, request_id=request)
@@ -74,11 +73,32 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
             repeated = self.writer.comment(role="observer", actor="observer", reference=self.ref,
                 body="Evidence recorded on the card.", request_id=request)
             self.assertEqual(corrected["event_id"], repeated["event_id"])
-        for index, body in enumerate(('Evidence: "Wait for PO decision."', "Не ждём решения ПО.",
-                                     "Implement PO routing next.", "PO session is recorded.")):
+        for index, body in enumerate(NEUTRAL_PO_NOTES):
             self.writer.comment(role="observer", actor="observer", reference=self.ref, body=body,
                                 request_id=f"note-{index}")
         self.writer.comment(role="po", actor="po", reference=self.ref, body="PO, please decide.", request_id="po-comment")
+
+    def test_every_request_frame_refuses_code_resume_then_accepts_exact_typed_correction(self):
+        code = self.card("code")
+        operation = self.card("operation", touches_production="none")
+        for index, body in enumerate(REQUEST_PO_NOTES):
+            with self.subTest(body=body):
+                request = f"syntax-resume-{index}"
+                delivery, through = f"syntax-delivery-{index}", f"syntax-event-{index}"
+                bad = self.entry(code["ref"], selected_step=body, next_safe_step=body)
+                for entry in (bad, {**bad, "po_request": {"card": code["ref"], "action": body}}):
+                    self.assert_refused(lambda entry=entry: self.writer.resume(role="observer", actor="observer",
+                        reference=self.ref, entry=entry, delivery_id=delivery, through_event=through,
+                        request_id=request), request)
+                corrected = {**bad, "current_task": operation["ref"],
+                             "po_request": {"card": operation["ref"], "action": body}}
+                accepted = self.writer.resume(role="observer", actor="observer", reference=self.ref,
+                    entry=corrected, delivery_id=delivery, through_event=through, request_id=request)
+                repeated = self.writer.resume(role="observer", actor="observer", reference=self.ref,
+                    entry=corrected, delivery_id=delivery, through_event=through, request_id=request)
+                self.assertEqual(accepted["event_id"], repeated["event_id"])
+                event = self.writer.audit.committed_event(request)
+                self.assertEqual((event["payload"]["delivery_id"], event["payload"]["through_event"]), (delivery, through))
 
     def test_bare_wait_and_bad_card_types_states_and_sprints_are_atomic_refusals(self):
         self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
@@ -107,7 +127,7 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
 
     def test_administrative_notes_write_comments_and_code_resumes_with_exact_ack(self):
         code = self.card("code")
-        for index, body in enumerate(ADMINISTRATIVE_PO_NOTES):
+        for index, body in enumerate((*ADMINISTRATIVE_PO_NOTES, *NEUTRAL_PO_NOTES)):
             with self.subTest(body=body):
                 self.writer.comment(role="observer", actor="observer", reference=self.ref,
                     body=body, request_id=f"administrative-comment-{index}")

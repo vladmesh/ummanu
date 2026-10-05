@@ -457,6 +457,24 @@ class BoardStoreSchemaTests(unittest.TestCase):
             command.downgrade(config, "0028_owner_turns")
         connection.rollback()
         self.assertEqual(migrate.current_revision(connection), "0029_po_channel")
+        # The additive extension needs no data conversion, but older consumers
+        # cannot forget an answered hotfix route during a native downgrade.
+        from ummanu.board.e2e_record import E2eState, HotfixRoute
+        route = HotfixRoute("ummanu-29", "released-paid-run", {"operation": "ummanu-30",
+            "status": "settled", "action": "decline", "holder": "",
+            "reason": "Investigated actual hotfix return route", "completion": "native-completion"})
+        state = E2eState.from_json(json.loads(released_e2e["extra"]["e2e"]))
+        state.hotfix_route = route
+        new_bag = {"extra": {"e2e": state.text()}}
+        connection.exec_driver_sql("UPDATE sprint_resumes SET po_request=NULL")
+        connection.exec_driver_sql("UPDATE tasks SET extensions=%s::jsonb WHERE task_ref='ummanu-29'",
+                                   (json.dumps(new_bag),))
+        connection.commit()
+        with self.assertRaisesRegex(RuntimeError, "Hotfix route receipts exist"):
+            command.downgrade(config, "0028_owner_turns")
+        connection.rollback()
+        self.assertEqual(migrate.current_revision(connection), "0029_po_channel")
+        self.assertEqual(connection.exec_driver_sql("SELECT extensions FROM tasks WHERE task_ref='ummanu-29'").scalar(), new_bag)
 
     def test_0027_preserves_released_permissions_budget_and_paid_runs_without_inventing_quotes(self) -> None:
         from alembic import command
