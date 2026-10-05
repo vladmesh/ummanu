@@ -31,6 +31,7 @@ from ummanu.dispatch.types import HostError, LegacyDispatcherRecord
 from ummanu.observer_root import observer_root_repo
 from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
+from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 
 REF = "sprint:1705"
 TOKEN = "sprint-1705"
@@ -199,6 +200,50 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         remove = next(event for event in self.host.events if isinstance(event, list) and event[3:5] == ["worktree", "remove"])
         self.assertNotIn("--force", remove)
         self.assertFalse(any("prune" in event for event in self.host.events if isinstance(event, list)))
+
+    def _quiescent_runtime(self, *, ok: bool) -> Any:
+        """The head runtime held to `LocalPtyHeadRuntime`'s real signatures (issue:5f3cdb4c).
+
+        An autospec refuses any keyword the real `stop_if_quiescent` does not take, which is how
+        the Orca-era `teardown=` slipped past the fake host and failed every production tick.
+        """
+        runtime = mock.create_autospec(LocalPtyHeadRuntime, instance=True)
+        stand_in = _HeadRuntime(self.host.events)
+        runtime.stop.side_effect = stand_in.stop
+
+        def stop_if_quiescent(run, initiator, **_kwargs):
+            if not ok:
+                return SimpleNamespace(ok=False, reason="turn_in_flight", run=run)
+            return runtime.stop(run, initiator)
+
+        runtime.stop_if_quiescent.side_effect = stop_if_quiescent
+        return runtime
+
+    def test_a_quiet_observer_is_stopped_through_the_real_runtime_signature_and_its_worktree_removed(self) -> None:
+        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
+        record = self.record(launched, SUPERVISED_HEAD)
+        runtime = self._quiescent_runtime(ok=True)
+
+        with mock.patch.object(self.host, "head_runtime_for", return_value=runtime):
+            self.assertTrue(self.host.stop_observer_if_quiescent(record, 3, False))
+
+        runtime.stop_if_quiescent.assert_called_once()
+        kwargs = runtime.stop_if_quiescent.call_args.kwargs
+        self.assertEqual(kwargs, {"expected_activity_epoch": 3, "head_process_alive": False})
+        self.assertFalse(self.git_path.exists())
+        self.assertEqual(self.orca_argvs(), [])
+
+    def test_a_refused_quiescent_stop_keeps_the_observer_worktree(self) -> None:
+        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
+        record = self.record(launched, SUPERVISED_HEAD)
+        runtime = self._quiescent_runtime(ok=False)
+
+        with mock.patch.object(self.host, "head_runtime_for", return_value=runtime):
+            self.assertFalse(self.host.stop_observer_if_quiescent(record, 0, True))
+
+        self.assertTrue(self.git_path.exists())
+        self.assertNotIn(["worktree", "remove"], [argv[:2] for argv in self.worktree_argvs()])
+        self.assertNotIn(f"head-stop:{LOCAL_PTY_RUNTIME}", self.host.events)
 
     def test_a_respawn_reuses_a_live_worktree_and_recuts_a_removed_one(self) -> None:
         workspace = self.host.observer_workspace(REF)
