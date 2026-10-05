@@ -1311,17 +1311,22 @@ class LocalPtySubstrateTests(unittest.TestCase):
         client = self._client(handle)
         client.stop("observer")
         self._await(lambda: not _alive(handle.head_pid), message="the head never stopped")
-        # Waited on the watchdog's own answer rather than on a proxy for it: between a head's exit
-        # and its reaping there is a window in which `/proc/<pid>/stat` can vanish under the
-        # reader, and the reader — which this card does not touch — calls that inconclusive rather
-        # than dead. What is asserted is unchanged; what is removed is a race on the reaper.
+        # Retain the successful native observation: a fresh read can be inconclusive during
+        # exit/reaping, even after the watchdog has classified the head as dead.
+        def watchdog_observes_dead() -> bool:
+            nonlocal status
+            status = head_process_status(str(handle.pid_file), expected=expected)
+            return status["state"] == HEARTBEAT_DEAD
+
         self._await(
-            lambda: head_process_status(str(handle.pid_file), expected=expected)["state"] == HEARTBEAT_DEAD,
+            watchdog_observes_dead,
             message="the watchdog never classified the stopped head as dead",
         )
-        self.assertEqual(
-            head_process_status(str(handle.pid_file), expected=expected)["state"], HEARTBEAT_DEAD
-        )
+        self.assertEqual(status["state"], HEARTBEAT_DEAD, status)
+        self.assertTrue(status["known"], status)
+        self.assertFalse(status["alive"], status)
+        self.assertFalse(status["match"], status)
+        self.assertEqual(status["pid"], handle.head_pid, status)
 
     # -- endings ---------------------------------------------------------------------------
 
