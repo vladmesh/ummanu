@@ -13,19 +13,27 @@ from dataclasses import dataclass
 from typing import Any
 
 CREATE_CARD_HINT = "Create/link a decision or operation card for this sprint; use current_task and po_request.card for a PO wait."
-# PO must be the addressee, not a modifier in a component name. Cyrillic ПО is
-# case-sensitive: lowercase по is a preposition, including at a sentence start.
-_PO = r"(?:po\b(?![-\w]|\s+(?:channel|session|input|service|turn)\b)|product owner\b)"
-_RU_PO = r"(?-i:ПО)\b(?![-\w])"
+# Positive continuations establish an addressee/actor. Every other word after
+# the role is a modifier by default; there is no component-noun denylist.
+_EN_VERB = r"(?:decide|choose|assign|approve|answer|act|resolve|confirm|review)\b"
+_RU_VERB = r"(?:выбрать|выбери|выберите|выбрал|назначить|назначь|назначьте|назначил|решить|реши|решите|решил|ответить|ответь|ответьте|ответил|согласовать|согласуй|согласуйте|согласовал|подтвердить|подтверди|подтвердите|подтвердил)\b"
+_EN_OBJECT = r"(?:decision|answer|action|approval)\b"
+_RU_OBJECT = r"(?:решение|решения|ответ|ответа|действие|действия|согласование|согласования)\b"
+_END_OR_ADDRESS = r"$|[:,]"
+_EN_CONTINUATION = rf"(?:{_END_OR_ADDRESS}|\s+(?:{_EN_OBJECT}|(?:to\s+|must\s+|needs?\s+to\s+|please\s+)?{_EN_VERB})|'s\s+{_EN_OBJECT})"
+_RU_CONTINUATION = rf"(?:{_END_OR_ADDRESS}|\s+(?:{_RU_OBJECT}|(?:должен\s+|нужно\s+|прошу\s+)?{_RU_VERB}))"
+# Cyrillic ПО is case-sensitive: lowercase по is always a preposition.
+_PO = rf"(?:po|product owner)\b(?![-\w])(?={_EN_CONTINUATION})"
+_RU_PO = rf"(?-i:ПО)\b(?![-\w])(?={_RU_CONTINUATION})"
 _REQUEST = re.compile(
     r"^(?:please\s+)?(?:"
     r"(?:ask|request|need|await|wait(?:ing)?\s+(?:for|on))\s+(?:(?:a|the)\s+)?" + _PO +
     r"|(?:need|await|wait(?:ing)?\s+(?:for|on))\s+(?:a\s+|the\s+)?(?:decision|action|answer|approval)\s+(?:from|by|of)\s+(?:the\s+)?" + _PO +
-    r"|po\s*(?:[:,]|must\b|needs?\s+to\b|please\b)"
+    r"|" + _PO + rf"(?:\s*[:,]|\s+(?:to\s+|must\s+|needs?\s+to\s+|please\s+)?{_EN_VERB})"
     r"|(?:прошу|просим|попросить|запросить|жд[её]м|жду|ожидаем|ожидаю|ожидать|ждать|дождаться)\s+(?:" + _RU_PO + r"|(?:решени[ея]|действи[ея]|ответа|согласования)\s+(?:от\s+)?" + _RU_PO + r")"
     r"|(?:нужно|нужен|нужна|требуется)\s+(?:решение|действие|ответ|согласование)\s+(?:от\s+)?" + _RU_PO +
     r"|(?:нужно|требуется)\s*,?\s*чтобы\s+" + _RU_PO +
-    r"|" + _RU_PO + r"\s*(?:[:,]|должен\b|нужно\b|прошу\b))",
+    r"|" + _RU_PO + rf"(?:\s*[:,]|\s+(?:должен\s+|нужно\s+|прошу\s+)?{_RU_VERB}))",
     re.IGNORECASE,
 )
 

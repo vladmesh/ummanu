@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import copy
 import json
+import tempfile
 import unittest
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -58,6 +60,7 @@ class DispositionTests(unittest.TestCase):
             self.saves.append(ref)
 
         self.writer = TaskWriter.__new__(TaskWriter)
+        self.writer.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.writer.client = SimpleNamespace(_query=mock.Mock(return_value=[]), call=save)
         self.writer._role = lambda role, allowed, actor: self.assertEqual(role, "dispatcher")
         self.writer.reader = SimpleNamespace(show=self.show, list=lambda: [self.show(ref) for ref in self.cards])
@@ -373,6 +376,71 @@ class DispositionTests(unittest.TestCase):
         retry = self.writer.comment.call_args_list[-2].kwargs
         self.assertEqual((retry["request_id"], retry["body"]), (failed["request_id"], failed["body"]))
         self.assertEqual(self.mark().state, "declined")
+
+    def released_unresolved(self):
+        operation = self.cards.pop(self.operation)
+        self.created = None
+        self.run.disposition = ""
+        for ref in (self.source, self.carrier):
+            state = e2e_record.e2e_state(self.show(ref))
+            state.after_merge.decision, state.after_merge.holder = "", None
+            state.after_merge.dispatch_id = ""
+            if ref == self.carrier:
+                state.after_merge_runs[0].disposition = ""
+            self.cards[ref]["extensions"]["extra"]["e2e"] = state.text()
+        return operation
+
+    def test_released_history_without_owned_marks_never_creates_or_links_a_question(self):
+        for stale in ("remerged", "superseded", "declined"):
+            with self.subTest(stale=stale):
+                self.setUp()
+                self.released_unresolved()
+                if stale == "superseded":
+                    self.writer._card_superseded = lambda ref: ref in {self.source, self.carrier}
+                else:
+                    for ref in (self.source, self.carrier):
+                        state = e2e_record.e2e_state(self.show(ref))
+                        if stale == "remerged":
+                            state.after_merge.merge_sha, state.after_merge.dispatch_id = "new", "new-run"
+                        else:
+                            state.after_merge.state = "declined"
+                        self.cards[ref]["extensions"]["extra"]["e2e"] = state.text()
+                before = copy.deepcopy(self.cards)
+                with mock.patch.object(e2e_after_merge, "_create_disposition") as create:
+                    for _ in range(2):
+                        e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+                create.assert_not_called()
+                self.assertEqual(self.cards, before)
+
+    def test_released_mixed_marks_create_one_holder_only_for_current_obligation(self):
+        operation = self.released_unresolved()
+        state = e2e_record.e2e_state(self.show(self.source))
+        state.after_merge.merge_sha, state.after_merge.dispatch_id = "new", "new-run"
+        self.cards[self.source]["extensions"]["extra"]["e2e"] = state.text()
+        before = self.show(self.source)
+        def create(*args):
+            self.cards[self.operation] = operation
+            self.created = {"ref": self.operation, "actor": {"role": "dispatcher"}, "kind": "created", "outcome": "success"}
+            return self.operation
+        with mock.patch.object(e2e_after_merge, "_create_disposition", side_effect=create) as created:
+            e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+            e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+        self.assertEqual(created.call_count, 1)
+        self.assertEqual(self.show(self.source), before)
+        self.assertEqual(self.mark(self.carrier).holder, self.operation)
+
+    def test_remerge_at_locked_creation_admission_prevents_a_stale_question(self):
+        self.released_unresolved()
+        def remerge(*args):
+            for ref in (self.source, self.carrier):
+                state = e2e_record.e2e_state(self.show(ref))
+                state.after_merge.merge_sha = "new"
+                self.cards[ref]["extensions"]["extra"]["e2e"] = state.text()
+            return []
+        self.writer.client._query.side_effect = remerge
+        with mock.patch.object(e2e_after_merge, "_create_disposition") as create:
+            self.assertEqual(e2e_after_merge._disposition(self.runtime, "ummanu", self.carrier, self.run, "Resolve"), "")
+        create.assert_not_called()
 
 
 if __name__ == "__main__":

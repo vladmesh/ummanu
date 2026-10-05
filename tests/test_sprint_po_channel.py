@@ -56,7 +56,10 @@ class ObserverRequestAdmissionTests(unittest.TestCase):
         for body in ("[observer:request] Assign the route", "Please ask PO to approve the route.",
                      "PO, please decide.", "Wait for the PO decision.", "We need PO to assign this.",
                      "Need a decision from PO.", "Прошу ПО назначить маршрут.", "Ждём решения ПО.",
-                     "Нужно решение ПО.", "ПО должен выбрать маршрут.", "Следующий шаг: ждать ответа ПО."):
+                     "Нужно решение ПО.", "ПО должен выбрать маршрут.", "Следующий шаг: ждать ответа ПО.",
+                     "Need PO.", "Wait for PO's approval.", "PO must decide.", "PO to approve.",
+                     "Request PO answer.", "Need Product Owner to resolve this.",
+                     "Ждём ПО ответ.", "Прошу ПО решить вопрос.", "ПО, назначь маршрут."):
             with self.subTest(body=body):
                 self.assertTrue(requests_po(body))
 

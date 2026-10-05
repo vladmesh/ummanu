@@ -4719,19 +4719,36 @@ Observer-to-PO questions use decision/operation cards. Sprint comments carry not
 not requests. `board/po_channel.py:requests_po` is the admission rule shared by comment and resume
 writes. It examines active sentence starts: `[observer:request]`; English `ask/request/need/await
 PO`, `wait/waiting for/on PO`, requests for a decision/action/answer/approval from PO, and direct
-`PO, ...`, `PO must/needs to/please ...`; Russian `прошу/просим/попросить/запросить ПО`,
+`PO, ...`, `PO <verb>` or `PO to/must/needs to/please <verb>`; Russian `прошу/просим/попросить/запросить ПО`,
 `ждём/жду/ожидаем/ожидаю/ожидать/ждать/дождаться решения/действия/ответа/согласования ПО`,
-`нужно/нужен/нужна/требуется решение/действие/ответ/согласование ПО`, `нужно, чтобы ПО ...`,
-and `ПО, ...` or `ПО должен/нужно/прошу ...`. Optional `please`, `we`, `нам`, list bullets and
+`нужно/нужен/нужна/требуется решение/действие/ответ/согласование ПО`, `нужно, чтобы ПО <verb>`,
+and `ПО, ...`, `ПО <verb>` or `ПО должен/нужно/прошу <verb>`. Optional `please`, `we`, `нам`, list bullets and
 `next [safe step]:` / `следующий [безопасный] шаг:` prefixes do not hide the request.
 Sentence boundaries are line breaks and `. ! ? ;`. Block quotations, fenced code and inline
 backtick/double-quote/guillemet quotations are evidence; negated sentences and future implementation
 mentions do not start the request grammar. This bounded grammar is not a classifier of every PO
 mention. Other request wording must use the explicit marker or typed wait representation.
-The Cyrillic role token is uppercase `ПО`; lowercase `по` is a preposition and is never
-an addressee. English PO component modifiers (`PO-channel`, `PO-input`, `PO session`,
-`PO input`, `PO service`, `PO turn`) do not request action from the PO. Thus ordinary
-CI/review notes and future component work remain writable with a current code card.
+The role is positively established by its following syntax, with no component-noun denylist:
+
+- English `PO`/`Product Owner` must end the sentence, precede `,`/`:`, precede a request
+  object (`decision`, `answer`, `action`, `approval`), or precede a supported verb, optionally
+  framed by `to`, `must`, `need/needs to`, or `please`. The exact verbs are `decide`, `choose`,
+  `assign`, `approve`, `answer`, `act`, `resolve`, `confirm`, `review`.
+  Possessive `PO's` is recognized only before one of those four request objects.
+- Cyrillic `ПО` is uppercase and case-sensitive; lowercase `по` is always a preposition.
+  It must end the sentence, precede `,`/`:`, precede `решение/решения`, `ответ/ответа`,
+  `действие/действия`, `согласование/согласования`, or precede a supported verb,
+  optionally framed by `должен`, `нужно`, or `прошу`. Exact verb forms are
+  `выбрать/выбери/выберите/выбрал`, `назначить/назначь/назначьте/назначил`,
+  `решить/реши/решите/решил`, `ответить/ответь/ответьте/ответил`,
+  `согласовать/согласуй/согласуйте/согласовал`, `подтвердить/подтверди/подтвердите/подтвердил`.
+- Any other following word defaults to a component modifier, including unlisted words,
+  plurals and translations. Hyphenated/word-attached role tokens are also modifiers.
+  Thus `Need PO context rollover`, `Wait for PO turns to drain`, `Need PO telemetry repair`
+  and `Ждём ПО телеметрию` remain ordinary code-card notes without `po_request`.
+
+These positive continuations are required in every request frame, including requests for
+an object from the role. A role-prefixed noun alone does not infer a request.
 `The PO must decide`, `Awaiting PO decision` and `Let the PO decide` are outside this
 finite grammar: use `[observer:request]` or a typed `po_request` for these wordings.
 
@@ -4810,9 +4827,18 @@ Only the native atomic PO In progress -> Done completion with the matching rende
 record and an actual session in the supported execution route is consumed. Extra
 fields, copied identities, empty investigation, unresolved prior effects, bare Done
 and free prose never authorize retry. Invalid/incomplete completion produces a durable
-neutral reason with no closed-card holder. The PO repairs it by reopening the same
-operation through the existing task move authority, then completing it natively with
-the corrected structured section; no fabricated origin or closed-sprint rewrite.
+neutral reason with no closed-card holder; the historical completion remains on the operation.
+The PO repairs it by native
+`task move --ref <operation> --to ready --role po --reason-file <reason-file>`.
+For a card in a reserved open sprint, this existing move authority requires
+`--sprint-override --sprint-override-reason-file <reason-file>`; it changes this card,
+not the sprint contract. The dispatcher claims the reopened Ready operation, and a new
+actual native PO turn supplies the corrected bound completion with a new completion
+request ID. Replaying the old Done ID repeats the old record and cannot correct it.
+Reuse the supported session or its native successor, not fabricated origin provenance.
+Ready/In progress again restores the operation as the live holder; corrected completion
+then reaches the same consumer. Old charges, run evidence and both completion events
+remain historical. Nothing spends again until current ordinary admission succeeds.
 
 Reconciliation reads authoritative completion and current covered marks under sorted
 card row locks, preserving newer merge/run/holder state. Receipt and marks commit in
@@ -4825,3 +4851,8 @@ of released records. Terminal receipts apply once. Pending marks rebuild deleted
 and current ancestry chooses the target; neither restart nor a lost queue save repeats
 completion, enqueue, charge or dispatch. Per-item degraded reads leave durable evidence
 intact and do not starve other carriers. Production/live validation remains DoD9.
+Before creating or recovering an operation, the writer locks carrier/covered rows and
+applies that same `owns_mark` rule and latest-run precedence to actual unresolved marks.
+No current obligation means no new/linking PO question; historical evidence and cleanup
+remain. Mixed old/new marks produce one holder only for the still-owned obligations.
+Superseded pending work cannot be revived by a retained or deleted-queue projection.

@@ -137,7 +137,7 @@ from ummanu.board.task_routing import (
     impact_bounds_refusal,
 )
 from ummanu.board.transitions import BoardProtocolError
-from ummanu.dispatch.cleanup import CleanupJournal, serialized
+from ummanu.dispatch.cleanup import CleanupJournal, ownership_lock, serialized
 from ummanu.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -2717,6 +2717,49 @@ class TaskWriter:
                 self.client.call("saveTaskMetadata", task_id=_task_number(task),
                                  values={e2e_record.E2E_FIELD: current.text()})
             return current
+
+    @contextlib.contextmanager
+    def after_merge_disposition_admission(self, *, role: str, actor: str, carrier: str,
+                                         run: e2e_record.E2eRun) -> Iterator[bool]:
+        """Keep current obligation ownership locked through operation create/recovery.
+
+        Historical runs retain their evidence and cleanup without a new question.
+        The existing owns_mark rule and released empty-dispatch precedence are
+        the same ones used when applying a disposition; superseded work is inert.
+        """
+        from ummanu.board.e2e_disposition import owns_mark
+
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        # Native creates take the ownership lock before their SQL transaction.
+        # Keep that order while checking sources and recovering/creating a holder.
+        with ownership_lock(self.data_dir), self._mutation():
+            for ref in sorted({carrier, *(item["ref"] for item in run.covered)}):
+                self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (ref,))
+            carrier_task = self.reader.show(carrier)
+            carried = e2e_record.e2e_state(carrier_task)
+            stored = carried.after_merge_run(run.dispatch_id)
+            if stored is None or stored.sha != run.sha or stored.covered != run.covered:
+                raise TaskError("validation", "disposition must belong to the actual carrier/run", 2)
+            owned = False
+            for item in run.covered:
+                try:
+                    task = self.reader.show(item["ref"])
+                except TaskError as exc:
+                    if exc.code != "not_found":
+                        raise
+                    continue
+                mark = e2e_record.e2e_state(task).after_merge
+                if (mark is None or task.get("closed") or task.get("type") != "code"
+                        or task.get("project") != carrier_task.get("project")
+                        or self._card_superseded(item["ref"])
+                        or not owns_mark(mark, run=run, carrier=carrier, covered=item)
+                        or mark.state == e2e_record.AM_DECLINED):
+                    continue
+                latest = next((candidate for candidate in reversed(carried.after_merge_runs)
+                               if item in candidate.covered), None)
+                if mark.dispatch_id or latest is stored:
+                    owned = True
+            yield owned
 
     def reconcile_after_merge_disposition(self, *, role: str, actor: str, carrier: str,
                                           dispatch_id: str) -> dict[str, Any]:

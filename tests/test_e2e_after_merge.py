@@ -1217,13 +1217,13 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         return cards, run
 
     def prepare_native_completion(self, carrier, action="retry", *, holder="", malformed=False, bare=False,
-                                  request="native-disposition-complete", session="disposition-po"):
+                                  request="native-disposition-complete", session="disposition-po", session_request=None):
         """Commit native preparation separately; stable claims replay its session and turn."""
         run = self.run_of(carrier, 0)
         operation = self.reader.show(run.disposition)
         store = PoStore(self.board.credentials)
         claimed_session, session_created = store.claim_session(session_id=session, cli="claude", model="sonnet", effort="high",
-            cwd=str(self.data_dir), cli_session_id=None, request_id=request + "-po-create")
+            cwd=str(self.data_dir), cli_session_id=None, request_id=session_request or request + "-po-create")
         self.assertEqual(claimed_session.session_id, session)
         turn, turn_created = store.claim_turn(session, "Resolve the actual after-merge disposition", lambda seq: self.data_dir / f"{session}-{seq}.log",
             request_id=request + "-turn", card={"ref": operation["ref"], "type": "operation"})
@@ -1367,6 +1367,65 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(self.run_of(cards[-1]).disposition_result["status"], "neutral")
         self.assertNotIn("waiting_on", self.mark(cards[0]))
         self.assertEqual(len(self.host.dispatches), 1)
+
+    def _neutral_completion_repair(self, *, bare=False, malformed=False):
+        cards, original = self.uncertain()
+        first = self.prepare_native_completion(cards[-1], bare=bare, malformed=malformed)
+        completed = self.complete_native(first)
+        self.am_tick()
+        self.assertEqual(self.run_of(cards[-1], 0).disposition_result["status"], "neutral")
+        self.assertTrue(all("waiting_on" not in self.mark(ref) for ref in cards))
+        paid = self.reader.sprint_e2e_budget(SPRINT)["charges"]
+        self.assertEqual(len(self.host.dispatches), 1)
+        reopened = self.writer.move(role="po", actor="po", reference=original.disposition,
+            target="ready", reason="Repair the incomplete bound disposition", request_id="repair-reopen",
+            sprint_override=True, sprint_override_reason="Reopen this sprint operation to correct its completion")
+        self.assertEqual(reopened["task"]["state"], "ready")
+        self.am_tick()
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == original.disposition for ref in cards))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["charges"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+        # Reuse the committed session; the reopened operation needs a new actual
+        # native turn/claim and a new completion identity, not the old Done replay.
+        corrected = self.prepare_native_completion(cards[-1], request="corrected-disposition",
+            session=first["turn"].session_id, session_request=first["completion"]["request_id"] + "-po-create")
+        self.assertFalse(corrected["session_created"])
+        self.assertTrue(corrected["turn_created"])
+        self.assertNotEqual(corrected["turn"].seq, first["turn"].seq)
+        self.assertEqual(corrected["turn"].state, "running")
+        self.assertEqual(self.reader.show(original.disposition)["state"], "in_progress")
+        fixed = self.complete_native(corrected)
+        self.assertNotEqual(fixed["event_id"], completed["event_id"])
+        self.assertEqual(len(self.comments_on(original.disposition, "[completion:operation]")), 2)
+        self.assertEqual([(t.seq, t.state) for t in corrected["store"].turns(first["turn"].session_id)],
+                         [(first["turn"].seq, "completed"), (corrected["turn"].seq, "completed")])
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick()
+        repaired = self.run_of(cards[-1], 0)
+        self.assertEqual((repaired.dispatch_id, repaired.sha, repaired.covered, repaired.result),
+                         (original.dispatch_id, original.sha, original.covered, original.result))
+        self.assertEqual(repaired.disposition_result["completion"], fixed["event_id"])
+        self.assertEqual(repaired.disposition_result["status"], "settled")
+        self.assertEqual(set(self.pending()), set(cards))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["charges"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.host.dispatch_answer = "ok"
+        self.am_tick()
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 2)
+        self.assertEqual(len(self.host.dispatches), 2)
+        next_run = self.run_of(cards[-1])
+        self.conclude("success", next_run.wait_ref)
+        self.am_tick()
+        self.assertTrue(all(self.mark(ref)["state"] == "green" for ref in cards))
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
+
+    def test_bare_neutral_completion_reopens_and_natively_repairs_same_operation(self):
+        self._neutral_completion_repair(bare=True)
+
+    def test_malformed_neutral_completion_reopens_and_natively_repairs_same_operation(self):
+        self._neutral_completion_repair(malformed=True)
 
     def test_native_completion_comment_failure_rolls_back_done_and_outcome(self):
         cards, run = self.uncertain()
@@ -1518,6 +1577,93 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual((mark.merge_sha, mark.state), (_sha("f"), "pending"))
         self.assertEqual(self.mark(cards[-1])["state"], "declined")
         self.assertEqual(self.run_of(cards[-1]).dispatch_id, old.dispatch_id)
+
+    def released_uncertain_without_operation(self):
+        # The released 0024 producer retained uncertain paid runs and pending
+        # marks, with no PO operation. Arrange that actual JSON shape in SQL.
+        with mock.patch.object(e2e_after_merge, "_disposition", return_value=""):
+            cards, run = self._arrange_refused_without_assertion()
+        self.assertFalse(run.disposition)
+        for ref in cards:
+            state = e2e_state(self.reader.show(ref))
+            state.after_merge.state = "pending"
+            state.after_merge.dispatch_id = ""
+            state.after_merge.decision, state.after_merge.holder = "", None
+            self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=ref, state=state.text())
+        self.drop_queue()
+        return cards, self.run_of(cards[-1])
+
+    def test_remerged_released_uncertain_history_does_not_create_a_po_question(self):
+        cards, run = self.released_uncertain_without_operation()
+        for ref in cards:
+            self.merge(ref, _sha("f"))
+            state = e2e_state(self.reader.show(ref))
+            state.after_merge = AfterMergeMark(merge_sha=_sha("f"), state="pending",
+                charged=list(state.after_merge.charged))
+            self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=ref, state=state.text())
+        before = {ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}
+        paid = self.reader.sprint_e2e_budget(SPRINT)["charges"]
+        self.drop_queue()
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        self.assertFalse(any(task["type"] == "operation" for task in self.reader.list()))
+        self.assertFalse(self.run_of(cards[-1], 0).disposition)
+        self.assertEqual(self.run_of(cards[-1], 0).result, run.result)
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}, before)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["charges"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_superseded_released_history_keeps_evidence_without_question_or_paid_retry(self):
+        cards, run = self.released_uncertain_without_operation()
+        for ref in cards:
+            self.writer.create(role="observer", actor="observer", project="ummanu", task_type="code",
+                title="Supported successor", sprint=SPRINT, seed_ref="pipeline/" + ref,
+                supersedes=ref, request_id="supersede-" + ref)
+            self.assertTrue(self.writer._card_superseded(ref))
+        before = {ref: e2e_state(self.reader.show(ref)).text() for ref in cards}
+        # Also retain a stale released queue, to prove it cannot bypass the
+        # ownership guard through pending admission rather than PO creation.
+        with file_lock(self.runtime.production_state.tick_lock):
+            payload = self.runtime.production_state.load()
+            queues(payload)["ummanu"] = {"pending": [{**item, "repo": REPO, "marked": True} for item in run.covered],
+                "run": None, "cleanup": [], "budget_waits": []}
+            self.runtime.production_state.save(payload)
+        self.am_tick(self._runtime())
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        self.assertFalse(any(task["type"] == "operation" for task in self.reader.list()))
+        self.assertFalse(self.pending())
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in cards}, before)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_mixed_released_marks_create_one_operation_and_preserve_newer_obligation(self):
+        cards, old = self.released_uncertain_without_operation()
+        stale = cards[0]
+        self.merge(stale, _sha("f"))
+        state = e2e_state(self.reader.show(stale))
+        state.after_merge = AfterMergeMark(merge_sha=_sha("f"), state="pending",
+            charged=list(state.after_merge.charged))
+        self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=stale, state=state.text())
+        before = e2e_state(self.reader.show(stale)).after_merge
+        self.drop_queue()
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        run = self.run_of(cards[-1], 0)
+        self.assertTrue(run.disposition)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.assertEqual(e2e_state(self.reader.show(stale)).after_merge, before)
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == run.disposition for ref in cards[1:]))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.native_complete(cards[-1], "decline")
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+        self.assertTrue(all(self.mark(ref)["state"] == "declined" for ref in cards[1:]))
+        self.assertEqual(e2e_state(self.reader.show(stale)).after_merge, before)
+        self.assertEqual(self.run_of(cards[-1], 0).dispatch_id, old.dispatch_id)
 
     def test_released_hotfix_recovery_isolates_bad_carrier_and_preserves_newer_mark(self):
         def released_red(runtime, project, carrier, state, run):

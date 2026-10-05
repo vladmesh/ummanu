@@ -345,6 +345,10 @@ def _mark_queued(
     """Every newly queued card shows it is pending; a card that is not a code card leaves the queue."""
     changed = False
     for entry in list(queue["pending"]):
+        if runtime.writer._card_superseded(str(entry["ref"])):
+            queue["pending"].remove(entry)
+            changed = True
+            continue
         if entry.get("marked"):
             # A crash may lose the queue save after the durable disposition link.
             previous = e2e_record.e2e_state(runtime.reader.show(str(entry["ref"]))).after_merge
@@ -438,7 +442,8 @@ def _recover_pending(runtime: Any, payload: dict[str, Any], records: dict[str, A
         try:
             task = runtime.reader.show(card["ref"])
             mark = e2e_record.e2e_state(task).after_merge
-            if mark is None or mark.state not in {AM_PENDING, AM_BUDGET_WAIT} or task.get("closed"):
+            if (mark is None or mark.state not in {AM_PENDING, AM_BUDGET_WAIT} or task.get("closed")
+                    or runtime.writer._card_superseded(task["ref"])):
                 continue
             project = str(task["project"])
             queue = _queue(payload, project)
@@ -1056,9 +1061,10 @@ def _red(runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2e
             "open sprint or a real PO turn, or document why no correction is needed. "
             "Do not fabricate a PO origin or rewrite a closed sprint.")
         _persist_run(runtime, carrier_ref, state, run)
-        runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=run.hotfix,
-            body=f"PO operation {run.disposition} owns this hotfix's return-route assignment and disposition.",
-            request_id=stage_request_id("e2e-am-hotfix-route", run.dispatch_id))
+        if run.disposition:
+            runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=run.hotfix,
+                body=f"PO operation {run.disposition} owns this hotfix's return-route assignment and disposition.",
+                request_id=stage_request_id("e2e-am-hotfix-route", run.dispatch_id))
     for item in run.covered:
         runtime.writer.comment(
             role="dispatcher",
@@ -1130,6 +1136,15 @@ def _hotfix(runtime: Any, project: str, carrier_ref: str, run: E2eRun) -> str:
 
 def _disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRun, action: str) -> str:
     """One PO operation per run, including committed-but-not-linked recovery."""
+    with runtime.writer.after_merge_disposition_admission(role="dispatcher", actor=runtime.owner,
+                                                        carrier=carrier_ref, run=run) as owned:
+        if not owned:
+            return ""
+        return _create_disposition(runtime, project, carrier_ref, run, action)
+
+
+def _create_disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRun, action: str) -> str:
+    """Only called while covered ownership is locked by _disposition."""
     request_id = stage_request_id("e2e-am-disposition", run.dispatch_id)
     known = runtime.audit.committed_event(request_id)
     if known is not None and known.get("ref"):
@@ -1206,6 +1221,10 @@ def _requeue(
             carrier_ref, run, "Resolve the unconfirmed after-merge result before any further paid run. "
             "Investigate the evidence and record a safe disposition, or create follow-up work.")
         _persist_run(runtime, carrier_ref, state, run)
+        if not run.disposition:
+            # Ownership was replaced while this paid effect ended. Keep its
+            # historical evidence/cleanup, without rewriting current obligations.
+            return
     for item in run.covered:
         runtime.writer.comment(
             role="dispatcher",
@@ -1231,8 +1250,8 @@ def _requeue(
         f"{owner_events.E2E_AFTER_MERGE}:{run.dispatch_id}",
     )
     if not retry:
-        covered = {item["ref"] for item in run.covered}
-        queue["pending"] = [entry for entry in queue["pending"] if entry["ref"] not in covered]
+        covered = {(item["ref"], item["merge_sha"]) for item in run.covered}
+        queue["pending"] = [entry for entry in queue["pending"] if (entry["ref"], entry["merge_sha"]) not in covered]
         return
     known = {str(entry.get("ref")) for entry in queue["pending"]}
     queue["pending"] = [
