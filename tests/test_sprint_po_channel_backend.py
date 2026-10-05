@@ -20,6 +20,7 @@ from tests.fakes.sprints import SprintFixture
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_execution import assignment, create_assignment
+from ummanu.board.sql_cards import SqlCardClient
 from ummanu.cli import main
 from ummanu.dispatch.po_cards import ServicePoChannel, advance_po_card, claim_po_card
 from ummanu.dispatch.state import new_attempt_id
@@ -27,7 +28,7 @@ from ummanu.po.runner import PoRunner
 from ummanu.po.service import PoService, listening
 from ummanu.po.store import COMPLETED, PoStore
 from ummanu.sprint_observer import head_choice
-from ummanu.sprints import SprintReader
+from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 
@@ -150,31 +151,70 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
     def test_concurrent_committed_completion_is_seen_at_the_locked_admission_boundary(self):
         card = self.card()
         entry = self.entry(card["ref"], po_request={"card": card["ref"], "action": "choose route"})
+        # One client's transactions serialize across threads. A separate client to
+        # the same store lets this probe reach the real PostgreSQL row lock.
+        resumer = SqlCardClient(self.client.credentials, self.client.instance_dir)
+        self.addCleanup(resumer.close)
+        writer = SprintWriter(resumer, data_dir=self.tmp.name, instance=self.instance)
         reached_lock = threading.Event()
-        query = self.client._query
+        finished = threading.Event()
+        query = resumer._query
+        resume_pids = []
         outcomes = []
         def queries(sql, params=()):
             if sql.startswith("SELECT task_ref FROM tasks") and "FOR UPDATE" in sql:
+                resume_pids.append(resumer.connection.info.backend_pid)
                 reached_lock.set()
             return query(sql, params)
         def write():
             try:
-                self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+                writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
                     request_id="concurrent", delivery_id="d", through_event="e")
             except TaskError as exc:
                 outcomes.append(exc.code)
+            except Exception as exc:
+                outcomes.append(exc)
+            finally:
+                finished.set()
         before = self.snapshot()
-        with mock.patch.object(self.client, "_query", side_effect=queries):
-            with self.client.transaction():
-                self.client._execute("UPDATE tasks SET state='done' WHERE task_ref=%s", (card["ref"],))
-                thread = threading.Thread(target=write)
-                thread.start()
-                self.assertTrue(reached_lock.wait(10), "resume never reached the card lock")
-            thread.join(10)
+        thread = threading.Thread(target=write)
+        with mock.patch.object(resumer, "_query", side_effect=queries):
+            try:
+                with self.client.transaction():
+                    self.client._execute("UPDATE tasks SET state='done' WHERE task_ref=%s", (card["ref"],))
+                    completion_pid = self.client.connection.info.backend_pid
+                    thread.start()
+                    self.assertTrue(reached_lock.wait(10), "resume never reached the card lock")
+                    eventually(lambda: self.client._query(
+                        "SELECT %s = ANY(pg_blocking_pids(%s))", (completion_pid, resume_pids[0]))[0][0],
+                        "PostgreSQL did not block resume behind completion", timeout=10)
+                    self.assertFalse(finished.is_set(), "resume settled before completion committed")
+                    self.assertEqual(self.snapshot(), before)
+                    self.assertIsNone(self.writer.audit.committed_event("concurrent"))
+            finally:
+                # Release the transaction before joining, including on a failed
+                # assertion, so no writer leaks into fixture/database teardown.
+                if thread.ident is not None:
+                    thread.join(10)
         self.assertFalse(thread.is_alive())
+        self.assertTrue(finished.is_set())
         self.assertEqual(outcomes, ["po_card_required"])
+        self.assertEqual(TaskReader(resumer).show(card["ref"])["state"], "done")
         self.assertEqual(self.snapshot(), before)
         self.assertIsNone(self.writer.audit.committed_event("concurrent"))
+        self.assertTrue(self.writer.audit.events(self.ref, kind="po_channel_denied"))
+        operation = self.card("operation", touches_production="none")
+        corrected = self.entry(operation["ref"], po_request={"card": operation["ref"], "action": "choose route"})
+        accepted = writer.resume(role="observer", actor="observer", reference=self.ref, entry=corrected,
+            request_id="concurrent", delivery_id="d", through_event="e")
+        repeated = writer.resume(role="observer", actor="observer", reference=self.ref, entry=corrected,
+            request_id="concurrent", delivery_id="d", through_event="e")
+        self.assertEqual(accepted["event_id"], repeated["event_id"])
+        event = writer.audit.committed_event("concurrent")
+        self.assertEqual((event["payload"]["delivery_id"], event["payload"]["through_event"]), ("d", "e"))
+        self.assertEqual(self.sprint(self.ref)["resume"]["po_request"], corrected["po_request"])
+        self.assertEqual(len(self.snapshot()[1]), len(before[1]) + 1)
+        self.assertEqual(TaskReader(resumer).show(card["ref"])["state"], "done")
 
 
 class StandalonePoExecutionBackendTests(SprintFixture):
