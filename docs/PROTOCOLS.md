@@ -1592,11 +1592,11 @@ cuts one `decision` card on the sprint, in the waiting card's project, under req
 `dispatcher-e2e-budget-<sprint>-<budget>`: one card per (sprint, budget generation), the generation
 being the budget the runs were spent against. Its body carries the card waiting for e2e and its SHA,
 every run spent (card, SHA, run link, state and result summary, when), the question ("raise the e2e
-budget of <sprint> by N runs, or no?") with the two exact answer lines below, the instruction to hand
-it to the owner quoting them (a money decision; the PO does not raise the budget on its own authority),
-and the exact raise command. It is executed like
+budget of <sprint> by N runs, or no?") and the supported grant commands. It is executed like
 every decision card ([Decision and operation cards](#decision-and-operation-cards)): the sprint's PO
-session takes it, and the PO hands it to the owner with `task handover`.
+session resolves it under effective standing authority, declining further runs when appropriate.
+Only a new uncovered owner decision requires explicit `task handover --to owner`. The question
+itself grants no money; released exact owner-comment answer lines below remain compatible.
 
 The waiting card is not Blocked. It stays in its column (Validate, or Assessment in the release audit)
 and its entry records `budget_wait` (`decision`, `generation`, `scope`, `since`); `task show` carries
@@ -1608,10 +1608,10 @@ second decision is cut. Each tick the stage re-checks a waiting card first, with
 - a run is available again (the budget was raised): the mark is cleared, and the stage reads the gate
   and charges the next run as usual. When a raise was spent by other cards first, the card's next
   attempt finds the budget spent again and waits on the decision of the new generation;
-- the decision is Done and the budget was not raised (the owner said no): the mark is cleared and the
+- the decision is Done and the budget was not raised: the mark is cleared and the
   card is Blocked with the decision's completion text (`blocked_reason: other`, request id
-  `dispatcher-e2e-budget-declined-<card>-<decision>`): the owner's money decision, not a defect of the
-  card's code, so no worker round is charged;
+  `dispatcher-e2e-budget-declined-<card>-<decision>`): the exhausted budget and completed-without-grant
+  disposition prevent another run, so no worker round is charged. This does not infer an owner answer;
 - otherwise it keeps waiting.
 
 **The released owner-comment answer.** A sprint also accepts a quoted answer from the PO
@@ -1691,7 +1691,7 @@ marked on the board for that merge SHA is not queued again), so a replay after a
 two queues the card once. The
 pending sets live in the dispatcher's production state (`e2e_after_merge`, one queue per project:
 `pending`, the `run` in flight, `budget_waits`, `cleanup`), beside the post-merge watches; `production
-observe` lists them. Each queued card is marked on the board too (below).
+observe` lists them. Each new pending mark commits against the latest native green post-merge CI fact before its queue projection; released unmarked queues use the same admission below.
 
 **One run in flight per project, coalesced.** Each tick, after the post-merge watches, every project's
 queue advances on its own (`reconcile_after_merge`); one project never waits on another. While a project
@@ -1706,9 +1706,13 @@ has a run in flight its pending cards wait. When it has none and the set is not 
   id `<carrier>-e2e-am-<n>-<random>`) lives on the newest covered card, the *carrier*, in its `e2e` field
   under `after_merge_runs`, with `covered` (`{ref, merge_sha}` each), the branch, and what paid for it;
   every covered card's mark says `covered` with that dispatch id. All of it is one write,
-  `TaskWriter.record_after_merge_intent`, in the transaction that charges the run. The production state
-  names the run in flight before that write, so a dispatcher that dies in between finds no intent on the
-  carrier and puts the cards back, with nothing charged and nothing dispatched.
+  `TaskWriter.record_after_merge_intent`, in the transaction that charges the run. It rereads the
+  actual pending marks and supersession under the ownership lock then sorted source locks, preserves
+  existing run/charge records, and refuses stale snapshots without a charge. The production state
+  names the run in flight after that write. If its projection save is lost, recovery discovers the
+  carrier's committed intent without another charge or POST; an unconfirmed prior effect uses the
+  ordinary PO disposition. Released queue-only runs with no intent still return their cards to pending,
+  with nothing charged or dispatched.
 
 **Exact SHA, on a branch the dispatcher owns.** `workflow_dispatch` takes a branch or a tag, not a SHA,
 and `main` may have moved past the target. The dispatcher creates the branch `pipeline-e2e/<dispatch
@@ -4711,3 +4715,192 @@ After merge it uses the existing declined mark and comment, which emit no owner 
 Paid runs settle before admission is reconsidered. Pending waits and later arriving cards both
 consult the same standing answer. Without a standing answer the released PO budget-card route
 remains; it grants no runs automatically.
+
+
+### Observer PO channel
+
+Observer-to-PO questions use decision/operation cards. Sprint comments carry notes and evidence,
+not requests. `board/po_channel.py:requests_po` is the admission rule shared by comment and resume
+writes. It examines active sentence starts: `[observer:request]`; English `ask/request/need/await
+PO`, `wait/waiting for/on PO`, requests for a decision/action/answer/approval from PO, and direct
+`PO, ...`, `PO <verb>` or `PO to/must/needs to/please <verb>`; Russian `прошу/просим/попросить/запросить ПО`,
+`ждём/жду/ожидаем/ожидаю/ожидать/ждать/дождаться решения/действия/ответа/согласования ПО`,
+`нужно/нужен/нужна/требуется решение/действие/ответ/согласование ПО`, `нужно, чтобы ПО <verb>`,
+and `ПО, ...`, `ПО <verb>` or `ПО должен/нужно/прошу <verb>`. Optional `please`, `we`, `нам`, list bullets and
+`next [safe step]:` / `следующий [безопасный] шаг:` prefixes do not hide the request.
+Sentence boundaries are line breaks and `. ! ? ;`. Block quotations, fenced code and inline
+backtick/double-quote/guillemet quotations are evidence; negated sentences and future implementation
+mentions do not start the request grammar. This bounded grammar is not a classifier of every PO
+mention. Other request wording must use the explicit marker or typed wait representation.
+Request context establishes the role before any ambiguity restriction:
+
+- A request object before the role (`decision/answer/action/approval from/by/of
+  [the] PO`, or `решение/решения/ответ/ответа/действие/действия/согласование/согласования
+  [от] ПО`) names the addressee. Complements after PO do not change that, including
+  `Need a decision from PO on the route` and `Ждём ответа ПО на вопрос`.
+- `ask/request/need/await/wait/waiting for/on [a/an/the] PO to/must/need/needs to/please
+  <word>` and direct `PO to/must/need/needs to/please <word>` establish the actor.
+  Action words are unrestricted within these explicit frames: `Ask PO to pick the
+  route` and `PO must improve telemetry next` are requests. `Ask PO for [a/an/the]
+  decision/answer/action/approval` is also a request, with the object boundary below.
+- Russian actor frames `ПО должен/должна/нужно/прошу <word>` and `нужно/требуется,
+  чтобы ПО <word>` likewise need no action-word vocabulary. After a request/wait
+  prefix, an infinitive ending in `ть/ти/чь` or a supported direct verb establishes
+  the actor, e.g. `Прошу ПО перепроверить ограничения`. Cyrillic `ПО` is uppercase
+  and case-sensitive; lowercase `по` is always a preposition.
+- Ambiguous objects after the role, including possessive `PO's`, must end the
+  sentence, precede address punctuation, or start a complement with English
+  `for/on/about/from/by/of/to/regarding` or Russian `по/на/о/об/для/от`.
+  A following bare noun is a component phrase, not a bounded request object.
+  Thus `Need PO answer delivery fix`, `Need PO approval flow rework` and
+  `Wait for PO decision card ummanu-80 to merge` are ordinary notes. Bare direct
+  English `PO answer/review` requires end/address or a complement introduced by
+  `the/a/an/this/that/for/on/about`; `PO review fix ummanu-80 is in CI` and
+  `PO answer delivery is fixed` remain notes.
+- Bare direct English verbs `decide/choose/assign/approve/act/resolve/confirm`
+  and Russian `выбрать/выбери/выберите/выбрал`, `назначить/назначь/назначьте/назначил`,
+  `решить/реши/решите/решил`, `ответить/ответь/ответьте/ответил`,
+  `согласовать/согласуй/согласуйте/согласовал`,
+  `подтвердить/подтверди/подтвердите/подтвердил` are supported request forms.
+- An otherwise bare role after a request/wait prefix must end the sentence or
+  precede address punctuation. Hyphenated/word-attached role tokens are modifiers.
+  Unlisted component nouns, plurals and translations require no denylist:
+  `Need PO context rollover`, `Wait for PO turns to drain`, `Need PO telemetry repair`
+  and `Ждём ПО телеметрию` remain code-card notes without `po_request`.
+
+`The PO must decide`, `Awaiting PO decision` and `Let the PO decide` are outside this
+finite grammar: use `[observer:request]` or a typed `po_request` for these wordings.
+
+A future PO wait resume retains the six required prose fields and adds
+`"po_request":{"card":"ummanu-N","action":"the missing decision/action"}`. `current_task` must
+name that same card. The board row is locked and read inside the resume write transaction: the
+card must be a live, nonsuperseded decision/operation in this sprint, Ready or In progress. A bare
+recognized PO wait in `next_safe_step` or `selected_step` is refused even if prose contains a ref.
+A typed request is validated even when prose uses different wording. No comment, resume or successful
+request/delivery acknowledgement commits on refusal. A denial audit uses a separate request/content
+key, so a corrected retry can use the original request ID and exact delivery pair. Duplicate successful
+resumes retain normal idempotency. Released six-field resumes remain readable and restore verbatim;
+no historical prose is retroactively reinterpreted. PO comments and genuine owner answers keep their
+existing channels and launch/role identity checks still precede observer admission.
+
+### Standalone pipeline PO execution
+
+Uncovered e2e questions use their existing budget-generation, spent-batch or run identity. A supported
+open source sprint routes to its PO session; otherwise a genuine PO origin routes to its session or
+successor. With neither, a dispatcher e2e decision/operation has an explicit `po_execution` extension:
+immutable `{request,purpose,sources}` plus native service resolution `initial`, `executor`, `successors`.
+The supported purposes are `e2e_budget` and `e2e_disposition`, admitted only for the corresponding
+dispatcher create ID and real project code sources. Ordinary out-of-sprint headless admission does
+not change. This assignment is not `po_origin` and creates no origin-return outbox obligation.
+
+The assignment opens a dedicated service session with installed default CLI/model and explicit effort,
+under `<create request>-po-session`. Choice is frozen before the native create; the session is recorded
+before submission. Closed/missing sessions use native successor resolution under
+`<create request>-po-successor-<closed session>`. Monotone card writes preserve committed sessions and
+successors against stale ticks. `/po` lists cards assigned to the executor, and task readback exposes
+the assignment. Claim/submission IDs, restart reconstruction, completed-without-response Blocked,
+new handovers, answer delivery, degraded reads and the persisted 30-minute/failed-execution escalation
+all use `dispatch/po_cards.py:_episode_outcome`. No second attention lifecycle is introduced.
+
+Spent pre-merge caps and after-merge batches wait on one PO decision without spending more. Later
+covered cards join it. A red unowned hotfix stays Blocked and a per-run PO operation owns its route
+assignment; released 0024 Blocked hotfixes recover via their real create ID and carrier run. Refused or
+unidentified dispatches, ambiguous identity, wrong SHA and unreachable result evidence have per-run PO
+operations and no automatic paid retry. Still-pending 0024 uncertain outcomes recover through their
+actual carrier/run with a new linkage comment; their original notice/comment audit remains intact.
+Planned cancellation/deadline and cancelled/timed_out/skipped
+workflow conclusions safely requeue through normal budget admission; cleanup and transient machine
+reads retry without questions. Adapter removal declines pending work under that explicit configuration.
+Standing refusal is applied before questions or paid retries, and already paid runs retain their history.
+A decision completed without a genuine grant declines further runs. Sprint quotations are the native
+monetary path; released genuine owner-comment grants remain consumed by the existing authorization
+writer. Assignment and an uncovered question grant no money. Only the PO explicitly hands over a new
+uncovered owner question. Actual steward escalation, failed PO execution and its deadline remain valid.
+
+### Native after-merge PO dispositions
+
+Every uncertain run and unowned red-hotfix return route has one operation under
+`dispatcher-e2e-am-disposition-<dispatch id>`. Its create audit, actual carrier run and
+covered merge identities bind its result. All producers and released 0024 recovery use
+`TaskWriter.reconcile_after_merge_disposition` and `board/e2e_disposition.py`, including
+committed-but-not-linked creates, closing-run recovery and drained project queues.
+
+Native `task complete --kind operation --body-file ...` preserves an optional
+`## E2E disposition` section containing a plain JSON object. Required fields are
+`operation` (this operation ref), `carrier`, `run` (actual dispatch id), `covered`
+(the exact ordered `{ref,merge_sha}` objects in the operation), `action` and nonempty
+`evidence` (investigation and verification). Actions:
+
+- `retry`: additionally requires `prior_effect` equal to `not_started` or `finished`.
+  The PO attests investigation resolved the uncertain prior effect. It re-admits
+  pending work through the current adapter/target, standing decisions and ordinary
+  all-or-none budget/cap admission. This record grants no money or production rights.
+- `decline`: settles the run's obligation, retaining its operation/evidence and paid
+  records; the completed operation is no longer an active wait.
+- `follow_up`: additionally requires `holder`, a separate actual planned code/infra/
+  research/decision/operation card in an open supported sprint or from a genuine PO
+  turn, in this project. Dependents wait on that live card. Its Done settles the
+  original disposition; missing, superseded or unrouted work becomes neutral.
+  Native Done retention does not invalidate a completed operation/follow-up.
+
+Only the native atomic PO In progress -> Done completion with the matching rendered
+record and an actual session in the supported execution route is consumed. Extra
+fields, copied identities, empty investigation, unresolved prior effects, bare Done
+and free prose never authorize retry. Invalid/incomplete completion produces a durable
+neutral reason with no closed-card holder; the historical completion remains on the operation.
+The PO repairs it by native
+`task move --ref <operation> --to ready --role po --reason-file <reason-file>`.
+For a card in a reserved open sprint, this existing move authority requires
+`--sprint-override --sprint-override-reason-file <reason-file>`; it changes this card,
+not the sprint contract. The dispatcher claims the reopened Ready operation, and a new
+actual native PO turn supplies the corrected bound completion with a new completion
+request ID. Replaying the old Done ID repeats the old record and cannot correct it.
+Reuse the supported session or its native successor, not fabricated origin provenance.
+Ready/In progress again restores the operation as the live holder; corrected completion
+then reaches the same consumer. Old charges, run evidence and both completion events
+remain historical. Nothing spends again until current ordinary admission succeeds.
+
+Reconciliation takes the existing ownership lock before sorted operation/carrier/
+source/hotfix/follow-up row locks, then rereads run identity, committed create,
+completion, supersession and current covered marks, preserving newer merge/run/holder state. Receipt and marks commit in
+one transaction before queue projection saves and publication. `disposition_result`
+on the existing e2e run holds the receipt; `after_merge.holder` distinguishes a live
+obligation from the historical `decision` link. Omitted/null holder reads the released
+decision-as-holder format; empty holder means no live wait. The existing extension bag
+and normalized exports carry both fields without a new table/column or reinterpretation
+of released records. Terminal receipts apply once. Pending marks rebuild deleted queues
+and current ancestry chooses the target; neither restart nor a lost queue save repeats
+completion, enqueue, charge or dispatch. Per-item degraded reads leave durable evidence
+intact and do not starve other carriers. Production/live validation remains DoD9.
+Before creating or recovering an operation, the writer applies the same
+`board/e2e_disposition.py` source/pending/`owns_mark` rule under those locks.
+Retention closure alone never ends an unresolved paid, pending or budget-wait
+obligation. Actual supersession, current merge/run/holder replacement, decline or
+native terminal disposition does. Missing/unreadable evidence degrades rather than
+pretending the question was answered. The existing complete board snapshot read
+includes retained sources/carriers; released0024 hotfix create audit also discovers
+its actual carrier. No retention exemption or new recovery index is needed.
+
+An actual open, unowned Blocked hotfix is an independent return-route obligation:
+its committed dispatcher create must bind this run/hotfix. Even all-newer source
+marks leave that question needing its one PO operation. Historical red runs with
+neither current sources nor unresolved hotfix create no operation or fresh hotfix.
+Creation and run linkage commit before queue projection, preserving released
+committed-create-before-link recovery by the same stable request ID.
+
+For this unowned hotfix, a native `follow_up` names supported planned work, and
+native `decline` records the terminal route disposition; `retry` alone cannot answer
+its route question. The consumer atomically copies its bound receipt to the actual
+hotfix's `e2e.hotfix_route` (`carrier`, `run`, `result`) and maintains its native
+`blocked_by` dependency, with a dispatcher audit/comment naming the outcome.
+The public e2e view shows that receipt and the single live route holder. Terminal
+or neutral receipts have no Done-holder wait. Only settled receipts suppress the
+otherwise generic Blocked-to-observer wait for this answered route; a neutral
+receipt keeps "Blocked work returns to the sprint observer". Live waiting/follow-up
+holders and explicit owner handover/escalation retain their precedence. The code card
+remains Blocked for its historical code state; no dispatcher impersonates PO or
+fabricates a code completion. Follow-up Done clears its dependency and settles
+both receipts, including retained Done follow-up. Receipt/marks/hotfix publication
+fail together, and repeated ticks/native completion/restarts do not ask or spend
+again. Bare/malformed completion remains neutral with PO repair of the same operation.
+Superseded pending work cannot be revived by a retained or deleted-queue projection.

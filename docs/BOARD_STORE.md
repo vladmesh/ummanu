@@ -80,7 +80,7 @@ keys cannot cross kinds.
 Conventions: `text` identifiers, `timestamptz` times, surrogate `bigint` keys only where a row has
 no natural key. Every reference between entities is a foreign key; a reference meaningful only
 within one sprint is a composite foreign key carrying the sprint (§3.3, §3.4, §3.8). Closed
-vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in eight columns (§3.10).
+vocabularies are `CHECK` constraints (§3.12). `jsonb` appears in ten columns (§3.10).
 
 The DDL is grouped by entity. Forward and mutual references are added with `ALTER TABLE` after both
 tables exist (§3.13). `board/schema.py` is authoritative; the DDL below mirrors it.
@@ -231,6 +231,8 @@ CREATE TABLE sprint_resumes (                         -- append-only; sprints.re
     next_safe_step       text NOT NULL,
     recorded_at          timestamptz NOT NULL,
     recorded_at_source   text, -- malformed restored legacy spelling, retained as stale evidence
+    po_request           jsonb, -- future PO wait: {card, action}; NULL for released resumes (0029, J10)
+    CHECK (po_request IS NULL OR jsonb_typeof(po_request) = 'object'),
     UNIQUE (resume_id, sprint_ref)                    -- target of the scoped cursor
 );
 ```
@@ -645,7 +647,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 - One advisory lock (`ummanu.board.requests`) serializes separate claims outside a transaction;
   the per-card marker lock is also an advisory lock.
 
-### 3.10 The eight `jsonb` columns
+### 3.10 The ten `jsonb` columns
 
 | Column | Content |
 |---|---|
@@ -657,6 +659,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 | (J6) `issues.extensions` | (J3) for Issues |
 | (J7) `products.extensions` | (J3) for Products |
 | (J9) `sprints.owner_decisions` | append-only quoted entries with stable IDs and PO audit attribution; latest scoped answer wins; empty for released sprints |
+| (J10) `sprint_resumes.po_request` | optional `{card, action}` identifying a board-owned PO wait; admission locks and validates the actual card, not references extracted from prose; NULL for released resumes |
 | (J8) `sprints.local_run_exceptions` | creation-only list of `{project, argv, rationale}`; exact vectors for registered, reserved projects; default `[]` |
 
 No extension bag may hold a field the schema names. Link sets, budget counters, resume fields and
@@ -747,6 +750,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0026_sprint_local_runs` | additive `sprints.local_run_exceptions` jsonb, not null, default `[]`, array CHECK; existing sprints gain no exceptions; released empty create intents retain request identity; ships through the automatic release migration boundary; downgrade refuses while a nonempty declaration exists |
 | `0027_sprint_owner_decisions` | additive quoted owner decision array, default `[]`; existing permission/counter/charge records unchanged; downgrade refuses nonempty authority |
 | `0028_owner_turns` | reclassifies released `card_waits_for_person`, `e2e_budget_spent`, `e2e_after_merge` rows as notices, preserving IDs, quotations, dedup keys and read history; adds `po_card_escalated` with matching current kind/class constraints. The `owner_event_routine_notice` trigger normalizes actual 0023/0024/0025 producers' obsolete class during release activation, so their real occurrences remain notices. Downgrade refuses while any changed kind exists rather than fabricate old attention. No new table or column. |
+| `0029_po_channel` | nullable typed PO wait on `sprint_resumes`, object CHECK; released six-field resumes, delivery cursors and audit are unchanged. Task PO execution assignment and per-run disposition use existing extension bags. Downgrade refuses while a typed PO wait exists. |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -758,7 +762,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 31 tables, 59 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
+(including `alembic_version`): 31 tables, 60 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1115,7 +1119,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0028_owner_turns`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0029_po_channel`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
@@ -1228,6 +1232,20 @@ through `e2e_state`, which treats a field that does not parse as no runs. It als
 sprint has a second key, `e2e_cap`, JSON `{raises: [{add, authorized_by, decision, at}]}`, the raises
 of its own e2e cap the owner authorized, written only by `task e2e-budget` (`TaskWriter.raise_e2e_cap`)
 and read through `e2e_budget.cap_raises` (secretary-1796).
+After-merge runs additionally hold an optional `disposition_result` receipt of native
+PO completion. Covered marks' optional `holder` is the live obligation, distinct from
+their historical `decision` link; absent/null preserves released readback and empty
+means no active holder. Both use the same e2e extension text and normalized metadata.
+The actual hotfix's optional `e2e.hotfix_route` is the typed `{carrier, run, result}`
+copy of that receipt, with native `blocked_by` holding its live operation/follow-up.
+Its public schema and normalized metadata preserve this same text. Reconciliation
+takes the ownership lock then sorted operation/carrier/source/hotfix/follow-up rows
+and commits receipt, marks, hotfix dependency and audit/comment together, then
+reconstructs queue projections. Retention is not terminal disposition evidence;
+complete supported board reads retain unresolved sources and carrier records. No new table, authority grant,
+origin backfill or released-bag migration is needed; 0029 leaves those bags untouched,
+including absent hotfix_route. It does not invent terminal route authority, and native
+downgrade refuses existing hotfix route receipts rather than letting older consumers forget them.
 
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that

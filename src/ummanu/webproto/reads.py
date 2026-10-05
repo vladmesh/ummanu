@@ -321,7 +321,8 @@ class ReadLayer(ProtocolBoundary):
         for card in cards:
             origin = _object(card.get("origin"))
             delegated = _text(origin.get("po_session")) == session
-            if not session or not (delegated or _text(origin.get("current_session")) == session):
+            assigned = _text(_object(card.get("po_execution")).get("executor")) == session
+            if not session or not (delegated or assigned or _text(origin.get("current_session")) == session):
                 continue
             returns = [row for row in origin.get("returns") or [] if isinstance(row, dict)]
             items.append(
@@ -330,7 +331,7 @@ class ReadLayer(ProtocolBoundary):
                     "title": _text(card.get("title")),
                     "type": _text(card.get("type")) or None,
                     "state": _text(card.get("state")) or None,
-                    "relation": "delegated" if delegated else "inherited",
+                    "relation": "assigned" if assigned else "delegated" if delegated else "inherited",
                     "last_return": returns[-1] if returns else None,
                 }
             )
@@ -733,7 +734,7 @@ def _card_value(card: dict[str, Any] | None) -> dict[str, Any] | None:
     value["touches_production"] = touches_production(card)
     # The blocks `task show` carries (secretary-1811): the PO session a card was delegated from and
     # its returns, a wait card's target and outcome, a code card's e2e runs. Null for a card without.
-    for block in ("origin", "wait", "e2e"):
+    for block in ("origin", "wait", "e2e", "po_execution"):
         value[block] = card.get(block) if isinstance(card.get(block), dict) else None
     return value
 

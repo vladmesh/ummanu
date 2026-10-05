@@ -178,6 +178,7 @@ unit tests/test_doctor_record.py
 unit tests/test_po_handover.py
 unit tests/test_wait_cards.py
 unit tests/test_e2e_declaration.py
+unit tests/test_e2e_disposition.py
 unit tests/test_po_production_rights.py
 unit tests/test_sprint_po_channel.py
 unit tests/test_schemas.py

@@ -46,7 +46,7 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 #: `head_revision()` reads from the script directory; the schema gate (`board.schema_gate`) compares
 #: against this literal so that a healthy read never imports Alembic, and `tests/test_board_store.py`
 #: holds the two equal.
-#: `0028_owner_turns` is the head: PO sessions, turns and feed, the one record of /po
+#: `0029_po_channel` is the head: PO sessions, turns and feed, the one record of /po
 #: request ids, who closed a session and when, the card kinds with their review choice and
 #: live-impact flag, the indexes the audit's narrowed reads are served by, the budget pass's
 #: candidate index, the extension bag under its neutral key, a PO session's reasoning effort
@@ -56,8 +56,9 @@ SCRIPT_LOCATION = Path(__file__).resolve().parent / "migrations"
 #: returned result, the outbox of the returns a delegated card owes, and a sprint's e2e run budget
 #: with the bell kind of a spent per-card e2e cap, and the bell kind of an after-merge e2e run that
 #: returns a notice, creation-only sprint local-run exceptions, quoted standing owner decisions,
-#: and explicit owner-turn attention with routine legacy notices reclassified.
-EXPECTED_SCHEMA_REVISION = "0028_owner_turns"
+#: explicit owner-turn attention with routine legacy notices reclassified, and optional
+#: typed PO waits on future observer resumes.
+EXPECTED_SCHEMA_REVISION = "0029_po_channel"
 
 #: A fixed 64-bit key, so every runner of every checkout contends on the same lock.  Any constant
 #: would do; this one is the first 63 bits of sha256("ummanu.board.migrations"), recorded here

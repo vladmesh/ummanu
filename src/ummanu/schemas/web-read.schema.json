@@ -209,6 +209,64 @@
         "classification": {"type": ["string", "null"]}
       }
     },
+    "po_execution_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replaces": {"type": "string"},
+        "via": {"const": "create_session"},
+        "session": {"type": "string"},
+        "cli": {"type": "string"},
+        "model": {"type": "string"},
+        "effort": {"type": "string"}
+      }
+    },
+    "po_execution": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["request", "purpose", "sources", "initial", "executor", "successors"],
+      "properties": {
+        "request": {"type": "string", "minLength": 1},
+        "purpose": {"enum": ["e2e_budget", "e2e_disposition"]},
+        "sources": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "initial": {"$ref": "#/$defs/po_execution_resolution"},
+        "executor": {"type": "string"},
+        "successors": {"type": "object", "additionalProperties": {"$ref": "#/$defs/po_execution_resolution"}}
+      }
+    },
+    "e2e_disposition_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "status", "action", "holder", "reason"],
+      "properties": {
+        "operation": {"type": "string", "minLength": 1},
+        "status": {"enum": ["waiting", "neutral", "follow_up", "settled"]},
+        "action": {"enum": ["", "retry", "decline", "follow_up"]},
+        "holder": {"type": "string"},
+        "reason": {"type": "string", "minLength": 1},
+        "completion": {"type": "string", "minLength": 1}
+      },
+      "description": "Durable native PO completion effect on one actual after-merge run. Empty holder means historical operation evidence only; retry grants no budget."
+    },
+    "task_e2e": {
+      "type": ["object", "null"],
+      "properties": {
+        "hotfix_route": {
+          "type": "object", "additionalProperties": false,
+          "required": ["carrier", "run", "result"],
+          "properties": {
+            "carrier": {"type": "string", "minLength": 1},
+            "run": {"type": "string", "minLength": 1},
+            "result": {"$ref": "#/$defs/e2e_disposition_result"}
+          }
+        },
+        "waiting_on": {"type": "string", "minLength": 1},
+        "after_merge_runs": {
+          "type": "array",
+          "items": {"type": "object", "properties": {"disposition_result": {"$ref": "#/$defs/e2e_disposition_result"}}}
+        }
+      }
+    },
     "task": {
       "type": "object",
       "required": ["schema_version", "kind", "observed_at", "ref", "card", "project", "attempt", "agents", "heads", "work", "events"],
@@ -220,7 +278,10 @@
         "card": {
           "type": "object",
           "required": ["source", "value"],
-          "properties": {"source": {"$ref": "#/$defs/source"}, "value": {"type": ["object", "null"]}}
+          "properties": {
+            "source": {"$ref": "#/$defs/source"},
+            "value": {"type": ["object", "null"], "properties": {"po_execution": {"$ref": "#/$defs/po_execution"}, "e2e": {"$ref": "#/$defs/task_e2e"}}}
+          }
         },
         "project": {
           "type": "object",

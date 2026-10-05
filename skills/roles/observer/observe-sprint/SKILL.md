@@ -526,3 +526,27 @@ records conversation answers with `task record-owner-answer --role po --handover
 --body-file <quotation-file> --request-id <id>`; genuine owner card comments also settle attention.
 An answered unfinished card is with the PO. Apply recorded standing decisions once, by ID, and
 follow dependency-card links instead of counting each dependent as an owner question.
+
+An observer sprint comment is for notes and evidence. Requests such as `[observer:request]`,
+`PO, please choose the route`, `Wait for PO decision` or `Ждём решения ПО` are refused with a
+create-card hint. Create a decision/operation card in this sprint and put its ref in `current_task`.
+For a saved PO wait, also set `po_request` to `{"card":"<same ref>","action":"<missing decision/action>"}`.
+The writer checks the card's actual type, sprint and actionable state in the resume transaction;
+a code, foreign, archived, superseded, Blocked, Done or nonexistent card cannot own that step.
+Refusal commits no resume, sprint comment or delivery acknowledgement. Correct the input and retry
+the same request ID and delivery pair. Quotations, negated waits, administrative notes and future
+implementation analysis remain ordinary evidence. Other direct request phrasing must use this
+explicit representation; do not hide a request in free prose. See docs/PROTOCOLS.md, Observer PO channel.
+The role is uppercase Cyrillic `ПО`, distinct from the preposition `по`. Request
+objects before the role establish the addressee even with following complements:
+`Need a decision from PO on the route` and `Ждём ответа ПО на вопрос` are requests.
+Explicit actor frames such as `Ask PO to pick the route`, `PO must improve telemetry`
+and `ПО должен сопоставить результаты` do not depend on a fixed verb vocabulary.
+Ambiguous objects after the role require a sentence/address or complement boundary;
+`Need PO answer delivery fix`, `Wait for PO decision card ummanu-80 to merge` and
+`PO review fix ummanu-80 is in CI` remain component/status notes. Unlisted nouns,
+plurals and translations need no denylist: `Need PO context rollover`, `Wait for
+PO turns to drain` and `Ждём ПО сессию` remain notes. See the exact frames and
+boundaries in docs/PROTOCOLS.md, Observer PO channel.
+The bounded grammar does not recognize `The PO must decide`, `Awaiting PO decision`
+or `Let the PO decide`; use the marker or typed request for these wordings.

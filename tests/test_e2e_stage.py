@@ -497,9 +497,9 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
 
     # --- the per-card cap, outside every sprint ---------------------------------------------------------
 
-    def test_the_fourth_run_of_a_card_outside_every_sprint_is_not_dispatched_and_the_card_is_blocked(self) -> None:
+    def test_the_fourth_run_of_a_card_outside_every_sprint_waits_for_assigned_po_decision(self) -> None:
         """Since secretary-1796 the per-card cap binds only a card outside every sprint (a sprint's card
-        spends the sprint budget, `tests/test_e2e_budget.py`); with no PO origin it Blocks, and rings."""
+        spends the sprint budget, `tests/test_e2e_budget.py`); with no PO origin an explicit assignment owns its question."""
         self.arrange(review="skipped", observed=False)
         previous = {
             "runs": [
@@ -525,17 +525,17 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         )
         self._run_worker_to_validate()
 
-        blocked = self.tick()
-
-        self.assertBlockedAsInfrastructure(blocked, "e2e run cap reached (3)", taxonomy="other")
-        self.assertEqual(blocked["reason"], "e2e run cap reached (3)")
+        waiting = self.tick()
+        self.assertEqual(waiting["action"], "e2e-budget-waiting")
         self.assertEqual(self.host.dispatches, [])
         self.assertEqual(self.card()["e2e"]["runs_dispatched"], 3)
         self.assertEqual(self.card()["e2e"]["run_cap"], 3)
-        [bell] = [event for event in OwnerEventStore(self.board.credentials).events() if event.subject_ref == CARD_REF]
-        self.assertEqual((bell.kind, bell.event_class), ("e2e_budget_spent", "notice"))
-        self.assertFalse(bell.held or bell.pinned)
-        self.assertIn("e2e run cap reached (3)", bell.text)
+        decision = self.reader.show(self.card()["e2e"]["waiting_on"])
+        self.assertEqual(decision["type"], "decision")
+        self.assertEqual(decision["po_execution"]["sources"], [CARD_REF])
+        self.assertNotIn("po_origin", decision["extensions"]["extra"])
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
+
 
 
 if __name__ == "__main__":

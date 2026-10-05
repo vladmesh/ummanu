@@ -2196,9 +2196,9 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
     reference = str(card.get("ref") or "")
     state = str(card.get("state") or "")
     kind = str(card.get("type") or "")
-    if not reference or card.get("closed"):
+    if not reference:
         return []
-    live = state != "done"
+    live = state != "done" and not card.get("closed")
     found: list[dict[str, Any]] = []
 
     def said(what: str, detail: str) -> None:
@@ -2260,6 +2260,13 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
         )
     elif escalation := attention_record(card, OWNER_ESCALATION):
         said(WAITING_ON_OWNER, str(escalation["reason"]))
+    elif (route := e2e_state(card).hotfix_route) and (
+        route.result["status"] == "settled"
+        or (route.result["holder"] and route.result["status"] in {"waiting", "follow_up"})
+    ):
+        if route.result["holder"] and route.result["status"] in {"waiting", "follow_up"}:
+            said(WAITING_ON_DEPENDENCY, route.result["reason"])
+            found[-1]["holder"] = route.result["holder"]
     elif is_po_executed(card) and state == "in_progress":
         said(WAITING_ON_PO, f"{kind} card with the PO")
     elif state == "blocked" and kind != "wait" and not e2e_state(card).budget_decline:

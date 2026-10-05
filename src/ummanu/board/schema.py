@@ -282,9 +282,14 @@ class SprintResume(Base):
     recorded_at = sa.Column(TIMESTAMPTZ, nullable=False)
     # Restore must retain malformed legacy evidence so freshness can report it as stale.
     recorded_at_source = sa.Column(sa.Text)
+    po_request = sa.Column(JSONB)
 
     # The target a scoped foreign key needs; redundant with the primary key by design.
-    __table_args__ = (sa.UniqueConstraint("resume_id", "sprint_ref"),)
+    __table_args__ = (
+        sa.UniqueConstraint("resume_id", "sprint_ref"),
+        sa.CheckConstraint("po_request IS NULL OR jsonb_typeof(po_request) = 'object'",
+                           name="sprint_resume_po_request_is_object"),
+    )
 
 
 # --- §3.4 Budget --------------------------------------------------------------------------
@@ -1026,6 +1031,7 @@ PASSWORD_PARAMETERS = ("app_password", "read_password")
 
 #: The columns §3.10 declares `jsonb`, and the only ones in the schema.
 JSONB_COLUMNS = (
+    ("sprint_resumes", "po_request"),
     ("sprints", "owner_decisions"),
     ("sprints", "local_run_exceptions"),
     ("products", "extensions"),

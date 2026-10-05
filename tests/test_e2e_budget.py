@@ -272,10 +272,11 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         self.assertIn("The e2e run budget of sprint:1031 is spent: 3 of 3 runs.", body)
         self.assertIn(f"https://github.com/{REPO}/actions/runs/", body)
         self.assertIn("(failure: red)", body)
-        self.assertIn("Raise the e2e budget of sprint:1031 by N runs, or no?", body)
-        self.assertIn("task handover", body)
+        self.assertIn("Disposition for sprint:1031: apply existing authority or decline further runs.", body)
+        self.assertIn("Only a new uncovered owner decision calls for explicit `task handover --to owner`", body)
+        self.assertIn("this question grants no money", body)
         self.assertIn("sprint e2e-budget --ref sprint:1031 --role po --authorized-by <event id>", body)
-        # The two exact answer lines the owner is asked for.
+        # The released genuine owner-comment answers remain supported after explicit handover.
         self.assertIn("\n    e2e budget: raise <N>\n    e2e budget: no\n", body)
         [joined] = [c["body"] for c in shown["comments"] if OTHER in c["body"]]
         self.assertIn("joins this decision", joined)
@@ -422,6 +423,8 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         event = self.blocked_transition()
         self.assertIn("no more e2e runs for sprint:1031 this month", str(event.get("reason")))
         self.assertIn(f"the decision {decision} was completed without a raise", str(event.get("reason")))
+        self.assertIn("No additional budget was granted", str(event.get("reason")))
+        self.assertNotIn("owner's money decision", str(event.get("reason")))
         self.assertEqual(event["data"]["terminal_taxonomy"]["blocked_reason"], "other")
         self.assertNotIn("gate-red", str(event.get("request_id")), "not charged as a code defect")
         self.assertNotIn("mark", card.get("e2e") or {})
@@ -592,15 +595,21 @@ class OutOfSprintCapTests(BudgetStageFixture, unittest.TestCase):
         )
         self.assertEqual(len(e2e_state(self.reader.show(OTHER)).runs), 3)
 
-    def test_a_card_with_no_origin_is_blocked_and_rings_the_bell(self) -> None:
+    def test_a_card_with_no_origin_has_one_assigned_po_decision_without_spending(self) -> None:
         self.spent_cap(origin=False)
-
-        blocked = self.tick()
-
-        self.assertBlockedAsInfrastructure(blocked, "e2e run cap reached (3)", taxonomy="other")
-        self.assertEqual(self.decisions(), [])
-        [bell] = [e for e in OwnerEventStore(self.board.credentials).events() if e.subject_ref == CARD_REF]
-        self.assertEqual((bell.kind, bell.event_class), ("e2e_budget_spent", "notice"))
+        waiting = self.tick()
+        self.assertEqual(waiting["action"], "e2e-budget-waiting")
+        [decision] = self.decisions()
+        shown = self.reader.show(decision["ref"])
+        self.assertIsNone(origin_field.po_origin(shown))
+        self.assertEqual(shown["po_execution"]["purpose"], "e2e_budget")
+        self.assertEqual(shown["po_execution"]["sources"], [CARD_REF])
+        self.assertEqual(self.card()["e2e"]["waiting_on"], decision["ref"])
+        self.assertEqual(self.tick()["action"], "e2e-budget-waiting")
+        self.assertEqual(len(self.decisions()), 1)
+        self.assertEqual(len(e2e_state(self.card()).runs), 3)
+        self.assertEqual(self.host.dispatches, [])
+        self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
 
 
 class SprintBudgetEntityTests(SprintFixture):

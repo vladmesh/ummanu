@@ -4737,9 +4737,12 @@ def _po_delegated(section: Any) -> str:
         )
         state = str(item.get("state") or "unknown")
         tally[state] = tally.get(state, 0) + 1
-        if (last and not last.get("status")) or (not last and state in PO_RETURNED_STATES):
+        if item.get("relation") != "assigned" and (
+            (last and not last.get("status")) or (not last and state in PO_RETURNED_STATES)
+        ):
             pending += 1
-        relation = "" if item.get("relation") != "inherited" else ' <span class="age">(as successor)</span>'
+        relation = (' <span class="age">(PO assignment)</span>' if item.get("relation") == "assigned"
+                    else ' <span class="age">(as successor)</span>' if item.get("relation") == "inherited" else "")
         rows.append(
             [
                 _link(str(item.get("ref") or "")) + relation,

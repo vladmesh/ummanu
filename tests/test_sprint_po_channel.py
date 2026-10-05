@@ -16,7 +16,10 @@ from typing import Any
 from unittest import mock
 
 from tests.po_fake_store import FakePoStore
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, REQUEST_PO_NOTES, NEUTRAL_PO_NOTES
 from ummanu import sprint_commands
+from ummanu.board.po_channel import requests_po
+from ummanu.board.sprint_read import RESUME_FIELDS, SprintResume
 from ummanu.board.sprint_write import SprintCreateIntent
 from ummanu.board.sql_sprints import SqlSprintRecords
 from ummanu.cli import main
@@ -46,6 +49,40 @@ PRE_0016_META = {
     "sprint_resume": "",
     "sprint_budget": '{"by_type":{}}',
 }
+
+
+class ObserverRequestAdmissionTests(unittest.TestCase):
+    def test_direct_requests_and_waits_in_both_languages(self):
+        for body in REQUEST_PO_NOTES:
+            with self.subTest(body=body):
+                self.assertTrue(requests_po(body))
+
+    def test_notes_negation_quotations_and_future_implementation_are_not_requests(self):
+        for body in NEUTRAL_PO_NOTES:
+            with self.subTest(body=body):
+                self.assertFalse(requests_po(body))
+
+    def test_typed_wait_roundtrips_without_changing_historical_six_field_readback(self):
+        old = dict.fromkeys(RESUME_FIELDS, "ordinary analysis")
+        legacy = SprintResume.from_legacy(old, required=True, now=lambda: "2026-10-05T00:00:00Z")
+        self.assertNotIn("po_request", legacy.to_document())
+        wait = {**old, "current_task": "ummanu-1", "po_request": {"card": "ummanu-1", "action": "choose route"}}
+        parsed = SprintResume.from_legacy(wait, required=True)
+        self.assertEqual(parsed.to_document()["po_request"], wait["po_request"])
+        for invalid in ({"card": "ummanu-1"}, {"card": "ummanu-1", "action": ""}, "ummanu-1"):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                SprintResume.from_legacy({**old, "po_request": invalid}, required=True)
+
+    def test_administrative_preposition_and_component_modifiers_are_not_addressees(self):
+        for body in ADMINISTRATIVE_PO_NOTES:
+            with self.subTest(body=body):
+                self.assertFalse(requests_po(body))
+
+    def test_other_english_request_wording_needs_explicit_representation(self):
+        for body in ("The PO must decide", "Awaiting PO decision", "Let the PO decide"):
+            with self.subTest(body=body):
+                self.assertFalse(requests_po(body))
+                self.assertTrue(requests_po("[observer:request] " + body))
 
 
 def po_session_state(store: FakePoStore):

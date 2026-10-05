@@ -23,6 +23,8 @@ from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
 from ummanu._fsutil import file_lock
 from ummanu.board import po_origin as origin_field
+from ummanu.board import po_execution
+from ummanu.board.e2e_disposition import completion_identity
 from ummanu.board.e2e_record import AfterMergeMark, e2e_state
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.dispatch import e2e_after_merge
@@ -33,6 +35,8 @@ from ummanu.dispatch.state import new_attempt_id, now_rfc3339
 from ummanu.dispatch.types import HostError
 from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, is_significant_card_event
+from ummanu.po.store import PoStore
+from ummanu.webproto.sprint_reads import card_waits
 
 SPRINT = "sprint:1031"
 OTHER_REPO = "vladmesh/codegen"
@@ -205,6 +209,22 @@ class AfterMergeFixture(E2eStageFixture):
         self.start_dispatcher()
         self.merged_at = 1_700_000_000.0
         self.number = 9000
+
+    def retain_done(self, *refs):
+        """Native retention of actual old Done episodes, preserving their card type/audit."""
+        for ref in refs:
+            self.board.set_moved(self.board.key_of(ref), 1_700_000_000)
+            before = e2e_state(self.reader.show(ref)).text()
+            result = self.writer.retire_done(reference=ref, expected_date_moved=1_700_000_000,
+                cutoff=1_700_000_001, retention_days=14, request_id="retain-" + ref)
+            self.assertTrue(result["retired"])
+            self.assertTrue(self.writer.retire_done(reference=ref, expected_date_moved=1_700_000_000,
+                cutoff=1_700_000_001, retention_days=14, request_id="retain-" + ref)["skipped"])
+            task = self.reader.show(ref)
+            self.assertEqual((task["state"], task["type"], task["closed"]), ("done", "code", True))
+            self.assertEqual(e2e_state(task).text(), before)
+            self.assertNotIn(ref, {card["ref"] for card in self.reader.list()})
+            self.assertEqual(self.writer.audit.committed_event("retain-" + ref)["kind"], "retired")
 
     # --- arrangement ------------------------------------------------------------------------------
 
@@ -526,6 +546,38 @@ class QueueingTests(AfterMergeFixture, unittest.TestCase):
 
 
 class ExactShaTests(AfterMergeFixture, unittest.TestCase):
+    def test_released_notice_and_pending_uncertain_run_get_one_holder_before_retry(self) -> None:
+        cards = self.three_merged_in_one_run()
+        self.host.ran_on = _sha("9")
+        # The actual 0024 producer: uncertain outcome -> notice/comment -> pending.
+        def released(runtime, project, carrier, state, run, entries, queue):
+            run.resolution, run.acted = "blocked", True
+            for item in run.covered:
+                runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=item["ref"],
+                    body="Released after-merge result could not be confirmed; pending again.",
+                    request_id="released-result-" + item["ref"])
+                e2e_after_merge._remark(runtime, item["ref"], carrier, state, state="pending", dispatch_id="", run_url="")
+            e2e_after_merge._persist(runtime, carrier, state)
+            queue["pending"] = [{**entry, "marked": True} for entry in entries]
+            e2e_after_merge._bell(runtime, carrier, "Released unconfirmed result", "released-notice")
+            return {"action": "released"}
+        with mock.patch.object(e2e_after_merge, "_act", side_effect=released):
+            self.am_tick()
+        original = self.writer.audit.committed_event("released-result-" + cards[0])
+        paid = self.reader.sprint_e2e_budget(SPRINT)["used"]
+        self.am_tick()
+        run = self.run_of(cards[-1])
+        operation = self.reader.show(run.disposition)
+        self.assertEqual(operation["type"], "operation")
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.writer.audit.committed_event("released-result-" + cards[0]), original)
+        self.assertEqual(self.mark(cards[0])["waiting_on"], operation["ref"])
+        self.assertEqual(len(self.bells()), 1)
+        self.am_tick()
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
+
     def test_the_run_is_dispatched_on_a_dispatcher_owned_branch_at_the_target_and_the_branch_is_deleted(
         self,
     ) -> None:
@@ -616,8 +668,11 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(self.comments_on(cards[0], "E2E after merge — green"), [])
         self.assertEqual(self.hotfixes(), [])
         self.assertEqual(len(self.bells()), 1)
-        self.assertEqual(sorted(self.pending()), sorted(cards))
-        self.assertEqual(self.mark(cards[0])["state"], "pending")
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.mark(cards[0])["state"], "blocked")
+        operation = self.reader.show(run.disposition)
+        self.assertEqual(operation["type"], "operation")
+        self.assertEqual(self.mark(cards[0])["waiting_on"], operation["ref"])
         self.assertNotIn(run.git_ref, self.host.refs)
 
     def test_a_crash_between_the_branch_and_the_dispatch_never_dispatches(self) -> None:
@@ -646,15 +701,17 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
             [],
             "the crashed intent is never dispatched",
         )
-        # The recorded branch is cleaned up, and the cards go back for the next run, charged anew.
+        # Unconfirmed dispatch evidence is owned by the PO before another paid attempt.
         self.assertNotIn(run.git_ref, self.host.refs)
         self.assertEqual(crashed.git_ref_state, "deleted")
         self.assertEqual(len(self.bells()), 1)
-        [(_, next_ref, _)] = [
-            entry for entry in self.host.ref_log if entry[0] == "create" and entry[1] != run.git_ref
-        ]
-        self.assertEqual([d["ref"] for d in self.host.dispatches], [next_ref])
-        self.assertEqual([item["ref"] for item in self.run_of(cards[-1]).covered], cards)
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.host.dispatches, [])
+        operation = self.reader.show(crashed.disposition)
+        self.assertEqual(operation["type"], "operation")
+        self.assertEqual(self.mark(cards[0])["waiting_on"], operation["ref"])
+        self.am_tick(restarted)
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
 
     def test_a_crash_after_the_dispatch_is_recovered_without_a_second_dispatch(self) -> None:
         cards = self.three_merged_in_one_run()
@@ -891,9 +948,11 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
             self.assertEqual((view["state"], view["decision"]), ("declined", decision["ref"]))
             [comment] = self.comments_on(card, "## E2E after merge — declined")
             self.assertIn(f"the decision {decision['ref']} was completed without a raise", comment)
+            self.assertIn("No additional budget was granted", comment)
+            self.assertNotIn("owner's money decision", comment)
         self.assertEqual(self.queue(), {})
 
-    def test_a_batch_no_po_session_owns_is_declined_whole_with_the_bell(self) -> None:
+    def test_a_batch_without_po_origin_waits_on_one_assigned_decision(self) -> None:
         capped, fresh = self.done_card(sprint=""), self.done_card(sprint="")
         self.on_main(_sha("a"), _sha("b"))
         self.merge(capped, _sha("a"))
@@ -904,15 +963,24 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
             role="dispatcher", actor="ummanu-pilot", reference=capped, state=state.text()
         )
 
-        [declined] = self.am_tick()
-
-        self.assertEqual(declined["action"], "e2e-after-merge-declined", declined)
-        self.assertEqual([c for c in self.reader.list() if c.get("type") == "decision"], [])
+        [waiting] = self.am_tick()
+        self.assertEqual(waiting["action"], "e2e-after-merge-budget-waiting", waiting)
+        [decision] = [c for c in self.reader.list() if c.get("type") == "decision"]
+        self.assertIsNone(origin_field.po_origin(decision))
+        self.assertEqual(decision["po_execution"]["sources"], [capped, fresh])
         for card in (capped, fresh):
-            self.assertEqual(self.mark(card)["state"], "declined")
-        [bell] = [e for e in OwnerEventStore(self.board.credentials).events() if e.kind == "e2e_budget_spent"]
-        self.assertEqual(bell.subject_ref, capped)
-        self.assertEqual(self.pending(), [])
+            self.assertEqual(self.mark(card)["waiting_on"], decision["ref"])
+        self.assertEqual(self.host.dispatches, [])
+        self.assertEqual(sorted(self.pending()), sorted([capped, fresh]))
+        self.am_tick()
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "decision"]), 1)
+        late = self.done_card(sprint="")
+        self.on_main(_sha("c"))
+        self.merge(late, _sha("c"))
+        self.am_tick()
+        self.assertEqual(self.mark(late)["waiting_on"], decision["ref"])
+        self.assertEqual(len(self.comments_on(decision["ref"], f"- {late} waits")), 1)
+        self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
 
     def test_a_spent_sprint_budget_dispatches_nothing_and_names_every_covered_card(self) -> None:
         self.spend_sprint(3)
@@ -1017,7 +1085,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         self.assertIn(run.run_url, hotfix["description"])
         self.assertEqual(self.bells(), [])
 
-    def test_a_failure_nobody_owns_is_blocked_at_once_and_rings_the_bell(self) -> None:
+    def test_a_failure_without_origin_has_one_po_return_route_operation(self) -> None:
         def cards() -> list[str]:
             made = [self.done_card(sprint="")]
             self.on_main(_sha("a"))
@@ -1036,8 +1104,15 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         ]
         self.assertEqual(len(blocked), 1)
         self.assertIn("after-merge e2e red, no sprint or origin owns it", blocked[0]["reason"])
-        [bell] = self.bells()
-        self.assertEqual((bell.event_class, bell.subject_ref), ("notice", hotfix["ref"]))
+        [operation] = [c for c in self.reader.list() if c.get("type") == "operation"]
+        self.assertEqual(operation["po_execution"]["purpose"], "e2e_disposition")
+        self.assertIsNone(origin_field.po_origin(operation))
+        self.assertIn(hotfix["ref"], operation["description"])
+        self.assertEqual(self.bells(), [])
+        self.am_tick()
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
+        self.assertEqual(self.run_of(operation["po_execution"]["sources"][0]).disposition, operation["ref"])
+        self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
 
     def test_a_replayed_red_outcome_cuts_no_second_hotfix(self) -> None:
         cards, run = self.run_to("failure")
@@ -1136,6 +1211,837 @@ class VisibilityTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(
             (shown["ref"], shown["covered"]), (run.git_ref, [{"ref": card, "merge_sha": _sha("a")}])
         )
+
+
+class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
+    """Actual SQL/native PO completion -> shared consumer -> ordinary paid admission."""
+
+    def uncertain(self, *, conclusion="refused", sprint=SPRINT, count=2):
+        cards = [self.done_card(sprint=sprint) for _ in range(count)]
+        self.on_main(*(_sha(digit) for digit in "abcdef"))
+        for ref, digit in zip(cards, "abc", strict=False):
+            self.merge(ref, _sha(digit))
+        if conclusion == "refused":
+            self.host.dispatch_answer = ("http", "gh: workflow dispatch refused (HTTP 422)")
+        self.am_tick()
+        if conclusion != "refused":
+            self.conclude(conclusion, self.run_of(cards[-1]).wait_ref)
+            self.am_tick()
+        run = self.run_of(cards[-1])
+        self.assertTrue(run.disposition)
+        self.assertEqual(len([card for card in self.reader.list() if card.get("type") == "operation"]), 1)
+        return cards, run
+
+    def prepare_native_completion(self, carrier, action="retry", *, holder="", malformed=False, bare=False,
+                                  request="native-disposition-complete", session="disposition-po", session_request=None):
+        """Commit native preparation separately; stable claims replay its session and turn."""
+        run = self.run_of(carrier, 0)
+        operation = self.reader.show(run.disposition)
+        store = PoStore(self.board.credentials)
+        claimed_session, session_created = store.claim_session(session_id=session, cli="claude", model="sonnet", effort="high",
+            cwd=str(self.data_dir), cli_session_id=None, request_id=session_request or request + "-po-create")
+        self.assertEqual(claimed_session.session_id, session)
+        turn, turn_created = store.claim_turn(session, "Resolve the actual after-merge disposition", lambda seq: self.data_dir / f"{session}-{seq}.log",
+            request_id=request + "-turn", card={"ref": operation["ref"], "type": "operation"})
+        if operation.get("sprint"):
+            SprintWriter(self.board, data_dir=self.data_dir).set_po_session(role="po", actor="po",
+                reference=operation["sprint"], session_id=session, request_id=request + "-session")
+        else:
+            assigned = po_execution.assignment(operation)
+            assigned.initial = {"via": "create_session", "replaces": "", "session": session,
+                                "cli": "claude", "model": "sonnet", "effort": "high"}
+            assigned.executor = session
+            self.writer.record_po_execution(role="dispatcher", actor="ummanu-pilot",
+                reference=operation["ref"], state=assigned.text())
+        if operation["state"] == "ready":
+            self.writer.claim(role="dispatcher", actor="ummanu-pilot", reference=operation["ref"],
+                worker="po-" + operation["ref"], request_id=request + "-claim")
+        record = {**completion_identity(operation["ref"], carrier, run), "action": action,
+                  "evidence": "Investigated GitHub run/POST evidence; previous effect is resolved"}
+        if action == "retry":
+            record["prior_effect"] = "finished" if run.result else "not_started"
+        elif action == "follow_up":
+            record["holder"] = holder
+        if malformed:
+            record["run"] = "not-the-actual-run"
+        body = "## What was done\nInvestigated the prior effect.\n\n## How to verify\nRead the original run and dispatch receipt."
+        if not bare:
+            body += "\n\n## E2E disposition\n" + json.dumps(record)
+        return {"store": store, "turn": turn, "session_created": session_created, "turn_created": turn_created,
+            "completion": {"role": "po", "actor": "po", "reference": operation["ref"], "kind": "operation",
+                           "body": body, "po_session": session, "request_id": request}}
+
+    def complete_native(self, prepared):
+        """Retry only the prepared completion, retaining its exact body/session/turn/request."""
+        completed = self.writer.complete(**prepared["completion"])
+        repeated = self.writer.complete(**prepared["completion"])
+        self.assertEqual(completed["event_id"], repeated["event_id"])
+        self.assertTrue(repeated["replayed"])
+        store, turn = prepared["store"], prepared["turn"]
+        was_running = store.turn(turn.session_id, turn.seq).state == "running"
+        self.assertEqual(store.complete_turn(turn.session_id, turn.seq, "Disposition recorded"), was_running)
+        self.assertEqual(store.turn(turn.session_id, turn.seq).state, "completed")
+        return completed
+
+    def native_complete(self, carrier, action="retry", **options):
+        return self.complete_native(self.prepare_native_completion(carrier, action, **options))
+
+    def drop_queue(self):
+        with file_lock(self.runtime.production_state.tick_lock):
+            payload = self.runtime.production_state.load()
+            queues(payload).clear()
+            self.runtime.production_state.save(payload)
+
+    def retained_budget_batch(self):
+        cards = [self.done_card(sprint="") for _ in range(2)]
+        self.on_main(*(_sha(digit) for digit in "abcdef"))
+        for ref, digit in zip(cards, "ab", strict=True):
+            self.merge(ref, _sha(digit))
+        state = e2e_state(self.reader.show(cards[0]))
+        state.after_merge = AfterMergeMark(_sha("a"), charged=["paid-1", "paid-2", "paid-3"])
+        self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=cards[0], state=state.text())
+        self.am_tick()
+        [decision] = [task for task in self.reader.list() if task["type"] == "decision"]
+        self.assertIsNone(origin_field.po_origin(decision))
+        before = {ref: list(e2e_state(self.reader.show(ref)).after_merge.charged) for ref in cards}
+        self.retain_done(*cards)
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        self.am_tick(self._runtime())
+        self.assertEqual(sorted(self.pending()), sorted(cards))
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == decision["ref"] for ref in cards))
+        self.assertEqual({ref: list(e2e_state(self.reader.show(ref)).after_merge.charged) for ref in cards}, before)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "decision"]), 1)
+        self.assertFalse(self.host.dispatches)
+        return cards, decision, before
+
+    def retained_delayed_grant(self, conclusion):
+        cards, decision, before = self.retained_budget_batch()
+        # A genuine released owner-comment grant follows an explicit native PO
+        # handover. Its recorded authority, not retention, authorizes the charge.
+        store = PoStore(self.board.credentials)
+        session, _ = store.claim_session(session_id="retained-budget-po", cli="claude", model="sonnet", effort="high",
+            cwd=str(self.data_dir), cli_session_id=None, request_id="retained-budget-create")
+        assignment = po_execution.assignment(decision)
+        assignment.initial = {"via": "create_session", "replaces": "", "session": session.session_id,
+                              "cli": "claude", "model": "sonnet", "effort": "high"}
+        assignment.executor = session.session_id
+        self.writer.record_po_execution(role="dispatcher", actor="ummanu-pilot", reference=decision["ref"], state=assignment.text())
+        turn, _ = store.claim_turn(session.session_id, "Investigate exhausted batch budget", lambda seq: self.data_dir / f"budget-{seq}.log",
+            request_id="retained-budget-question", card={"ref": decision["ref"], "type": "decision"})
+        self.writer.claim(role="dispatcher", actor="ummanu-pilot", reference=decision["ref"], worker="po-" + decision["ref"],
+            request_id="retained-budget-claim")
+        self.writer.handover(role="po", actor="po", reference=decision["ref"], to="owner", reason="One additional paid run needs new monetary authority",
+            po_session=session.session_id, request_id="retained-budget-handover")
+        store.complete_turn(turn.session_id, turn.seq, "Handed the uncovered monetary question to owner")
+        answer = self.writer.comment(role="owner", actor="owner", reference=decision["ref"], body="e2e budget: raise 1",
+            request_id="retained-budget-owner-answer")["event_id"]
+        response, _ = store.claim_turn(session.session_id, "Apply the recorded owner answer once", lambda seq: self.data_dir / f"budget-{seq}.log",
+            request_id="retained-budget-response", card={"ref": decision["ref"], "type": "decision"})
+        self.writer.raise_e2e_cap(role="po", actor="po", reference=cards[0], authorized_by=answer)
+        self.writer.raise_e2e_cap(role="po", actor="po", reference=cards[0], authorized_by=answer)
+        completed = self.writer.complete(role="po", actor="po", reference=decision["ref"], kind="decision",
+            body="## Decision\nApplied the recorded owner grant once.\n\n## How to verify\nRead the source cap raise and original paid records.",
+            po_session=session.session_id, request_id="retained-budget-complete")
+        self.assertIsNotNone(completed["event_id"])
+        store.complete_turn(response.session_id, response.seq, "Applied the existing grant and completed the decision")
+        self.assertEqual(len(store.turns(session.session_id)), 2)
+        explicit_events = [event.id for event in OwnerEventStore(self.board.credentials).events()
+                           if event.event_class == "needs_owner"]
+        if conclusion == "refused":
+            self.host.dispatch_answer = ("http", "gh: workflow dispatch refused (HTTP 422)")
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        if conclusion == "failure":
+            self.conclude("failure", self.run_of(cards[-1]).wait_ref)
+            self.am_tick(self._runtime())
+        run = self.run_of(cards[-1])
+        self.assertTrue(run.disposition)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == run.disposition for ref in cards))
+        paid = {ref: list(e2e_state(self.reader.show(ref)).after_merge.charged) for ref in cards}
+        for ref in cards:
+            self.assertEqual(paid[ref], [*before[ref], run.dispatch_id])
+            self.assertTrue(self.reader.show(ref)["closed"])
+        prepared = self.prepare_native_completion(cards[-1], "decline")
+        self.assertTrue(prepared["turn_created"])
+        self.complete_native(prepared)
+        self.drop_queue()
+        for _ in range(2):
+            self.am_tick(self._runtime())
+        receipt = self.run_of(cards[-1]).disposition_result
+        self.assertEqual((receipt["status"], receipt["action"]), ("settled", "decline"))
+        self.assertTrue(all(not card_waits(self.reader.show(ref)) for ref in cards))
+        if run.hotfix:
+            hotfix = self.reader.show(run.hotfix)
+            self.assertEqual(e2e_state(hotfix).hotfix_route.result, receipt)
+            self.assertEqual(card_waits(hotfix), [])
+            self.assertIsNone(hotfix["blocked_by"])
+        self.assertEqual({ref: list(e2e_state(self.reader.show(ref)).after_merge.charged) for ref in cards}, paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.assertEqual(len(prepared["store"].turns(prepared["turn"].session_id)), 1)
+        self.assertEqual([event.id for event in OwnerEventStore(self.board.credentials).events()
+                          if event.event_class == "needs_owner"], explicit_events)
+
+    def test_delayed_grant_after_native_retention_reaches_one_red_hotfix_po_operation(self):
+        self.retained_delayed_grant("failure")
+
+    def test_delayed_grant_after_native_retention_reaches_one_uncertain_po_operation(self):
+        self.retained_delayed_grant("refused")
+
+    def test_closed_pending_sources_recover_deleted_queue_and_dispatch_once(self):
+        cards = self.three_merged_in_one_run()
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick()
+        self.retain_done(*cards)
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        self.am_tick(self._runtime())
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        self.assertEqual(self.run_of(cards[-1]).covered, [{"ref": ref, "merge_sha": _sha(digit)}
+            for ref, digit in zip(cards, "abc", strict=True)])
+        self.assertTrue(all(self.reader.show(ref)["closed"] for ref in cards))
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
+
+    def test_paid_intent_precedes_lost_queue_projection_and_recovers_without_second_charge(self):
+        cards = self.three_merged_in_one_run()
+        actual = self.runtime.save_records
+        def lost_projection(payload, records):
+            inflight = queues(payload).get("ummanu", {}).get("run")
+            if inflight:
+                run = self.run_of(inflight["carrier"])
+                self.assertEqual(run.dispatch_id, inflight["dispatch_id"])
+                self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+                raise SimulatedCrash("paid queue projection lost")
+            return actual(payload, records)
+        with mock.patch.object(self.runtime, "save_records", side_effect=lost_projection), self.assertRaises(SimulatedCrash):
+            self.am_tick()
+        self.assertEqual(len(self.host.dispatches), 0)
+        paid = self.reader.sprint_e2e_budget(SPRINT)["charges"]
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        with self.later(16):
+            self.am_tick(self._runtime())
+        run = self.run_of(cards[-1])
+        self.assertTrue(run.disposition)
+        self.native_complete(cards[-1], "decline")
+        self.am_tick(self._runtime())
+        self.assertEqual(self.run_of(cards[-1]).disposition_result["status"], "settled")
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["charges"], paid)
+        self.assertEqual(len(self.host.dispatches), 0)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+
+    def test_new_holder_creation_and_link_roll_back_together(self):
+        original = self.writer.record_after_merge_run
+        def lost_link(**fields):
+            if fields["run"].disposition:
+                raise TaskError("backend_error", "atomic link save lost", 1)
+            return original(**fields)
+        with mock.patch.object(self.writer, "record_after_merge_run", side_effect=lost_link):
+            cards, _ = self._arrange_refused_without_assertion()
+        self.assertFalse(any(task["type"] == "operation" for task in self.reader.list()))
+        self.assertFalse(self.run_of(cards[-1]).disposition)
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        self.assertTrue(self.run_of(cards[-1]).disposition)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_refused_dispatch_native_retry_pending_budget_and_actual_green(self):
+        cards, first = self.uncertain()
+        self.native_complete(cards[-1])
+        self.host.dispatch_answer = "ok"
+        self.drop_queue()
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+        self.assertEqual(set(self.pending()), set(cards))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        for ref in cards:
+            self.assertEqual(self.mark(ref)["state"], "pending")
+            self.assertNotIn("waiting_on", self.mark(ref))
+        self.am_tick(self._runtime())
+        next_run = self.run_of(cards[-1])
+        self.assertNotEqual(next_run.dispatch_id, first.dispatch_id)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 2)
+        self.conclude("success", next_run.wait_ref)
+        self.am_tick()
+        for ref in cards:
+            self.assertEqual(self.mark(ref)["state"], "green")
+        self.am_tick()
+        self.assertEqual(len(self.host.dispatches), 2)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 2)
+        self.assertEqual(self.run_of(cards[-1], 0).disposition, first.disposition)
+
+    def test_startup_failure_native_retry_goes_through_same_consumer(self):
+        cards, first = self.uncertain(conclusion="startup_failure")
+        self.native_complete(cards[-1])
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        next_run = self.run_of(cards[-1])
+        self.assertNotEqual(first.dispatch_id, next_run.dispatch_id)
+        self.conclude("success", next_run.wait_ref)
+        self.am_tick()
+        self.assertEqual(self.mark(cards[0])["state"], "green")
+        self.assertEqual(len(self.host.dispatches), 2)
+
+    def test_explicit_decline_removes_done_holder_but_preserves_paid_run(self):
+        cards, run = self.uncertain(sprint="")
+        self.native_complete(cards[-1], "decline")
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        for ref in cards:
+            self.assertEqual(self.mark(ref)["state"], "declined")
+            self.assertEqual(card_waits(self.reader.show(ref)), [])
+            self.assertEqual(e2e_state(self.reader.show(ref)).after_merge.charged, [run.dispatch_id])
+        receipt = self.run_of(cards[-1]).disposition_result
+        self.assertEqual((receipt["status"], receipt["action"]), ("settled", "decline"))
+        self.assertEqual(self.run_of(cards[-1]).dispatch_id, run.dispatch_id)
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
+        # Actual normalized SQL export carries the raw extension and PO comment.
+        from ummanu.data import normalize_board_card
+        rows = {row["reference"]: row for row in self.reader.export()}
+        normalized = normalize_board_card(rows[cards[-1]], rows[cards[-1]])
+        self.assertEqual(json.loads(normalized["metadata"]["e2e"])["after_merge_runs"][0]["disposition_result"], receipt)
+        self.assertTrue(any("E2E disposition" in c["text"] for c in normalize_board_card(rows[run.disposition], rows[run.disposition])["comments"]))
+
+    def test_follow_up_owns_red_route_then_its_done_settles_original_operation(self):
+        cards, run = self.uncertain(conclusion="failure", sprint="", count=1)
+        follow_up = self.writer.create(role="observer", actor="observer", project="ummanu", task_type="code",
+            title="Planned correction of after-merge failure", sprint=SPRINT, request_id="planned-follow-up")["task"]
+        self.native_complete(cards[-1], "follow_up", holder=follow_up["ref"])
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        self.assertEqual(self.mark(cards[0])["waiting_on"], follow_up["ref"])
+        self.assertEqual(card_waits(self.reader.show(cards[0]))[0]["holder"], follow_up["ref"])
+        self.assertEqual(card_waits(self.reader.show(run.hotfix))[0]["holder"], follow_up["ref"])
+        self.assertEqual(self.reader.show(run.hotfix)["blocked_by"], follow_up["ref"])
+        # This test's code follow-up is arranged as already merged, by the supported
+        # fixture backend. Native headless PO completion remains the boundary above.
+        self.board.move(self.board.key_of(follow_up["ref"]), "done")
+        self.retain_done(follow_up["ref"])
+        self.am_tick()
+        self.assertEqual(card_waits(self.reader.show(run.hotfix)), [])
+        self.assertIsNone(self.reader.show(run.hotfix)["blocked_by"])
+        self.assertEqual(e2e_state(self.reader.show(run.hotfix)).hotfix_route.result["status"], "settled")
+        self.assertNotIn("waiting_on", self.mark(cards[0]))
+        self.assertEqual(self.run_of(cards[-1]).disposition_result["status"], "settled")
+        self.assertEqual(self.run_of(cards[-1]).hotfix, run.hotfix)
+
+    def test_done_without_structured_outcome_or_with_wrong_binding_is_neutral(self):
+        cards, _run = self.uncertain()
+        self.native_complete(cards[-1], bare=True)
+        self.am_tick()
+        self.assertEqual(self.run_of(cards[-1]).disposition_result["status"], "neutral")
+        self.assertNotIn("waiting_on", self.mark(cards[0]))
+        self.assertIn("reopen", self.mark(cards[0])["note"])
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+
+    def test_malformed_record_cannot_retry(self):
+        cards, _run = self.uncertain()
+        self.native_complete(cards[-1], malformed=True)
+        self.am_tick()
+        self.assertEqual(self.run_of(cards[-1]).disposition_result["status"], "neutral")
+        self.assertNotIn("waiting_on", self.mark(cards[0]))
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def _neutral_completion_repair(self, *, bare=False, malformed=False):
+        cards, original = self.uncertain()
+        first = self.prepare_native_completion(cards[-1], bare=bare, malformed=malformed)
+        completed = self.complete_native(first)
+        self.am_tick()
+        self.assertEqual(self.run_of(cards[-1], 0).disposition_result["status"], "neutral")
+        self.assertTrue(all("waiting_on" not in self.mark(ref) for ref in cards))
+        paid = self.reader.sprint_e2e_budget(SPRINT)["charges"]
+        self.assertEqual(len(self.host.dispatches), 1)
+        reopened = self.writer.move(role="po", actor="po", reference=original.disposition,
+            target="ready", reason="Repair the incomplete bound disposition", request_id="repair-reopen",
+            sprint_override=True, sprint_override_reason="Reopen this sprint operation to correct its completion")
+        self.assertEqual(reopened["task"]["state"], "ready")
+        self.am_tick()
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == original.disposition for ref in cards))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["charges"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+        # Reuse the committed session; the reopened operation needs a new actual
+        # native turn/claim and a new completion identity, not the old Done replay.
+        corrected = self.prepare_native_completion(cards[-1], request="corrected-disposition",
+            session=first["turn"].session_id, session_request=first["completion"]["request_id"] + "-po-create")
+        self.assertFalse(corrected["session_created"])
+        self.assertTrue(corrected["turn_created"])
+        self.assertNotEqual(corrected["turn"].seq, first["turn"].seq)
+        self.assertEqual(corrected["turn"].state, "running")
+        self.assertEqual(self.reader.show(original.disposition)["state"], "in_progress")
+        fixed = self.complete_native(corrected)
+        self.assertNotEqual(fixed["event_id"], completed["event_id"])
+        self.assertEqual(len(self.comments_on(original.disposition, "[completion:operation]")), 2)
+        self.assertEqual([(t.seq, t.state) for t in corrected["store"].turns(first["turn"].session_id)],
+                         [(first["turn"].seq, "completed"), (corrected["turn"].seq, "completed")])
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick()
+        repaired = self.run_of(cards[-1], 0)
+        self.assertEqual((repaired.dispatch_id, repaired.sha, repaired.covered, repaired.result),
+                         (original.dispatch_id, original.sha, original.covered, original.result))
+        self.assertEqual(repaired.disposition_result["completion"], fixed["event_id"])
+        self.assertEqual(repaired.disposition_result["status"], "settled")
+        self.assertEqual(set(self.pending()), set(cards))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["charges"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.host.dispatch_answer = "ok"
+        self.am_tick()
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 2)
+        self.assertEqual(len(self.host.dispatches), 2)
+        next_run = self.run_of(cards[-1])
+        self.conclude("success", next_run.wait_ref)
+        self.am_tick()
+        self.assertTrue(all(self.mark(ref)["state"] == "green" for ref in cards))
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
+
+    def test_bare_neutral_completion_reopens_and_natively_repairs_same_operation(self):
+        self._neutral_completion_repair(bare=True)
+
+    def test_malformed_neutral_completion_reopens_and_natively_repairs_same_operation(self):
+        self._neutral_completion_repair(malformed=True)
+
+    def test_native_completion_comment_failure_rolls_back_done_and_outcome(self):
+        cards, run = self.uncertain()
+        prepared = self.prepare_native_completion(cards[-1])
+        self.assertTrue(prepared["session_created"])
+        self.assertTrue(prepared["turn_created"])
+        store, turn = prepared["store"], prepared["turn"]
+        request = prepared["completion"]["request_id"]
+        session = store.session(turn.session_id)
+        feed = store.feed(turn.session_id)
+        claimed = self.writer.audit.committed_event(request + "-claim")
+        self.assertIsNotNone(claimed)
+        po_requests = [store.request(request + suffix) for suffix in ("-po-create", "-turn")]
+        self.assertTrue(all(po_requests))
+        self.assertEqual(store.turns(turn.session_id), [turn])
+        self.assertEqual(len(feed), 1)
+        real_call = self.board.call
+        def failed_comment(method, **fields):
+            if method == "createComment" and "[completion:operation]" in str(fields.get("content")):
+                raise RuntimeError("completion comment unavailable")
+            return real_call(method, **fields)
+        # The native SQL transition rolls back and translates a post-effect
+        # failure into TaskError; the injected backend exception is not public.
+        with mock.patch.object(self.board, "call", side_effect=failed_comment), self.assertRaisesRegex(TaskError, "rolled back together with its record") as raised:
+            self.complete_native(prepared)
+        self.assertEqual((raised.exception.code, raised.exception.exit_code), ("backend_error", 1))
+        operation = self.reader.show(run.disposition)
+        self.assertEqual(operation["state"], "in_progress")
+        self.assertFalse(any("[completion:operation]" in comment["body"] for comment in operation["comments"]))
+        self.assertIsNone(self.writer.audit.committed_event(request))
+        self.assertEqual(self.writer.client._query("SELECT count(*) FROM requests WHERE request_id=%s", (request,)), [(0,)])
+        self.assertEqual(store.session(turn.session_id), session)
+        self.assertEqual(store.turns(turn.session_id), [turn])
+        self.assertEqual(store.feed(turn.session_id), feed)
+        self.assertEqual(self.writer.audit.committed_event(request + "-claim"), claimed)
+        self.assertEqual([store.request(request + suffix) for suffix in ("-po-create", "-turn")], po_requests)
+        self.am_tick()
+        receipt = self.run_of(cards[-1], 0).disposition_result
+        self.assertEqual((receipt["status"], receipt["action"], receipt["holder"]), ("waiting", "", run.disposition))
+        self.assertNotIn("completion", receipt)
+        self.assertFalse(self.pending())
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == run.disposition for ref in cards))
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        replay = self.prepare_native_completion(cards[-1])
+        self.assertFalse(replay["session_created"])
+        self.assertFalse(replay["turn_created"])
+        self.assertEqual(replay["turn"], turn)
+        self.assertEqual(replay["completion"], prepared["completion"])
+        completed = self.complete_native(prepared)
+        repeated = self.complete_native(replay)
+        self.assertEqual(completed["event_id"], repeated["event_id"])
+        self.assertTrue(repeated["replayed"])
+        self.assertEqual(store.session(turn.session_id), session)
+        self.assertEqual([(t.seq, t.state) for t in store.turns(turn.session_id)], [(turn.seq, "completed")])
+        self.assertEqual([store.request(request + suffix) for suffix in ("-po-create", "-turn")], po_requests)
+        self.assertEqual([entry.role for entry in store.feed(turn.session_id)], ["owner", "agent"])
+        self.assertEqual(len(self.comments_on(run.disposition, "[completion:operation]")), 1)
+        self.assertEqual(len([event for event in self.writer.audit.events(run.disposition) if event.get("request_id") == request]), 1)
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick()
+            self.am_tick(self._runtime())
+        self.assertEqual(self.run_of(cards[-1], 0).disposition_result["status"], "settled")
+        self.assertEqual(set(self.pending()), set(cards))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        self.host.dispatch_answer = "ok"
+        self.am_tick()
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 2)
+        self.assertEqual(len(self.host.dispatches), 2)
+
+    def test_committed_transition_survives_queue_save_failure_and_deleted_queue(self):
+        cards, _run = self.uncertain()
+        self.native_complete(cards[-1])
+        self.host.dispatch_answer = "ok"
+        self.drop_queue()
+        with mock.patch.object(self.runtime, "save_records", side_effect=OSError("queue save lost")), self.assertRaisesRegex(OSError, "queue save lost"):
+            self.am_tick()
+        self.assertEqual(self.run_of(cards[-1]).disposition_result["status"], "settled")
+        self.assertEqual(self.mark(cards[0])["state"], "pending")
+        self.am_tick(self._runtime())
+        self.am_tick()
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 2)
+        self.assertEqual(len(self.host.dispatches), 2)
+
+    def test_committed_create_before_run_link_recovers_one_operation_without_queue(self):
+        original = self.writer.record_after_merge_run
+        def lost_link(**fields):
+            if fields["run"].disposition:
+                raise TaskError("backend_error", "link save lost", 1)
+            return original(**fields)
+        with mock.patch.object(self.writer, "record_after_merge_run", side_effect=lost_link), \
+                mock.patch.object(e2e_after_merge, "_disposition", side_effect=e2e_after_merge._create_disposition):
+            # Released producer committed the native create before linking it.
+            cards, _ = self._arrange_refused_without_assertion()
+        self.assertEqual(len([card for card in self.reader.list() if card.get("type") == "operation"]), 1)
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        run = self.run_of(cards[-1])
+        self.assertTrue(run.disposition)
+        self.assertEqual(self.mark(cards[0])["waiting_on"], run.disposition)
+        self.native_complete(cards[-1], "decline")
+        self.am_tick()
+        self.assertEqual(self.mark(cards[0])["state"], "declined")
+
+    def _arrange_refused_without_assertion(self):
+        cards = self.three_merged_in_one_run()
+        self.host.dispatch_answer = ("http", "gh: refused (HTTP 422)")
+        self.am_tick()
+        return cards, self.run_of(cards[-1])
+
+    def test_retry_does_not_override_standing_refusal(self):
+        cards, _run = self.uncertain()
+        self.native_complete(cards[-1])
+        BudgetTests.standing_refusal(self)
+        self.host.dispatch_answer = "ok"
+        self.am_tick()
+        self.am_tick()
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        for ref in cards:
+            self.assertEqual(self.mark(ref)["state"], "declined")
+            self.assertEqual(self.mark(ref)["decision"], SPRINT + "/stop-am")
+
+    def test_retry_with_one_spent_cap_charges_entire_batch_none(self):
+        cards, run = self.uncertain(sprint="")
+        self.native_complete(cards[-1])
+        state = e2e_state(self.reader.show(cards[0]))
+        state.after_merge.charged.extend(["older-1", "older-2"])
+        self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=cards[0], state=state.text())
+        self.host.dispatch_answer = "ok"
+        self.am_tick()
+        self.am_tick()
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(e2e_state(self.reader.show(cards[1])).after_merge.charged, [run.dispatch_id])
+        self.assertEqual(len(e2e_state(self.reader.show(cards[0])).after_merge.charged), 3)
+        decisions = [card for card in self.reader.list() if card.get("type") == "decision"]
+        self.assertEqual(len(decisions), 1)
+        for ref in cards:
+            self.assertEqual(self.mark(ref)["waiting_on"], decisions[0]["ref"])
+
+    def test_completed_old_run_preserves_a_covered_card_remerged_with_newer_mark(self):
+        cards, old = self.uncertain()
+        self.host.dispatch_answer = "ok"
+        self.merge(cards[0], _sha("f"))
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick()
+        self.native_complete(cards[-1], "decline")
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick()
+        mark = e2e_state(self.reader.show(cards[0])).after_merge
+        self.assertEqual((mark.merge_sha, mark.state), (_sha("f"), "pending"))
+        self.assertEqual(self.mark(cards[-1])["state"], "declined")
+        self.assertEqual(self.run_of(cards[-1]).dispatch_id, old.dispatch_id)
+
+    def released_uncertain_without_operation(self):
+        # The released 0024 producer retained uncertain paid runs and pending
+        # marks, with no PO operation. Arrange that actual JSON shape in SQL.
+        with mock.patch.object(e2e_after_merge, "_disposition", return_value=""):
+            cards, run = self._arrange_refused_without_assertion()
+        self.assertFalse(run.disposition)
+        for ref in cards:
+            state = e2e_state(self.reader.show(ref))
+            state.after_merge.state = "pending"
+            state.after_merge.dispatch_id = ""
+            state.after_merge.decision, state.after_merge.holder = "", None
+            self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=ref, state=state.text())
+        self.drop_queue()
+        return cards, self.run_of(cards[-1])
+
+    def test_remerged_released_uncertain_history_does_not_create_a_po_question(self):
+        cards, run = self.released_uncertain_without_operation()
+        for ref in cards:
+            self.merge(ref, _sha("f"))
+            state = e2e_state(self.reader.show(ref))
+            state.after_merge = AfterMergeMark(merge_sha=_sha("f"), state="pending",
+                charged=list(state.after_merge.charged))
+            self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=ref, state=state.text())
+        before = {ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}
+        paid = self.reader.sprint_e2e_budget(SPRINT)["charges"]
+        self.drop_queue()
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        self.assertFalse(any(task["type"] == "operation" for task in self.reader.list()))
+        self.assertFalse(self.run_of(cards[-1], 0).disposition)
+        self.assertEqual(self.run_of(cards[-1], 0).result, run.result)
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}, before)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["charges"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_superseded_released_history_keeps_evidence_without_question_or_paid_retry(self):
+        cards, run = self.released_uncertain_without_operation()
+        for ref in cards:
+            self.writer.create(role="observer", actor="observer", project="ummanu", task_type="code",
+                title="Supported successor", sprint=SPRINT, seed_ref="pipeline/" + ref,
+                supersedes=ref, request_id="supersede-" + ref)
+            self.assertTrue(self.writer._card_superseded(ref))
+        before = {ref: e2e_state(self.reader.show(ref)).text() for ref in cards}
+        # Also retain a stale released queue, to prove it cannot bypass the
+        # ownership guard through pending admission rather than PO creation.
+        with file_lock(self.runtime.production_state.tick_lock):
+            payload = self.runtime.production_state.load()
+            queues(payload)["ummanu"] = {"pending": [{**item, "repo": REPO, "marked": True} for item in run.covered],
+                "run": None, "cleanup": [], "budget_waits": []}
+            self.runtime.production_state.save(payload)
+        self.am_tick(self._runtime())
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        self.assertFalse(any(task["type"] == "operation" for task in self.reader.list()))
+        self.assertFalse(self.pending())
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in cards}, before)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_mixed_released_marks_create_one_operation_and_preserve_newer_obligation(self):
+        cards, old = self.released_uncertain_without_operation()
+        stale = cards[0]
+        self.merge(stale, _sha("f"))
+        state = e2e_state(self.reader.show(stale))
+        state.after_merge = AfterMergeMark(merge_sha=_sha("f"), state="pending",
+            charged=list(state.after_merge.charged))
+        self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=stale, state=state.text())
+        before = e2e_state(self.reader.show(stale)).after_merge
+        self.drop_queue()
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        run = self.run_of(cards[-1], 0)
+        self.assertTrue(run.disposition)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.assertEqual(e2e_state(self.reader.show(stale)).after_merge, before)
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == run.disposition for ref in cards[1:]))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.native_complete(cards[-1], "decline")
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+        self.assertTrue(all(self.mark(ref)["state"] == "declined" for ref in cards[1:]))
+        self.assertEqual(e2e_state(self.reader.show(stale)).after_merge, before)
+        self.assertEqual(self.run_of(cards[-1], 0).dispatch_id, old.dispatch_id)
+
+    def released_red_without_operation(self):
+        def released_red(runtime, project, carrier, state, run):
+            run.hotfix = e2e_after_merge._hotfix(runtime, project, carrier, run)
+            e2e_after_merge._persist_run(runtime, carrier, state, run)
+            for covered in run.covered:
+                e2e_after_merge._remark(runtime, covered["ref"], carrier, state, run=run,
+                    state="red", hotfix=run.hotfix, run_url=run.run_url)
+        cards = [self.done_card(sprint="") for _ in range(2)]
+        self.on_main(*(_sha(digit) for digit in "abf"))
+        for ref, digit in zip(cards, "ab", strict=True):
+            self.merge(ref, _sha(digit))
+        self.am_tick()
+        self.conclude("failure", self.run_of(cards[-1]).wait_ref)
+        with mock.patch.object(e2e_after_merge, "_red", side_effect=released_red):
+            self.am_tick()
+        run = self.run_of(cards[-1])
+        self.assertFalse(run.disposition)
+        self.assertEqual(self.reader.show(run.hotfix)["state"], "blocked")
+        for ref in cards:
+            self.merge(ref, _sha("f"))
+            state = e2e_state(self.reader.show(ref))
+            state.after_merge = AfterMergeMark(_sha("f"), charged=list(state.after_merge.charged))
+            self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=ref, state=state.text())
+        self.retain_done(*cards)
+        self.drop_queue()
+        return cards, run
+
+    def all_remerged_hotfix_disposition(self, action):
+        cards, old = self.released_red_without_operation()
+        before = {ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        run = self.run_of(cards[-1])
+        self.assertTrue(run.disposition)
+        self.assertEqual(card_waits(self.reader.show(run.hotfix))[0]["holder"], run.disposition)
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}, before)
+        holder = ""
+        if action == "follow_up":
+            holder = self.writer.create(role="observer", actor="observer", project="ummanu", task_type="code",
+                title="Planned actual hotfix correction", sprint=SPRINT, request_id="hotfix-planned-work")["task"]["ref"]
+        prepared = self.prepare_native_completion(cards[-1], action, holder=holder)
+        self.complete_native(prepared)
+        self.drop_queue()
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            if holder:
+                self.assertEqual(card_waits(self.reader.show(run.hotfix))[0]["holder"], holder)
+                self.board.move(self.board.key_of(holder), "done")
+                self.retain_done(holder)
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        current = self.run_of(cards[-1])
+        receipt = current.disposition_result
+        self.assertEqual((receipt["status"], receipt["action"]), ("settled", action))
+        self.assertEqual(e2e_state(self.reader.show(old.hotfix)).hotfix_route.result, receipt)
+        self.assertEqual(card_waits(self.reader.show(old.hotfix)), [])
+        self.assertIsNone(self.reader.show(old.hotfix)["blocked_by"])
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}, before)
+        self.assertEqual((current.dispatch_id, current.sha, current.covered, current.result, current.hotfix),
+                         (old.dispatch_id, old.sha, old.covered, old.result, old.hotfix))
+        self.assertEqual((len(self.host.dispatches), len(self.hotfixes())), (1, 1))
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.assertEqual(len(prepared["store"].turns(prepared["turn"].session_id)), 1)
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
+        from ummanu.data import normalize_board_card
+        rows = {row["reference"]: row for row in self.reader.export()}
+        normalized = normalize_board_card(rows[old.hotfix], rows[old.hotfix])
+        restored = e2e_state({"extensions": {"extra": {"e2e": normalized["metadata"]["e2e"]}}})
+        self.assertEqual(restored.hotfix_route.result, receipt)
+
+    def test_all_remerged_retained_sources_do_not_dispose_of_the_open_hotfix(self):
+        self.all_remerged_hotfix_disposition("decline")
+
+    def test_all_remerged_retained_sources_hotfix_follow_up_is_real_and_terminal_on_done(self):
+        self.all_remerged_hotfix_disposition("follow_up")
+
+    def test_fully_terminal_released_hotfix_and_remerged_sources_have_no_question(self):
+        cards, old = self.released_red_without_operation()
+        self.board.move(self.board.key_of(old.hotfix), "done")
+        self.retain_done(old.hotfix)
+        before = {ref: e2e_state(self.reader.show(ref)).text() for ref in cards}
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        self.assertFalse(any(task["type"] == "operation" for task in self.reader.list()))
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in cards}, before)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_superseded_released_hotfix_and_remerged_sources_have_no_question(self):
+        cards, old = self.released_red_without_operation()
+        self.writer.create(role="observer", actor="observer", project="ummanu", task_type="code",
+            title="Actual replacement hotfix", sprint=SPRINT, seed_ref="pipeline/" + old.hotfix,
+            supersedes=old.hotfix, request_id="actual-hotfix-successor")
+        before = {ref: e2e_state(self.reader.show(ref)).text() for ref in cards}
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+        self.assertFalse(any(task["type"] == "operation" for task in self.reader.list()))
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in cards}, before)
+        self.assertEqual(len(self.host.dispatches), 1)
+
+    def test_hotfix_native_disposition_receipt_and_publication_roll_back_together(self):
+        cards, run = self.uncertain(conclusion="failure", sprint="", count=1)
+        self.native_complete(cards[-1], "decline")
+        before = {ref: e2e_state(self.reader.show(ref)).text() for ref in (*cards, run.hotfix)}
+        actual = self.writer.comment
+        def failed_publication(**fields):
+            if fields["reference"] == run.hotfix and fields["request_id"].startswith("dispatcher-e2e-am-hotfix-disposition-"):
+                raise TaskError("backend_error", "hotfix publication lost", 1)
+            return actual(**fields)
+        with mock.patch.object(self.writer, "comment", side_effect=failed_publication):
+            outcomes = self.am_tick()
+        self.assertTrue(any(row["status"] == "degraded" and "hotfix publication lost" in row.get("reason", "") for row in outcomes))
+        self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in before}, before)
+        self.drop_queue()
+        self.am_tick(self._runtime())
+        self.am_tick(self._runtime())
+        self.assertEqual(e2e_state(self.reader.show(run.hotfix)).hotfix_route.result["action"], "decline")
+        self.assertEqual(card_waits(self.reader.show(run.hotfix)), [])
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+
+    def test_released_hotfix_recovery_isolates_bad_carrier_and_preserves_newer_mark(self):
+        def released_red(runtime, project, carrier, state, run):
+            run.hotfix = e2e_after_merge._hotfix(runtime, project, carrier, run)
+            e2e_after_merge._persist_run(runtime, carrier, state, run)
+            for covered in run.covered:
+                e2e_after_merge._remark(runtime, covered["ref"], carrier, state, run=run,
+                    state="red", hotfix=run.hotfix, run_url=run.run_url)
+
+        carriers, current_source = [], ""
+        self.on_main(_sha("a"), _sha("b"), _sha("c"), _sha("f"))
+        with mock.patch.object(e2e_after_merge, "_red", side_effect=released_red):
+            for digit in "ac":
+                carrier = self.done_card(sprint="")
+                carriers.append(carrier)
+                self.host.run_answer = ("in_progress", None)
+                if digit == "c":
+                    # The carrier will remerge, but this covered obligation still
+                    # belongs to the released red run and needs its PO route.
+                    current_source = self.done_card(sprint="")
+                    self.merge(current_source, _sha("b"))
+                self.merge(carrier, _sha(digit))
+                self.am_tick()
+                self.conclude("failure", self.run_of(carrier).wait_ref)
+                self.am_tick()
+        self.assertEqual(len(self.hotfixes()), 2)
+        self.assertFalse(any(self.run_of(ref).disposition for ref in carriers))
+        # A newer merge is already represented on the recoverable carrier. The
+        # old red route must not replace it, even when the old carrier is unreadable.
+        self.merge(carriers[1], _sha("f"))
+        state = e2e_state(self.reader.show(carriers[1]))
+        state.after_merge = AfterMergeMark(merge_sha=_sha("f"), state="pending",
+                                          charged=list(state.after_merge.charged))
+        self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=carriers[1], state=state.text())
+        newer = e2e_state(self.reader.show(carriers[1])).after_merge
+        original_run = self.run_of(carriers[1])
+        paid = {ref: list(e2e_state(self.reader.show(ref)).after_merge.charged)
+                for ref in (*carriers, current_source)}
+        self.retain_done(*carriers, current_source)
+        original = self.reader.show
+        def unread_old(ref):
+            if ref == carriers[0]:
+                raise TaskError("backend_error", "old carrier unreadable", 1)
+            return original(ref)
+        with mock.patch.object(self.reader, "show", side_effect=unread_old), mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            results = self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+            run = self.run_of(carriers[1])
+            self.assertTrue(run.disposition)
+            self.assertEqual(self.mark(current_source)["waiting_on"], run.disposition)
+            self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+            self.assertEqual(e2e_state(self.reader.show(carriers[1])).after_merge, newer)
+            self.native_complete(carriers[1], "decline")
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+            self.assertEqual(self.mark(current_source)["state"], "declined")
+            self.assertNotIn("waiting_on", self.mark(current_source))
+        self.assertTrue(any(row["status"] == "degraded" and "old carrier unreadable" in row.get("reason", "") for row in results))
+        run = self.run_of(carriers[1])
+        self.assertTrue(run.disposition)
+        self.assertEqual((run.dispatch_id, run.sha, run.covered, run.result, run.hotfix),
+                         (original_run.dispatch_id, original_run.sha, original_run.covered, original_run.result, original_run.hotfix))
+        self.assertEqual(run.disposition_result["status"], "settled")
+        self.assertEqual(run.disposition_result["action"], "decline")
+        self.assertEqual(e2e_state(self.reader.show(carriers[1])).after_merge, newer)
+        self.assertEqual((self.mark(carriers[1])["merge_sha"], self.mark(carriers[1])["state"]), (_sha("f"), "pending"))
+        self.assertNotIn("waiting_on", self.mark(carriers[1]))
+        self.assertFalse(self.run_of(carriers[0]).disposition)
+        self.assertEqual({ref: list(e2e_state(self.reader.show(ref)).after_merge.charged)
+                          for ref in (*carriers, current_source)}, paid)
+        self.assertEqual(len(self.hotfixes()), 2)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+        self.assertEqual(len(self.host.dispatches), 2)
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
 
 
 if __name__ == "__main__":

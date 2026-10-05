@@ -43,6 +43,7 @@ from ummanu.board.owner_handover import (
     render_handover_comment,
     waiting_owner,
 )
+from ummanu.board.po_execution import assignment, create_assignment
 from ummanu.cli import main
 from ummanu.dispatch.po_cards import (
     PO_BLOCKED_ACTION,
@@ -70,6 +71,65 @@ from ummanu.webproto.sprint_reads import (
     WAITING_WAITING,
     _Production,
 )
+
+
+class AssignedOwnerEpisodeTests(HandedOverFixture):
+    def submitted_card(self, description="WAIT-GATE"):
+        self.start()
+        task = card(description=description)
+        task["sprint"] = ""
+        task["extensions"] = {"extra": {"po_execution": create_assignment(
+            "dispatcher-e2e-cap-source-3", "e2e_budget", ["source"])}}
+        runtime = self.runtime(task, comments=[])
+        runtime.po.successor_choice = lambda _closed: ("claude", "opus", "high")
+        self.claim(runtime)
+        return runtime, self.record().po_submission.session_id
+
+    def test_two_explicit_handovers_answer_restart_and_done_use_current_episode(self):
+        runtime, session = self.submitted_card()
+        self.hand_over("Which route?")
+        self.assertEqual(self.tick(runtime)["action"], "po-card-waiting-owner")
+        self.owner_says("Use the existing route.", "evt-assigned-answer-1")
+        self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+        # The current handover wins while the previous turn is still running.
+        self.hand_over("Which remaining route?")
+        self.records.clear()
+        self.assertEqual(self.tick(runtime)["action"], "po-card-waiting-owner")
+        self.owner_says("Use the same authority.", "evt-assigned-answer-2")
+        self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+        self.cards.complete_as_po("decision", DECISION_BODY)
+        self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
+        self.gate.touch()
+        self.settled(session, 3)
+        self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
+        self.assertEqual(assignment(self.cards.card).executor, session)
+        self.assertNotIn("po_origin", self.cards.card["extensions"]["extra"])
+        self.assertNotIn("owner_escalation", self.cards.card["extensions"]["extra"])
+
+    def test_done_or_new_handover_during_assigned_turn_read_wins(self):
+        for change in ("done", "handover"):
+            with self.subTest(change=change):
+                fixture = AssignedOwnerEpisodeTests()
+                fixture.setUp()
+                try:
+                    runtime, session = fixture.submitted_card()
+                    fixture.gate.touch()
+                    fixture.settled(session, 1)
+                    turn_read = runtime.po.turn
+                    def raced(*args, fixture=fixture, turn_read=turn_read, change=change):
+                        result = turn_read(*args)
+                        if change == "done":
+                            fixture.cards.complete_as_po("decision", DECISION_BODY)
+                        else:
+                            fixture.hand_over("Which route?")
+                        return result
+                    with mock.patch.object(runtime.po, "turn", side_effect=raced):
+                        outcome = fixture.tick(runtime)
+                    self.assertEqual(outcome["action"], "po-card-closed" if change == "done" else "po-card-waiting-owner")
+                    self.assertFalse(any(e["kind"] == "move" and e["to"] == "blocked" for e in fixture.cards.log))
+                    self.assertNotIn("owner_escalation", fixture.cards.card["extensions"]["extra"])
+                finally:
+                    fixture.doCleanups()
 
 
 class WriterFixture(unittest.TestCase):

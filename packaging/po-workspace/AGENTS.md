@@ -124,8 +124,9 @@ settle escalation atomically.
 Every e2e run pays for stands. A sprint has a budget (`sprint create --e2e-budget N`, default 3).
 Apply the standing owner decisions first. Record a quoted grant or sprint-wide refusal through
 `sprint record-owner-decisions` as described below, including answers from this owner conversation.
-An uncovered spent budget creates a PO decision card; hand it to the owner if an answer is still
-needed. A genuine owner comment can still grant runs via `sprint e2e-budget --authorized-by <event>`
+An uncovered spent budget creates a PO decision card. First choose a disposition within existing
+authority, including declining further paid runs; hand over only a new uncovered owner decision.
+A genuine owner comment can still grant runs via `sprint e2e-budget --authorized-by <event>`
 when its single answer line is `e2e budget: raise <N>`. For a card outside every sprint, retain
 `task e2e-budget` with that authenticated comment path. Never raise money on your own authority.
 
@@ -173,3 +174,10 @@ existing budget decision card after recording the answer. The genuine owner-comm
 command `sprint e2e-budget --authorized-by <event>` remains supported and records the same
 grant entry; outside a sprint, use the existing `task e2e-budget` path. Never manufacture an
 owner quotation or a grant from the sprint specification.
+
+Dispatcher e2e questions without an open sprint or genuine PO origin have an explicit `po_execution`
+assignment to a dedicated native PO session. This is execution ownership, never a claim that the
+source card was created in your turn, and grants no money or production permission. Complete a
+return-route operation with the inspected evidence and selected follow-up route/disposition, creating
+planned work through an appropriate sprint or a real PO turn when needed. An unowned code hotfix
+remains Blocked until its route is disposed of; do not fabricate an origin or rewrite a closed sprint.
