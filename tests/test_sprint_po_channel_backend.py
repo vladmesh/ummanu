@@ -384,8 +384,16 @@ class SprintPoChannelBackendTests(SprintFixture):
         old, _ = runner.create_session_request("claude", "opus", "create-old", "high")
         ref = "sprint:rollover"
         decision = self.decision("stop", "e2e_refusal", "no_more_e2e")
-        self._create(goal="bounded PO", reference=ref, po_session=old.session_id,
-                     standing_decisions=[decision])
+        decision["quotation"] = "No further e2e runs.\nВладелец сказал нет."
+        created = self._create(goal="bounded PO", reference=ref, po_session=old.session_id)
+        # Append through the native PO writer. A refusal-only create asks the
+        # legacy metadata proof to retain empty productions and the default e2e
+        # budget, which its SQL readback deliberately omits.
+        recorded = self.writer.record_owner_decisions(role="po", actor="po", reference=ref,
+                                                     entries=[decision], request_id="standing-refusal")
+        self.assertEqual(recorded["sprint"]["e2e"]["budget"], created["sprint"]["e2e"]["budget"])
+        self.assertEqual(recorded["sprint"]["allowed_productions"], [])
+        self.assertEqual(self.client.call("getSprintE2eBudget", sprint_ref=ref)["refusal"]["id"], decision["id"])
         entry = {"selected_step": "Latest durable summary", "selected_why": "Native evidence",
                  "rejected_alternatives": "none", "current_task": "none", "dod_state": "pending",
                  "next_safe_step": "Read the current sprint"}
@@ -395,7 +403,7 @@ class SprintPoChannelBackendTests(SprintFixture):
         original_feed = store.feed(old.session_id)
         canonical = rollover_request_id(ref, old.session_id)
         adapter = BoardSprintSessions(self.instance, data)
-        service = PoService(runner, sprints=adapter)
+        service = PoService(runner, instance=self.instance, sprints=adapter)
         # Stop after the real native comment committed, before the session record.
         with mock.patch("ummanu.board.backend.board_client", return_value=self.client), mock.patch.object(service, "pump"):
             record = adapter.sprint(ref)
@@ -411,7 +419,8 @@ class SprintPoChannelBackendTests(SprintFixture):
             self.assertIn("Latest predecessor answer", seed.text)
             self.assertEqual(adapter.sprint(ref).po_session, old.session_id)
             # Fresh resolver over the same SQL records and durable queue.
-            restarted = PoService(PoRunner(store, data, turn_launcher=unscoped_test_launch), sprints=adapter)
+            restarted = PoService(PoRunner(store, data, turn_launcher=unscoped_test_launch),
+                                  instance=self.instance, sprints=adapter)
             with mock.patch.object(restarted, "pump"):
                 other = restarted.sprint_session(sprint_ref=ref, request_id="caller-b")
                 replay = restarted.sprint_session(sprint_ref=ref, request_id="caller-a")
