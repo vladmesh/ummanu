@@ -8005,7 +8005,13 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         move.assert_not_called()
         self.assertEqual(canon.committed(request_id), owned)
         self._assert_one_generation(2)
-        self.assertIn(body, self.host.resumed_continuations[-1])
+        prompt = self.host.resumed_continuations[-1]
+        self.assertIn(str(Path(self._pilot_record()["workspace"]) / "TASK.md"), prompt)
+        self.assertIn("observer decision outranks", prompt)
+        self.assertEqual(self._pilot_record()["report_decision"], body)
+        document = self._task_document()
+        self.assertIn("## Observer rework decision to follow", document)
+        self.assertIn(body, document)
         self.assertEqual(self.card_comments().count(f"[dispatcher]\n{original}"), 1)
 
     def test_a_new_round_removes_the_previous_rounds_report_body(self) -> None:
