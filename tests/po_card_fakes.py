@@ -100,6 +100,10 @@ class OneCardBoard:
         assert role == "dispatcher" and reference == self.card["ref"], (role, reference)
         self.card.setdefault("extensions", {}).setdefault("extra", {})["po_return"] = state
 
+    def record_po_execution(self, *, role: str, reference: str, state: str, **_: Any) -> None:
+        assert role == "dispatcher" and reference == self.card["ref"]
+        self.card.setdefault("extensions", {}).setdefault("extra", {})["po_execution"] = state
+
     # audit
     def committed_event(self, request_id: str) -> dict[str, Any] | None:
         return next((event for event in self.log if event["request_id"] == request_id), None)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ummanu.dispatch.cleanup import CleanupJournal, serialized
-
 import contextlib
 import fcntl
 import hashlib
@@ -18,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ummanu.board import e2e_budget, e2e_record, owner_events, wait_card
+from ummanu.board import po_execution as execution_field
 from ummanu.board import po_origin as origin_field
 from ummanu.board.audit_contract import card_transition_of, is_protocol_event
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id, entity_number
@@ -138,6 +137,7 @@ from ummanu.board.task_routing import (
     impact_bounds_refusal,
 )
 from ummanu.board.transitions import BoardProtocolError
+from ummanu.dispatch.cleanup import CleanupJournal, serialized
 from ummanu.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -386,6 +386,7 @@ def _po_card_create_refusal(
     base_branch: str,
     origin: bool = False,
     activation_operation: bool = False,
+    execution: bool = False,
 ) -> str:
     """Why a `decision`/`operation`/`wait` card cannot be created as asked, or `""`.
 
@@ -408,7 +409,7 @@ def _po_card_create_refusal(
         return f"the dispatcher cuts only a wait or a decision card, not a {kind} card"
     if role not in {Role.OBSERVER.value, Role.PO.value, Role.DISPATCHER.value}:
         return f"a {kind} card is cut by the observer or the PO, not by {role}"
-    if not sprint and not waits and not origin:
+    if not sprint and not waits and not origin and not execution:
         return (
             f"a {kind} card needs --sprint: the PO session of that sprint executes it (cut inside a PO "
             "turn, the session of that turn does)"
@@ -1077,6 +1078,8 @@ class TaskReader:
         # The PO session a delegated card came from, and where its results went (secretary-1792).
         if (origin := origin_field.origin_view(result)) is not None:
             result["origin"] = origin
+        if (execution := execution_field.assignment(result)) is not None:
+            result[execution_field.PO_EXECUTION] = execution.to_document()
         # The e2e runs the dispatcher dispatched for a code card, and their wait cards (secretary-1795).
         if (e2e := e2e_record.e2e_view(result)) is not None:
             result["e2e"] = e2e
@@ -1206,6 +1209,7 @@ class TaskWriter:
         touches_production: str = "",
         wait: Mapping[str, Any] | None = None,
         origin: Mapping[str, Any] | None = None,
+        po_execution: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
@@ -1247,6 +1251,7 @@ class TaskWriter:
             touches_production=touches_production,
             wait=wait,
             origin=origin,
+            po_execution=po_execution,
             request_id=request_id,
             restoring=restoring,
             steward_report=False,
@@ -1283,6 +1288,7 @@ class TaskWriter:
         touches_production: str = "",
         wait: Mapping[str, Any] | None = None,
         origin: Mapping[str, Any] | None = None,
+        po_execution: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         restoring: bool = False,
         steward_report: bool,
@@ -1297,6 +1303,9 @@ class TaskWriter:
         activation_operation = task_type == TaskType.OPERATION.value and str(request_id or "").startswith(
             ACTIVATION_OPERATION_REQUEST_PREFIX
         )
+        disposition_operation = task_type == TaskType.OPERATION.value and str(request_id or "").startswith(
+            execution_field.DISPOSITION_PREFIX
+        )
         dispatcher_creates = (
             task_type in {TaskType.WAIT.value, TaskType.DECISION.value}
             or (
@@ -1304,6 +1313,7 @@ class TaskWriter:
                 and str(request_id or "").startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
             )
             or activation_operation
+            or disposition_operation
         )
         role = self._role(
             role,
@@ -1357,6 +1367,30 @@ class TaskWriter:
         review = review_value.value
         # The PO turn this create runs in: only the PO has one, and only its environment names it.
         origin_record = _origin_request(origin)
+        execution_record = None
+        if po_execution is not None:
+            try:
+                execution_record = execution_field.PoExecution.from_document(po_execution)
+            except (ValueError, TypeError) as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            supported = (
+                task_type == "decision" and execution_record.purpose == "e2e_budget"
+                and (str(request_id or "").startswith(e2e_budget.decision_prefix(execution_record.sources[0]))
+                     or str(request_id or "").startswith("dispatcher-e2e-budget-")
+                     or bool(e2e_budget.batch_decision_cards(str(request_id or ""))))
+            ) or (disposition_operation and execution_record.purpose == "e2e_disposition")
+            if (role != "dispatcher" or not supported or sprint or origin_record
+                    or execution_record.request != request_id or execution_record.initial
+                    or execution_record.executor or execution_record.successors):
+                raise TaskError("validation", "PO execution assignment is only for a dispatcher e2e question without sprint or origin", 2)
+            for source in execution_record.sources:
+                source_card = self.reader.show(source)
+                if source_card.get("type") != "code" or source_card.get("project") != project:
+                    raise TaskError("validation", "PO e2e assignment sources must be code cards of this project", 2)
+                if str(request_id or "").startswith("dispatcher-e2e-budget-") and not str(request_id).startswith(
+                    e2e_budget.decision_prefix(str(source_card.get("sprint") or ""))
+                ):
+                    raise TaskError("validation", "standalone sprint-budget disposition must name its actual source sprint", 2)
         # The dispatcher carries a card's origin onto the decision its spent e2e cap needs, so the
         # decision goes to the PO session that cut the card (secretary-1796), and onto the hotfix `code`
         # card a red after-merge e2e run needs outside every sprint (secretary-1807); it originates
@@ -1386,7 +1420,8 @@ class TaskWriter:
                 seed_ref=seed_ref,
                 base_branch=base_branch,
                 origin=bool(origin_record),
-                activation_operation=activation_operation,
+                activation_operation=activation_operation or disposition_operation,
+                execution=execution_record is not None,
             )
             if refusal:
                 raise TaskError("validation", refusal, 2)
@@ -1588,6 +1623,7 @@ class TaskWriter:
             **({"wait_request": wait_request} if waits else {}),
             # Where a delegated card came from: part of the identity, so a replay is the same turn's.
             **({"po_origin": origin_record} if origin_record else {}),
+            **({"po_execution": execution_record.to_document()} if execution_record else {}),
             **({"steward_report": True} if steward_report else {}),
             **override_payload,
             "title_sha256": _digest(title),
@@ -1682,6 +1718,7 @@ class TaskWriter:
                         if origin_record
                         else ""
                     ),
+                    po_execution=execution_record.text() if execution_record else "",
                     steward_report=steward_report,
                     event=event,
                     request_id=request_id,
@@ -1774,6 +1811,7 @@ class TaskWriter:
         request_id: str,
         wait_spec: str = "",
         po_origin: str = "",
+        po_execution: str = "",
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
         # read through createTask prevents two local task-create processes assigning one ref.
@@ -1839,6 +1877,8 @@ class TaskWriter:
                 if po_origin:
                     # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
                     values[origin_field.PO_ORIGIN] = po_origin
+                if po_execution:
+                    values[execution_field.PO_EXECUTION] = po_execution
                 if blocked_by:
                     values["blocked_by"] = blocked_by
                 if head:
@@ -2483,6 +2523,34 @@ class TaskWriter:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={origin_field.PO_RETURN: state}
             )
+
+    def record_po_execution(self, *, role: str, actor: str, reference: str, state: str) -> None:
+        """Persist service resolution on an explicitly assigned PO card; preserve create identity."""
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        offered = execution_field.PoExecution.from_document(json.loads(state))
+        with self._mutation():
+            if getattr(self.client, "credentials", None):
+                self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
+            task = self.reader.show(reference)
+            current = execution_field.assignment(task)
+            if current is None or (current.request, current.purpose, current.sources) != (
+                offered.request, offered.purpose, offered.sources
+            ):
+                raise TaskError("validation", "PO execution resolution cannot change assignment identity", 2)
+            # Resolution is monotone: a stale tick cannot lose another tick's committed
+            # session/choice or a successor already accepted under its stable service ID.
+            def resolved(old: dict[str, str], new: dict[str, str]) -> dict[str, str]:
+                return {**new, **{key: value for key, value in old.items() if value or key not in new}}
+            offered.initial = resolved(current.initial, offered.initial)
+            for closed, row in current.successors.items():
+                offered.successors[closed] = resolved(row, offered.successors.get(closed, {}))
+            if current.executor and current.executor != offered.executor:
+                # Preserve a newer executor if the offered session precedes it in this line.
+                from ummanu.board.po_origin import ReturnState, line_head
+                offered.executor = line_head(offered.executor or current.executor,
+                                             ReturnState(successors=offered.successors))
+            self.client.call("saveTaskMetadata", task_id=_task_number(task),
+                             values={execution_field.PO_EXECUTION: offered.text()})
 
     def record_e2e_state(self, *, role: str, actor: str, reference: str, state: str) -> None:
         """The dispatcher's one write of a code card's `e2e` run records (secretary-1795).
@@ -5486,6 +5554,8 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         values[origin_field.PO_ORIGIN] = origin_field.origin_text(
             _text(origin.get("session")), _text(origin.get("request"))
         )
+    if isinstance(execution := payload.get("po_execution"), Mapping):
+        values[execution_field.PO_EXECUTION] = execution_field.PoExecution.from_document(execution).text()
     for payload_key, metadata_key in (
         ("blocked_by", "blocked_by"),
         ("head", "head"),

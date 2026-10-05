@@ -526,6 +526,38 @@ class QueueingTests(AfterMergeFixture, unittest.TestCase):
 
 
 class ExactShaTests(AfterMergeFixture, unittest.TestCase):
+    def test_released_notice_and_pending_uncertain_run_get_one_holder_before_retry(self) -> None:
+        cards = self.three_merged_in_one_run()
+        self.host.ran_on = _sha("9")
+        # The actual 0024 producer: uncertain outcome -> notice/comment -> pending.
+        def released(runtime, project, carrier, state, run, entries, queue):
+            run.resolution, run.acted = "blocked", True
+            for item in run.covered:
+                runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=item["ref"],
+                    body="Released after-merge result could not be confirmed; pending again.",
+                    request_id="released-result-" + item["ref"])
+                e2e_after_merge._remark(runtime, item["ref"], carrier, state, state="pending", dispatch_id="", run_url="")
+            e2e_after_merge._persist(runtime, carrier, state)
+            queue["pending"] = [{**entry, "marked": True} for entry in entries]
+            e2e_after_merge._bell(runtime, carrier, "Released unconfirmed result", "released-notice")
+            return {"action": "released"}
+        with mock.patch.object(e2e_after_merge, "_act", side_effect=released):
+            self.am_tick()
+        original = self.writer.audit.committed_event("released-result-" + cards[0])
+        paid = self.reader.sprint_e2e_budget(SPRINT)["used"]
+        self.am_tick()
+        run = self.run_of(cards[-1])
+        operation = self.reader.show(run.disposition)
+        self.assertEqual(operation["type"], "operation")
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], paid)
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.writer.audit.committed_event("released-result-" + cards[0]), original)
+        self.assertEqual(self.mark(cards[0])["waiting_on"], operation["ref"])
+        self.assertEqual(len(self.bells()), 1)
+        self.am_tick()
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
+
     def test_the_run_is_dispatched_on_a_dispatcher_owned_branch_at_the_target_and_the_branch_is_deleted(
         self,
     ) -> None:
@@ -616,8 +648,11 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(self.comments_on(cards[0], "E2E after merge — green"), [])
         self.assertEqual(self.hotfixes(), [])
         self.assertEqual(len(self.bells()), 1)
-        self.assertEqual(sorted(self.pending()), sorted(cards))
-        self.assertEqual(self.mark(cards[0])["state"], "pending")
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.mark(cards[0])["state"], "blocked")
+        operation = self.reader.show(run.disposition)
+        self.assertEqual(operation["type"], "operation")
+        self.assertEqual(self.mark(cards[0])["waiting_on"], operation["ref"])
         self.assertNotIn(run.git_ref, self.host.refs)
 
     def test_a_crash_between_the_branch_and_the_dispatch_never_dispatches(self) -> None:
@@ -646,15 +681,17 @@ class ExactShaTests(AfterMergeFixture, unittest.TestCase):
             [],
             "the crashed intent is never dispatched",
         )
-        # The recorded branch is cleaned up, and the cards go back for the next run, charged anew.
+        # Unconfirmed dispatch evidence is owned by the PO before another paid attempt.
         self.assertNotIn(run.git_ref, self.host.refs)
         self.assertEqual(crashed.git_ref_state, "deleted")
         self.assertEqual(len(self.bells()), 1)
-        [(_, next_ref, _)] = [
-            entry for entry in self.host.ref_log if entry[0] == "create" and entry[1] != run.git_ref
-        ]
-        self.assertEqual([d["ref"] for d in self.host.dispatches], [next_ref])
-        self.assertEqual([item["ref"] for item in self.run_of(cards[-1]).covered], cards)
+        self.assertEqual(self.pending(), [])
+        self.assertEqual(self.host.dispatches, [])
+        operation = self.reader.show(crashed.disposition)
+        self.assertEqual(operation["type"], "operation")
+        self.assertEqual(self.mark(cards[0])["waiting_on"], operation["ref"])
+        self.am_tick(restarted)
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
 
     def test_a_crash_after_the_dispatch_is_recovered_without_a_second_dispatch(self) -> None:
         cards = self.three_merged_in_one_run()
@@ -893,7 +930,7 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
             self.assertIn(f"the decision {decision['ref']} was completed without a raise", comment)
         self.assertEqual(self.queue(), {})
 
-    def test_a_batch_no_po_session_owns_is_declined_whole_with_the_bell(self) -> None:
+    def test_a_batch_without_po_origin_waits_on_one_assigned_decision(self) -> None:
         capped, fresh = self.done_card(sprint=""), self.done_card(sprint="")
         self.on_main(_sha("a"), _sha("b"))
         self.merge(capped, _sha("a"))
@@ -904,15 +941,24 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
             role="dispatcher", actor="ummanu-pilot", reference=capped, state=state.text()
         )
 
-        [declined] = self.am_tick()
-
-        self.assertEqual(declined["action"], "e2e-after-merge-declined", declined)
-        self.assertEqual([c for c in self.reader.list() if c.get("type") == "decision"], [])
+        [waiting] = self.am_tick()
+        self.assertEqual(waiting["action"], "e2e-after-merge-budget-waiting", waiting)
+        [decision] = [c for c in self.reader.list() if c.get("type") == "decision"]
+        self.assertIsNone(origin_field.po_origin(decision))
+        self.assertEqual(decision["po_execution"]["sources"], [capped, fresh])
         for card in (capped, fresh):
-            self.assertEqual(self.mark(card)["state"], "declined")
-        [bell] = [e for e in OwnerEventStore(self.board.credentials).events() if e.kind == "e2e_budget_spent"]
-        self.assertEqual(bell.subject_ref, capped)
-        self.assertEqual(self.pending(), [])
+            self.assertEqual(self.mark(card)["waiting_on"], decision["ref"])
+        self.assertEqual(self.host.dispatches, [])
+        self.assertEqual(sorted(self.pending()), sorted([capped, fresh]))
+        self.am_tick()
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "decision"]), 1)
+        late = self.done_card(sprint="")
+        self.on_main(_sha("c"))
+        self.merge(late, _sha("c"))
+        self.am_tick()
+        self.assertEqual(self.mark(late)["waiting_on"], decision["ref"])
+        self.assertEqual(len(self.comments_on(decision["ref"], f"- {late} waits")), 1)
+        self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
 
     def test_a_spent_sprint_budget_dispatches_nothing_and_names_every_covered_card(self) -> None:
         self.spend_sprint(3)
@@ -1017,7 +1063,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         self.assertIn(run.run_url, hotfix["description"])
         self.assertEqual(self.bells(), [])
 
-    def test_a_failure_nobody_owns_is_blocked_at_once_and_rings_the_bell(self) -> None:
+    def test_a_failure_without_origin_has_one_po_return_route_operation(self) -> None:
         def cards() -> list[str]:
             made = [self.done_card(sprint="")]
             self.on_main(_sha("a"))
@@ -1036,8 +1082,15 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         ]
         self.assertEqual(len(blocked), 1)
         self.assertIn("after-merge e2e red, no sprint or origin owns it", blocked[0]["reason"])
-        [bell] = self.bells()
-        self.assertEqual((bell.event_class, bell.subject_ref), ("notice", hotfix["ref"]))
+        [operation] = [c for c in self.reader.list() if c.get("type") == "operation"]
+        self.assertEqual(operation["po_execution"]["purpose"], "e2e_disposition")
+        self.assertIsNone(origin_field.po_origin(operation))
+        self.assertIn(hotfix["ref"], operation["description"])
+        self.assertEqual(self.bells(), [])
+        self.am_tick()
+        self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
+        self.assertEqual(self.run_of(operation["po_execution"]["sources"][0]).disposition, operation["ref"])
+        self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
 
     def test_a_replayed_red_outcome_cuts_no_second_hotfix(self) -> None:
         cards, run = self.run_to("failure")

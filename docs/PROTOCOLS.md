@@ -4711,3 +4711,66 @@ After merge it uses the existing declined mark and comment, which emit no owner 
 Paid runs settle before admission is reconsidered. Pending waits and later arriving cards both
 consult the same standing answer. Without a standing answer the released PO budget-card route
 remains; it grants no runs automatically.
+
+
+### Observer PO channel
+
+Observer-to-PO questions use decision/operation cards. Sprint comments carry notes and evidence,
+not requests. `board/po_channel.py:requests_po` is the admission rule shared by comment and resume
+writes. It examines active sentence starts: `[observer:request]`; English `ask/request/need/await
+PO`, `wait/waiting for/on PO`, requests for a decision/action/answer/approval from PO, and direct
+`PO, ...`, `PO must/needs to/please ...`; Russian `прошу/просим/попросить/запросить ПО`,
+`ждём/жду/ожидаем/ожидаю/ожидать/ждать/дождаться решения/действия/ответа/согласования ПО`,
+`нужно/нужен/нужна/требуется решение/действие/ответ/согласование ПО`, `нужно, чтобы ПО ...`,
+and `ПО, ...` or `ПО должен/нужно/прошу ...`. Optional `please`, `we`, `нам`, list bullets and
+`next [safe step]:` / `следующий [безопасный] шаг:` prefixes do not hide the request.
+Sentence boundaries are line breaks and `. ! ? ;`. Block quotations, fenced code and inline
+backtick/double-quote/guillemet quotations are evidence; negated sentences and future implementation
+mentions do not start the request grammar. This bounded grammar is not a classifier of every PO
+mention. Other request wording must use the explicit marker or typed wait representation.
+
+A future PO wait resume retains the six required prose fields and adds
+`"po_request":{"card":"ummanu-N","action":"the missing decision/action"}`. `current_task` must
+name that same card. The board row is locked and read inside the resume write transaction: the
+card must be a live, nonsuperseded decision/operation in this sprint, Ready or In progress. A bare
+recognized PO wait in `next_safe_step` or `selected_step` is refused even if prose contains a ref.
+A typed request is validated even when prose uses different wording. No comment, resume or successful
+request/delivery acknowledgement commits on refusal. A denial audit uses a separate request/content
+key, so a corrected retry can use the original request ID and exact delivery pair. Duplicate successful
+resumes retain normal idempotency. Released six-field resumes remain readable and restore verbatim;
+no historical prose is retroactively reinterpreted. PO comments and genuine owner answers keep their
+existing channels and launch/role identity checks still precede observer admission.
+
+### Standalone pipeline PO execution
+
+Uncovered e2e questions use their existing budget-generation, spent-batch or run identity. A supported
+open source sprint routes to its PO session; otherwise a genuine PO origin routes to its session or
+successor. With neither, a dispatcher e2e decision/operation has an explicit `po_execution` extension:
+immutable `{request,purpose,sources}` plus native service resolution `initial`, `executor`, `successors`.
+The supported purposes are `e2e_budget` and `e2e_disposition`, admitted only for the corresponding
+dispatcher create ID and real project code sources. Ordinary out-of-sprint headless admission does
+not change. This assignment is not `po_origin` and creates no origin-return outbox obligation.
+
+The assignment opens a dedicated service session with installed default CLI/model and explicit effort,
+under `<create request>-po-session`. Choice is frozen before the native create; the session is recorded
+before submission. Closed/missing sessions use native successor resolution under
+`<create request>-po-successor-<closed session>`. Monotone card writes preserve committed sessions and
+successors against stale ticks. `/po` lists cards assigned to the executor, and task readback exposes
+the assignment. Claim/submission IDs, restart reconstruction, completed-without-response Blocked,
+new handovers, answer delivery, degraded reads and the persisted 30-minute/failed-execution escalation
+all use `dispatch/po_cards.py:_episode_outcome`. No second attention lifecycle is introduced.
+
+Spent pre-merge caps and after-merge batches wait on one PO decision without spending more. Later
+covered cards join it. A red unowned hotfix stays Blocked and a per-run PO operation owns its route
+assignment; released 0024 Blocked hotfixes recover via their real create ID and carrier run. Refused or
+unidentified dispatches, ambiguous identity, wrong SHA and unreachable result evidence have per-run PO
+operations and no automatic paid retry. Still-pending 0024 uncertain outcomes recover through their
+actual carrier/run with a new linkage comment; their original notice/comment audit remains intact.
+Planned cancellation/deadline and cancelled/timed_out/skipped
+workflow conclusions safely requeue through normal budget admission; cleanup and transient machine
+reads retry without questions. Adapter removal declines pending work under that explicit configuration.
+Standing refusal is applied before questions or paid retries, and already paid runs retain their history.
+A decision completed without a genuine grant declines further runs. Sprint quotations are the native
+monetary path; released genuine owner-comment grants remain consumed by the existing authorization
+writer. Assignment and an uncovered question grant no money. Only the PO explicitly hands over a new
+uncovered owner question. Actual steward escalation, failed PO execution and its deadline remain valid.

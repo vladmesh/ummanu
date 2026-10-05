@@ -46,10 +46,12 @@ the unfinished card to the observer through Blocked.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
+from ummanu.board import po_execution as execution_field
 from ummanu.board import po_origin as origin_field
 from ummanu.board.completion_evidence import missing_completion_evidence
 from ummanu.board.owner_handover import (
@@ -70,7 +72,7 @@ from ummanu.board.production_rights import (
 from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.dispatch.helpers import _worker_id
 from ummanu.dispatch.origin_returns import record_return_state, succeed_origin
-from ummanu.dispatch.po_delivery import DISPATCHER_SOURCE, SUCCESSORS_PER_TICK
+from ummanu.dispatch.po_delivery import DISPATCHER_SOURCE, SUCCESSORS_PER_TICK, open_successor
 from ummanu.dispatch.state import (
     DispatcherRecord,
     PoSubmission,
@@ -262,11 +264,13 @@ def completion_sections(kind: str) -> tuple[str, str]:
     return first, second
 
 
-def _of_sprint(submission: PoSubmission) -> str:
+def _of_sprint(submission: PoSubmission, task: dict[str, Any]) -> str:
     """Where the card belongs, as the inputs say it: its sprint, or no sprint at all."""
     if submission.sprint_ref:
         return f"of {submission.sprint_ref}"
-    return "(outside every sprint; you cut it in this session, so this session executes it)"
+    if origin_field.po_origin(task) is not None:
+        return "(outside every sprint; you cut it in this session, so this session executes it)"
+    return "(outside every sprint; explicitly assigned to this PO session for execution)"
 
 
 def render_po_card_input(
@@ -282,7 +286,7 @@ def render_po_card_input(
     first, second = completion_sections(kind)
     lines = [
         (
-            f"The dispatcher hands you {kind} card {reference} {_of_sprint(submission)}. Answer it in "
+            f"The dispatcher hands you {kind} card {reference} {_of_sprint(submission, task)}. Answer it in "
             "this turn and complete the card before the turn ends; a turn that ends with the card still "
             "In progress Blocks it, unless you handed it to the owner in this turn."
         ),
@@ -394,7 +398,7 @@ def render_owner_answer_input(
     first, second = completion_sections(kind)
     lines = [
         (
-            f"The owner answered {kind} card {reference} {_of_sprint(submission)}, which you handed to "
+            f"The owner answered {kind} card {reference} {_of_sprint(submission, task)}, which you handed to "
             f"the owner on {mark['since']}. Finish the work and complete the card in this turn. Only "
             "a new unresolved question needing the owner warrants a new explicit handover and request ID. Ending "
             "this turn without completing the card or a new handover returns the unfinished card "
@@ -469,7 +473,8 @@ def claim_po_card(
     record = _po_record(claimed, attempt_id)
     records[ref] = record
     runtime.save_records(payload, records)
-    if not record.po_submission.sprint_ref and origin_field.po_origin(claimed) is None:
+    if (not record.po_submission.sprint_ref and origin_field.po_origin(claimed) is None
+            and execution_field.assignment(claimed) is None):
         # Outside every sprint only the PO session that cut it executes it (secretary-1792).
         return _block(
             runtime,
@@ -591,11 +596,16 @@ def _submit(
                 )
                 submission.session_id = str(answer["session_id"])
                 submission.session_outcome = "created" if answer.get("created") else "recorded"
-            else:
+            elif origin is not None:
                 # Cut outside every sprint inside a PO turn: that session (or its successor) runs it.
-                assert origin is not None  # the claim Blocks such a card with no origin
                 submission.session_id = origin_field.line_head(origin["session"], origin_field.return_state(task))
                 submission.session_outcome = ORIGIN_SESSION
+            else:
+                execution = execution_field.assignment(task)
+                if execution is None:
+                    raise PoServiceError("the card has no durable PO execution assignment")
+                submission.session_id = _assigned_session(runtime, task, execution)
+                submission.session_outcome = "assigned"
             runtime.save_records(payload, records)
         step = "submit"
         if not submission.card:
@@ -609,6 +619,9 @@ def _submit(
             )
             submission.text = render_po_card_input(task, sprint, submission)
             runtime.save_records(payload, records)
+        current = runtime.reader.show(ref)
+        if current != task:
+            return advance_po_card(runtime, current, records, payload, record.attempt_id)
         answer = _submit_card(runtime, task, origin, submission, records, payload)
     except _SuccessorNotOpen as exc:
         return _unanswered(runtime, task, record, records, payload, step, exc)
@@ -668,10 +681,14 @@ def _submit_card(
     sprint's card is refused as before, its session being the sprint's resolver's to answer for.
     """
     state = origin_field.return_state(task) if origin is not None else None
+    execution = execution_field.assignment(runtime.reader.show(task["ref"])) if origin is None else None
     for _ in range(SUCCESSORS_PER_TICK + 1):
         if state is not None and state.executor != submission.session_id:
             state.executor = submission.session_id
             record_return_state(runtime, task["ref"], state)
+        if execution is not None and execution.executor != submission.session_id:
+            execution.executor = submission.session_id
+            _record_execution(runtime, task, execution)
         try:
             return runtime.po.submit(
                 session_id=submission.session_id,
@@ -681,10 +698,13 @@ def _submit_card(
                 card=submission.card,
             )
         except (SessionClosed, SessionNotFound):
-            if submission.sprint_ref or origin is None or state is None:
+            if submission.sprint_ref or (origin is None and execution is None):
                 raise
             closed = submission.session_id
-            following, why = succeed_origin(runtime, task, origin, state, closed)
+            if execution is not None:
+                following, why = _assigned_successor(runtime, task, execution, closed)
+            else:
+                following, why = succeed_origin(runtime, task, origin, state, closed)
             if not following:
                 raise _SuccessorNotOpen(why) from None
             submission.session_id = following
@@ -692,6 +712,40 @@ def _submit_card(
     raise _SuccessorNotOpen(
         f"every successor of PO session {submission.session_id} opened this tick was closed again"
     )
+
+
+def _record_execution(runtime: Any, task: dict[str, Any], execution: execution_field.PoExecution) -> None:
+    runtime.writer.record_po_execution(role="dispatcher", actor=runtime.owner,
+                                       reference=task["ref"], state=execution.text())
+    current = execution_field.assignment(runtime.reader.show(task["ref"]))
+    if current is None:
+        raise PoStoreError("the committed PO execution assignment cannot be read")
+    execution.initial.clear()
+    execution.initial.update(current.initial)
+    for closed, row in current.successors.items():
+        target = execution.successors.setdefault(closed, {})
+        target.clear()
+        target.update(row)
+    execution.executor = current.executor
+
+
+def _assigned_session(runtime: Any, task: dict[str, Any], execution: execution_field.PoExecution) -> str:
+    if not execution.initial.get("session"):
+        session, why = open_successor(runtime, reference=task["ref"], sprint_ref="", closed="",
+            record=execution.initial, persist=lambda: _record_execution(runtime, task, execution),
+            request_id=execution.request + "-po-session", freeze_choice=True)
+        if not session:
+            raise _SuccessorNotOpen(why)
+    return origin_field.line_head(execution.initial["session"],
+                                 origin_field.ReturnState(successors=execution.successors))
+
+
+def _assigned_successor(runtime: Any, task: dict[str, Any], execution: execution_field.PoExecution,
+                        closed: str) -> tuple[str, str]:
+    row = execution.successors.setdefault(closed, {})
+    return open_successor(runtime, reference=task["ref"], sprint_ref="", closed=closed, record=row,
+        persist=lambda: _record_execution(runtime, task, execution),
+        request_id=execution.request + "-po-successor-" + request_token(closed), freeze_choice=True)
 
 
 def _settle(
@@ -875,6 +929,13 @@ def _await_owner(
                     return _unanswered(runtime, task, record, records, payload, "owner answer session", exc)
                 except PoServiceError as exc:
                     return _refused(runtime, task, record, records, payload, "owner answer session", exc)
+            else:
+                execution = execution_field.assignment(task)
+                if execution is not None:
+                    try:
+                        submission.session_id = _assigned_session(runtime, task, execution)
+                    except (PoServiceError, PoStoreError) as exc:
+                        return _unanswered(runtime, task, record, records, payload, "owner answer session", exc)
         submission.owner_event_id = answer["event_id"]
         submission.owner_request_id = request_id
         submission.owner_text = render_owner_answer_input(task, submission, mark,
@@ -884,13 +945,12 @@ def _await_owner(
     submission.owner_submitted = False
     step = "owner answer"
     try:
-        runtime.po.submit(
-            session_id=submission.session_id,
-            text=submission.owner_text,
-            request_id=request_id,
-            source=DISPATCHER_SOURCE,
-            card=po_card_facts(task, submission, input=OWNER_ANSWER_INPUT),
-        )
+        followup = replace(submission, text=submission.owner_text, submit_request_id=request_id,
+                           card=po_card_facts(task, submission, input=OWNER_ANSWER_INPUT))
+        _submit_card(runtime, task, origin_field.po_origin(task), followup, records, payload)
+        submission.session_id = followup.session_id
+    except _SuccessorNotOpen as exc:
+        return _unanswered(runtime, task, record, records, payload, step, exc)
     except (ServiceUnavailable, OutcomeUnknown) as exc:
         return _unanswered(runtime, task, record, records, payload, step, exc)
     except ServiceRefused as exc:

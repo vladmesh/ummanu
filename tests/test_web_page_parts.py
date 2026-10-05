@@ -12,6 +12,13 @@ from ummanu.web import pages
 
 
 class LongTextTests(unittest.TestCase):
+    def test_completed_po_assignment_is_not_a_pending_origin_return(self) -> None:
+        drawn = pages._po_delegated({"items": [{"ref": "ummanu-7", "type": "decision",
+            "title": "Choose route", "state": "done", "relation": "assigned"}]})
+        self.assertIn("PO assignment", drawn)
+        self.assertIn("1 done", drawn)
+        self.assertNotIn("not returned yet", drawn)
+
     def test_short_text_is_shown_as_it_is_in_the_reading_face(self) -> None:
         self.assertEqual(pages._long("one line"), '<span class="prose">one line</span>')
 

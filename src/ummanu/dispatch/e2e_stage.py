@@ -54,7 +54,7 @@ stage re-checks the budget first: a raise (the owner's word, applied by the PO w
 e2e-budget`) lets the card dispatch; the decision Done with no raise Blocks it with the decision's text
 (`blocked_reason: other`). A card outside every sprint keeps the per-card cap of :data:`E2E_RUN_CAP`
 plus the raises on it: a spent cap gets a decision card with the card's PO origin when it has one, and
-is Blocked with an `e2e_budget_spent` bell event when it has none.
+has explicit PO execution assignment when it has none.
 """
 
 from __future__ import annotations
@@ -65,7 +65,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ummanu.board import e2e_budget, e2e_record, owner_events, owner_decisions, wait_card
+from ummanu.board import e2e_budget, e2e_record, owner_decisions, po_execution, wait_card
 from ummanu.board import po_origin as origin_field
 from ummanu.board.completion_evidence import has_candidate
 from ummanu.board.e2e_record import FAILURE, REFUSED, SENT, SUCCESS, BudgetWait, E2eRun, E2eState
@@ -818,37 +818,10 @@ def _cap_spent(
     *,
     step: str,
 ) -> dict[str, Any]:
-    """A card outside every sprint spent its own cap: a decision for its PO origin, or Blocked and the bell."""
+    """A spent standalone cap has one PO decision, using origin or explicit assignment."""
     ref = task["ref"]
     cap = e2e_budget.card_cap(task)
     origin = origin_field.po_origin(task)
-    if origin is None:
-        reason = (
-            f"e2e run cap reached ({cap}): this card belongs to no sprint and has dispatched "
-            f"{state.dispatched} e2e runs across its candidates, so none is dispatched for `{sha[:12]}`. "
-            "It came from no PO session either, so no PO owns this money decision. Re-cut it in a sprint with an e2e budget, or through the PO, to spend more runs. "
-            "`task show` lists the runs."
-        )
-        owner_events.record(
-            owner_events.E2E_BUDGET_SPENT,
-            ref,
-            reason,
-            f"{owner_events.E2E_BUDGET_SPENT}:{ref}:{cap}",
-            to=getattr(getattr(runtime, "reader", None), "client", None),
-        )
-        return _block(
-            runtime,
-            task,
-            record,
-            records,
-            payload,
-            attempt_id,
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-cap-blocked", ref, sha),
-            reason=reason,
-            step=step,
-            outcome=f"e2e run cap reached ({cap})",
-            blocked_reason="other",
-        )
     charges = [{"card": ref, "dispatch_id": run.dispatch_id, "at": run.intent_at} for run in state.runs]
     return _await_decision(
         runtime,
@@ -970,27 +943,48 @@ def _decision_card(
                 ),
             )
         return decision
-    created = runtime.writer.create(
-        role="dispatcher",
-        actor=runtime.owner,
-        project=str(task.get("project") or ""),
-        task_type="decision",
-        title=f"E2E budget spent: {scope_ref} — more runs? (money decision for the owner)",
-        description=_decision_description(
-            runtime,
-            task,
-            state,
-            scope=scope,
-            scope_ref=scope_ref,
-            spent_line=spent_line,
-            charges=charges,
-            waiting=waiting,
-        ),
-        target="ready",
-        sprint=scope_ref if scope == "sprint" else "",
-        origin=origin,
-        request_id=request_id,
-    )
+    sprint_route = scope_ref if scope == "sprint" else ""
+    if sprint_route:
+        try:
+            supported = runtime.sprints.show(sprint_route, include_cards=False).get("status") == "open"
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            supported = False
+        if not supported:
+            sprint_route = ""
+            origin = origin_field.po_origin(task)
+    try:
+        created = runtime.writer.create(
+            role="dispatcher",
+            actor=runtime.owner,
+            project=str(task.get("project") or ""),
+            task_type="decision",
+            title=f"E2E budget spent: {scope_ref}: PO disposition",
+            description=_decision_description(
+                runtime,
+                task,
+                state,
+                scope=scope,
+                scope_ref=scope_ref,
+                spent_line=spent_line,
+                charges=charges,
+                waiting=waiting,
+            ),
+            target="ready",
+            sprint=sprint_route,
+            origin=origin,
+            **({"po_execution": po_execution.create_assignment(request_id, "e2e_budget", [ref for ref, _, _ in waiting])}
+               if not sprint_route and origin is None else {}),
+            request_id=request_id,
+        )
+    except TaskError:
+        # Another tick may have committed the same generation with a different first join.
+        if runtime.audit.committed_event(request_id) is None:
+            raise
+        return _decision_card(runtime, task, state, sha, scope=scope, scope_ref=scope_ref,
+                              generation=generation, spent_line=spent_line, charges=charges,
+                              origin=origin, waiting=waiting)
     return str(created["task"]["ref"])
 
 
@@ -1038,9 +1032,9 @@ def _decision_description(
         [
             (
                 f"{spent_line} Every e2e run pays for BitLaunch stands, so more runs are a money decision: "
-                "hand this card to the owner (`task handover`), quoting the two answer lines below in the "
-                "handover reason. The budget is raised only on the owner's recorded word, never on the PO's "
-                "own authority."
+                "the PO first applies effective standing decisions and decides a safe disposition within "
+                "its authority. Complete without a raise to decline further runs. Only a new uncovered "
+                "owner decision calls for explicit `task handover --to owner`; this question grants no money."
             ),
             "",
             "## Waiting for e2e",
@@ -1053,12 +1047,12 @@ def _decision_description(
             "",
             *(lines or ["- (none recorded)"]),
             "",
-            "## The question for the owner",
+            "## PO decision",
             "",
             (
-                f"Raise the e2e budget of {scope_ref} by N runs, or no? The owner answers with a comment on "
-                "this card holding exactly one of these two lines (any case; the rest of the comment is free "
-                "prose):"
+                f"Disposition for {scope_ref}: apply existing authority or decline further runs. "
+                "If a new grant is necessary, hand over the uncovered question explicitly. "
+                "Released genuine owner-comment grants remain readable with these answer lines:"
             ),
             "",
             f"    {e2e_budget.ANSWER_RAISE_LINE}",

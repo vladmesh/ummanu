@@ -111,6 +111,7 @@ def open_successor(
     record: dict[str, str],
     persist: Callable[[], None],
     request_id: str,
+    freeze_choice: bool = False,
 ) -> tuple[str, str]:
     """The one session that succeeds `closed`: `(session, "")`, or `("", why)`.
 
@@ -134,13 +135,19 @@ def open_successor(
         if record["via"] == SPRINT_ROUTE:
             answer = runtime.po.sprint_session(sprint_ref=sprint_ref, request_id=request_id)
         else:
-            choice = runtime.po.successor_choice(closed)
+            choice = ((record["cli"], record["model"], record["effort"])
+                      if all(record.get(key) for key in ("cli", "model", "effort"))
+                      else runtime.po.successor_choice(closed))
             if choice is None:
                 return (
                     "",
                     f"PO session {closed} is closed and this installation offers no model for a successor",
                 )
             cli, model, effort = choice
+            if freeze_choice and not record.get("cli"):
+                record.update({"cli": cli, "model": model, "effort": effort})
+                persist()
+                cli, model, effort = record["cli"], record["model"], record["effort"]
             answer = runtime.po.create_session(cli=cli, model=model, effort=effort, request_id=request_id)
     except (PoServiceError, PoStoreError) as exc:
         return "", f"the successor of closed PO session {closed} is not open yet: {type(exc).__name__}: {exc}"

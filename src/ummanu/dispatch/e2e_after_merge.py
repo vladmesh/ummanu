@@ -39,9 +39,8 @@ sprint it is the sprint's budget decision of the before-merge stage, cut or join
 batch's own decision (`e2e_budget.batch_decision_request_id`), naming every covered card with its cap and
 authorizing a raise of each spent one. Each covered card shows `e2e: budget spent, waiting on
 <decision>`, and a card queued later joins the same decision. A raise lets the next pass attempt the whole
-batch; the decision completed without one declines every card waiting on it. A batch in which no card
-came from a PO session has nobody to decide for it: every card is declined at once, and each spent one
-rings the `e2e_budget_spent` bell.
+batch; the decision completed without one declines every card waiting on it. A batch without a real
+PO origin has explicit durable execution assignment to a dedicated native PO service session.
 
 Waiting. A `wait` card on the run, with the adapter's deadline, returning to `card:<carrier>`, created
 once under a request id derived from the dispatch id. Its frozen result is read each tick.
@@ -53,12 +52,11 @@ Outcomes:
   failed jobs and steps, the bounded `--log-failed` fragment, the SHA and every covered card with its
   merge SHA: in the carrier's sprint when it is open (a `hotfix` budget event, and the sprint observer
   wakes on it as on a Blocked card); otherwise outside every sprint with the carrier's PO origin; with
-  neither, created and Blocked at once (`after-merge e2e red, no sprint or origin owns it`) with one
-  `e2e_after_merge` bell event;
+  neither, created and Blocked at once, with a per-run PO operation owning return-route assignment;
 - anything else (another conclusion, a wait outcome other than `target_reached`, a refused dispatch, a
   run never identified, several candidates, a run on another SHA): no hotfix, a comment on every
-  covered card, one `e2e_after_merge` bell event, and the covered cards go back to the pending set; the
-  next run is charged as usual.
+  covered card and a routine notice. Planned cancellation/time-limit outcomes requeue through budget
+  admission; unconfirmed dispatch/SHA/source evidence gets one PO operation before any further paid run.
 """
 
 from __future__ import annotations
@@ -69,7 +67,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from ummanu.board import e2e_budget, e2e_record, owner_events, owner_decisions, wait_card
+from ummanu.board import e2e_budget, e2e_record, owner_decisions, owner_events, po_execution, wait_card
 from ummanu.board import po_origin as origin_field
 from ummanu.board.e2e_record import (
     AFTER_MERGE,
@@ -244,6 +242,28 @@ def reconcile_after_merge(
 ) -> list[dict[str, Any]]:
     """Advance every project's after-merge queue once: a project never waits on another."""
     outcomes: list[dict[str, Any]] = []
+    # Released 0024 produced unowned Blocked hotfixes whose queue has already drained.
+    # Their create ID points to the real carrier/run; no prose or fabricated origin is used.
+    try:
+        for hotfix in runtime.reader.list(states={"blocked"}):
+            if hotfix.get("type") != "code" or hotfix.get("sprint") or origin_field.po_origin(hotfix):
+                continue
+            for event in runtime.audit.events(hotfix["ref"], kind="created"):
+                request = str(event.get("request_id") or "")
+                if not request.startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX):
+                    continue
+                dispatch_id = request.removeprefix(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX)
+                carrier_ref = dispatch_id.split(DISPATCH_INFIX, 1)[0]
+                carrier = runtime.reader.show(carrier_ref)
+                state = e2e_record.e2e_state(carrier)
+                run = next((item for item in state.after_merge_runs if item.dispatch_id == dispatch_id), None)
+                if run is None or run.disposition:
+                    continue
+                _red(runtime, str(carrier["project"]), carrier_ref, state, run)
+                outcomes.append(_outcome(str(carrier["project"]), "e2e-after-merge-route-assigned",
+                                         ref=hotfix["ref"], decision=run.disposition))
+    except (TaskError, ValueError, TypeError, KeyError) as exc:
+        outcomes.append(_outcome("", "e2e-after-merge-route-unread", status="degraded", reason=str(exc)))
     for project in sorted(queues(payload)):
         try:
             outcomes += _advance(runtime, payload, records, project)
@@ -288,6 +308,7 @@ def _progress(
     declined = _standing_declines(runtime, payload, records, project, queue)
     if declined is not None:
         outcomes.append(declined)
+    outcomes += _released_dispositions(runtime, payload, records, project, queue)
     if queue["budget_waits"]:
         held = _budget_recheck(runtime, payload, records, project, queue)
         if held is not None:
@@ -306,6 +327,11 @@ def _mark_queued(
     changed = False
     for entry in list(queue["pending"]):
         if entry.get("marked"):
+            # A crash may lose the queue save after the durable disposition link.
+            previous = e2e_record.e2e_state(runtime.reader.show(str(entry["ref"]))).after_merge
+            if previous is not None and previous.state == AM_BLOCKED and previous.decision:
+                queue["pending"].remove(entry)
+                changed = True
             continue
         task = runtime.reader.show(str(entry["ref"]))
         if str(task.get("type") or "code") != "code":
@@ -324,6 +350,49 @@ def _mark_queued(
         changed = True
     if changed:
         runtime.save_records(payload, records)
+
+
+def _released_dispositions(runtime: Any, payload: dict[str, Any], records: dict[str, Any],
+                           project: str, queue: dict[str, Any]) -> list[dict[str, Any]]:
+    """0024 requeued uncertain outcomes with a notice; consume their actual carrier/run.
+
+    Only still-pending marks of that carrier are linked. Newer resolved/covered marks,
+    released comments, paid intents and owner-event read history remain untouched.
+    """
+    outcomes = []
+    for entry in list(queue["pending"]):
+        mark = e2e_record.e2e_state(runtime.reader.show(entry["ref"])).after_merge
+        if mark is None or mark.state != AM_PENDING or not mark.carrier:
+            continue
+        state = e2e_record.e2e_state(runtime.reader.show(mark.carrier))
+        run = next((item for item in reversed(state.after_merge_runs)
+                    if any(covered["ref"] == entry["ref"] for covered in item.covered)), None)
+        if (run is None or not run.acted or run.resolution not in {AM_REQUEUED, AM_BLOCKED}
+                or _safe_retry(run)):
+            continue
+        run.disposition = _disposition(runtime, project, mark.carrier, run,
+            "Resolve the released unconfirmed after-merge result before any further paid run. "
+            "Investigate the evidence and record a safe disposition, or create follow-up work.")
+        _persist(runtime, mark.carrier, state)
+        covered = {item["ref"] for item in run.covered}
+        linked = []
+        for pending in list(queue["pending"]):
+            if pending["ref"] not in covered:
+                continue
+            current = e2e_record.e2e_state(runtime.reader.show(pending["ref"])).after_merge
+            if current is None or current.state != AM_PENDING or current.carrier != mark.carrier:
+                continue
+            runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=pending["ref"],
+                body=f"PO operation {run.disposition} owns the unresolved after-merge disposition; no automatic paid retry.",
+                request_id=stage_request_id("e2e-am-disposition-linked-" + pending["ref"], run.dispatch_id))
+            _remark(runtime, pending["ref"], mark.carrier, state, state=AM_BLOCKED, decision=run.disposition)
+            queue["pending"].remove(pending)
+            linked.append(pending["ref"])
+        if linked:
+            runtime.save_records(payload, records)
+            outcomes.append(_outcome(project, "e2e-after-merge-disposition-assigned",
+                                     decision=run.disposition, covered=linked))
+    return outcomes
 
 
 def _persist(runtime: Any, ref: str, state: E2eState) -> None:
@@ -587,7 +656,7 @@ def _settle(
         acted = _act(runtime, project, carrier_ref, state, run, entries, queue)
     else:
         # Acted on before a crash lost the queue's save: a requeue puts its cards back once more.
-        if run.resolution in {AM_REQUEUED, AM_BLOCKED}:
+        if run.resolution in {AM_REQUEUED, AM_BLOCKED} and not run.disposition:
             known = {str(entry.get("ref")) for entry in queue["pending"]}
             queue["pending"] = [
                 *({**entry, "marked": True} for entry in entries if str(entry.get("ref")) not in known),
@@ -860,6 +929,18 @@ def _red(runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2e
     if not run.hotfix:
         run.hotfix = _hotfix(runtime, project, carrier_ref, run)
         _persist(runtime, carrier_ref, state)
+    hotfix = runtime.reader.show(run.hotfix)
+    if (not hotfix.get("sprint") and origin_field.po_origin(hotfix) is None
+            and hotfix.get("state") != "done" and not hotfix.get("closed")):
+        run.disposition = _disposition(runtime, project, carrier_ref, run,
+            f"Assign the return route and disposition of unowned hotfix {run.hotfix}. "
+            "Inspect the run evidence, then create planned follow-up work through an appropriate "
+            "open sprint or a real PO turn, or document why no correction is needed. "
+            "Do not fabricate a PO origin or rewrite a closed sprint.")
+        _persist(runtime, carrier_ref, state)
+        runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=run.hotfix,
+            body=f"PO operation {run.disposition} owns this hotfix's return-route assignment and disposition.",
+            request_id=stage_request_id("e2e-am-hotfix-route", run.dispatch_id))
     for item in run.covered:
         runtime.writer.comment(
             role="dispatcher",
@@ -874,13 +955,14 @@ def _red(runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2e
             request_id=stage_request_id("e2e-am-red-" + item["ref"], run.dispatch_id),
         )
         _remark(
-            runtime, item["ref"], carrier_ref, state, state=AM_RED, hotfix=run.hotfix, run_url=run.run_url
+            runtime, item["ref"], carrier_ref, state, state=AM_RED, hotfix=run.hotfix,
+            decision=run.disposition, run_url=run.run_url
         )
 
 
 def _hotfix(runtime: Any, project: str, carrier_ref: str, run: E2eRun) -> str:
     """Create the run's one hotfix card, owned by the carrier's open sprint, else its PO origin, else
-    nobody (Blocked at once, and the bell). A create already committed is only read back."""
+    an explicit PO return-route operation (code stays Blocked). A committed create is read back."""
     request_id = stage_request_id("e2e-am-hotfix", run.dispatch_id)
     known = runtime.audit.committed_event(request_id)
     carrier = runtime.reader.show(carrier_ref)
@@ -925,8 +1007,33 @@ def _hotfix(runtime: Any, project: str, carrier_ref: str, run: E2eRun) -> str:
                     disposition="blocked", blocked_reason="other"
                 ).to_record(),
             )
-        _bell(runtime, hotfix, text, f"{owner_events.E2E_AFTER_MERGE}:hotfix:{run.dispatch_id}")
     return hotfix
+
+
+def _disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRun, action: str) -> str:
+    """One PO operation per run, including committed-but-not-linked recovery."""
+    request_id = stage_request_id("e2e-am-disposition", run.dispatch_id)
+    known = runtime.audit.committed_event(request_id)
+    if known is not None and known.get("ref"):
+        return str(known["ref"])
+    carrier = runtime.reader.show(carrier_ref)
+    sprint = str(carrier.get("sprint") or "")
+    sprint = sprint if _sprint_open(runtime, sprint) else ""
+    origin = None if sprint else next((found for ref in [carrier_ref, *(item["ref"] for item in run.covered)]
+                                      if (found := origin_field.po_origin(runtime.reader.show(ref))) is not None), None)
+    created = runtime.writer.create(role="dispatcher", actor=runtime.owner, project=project,
+        task_type="operation", title=f"PO disposition: after-merge e2e {run.dispatch_id}",
+        description="\n".join([action, "", "## Evidence", "", f"Run: {run.run_url or run.dispatch_id}",
+            f"Target SHA: {run.sha}; wait card: {run.wait_ref or 'none'}; hotfix: {run.hotfix or 'none'}",
+            *_covered_lines(run), "", run.closing_reason or str(run.result or {}), "",
+            "## Completion", "", ("Record What was done and How to verify with the selected route/disposition. "
+            "Apply effective standing decisions before spending. This assignment grants no monetary or "
+            "production authority. Use task handover --to owner only for a new uncovered owner decision.")]),
+        target="ready", sprint=sprint, origin=origin, touches_production="none",
+        **({"po_execution": po_execution.create_assignment(request_id, "e2e_disposition",
+                                                           [item["ref"] for item in run.covered])}
+           if not sprint and origin is None else {}), request_id=request_id)
+    return str(created["task"]["ref"])
 
 
 def _bell(runtime: Any, subject: str, text: str, key: str) -> None:
@@ -947,7 +1054,7 @@ def _requeue(
     entries: list[dict[str, Any]],
     queue: dict[str, Any],
 ) -> None:
-    """No hotfix: a comment on every covered card, one bell, and the cards go back to the pending set."""
+    """No hotfix: planned waits retry through budget admission; uncertain outcomes belong to the PO."""
     result = run.result or {}
     if run.closing:
         what = run.closing_reason
@@ -963,6 +1070,14 @@ def _requeue(
             f"({result.get('summary') or ''})."
         )
     note = safe_one_line(what, limit=500)
+    # Released cancellation/time-limit outcomes safely retry under normal budget admission.
+    # Unknown dispatch/SHA/source evidence needs PO disposition before another paid attempt.
+    retry = _safe_retry(run)
+    if not retry:
+        run.disposition = _disposition(runtime, str(runtime.reader.show(carrier_ref)["project"]),
+            carrier_ref, run, "Resolve the unconfirmed after-merge result before any further paid run. "
+            "Investigate the evidence and record a safe disposition, or create follow-up work.")
+        _persist(runtime, carrier_ref, state)
     for item in run.covered:
         runtime.writer.comment(
             role="dispatcher",
@@ -970,13 +1085,16 @@ def _requeue(
             reference=item["ref"],
             body=(
                 f"## E2E after merge — {run.resolution}\n\n{what}\n\nThat is not this change's code: no hotfix "
-                "card is cut. The covered cards are pending again, and the next after-merge run of the project "
-                "covers them (charged as usual).\n\nCovered cards:\n" + "\n".join(_covered_lines(run))
+                "card is cut. " + (
+                    "The covered cards are pending again; the next run covers them under normal budget admission."
+                    if retry else f"PO operation {run.disposition} owns the unresolved disposition; no automatic paid retry."
+                ) + "\n\nCovered cards:\n" + "\n".join(_covered_lines(run))
             ),
             request_id=stage_request_id("e2e-am-requeued-" + item["ref"], run.dispatch_id),
         )
         _remark(
-            runtime, item["ref"], carrier_ref, state, state=AM_PENDING, note=note, dispatch_id="", run_url=""
+            runtime, item["ref"], carrier_ref, state, state=AM_PENDING if retry else AM_BLOCKED,
+            decision=run.disposition, note=note, dispatch_id="", run_url=""
         )
     _bell(
         runtime,
@@ -984,11 +1102,24 @@ def _requeue(
         f"After-merge e2e run of {', '.join(item['ref'] for item in run.covered)} ended without an actionable verdict: {what}",
         f"{owner_events.E2E_AFTER_MERGE}:{run.dispatch_id}",
     )
+    if not retry:
+        covered = {item["ref"] for item in run.covered}
+        queue["pending"] = [entry for entry in queue["pending"] if entry["ref"] not in covered]
+        return
     known = {str(entry.get("ref")) for entry in queue["pending"]}
     queue["pending"] = [
         *({**entry, "marked": True} for entry in entries if str(entry.get("ref")) not in known),
         *queue["pending"],
     ]
+
+
+def _safe_retry(run: E2eRun) -> bool:
+    result = run.result or {}
+    return not run.closing and (
+        result.get("outcome") in {wait_card.DEADLINE_PASSED, wait_card.CANCELLED}
+        or (result.get("outcome") == wait_card.TARGET_REACHED
+            and run.conclusion in {"cancelled", "timed_out", "skipped"})
+    )
 
 
 def _cleanup_refs(
@@ -1091,10 +1222,6 @@ def _budget_spent(
             ),
             None,
         )
-        if origin is None:
-            return _batch_unowned(
-                runtime, payload, records, project, queue, tasks, by_ref, spent, carrier_ref
-            )
         generation = sum(e2e_budget.card_cap(tasks[ref]) for ref in spent)
         request_id = e2e_budget.batch_decision_request_id(spent, generation)
         decision = _batch_decision(runtime, project, tasks, by_ref, spent, request_id, origin)
@@ -1151,13 +1278,22 @@ def _batch_decision(
     by_ref: dict[str, dict[str, Any]],
     spent: list[str],
     request_id: str,
-    origin: dict[str, str],
+    origin: dict[str, str] | None,
 ) -> str:
     """The one decision an out-of-sprint batch with spent caps needs: every covered card named with its cap,
     cut once under `request_id`, which authorizes a raise of each spent card's cap."""
     known = runtime.audit.committed_event(request_id)
     if known is not None and known.get("ref"):
-        return str(known["ref"])
+        decision = str(known["ref"])
+        shown = runtime.reader.show(decision)
+        for ref in by_ref:
+            if f"- {ref} waits " not in str(shown.get("description") or ""):
+                runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=decision,
+                    body=_cap_line(ref, tasks[ref], str(by_ref[ref]["merge_sha"]), [])
+                         + "\n\nIt joins the batch: the same disposition applies to it.",
+                    request_id="-".join(request_token(part) for part in
+                                        ("dispatcher", "e2e-budget-join", decision, ref)))
+        return decision
     commands = [
         f"      python3 -P -m ummanu task e2e-budget --ref {ref} --role po --authorized-by <event id>"
         for ref in spent
@@ -1176,9 +1312,9 @@ def _batch_decision(
                 f"The after-merge e2e run of {project} would cover {len(by_ref)} cards outside every open sprint. "
                 "Such a run is charged to every covered card's own e2e cap, all together or none, and "
                 f"{', '.join(spent)} {'has' if len(spent) == 1 else 'have'} no run left, so nothing was "
-                "dispatched. Every e2e run pays for BitLaunch stands, so more runs are a money decision: hand "
-                "this card to the owner (`task handover`), quoting the two answer lines below in the handover "
-                "reason. A cap is raised only on the owner's recorded word, never on the PO's own authority."
+                "dispatched. The PO first decides a safe disposition using actual existing authority. "
+                "Complete without raising caps to decline the batch. Only a new uncovered owner "
+                "decision calls for explicit `task handover --to owner`. This card grants no money."
             ),
             "",
             "## Waiting for e2e",
@@ -1193,12 +1329,12 @@ def _batch_decision(
             "",
             *(charges or ["- (none recorded)"]),
             "",
-            "## The question for the owner",
+            "## PO decision",
             "",
             (
-                f"Raise the e2e cap of {', '.join(spent)} by N runs, or no? The owner answers with a comment on "
-                "this card holding exactly one of these two lines (any case; the rest of the comment is free "
-                "prose):"
+                f"Disposition for the spent caps of {', '.join(spent)}: use existing authority or decline. "
+                "If a new grant is necessary, hand over the uncovered question explicitly. "
+                "Released genuine owner-comment grants remain readable with these answer lines:"
             ),
             "",
             f"    {e2e_budget.ANSWER_RAISE_LINE}",
@@ -1222,53 +1358,27 @@ def _batch_decision(
             ),
         ]
     )
-    created = runtime.writer.create(
-        role="dispatcher",
-        actor=runtime.owner,
-        project=project,
-        task_type="decision",
-        title=f"E2E caps spent: {', '.join(spent)} — more runs for the after-merge run? (money decision for the owner)",
-        description=description,
-        target="ready",
-        sprint="",
-        origin=origin,
-        request_id=request_id,
-    )
-    return str(created["task"]["ref"])
-
-
-def _batch_unowned(
-    runtime: Any,
-    payload: dict[str, Any],
-    records: dict[str, Any],
-    project: str,
-    queue: dict[str, Any],
-    tasks: dict[str, dict[str, Any]],
-    by_ref: dict[str, dict[str, Any]],
-    spent: list[str],
-    carrier_ref: str,
-) -> dict[str, Any]:
-    """No card of the batch came from a PO session, so no decision can be handed to anyone: the whole
-    batch is declined, and each spent card rings the bell."""
-    text = (
-        f"No after-merge e2e run is dispatched: it would cover {', '.join(by_ref)}, outside every open sprint, "
-        f"and the e2e cap of {', '.join(spent)} is spent. No covered card came from a PO session, so there is "
-        "no PO route for the money decision. Re-cut the work in a sprint with an e2e budget, "
-        "or through the PO."
-    )
-    for ref in spent:
-        cap = e2e_budget.card_cap(tasks[ref])
-        owner_events.record(
-            owner_events.E2E_BUDGET_SPENT,
-            ref,
-            text,
-            f"{owner_events.E2E_BUDGET_SPENT}:{ref}:{cap}",
-            to=getattr(getattr(runtime, "reader", None), "client", None),
+    try:
+        created = runtime.writer.create(
+            role="dispatcher",
+            actor=runtime.owner,
+            project=project,
+            task_type="decision",
+            title=f"E2E caps spent: {', '.join(spent)}: PO batch disposition",
+            description=description,
+            target="ready",
+            sprint="",
+            origin=origin,
+            **({"po_execution": po_execution.create_assignment(request_id, "e2e_budget", list(by_ref))}
+               if origin is None else {}),
+            request_id=request_id,
         )
-    for ref in by_ref:
-        _decline(runtime, queue, ref, text, decision="")
-    runtime.save_records(payload, records)
-    return _outcome(project, "e2e-after-merge-declined", ref=carrier_ref, covered=list(by_ref), reason=text)
+    except TaskError:
+        known = runtime.audit.committed_event(request_id)
+        if known is None or not known.get("ref"):
+            raise
+        return _batch_decision(runtime, project, tasks, by_ref, spent, request_id, origin)
+    return str(created["task"]["ref"])
 
 
 def _decline(runtime: Any, queue: dict[str, Any], ref: str, text: str, *, decision: str) -> None:

@@ -18,7 +18,8 @@ The released genuine owner-comment grant adapter below records the same grant en
 
 An uncovered spent budget is a money decision. The dispatcher cuts a `decision` card for it, once per budget
 generation (:func:`decision_request_id`; the generation is the budget, or the card's cap, the runs were
-spent against), and the PO hands it to the owner. The budget is raised only on the owner's recorded
+spent against). The PO first applies standing authority or declines further runs, handing over only
+a new uncovered owner question. The released grant path raises only on the owner's recorded
 word: `sprint e2e-budget` / `task e2e-budget` with `--authorized-by`, the event id of an owner comment
 on that decision card (for a card's cap, also the after-merge batch decision that names the card spent,
 :func:`batch_decision_request_id`) made after its handover whose one answer line is `e2e budget: raise <N>`; the

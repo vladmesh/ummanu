@@ -327,7 +327,8 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         },
         "current_task": str(sprint.get("current_task") or ""),
         "resume": (
-            {str(key): str(value) for key, value in sorted(resume.items())}
+            {str(key): (dict(value) if key == "po_request" and isinstance(value, dict) else str(value))
+             for key, value in sorted(resume.items())}
             if isinstance(resume, dict)
             else None
         ),

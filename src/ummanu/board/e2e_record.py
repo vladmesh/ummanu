@@ -77,14 +77,14 @@ AM_GREEN = "green"
 AM_RED = "red"
 AM_BUDGET_WAIT = "budget_wait"
 AM_DECLINED = "declined"
-_AM_STATES = (AM_PENDING, AM_COVERED, AM_GREEN, AM_RED, AM_BUDGET_WAIT, AM_DECLINED)
 
 #: The resolution of an after-merge run once its result was acted on: green, red (a hotfix card), a
 #: conclusion or wait outcome that is neither (`requeued`), or a run that was never attached to the
 #: covered cards (`blocked`: refused, unidentified, ambiguous, or run on another SHA). The last two send
-#: the covered cards back to the pending set.
+#: planned waits return to the pending set; uncovered uncertain outcomes wait on PO disposition.
 AM_REQUEUED = "requeued"
 AM_BLOCKED = "blocked"
+_AM_STATES = (AM_PENDING, AM_COVERED, AM_GREEN, AM_RED, AM_BUDGET_WAIT, AM_DECLINED, AM_BLOCKED)
 
 #: The request-id prefix of the one `code` card the dispatcher may create: the hotfix of a red
 #: after-merge run, `dispatcher-e2e-am-hotfix-<dispatch id>` (`dispatch/e2e_after_merge.py`).
@@ -135,6 +135,8 @@ class E2eRun:
     charged_to: str = ""
     resolution: str = ""
     hotfix: str = ""
+    # The PO card owning an unresolved result/return-route question, distinct from the code hotfix.
+    disposition: str = ""
 
     @property
     def conclusion(self) -> str:
@@ -188,6 +190,7 @@ class E2eRun:
                 "charged_to",
                 "resolution",
                 "hotfix",
+                "disposition",
             )
         }
         if not (texts["dispatch_id"] and texts["sha"]) or texts["dispatch"] not in _DISPATCH_STATES:
@@ -459,7 +462,7 @@ def _after_merge_view(state: E2eState) -> dict[str, Any]:
                 **({"note": mark.note} if mark.note else {}),
                 **(
                     {"mark": mark.label(), "waiting_on": mark.decision}
-                    if mark.state == AM_BUDGET_WAIT
+                    if mark.decision and mark.state in {AM_BUDGET_WAIT, AM_RED, AM_BLOCKED}
                     else {}
                 ),
             }
@@ -479,6 +482,7 @@ def _after_merge_view(state: E2eState) -> dict[str, Any]:
                 "wait_card": run.wait_ref or None,
                 "dispatched_at": run.intent_at,
                 **({"hotfix": run.hotfix} if run.hotfix else {}),
+                **({"disposition": run.disposition} if run.disposition else {}),
                 **({"reason": run.closing_reason} if run.closing_reason else {}),
                 "result": (
                     {key: run.result.get(key) for key in ("outcome", "conclusion", "summary")}

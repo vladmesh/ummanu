@@ -42,6 +42,7 @@ from ummanu.board.completion_evidence import (
     review_required,
 )
 from ummanu.board.models import Actor, CardState, EntityKind, Event
+from ummanu.board.po_execution import assignment, create_assignment
 from ummanu.board.task_routing import TaskMetadata, TaskReview, TaskType, default_review
 from ummanu.board.transitions import transition_for
 from ummanu.cli import main
@@ -147,6 +148,92 @@ class ClaimAndSubmitTests(DispatcherFixture):
         with mock.patch.object(service.queue, "put", wraps=service.queue.put) as put, listening(service):
             self.claim(runtime)
         self.assertEqual([call.kwargs["source"] for call in put.call_args_list], ["po-service", "dispatcher"])
+
+
+class AssignedExecutionTests(DispatcherFixture):
+    def assigned(self):
+        task = card(description="WAIT-GATE")
+        task["sprint"] = ""
+        task["extensions"] = {"extra": {"po_execution": create_assignment(
+            "dispatcher-e2e-cap-source-3", "e2e_budget", ["source"])}}
+        runtime = self.runtime(task, comments=[])
+        runtime.po.successor_choice = lambda _closed: ("claude", "opus", "high")
+        return runtime
+
+    def test_assignment_submits_once_persists_session_and_completes_through_normal_episode(self):
+        self.start()
+        runtime = self.assigned()
+        first = self.claim(runtime)
+        self.assertEqual(first["action"], "po-card-submitted")
+        session = first["po_session"]
+        route = assignment(self.cards.card)
+        self.assertEqual((route.executor, route.initial["session"]), (session, session))
+        self.assertNotIn("po_origin", self.cards.card["extensions"]["extra"])
+        self.assertNotIn("you cut it", self.record().po_submission.text)
+        self.records.clear()  # restart recovers the claim's same submission episode
+        outcome = self.tick(runtime)
+        self.assertIn(outcome["action"], {"po-card-queued", "po-card-turn-running"})
+        self.assertEqual(self.record().po_submission.submit_request_id, first["po_request_id"])
+        self.cards.complete_as_po("decision", DECISION_BODY)
+        self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
+        self.assertEqual(self.session_ids(), [session])
+        self.gate.touch()
+        self.settled(session, 1)
+        self.assertEqual(len(FakePoStore(self.board).turns(session)), 1)
+
+    def test_lost_session_answer_reuses_native_create_and_frozen_defaults(self):
+        self.start()
+        runtime = self.assigned()
+        create = runtime.po.create_session
+        def lost(**fields):
+            create(**fields)
+            raise OutcomeUnknown("lost session answer")
+        runtime.po.create_session = lost
+        self.assertEqual(self.claim(runtime)["status"], "degraded")
+        route = assignment(self.cards.card)
+        self.assertEqual((route.initial["model"], route.initial["effort"]), ("opus", "high"))
+        runtime.po.create_session = create
+        runtime.po.successor_choice = lambda _closed: ("claude", "other-model", "low")
+        self.records.clear()
+        second = self.tick(runtime)
+        self.assertEqual(second["action"], "po-card-submitted")
+        self.assertEqual(len(self.session_ids()), 1)
+        self.cards.complete_as_po("decision", DECISION_BODY)
+        self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
+
+    def test_closed_assignment_session_uses_native_successor_and_keeps_provenance_absent(self):
+        service = self.start()
+        runtime = self.assigned()
+        session = self.session(service)
+        FakePoStore(self.board).close_session(session, "owner")
+        route = assignment(self.cards.card)
+        route.initial = {"replaces": "", "via": "create_session", "session": session}
+        self.cards.record_po_execution(role="dispatcher", reference=REF, state=route.text())
+        outcome = self.claim(runtime)
+        self.assertEqual(outcome["action"], "po-card-submitted")
+        following = outcome["po_session"]
+        route = assignment(self.cards.card)
+        self.assertNotEqual(following, session)
+        self.assertEqual(route.successors[session]["session"], following)
+        self.assertEqual(route.executor, following)
+        self.assertNotIn("po_origin", self.cards.card["extensions"]["extra"])
+        self.cards.complete_as_po("decision", DECISION_BODY)
+        self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
+
+    def test_missing_model_or_unreadable_defaults_remains_degraded_with_no_submission(self):
+        runtime = self.assigned()
+        runtime.po.successor_choice = lambda _closed: None
+        first = self.claim(runtime)
+        self.assertEqual(first["status"], "degraded")
+        self.assertFalse(self.record().po_submission.submitted)
+        self.assertEqual(self.cards.card["state"], "in_progress")
+        self.assertEqual(self.session_ids(), [])
+        from ummanu.po.store import PoStoreError
+        def unread(_closed):
+            raise PoStoreError("defaults unavailable")
+        runtime.po.successor_choice = unread
+        self.assertEqual(self.tick(runtime)["status"], "degraded")
+        self.assertNotIn("owner_escalation", self.cards.card["extensions"]["extra"])
 
 
 class RepeatTests(DispatcherFixture):

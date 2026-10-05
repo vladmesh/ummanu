@@ -208,7 +208,7 @@ class SqlSprintRecords:
             str(values[0]): values[1:]
             for values in self.client._query(
                 "SELECT s.ref, r.selected_step, r.selected_why, r.rejected_alternatives, "
-                "r.current_task, r.dod_state, r.next_safe_step, r.recorded_at, r.recorded_at_source "
+                "r.current_task, r.dod_state, r.next_safe_step, r.recorded_at, r.recorded_at_source, r.po_request "
                 "FROM sprints s JOIN sprint_resumes r ON r.resume_id = s.resume_id "
                 "WHERE s.ref = ANY(%s::text[])",
                 (references,),
@@ -284,6 +284,8 @@ class SqlSprintRecords:
                 names = ("selected_step", "selected_why", "rejected_alternatives", "current_task", "dod_state", "next_safe_step")
                 document = dict(zip(names, resume[:6], strict=True))
                 document["recorded_at"] = str(resume[7] or _rfc3339(resume[6]))
+                if resume[8] is not None:
+                    document["po_request"] = resume[8]
                 values["sprint_resume"] = json.dumps(document, separators=(",", ":"))
             else:
                 values["sprint_resume"] = ""
@@ -511,13 +513,14 @@ class SqlSprintRecords:
             malformed_source = source_timestamp if parsed_timestamp.utcoffset() is None else None
             row = self.client._query(
                 "INSERT INTO sprint_resumes (sprint_ref, selected_step, selected_why, rejected_alternatives, "
-                "current_task, dod_state, next_safe_step, recorded_at, recorded_at_source) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING resume_id",
+                "current_task, dod_state, next_safe_step, recorded_at, recorded_at_source, po_request) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb) RETURNING resume_id",
                 (
                     reference,
                     *(entry[name] for name in names),
                     _now() if malformed_source else parsed_timestamp,
                     malformed_source,
+                    json.dumps(entry["po_request"]) if entry.get("po_request") is not None else None,
                 ),
             )
             self.client._execute("UPDATE sprints SET resume_id=%s WHERE ref=%s", (row[0][0], reference))

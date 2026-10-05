@@ -592,15 +592,21 @@ class OutOfSprintCapTests(BudgetStageFixture, unittest.TestCase):
         )
         self.assertEqual(len(e2e_state(self.reader.show(OTHER)).runs), 3)
 
-    def test_a_card_with_no_origin_is_blocked_and_rings_the_bell(self) -> None:
+    def test_a_card_with_no_origin_has_one_assigned_po_decision_without_spending(self) -> None:
         self.spent_cap(origin=False)
-
-        blocked = self.tick()
-
-        self.assertBlockedAsInfrastructure(blocked, "e2e run cap reached (3)", taxonomy="other")
-        self.assertEqual(self.decisions(), [])
-        [bell] = [e for e in OwnerEventStore(self.board.credentials).events() if e.subject_ref == CARD_REF]
-        self.assertEqual((bell.kind, bell.event_class), ("e2e_budget_spent", "notice"))
+        waiting = self.tick()
+        self.assertEqual(waiting["action"], "e2e-budget-waiting")
+        [decision] = self.decisions()
+        shown = self.reader.show(decision["ref"])
+        self.assertIsNone(origin_field.po_origin(shown))
+        self.assertEqual(shown["po_execution"]["purpose"], "e2e_budget")
+        self.assertEqual(shown["po_execution"]["sources"], [CARD_REF])
+        self.assertEqual(self.card()["e2e"]["waiting_on"], decision["ref"])
+        self.assertEqual(self.tick()["action"], "e2e-budget-waiting")
+        self.assertEqual(len(self.decisions()), 1)
+        self.assertEqual(len(e2e_state(self.card()).runs), 3)
+        self.assertEqual(self.host.dispatches, [])
+        self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
 
 
 class SprintBudgetEntityTests(SprintFixture):

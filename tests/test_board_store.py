@@ -555,8 +555,8 @@ class SchemaModelTests(unittest.TestCase):
         self.assertNotIn("schema_migrations", schema.metadata.tables)
         self.assertNotIn("alembic_version", schema.metadata.tables)
 
-    def test_jsonb_is_exactly_the_eight_columns_section_3_10_names(self) -> None:
-        """Eight since `0026` added creation-only local-run authority as (J8)."""
+    def test_jsonb_is_exactly_the_columns_section_3_10_names(self) -> None:
+        """Ten with the quoted authority (J9) and typed PO wait (J10)."""
         from sqlalchemy.dialects.postgresql import JSONB
 
         found = {
@@ -581,8 +581,8 @@ class SchemaModelTests(unittest.TestCase):
 
         # 56 since `0022` added `origin_returns` with three (secretary-1792); 57 since `0023` added the
         # sprint's e2e counts (secretary-1796); 58 since `0026` added the local-run array shape;
-        # 59 since `0027` added the quoted owner-decision array shape.
-        self.assertEqual(len(checks), 59, "§3.13 counts 59 CHECK constraints at the head revision")
+        # 59 since `0027` added quoted decisions; 60 with `0029`'s typed PO wait shape.
+        self.assertEqual(len(checks), 60, "§3.13 counts 60 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -708,6 +708,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0029_po_channel",
                 "0028_owner_turns",
                 "0027_sprint_owner_decisions",
                 "0026_sprint_local_runs",

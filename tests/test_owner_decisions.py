@@ -225,6 +225,7 @@ class AdmissionTests(unittest.TestCase):
 
     def test_uncovered_spent_budget_still_creates_po_decision(self):
         runtime = self.runtime()
+        runtime.sprints = SimpleNamespace(show=mock.Mock(return_value={"status": "open"}))
         runtime.reader.sprint_e2e_budget.return_value["refusal"] = None
         runtime.audit.committed_event.return_value = None
         runtime.writer.create.return_value = {"task": {"ref": "decision-1"}}

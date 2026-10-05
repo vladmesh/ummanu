@@ -526,3 +526,14 @@ records conversation answers with `task record-owner-answer --role po --handover
 --body-file <quotation-file> --request-id <id>`; genuine owner card comments also settle attention.
 An answered unfinished card is with the PO. Apply recorded standing decisions once, by ID, and
 follow dependency-card links instead of counting each dependent as an owner question.
+
+An observer sprint comment is for notes and evidence. Requests such as `[observer:request]`,
+`PO, please choose the route`, `Wait for PO decision` or `Ждём решения ПО` are refused with a
+create-card hint. Create a decision/operation card in this sprint and put its ref in `current_task`.
+For a saved PO wait, also set `po_request` to `{"card":"<same ref>","action":"<missing decision/action>"}`.
+The writer checks the card's actual type, sprint and actionable state in the resume transaction;
+a code, foreign, archived, superseded, Blocked, Done or nonexistent card cannot own that step.
+Refusal commits no resume, sprint comment or delivery acknowledgement. Correct the input and retry
+the same request ID and delivery pair. Quotations, negated waits, administrative notes and future
+implementation analysis remain ordinary evidence. Other direct request phrasing must use this
+explicit representation; do not hide a request in free prose. See docs/PROTOCOLS.md, Observer PO channel.

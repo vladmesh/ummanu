@@ -1178,10 +1178,7 @@
                   "description": "The sprint's e2e run budget (secretary-1796): `budget`, `used`, `summary` (`e2e: <used> of <budget>`), `cards` (the cards that spent runs) and `charges` (one `{card, dispatch_id, at}` per run)."
                 },
                 "resume": {
-                  "type": [
-                    "object",
-                    "null"
-                  ]
+                  "$ref": "#/$defs/sprint_resume"
                 },
                 "budget": {
                   "type": [
@@ -1939,10 +1936,7 @@
                   "description": "The sprint's e2e run budget (secretary-1796): `budget`, `used`, `summary` (`e2e: <used> of <budget>`), `cards` (the cards that spent runs) and `charges` (one `{card, dispatch_id, at}` per run)."
                 },
                 "resume": {
-                  "type": [
-                    "object",
-                    "null"
-                  ]
+                  "$ref": "#/$defs/sprint_resume"
                 },
                 "budget": {
                   "type": [
@@ -2246,6 +2240,54 @@
                 "type": "string",
                 "minLength": 1
               }
+            }
+          }
+        }
+      }
+    },
+    "sprint_resume": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Released six-field resume plus recorded_at. Future PO waits name the owning card explicitly.",
+      "properties": {
+        "selected_step": {
+          "type": "string"
+        },
+        "selected_why": {
+          "type": "string"
+        },
+        "rejected_alternatives": {
+          "type": "string"
+        },
+        "current_task": {
+          "type": "string"
+        },
+        "dod_state": {
+          "type": "string"
+        },
+        "next_safe_step": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "type": "string"
+        },
+        "po_request": {
+          "type": "object",
+          "required": [
+            "card",
+            "action"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "card": {
+              "type": "string",
+              "minLength": 1
+            },
+            "action": {
+              "type": "string",
+              "minLength": 1
             }
           }
         }

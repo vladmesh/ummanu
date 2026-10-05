@@ -17,6 +17,8 @@ from unittest import mock
 
 from tests.po_fake_store import FakePoStore
 from ummanu import sprint_commands
+from ummanu.board.po_channel import requests_po
+from ummanu.board.sprint_read import RESUME_FIELDS, SprintResume
 from ummanu.board.sprint_write import SprintCreateIntent
 from ummanu.board.sql_sprints import SqlSprintRecords
 from ummanu.cli import main
@@ -46,6 +48,36 @@ PRE_0016_META = {
     "sprint_resume": "",
     "sprint_budget": '{"by_type":{}}',
 }
+
+
+class ObserverRequestAdmissionTests(unittest.TestCase):
+    def test_direct_requests_and_waits_in_both_languages(self):
+        for body in ("[observer:request] Assign the route", "Please ask PO to approve the route.",
+                     "PO, please decide.", "Wait for the PO decision.", "We need PO to assign this.",
+                     "Need a decision from PO.", "Прошу ПО назначить маршрут.", "Ждём решения ПО.",
+                     "Нужно решение ПО.", "ПО должен выбрать маршрут.", "Следующий шаг: ждать ответа ПО."):
+            with self.subTest(body=body):
+                self.assertTrue(requests_po(body))
+
+    def test_notes_negation_quotations_and_future_implementation_are_not_requests(self):
+        for body in ("No PO action is needed.", "Do not ask PO to decide.", "Не ждём решения ПО.",
+                     'Evidence: "Wait for PO decision."', '> [observer:request] historical request',
+                     "```\nPO, decide now.\n```", "Implement PO routing in the next code card.",
+                     "Future implementation will validate PO decisions.", "Recorded PO decision is quoted on the card.",
+                     "Будущая реализация проверяет решения ПО.", "Note: PO session is recorded."):
+            with self.subTest(body=body):
+                self.assertFalse(requests_po(body))
+
+    def test_typed_wait_roundtrips_without_changing_historical_six_field_readback(self):
+        old = dict.fromkeys(RESUME_FIELDS, "ordinary analysis")
+        legacy = SprintResume.from_legacy(old, required=True, now=lambda: "2026-10-05T00:00:00Z")
+        self.assertNotIn("po_request", legacy.to_document())
+        wait = {**old, "current_task": "ummanu-1", "po_request": {"card": "ummanu-1", "action": "choose route"}}
+        parsed = SprintResume.from_legacy(wait, required=True)
+        self.assertEqual(parsed.to_document()["po_request"], wait["po_request"])
+        for invalid in ({"card": "ummanu-1"}, {"card": "ummanu-1", "action": ""}, "ummanu-1"):
+            with self.subTest(value=invalid), self.assertRaises(ValueError):
+                SprintResume.from_legacy({**old, "po_request": invalid}, required=True)
 
 
 def po_session_state(store: FakePoStore):

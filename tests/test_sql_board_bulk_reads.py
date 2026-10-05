@@ -390,13 +390,15 @@ class _PerRecordOracle:
         values["sprint_local_run_exceptions"] = json.dumps(exceptions, sort_keys=True, separators=(",", ":"))
         resume = self.q(
             "SELECT selected_step, selected_why, rejected_alternatives, current_task, dod_state, "
-            "next_safe_step, recorded_at, recorded_at_source FROM sprint_resumes WHERE resume_id = "
+            "next_safe_step, recorded_at, recorded_at_source, po_request FROM sprint_resumes WHERE resume_id = "
             "(SELECT resume_id FROM sprints WHERE ref = %s)", (reference,)
         )
         if resume:
             names = ("selected_step", "selected_why", "rejected_alternatives", "current_task", "dod_state", "next_safe_step")
             document = dict(zip(names, resume[0][:6], strict=True))
             document["recorded_at"] = str(resume[0][7] or _rfc3339(resume[0][6]))
+            if resume[0][8] is not None:
+                document["po_request"] = resume[0][8]
             values["sprint_resume"] = json.dumps(document, separators=(",", ":"))
         else:
             values["sprint_resume"] = ""

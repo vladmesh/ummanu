@@ -231,6 +231,8 @@ CREATE TABLE sprint_resumes (                         -- append-only; sprints.re
     next_safe_step       text NOT NULL,
     recorded_at          timestamptz NOT NULL,
     recorded_at_source   text, -- malformed restored legacy spelling, retained as stale evidence
+    po_request           jsonb, -- future PO wait: {card, action}; NULL for released resumes (0029, J10)
+    CHECK (po_request IS NULL OR jsonb_typeof(po_request) = 'object'),
     UNIQUE (resume_id, sprint_ref)                    -- target of the scoped cursor
 );
 ```
@@ -657,6 +659,7 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
 | (J6) `issues.extensions` | (J3) for Issues |
 | (J7) `products.extensions` | (J3) for Products |
 | (J9) `sprints.owner_decisions` | append-only quoted entries with stable IDs and PO audit attribution; latest scoped answer wins; empty for released sprints |
+| (J10) `sprint_resumes.po_request` | optional `{card, action}` identifying a board-owned PO wait; admission locks and validates the actual card, not references extracted from prose; NULL for released resumes |
 | (J8) `sprints.local_run_exceptions` | creation-only list of `{project, argv, rationale}`; exact vectors for registered, reserved projects; default `[]` |
 
 No extension bag may hold a field the schema names. Link sets, budget counters, resume fields and
@@ -747,6 +750,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0026_sprint_local_runs` | additive `sprints.local_run_exceptions` jsonb, not null, default `[]`, array CHECK; existing sprints gain no exceptions; released empty create intents retain request identity; ships through the automatic release migration boundary; downgrade refuses while a nonempty declaration exists |
 | `0027_sprint_owner_decisions` | additive quoted owner decision array, default `[]`; existing permission/counter/charge records unchanged; downgrade refuses nonempty authority |
 | `0028_owner_turns` | reclassifies released `card_waits_for_person`, `e2e_budget_spent`, `e2e_after_merge` rows as notices, preserving IDs, quotations, dedup keys and read history; adds `po_card_escalated` with matching current kind/class constraints. The `owner_event_routine_notice` trigger normalizes actual 0023/0024/0025 producers' obsolete class during release activation, so their real occurrences remain notices. Downgrade refuses while any changed kind exists rather than fabricate old attention. No new table or column. |
+| `0029_po_channel` | nullable typed PO wait on `sprint_resumes`, object CHECK; released six-field resumes, delivery cursors and audit are unchanged. Task PO execution assignment and per-run disposition use existing extension bags. Downgrade refuses while a typed PO wait exists. |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -758,7 +762,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 31 tables, 59 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
+(including `alembic_version`): 31 tables, 60 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1115,7 +1119,7 @@ kind is refused.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0028_owner_turns`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0029_po_channel`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

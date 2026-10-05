@@ -15,6 +15,7 @@ from typing import Any
 
 from ummanu.board.legacy_codec import positive_int, text
 from ummanu.board.models import SprintState
+from ummanu.board.po_channel import PoRequest
 
 SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
 
@@ -189,6 +190,7 @@ class SprintResume:
     dod_state: str
     next_safe_step: str
     recorded_at: str
+    po_request: PoRequest | None = None
 
     @classmethod
     def from_legacy(
@@ -218,6 +220,12 @@ class SprintResume:
                 raise ValueError("resume entry is missing required fields: " + ", ".join(missing))
             return None
         recorded_at = text(source.get("recorded_at")) or now()
+        try:
+            po_request = PoRequest.from_document(source.get("po_request"))
+        except ValueError:
+            if required:
+                raise
+            po_request = None
         return cls(
             selected_step=str(source["selected_step"]).strip(),
             selected_why=str(source["selected_why"]).strip(),
@@ -226,9 +234,10 @@ class SprintResume:
             dod_state=str(source["dod_state"]).strip(),
             next_safe_step=str(source["next_safe_step"]).strip(),
             recorded_at=recorded_at,
+            po_request=po_request,
         )
 
-    def to_document(self) -> dict[str, str]:
+    def to_document(self) -> dict[str, Any]:
         return {
             "selected_step": self.selected_step,
             "selected_why": self.selected_why,
@@ -237,6 +246,7 @@ class SprintResume:
             "dod_state": self.dod_state,
             "next_safe_step": self.next_safe_step,
             "recorded_at": self.recorded_at,
+            **({"po_request": self.po_request.to_document()} if self.po_request else {}),
         }
 
 

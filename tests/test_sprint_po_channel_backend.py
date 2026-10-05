@@ -10,14 +10,272 @@ import contextlib
 import io
 import json
 import os
+import threading
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
+from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
+from ummanu.board.owner_events import OwnerEventStore
+from ummanu.board.po_execution import assignment, create_assignment
 from ummanu.cli import main
+from ummanu.dispatch.po_cards import ServicePoChannel, advance_po_card, claim_po_card
+from ummanu.dispatch.state import new_attempt_id
+from ummanu.po.runner import PoRunner
+from ummanu.po.service import PoService, listening
+from ummanu.po.store import COMPLETED, PoStore
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader
-from ummanu.tasks import TaskError
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
+
+
+class ObserverPoAdmissionBackendTests(SprintFixture):
+    def setUp(self):
+        super().setUp()
+        self.ref = self._create(goal="PO card channel", reference="sprint:7")["sprint"]["ref"]
+        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name, instance=self.instance)
+
+    def card(self, kind="decision", **fields):
+        return self.tasks.create(role="observer", actor="observer", project="ummanu", task_type=kind,
+            title="Choose route", sprint=self.ref, request_id="create-" + kind, **fields)["task"]
+
+    def entry(self, card="none", **fields):
+        return {"selected_step": "Route question", "selected_why": "missing route",
+                "rejected_alternatives": "unowned notice", "current_task": card,
+                "dod_state": "pending", "next_safe_step": "Wait for PO decision.", **fields}
+
+    def snapshot(self):
+        return self.client._query("SELECT resume_id FROM sprints WHERE ref=%s", (self.ref,)), self.client._query(
+            "SELECT body FROM sprint_comments WHERE sprint_ref=%s ORDER BY comment_id", (self.ref,))
+
+    def assert_refused(self, operation, request):
+        before = self.snapshot()
+        with self.assertRaises(TaskError) as refusal:
+            operation()
+        self.assertEqual(refusal.exception.code, "po_card_required")
+        self.assertIn("decision or operation", refusal.exception.message)
+        self.assertEqual(self.snapshot(), before)
+        self.assertIsNone(self.writer.audit.committed_event(request))
+        self.assertTrue(self.writer.audit.events(self.ref, kind="po_channel_denied"))
+
+    def test_request_comment_refusal_is_audited_without_consuming_corrected_retry(self):
+        for index, body in enumerate(("[observer:request] Assign the route", "PO, please decide.",
+                                     "Прошу ПО выбрать маршрут.", "Ждём решения ПО.")):
+            request = f"request-{index}"
+            operation = lambda body=body, request=request: self.writer.comment(role="observer", actor="observer", reference=self.ref,
+                body=body, request_id=request)
+            self.assert_refused(operation, request)
+            corrected = self.writer.comment(role="observer", actor="observer", reference=self.ref,
+                body="Evidence recorded on the card.", request_id=request)
+            repeated = self.writer.comment(role="observer", actor="observer", reference=self.ref,
+                body="Evidence recorded on the card.", request_id=request)
+            self.assertEqual(corrected["event_id"], repeated["event_id"])
+        for index, body in enumerate(('Evidence: "Wait for PO decision."', "Не ждём решения ПО.",
+                                     "Implement PO routing next.", "PO session is recorded.")):
+            self.writer.comment(role="observer", actor="observer", reference=self.ref, body=body,
+                                request_id=f"note-{index}")
+        self.writer.comment(role="po", actor="po", reference=self.ref, body="PO, please decide.", request_id="po-comment")
+
+    def test_bare_wait_and_bad_card_types_states_and_sprints_are_atomic_refusals(self):
+        self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+            entry=self.entry(), delivery_id="delivery-1", through_event="event-1", request_id="bare"), "bare")
+        code = self.card("code")
+        decision = self.card()
+        for ref in ("missing-999", code["ref"], "issue:open"):
+            entry = self.entry(ref, po_request={"card": ref, "action": "choose route"})
+            self.assert_refused(lambda entry=entry: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+                entry=entry, request_id="invalid-card"), "invalid-card")
+        for state in ("blocked", "done"):
+            self.client.move(self.client.key_of(decision["ref"]), state)
+            self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+                entry=self.entry(decision["ref"], po_request={"card": decision["ref"], "action": "choose route"}),
+                request_id="bad-state"), "bad-state")
+        self.client.move(self.client.key_of(decision["ref"]), "ready")
+        self.arrange_record_active(decision["ref"], active=False)
+        self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+            entry=self.entry(decision["ref"], po_request={"card": decision["ref"], "action": "choose route"}),
+            request_id="closed-card"), "closed-card")
+        self.client._execute("UPDATE tasks SET archived=false WHERE task_ref=%s", (decision["ref"],))
+        self.client.call("saveTaskMetadata", task_id=self.client.key_of(decision["ref"]), values={"sprint_ref": ""})
+        self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+            entry=self.entry(decision["ref"], po_request={"card": decision["ref"], "action": "choose route"}),
+            request_id="foreign-card"), "foreign-card")
+
+    def test_corrected_typed_wait_acknowledges_exact_pair_once_and_survives_export(self):
+        card = self.card()
+        old = self.entry(card["ref"], next_safe_step="Inspect evidence and implement the future PO route.")
+        self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=old, request_id="historical")
+        self.assertNotIn("po_request", self.sprint(self.ref)["resume"])
+        self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+            entry=self.entry(card["ref"]), request_id="wait", delivery_id="delivery-1", through_event="event-1"), "wait")
+        entry = self.entry(card["ref"], po_request={"card": card["ref"], "action": "Choose route"})
+        accepted = self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+            request_id="wait", delivery_id="delivery-1", through_event="event-1")
+        repeated = self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+            request_id="wait", delivery_id="delivery-1", through_event="event-1")
+        self.assertEqual(accepted["event_id"], repeated["event_id"])
+        event = self.writer.audit.committed_event("wait")
+        self.assertEqual((event["payload"]["delivery_id"], event["payload"]["through_event"]), ("delivery-1", "event-1"))
+        self.assertEqual(self.client._query("SELECT po_request FROM sprint_resumes WHERE resume_id="
+            "(SELECT resume_id FROM sprints WHERE ref=%s)", (self.ref,))[0][0], entry["po_request"])
+        from ummanu.data import normalize_sprint_entity
+        from ummanu.restore import _restore_sprint_metadata
+        normalized = normalize_sprint_entity(self.sprint(self.ref))
+        self.assertEqual(normalized["resume"]["po_request"], entry["po_request"])
+        restored = _restore_sprint_metadata(normalized)
+        self.assertEqual(json.loads(restored["sprint_resume"])["po_request"], entry["po_request"])
+
+    def test_done_race_and_comment_failure_roll_back_resume_and_delivery(self):
+        card = self.card()
+        entry = self.entry(card["ref"], po_request={"card": card["ref"], "action": "choose route"})
+        validate = self.writer._validate_po_step
+        def completed_before_validation(reference, resume):
+            self.client.move(self.client.key_of(card["ref"]), "done")
+            validate(reference, resume)
+        with mock.patch.object(self.writer, "_validate_po_step", side_effect=completed_before_validation):
+            self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+                entry=entry, request_id="race", delivery_id="d", through_event="e"), "race")
+        self.assertEqual(TaskReader(self.client).show(card["ref"])["state"], "ready", "card mutation rolled back too")
+        before = self.snapshot()
+        with self.named_failure("record_comment", error=RuntimeError("comment failure")), self.assertRaises(TaskError):
+            self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+                request_id="rollback", delivery_id="d", through_event="e")
+        self.assertEqual(self.snapshot(), before)
+        self.assertIsNone(self.writer.audit.committed_event("rollback"))
+        self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+            request_id="rollback", delivery_id="d", through_event="e")
+
+    def test_concurrent_committed_completion_is_seen_at_the_locked_admission_boundary(self):
+        card = self.card()
+        entry = self.entry(card["ref"], po_request={"card": card["ref"], "action": "choose route"})
+        reached_lock = threading.Event()
+        query = self.client._query
+        outcomes = []
+        def queries(sql, params=()):
+            if sql.startswith("SELECT task_ref FROM tasks") and "FOR UPDATE" in sql:
+                reached_lock.set()
+            return query(sql, params)
+        def write():
+            try:
+                self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+                    request_id="concurrent", delivery_id="d", through_event="e")
+            except TaskError as exc:
+                outcomes.append(exc.code)
+        before = self.snapshot()
+        with mock.patch.object(self.client, "_query", side_effect=queries):
+            with self.client.transaction():
+                self.client._execute("UPDATE tasks SET state='done' WHERE task_ref=%s", (card["ref"],))
+                thread = threading.Thread(target=write)
+                thread.start()
+                self.assertTrue(reached_lock.wait(10), "resume never reached the card lock")
+            thread.join(10)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcomes, ["po_card_required"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertIsNone(self.writer.audit.committed_event("concurrent"))
+
+
+class StandalonePoExecutionBackendTests(SprintFixture):
+    def setUp(self):
+        super().setUp()
+        self.tasks = TaskWriter(self.client, data_dir=self.tmp.name, instance=self.instance)
+        self.reader = TaskReader(self.client)
+        self.request = "dispatcher-e2e-cap-ummanu-12-3"
+        self.fields = dict(role="dispatcher", actor="dispatcher", project="ummanu", task_type="decision",
+            title="PO budget disposition", description="GATE: choose a safe disposition without a grant",
+            po_execution=create_assignment(self.request, "e2e_budget", ["ummanu-12"]), request_id=self.request)
+
+    def test_assignment_create_dedup_and_route_persistence_are_atomic(self):
+        before = self.client.card_count()
+        with mock.patch.object(self.tasks, "_create_backend", side_effect=RuntimeError("creation failure")), self.assertRaises(RuntimeError):
+            self.tasks.create(**self.fields)
+        self.assertEqual(self.client.card_count(), before)
+        self.assertIsNone(self.tasks.audit.committed_event(self.request))
+        first = self.tasks.create(**self.fields)
+        repeated = self.tasks.create(**self.fields)
+        self.assertEqual(first["task"]["ref"], repeated["task"]["ref"])
+        self.assertEqual(self.client.card_count(), before + 1)
+        ref = first["task"]["ref"]
+        route = assignment(self.reader.show(ref))
+        route.initial = {"replaces": "", "via": "create_session", "session": "assigned-session"}
+        route.executor = "assigned-session"
+        self.tasks.record_po_execution(role="dispatcher", actor="dispatcher", reference=ref, state=route.text())
+        self.assertEqual(TaskReader(self.client).show(ref)["po_execution"]["executor"], "assigned-session")
+        stale = assignment(self.reader.show(ref))
+        route.successors["assigned-session"] = {"replaces": "assigned-session", "via": "create_session", "session": "successor"}
+        route.executor = "successor"
+        self.tasks.record_po_execution(role="dispatcher", actor="dispatcher", reference=ref, state=route.text())
+        stale.initial = {}
+        self.tasks.record_po_execution(role="dispatcher", actor="dispatcher", reference=ref, state=stale.text())
+        current = assignment(self.reader.show(ref))
+        self.assertEqual((current.initial["session"], current.executor), ("assigned-session", "successor"))
+        self.assertEqual(current.successors["assigned-session"]["session"], "successor")
+        self.assertNotIn("origin", self.reader.show(ref))
+        route.sources = ("ummanu-999",)
+        with self.assertRaises(TaskError):
+            self.tasks.record_po_execution(role="dispatcher", actor="dispatcher", reference=ref, state=route.text())
+        self.assertEqual(self.reader.show(ref)["po_execution"]["sources"], ["ummanu-12"])
+        with self.client.transaction():
+            self.assertEqual(self.client._query("SELECT count(*) FROM origin_returns WHERE task_ref=%s", (ref,)), [(0,)])
+        self.assertEqual(OwnerEventStore(self.client.credentials).events(), [])
+
+    def test_generic_outside_sprint_creation_and_unrelated_operation_are_still_refused(self):
+        for fields in ({"po_execution": None}, {"role": "po", "actor": "po"},
+                       {"request_id": "generic-request"}, {"task_type": "operation"}):
+            with self.subTest(fields=fields), self.assertRaises(TaskError):
+                self.tasks.create(**{**self.fields, **fields})
+        self.assertEqual(self.client.card_count(), 1)
+
+    def test_unowned_question_native_service_submission_restart_and_completion(self):
+        data = Path(self.tmp.name)
+        (data / "po").mkdir()
+        executable = data / "fake-claude"
+        executable.write_text(FAKE_CLAUDE)
+        executable.chmod(0o700)
+        store = PoStore(self.client.credentials)
+        runner = PoRunner(store, data, executables={"claude": str(executable)},
+            turn_launcher=unscoped_test_launch, env={**os.environ, "FAKE_LOG": str(data / "cli.log")})
+        service = PoService(runner, data_dir=data, instance=self.instance)
+        service.start()
+        thread = threading.Thread(target=service.run, kwargs={"tick": 0.05, "say": lambda _: None})
+        thread.start()
+        def stop():
+            (data / "cli.log.gate").touch()
+            service.stop()
+            thread.join(10)
+            for live in list(runner._live.values()):
+                if live.process.poll() is None:
+                    live.process.kill()
+                live.thread.join(5)
+        self.addCleanup(stop)
+        self.enterContext(listening(service))
+        channel = ServicePoChannel(data, self.instance)
+        channel._store = store
+        task = self.tasks.create(**self.fields)["task"]
+        runtime = SimpleNamespace(owner="dispatcher", reader=self.reader, writer=self.tasks,
+            audit=self.tasks.audit, po=channel, sprints=self.sprint_reader(), save_records=lambda *_: None)
+        records, payload, attempt = {}, {}, new_attempt_id()
+        submitted = claim_po_card(runtime, task, records, payload, attempt)
+        self.assertEqual(submitted["action"], "po-card-submitted", submitted)
+        session = submitted["po_session"]
+        self.assertEqual(self.reader.show(task["ref"])["po_execution"]["executor"], session)
+        eventually(lambda: bool(store.turns(session)), "assigned turn was never started")
+        records.clear()
+        recovered = advance_po_card(runtime, self.reader.show(task["ref"]), records, payload, attempt)
+        self.assertIn(recovered["action"], {"po-card-queued", "po-card-turn-running"})
+        self.assertEqual(len(store.sessions()), 1)
+        self.tasks.complete(role="po", actor="po", reference=task["ref"], kind="decision",
+            body="## Decision\nNo further paid runs.\n\n## How to verify\nRead the preserved three runs.",
+            po_session=session, request_id="complete-assignment")
+        self.assertEqual(advance_po_card(runtime, self.reader.show(task["ref"]), records, payload, attempt)["action"], "po-card-closed")
+        (data / "cli.log.gate").touch()
+        eventually(lambda: store.turns(session)[0].state == COMPLETED, "assigned turn did not finish")
+        self.assertEqual(len(store.turns(session)), 1)
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.client.credentials).events()))
+        self.assertNotIn("origin", self.reader.show(task["ref"]))
+        self.assertEqual(self.client._query("SELECT count(*) FROM origin_returns WHERE task_ref=%s", (task["ref"],)), [(0,)])
 
 
 class SprintPoChannelBackendTests(SprintFixture):

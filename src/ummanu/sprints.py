@@ -1834,14 +1834,22 @@ class SprintWriter:
         # is, so a refusal's audit record is not rolled back with the write it refused.
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
-        return self._comment_atomic(
-            role=role, actor=actor, reference=reference, body=body, request_id=request_id
-        )
+        try:
+            return self._comment_atomic(
+                role=role, actor=actor, reference=reference, body=body, request_id=request_id
+            )
+        except TaskError as exc:
+            self._channel_denial(exc, role, actor, reference, request_id, body)
+            raise
 
     @_sql_atomic
     def _comment_atomic(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str
     ) -> dict[str, Any]:
+        from ummanu.board.po_channel import CREATE_CARD_HINT, requests_po
+
+        if role == "observer" and requests_po(body):
+            raise TaskError("po_card_required", CREATE_CARD_HINT, 3)
         return self._write(
             "commented",
             role,
@@ -2482,15 +2490,15 @@ class SprintWriter:
             request_id=request_id,
         )
 
-        return self._resume_atomic(
-            role=role,
-            actor=actor,
-            reference=reference,
-            normalized=normalized,
-            request_id=request_id,
-            delivery_id=delivery_id,
-            through_event=through_event,
-        )
+        try:
+            return self._resume_atomic(
+                role=role, actor=actor, reference=reference, normalized=normalized,
+                request_id=request_id, delivery_id=delivery_id, through_event=through_event,
+            )
+        except TaskError as exc:
+            self._channel_denial(exc, role, actor, reference, request_id,
+                                 json.dumps(normalized.to_document(), sort_keys=True))
+            raise
 
     @_sql_atomic
     def _resume_atomic(
@@ -2505,6 +2513,7 @@ class SprintWriter:
         through_event: str,
     ) -> dict[str, Any]:
         def mutation(sprint: SprintWriteSnapshot) -> None:
+            self._validate_po_step(reference, normalized)
             self.client.call(
                 "saveTaskMetadata",
                 task_id=_sprint_number(sprint),
@@ -2521,6 +2530,45 @@ class SprintWriter:
         if delivery_id:
             payload.update({"delivery_id": delivery_id, "through_event": through_event})
         return self._write("resume_recorded", role, actor, reference, request_id, payload, mutation)
+
+    def _validate_po_step(self, reference: str, resume: SprintResume) -> None:
+        from ummanu.board.po_channel import CREATE_CARD_HINT, requests_po
+
+        request = resume.po_request
+        if request is None and not (requests_po(resume.next_safe_step) or requests_po(resume.selected_step)):
+            return
+        if request is None or request.card != resume.current_task:
+            raise TaskError("po_card_required", CREATE_CARD_HINT, 3)
+        # Hold the actual card against completion/archive/type/sprint races until this
+        # transaction commits the resume and its exact delivery acknowledgement.
+        self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (request.card,))
+        try:
+            card = TaskReader(self.client).show(request.card)
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            raise TaskError("po_card_required", CREATE_CARD_HINT, 3) from None
+        if (card.get("record_type") != "task" or card.get("type") not in {"decision", "operation"}
+                or card.get("sprint") != reference or card.get("state") not in {"ready", "in_progress"}
+                or card.get("closed") or self.client._query(
+                    "SELECT 1 FROM task_supersessions WHERE supersedes=%s", (request.card,))):
+            raise TaskError("po_card_required", CREATE_CARD_HINT, 3)
+
+    def _channel_denial(self, exc: TaskError, role: str, actor: str, reference: str,
+                        request_id: str, content: str) -> None:
+        """Audit after rollback on a separate key, leaving the successful retry key free."""
+        if exc.code != "po_card_required":
+            return
+        denial_id = request_id + "-po-channel-denied-" + _digest(content)
+        if self.audit.committed_event(denial_id) is not None:
+            return
+        event = self._event("po_channel_denied", role, actor, reference, denial_id,
+            {"code": exc.code, "message": exc.message, "operation_request_id": request_id,
+             "content_sha256": _digest(content)})
+        event["outcome"] = "denied"
+        event["backend"]["revision"] = "not_written"
+        self.audit.stage(denial_id, event)
+        self.audit.append(denial_id, event)
 
     def close(
         self,
