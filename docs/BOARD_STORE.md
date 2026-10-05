@@ -1238,17 +1238,11 @@ their historical `decision` link; absent/null preserves released readback and em
 means no active holder. Both use the same e2e extension text and normalized metadata.
 The actual hotfix's optional `e2e.hotfix_route` is the typed `{carrier, run, result}`
 copy of that receipt, with native `blocked_by` holding its live operation/follow-up.
-Its public schema and normalized metadata preserve this same text. Neutral hotfix
-routes stay visibly assigned to PO repair of the same operation,
-without a dependency on its Done state. Only native settled decline/completed
-follow-up answers the route; reopening restores the actual live holder.
-Reconciliation takes the ownership lock then sorted operation/carrier/source/hotfix/follow-up rows
+Its public schema and normalized metadata preserve this same text. Reconciliation
+takes the ownership lock then sorted operation/carrier/source/hotfix/follow-up rows
 and commits receipt, marks, hotfix dependency and audit/comment together, then
 reconstructs queue projections. Retention is not terminal disposition evidence;
-complete supported board reads retain unresolved sources and carrier records.
-Dispatcher discovery uses `restore_snapshot(include_comments=False)` with batched
-metadata and no comment histories; recovery callers retain the comment-bearing default.
-No new table, authority grant,
+complete supported board reads retain unresolved sources and carrier records. No new table, authority grant,
 origin backfill or released-bag migration is needed; 0029 leaves those bags untouched,
 including absent hotfix_route. It does not invent terminal route authority, and native
 downgrade refuses existing hotfix route receipts rather than letting older consumers forget them.

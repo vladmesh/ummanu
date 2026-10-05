@@ -16,8 +16,6 @@ from ummanu.board.completion_evidence import (
     E2E_DISPOSITION_SECTION, po_completion_record, render_po_completion_record,
 )
 
-HOTFIX_ROUTE_ACTIONS = ("decline", "follow_up")
-
 
 def safe_retry(run: e2e_record.E2eRun) -> bool:
     result = run.result or {}
@@ -63,7 +61,7 @@ def owns_mark(mark: e2e_record.AfterMergeMark | None, *, run: e2e_record.E2eRun,
 
 
 def hotfix_obligation(task: Mapping[str, Any], *, run: e2e_record.E2eRun,
-                      project: str, carrier: str, created: Mapping[str, Any] | None,
+                      project: str, created: Mapping[str, Any] | None,
                       superseded: bool) -> bool:
     """An actual released hotfix is independent of its covered source marks.
 
@@ -76,10 +74,6 @@ def hotfix_obligation(task: Mapping[str, Any], *, run: e2e_record.E2eRun,
             or task.get("project") != project):
         raise ValueError("Hotfix lacks matching committed dispatcher create/run identity")
     receipt = run.disposition_result or {}
-    route = e2e_record.e2e_state(task).hotfix_route
-    if route and (route.carrier != carrier or route.run != run.dispatch_id
-                  or route.result["operation"] != run.disposition):
-        return False
     return bool(not superseded and not task.get("closed") and task.get("state") == "blocked"
                 and not task.get("sprint") and po_origin.po_origin(task) is None
                 and task.get("blocked_by") in (None, "", run.disposition, receipt.get("holder"))
@@ -89,28 +83,6 @@ def hotfix_obligation(task: Mapping[str, Any], *, run: e2e_record.E2eRun,
 def completion_identity(operation: str, carrier: str, run: e2e_record.E2eRun) -> dict[str, Any]:
     return {"operation": operation, "carrier": carrier, "run": run.dispatch_id,
             "covered": [dict(item) for item in run.covered]}
-
-
-def hotfix_route_effect(effect: dict[str, str], *, operation: str) -> dict[str, str]:
-    """An unanswered code route stays a PO repair obligation, never a paid retry."""
-    if effect["action"] == "retry":
-        effect = {**effect, "status": "neutral", "action": "", "holder": "",
-                  "reason": "Retry cannot answer the unowned hotfix return route; only explicit decline or a real planned follow_up can"}
-    if effect["status"] == "neutral":
-        effect = {**effect, "reason": effect["reason"]
-            + f". PO must natively reopen operation {operation} and record corrected decline or real planned follow_up on this same operation"}
-    return effect
-
-
-def hotfix_route_wait(route: e2e_record.HotfixRoute) -> dict[str, str] | None:
-    """Project responsibility from the committed receipt without a Done dependency."""
-    result = route.result
-    if result["status"] == "settled" and result["action"] in HOTFIX_ROUTE_ACTIONS:
-        return None
-    if result["status"] in {"waiting", "follow_up"} and result["holder"]:
-        return {"kind": "dependency", "detail": result["reason"], "holder": result["holder"]}
-    return {"kind": "po", "detail": f"Unanswered hotfix return route: PO repair of operation {result['operation']}. "
-        + result["reason"] + ". Natively reopen and correct this same operation; no live holder is recorded"}
 
 
 def parse_outcome(text: str, *, operation: str, carrier: str,

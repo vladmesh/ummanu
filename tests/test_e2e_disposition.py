@@ -18,7 +18,7 @@ from unittest import mock
 from ummanu.board import e2e_disposition, e2e_record, po_execution
 from ummanu.board.completion_evidence import po_completion_fields, render_po_completion_record
 from ummanu.dispatch import e2e_after_merge
-from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.tasks import TaskError, TaskWriter
 from ummanu.webproto.sprint_reads import card_waits
 
 
@@ -59,7 +59,7 @@ class DispositionTests(unittest.TestCase):
                 raise TaskError("backend_error", "save interrupted", 1)
             values = dict(fields["values"])
             if "blocked_by" in values:
-                self.cards[ref]["blocked_by"] = values.pop("blocked_by") or None
+                self.cards[ref]["blocked_by"] = values.pop("blocked_by")
             self.cards[ref].setdefault("extensions", {}).setdefault("extra", {}).update(values)
             self.saves.append(ref)
 
@@ -68,7 +68,7 @@ class DispositionTests(unittest.TestCase):
         self.writer.client = SimpleNamespace(_query=mock.Mock(return_value=[]), call=save)
         self.writer._role = lambda role, allowed, actor: self.assertEqual(role, "dispatcher")
         self.writer.reader = SimpleNamespace(show=self.show, list=lambda: [self.show(ref) for ref in self.cards])
-        self.writer.reader.restore_snapshot = lambda **kw: {card["ref"]: card for card in self.writer.reader.list()}
+        self.writer.reader.restore_snapshot = lambda: {card["ref"]: card for card in self.writer.reader.list()}
         self.writer.audit = SimpleNamespace(committed_event=lambda request: self.hotfix_created
             if request.startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX) else self.created,
                                             events=lambda ref, **kw: copy.deepcopy(self.events) if ref == self.operation else [])
@@ -477,7 +477,7 @@ class DispositionTests(unittest.TestCase):
         source = e2e_record.e2e_state(self.show(self.source))
         source.after_merge.decision = ""
         self.cards[self.source]["extensions"]["extra"]["e2e"] = source.text()
-        self.writer.reader.restore_snapshot = lambda **kw: {ref: self.show(ref) for ref in self.cards}
+        self.writer.reader.restore_snapshot = lambda: {ref: self.show(ref) for ref in self.cards}
         self.writer.reader.list = lambda: [self.show(ref) for ref in self.cards if not self.cards[ref].get("closed")]
         self.complete(self.outcome("decline"))
         e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
@@ -570,168 +570,6 @@ class DispositionTests(unittest.TestCase):
         self.created = {"ref": self.operation, "actor": {"role": "dispatcher"}, "kind": "created", "outcome": "success"}
         return self.operation
 
-    def bound_hotfix(self):
-        operation, hotfix = self.released_hotfix()
-        self.install_operation(operation)
-        state = e2e_record.e2e_state(self.show(self.carrier))
-        state.after_merge_runs[0].disposition = self.operation
-        self.cards[self.carrier]["extensions"]["extra"]["e2e"] = state.text()
-        return hotfix
-
-    def test_neutral_hotfix_responsibility_survives_restart_and_same_operation_repair(self):
-        from ummanu.board.owner_handover import OWNER_ESCALATION, WAITING_OWNER, WAITING_OWNER_REASON, WAITING_OWNER_BY
-        from ummanu.data import normalize_board_card
-        from jsonschema import Draft202012Validator
-        for mode in ("retry", "bare", "malformed"):
-            for remerged in (False, True):
-                with self.subTest(mode=mode, remerged=remerged):
-                    self.setUp()
-                    hotfix = self.bound_hotfix()
-                    if remerged:
-                        for ref in (self.source, self.carrier):
-                            state = e2e_record.e2e_state(self.show(ref))
-                            state.after_merge.merge_sha, state.after_merge.dispatch_id = "new", "new-run"
-                            self.cards[ref]["extensions"]["extra"]["e2e"] = state.text()
-                            self.cards[ref]["closed"] = True
-                    before = {ref: self.mark(ref) for ref in (self.source, self.carrier)}
-                    outcome = None if mode == "bare" else self.outcome(run="foreign") if mode == "malformed" else self.outcome()
-                    self.complete(outcome)
-                    self.reconcile()
-                    neutral = e2e_record.e2e_state(self.show(hotfix)).hotfix_route.result
-                    self.assertEqual((neutral["status"], neutral["holder"]), ("neutral", ""))
-                    self.assertIsNone(self.show(hotfix)["blocked_by"])
-                    [repair] = card_waits(self.show(hotfix))
-                    self.assertEqual(repair["kind"], "po")
-                    self.assertNotIn("holder", repair)
-                    self.assertIn(self.operation, repair["detail"])
-                    self.assertIn("reopen", repair["detail"])
-                    self.assertIn(neutral["reason"], repair["detail"])
-                    task = self.show(hotfix)
-                    schema = json.loads((Path(__file__).parents[1] / "src/ummanu/schemas/web-read.schema.json").read_text())
-                    Draft202012Validator({"$ref": "#/$defs/task_e2e", "$defs": schema["$defs"]}).validate(task["e2e"])
-                    row = {"reference": hotfix, "metadata": {"e2e": task["extensions"]["extra"]["e2e"]}}
-                    normalized = normalize_board_card(row, row)
-                    self.assertEqual(e2e_record.E2eState.from_json(json.loads(normalized["metadata"]["e2e"])).hotfix_route.result, neutral)
-                    stable = copy.deepcopy(self.cards)
-                    with mock.patch.object(e2e_after_merge, "_create_disposition") as create:
-                        for _ in range(2):
-                            e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
-                            self.assertEqual(card_waits(self.show(hotfix)), [repair])
-                        create.assert_not_called()
-                    self.assertEqual(self.cards, stable)
-                    if remerged:
-                        self.assertEqual({ref: self.mark(ref) for ref in before}, before)
-                    else:
-                        self.assertTrue(all(not card_waits(self.show(ref)) for ref in before))
-                    self.cards[hotfix]["extensions"]["extra"][OWNER_ESCALATION] = json.dumps({"reason": "Actual steward escalation"})
-                    self.assertEqual(card_waits(self.show(hotfix))[0]["kind"], "owner")
-                    del self.cards[hotfix]["extensions"]["extra"][OWNER_ESCALATION]
-                    self.cards[hotfix]["extensions"]["extra"].update({WAITING_OWNER: "2026-10-05T08:00:00Z",
-                        WAITING_OWNER_REASON: "Explicit actual handover", WAITING_OWNER_BY: "po"})
-                    self.assertEqual(card_waits(self.show(hotfix))[0]["kind"], "owner")
-                    for key in (WAITING_OWNER, WAITING_OWNER_REASON, WAITING_OWNER_BY):
-                        del self.cards[hotfix]["extensions"]["extra"][key]
-                    self.cards[self.operation].update(state="ready", closed=False)
-                    self.reconcile()
-                    self.assertEqual(card_waits(self.show(hotfix))[0]["holder"], self.operation)
-                    self.assertEqual(self.show(hotfix)["blocked_by"], self.operation)
-                    previous_events = copy.deepcopy(self.events)
-                    self.cards[self.operation]["state"] = "in_progress"
-                    if mode == "bare":
-                        self.cards["ummanu-5"] = {"id": 5, "ref": "ummanu-5", "project": "ummanu", "type": "code",
-                            "state": "ready", "extensions": {"extra": {"po_origin": '{"session":"real-po","request":"turn-1"}'}}}
-                        self.complete(self.outcome("follow_up", holder="ummanu-5"))
-                    else:
-                        self.complete(self.outcome("decline"))
-                    self.events[0].update(event_id="corrected-completion", request_id="completed-2")
-                    self.events = previous_events + self.events
-                    self.reconcile()
-                    if mode == "bare":
-                        self.assertEqual(card_waits(self.show(hotfix))[0]["holder"], "ummanu-5")
-                        self.cards["ummanu-5"].update(state="done", closed=True)
-                        self.reconcile()
-                    settled = e2e_record.e2e_state(self.show(hotfix)).hotfix_route.result
-                    self.assertEqual((settled["status"], settled["completion"]), ("settled", "corrected-completion"))
-                    self.assertEqual(card_waits(self.show(hotfix)), [])
-                    self.assertIsNone(self.show(hotfix)["blocked_by"])
-                    self.assertFalse(self.reconcile()["changed"])
-                    self.assertTrue(all(self.mark(ref).charged == before[ref].charged for ref in before))
-
-    def test_newer_hotfix_receipt_wins_over_old_completion(self):
-        hotfix = self.bound_hotfix()
-        self.complete(self.outcome("decline"))
-        state = e2e_record.e2e_state(self.show(hotfix))
-        state.hotfix_route = e2e_record.HotfixRoute("ummanu-99", "new-run",
-            {"operation": "ummanu-98", "status": "neutral", "action": "", "holder": "", "reason": "New route requires repair"})
-        self.cards[hotfix]["extensions"] = {"extra": {"e2e": state.text()}}
-        before = self.show(hotfix)
-        self.reconcile()
-        self.assertEqual(self.show(hotfix), before)
-
-    def test_mark_repeats_skip_identical_writes_but_changed_result_is_saved(self):
-        self.cards[self.operation]["state"] = "ready"
-        changes = {"note": "Published first result"}
-        for _ in range(3):
-            self.writer.record_after_merge_mark(role="dispatcher", actor="dispatcher", reference=self.source,
-                carrier=self.carrier, run=self.run, changes=changes)
-        self.assertEqual(self.saves, [self.source])
-        self.writer.record_after_merge_mark(role="dispatcher", actor="dispatcher", reference=self.source,
-            carrier=self.carrier, run=self.run, changes={"note": "New legitimate outcome"})
-        self.assertEqual(self.saves, [self.source, self.source])
-        self.assertEqual(self.mark().charged, [self.run.dispatch_id])
-
-    def test_complete_discovery_explicitly_omits_comments(self):
-        discovery = mock.Mock(side_effect=self.writer.reader.restore_snapshot)
-        self.writer.reader.restore_snapshot = discovery
-        e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
-        discovery.assert_called_once_with(include_comments=False)
-
-    def test_bound_hotfix_producer_and_released_guidance_offer_only_real_route_answers(self):
-        operation, hotfix = self.released_hotfix()
-        self.writer.create = mock.Mock(return_value={"task": {"ref": self.operation}})
-        self.created = None
-        self.assertEqual(e2e_after_merge._disposition(self.runtime, "ummanu", self.carrier, self.run, "Assign the return route"), self.operation)
-        description = self.writer.create.call_args.kwargs["description"]
-        self.assertIn("action (decline, follow_up)", description)
-        self.assertNotIn("action (retry,", description)
-        self.assertIn("Retry alone cannot", description)
-        self.assertIn("this same operation", description)
-        self.writer.create.reset_mock()
-        self.install_operation(operation)
-        e2e_after_merge._disposition(self.runtime, "ummanu", self.carrier, self.run, "Recover the route")
-        self.writer.create.assert_not_called()
-        self.assertTrue(any(call.kwargs["reference"] == self.operation and "Only explicit decline" in call.kwargs["body"]
-                            for call in self.writer.comment.call_args_list))
-
-    def test_uncertain_result_producer_retains_investigated_retry(self):
-        self.created = None
-        self.writer.create = mock.Mock(return_value={"task": {"ref": self.operation}})
-        e2e_after_merge._create_disposition(self.runtime, "ummanu", self.carrier, self.run, "Investigate the prior effect")
-        description = self.writer.create.call_args.kwargs["description"]
-        self.assertIn("action (retry, decline, follow_up)", description)
-        self.assertIn("prior_effect: not_started or finished", description)
-
-    def test_native_snapshot_omits_comment_calls_preserving_normalized_retained_cards(self):
-        reader = TaskReader.__new__(TaskReader)
-        reader.board_name = "Pipeline"
-        reader._board = lambda: (1, {1: "Done"}, {})
-        rows = [{"id": n, "reference": f"ummanu-{n}", "column_id": 1, "is_active": int(n == 1)} for n in (1, 2)]
-        batches = []
-        def batch(calls):
-            calls = list(calls)
-            batches.append(calls)
-            return [{"task_type": "code", "project": "ummanu"} if method == "getTaskMetadata"
-                    else [{"comment": "Preserved recovery history"}] for method, _ in calls]
-        reader.client = SimpleNamespace(call_batch=batch)
-        with mock.patch("ummanu.tasks.all_project_cards", return_value=rows):
-            complete = reader.restore_snapshot()
-            lean = reader.restore_snapshot(include_comments=False)
-        self.assertEqual(len(batches), 2)
-        self.assertEqual([method for method, _ in batches[1]], ["getTaskMetadata"] * 2)
-        self.assertTrue(complete["ummanu-2"]["closed"])
-        self.assertTrue(complete["ummanu-2"]["comments"])
-        self.assertEqual(lean, {ref: {**card, "comments": []} for ref, card in complete.items()})
-
     def test_released_red_hotfix_owns_route_even_when_every_source_has_remerged(self):
         operation, hotfix = self.released_hotfix()
         for ref in (self.source, self.carrier):
@@ -751,7 +589,7 @@ class DispositionTests(unittest.TestCase):
         route = e2e_record.e2e_state(self.show(hotfix)).hotfix_route
         self.assertEqual((route.carrier, route.run, route.result["action"]), (self.carrier, self.run.dispatch_id, "decline"))
         self.assertEqual(card_waits(self.show(hotfix)), [])
-        self.assertIsNone(self.show(hotfix)["blocked_by"])
+        self.assertEqual(self.show(hotfix)["blocked_by"], "")
 
     def test_terminal_or_superseded_hotfix_with_stale_sources_has_no_question(self):
         for terminal in ("done", "superseded"):

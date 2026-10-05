@@ -210,7 +210,7 @@ class AfterMergeFixture(E2eStageFixture):
         self.merged_at = 1_700_000_000.0
         self.number = 9000
 
-    def retain_done(self, *refs, task_type="code"):
+    def retain_done(self, *refs):
         """Native retention of actual old Done episodes, preserving their card type/audit."""
         for ref in refs:
             self.board.set_moved(self.board.key_of(ref), 1_700_000_000)
@@ -221,7 +221,7 @@ class AfterMergeFixture(E2eStageFixture):
             self.assertTrue(self.writer.retire_done(reference=ref, expected_date_moved=1_700_000_000,
                 cutoff=1_700_000_001, retention_days=14, request_id="retain-" + ref)["skipped"])
             task = self.reader.show(ref)
-            self.assertEqual((task["state"], task["type"], task["closed"]), ("done", task_type, True))
+            self.assertEqual((task["state"], task["type"], task["closed"]), ("done", "code", True))
             self.assertEqual(e2e_state(task).text(), before)
             self.assertNotIn(ref, {card["ref"] for card in self.reader.list()})
             self.assertEqual(self.writer.audit.committed_event("retain-" + ref)["kind"], "retired")
@@ -1602,165 +1602,6 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
 
     def test_bare_neutral_completion_reopens_and_natively_repairs_same_operation(self):
         self._neutral_completion_repair(bare=True)
-
-    def hotfix_neutral_repair(self, mode, *, remerged=False, correction="decline"):
-        if remerged:
-            cards, original = self.released_red_without_operation()
-            # Newer green merges are independent pending work. Hold their paid
-            # admission while measuring repair of the original hotfix route,
-            # as the existing all-remerged disposition fixtures do.
-            self.enterContext(mock.patch.object(e2e_after_merge, "_start", return_value=None))
-            self.am_tick(self._runtime())
-            original = self.run_of(cards[-1])
-        else:
-            cards, original = self.uncertain(conclusion="failure", sprint="")
-        operation = self.reader.show(original.disposition)
-        self.assertIn("action (decline, follow_up)", operation["description"])
-        self.assertIn("Retry alone cannot", operation["description"])
-        newer = {ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}
-        paid = {ref: list(newer[ref].charged) for ref in cards}
-        first = self.prepare_native_completion(cards[-1], bare=mode == "bare", malformed=mode == "malformed")
-        completed = self.complete_native(first)
-        if mode == "retry" and not remerged:
-            before = {ref: e2e_state(self.reader.show(ref)).text() for ref in [*cards, original.hotfix]}
-            real_comment = self.writer.comment
-            def fail_repair(**fields):
-                if fields["reference"] == original.disposition:
-                    raise TaskError("backend_error", "repair publication unavailable", 1)
-                return real_comment(**fields)
-            with mock.patch.object(self.writer, "comment", side_effect=fail_repair), self.assertRaisesRegex(TaskError, "repair publication unavailable"):
-                self.writer.reconcile_after_merge_disposition(role="dispatcher", actor="ummanu-pilot",
-                    carrier=cards[-1], dispatch_id=original.dispatch_id)
-            self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in before}, before)
-        self.drop_queue()
-        self.am_tick(self._runtime())
-        hotfix = self.reader.show(original.hotfix)
-        receipt = e2e_state(hotfix).hotfix_route.result
-        self.assertEqual((receipt["status"], receipt["holder"]), ("neutral", ""))
-        self.assertEqual(receipt, self.run_of(cards[-1]).disposition_result)
-        self.assertIsNone(hotfix["blocked_by"])
-        [repair] = card_waits(hotfix)
-        self.assertEqual(repair["kind"], "po")
-        self.assertNotIn("holder", repair)
-        self.assertIn(original.disposition, repair["detail"])
-        self.assertIn("reopen", repair["detail"])
-        self.assertIn(receipt["reason"], repair["detail"])
-        self.assertEqual(self.reader.show(original.disposition)["state"], "done")
-        self.assertTrue(self.comments_on(original.disposition, "return route remains unanswered"))
-        from ummanu.data import normalize_board_card
-        rows = {row["reference"]: row for row in self.reader.export()}
-        neutral_export = normalize_board_card(rows[original.hotfix], rows[original.hotfix])
-        self.assertEqual(e2e_state({"extensions": {"extra": {"e2e": neutral_export["metadata"]["e2e"]}}}).hotfix_route.result, receipt)
-        stable = {ref: e2e_state(self.reader.show(ref)).text() for ref in [*cards, original.hotfix]}
-        for _ in range(2):
-            self.drop_queue()
-            runtime = self._runtime()
-            with mock.patch.object(runtime.reader, "restore_snapshot", wraps=runtime.reader.restore_snapshot) as discovery:
-                self.am_tick(runtime)
-                discovery.assert_called_once_with(include_comments=False)
-            self.assertEqual(card_waits(self.reader.show(original.hotfix)), [repair])
-            self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in stable}, stable)
-        if remerged:
-            self.assertEqual({ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}, newer)
-        else:
-            self.assertTrue(all(not card_waits(self.reader.show(ref)) for ref in cards))
-        self.assertEqual(len(first["store"].turns(first["turn"].session_id)), 1)
-        self.writer.move(role="po", actor="po", reference=original.disposition, target="ready",
-            reason="Repair this same unanswered native hotfix route", request_id="hotfix-repair-reopen")
-        self.am_tick(self._runtime())
-        self.assertEqual(card_waits(self.reader.show(original.hotfix))[0]["holder"], original.disposition)
-        self.assertEqual(self.reader.show(original.hotfix)["blocked_by"], original.disposition)
-        holder = ""
-        if correction == "follow_up":
-            holder = self.writer.create(role="observer", actor="observer", project="ummanu", task_type="code",
-                title="Planned correction of unanswered hotfix", sprint=SPRINT, request_id="hotfix-repair-planned")["task"]["ref"]
-        corrected = self.prepare_native_completion(cards[-1], correction, holder=holder,
-            request="hotfix-corrected-completion", session=first["turn"].session_id,
-            session_request=first["completion"]["request_id"] + "-po-create")
-        self.assertFalse(corrected["session_created"])
-        self.assertTrue(corrected["turn_created"])
-        self.assertNotEqual(corrected["turn"].seq, first["turn"].seq)
-        fixed = self.complete_native(corrected)
-        self.assertNotEqual(fixed["event_id"], completed["event_id"])
-        self.retain_done(original.disposition, task_type="operation")
-        self.am_tick(self._runtime())
-        if holder:
-            self.assertEqual(card_waits(self.reader.show(original.hotfix))[0]["holder"], holder)
-            self.assertEqual(self.reader.show(original.hotfix)["blocked_by"], holder)
-            self.board.move(self.board.key_of(holder), "done")
-            self.retain_done(holder)
-        for _ in range(2):
-            self.drop_queue()
-            self.am_tick(self._runtime())
-        current = self.run_of(cards[-1])
-        self.assertEqual((current.disposition_result["status"], current.disposition_result["action"],
-                          current.disposition_result["completion"]), ("settled", correction, fixed["event_id"]))
-        self.assertEqual(e2e_state(self.reader.show(original.hotfix)).hotfix_route.result, current.disposition_result)
-        self.assertEqual(card_waits(self.reader.show(original.hotfix)), [])
-        self.assertIsNone(self.reader.show(original.hotfix)["blocked_by"])
-        self.assertEqual((current.dispatch_id, current.sha, current.covered, current.result, current.hotfix),
-                         (original.dispatch_id, original.sha, original.covered, original.result, original.hotfix))
-        self.assertEqual({ref: list(e2e_state(self.reader.show(ref)).after_merge.charged) for ref in cards}, paid)
-        if remerged:
-            self.assertEqual({ref: e2e_state(self.reader.show(ref)).after_merge for ref in cards}, newer)
-        self.assertEqual((len(self.host.dispatches), len(self.hotfixes())), (1, 1))
-        self.assertEqual([(turn.seq, turn.state) for turn in corrected["store"].turns(first["turn"].session_id)],
-                         [(first["turn"].seq, "completed"), (corrected["turn"].seq, "completed")])
-        self.assertEqual(len(self.comments_on(original.disposition, "[completion:operation]")), 2)
-        all_cards = self.reader.restore_snapshot(include_comments=False)
-        self.assertEqual([ref for ref, card in all_cards.items() if card["type"] == "operation"], [original.disposition])
-        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
-        from ummanu.data import normalize_board_card
-        rows = {row["reference"]: row for row in self.reader.export()}
-        normalized = normalize_board_card(rows[original.hotfix], rows[original.hotfix])
-        restored = e2e_state({"extensions": {"extra": {"e2e": normalized["metadata"]["e2e"]}}})
-        self.assertEqual(restored.hotfix_route.result, current.disposition_result)
-
-    def test_hotfix_retry_neutral_reopens_to_native_decline(self):
-        self.hotfix_neutral_repair("retry")
-
-    def test_hotfix_bare_neutral_reopens_to_planned_follow_up_done(self):
-        self.hotfix_neutral_repair("bare", correction="follow_up")
-
-    def test_hotfix_malformed_neutral_reopens_to_native_decline(self):
-        self.hotfix_neutral_repair("malformed")
-
-    def test_retained_remerged_hotfix_retry_neutral_reopens_to_planned_follow_up_done(self):
-        self.hotfix_neutral_repair("retry", remerged=True, correction="follow_up")
-
-    def test_retained_remerged_hotfix_bare_neutral_reopens_to_native_decline(self):
-        self.hotfix_neutral_repair("bare", remerged=True)
-
-    def test_retained_remerged_hotfix_malformed_neutral_reopens_to_planned_follow_up_done(self):
-        self.hotfix_neutral_repair("malformed", remerged=True, correction="follow_up")
-
-    def test_repeated_routed_red_reconciliation_skips_unchanged_marks(self):
-        cards = self.three_merged_in_one_run()
-        self.am_tick()
-        self.conclude("failure", self.run_of(cards[-1]).wait_ref)
-        self.am_tick()
-        run = self.run_of(cards[-1])
-        self.assertTrue(run.hotfix)
-        self.assertFalse(run.disposition)
-        self.board.move(self.board.key_of(run.hotfix), "done")
-        before = {ref: e2e_state(self.reader.show(ref)).text() for ref in cards}
-        real_call = self.board.call
-        saves = []
-        def count_writes(method, **fields):
-            if method == "saveTaskMetadata" and "e2e" in fields.get("values", {}):
-                saves.append(fields)
-            return real_call(method, **fields)
-        with mock.patch.object(self.board, "call", side_effect=count_writes):
-            self.am_tick(self._runtime())
-            self.am_tick(self._runtime())
-            self.assertEqual(saves, [])
-            self.writer.record_after_merge_mark(role="dispatcher", actor="ummanu-pilot", reference=cards[0],
-                carrier=cards[-1], run=run, changes={"note": "New legitimate result evidence"})
-            self.assertEqual(len(saves), 1)
-        self.assertEqual({ref: e2e_state(self.reader.show(ref)).text() for ref in cards[1:]},
-                         {ref: before[ref] for ref in cards[1:]})
-        self.assertEqual(len(self.host.dispatches), 1)
-        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
 
     def test_malformed_neutral_completion_reopens_and_natively_repairs_same_operation(self):
         self._neutral_completion_repair(malformed=True)

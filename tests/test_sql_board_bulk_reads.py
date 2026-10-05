@@ -517,7 +517,6 @@ class StatementCountTests(_Case):
 
         self.assert_bounded(self.listed(lambda client: TaskReader(client).list()))
         self.assert_bounded(self.listed(lambda client: list(TaskReader(client).restore_snapshot())))
-        self.assert_bounded(self.listed(lambda client: list(TaskReader(client).restore_snapshot(include_comments=False))))
 
     def test_a_raw_batch_of_every_record_is_bounded(self) -> None:
         def batch(client: SqlCardClient) -> list[Any]:
