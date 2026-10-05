@@ -1363,10 +1363,23 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
             if method == "createComment" and "[completion:operation]" in str(fields.get("content")):
                 raise RuntimeError("completion comment unavailable")
             return real_call(method, **fields)
-        with mock.patch.object(self.board, "call", side_effect=failed_comment), self.assertRaisesRegex(RuntimeError, "completion comment unavailable"):
+        # The native SQL transition rolls back and translates a post-effect
+        # failure into TaskError; the injected backend exception is not public.
+        with mock.patch.object(self.board, "call", side_effect=failed_comment), self.assertRaisesRegex(TaskError, "rolled back together with its record") as raised:
             self.native_complete(cards[-1])
-        self.assertEqual(self.reader.show(run.disposition)["state"], "in_progress")
+        self.assertEqual((raised.exception.code, raised.exception.exit_code), ("backend_error", 1))
+        operation = self.reader.show(run.disposition)
+        self.assertEqual(operation["state"], "in_progress")
+        self.assertFalse(any("[completion:operation]" in comment["body"] for comment in operation["comments"]))
         self.assertIsNone(self.writer.audit.committed_event("native-disposition-complete"))
+        self.am_tick()
+        receipt = self.run_of(cards[-1], 0).disposition_result
+        self.assertEqual((receipt["status"], receipt["action"], receipt["holder"]), ("waiting", "", run.disposition))
+        self.assertNotIn("completion", receipt)
+        self.assertFalse(self.pending())
+        self.assertTrue(all(self.mark(ref)["waiting_on"] == run.disposition for ref in cards))
+        self.assertEqual(len(self.host.dispatches), 1)
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
         self.native_complete(cards[-1])
         self.am_tick()
         self.assertEqual(self.run_of(cards[-1], 0).disposition_result["status"], "settled")
