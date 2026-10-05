@@ -1146,7 +1146,7 @@ def _budget_recheck(
             f"No e2e run is dispatched: the e2e budget ({budget} runs) is spent, and the decision "
             f"{waiting.decision} "
             + ("was completed without a raise" if decision is not None else "no longer exists")
-            + ". This is the owner's money decision, not a defect of the card's code."
+            + ". No additional budget was granted; the exhausted budget prevents another run."
             + (f"\n\nThe decision:\n\n{said}" if said else "")
         ),
         step=step,

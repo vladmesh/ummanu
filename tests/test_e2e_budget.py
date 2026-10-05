@@ -423,6 +423,8 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
         event = self.blocked_transition()
         self.assertIn("no more e2e runs for sprint:1031 this month", str(event.get("reason")))
         self.assertIn(f"the decision {decision} was completed without a raise", str(event.get("reason")))
+        self.assertIn("No additional budget was granted", str(event.get("reason")))
+        self.assertNotIn("owner's money decision", str(event.get("reason")))
         self.assertEqual(event["data"]["terminal_taxonomy"]["blocked_reason"], "other")
         self.assertNotIn("gate-red", str(event.get("request_id")), "not charged as a code defect")
         self.assertNotIn("mark", card.get("e2e") or {})

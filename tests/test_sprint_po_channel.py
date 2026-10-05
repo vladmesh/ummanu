@@ -16,6 +16,7 @@ from typing import Any
 from unittest import mock
 
 from tests.po_fake_store import FakePoStore
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES
 from ummanu import sprint_commands
 from ummanu.board.po_channel import requests_po
 from ummanu.board.sprint_read import RESUME_FIELDS, SprintResume
@@ -78,6 +79,17 @@ class ObserverRequestAdmissionTests(unittest.TestCase):
         for invalid in ({"card": "ummanu-1"}, {"card": "ummanu-1", "action": ""}, "ummanu-1"):
             with self.subTest(value=invalid), self.assertRaises(ValueError):
                 SprintResume.from_legacy({**old, "po_request": invalid}, required=True)
+
+    def test_administrative_preposition_and_component_modifiers_are_not_addressees(self):
+        for body in ADMINISTRATIVE_PO_NOTES:
+            with self.subTest(body=body):
+                self.assertFalse(requests_po(body))
+
+    def test_other_english_request_wording_needs_explicit_representation(self):
+        for body in ("The PO must decide", "Awaiting PO decision", "Let the PO decide"):
+            with self.subTest(body=body):
+                self.assertFalse(requests_po(body))
+                self.assertTrue(requests_po("[observer:request] " + body))
 
 
 def po_session_state(store: FakePoStore):

@@ -1232,6 +1232,13 @@ through `e2e_state`, which treats a field that does not parse as no runs. It als
 sprint has a second key, `e2e_cap`, JSON `{raises: [{add, authorized_by, decision, at}]}`, the raises
 of its own e2e cap the owner authorized, written only by `task e2e-budget` (`TaskWriter.raise_e2e_cap`)
 and read through `e2e_budget.cap_raises` (secretary-1796).
+After-merge runs additionally hold an optional `disposition_result` receipt of native
+PO completion. Covered marks' optional `holder` is the live obligation, distinct from
+their historical `decision` link; absent/null preserves released readback and empty
+means no active holder. Both use the same e2e extension text and normalized metadata.
+Reconciliation locks the operation/carrier/sources/follow-up and commits receipt plus
+marks together, then reconstructs queue projections. No new table, authority grant,
+origin backfill or released-bag migration is needed; 0029 leaves those bags untouched.
 
 The only other top-level keys are the markers in `EXTENSION_MARKERS` (`board_never_named`, §3.10).
 Rows written before `0014_neutral_extension_bag` held the bag under the retired board's name; that

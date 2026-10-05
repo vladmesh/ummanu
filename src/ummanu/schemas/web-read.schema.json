@@ -234,6 +234,30 @@
         "successors": {"type": "object", "additionalProperties": {"$ref": "#/$defs/po_execution_resolution"}}
       }
     },
+    "e2e_disposition_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "status", "action", "holder", "reason"],
+      "properties": {
+        "operation": {"type": "string", "minLength": 1},
+        "status": {"enum": ["waiting", "neutral", "follow_up", "settled"]},
+        "action": {"enum": ["", "retry", "decline", "follow_up"]},
+        "holder": {"type": "string"},
+        "reason": {"type": "string", "minLength": 1},
+        "completion": {"type": "string", "minLength": 1}
+      },
+      "description": "Durable native PO completion effect on one actual after-merge run. Empty holder means historical operation evidence only; retry grants no budget."
+    },
+    "task_e2e": {
+      "type": ["object", "null"],
+      "properties": {
+        "waiting_on": {"type": "string", "minLength": 1},
+        "after_merge_runs": {
+          "type": "array",
+          "items": {"type": "object", "properties": {"disposition_result": {"$ref": "#/$defs/e2e_disposition_result"}}}
+        }
+      }
+    },
     "task": {
       "type": "object",
       "required": ["schema_version", "kind", "observed_at", "ref", "card", "project", "attempt", "agents", "heads", "work", "events"],
@@ -247,7 +271,7 @@
           "required": ["source", "value"],
           "properties": {
             "source": {"$ref": "#/$defs/source"},
-            "value": {"type": ["object", "null"], "properties": {"po_execution": {"$ref": "#/$defs/po_execution"}}}
+            "value": {"type": ["object", "null"], "properties": {"po_execution": {"$ref": "#/$defs/po_execution"}, "e2e": {"$ref": "#/$defs/task_e2e"}}}
           }
         },
         "project": {

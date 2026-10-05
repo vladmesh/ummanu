@@ -2629,6 +2629,15 @@ class TaskWriter:
             if str(task.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
                 raise TaskError("validation", f"{reference} is not a code card; it carries no e2e runs", 2)
         with self._mutation():
+            for reference in sorted(states):
+                self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
+            tasks = {reference: self.reader.show(reference) for reference in states}
+            for reference, task in tasks.items():
+                proposed = e2e_record.E2eState.from_json(json.loads(states[reference])).after_merge
+                mark = e2e_record.e2e_state(task).after_merge
+                if (proposed is None or mark is None or mark.merge_sha != proposed.merge_sha
+                        or mark.state not in {e2e_record.AM_PENDING, e2e_record.AM_BUDGET_WAIT}):
+                    return {"charged": False, "stale": True}
             charge: dict[str, Any] = {"charged": True}
             if sprint:
                 charge = self.client.call(
@@ -2653,6 +2662,183 @@ class TaskWriter:
                     "saveTaskMetadata", task_id=_task_number(tasks[reference]), values={e2e_record.E2E_FIELD: text}
                 )
             return charge
+
+    def record_after_merge_run(self, *, role: str, actor: str, reference: str,
+                               run: e2e_record.E2eRun) -> e2e_record.E2eState:
+        """Update this run under the carrier lock, retaining newer marks and other runs."""
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        with self._mutation():
+            self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
+            task = self.reader.show(reference)
+            current = e2e_record.e2e_state(task)
+            stored = current.after_merge_run(run.dispatch_id)
+            if stored is None or any(getattr(stored, key) != getattr(run, key) for key in (
+                    "sha", "covered", "repo", "branch", "workflow", "intent_at", "deadline",
+                    "placement", "git_ref", "charged_to")):
+                raise TaskError("validation", "after-merge run identity changed", 2)
+            # A later completion receipt is durable and cannot be lost by a stale
+            # closing/cleanup save. Intent identity and paid records stay intact.
+            run.disposition_result = stored.disposition_result or run.disposition_result
+            run.disposition = stored.disposition or run.disposition
+            run.hotfix = stored.hotfix or run.hotfix
+            run.result = stored.result if stored.result is not None else run.result
+            run.resolution = stored.resolution or run.resolution
+            if stored.git_ref_state == "deleted":
+                run.git_ref_state = "deleted"
+            run.acted = stored.acted or run.acted
+            current.after_merge_runs[current.after_merge_runs.index(stored)] = run
+            self.client.call("saveTaskMetadata", task_id=_task_number(task),
+                             values={e2e_record.E2E_FIELD: current.text()})
+            return current
+
+    def record_after_merge_mark(self, *, role: str, actor: str, reference: str,
+                                carrier: str, run: e2e_record.E2eRun,
+                                changes: dict[str, Any]) -> e2e_record.E2eState:
+        """Only this run's current covered merge may gain its outcome/holder."""
+        from ummanu.board.e2e_disposition import owns_mark
+
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        with self._mutation():
+            for ref in sorted({reference, carrier}):
+                self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (ref,))
+            task = self.reader.show(reference)
+            current = e2e_record.e2e_state(task)
+            carried = e2e_record.e2e_state(self.reader.show(carrier))
+            stored = carried.after_merge_run(run.dispatch_id)
+            covered = next((item for item in run.covered if item["ref"] == reference), None)
+            latest = next((candidate for candidate in reversed(carried.after_merge_runs)
+                           if covered in candidate.covered), None) if covered else None
+            if (covered and stored and stored.sha == run.sha and stored.covered == run.covered
+                    and owns_mark(current.after_merge, run=stored, carrier=carrier, covered=covered)
+                    and (current.after_merge.dispatch_id or latest is stored)
+                    and not stored.disposition_result):
+                for name, value in changes.items():
+                    setattr(current.after_merge, name, value)
+                self.client.call("saveTaskMetadata", task_id=_task_number(task),
+                                 values={e2e_record.E2E_FIELD: current.text()})
+            return current
+
+    def reconcile_after_merge_disposition(self, *, role: str, actor: str, carrier: str,
+                                          dispatch_id: str) -> dict[str, Any]:
+        """Read native PO completion and atomically persist receipt plus covered obligations.
+
+        Queue contents are a recoverable projection, never completion authority.
+        The locks serialize PO completion and re-merges against this consumption;
+        no charge or grant occurs here. Missing evidence clears a dead holder with
+        a neutral reason; degraded reads roll back and can be tried again.
+        """
+        from ummanu.board.e2e_disposition import disposition_effect, owns_mark
+        from ummanu.sprints import SprintReader
+
+        self._role(role, {Role.DISPATCHER}, actor=actor)
+        initial = e2e_record.e2e_state(self.reader.show(carrier)).after_merge_run(dispatch_id)
+        if initial is None or not initial.disposition:
+            raise TaskError("validation", "a disposition must belong to an actual after-merge run", 2)
+        if not initial.covered or carrier not in {item["ref"] for item in initial.covered}:
+            raise TaskError("validation", "disposition needs the actual covered carrier/sources", 2)
+        created = self.audit.committed_event(execution_field.DISPOSITION_PREFIX + dispatch_id)
+        if (not created or created.get("kind") != "created" or created.get("outcome") != "success"
+                or created.get("ref") != initial.disposition
+                or (created.get("actor") or {}).get("role") != "dispatcher"):
+            raise TaskError("validation", "disposition operation has no matching committed run create", 2)
+        refs = {carrier, initial.disposition, *(item["ref"] for item in initial.covered)}
+        # Lock a possible follow-up along with the operation, then read it again
+        # under the lock. Malformed completion cannot authorize a guessed holder.
+        from ummanu.board.completion_evidence import E2E_DISPOSITION_SECTION, po_completion_record
+        try:
+            fields = po_completion_record(self.reader.show(initial.disposition)) or {}
+            document = json.loads(fields.get(E2E_DISPOSITION_SECTION) or "null")
+            if isinstance(document, dict) and isinstance(document.get("holder"), str):
+                refs.add(document["holder"])
+        except (ValueError, TaskError) as exc:
+            if isinstance(exc, TaskError) and exc.code != "not_found":
+                raise
+        with self._mutation():
+            for reference in sorted(refs):
+                self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
+            tasks, missing = {}, []
+            for ref in {carrier, *(item["ref"] for item in initial.covered)}:
+                try:
+                    tasks[ref] = self.reader.show(ref)
+                except TaskError as exc:
+                    if exc.code != "not_found" or ref == carrier:
+                        raise
+                    missing.append(ref)
+            current = {ref: e2e_record.e2e_state(task) for ref, task in tasks.items()}
+            run = current[carrier].after_merge_run(dispatch_id)
+            if run is None or run.disposition != initial.disposition or run.covered != initial.covered or run.sha != initial.sha:
+                raise TaskError("validation", "disposition run identity changed", 2)
+            if any(task.get("project") != tasks[carrier].get("project") or task.get("type") != "code" for task in tasks.values()):
+                raise TaskError("validation", "disposition sources must be actual project code cards", 2)
+            if run.disposition_result and run.disposition_result.get("status") == "settled":
+                # Applied retry/decline and completed follow-up are historical.
+                # Changing the old operation cannot enqueue or spend twice.
+                return {**run.disposition_result, "covered": [], "changed": False}
+
+            def read_locked(reference: str) -> dict[str, Any]:
+                if reference not in refs:
+                    raise TaskError("backend_error", "disposition holder changed during admission; retry the read", 1)
+                return self.reader.show(reference)
+
+            def read_sprint(reference: str) -> dict[str, Any]:
+                value = SprintReader(self.client).show(reference, include_cards=False)
+                sessions = {value.get("po_session")}
+                # Resolver successors do not invalidate a completion made in the
+                # recorded sprint session before it closed. Read durable route
+                # history, never an unrecorded session or monetary grant.
+                for event in self.audit.events(reference):
+                    if event.get("kind") == "po_session_set" and (event.get("actor") or {}).get("role") == "po":
+                        sessions.add((event.get("payload") or {}).get("po_session"))
+                    elif event.get("kind") == "created":
+                        sessions.add((event.get("payload") or {}).get("po_session"))
+                return {**value, "_po_sessions": sessions - {None, ""}}
+
+            try:
+                if missing:
+                    raise TaskError("not_found", "Covered source(s): " + ", ".join(sorted(missing)), 2)
+                operation = read_locked(run.disposition)
+                if operation.get("project") != tasks[carrier].get("project"):
+                    raise TaskError("validation", "disposition operation is foreign", 2)
+                effect = disposition_effect(operation=operation, carrier=carrier, run=run,
+                    events=self.audit.events(run.disposition), read=read_locked,
+                    sprint=read_sprint,
+                    superseded=self._card_superseded)
+            except TaskError as exc:
+                if exc.code != "not_found":
+                    raise
+                effect = {"status": "neutral", "action": "", "holder": "",
+                          "reason": f"Disposition evidence is missing: {exc.message}; PO must repair the route"}
+            linked = []
+            receipt = {"operation": run.disposition, **effect}
+            changed = run.disposition_result != receipt
+            for item in run.covered:
+                if item["ref"] not in current:
+                    continue
+                mark = current[item["ref"]].after_merge
+                if (run.disposition_result == receipt or self._card_superseded(item["ref"])
+                        or not owns_mark(mark, run=run, carrier=carrier, covered=item)):
+                    continue
+                if not mark.dispatch_id:
+                    latest = next((candidate for candidate in reversed(current[carrier].after_merge_runs)
+                                   if item in candidate.covered), None)
+                    if latest is not run:
+                        continue
+                # A spent budget or newer holder/run is already an independent
+                # obligation and was excluded by owns_mark above.
+                mark.decision = run.disposition
+                mark.dispatch_id = dispatch_id
+                mark.holder = effect["holder"]
+                mark.note = effect["reason"]
+                mark.state = (e2e_record.AM_PENDING if effect["action"] == "retry" and effect["status"] == "settled"
+                              else e2e_record.AM_DECLINED if effect["status"] == "settled"
+                              else e2e_record.AM_RED if run.resolution == e2e_record.AM_RED and effect["status"] == "waiting"
+                              else e2e_record.AM_BLOCKED)
+                linked.append(item["ref"])
+            run.disposition_result = receipt
+            for ref in {carrier, *linked}:
+                self.client.call("saveTaskMetadata", task_id=_task_number(tasks[ref]),
+                                 values={e2e_record.E2E_FIELD: current[ref].text()})
+            return {**effect, "operation": run.disposition, "covered": linked, "changed": changed}
 
     def _sprint_open(self, sprint: str) -> bool:
         """Whether a card's sprint is open: a card of a closed sprint spends its own e2e cap after the

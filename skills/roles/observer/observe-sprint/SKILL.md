@@ -537,3 +537,7 @@ Refusal commits no resume, sprint comment or delivery acknowledgement. Correct t
 the same request ID and delivery pair. Quotations, negated waits, administrative notes and future
 implementation analysis remain ordinary evidence. Other direct request phrasing must use this
 explicit representation; do not hide a request in free prose. See docs/PROTOCOLS.md, Observer PO channel.
+The role is uppercase Cyrillic `ПО`, distinct from the preposition `по`. `PO-channel`,
+`PO-input`, `PO session/input/service/turn` are component modifiers and ordinary notes.
+The bounded grammar does not recognize `The PO must decide`, `Awaiting PO decision`
+or `Let the PO decide`; use the marker or typed request for these wordings.

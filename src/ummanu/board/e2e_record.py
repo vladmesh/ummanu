@@ -137,6 +137,9 @@ class E2eRun:
     hotfix: str = ""
     # The PO card owning an unresolved result/return-route question, distinct from the code hotfix.
     disposition: str = ""
+    # Applied native completion receipt. Marks and this receipt commit together;
+    # retry pending recovery reads the marks, even after the project queue vanished.
+    disposition_result: dict[str, str] | None = None
 
     @property
     def conclusion(self) -> str:
@@ -218,6 +221,8 @@ class E2eRun:
                 if isinstance(result, Mapping) and result.get("outcome")
                 else None
             ),
+            disposition_result=(dict(payload["disposition_result"])
+                                if isinstance(payload.get("disposition_result"), Mapping) else None),
         )
 
 
@@ -268,6 +273,9 @@ class AfterMergeMark:
     note: str = ""
     # Dispatch ids charged to this card's own cap (no open sprint paid for them).
     charged: list[str] = field(default_factory=list)
+    # None reads the released decision-as-holder format. Empty explicitly means
+    # historical decision only; otherwise the live operation/follow-up holder.
+    holder: str | None = None
 
     def label(self) -> str:
         """The one line `task show` gives: pending, covered by <run>, green, red -> <hotfix card>."""
@@ -294,6 +302,7 @@ class AfterMergeMark:
                 for name in ("dispatch_id", "run_url", "carrier", "hotfix", "decision", "note")
             },
             charged=[str(item) for item in charged if str(item)] if isinstance(charged, list) else [],
+            holder=str(payload["holder"]) if payload.get("holder") is not None else None,
         )
 
 
@@ -461,8 +470,9 @@ def _after_merge_view(state: E2eState) -> dict[str, Any]:
                 **({"decision": mark.decision} if mark.decision else {}),
                 **({"note": mark.note} if mark.note else {}),
                 **(
-                    {"mark": mark.label(), "waiting_on": mark.decision}
-                    if mark.decision and mark.state in {AM_BUDGET_WAIT, AM_RED, AM_BLOCKED}
+                    {"mark": mark.note or mark.label(), "waiting_on": mark.holder if mark.holder is not None else mark.decision}
+                    if (mark.holder if mark.holder is not None else mark.decision)
+                    and mark.state in {AM_BUDGET_WAIT, AM_RED, AM_BLOCKED}
                     else {}
                 ),
             }
@@ -483,6 +493,7 @@ def _after_merge_view(state: E2eState) -> dict[str, Any]:
                 "dispatched_at": run.intent_at,
                 **({"hotfix": run.hotfix} if run.hotfix else {}),
                 **({"disposition": run.disposition} if run.disposition else {}),
+                **({"disposition_result": dict(run.disposition_result)} if run.disposition_result is not None else {}),
                 **({"reason": run.closing_reason} if run.closing_reason else {}),
                 "result": (
                     {key: run.result.get(key) for key in ("outcome", "conclusion", "summary")}

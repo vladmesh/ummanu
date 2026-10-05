@@ -2,6 +2,9 @@
 
 PO execution assignments and run dispositions use the existing task extension bag.
 There is no backfill of fabricated origins, sessions, requests or owner authority.
+The native completion's optional E2E disposition section remains comment/event
+evidence; optional run receipts and live holders remain inside the existing e2e
+JSON text. This migration leaves every released bag and its audit unchanged.
 """
 
 import sqlalchemy as sa

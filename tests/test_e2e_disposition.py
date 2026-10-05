@@ -1,0 +1,379 @@
+"""Durable after-merge disposition rules/transactions over an in-memory board.
+
+The actual PostgreSQL completion and dispatcher boundary is exercised in
+test_e2e_after_merge, in CI. No SQL/container backend is started by this suite.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+import unittest
+from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest import mock
+
+from ummanu.board import e2e_disposition, e2e_record, po_execution
+from ummanu.board.completion_evidence import po_completion_fields, render_po_completion_record
+from ummanu.dispatch import e2e_after_merge
+from ummanu.tasks import TaskError, TaskWriter
+from ummanu.webproto.sprint_reads import card_waits
+
+
+class DispositionTests(unittest.TestCase):
+    def setUp(self):
+        self.carrier, self.source, self.operation = "ummanu-2", "ummanu-1", "ummanu-3"
+        self.run = e2e_record.E2eRun(dispatch_id="ummanu-2-e2e-am-1-abc", sha="b" * 40,
+            repo="vladmesh/ummanu", branch="pipeline-e2e/old", workflow="e2e.yml",
+            intent_at="2026-10-05T00:00:00Z", placement="after_merge", dispatch="refused",
+            closing="closed", resolution="blocked", acted=True, disposition=self.operation,
+            covered=[{"ref": self.source, "merge_sha": "a" * 40},
+                     {"ref": self.carrier, "merge_sha": "b" * 40}])
+        self.cards = {}
+        for covered in self.run.covered:
+            state = e2e_record.E2eState(after_merge=e2e_record.AfterMergeMark(
+                merge_sha=covered["merge_sha"], state="blocked", dispatch_id=self.run.dispatch_id,
+                carrier=self.carrier, decision=self.operation, charged=[self.run.dispatch_id]),
+                after_merge_runs=[copy.deepcopy(self.run)] if covered["ref"] == self.carrier else [])
+            self.cards[covered["ref"]] = {"id": int(covered["ref"].split("-")[-1]),
+                "ref": covered["ref"], "project": "ummanu", "type": "code", "state": "done",
+                "extensions": {"extra": {"e2e": state.text()}}}
+        assignment = po_execution.PoExecution(po_execution.DISPOSITION_PREFIX + self.run.dispatch_id,
+            "e2e_disposition", (self.source, self.carrier),
+            initial={"via": "create_session", "replaces": "", "session": "po-session-1"}, executor="po-session-1")
+        self.cards[self.operation] = {"id": 3, "ref": self.operation, "project": "ummanu",
+            "type": "operation", "state": "in_progress", "comments": [],
+            "extensions": {"extra": {"po_execution": assignment.text()}}}
+        self.events = []
+        self.created = {"ref": self.operation, "actor": {"role": "dispatcher"}, "kind": "created", "outcome": "success"}
+        self.saves = []
+        self.fail_save = ""
+
+        def save(method, **fields):
+            self.assertEqual(method, "saveTaskMetadata")
+            ref = next(ref for ref, card in self.cards.items() if card["id"] == fields["task_id"])
+            if ref == self.fail_save:
+                raise TaskError("backend_error", "save interrupted", 1)
+            self.cards[ref]["extensions"]["extra"].update(fields["values"])
+            self.saves.append(ref)
+
+        self.writer = TaskWriter.__new__(TaskWriter)
+        self.writer.client = SimpleNamespace(_query=mock.Mock(return_value=[]), call=save)
+        self.writer._role = lambda role, allowed, actor: self.assertEqual(role, "dispatcher")
+        self.writer.reader = SimpleNamespace(show=self.show, list=lambda: [self.show(ref) for ref in self.cards])
+        self.writer.audit = SimpleNamespace(committed_event=lambda request: self.created,
+                                            events=lambda ref, **kw: copy.deepcopy(self.events) if ref == self.operation else [])
+        self.writer.comment = mock.Mock()
+
+        @contextmanager
+        def transaction():
+            before = copy.deepcopy(self.cards)
+            try:
+                yield
+            except BaseException:
+                self.cards = before
+                raise
+        self.writer._mutation = transaction
+        self.runtime = SimpleNamespace(writer=self.writer, reader=self.writer.reader, audit=self.writer.audit,
+            owner="dispatcher", save_records=mock.Mock())
+
+    def show(self, ref):
+        if ref not in self.cards:
+            raise TaskError("not_found", ref, 2)
+        task = copy.deepcopy(self.cards[ref])
+        view = e2e_record.e2e_view(task)
+        if view:
+            task["e2e"] = view
+        return task
+
+    def outcome(self, action="retry", **fields):
+        result = {**e2e_disposition.completion_identity(self.operation, self.carrier, self.run),
+                  "action": action, "evidence": "GitHub investigation: previous POST was refused; no workflow started"}
+        if action == "retry":
+            result["prior_effect"] = "not_started"
+        return {**result, **fields}
+
+    def complete(self, outcome=None, *, session="po-session-1", body=None):
+        body = body or "## What was done\nInvestigated prior effect.\n\n## How to verify\nRead GitHub dispatch receipt."
+        if outcome is not None:
+            body += "\n\n## E2E disposition\n" + json.dumps(outcome)
+        fields, refusal = po_completion_fields("operation", body)
+        self.assertFalse(refusal)
+        record = render_po_completion_record("operation", fields)
+        self.cards[self.operation].update(state="done", comments=[{"marker": "po", "body": "[po]\n" + record}])
+        self.events = [{"ref": self.operation, "record_type": "board.protocol_event", "transition": {"source": "in_progress", "target": "done"},
+            "reason": record, "actor": {"role": "po"}, "data": {"po_session": session},
+            "request_id": "completed-1", "event_id": "completion-event"}]
+
+    def reconcile(self):
+        return self.writer.reconcile_after_merge_disposition(role="dispatcher", actor="dispatcher",
+            carrier=self.carrier, dispatch_id=self.run.dispatch_id)
+
+    def mark(self, ref=None):
+        return e2e_record.e2e_state(self.show(ref or self.source)).after_merge
+
+    def follow_up(self, state="ready", **fields):
+        self.cards["ummanu-4"] = {"id": 4, "ref": "ummanu-4", "project": "ummanu", "type": "code",
+            "state": state, "extensions": {"extra": {"po_origin": '{"session":"real-po","request":"turn-1"}'}}, **fields}
+
+    def test_explicit_retry_is_durable_pending_and_survives_deleted_queue(self):
+        self.complete(self.outcome())
+        result = self.reconcile()
+        self.assertEqual((result["status"], self.mark().state, self.mark().holder), ("settled", "pending", ""))
+        self.assertEqual(self.mark().charged, [self.run.dispatch_id])
+        self.assertFalse(self.reconcile()["changed"])
+        payload = {}
+        e2e_after_merge._recover_pending(self.runtime, payload, {}, self.writer.reader.list())
+        queue = e2e_after_merge.queues(payload)["ummanu"]
+        self.assertEqual({entry["ref"] for entry in queue["pending"]}, {self.source, self.carrier})
+        self.assertTrue(all(entry["repo"] == self.run.repo for entry in queue["pending"]))
+        e2e_after_merge._recover_pending(self.runtime, payload, {}, self.writer.reader.list())
+        self.assertEqual(len(queue["pending"]), 2)
+        self.assertEqual(card_waits(self.show(self.source))[0]["kind"], "run")
+
+    def test_decline_settles_live_wait_retaining_evidence_and_charge(self):
+        self.complete(self.outcome("decline"))
+        self.reconcile()
+        self.assertEqual(self.mark().state, "declined")
+        self.assertEqual(self.mark().decision, self.operation)
+        self.assertEqual(card_waits(self.show(self.source)), [])
+        receipt = e2e_record.e2e_state(self.show(self.carrier)).after_merge_runs[0].disposition_result
+        self.assertEqual(receipt["operation"], self.operation)
+
+    def test_concrete_follow_up_is_live_holder_then_done_settles(self):
+        self.follow_up()
+        self.complete(self.outcome("follow_up", holder="ummanu-4"))
+        self.reconcile()
+        self.assertEqual(self.mark().holder, "ummanu-4")
+        self.assertEqual(card_waits(self.show(self.source))[0]["holder"], "ummanu-4")
+        self.cards["ummanu-4"]["state"] = "done"
+        self.reconcile()
+        self.assertEqual(self.mark().state, "declined")
+        self.assertEqual(card_waits(self.show(self.source)), [])
+        self.assertFalse(self.reconcile()["changed"])
+
+    def test_bare_done_and_unresolved_or_mismatched_outcomes_are_neutral(self):
+        for outcome in (None, self.outcome(run="another-run"), self.outcome(prior_effect="uncertain"),
+                        self.outcome(budget=99), self.outcome(covered=[])):
+            with self.subTest(outcome=outcome):
+                self.setUp()
+                self.complete(outcome)
+                result = self.reconcile()
+                self.assertEqual(result["status"], "neutral")
+                self.assertTrue(result["reason"])
+                self.assertEqual((self.mark().state, self.mark().holder), ("blocked", ""))
+                self.assertEqual(card_waits(self.show(self.source)), [])
+
+    def test_native_po_authority_is_required_even_with_well_formed_record(self):
+        for session, role in (("foreign-session", "po"), ("", "po"), ("po-session-1", "observer")):
+            with self.subTest(session=session, role=role):
+                self.complete(self.outcome(), session=session)
+                self.events[0]["actor"]["role"] = role
+                self.assertEqual(self.reconcile()["status"], "neutral")
+        self.complete(self.outcome())
+        self.events = []
+        self.assertEqual(self.reconcile()["status"], "neutral")
+
+    def test_later_bare_done_cannot_reuse_an_earlier_native_completion(self):
+        self.complete(self.outcome())
+        self.events.append({"record_type": "board.protocol_event", "ref": self.operation,
+            "transition": {"source": "ready", "target": "done"}, "actor": {"role": "po"},
+            "reason": "just Done", "data": {}, "request_id": "later-bare-done"})
+        self.assertEqual(self.reconcile()["status"], "neutral")
+
+    def test_recorded_sprint_session_rollover_does_not_invalidate_prior_completion(self):
+        self.cards[self.operation]["sprint"] = "sprint:7"
+        self.complete(self.outcome())
+        completion_events = self.events
+        self.writer.audit.events = lambda ref, **kw: completion_events if ref == self.operation else [
+            {"kind": "po_session_set", "actor": {"role": "po"}, "payload": {"po_session": "po-session-1"}}]
+        with mock.patch("ummanu.sprints.SprintReader.show", return_value={"status": "open", "po_session": "po-session-2"}):
+            self.assertEqual(self.reconcile()["status"], "settled")
+
+    def test_superseded_follow_up_becomes_neutral_without_dead_holder(self):
+        self.follow_up()
+        self.complete(self.outcome("follow_up", holder="ummanu-4"))
+        self.reconcile()
+        self.writer._card_superseded = lambda ref: ref == "ummanu-4"
+        self.assertEqual(self.reconcile()["status"], "neutral")
+        self.assertEqual(self.mark().holder, "")
+
+    def test_missing_operation_or_unowned_follow_up_has_no_closed_holder(self):
+        self.complete(self.outcome("follow_up", holder="ummanu-4"))
+        self.assertEqual(self.reconcile()["status"], "neutral")
+        self.follow_up(extensions={"extra": {}})
+        self.assertEqual(self.reconcile()["status"], "neutral")
+        del self.cards[self.operation]
+        self.assertEqual(self.reconcile()["status"], "neutral")
+        self.assertEqual(self.mark().holder, "")
+
+    def test_missing_source_is_neutral_on_surviving_carrier_and_cannot_retry(self):
+        self.complete(self.outcome())
+        del self.cards[self.source]
+        effect = self.reconcile()
+        self.assertEqual(effect["status"], "neutral")
+        self.assertIn("Covered source", effect["reason"])
+        self.assertEqual(self.mark(self.carrier).holder, "")
+        self.assertEqual(self.mark(self.carrier).state, "blocked")
+
+    def test_transition_save_failure_rolls_back_and_recovery_applies_once(self):
+        self.complete(self.outcome())
+        self.fail_save = self.source
+        with self.assertRaisesRegex(TaskError, "save interrupted"):
+            self.reconcile()
+        self.assertEqual(self.mark().state, "blocked")
+        self.assertIsNone(e2e_record.e2e_state(self.show(self.carrier)).after_merge_runs[0].disposition_result)
+        self.fail_save = ""
+        self.assertTrue(self.reconcile()["changed"])
+        self.assertFalse(self.reconcile()["changed"])
+
+    def test_newer_merge_run_or_holder_is_preserved(self):
+        for changes in ({"merge_sha": "new"}, {"dispatch_id": "new-run"}, {"decision": "ummanu-5"},
+                        {"holder": "ummanu-5"}, {"state": "green"}):
+            with self.subTest(changes=changes):
+                self.setUp()
+                state = e2e_record.e2e_state(self.show(self.source))
+                for key, value in changes.items():
+                    setattr(state.after_merge, key, value)
+                self.cards[self.source]["extensions"]["extra"]["e2e"] = state.text()
+                before = self.mark()
+                self.complete(self.outcome())
+                self.reconcile()
+                self.assertEqual(self.mark(), before)
+                self.assertEqual(self.mark(self.carrier).state, "pending")
+
+    def test_replay_does_not_reset_later_budget_decline(self):
+        self.complete(self.outcome())
+        self.reconcile()
+        state = e2e_record.e2e_state(self.show(self.source))
+        state.after_merge.state, state.after_merge.note = "declined", "adapter removed"
+        self.cards[self.source]["extensions"]["extra"]["e2e"] = state.text()
+        self.reconcile()
+        self.assertEqual(self.mark().state, "declined")
+
+    def proposal(self):
+        states = {}
+        for covered in self.run.covered:
+            state = e2e_record.e2e_state(self.show(covered["ref"]))
+            state.after_merge.state = "covered"
+            state.after_merge.dispatch_id = "next-run"
+            state.after_merge.charged.append("next-run")
+            states[covered["ref"]] = state.text()
+        return states
+
+    def test_explicit_retry_still_admits_batch_all_or_none_against_actual_cap(self):
+        self.complete(self.outcome())
+        self.reconcile()
+        capped = e2e_record.e2e_state(self.show(self.source))
+        capped.after_merge.charged.extend(["older-1", "older-2"])
+        self.cards[self.source]["extensions"]["extra"]["e2e"] = capped.text()
+        before = copy.deepcopy(self.cards)
+        result = self.writer.record_after_merge_intent(role="dispatcher", actor="dispatcher",
+            states=self.proposal(), sprint="", carrier=self.carrier, dispatch_id="next-run")
+        self.assertEqual(result, {"charged": False, "spent": [self.source]})
+        self.assertEqual(self.cards, before)
+        self.assertEqual(self.mark(self.carrier).charged, [self.run.dispatch_id])
+
+    def test_retry_pending_does_not_override_newer_mark_at_atomic_admission(self):
+        self.complete(self.outcome())
+        self.reconcile()
+        offered = self.proposal()
+        current = e2e_record.e2e_state(self.show(self.source))
+        current.after_merge.merge_sha = "new-merge"
+        self.cards[self.source]["extensions"]["extra"]["e2e"] = current.text()
+        before = copy.deepcopy(self.cards)
+        result = self.writer.record_after_merge_intent(role="dispatcher", actor="dispatcher",
+            states=offered, sprint="", carrier=self.carrier, dispatch_id="next-run")
+        self.assertEqual(result, {"charged": False, "stale": True})
+        self.assertEqual(self.cards, before)
+
+    def test_recovered_timestamps_choose_newest_descendant_as_run_and_budget_carrier(self):
+        self.complete(self.outcome())
+        self.reconcile()
+        self.runtime.host = SimpleNamespace()
+        queue = {"pending": [
+            {"ref": self.carrier, "merge_sha": "b" * 40, "repo": self.run.repo, "merged_at": 1},
+            {"ref": self.source, "merge_sha": "a" * 40, "repo": self.run.repo, "merged_at": 2}],
+            "run": None, "budget_waits": [], "cleanup": []}
+        declaration = SimpleNamespace(after_merge=True, workflow="e2e.yml", deadline="2h")
+        with mock.patch.object(e2e_after_merge, "declared_e2e", return_value=declaration), \
+                mock.patch.object(e2e_after_merge, "is_ancestor", side_effect=lambda host, repo, base, head: base <= head), \
+                mock.patch.object(e2e_after_merge, "_push_and_dispatch"), \
+                mock.patch.object(e2e_after_merge, "_settle", return_value=(None, False)):
+            result = e2e_after_merge._start(self.runtime, {}, {}, "ummanu", queue)
+        self.assertEqual(result["pilot_ref"], self.carrier)
+        latest = e2e_record.e2e_state(self.show(self.carrier)).after_merge_runs[-1]
+        self.assertEqual(latest.sha, "b" * 40)
+        self.assertEqual([item["ref"] for item in latest.covered], [self.source, self.carrier])
+        self.assertEqual(latest.charged_to, "cards")
+        for ref in (self.source, self.carrier):
+            self.assertEqual(len(self.mark(ref).charged), 2)
+
+    def test_bounded_record_preserves_normalized_metadata_without_money_or_origin(self):
+        from ummanu.data import normalize_board_card
+        self.complete(self.outcome())
+        self.reconcile()
+        raw = self.cards[self.carrier]["extensions"]["extra"]["e2e"]
+        row = {"reference": self.carrier, "metadata": {"e2e": raw}}
+        normalized = normalize_board_card(row, row)
+        restored = e2e_record.E2eState.from_json(json.loads(normalized["metadata"]["e2e"]))
+        self.assertEqual(restored.after_merge_runs[0].disposition_result["action"], "retry")
+        self.assertEqual(restored.after_merge.holder, "")
+        self.assertEqual(restored.dispatched, 1)
+        self.assertNotIn("po_origin", normalized["metadata"])
+
+    def test_stale_red_mark_and_carrier_run_save_preserve_newer_merge(self):
+        state = e2e_record.e2e_state(self.show(self.carrier))
+        state.after_merge.merge_sha, state.after_merge.dispatch_id = "new", "new-run"
+        self.cards[self.carrier]["extensions"]["extra"]["e2e"] = state.text()
+        self.writer.record_after_merge_mark(role="dispatcher", actor="dispatcher", reference=self.carrier,
+            carrier=self.carrier, run=self.run, changes={"state": "red", "decision": self.operation})
+        self.writer.record_after_merge_run(role="dispatcher", actor="dispatcher", reference=self.carrier, run=self.run)
+        self.assertEqual((self.mark(self.carrier).merge_sha, self.mark(self.carrier).dispatch_id), ("new", "new-run"))
+
+    def test_degraded_read_is_not_completion_evidence_and_other_carrier_recovers(self):
+        bad = "ummanu-0"
+        listing = self.writer.reader.list()
+        listing.append({**copy.deepcopy(self.cards[self.carrier]), "ref": bad})
+        self.writer.reader.list = lambda: listing
+        original = self.writer.reader.show
+        self.writer.reader.show = lambda ref: (_ for _ in ()).throw(TaskError("backend_error", "old carrier unreadable", 1)) if ref == bad else original(ref)
+        self.complete(self.outcome("decline"))
+        results = e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+        self.assertTrue(any(row["status"] == "degraded" and row["pilot_ref"] == bad for row in results))
+        self.assertEqual(self.mark().state, "declined")
+        self.assertTrue(any(row["action"] == "e2e-after-merge-disposition-settled" for row in results))
+
+    def test_committed_create_and_released_pending_reach_shared_consumer(self):
+        state = e2e_record.e2e_state(self.show(self.carrier))
+        state.after_merge_runs[0].disposition = ""
+        self.cards[self.carrier]["extensions"]["extra"]["e2e"] = state.text()
+        for ref in (self.source, self.carrier):
+            state = e2e_record.e2e_state(self.show(ref))
+            state.after_merge.state, state.after_merge.decision = "pending", ""
+            state.after_merge.dispatch_id = ""
+            self.cards[ref]["extensions"]["extra"]["e2e"] = state.text()
+        self.complete(self.outcome("decline"))
+        result = e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+        self.assertEqual(self.mark().state, "declined")
+        actual = e2e_record.e2e_state(self.show(self.carrier)).after_merge_runs[0]
+        self.assertEqual(actual.disposition, self.operation)
+        self.assertEqual(actual.disposition_result["action"], "decline")
+        self.assertTrue(any(item["action"] == "e2e-after-merge-disposition-settled" for item in result))
+
+    def test_publication_recovers_after_committed_transition_without_reapplying(self):
+        self.complete(self.outcome("decline"))
+        self.writer.comment.side_effect = TaskError("backend_error", "publication unavailable", 1)
+        with self.assertRaisesRegex(TaskError, "publication unavailable"):
+            e2e_after_merge._reconcile_disposition(self.runtime, {}, {}, self.carrier, self.run.dispatch_id)
+        failed = self.writer.comment.call_args.kwargs
+        self.assertEqual(self.mark().state, "declined")
+        self.writer.comment.side_effect = None
+        e2e_after_merge._reconcile_disposition(self.runtime, {}, {}, self.carrier, self.run.dispatch_id)
+        retry = self.writer.comment.call_args_list[-2].kwargs
+        self.assertEqual((retry["request_id"], retry["body"]), (failed["request_id"], failed["body"]))
+        self.assertEqual(self.mark().state, "declined")
+
+
+if __name__ == "__main__":
+    unittest.main()

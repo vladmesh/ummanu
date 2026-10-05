@@ -18,6 +18,7 @@ from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_execution import assignment, create_assignment
 from ummanu.board.sql_cards import SqlCardClient
@@ -103,6 +104,36 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
         self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
             entry=self.entry(decision["ref"], po_request={"card": decision["ref"], "action": "choose route"}),
             request_id="foreign-card"), "foreign-card")
+
+    def test_administrative_notes_write_comments_and_code_resumes_with_exact_ack(self):
+        code = self.card("code")
+        for index, body in enumerate(ADMINISTRATIVE_PO_NOTES):
+            with self.subTest(body=body):
+                self.writer.comment(role="observer", actor="observer", reference=self.ref,
+                    body=body, request_id=f"administrative-comment-{index}")
+                entry = self.entry(code["ref"], selected_step=body, next_safe_step=body)
+                request = f"administrative-resume-{index}"
+                self.writer.resume(role="observer", actor="observer", reference=self.ref,
+                    entry=entry, delivery_id=f"delivery-{index}", through_event=f"through-{index}",
+                    request_id=request)
+                saved = self.sprint(self.ref)["resume"]
+                self.assertEqual(saved["current_task"], code["ref"])
+                self.assertEqual(saved["next_safe_step"], body)
+                self.assertNotIn("po_request", saved)
+                event = self.writer.audit.committed_event(request)
+                self.assertEqual((event["payload"]["delivery_id"], event["payload"]["through_event"]),
+                                 (f"delivery-{index}", f"through-{index}"))
+        request = "administrative-then-real-request"
+        self.assert_refused(lambda: self.writer.resume(role="observer", actor="observer", reference=self.ref,
+            entry=self.entry(code["ref"]), delivery_id="real-delivery", through_event="real-event",
+            request_id=request), request)
+        operation = self.card("operation", touches_production="none")
+        self.writer.resume(role="observer", actor="observer", reference=self.ref,
+            entry=self.entry(operation["ref"], po_request={"card": operation["ref"], "action": "choose route"}),
+            delivery_id="real-delivery", through_event="real-event", request_id=request)
+        event = self.writer.audit.committed_event(request)
+        self.assertEqual((event["payload"]["delivery_id"], event["payload"]["through_event"]),
+                         ("real-delivery", "real-event"))
 
     def test_corrected_typed_wait_acknowledges_exact_pair_once_and_survives_export(self):
         card = self.card()

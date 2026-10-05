@@ -53,6 +53,9 @@ PO_COMPLETION_SECTIONS = {
 }
 #: The role whose comments carry a PO-executed card's completion record.
 PO_COMPLETION_ROLE = "po"
+# Optional machine-readable disposition, preserved by native task complete. Missing
+# or malformed records may still complete the operation but never permit paid retry.
+E2E_DISPOSITION_SECTION = "E2E disposition"
 # The research report directory, relative to the worker's workspace, and the file it must hold.
 RESEARCH_REPORT_DIR = ".ummanu-report"
 RESEARCH_REPORT_FILE = "report.md"
@@ -154,12 +157,19 @@ def render_infra_completion_record(fields: Mapping[str, str]) -> str:
 
 def po_completion_fields(kind: str, body: str) -> tuple[dict[str, str], str]:
     """The two sections a `task complete` body of this kind carries, and why it lacks them."""
-    return _required_sections(body, PO_COMPLETION_SECTIONS[kind], f"a {kind} completion body")
+    fields, refusal = _required_sections(body, PO_COMPLETION_SECTIONS[kind], f"a {kind} completion body")
+    sections = _sections(body)
+    if kind == TaskType.OPERATION.value and E2E_DISPOSITION_SECTION in sections:
+        fields[E2E_DISPOSITION_SECTION] = sections[E2E_DISPOSITION_SECTION]
+    return fields, refusal
 
 
 def render_po_completion_record(kind: str, fields: Mapping[str, str]) -> str:
     """The comment body `task complete` writes; `po_completion_record` reads it back."""
-    return _render_completion_record(PO_COMPLETION_MARKERS[kind], PO_COMPLETION_SECTIONS[kind], fields)
+    names = PO_COMPLETION_SECTIONS[kind]
+    if kind == TaskType.OPERATION.value and E2E_DISPOSITION_SECTION in fields:
+        names = (*names, E2E_DISPOSITION_SECTION)
+    return _render_completion_record(PO_COMPLETION_MARKERS[kind], names, fields)
 
 
 def render_research_completion_link(reference: str) -> str:

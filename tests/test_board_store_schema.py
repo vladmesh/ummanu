@@ -433,6 +433,15 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "dod_state,next_safe_step,recorded_at) VALUES ('sprint:7','step','why','other','none','pending',"
             "'Wait for PO decision','2026-10-04T19:00:00Z') RETURNING resume_id").scalar()
         connection.exec_driver_sql("UPDATE sprints SET resume_id=%s WHERE ref='sprint:7'", (resume,))
+        released_e2e = {"extra": {"e2e": json.dumps({"runs": [],
+            "after_merge": {"merge_sha": "paid-sha", "state": "pending", "carrier": "ummanu-29",
+                            "charged": ["released-paid-run"]},
+            "after_merge_runs": [{"dispatch_id": "released-paid-run", "sha": "paid-sha",
+                                  "dispatch": "refused", "acted": True, "resolution": "blocked"}]})}}
+        connection.exec_driver_sql(
+            "INSERT INTO tasks (task_ref,task_number,title,task_type,state,extensions,created_at,updated_at) "
+            "VALUES ('ummanu-29',29,'released uncertain run','code','done',%s::jsonb,now(),now())",
+            (json.dumps(released_e2e),))
         before = connection.exec_driver_sql("SELECT * FROM sprint_resumes").one()
         connection.commit()
         self.assertEqual(self.run_migrations(connection, admit=admit_additive), ("0029_po_channel",))
@@ -440,6 +449,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertEqual(tuple(after[:-1]), tuple(before))
         self.assertIsNone(after[-1])
         self.assertEqual(connection.exec_driver_sql("SELECT resume_id FROM sprints WHERE ref='sprint:7'").scalar(), resume)
+        self.assertEqual(connection.exec_driver_sql("SELECT extensions FROM tasks WHERE task_ref='ummanu-29'").scalar(), released_e2e)
         connection.exec_driver_sql("UPDATE sprint_resumes SET po_request=%s::jsonb",
                                    (json.dumps({"card": "ummanu-1", "action": "choose route"}),))
         connection.commit()

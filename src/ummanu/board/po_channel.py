@@ -13,15 +13,19 @@ from dataclasses import dataclass
 from typing import Any
 
 CREATE_CARD_HINT = "Create/link a decision or operation card for this sprint; use current_task and po_request.card for a PO wait."
+# PO must be the addressee, not a modifier in a component name. Cyrillic ПО is
+# case-sensitive: lowercase по is a preposition, including at a sentence start.
+_PO = r"(?:po\b(?![-\w]|\s+(?:channel|session|input|service|turn)\b)|product owner\b)"
+_RU_PO = r"(?-i:ПО)\b(?![-\w])"
 _REQUEST = re.compile(
     r"^(?:please\s+)?(?:"
-    r"(?:ask|request|need|await|wait(?:ing)?\s+(?:for|on))\s+(?:(?:a|the)\s+)?(?:po|product owner)\b"
-    r"|(?:need|await|wait(?:ing)?\s+(?:for|on))\s+(?:a\s+|the\s+)?(?:decision|action|answer|approval)\s+(?:from|by|of)\s+(?:the\s+)?po\b"
+    r"(?:ask|request|need|await|wait(?:ing)?\s+(?:for|on))\s+(?:(?:a|the)\s+)?" + _PO +
+    r"|(?:need|await|wait(?:ing)?\s+(?:for|on))\s+(?:a\s+|the\s+)?(?:decision|action|answer|approval)\s+(?:from|by|of)\s+(?:the\s+)?" + _PO +
     r"|po\s*(?:[:,]|must\b|needs?\s+to\b|please\b)"
-    r"|(?:прошу|просим|попросить|запросить|жд[её]м|жду|ожидаем|ожидаю|ожидать|ждать|дождаться)\s+(?:по\b|(?:решени[ея]|действи[ея]|ответа|согласования)\s+(?:от\s+)?по\b)"
-    r"|(?:нужно|нужен|нужна|требуется)\s+(?:решение|действие|ответ|согласование)\s+(?:от\s+)?по\b"
-    r"|(?:нужно|требуется)\s*,?\s*чтобы\s+по\b"
-    r"|по\s*(?:[:,]|должен\b|нужно\b|прошу\b))",
+    r"|(?:прошу|просим|попросить|запросить|жд[её]м|жду|ожидаем|ожидаю|ожидать|ждать|дождаться)\s+(?:" + _RU_PO + r"|(?:решени[ея]|действи[ея]|ответа|согласования)\s+(?:от\s+)?" + _RU_PO + r")"
+    r"|(?:нужно|нужен|нужна|требуется)\s+(?:решение|действие|ответ|согласование)\s+(?:от\s+)?" + _RU_PO +
+    r"|(?:нужно|требуется)\s*,?\s*чтобы\s+" + _RU_PO +
+    r"|" + _RU_PO + r"\s*(?:[:,]|должен\b|нужно\b|прошу\b))",
     re.IGNORECASE,
 )
 
