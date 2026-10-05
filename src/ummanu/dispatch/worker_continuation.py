@@ -19,7 +19,6 @@ from ummanu.dispatch.host import _record_worker_delivery_evidence
 from ummanu.dispatch.launch import STAGE_REWORK, WORKER_ROLE
 from ummanu.dispatch.launch import clear_launch_intent as _clear_launch_intent
 from ummanu.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
-from ummanu.dispatch.decision_pointer import decision_pointer
 from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt, now_rfc3339
 from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
 from ummanu.dispatch.tui import COMPOSER_EMPTY, COMPOSER_UNKNOWN, READINESS_BUSY
@@ -202,8 +201,7 @@ def complete_red_transition(
         task,
         record,
         target="in_progress",
-        reason=(decision_pointer(runtime, task, continuation.decision)
-                if continuation.decision else continuation.move_reason),
+        reason=continuation.move_reason,
         # The board refuses to take a card out of Assessment without a decision; a red gate
         # moving out of Validate carries none and is refused nothing.
         decision=continuation.decision,

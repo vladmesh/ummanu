@@ -7969,6 +7969,45 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._assert_one_generation(2)
         self.assertIn("Generation 2", self.host.resumed_continuations[-1])
 
+    def test_released_full_reason_continuation_survives_native_move_save_crash(self) -> None:
+        """The released continuation and native request retain the same bytes at upgrade."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self.assertEqual(self.tick()["to"], "assessment")
+        body = "Repair the native replay defect and keep the worker instruction."
+        self._decide("rework", body)
+        task = self.reader.show("ummanu-510")
+        payload = self.runtime.production_state.load()
+        records = self.runtime.production_state.records(payload)
+        record = records["ummanu-510"]
+        original = f"Observer decision: rework. {body}"
+        record.worker_continuation.begin_red_transition(
+            "review", len(task["comments"]), original, "red", "rework",
+            reserved_generation=2, decision_body=body)
+        self.runtime.save_records(payload, records)
+        request_id = _attempt_request_id(
+            record.attempt_id, "review-red", "ummanu-510", str(len(task["comments"])))
+        canon = self.writer.board_host.canon
+        with (mock.patch.object(self.runtime, "save_records", side_effect=OSError("lost state save")),
+              self.assertRaisesRegex(OSError, "lost state save")):
+            dispatcher_worker_continuation.complete_red_transition(
+                self.runtime, task, record, records, payload, record.attempt_id, ref="ummanu-510")
+        owned = canon.committed(request_id)
+        self.assertIsNotNone(owned)
+        self.assertEqual(owned.reason, original)
+        self.assertEqual(self._pilot_record()["report_generation"], 1)
+        with mock.patch.object(self.writer.board_host, "_move_card", wraps=self.writer.board_host._move_card) as move:
+            recovered = self.tick()
+        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        move.assert_not_called()
+        self.assertEqual(canon.committed(request_id), owned)
+        self._assert_one_generation(2)
+        self.assertIn(body, self.host.resumed_continuations[-1])
+        self.assertEqual(self.card_comments().count(f"[dispatcher]\n{original}"), 1)
+
     def test_a_new_round_removes_the_previous_rounds_report_body(self) -> None:
         """The last thing that could make a command from a round that is over report this one.
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ummanu.board.models import Actor, EntityKind, EventKind
 from ummanu.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
 from ummanu.board.roles import Role
 from ummanu.board.terminal_taxonomy import (
@@ -543,6 +544,23 @@ def terminal_effect(
     )
     if obligation is not None:
         obligation = {"card_ref": task["ref"], **obligation}
+    if decision in {"release", "reslice"}:
+        # These paths have no frozen continuation. Their native transition intent owns
+        # the reason once staged, including full-body reasons written by released code.
+        # The writer/host still checks the complete operation identity and data below.
+        canon = runtime.writer.board_host.canon
+        existing = canon.event(request_id) if canon is not None else None
+        if (
+            existing is not None
+            and existing.entity_kind is EntityKind.CARD
+            and existing.kind is (
+                EventKind.CARD_RELEASED if decision == "release" else EventKind.CARD_BLOCKED
+            )
+            and existing.ref == task["ref"]
+            and existing.actor == Actor("dispatcher", runtime.owner)
+            and existing.target_state == target
+        ):
+            reason = existing.reason
     effect = runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,

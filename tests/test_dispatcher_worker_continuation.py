@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import ast
 import copy
+from dataclasses import replace
 import inspect
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from ummanu.board import Actor, BoardEventPending, Card, CardState, EntityKind, SqlBoardHost, TransitionRequest
+from ummanu.board.fake import MemoryAudit
+from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch import worker_continuation as continuation_module
 from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from ummanu.dispatch.worker_lifecycle import (
@@ -144,7 +149,7 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.assertIsNone(self.recover("report:done"))
         self.assertEqual(self.runtime.mock_calls, [])
 
-    def test_recovered_observer_rework_moves_with_pointer_and_preserves_worker_instruction(self):
+    def test_recovered_observer_rework_keeps_frozen_reason_and_worker_instruction(self):
         self.runtime.audit.events.return_value = []
         body = "Repair the canonical defect and preserve its evidence."
         self.record.worker_continuation.begin_red_transition(
@@ -158,11 +163,31 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
             self.assertEqual(self.complete()["action"], "delivered")
         move = self.accounting.terminal_effect.call_args.kwargs
         self.assertEqual(move["decision"], "rework")
-        self.assertIn("[decision:rework]", move["reason"])
-        self.assertIn("task show --ref sample-1", move["reason"])
-        self.assertNotIn(body, move["reason"])
+        self.assertEqual(move["reason"], f"Observer decision: rework. {body}")
         self.assertEqual(self.record.report_decision, body)
         self.assertEqual(self.record.report_protocol_prerequisites, ("repair-contract",))
+
+    def test_new_observer_rework_freezes_pointer_before_move(self):
+        from ummanu.dispatch import assessment_decision
+
+        self.runtime.audit.events.return_value = []
+        body = "Repair the canonical defect and preserve its evidence."
+        frozen = []
+        self.runtime.save_records.side_effect = lambda *_: frozen.append(self.record.to_json())
+        with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={}):
+            assessment_decision.rework_parked(
+                self.runtime, self.task, self.record, self.records, self.payload, "tick",
+                reason=body, protocol_prerequisites=("repair-contract",))
+        reason = frozen[0]["worker_continuation"]["move_reason"]
+        self.assertIn("[decision:rework]", reason)
+        self.assertNotIn(body, reason)
+        self.assertEqual(self.accounting.terminal_effect.call_args.kwargs["reason"], reason)
+        # A retry cannot replace the pointer from its frozen intent with a newer audit read.
+        self.runtime.audit.events.side_effect = AssertionError("re-read frozen decision")
+        with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={}):
+            self.complete()
+        self.assertEqual(self.accounting.terminal_effect.call_args.kwargs["reason"], reason)
+        self.assertEqual(self.record.report_decision, body)
 
     def test_release_and_reslice_routing_keep_only_the_canonical_pointer(self):
         from ummanu.dispatch import assessment_decision, release_lifecycle
@@ -434,6 +459,105 @@ class ContinuationOwnershipTests(unittest.TestCase):
         positions = [advance_source.index(name) for name in names]
         self.assertEqual(positions, sorted(positions))
         self.assertNotIn("if continuation.delivery_pending:", advance_source)
+
+
+class DecisionNativeReplayTests(unittest.TestCase):
+    """Exercise the native host's strict replay seam without opening a SQL store."""
+
+    def setUp(self):
+        self.enterContext(mock.patch.object(attempt_accounting, "_attempt_outcome_obligation", return_value=None))
+        self.reset_native()
+
+    def reset_native(self):
+        self.audit = MemoryAudit()
+        self.host = SqlBoardHost(mock.sentinel.client, data_dir="/unused", audit=self.audit)
+        self.card = Card("sample-1", "Decision replay", CardState.ASSESSMENT)
+        self.host.read = mock.Mock(side_effect=lambda *_: self.card)
+        self.host._move_card = mock.Mock(side_effect=self.move_card)
+        self.runtime = SimpleNamespace(
+            owner="dispatcher", writer=SimpleNamespace(board_host=self.host, move=self.move))
+        self.record = DispatcherRecord(
+            worker="worker", workspace="/unused", handle="worker", head="codex",
+            review_head="claude", comment_baseline=0, review_baseline=0,
+            state="assessment", claimed_at=1.0, attempt_id="held-attempt")
+
+    def move_card(self, _card, target):
+        self.card = replace(self.card, state=target)
+
+    def move(self, **kwargs):
+        result = self.host.transition(TransitionRequest(
+            EntityKind.CARD, kwargs["reference"], CardState(kwargs["target"]),
+            Actor(kwargs["role"], kwargs["actor"]), kwargs["reason"],
+            request_id=kwargs["request_id"], data={"terminal_taxonomy": kwargs["terminal_taxonomy"]}))
+        return {"event_id": result.event.event_id}
+
+    def effect(self, decision, reason, request_id="decision-move"):
+        target = "done" if decision == "release" else "blocked"
+        return attempt_accounting.terminal_effect(
+            self.runtime, {"ref": "sample-1"}, self.record, target=target,
+            reason=reason, request_id=request_id, terminal_state=target,
+            disposition=decision, decision=decision)
+
+    def test_release_and_reslice_replay_owned_full_reason_and_new_pointer(self):
+        for decision in ("release", "reslice"):
+            for original in ("Observer decision: " + decision + ". Full released reason.",
+                             "Observer decision: " + decision + ". See canonical-event."):
+                for committed in (False, True):
+                    with self.subTest(decision=decision, original=original, committed=committed):
+                        self.reset_native()
+                        # The native host stages its own intent and performs the move; a failed
+                        # journal append leaves that exact owned record for recovery.
+                        with mock.patch.object(self.audit, "append", side_effect=OSError("lost commit")):
+                            with self.assertRaises(BoardEventPending):
+                                self.effect(decision, original)
+                        owned = self.host.canon.event("decision-move")
+                        if committed:
+                            self.host.canon.commit("decision-move", owned)
+                        self.effect(decision, "Observer decision: " + decision + ". See newer-event.")
+                        self.assertEqual(self.host.canon.committed("decision-move"), owned)
+                        self.assertEqual(self.host._move_card.call_count, 1)
+                        self.assertEqual(self.audit.status(), {"ok": True, "pending": 0})
+
+    def test_released_continuation_replays_native_move_after_lost_state_save(self):
+        body = "Repair the canonical defect and preserve its evidence."
+        original = f"Observer decision: rework. {body}"
+        self.record.worker_continuation.begin_red_transition(
+            "review", 0, original, "red", "rework", reserved_generation=2,
+            decision_body=body, decision_protocol_prerequisites=("repair-contract",))
+        frozen = self.record.to_json()
+        self.runtime.reader = SimpleNamespace(show=lambda _: {"ref": "sample-1", "comments": []})
+        self.runtime.save_records = mock.Mock(side_effect=OSError("lost state save"))
+        records = {"sample-1": self.record}
+        with self.assertRaisesRegex(OSError, "lost state save"):
+            continuation_module.complete_red_transition(
+                self.runtime, {"ref": "sample-1"}, self.record, records, {}, "tick", ref="sample-1")
+        events = self.host.canon.events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].reason, original)
+        self.record = DispatcherRecord.from_json(frozen)
+        records["sample-1"] = self.record
+        self.runtime.save_records.side_effect = None
+        with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={}):
+            continuation_module.complete_red_transition(
+                self.runtime, {"ref": "sample-1"}, self.record, records, {}, "new-tick", ref="sample-1")
+        self.assertEqual(self.host.canon.events(), events)
+        self.assertEqual(self.host._move_card.call_count, 1)
+        self.assertEqual(self.record.report_decision, body)
+        self.assertEqual(self.record.report_protocol_prerequisites, ("repair-contract",))
+        self.assertEqual(self.record.report_generation, 2)
+
+    def test_mismatched_native_identity_and_data_still_refuse(self):
+        self.effect("release", "original pointer")
+        owned = self.host.canon.committed("decision-move")
+        for field, value in (("ref", "other-1"), ("actor", Actor("dispatcher", "other")),
+                             ("target_state", "blocked"), ("data", {"foreign": True})):
+            with self.subTest(field=field):
+                foreign = replace(owned, **{field: value})
+                with mock.patch.object(self.host.canon, "event", return_value=foreign):
+                    with self.assertRaisesRegex(ValueError, "another operation or payload"):
+                        self.effect("release", "new pointer")
+                self.assertEqual(self.host.canon.committed("decision-move"), owned)
+                self.assertEqual(self.host._move_card.call_count, 1)
 
 
 if __name__ == "__main__":
