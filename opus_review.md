@@ -1086,3 +1086,318 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 4. **INEF-01 и INEF-04.** Профилирование тика и рендера карточки на реальном числе активных карточек и runs.
 5. **CON-03 и CON-18.** Намеренны ли `status:"ok"` при блокировке и потеря ESCALATE на healthy-тиках: вопрос к владельцу контракта.
 6. **BUG-19 и BUG-24 (Г-часть).** Проверка тестами отказов.
+
+## 12. Проверка на production-хосте (2026-10-05, прод на 6b0d85c7)
+
+Проверка шла только на чтение: `SELECT` под ролью `ummanu_read` с `default_transaction_read_only=on`, файлы в `~/ummanu-data`, `systemctl show/cat`, `journalctl`, `gh api` GET и несколько `curl` GET к `127.0.0.1:8787`. Сервисы не перезапускались, в доску и в инстанс ничего не писалось. Секреты в отчёт не попали.
+
+**Ревизия прода.** `/home/dev/ummanu` HEAD — `6b0d85c7` (merge PR #667), рабочее дерево чистое. От `e310833` отличается одним файлом, `tests/test_local_pty_supervisor.py` (+13/−8), поэтому все ссылки file:line из §1–§11 верны и для прода.
+
+**Окно истории.** Журналы systemd под нынешними именами юнитов начинаются 2026-10-02 08:38 (переименование secretary → ummanu). У `secretary-web.service` журнал есть с 2026-09-25. Аудит `requests` хранится с 2026-07-13, `runs.jsonl` ролей — с 2026-08-04, Codex rollout — с 2026-09-24.
+
+### Сводка
+
+| Пункт | Вердикт |
+|---|---|
+| DOC-06 | **подтверждено** (curator) |
+| BUG-11 | **опровергнуто по истории** (2 из 2 реальных повторных подъёмов прошли) |
+| DEAD-H1 | **подтверждено** (staged-строк не было и нет; settle и recover работы не находили) |
+| DEAD-R | **подтверждено** (дублей нет, pending-ремонтов нет) |
+| BUG-10 | **подтверждено**, плюс вторая слепая зона: регэксп имён |
+| BUG-14 | **подтверждено** (failed с 2026-10-05) |
+| BUG-13 | **опровергнуто для этого хоста** (настроена модель по умолчанию) |
+| BUG-20 | **подтверждено** |
+| BUG-23 (продукт) | **опровергнуто для этого хоста** |
+| BUG-07 | **опровергнуто по истории** (0 ответов 500 с 25.09) |
+| BUG-12 | **опровергнуто по истории** |
+| CON-08 | **подтверждено** (форматы сосуществуют); влияние — сравнение в пределах одной секунды |
+| CON-09 | **опровергнуто для этого хоста** |
+| BUG-24 EXDEV | **опровергнуто для этого хоста** |
+| INEF-01/04/05/07/11/12/13 | масштаб измерен (12.14). Главное: `cleanup.json` 37,5 МБ переписывается ≈91 раз за 5 мин; тик 05.10 — 100–466 с при 72 % CPU |
+| Branch protection, `e2e-synthetic` | `main` не защищена; адаптера нет |
+
+### 12.1 DOC-06: видят ли Codex-головы свои role-skills
+
+**Что проверено:**
+- `ls -la <data>/codex-home/skills` и `~/.config/orca/codex-runtime-home/home/skills`;
+- `skills/manifest.toml` и `heads/heads.yaml`;
+- `/proc/<pid>/environ` живых Codex-голов;
+- каталог `## Skills` во всех rollout `<data>/codex-home/sessions/**`: 1 483 файла, из них 349 TUI.
+
+**Найдено (Ф):**
+- В `<data>/codex-home/skills` есть только `.system`. В Orca-корне лежат все 9 role-skills, включая `curate`, `retro`, `steward`, `observe-sprint`, `open-sprint`, `knowledge-doc` и `grilling`.
+- Живые Codex-головы запускаются с `CODEX_HOME=/home/dev/ummanu-data/codex-home`. Это видно у pid 377672/377679 (observer sprint-1479) и у curator.
+- Сейчас Codex использует из ролей только curator: `role_defaults.curator = codex-terra-high-local-pty`. Steward и retro работают на Claude, их `.claude/skills/{steward,retro}` в workspace на месте.
+- Все 9 TUI-сессий curator за 03–04.10 показывают один и тот же каталог: `Skill roots: r0 = <data>/codex-home/skills/.system` плюс plugin-кэш. Доступны только `imagegen`, `openai-docs`, `skill-creator` и `skill-installer`; `curate` в каталоге нет.
+- Ни один rollout из 1 483 не содержит `curate`, `steward`, `retro` или `observe-sprint` в каталоге. Role-skills видны только PO (`codex_exec`, cwd `<data>/po`, корень `@po/.agents/skills`: `grilling`, `knowledge-doc`, `open-sprint`).
+- Пример: сессия `rollout-2026-10-04T22-00-20-*`, prompt `$curate`. Голова сначала ищет инструменты по `/curat/`, затем `memory_search("… $curate")`, затем `rg -i curate` по своему cwd. Только после этого она пишет «I found the installed `curate` role procedure» и читает `skills/roles/curator/curate/SKILL.md`.
+- Это работает лишь потому, что cwd curator (`~/orca/workspaces/ummanu/curator`) — git-checkout самого ummanu от 2026-10-02. Значит, голова читает версию skill из checkout, а не синхронизированную копию.
+- Попутно (DOC-07, **Ф**): `codex-home/AGENTS.md` этой сессии велит звать сервер памяти `memory`.
+
+**Вердикт: подтверждено** для curator, единственной Codex-роли на этом хосте. Interactive/retro/steward на Codex сейчас не настроены. Для них дефект латентный: при переключении профиля они так же не увидят skill.
+
+### 12.2 BUG-11: повторный подъём на том же `run_id` с устаревшим `head.pid`
+
+**Что проверено:**
+- все 838 `heads/*/journal.jsonl`: поиск run-директорий с несколькими `run.started` и остановок с инициатором `head-launch` (сигнатура `_abandon_bring_up`, `local_pty_head.py:2292-2333`);
+- `automation-state/{curator,steward,retro}/runs.jsonl`;
+- journald ролей;
+- `task_comments` на тексты `DELIVER_HEAD_ENDED` (`local_pty_head.py:366`) и «its prompt did not reach it».
+
+**Найдено (Ф):**
+- **Повторные подъёмы на том же run_id.** Их 5 run-директорий: curator `5f36bbcb` (×3, 24.09), `8c826d2e` (×2, 24.09 и 03.10 15:58), `c4ee912c` (×2, 04.10 12:41 и 22:00); steward `0af77284` (×6); retro `2e203b4c` (×2).
+- **Случаи с Codex TUI.** Prompt после старта (`curator-dispatch` + `curator-dispatch:submit`) при мёртвом прошлом pid был дважды: `8c826d2e` 03.10 и `c4ee912c` 04.10 22:00.
+  - В `c4ee912c` прошлая инкарнация остановлена `drain.requested po` в 21:40:50, без `run.exited`.
+  - Новый `head.pid` записан в 22:00:18, prompt отправлен в 22:00:26. Оба `input.accepted` прошли, `turn.started` есть, в `runs.jsonl` записано `supervised-started` и `advance` в 22:03.
+- **Остановки `head-launch`.** Их 0. `supervised-start-failed` и аналогов в `runs.jsonl` ролей тоже нет.
+- **`DELIVER_HEAD_ENDED` в истории — 2 раза, оба на карточках, а не у постоянных ролей:**
+  - `secretary-1713`, 24.09: reviewer, 10 неудачных запусков подряд;
+  - `butler-12`, 02.10 17:38: worker, run `3b3a9012`. Run_id свежий, один `run.started`. Голова действительно завершилась через 0,8 с после submit (`turn.finished head_exited`, `run.exited`). Устаревший pid тут ни при чём.
+
+**Почему не сработало (О):** `_identity_written` (`client.py:294-306`) действительно принимает старую запись. Но к моменту `_rehydrate` перед доставкой prompt (через ≈6–8 с после старта) launch-обёртка уже перезаписала `head.pid` новым живым pid. Опасное окно — только время между возвратом `start` и записью новой identity.
+
+**Вердикт: опровергнуто по истории.** Оба реальных случая Codex-TUI на переиспользованном run_id прошли успешно. Узкая гонка в коде остаётся (**Г**), её закрывает тест из §11.3 п.1.
+
+### 12.3 DEAD-H1: остаются ли протокольные `requests` в `staged`
+
+**Что проверено:**
+- `SELECT status, count(*) FROM requests GROUP BY 1`;
+- распределение `settled_at - created_at` по `protocol`;
+- поиск `stale_refusal`;
+- журнал диспетчера на «unresolved pending record» и «stale staged».
+
+**Найдено (Ф):**
+- В `requests` 53 695 строк (2026-07-13 … 2026-10-05), все `committed`. `staged` — 0, `discarded` — 0.
+- Задержка между `created_at` и `settled_at`:
+
+  | Строки | Число | Максимум | Дольше 1 мин | Дольше 15 мин |
+  |---|---|---|---|---|
+  | протокольные | 14 842 | 5,2 с | 0 | 0 |
+  | прочие | 38 853 | 1 мин 24 с | 2 | 0 |
+
+- `settle_stale_staged` (`sql_audit.py`, грейс `STALE_STAGED_GRACE_SECONDS = 900`) коммитит только строки старше 15 мин, а отказ оставил бы `discarded`. Ни одной такой строки нет, значит работы он не находил ни разу.
+- `oldest_pending` вызывается только для текста отказа checkpoint (`checkpoint.py:155,529`). Отказ «unresolved pending record(s)» в журнале диспетчера (с 02.10) встречается 0 раз.
+- `recover_*` (`sql_host.py:464-660`) вызываются из `tasks.py:5255,5259,5383` и `product_issues.py:1036,1330,1401` только над staged-строкой. Логов нет, но и предусловия на хранилище не было ни разу.
+- Оговорка (Г): транзиентная staged-строка (≤5 с) теоретически может попасть в `reconcile` соседнего процесса. Следов этого нет.
+
+**Вердикт: подтверждено.** В production протокольные строки в `staged` не задерживаются, settle и recover работы не находили. Вывод машинерии из эксплуатации по этому критерию обоснован.
+
+### 12.4 DEAD-R: дубли ссылок и pending `reference_repaired`
+
+**Что проверено:** дубли `tasks` по `task_ref`, `(project_id, task_number)` и `board_key`; уникальные индексы `tasks`; строки `requests` с `operation='reference_repaired'`.
+
+**Найдено (Ф):**
+- В `tasks` 1 729 строк. Число различных `task_ref`, номеров и `board_key` тоже 1 729.
+- Уникальность обеспечивают индексы `tasks_pkey`, `tasks_project_id_task_number_key` и `uq_tasks_board_key`.
+- `reference_repaired` встречается 2 раза, оба `committed`: `secretary-1551` и `secretary-1552`, 2026-09-05 11:56, ещё на `backend.kind = kanboard`.
+- Pending-строк нет.
+
+**Вердикт: подтверждено.** Дублей нет, pending-ремонтов нет, а на PostgreSQL дубль невозможен по схеме. `board/reference_repair.py` можно выводить.
+
+### 12.5 BUG-10: в каком корне steward ищет осиротевшие workspace
+
+**Что проверено:**
+- `systemctl cat ummanu-steward.service` и `packaging/systemd/ummanu-steward.service:13-17`;
+- `runtime.env` (только ключи);
+- `automation-state/steward/{runs.jsonl,watermark.json}`;
+- содержимое `<data>/workspaces/*` против состояния карточек в `tasks`.
+
+**Найдено (Ф):**
+- Юнит и `runtime.env` не задают `TA_WORKSPACES_ROOT`, поэтому steward сканирует `~/orca/workspaces` (`shared_state.py:8`). Там нет ни одного каталога с pipeline-именем: только `ummanu/{curator,pipeline,retro,steward}` и один старый `codegen_orchestrator/codegen-orchestrator-1342-…`.
+- `new_orphan_workspaces` равно 0 во всех 121 precheck с 2026-08-04 по 2026-10-05. `notified_orphans = []`.
+- Реально в `<data>/workspaces` лежит 41 карточный workspace (без `observers/`). Из них 29 принадлежат `done`-карточкам (13 из них уже archived), 2 — archived `ready`-карточкам (`codegen-orchestrator-1456`, `-1488`). Ещё 8 — блокированные или в работе, то есть живые.
+- **Вторая слепая зона (Ф, новая).** `_PIPELINE_WS_RE = ^(review-)?\d+-` (`steward/signals.py:448`) ждёт имя, начинающееся с цифр. Нынешние имена — `<project>-<n>-<slug>`. Регэксп совпадает с 0 из 41. Поэтому даже с правильным `TA_WORKSPACES_ROOT` сигнал останется слеп.
+
+**Вердикт: подтверждено.** Сигнал сирот мёртв по двум причинам: корень и регэксп.
+
+### 12.6 BUG-14: `ummanu-instance-maintenance`
+
+**Что проверено:** `systemctl show` для service и timer; journald обоих имён юнита; `git count-objects -v` по `<data>/backup/*.git` (только чтение).
+
+**Найдено (Ф):**
+- Юнит `failed`, `ExecMainStatus=1`, последний запуск 2026-10-05 04:26:59 UTC: `{"error": "instance repo is not a git repository: /home/dev/ummanu-data/instance", "status": "failed"}`. Следующий запуск — 2026-10-06 04:20:58, он упадёт так же.
+- До этого запуски шли успешно (`status: ok`) — `secretary-instance-maintenance` с 27.09 и `ummanu-…` 03.10 и 04.10. Тогда работали Docker-cleanup (например, 29.09: удалено 9 и 3 анонимных тома) и упаковка: 04.10 loose 10 495 → 5, packs 13 → 14. Instance тогда указывал на `/home/dev/secretary-instance`.
+- Юнит переписан 2026-10-04 12:10. Instance стал обычным каталогом `<data>/instance` (live root, создан 04.10 13:44).
+- Bare snapshot repo `<data>/backup/ummanu-instance.git` не упакован ни разу: 7 953 loose-объекта, 141 MiB, 0 packs. Последний коммит — 2026-10-05 23:17.
+
+**Вердикт: подтверждено.** Падение началось с переходом на live root (1 падение на момент проверки). Docker-cleanup и упаковка с 05.10 не выполняются.
+
+### 12.7 BUG-13: модель индекса памяти
+
+**Что проверено:** `instance.yaml` (`host.memory_model` / `memory_dim`), `Environment` юнита `ummanu-memory.service`, `index_metadata` в `<data>/memory/index.sqlite` (открыт `mode=ro`), `manifest.json`.
+
+**Найдено (Ф):**
+- В конфиге `memory_model: intfloat/multilingual-e5-large`, `memory_dim: 1024`; юнит указывает то же.
+- В индексе `model = intfloat/multilingual-e5-large`, `dimension = 1024`, `schema = 2`, 345 фактов, `vec0(embedding float[1024])`. Последняя пересборка — 2026-10-04 22:03.
+- Настроенная модель совпадает с той, что зашита в `installation.py` и `memory/__init__.py:6`. Поэтому пересборка через install/recover здесь не меняет индекс, даже если она была.
+
+**Вердикт: опровергнуто для этого хоста.** Дефект кода (Ф по трассировке) остаётся латентным для любой установки с другой моделью.
+
+### 12.8 BUG-20: CSP и Google Fonts
+
+**Что проверено:** `curl -D` для `/`, `/projects/ummanu` и `/tasks/ummanu-90` на `127.0.0.1:8787`; поиск ссылок на шрифты в HTML.
+
+**Найдено (Ф):**
+- Живой заголовок: `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'`.
+- В каждой из трёх страниц есть `<link rel="preconnect" href="https://fonts.googleapis.com">` и `<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans…">` (`pages.py:530,897-898`).
+- В политике нет ни внешнего `style-src`, ни `font-src`, поэтому таблица стилей блокируется, и шрифт откатывается на системный.
+
+**Вердикт: подтверждено** по заголовку и разметке. Консоль браузера не смотрели, но семантика CSP однозначна.
+
+### 12.9 BUG-23, продуктовая часть: login-профиль в stdout
+
+**Что проверено:** `bash -lc 'echo MARK'` под `dev`; `~/.profile` и `~/.bashrc` на `nvm`; `grep nvm` по `instance/gate-runs` (16 файлов) и по worker-local receipts в `<data>/workspaces/*/*/.ummanu-task-env/checks`.
+
+**Найдено (Ф):** login-shell печатает только `MARK`, в профилях `nvm` нет, совпадений в gate-runs и receipts — 0.
+
+**Вердикт: опровергнуто для этого хоста.** Утечка из §9 BUG-23 — свойство контейнера аудитора. Негерметичность тестов при этом остаётся (Ф).
+
+### 12.10 BUG-07: HTTP 500 от устаревшей записи диспетчера
+
+**Что проверено:** access-лог `ummanu-web.service` (с 02.10) и `secretary-web.service` (25.09–02.10), разбор по статусам; классы трейсбеков; Caddyfile на наличие `log`.
+
+**Найдено (Ф):**
+- **ummanu-web:** 7 339 ответов 200, 199 — 303, 3 — 401, 1 — 503 (`GET /` 2026-10-04 10:59:52, это `backend_unavailable`, `statuses.py:41`).
+- **secretary-web:** 16 799 ответов 200, 347 — 303, 3 — 400, 5 — 401, 2 — 404.
+- Статуса 500 нет ни разу.
+- Трейсбеки: 50 `BrokenPipeError`, 9 `ConnectionResetError` и 4 обрыва при обработке запроса — всё это клиентские разрывы. `DispatcherError` и `LegacyDispatcherRecord` не встречаются.
+- В Caddyfile нет директивы `log`, поэтому access-лога фронта нет.
+- Сейчас в `production-state.json` 3 записи `records`, и дашборд отвечает 200.
+
+**Вердикт: опровергнуто по истории** (окно 25.09–05.10). Кодовый путь (Ф) остаётся.
+
+### 12.11 BUG-12: operation-карточки после ремонта pending-create
+
+**Что проверено:**
+- `tasks.extensions->'extra'` по `task_type`;
+- история `requests` у единственной operation-карточки без поля;
+- `sql_cards.py:1110-1117` (чтение `record_type`).
+
+**Найдено (Ф):**
+- Operation-карточек 74 (2026-09-26 … 2026-10-05). У 73 есть `touches_production`.
+- Без поля только `secretary-1763`. Она создана 2026-09-26 15:47:49 обычным путём: строка `created` закоммичена через 1,7 мс, актор observer. Первая карточка с полем появилась в 18:11 того же дня, то есть `secretary-1763` старше самого поля.
+- Ремонт pending-create требует задержавшейся staged-строки, а таких не было (12.3).
+- `record_type="task"` на PostgreSQL выставляет чтение для любой строки `tasks` (`sql_cards.py:1117`), поэтому эта половина находки на SQL-бэкенде не проявляется.
+
+**Вердикт: опровергнуто по истории.** Ремонтных create не было. Расхождение кода (`tasks.py:5877-5920`) остаётся, но достижимо только из staged-строки.
+
+### 12.12 CON-08 и CON-09: форматы времени и env-файлы
+
+**Что проверено:**
+- типы всех колонок `*_at`;
+- доля дробных секунд по таблицам;
+- формы строк-времени в `requests.intent`, `tasks.extensions` и `production-state.json`;
+- форма строк `runtime.env`, `board-store.env`, `webfront/owner-password.env`: счётчики `export`, кавычек, `$`, `\`, пробелов и расхождений с `shlex.split`. Значения не печатались.
+
+**Найдено (Ф):**
+- Все колонки времени в БД — `timestamptz`, поэтому сравнение в SQL типизировано.
+- Точность смешанная:
+
+  | Колонка | Дробные секунды |
+  |---|---|
+  | `board_events.occurred_at` | 14 844 из 14 844 |
+  | `requests.created_at` | 31 661 из 53 702 |
+  | `task_comments.created_at` | 10 816 из 26 939 |
+  | `tasks.created_at` | 747 из 1 729 |
+  | `sprints.created_at` | 45 из 149 |
+
+- В JSON-тексте формы сосуществуют:
+  - `requests.intent` (`at` / `occurred_at` и т. п.): `…:SSZ` — 38 858, `…:SS.ffffffZ` — 14 844;
+  - `tasks.extensions`: 470 и 186;
+  - `production-state.json`: 200 и 2;
+  - `runs.jsonl` ролей: `…+00:00` (374).
+- `chargeSprintE2e(at=isoformat())` пишет в `sprint_e2e_charges.charged_at timestamptz` и поэтому безвреден.
+- Строковое сравнение `Z` с `.fZ` и `+00:00` ошибается только в пределах одной секунды.
+- Env-файлы. `runtime.env`: 1 строка `KEY=VAL` и 2 комментария. `board-store.env`: 9 строк `KEY=VAL`. `owner-password.env`: 1 строка. Ни `export`, ни кавычек, ни `$` или `\`, ни расхождений с `shlex`.
+
+**Вердикт:** CON-08 — **подтверждено** (сосуществуют), влияние ограничено одной секундой (**О**). CON-09 — **опровергнуто для этого хоста**: три парсера читают эти файлы одинаково.
+
+### 12.13 BUG-24: EXDEV у backup
+
+**Что проверено:** юниты `*backup*`; `PrivateTmp` у всех юнитов `ummanu*`; `findmnt -T /tmp` и `-T <data>`; `<data>/backups`.
+
+**Найдено (Ф):**
+- Юнитов backup нет, бэкап запускается вручную.
+- `PrivateTmp=yes` нет ни у одного юнита.
+- `/tmp` и `<data>` лежат на одной ФС: `/dev/sda2`, ext4.
+- Последний бэкап — `ummanu-backup-{core,full}-20261002T114729Z.tar` (2,9 ГиБ и 1,0 ГиБ), создан успешно.
+
+**Вердикт: опровергнуто для этого хоста.** Гипотеза остаётся для хостов с tmpfs-`/tmp`.
+
+### 12.14 Масштаб INEF-01, -04, -05, -07, -11, -12, -13
+
+**Что проверено:**
+- `production-state.json` и `dispatcher/cleanup.json`;
+- `<data>/webproto/runs`;
+- `requests` с `product_run.*`;
+- размеры журналов голов;
+- интервалы тиков по journald (`OnUnitActiveSec=60s`, поэтому интервал ≈ длительность + 60 с);
+- `tick_telemetry`;
+- `ps` (накопленное CPU);
+- `pg_stat_database.sessions` (два замера);
+- inotify-наблюдение за `dispatcher/` в течение 300 с;
+- 7 одиночных GET.
+
+**Найдено (Ф):**
+- **INEF-01.** Сейчас в диспетчере 3 активные записи `records`, 129 `attempts` и 38 `resume_workspaces`. Главный множитель — не число записей, а размер журнала cleanup:
+  - `dispatcher/cleanup.json` весит 37,5 МБ: 240 intents, медиана 41 КБ, максимум 675 КБ, основной объём — поля `heads` и `record`;
+  - файл переписывается вместе с `production-state.json` (531 КБ, mtime совпадают до 0,07 с);
+  - **inotify 23:27:32–23:32:33 (300 с; один тик закончился в 23:29:54, следующий шёл):** `cleanup.json` атомарно заменён (`IN_MOVED_TO`) 91 раз, сериями примерно раз в 0,8 с (t = 145–157 с и 181–219 с). Это ≈3,4 ГБ записи за 5 минут, ≈11 МБ/с в среднем. За то же окно `production-state.json` заменён 12 раз, `resource_health.json` — 1 раз;
+  - процесс тика загружен CPU: `production-tick` за 109 с жизни потребил 78 с CPU (72 %), а на хосте всего 3 ядра;
+  - длительность тика:
+
+    | Период | Медиана | p90 |
+    |---|---|---|
+    | 02–04.10 | ≈5 с | 45–55 с |
+    | 05.10 | ≈100 с | ≈380 с |
+
+    `tick_telemetry.last.duration_ms` равно 466 308, из них checkpoint — 51–54 с.
+  - Причину роста 05.10 без профилирования не разделить (**Г**).
+- **INEF-04.** Product-run записей 4: `<data>/webproto/runs/*.json` от 2026-09-06. Аудит `product_run.started` и `.finished` — по 10 строк, все 06.09, роста нет.
+  - Карточка по логу: `GET /tasks/{ref}` p50 163 мс, p90 2,9 с (n = 160); замеры 0,17 и 0,14 с.
+  - Сама находка (Ф) верна, но на нынешних объёмах цена ничтожна.
+- **INEF-05.**
+  - Журналов голов 838 (`heads/`, 49 МиБ) плюс 305 в `po-heads` (0,5 МиБ). `du`: `heads` 66 МБ, `po-runs` 28 МБ. Ротации и удаления нет: все run-директории с 24.09 на месте.
+  - Самый большой журнал — 1,8 МиБ.
+  - Рост за активное время головы (n = 338): p50 49 КиБ/ч, p90 0,48 МиБ/ч, максимум 1,14 МиБ/ч. Оценка аудита ≈1,4 МБ/ч соответствует худшему случаю.
+  - Вывод PTY в журнал не пишется: в нём только события с счётчиками байт, хвост лежит в `output.tail`.
+- **INEF-07.** `production-state.json` (531 КБ) заменён 12 раз за 300 с, при 3 активных записях. На 1,5 тика это ≈8 перезаписей за тик, ≈6 МБ. Привязать отдельные записи к `wait_vitality` и `review_verdict` без трассировки нельзя.
+- **INEF-11.**
+  - Страницы: `/` 53,8 КБ (13,7 КБ gzip), `/projects/ummanu` 47,3 КБ (11,8 КБ), `/tasks/ummanu-90` 67,5 КБ (18,2 КБ).
+  - В Caddyfile нет `encode`.
+  - Автообновление 30 с включено по умолчанию (`localStorage 'ummanu.web.refresh' !== 'off'`). Открытый дашборд даёт ≈155 МБ в сутки, с gzip было бы ≈39 МБ.
+  - Латентность по логу с 03.10: `/` p50 1,9 с, p90 4,5 с, максимум 12,9 с (n = 60); `/api/system` p50 1,9 с; `/sprints` p50 0,6 с, p90 3,1 с; `/po/sessions/{id}` p50 0,47 с, p90 2,9 с (n = 1 569).
+- **INEF-12.** `pg_stat_database.sessions` = 43 803 при старте postmaster 2026-10-02 08:37 (`stats_reset` NULL). Это ≈505 сессий в час, если считать от старта; средняя сессия ≈36 с. Сейчас открыто 4 соединения `ummanu_app`. Второй замер — 43 832 в 23:31:47: +29 сессий за 5 мин 08 с, то есть ≈340 в час сейчас. Разделить сессии по процессам нельзя: `application_name` пуст.
+- **INEF-13.** Supervisor каждой головы держит 0,09–0,17 % CPU, `web-serve` — 3 %, `po-serve` — 0,9 %. Опрос `_await_*` идёт внутри процесса тика, и его долю в 72 % CPU тика без профилировщика не выделить (**Г**).
+
+**Вердикт:**
+- INEF-01 — **подтверждено и масштабнее оценки**: дорог не `reader.show`, а 37,5-мегабайтный `cleanup.json`, который переписывается до раза в секунду.
+- INEF-04 — **подтверждено, но масштаб ничтожен**.
+- INEF-05 — **подтверждено** (нет ротации), рост ниже оценки.
+- INEF-07 — **подтверждено** (≈8 перезаписей state за тик).
+- INEF-11 — **подтверждено**.
+- INEF-12 — **частично**: ≈340 сессий в час, по процессам не разделено.
+- Доли INEF-01/07/13 в CPU тика — **не определено по истории**, эксперимент ниже.
+
+### 12.15 Факты репозитория
+
+**Что проверено:** `gh api repos/vladmesh/ummanu/branches/main/protection`, `…/rules/branches/main`, `…/rulesets`; `instance/adapters/*.yaml`; запуски workflow `e2e-synthetic.yml`.
+
+**Найдено (Ф):**
+- **Защиты `main` нет:** protection отвечает 404 «Branch not protected», rules и rulesets — `[]`. Значит, `typecheck` (как и любой другой check) не обязателен (CI-01).
+- **`e2e-synthetic.yml`** — workflow без тестов: на `workflow_dispatch` он спит заданное число минут и завершается с заданным `outcome`, его писали для live proof sprint:1469.
+  - Ни один из 16 адаптеров инстанса на него не ссылается.
+  - Единственный адаптер с `validation.e2e` — `codegen-orchestrator.yaml` (`stand-e2e.yml`, `after_merge`, `mega-noop`).
+  - Запусков за всё время 2, оба 2026-09-28.
+  - По его собственному заголовку его можно удалять.
+
+### 12.16 Что осталось не определено, и как это закрыть
+
+| Пункт | Эксперимент | Риск для спринтов, карточек и PO |
+|---|---|---|
+| Доли INEF-01/07/13 в CPU тика (72 %, 100–466 с 05.10) | `py-spy record --pid <tick> --duration 120 --rate 20 --nonblocking` на одном тике; альтернатива — `cProfile` через тот же `ummanu dispatcher production-tick` на стенде-реплике | `--nonblocking` не останавливает процесс, тик удлиняется на ≈1–3 %. Это профилировщик на живом процессе, поэтому нужно разрешение владельца; на стенде риска нет |
+| Перезаписи state и cleanup по тикам и вызывающим (INEF-01/07): 300-секундного окна мало | inotify на `dispatcher/` (только чтение) на 1 ч, сопоставить с границами тиков в journald; вызывающих показывает py-spy из строки выше | Нулевой: процессы не трогаются |
+| Темп `sessions` по процессам (INEF-12) | Включить `log_connections` или задать `application_name` в DSN | Включение `log_connections` требует reload Postgres: доска не прерывается, но это запись в конфиг БД, поэтому только окно владельца. Через DSN — правка кода |
+| Узкая гонка BUG-11 | Unit-тест: Codex-TUI профиль, `head.pid` прошлой инкарнации с тем же `run_id` и мёртвым pid, `start` возвращает до записи новой identity | Нулевой, локальный тест |
+
+Временные файлы были в `/tmp/research-ummanu-90` и удалены; фоновых процессов не осталось.
