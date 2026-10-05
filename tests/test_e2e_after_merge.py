@@ -1216,15 +1216,17 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(len([card for card in self.reader.list() if card.get("type") == "operation"]), 1)
         return cards, run
 
-    def native_complete(self, carrier, action="retry", *, holder="", malformed=False, bare=False,
-                        request="native-disposition-complete", session="disposition-po"):
+    def prepare_native_completion(self, carrier, action="retry", *, holder="", malformed=False, bare=False,
+                                  request="native-disposition-complete", session="disposition-po"):
+        """Commit native preparation separately; stable claims replay its session and turn."""
         run = self.run_of(carrier, 0)
         operation = self.reader.show(run.disposition)
         store = PoStore(self.board.credentials)
-        store.create_session(session_id=session, cli="claude", model="sonnet", effort="high",
-                             cwd=str(self.data_dir), cli_session_id=None)
-        store.claim_turn(session, "Resolve the actual after-merge disposition", lambda seq: self.data_dir / f"{session}-{seq}.log",
-                         request_id=request + "-turn", card={"ref": operation["ref"], "type": "operation"})
+        claimed_session, session_created = store.claim_session(session_id=session, cli="claude", model="sonnet", effort="high",
+            cwd=str(self.data_dir), cli_session_id=None, request_id=request + "-po-create")
+        self.assertEqual(claimed_session.session_id, session)
+        turn, turn_created = store.claim_turn(session, "Resolve the actual after-merge disposition", lambda seq: self.data_dir / f"{session}-{seq}.log",
+            request_id=request + "-turn", card={"ref": operation["ref"], "type": "operation"})
         if operation.get("sprint"):
             SprintWriter(self.board, data_dir=self.data_dir).set_po_session(role="po", actor="po",
                 reference=operation["sprint"], session_id=session, request_id=request + "-session")
@@ -1249,14 +1251,24 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         body = "## What was done\nInvestigated the prior effect.\n\n## How to verify\nRead the original run and dispatch receipt."
         if not bare:
             body += "\n\n## E2E disposition\n" + json.dumps(record)
-        completed = self.writer.complete(role="po", actor="po", reference=operation["ref"],
-            kind="operation", body=body, po_session=session, request_id=request)
-        repeated = self.writer.complete(role="po", actor="po", reference=operation["ref"],
-            kind="operation", body=body, po_session=session, request_id=request)
+        return {"store": store, "turn": turn, "session_created": session_created, "turn_created": turn_created,
+            "completion": {"role": "po", "actor": "po", "reference": operation["ref"], "kind": "operation",
+                           "body": body, "po_session": session, "request_id": request}}
+
+    def complete_native(self, prepared):
+        """Retry only the prepared completion, retaining its exact body/session/turn/request."""
+        completed = self.writer.complete(**prepared["completion"])
+        repeated = self.writer.complete(**prepared["completion"])
         self.assertEqual(completed["event_id"], repeated["event_id"])
         self.assertTrue(repeated["replayed"])
-        store.complete_turn(session, store.turns(session)[-1].seq, "Disposition recorded")
+        store, turn = prepared["store"], prepared["turn"]
+        was_running = store.turn(turn.session_id, turn.seq).state == "running"
+        self.assertEqual(store.complete_turn(turn.session_id, turn.seq, "Disposition recorded"), was_running)
+        self.assertEqual(store.turn(turn.session_id, turn.seq).state, "completed")
         return completed
+
+    def native_complete(self, carrier, action="retry", **options):
+        return self.complete_native(self.prepare_native_completion(carrier, action, **options))
 
     def drop_queue(self):
         with file_lock(self.runtime.production_state.tick_lock):
@@ -1358,6 +1370,19 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
 
     def test_native_completion_comment_failure_rolls_back_done_and_outcome(self):
         cards, run = self.uncertain()
+        prepared = self.prepare_native_completion(cards[-1])
+        self.assertTrue(prepared["session_created"])
+        self.assertTrue(prepared["turn_created"])
+        store, turn = prepared["store"], prepared["turn"]
+        request = prepared["completion"]["request_id"]
+        session = store.session(turn.session_id)
+        feed = store.feed(turn.session_id)
+        claimed = self.writer.audit.committed_event(request + "-claim")
+        self.assertIsNotNone(claimed)
+        po_requests = [store.request(request + suffix) for suffix in ("-po-create", "-turn")]
+        self.assertTrue(all(po_requests))
+        self.assertEqual(store.turns(turn.session_id), [turn])
+        self.assertEqual(len(feed), 1)
         real_call = self.board.call
         def failed_comment(method, **fields):
             if method == "createComment" and "[completion:operation]" in str(fields.get("content")):
@@ -1366,12 +1391,18 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         # The native SQL transition rolls back and translates a post-effect
         # failure into TaskError; the injected backend exception is not public.
         with mock.patch.object(self.board, "call", side_effect=failed_comment), self.assertRaisesRegex(TaskError, "rolled back together with its record") as raised:
-            self.native_complete(cards[-1])
+            self.complete_native(prepared)
         self.assertEqual((raised.exception.code, raised.exception.exit_code), ("backend_error", 1))
         operation = self.reader.show(run.disposition)
         self.assertEqual(operation["state"], "in_progress")
         self.assertFalse(any("[completion:operation]" in comment["body"] for comment in operation["comments"]))
-        self.assertIsNone(self.writer.audit.committed_event("native-disposition-complete"))
+        self.assertIsNone(self.writer.audit.committed_event(request))
+        self.assertEqual(self.writer.client._query("SELECT count(*) FROM requests WHERE request_id=%s", (request,)), [(0,)])
+        self.assertEqual(store.session(turn.session_id), session)
+        self.assertEqual(store.turns(turn.session_id), [turn])
+        self.assertEqual(store.feed(turn.session_id), feed)
+        self.assertEqual(self.writer.audit.committed_event(request + "-claim"), claimed)
+        self.assertEqual([store.request(request + suffix) for suffix in ("-po-create", "-turn")], po_requests)
         self.am_tick()
         receipt = self.run_of(cards[-1], 0).disposition_result
         self.assertEqual((receipt["status"], receipt["action"], receipt["holder"]), ("waiting", "", run.disposition))
@@ -1380,9 +1411,31 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         self.assertTrue(all(self.mark(ref)["waiting_on"] == run.disposition for ref in cards))
         self.assertEqual(len(self.host.dispatches), 1)
         self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
-        self.native_complete(cards[-1])
-        self.am_tick()
+        replay = self.prepare_native_completion(cards[-1])
+        self.assertFalse(replay["session_created"])
+        self.assertFalse(replay["turn_created"])
+        self.assertEqual(replay["turn"], turn)
+        self.assertEqual(replay["completion"], prepared["completion"])
+        completed = self.complete_native(prepared)
+        repeated = self.complete_native(replay)
+        self.assertEqual(completed["event_id"], repeated["event_id"])
+        self.assertTrue(repeated["replayed"])
+        self.assertEqual(store.session(turn.session_id), session)
+        self.assertEqual([(t.seq, t.state) for t in store.turns(turn.session_id)], [(turn.seq, "completed")])
+        self.assertEqual([store.request(request + suffix) for suffix in ("-po-create", "-turn")], po_requests)
+        self.assertEqual([entry.role for entry in store.feed(turn.session_id)], ["owner", "agent"])
+        self.assertEqual(len(self.comments_on(run.disposition, "[completion:operation]")), 1)
+        self.assertEqual(len([event for event in self.writer.audit.events(run.disposition) if event.get("request_id") == request]), 1)
+        with mock.patch.object(e2e_after_merge, "_start", return_value=None):
+            self.am_tick()
+            self.am_tick(self._runtime())
         self.assertEqual(self.run_of(cards[-1], 0).disposition_result["status"], "settled")
+        self.assertEqual(set(self.pending()), set(cards))
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 1)
+        self.host.dispatch_answer = "ok"
+        self.am_tick()
+        self.assertEqual(self.reader.sprint_e2e_budget(SPRINT)["used"], 2)
+        self.assertEqual(len(self.host.dispatches), 2)
 
     def test_committed_transition_survives_queue_save_failure_and_deleted_queue(self):
         cards, _run = self.uncertain()
