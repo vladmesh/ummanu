@@ -55,9 +55,11 @@ class QueuedInput:
     queued_at: str
     # The card facts of a dispatcher input (`PoService.submit`); part of what its request id binds.
     card: dict[str, Any] | None = None
-    # What the service adds to the turn's prompt after the text: an operation card's production
-    # rights (`PoService._production_rule`). The service's own, so not part of what the id binds.
+    # Frozen service additions: selected new sprint comments and production rights.
+    # The service's own, so not part of what the request id binds.
     note: str | None = None
+    # Native display source/summary and accepted sprint comment position, transferred at claim.
+    metadata: dict[str, Any] | None = None
 
     def document(self) -> dict[str, Any]:
         document = {
@@ -71,6 +73,8 @@ class QueuedInput:
             document["card"] = self.card
         if self.note is not None:
             document["note"] = self.note
+        if self.metadata is not None:
+            document["metadata"] = self.metadata
         return document
 
 
@@ -126,6 +130,7 @@ class PoQueue:
         source: str,
         card: dict[str, Any] | None = None,
         note: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> QueuedInput:
         """Write one input durably and return it; the caller acknowledges only after this returns."""
         if source not in (*SOURCES, SERVICE_SOURCE):
@@ -143,6 +148,7 @@ class PoQueue:
             queued_at=datetime.now(UTC).isoformat(),
             card=dict(card) if card is not None else None,
             note=note,
+            metadata=dict(metadata) if metadata is not None else None,
         )
         try:
             write_durably(self.directory / name, json.dumps(queued.document(), ensure_ascii=False))
@@ -234,6 +240,7 @@ class PoQueue:
                 queued_at=str(document.get("queued_at") or ""),
                 card=document["card"] if isinstance(document.get("card"), dict) else None,
                 note=document["note"] if isinstance(document.get("note"), str) else None,
+                metadata=document["metadata"] if isinstance(document.get("metadata"), dict) else None,
             )
         except KeyError:
             return None

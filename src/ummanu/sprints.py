@@ -631,6 +631,7 @@ class SprintReader:
         reference: str,
         *,
         include_cards: bool = True,
+        include_comments: bool = False,
         include_resume_freshness: bool = True,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
@@ -640,8 +641,14 @@ class SprintReader:
             raise TaskError("not_found", "sprint was not found", 2)
         task_id = _task_id(raw)
         comments = None
-        if include_cards:
-            comments_raw = self.client.call("getAllComments", task_id=task_id) or []
+        if include_cards or include_comments:
+            comments_raw = self.client.call("getAllComments", task_id=task_id)
+            if include_comments and (
+                not isinstance(comments_raw, list)
+                or any(not isinstance(comment, dict) for comment in comments_raw)
+            ):
+                raise TaskError("backend_error", "sprint comments could not be read completely", 1)
+            comments_raw = comments_raw or []
             comments = [
                 {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
                 for comment in comments_raw

@@ -24,7 +24,7 @@ from typing import Any
 from unittest import mock
 
 from tests.po_card_fakes import OPERATION_BODY, REF, SPRINT, DispatcherFixture, card
-from tests.po_fake_store import FakePoStore
+from tests.po_fake_store import FakePoStore, sprint_client
 from tests.po_handover_fakes import HandedOverFixture
 from ummanu import sprint_commands
 from ummanu.board.owner_handover import HANDED_TO_OWNER, waiting_owner
@@ -263,7 +263,8 @@ class AllowedTests(RuleFixture):
 
         facts = {"card_ref": REF, "kind": "operation", "touches_production": "relay", "sprint_ref": SPRINT,
                  "input": CARD_INPUT}
-        self.assertEqual(submission.card, facts)
+        self.assertEqual({key: submission.card[key] for key in facts}, facts)
+        facts = submission.card
         session = submission.session_id
         self.assertEqual(self.settled(session, 2).state, po_store.COMPLETED)
         request = FakePoStore(self.board).request(submission.submit_request_id)
@@ -299,12 +300,13 @@ class AllowedTests(RuleFixture):
         submission, prompt = self.card_turn(runtime)
 
         self.assertEqual(
-            submission.card,
+            {key: submission.card[key] for key in ("card_ref", "kind", "touches_production", "sprint_ref", "input")},
             {"card_ref": REF, "kind": "decision", "touches_production": None, "sprint_ref": SPRINT,
              "input": CARD_INPUT},
         )
         self.assertNotIn(RIGHTS_HEADING, prompt)
-        self.assertEqual(prompt, submission.text)
+        self.assertTrue(prompt.startswith(submission.text.rstrip()))
+        self.assertIn("This decision input grants no production permission.", prompt)
         self.assertEqual(self.handovers(), [])
 
     def test_the_facts_survive_the_dispatcher_record(self) -> None:
@@ -382,7 +384,11 @@ class PoDecidesTests(RuleFixture):
         self.assertEqual(self.settled(session, 3).state, po_store.COMPLETED)
         submission = self.record().po_submission
         request = FakePoStore(self.board).request(request_id)
-        facts = {**submission.card, "input": OWNER_ANSWER_INPUT}
+        facts = {key: submission.card[key] for key in
+                 ("card_ref", "kind", "touches_production", "sprint_ref", "input")}
+        facts["input"] = OWNER_ANSWER_INPUT
+        facts["display_summary"] = "Owner answer for " + submission.card["display_summary"]
+        facts["deliver_sprint_comments"] = True
         self.assertEqual(request.fingerprint, po_store.send_fingerprint(session, submission.owner_text, facts))
         answer = self.calls()[-1]["prompt"]
         # The answer is delivered as quoted, without changing the sprint's recorded authority.
@@ -689,15 +695,33 @@ class AllowProductionCommandTests(unittest.TestCase):
 
 class SprintRecordTests(unittest.TestCase):
     def test_the_sprint_record_carries_its_allowed_productions(self) -> None:
-        document = {"ref": SPRINT, "status": "open", "po_session": None, "allowed_productions": ["relay"]}
+        comments = [{"date_creation": 1700000000, "comment": f"comment-{index:03d}"}
+                    for index in range(50)]
+        client = sprint_client(SPRINT, comments, metadata={ALLOWED_PRODUCTIONS_FIELD: '["relay"]'})
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("ummanu.sprints.SprintReader.show", return_value=document),
-            mock.patch("ummanu.board.backend.board_client"),
+            mock.patch("ummanu.board.backend.board_client", return_value=client),
+            mock.patch.object(TaskReader, "list") as cards,
         ):
             record = BoardSprintSessions(tmp, tmp).sprint(SPRINT)
-        self.assertEqual(record, SprintRecord(SPRINT, "open", None, ("relay",)))
+        expected = tuple({"created_at": "2023-11-14T22:13:20Z", "body": row["comment"]}
+                         for row in comments)
+        self.assertEqual(record, SprintRecord(SPRINT, "open", None, ("relay",), comments=expected))
+        client.call.assert_any_call("getAllComments", task_id=50)
+        cards.assert_not_called()
         self.assertFalse(hasattr(BoardSprintSessions, "hand_over"))
+
+    def test_native_adapter_distinguishes_empty_from_unreadable_comments(self) -> None:
+        for comments in (None, {}, [None]):
+            with self.subTest(comments=comments), tempfile.TemporaryDirectory() as tmp:
+                client = sprint_client(SPRINT, comments)
+                with mock.patch("ummanu.board.backend.board_client", return_value=client):
+                    with self.assertRaisesRegex(TaskError, "comments could not be read completely"):
+                        BoardSprintSessions(tmp, tmp).sprint(SPRINT)
+        with tempfile.TemporaryDirectory() as tmp:
+            client = sprint_client(SPRINT, [])
+            with mock.patch("ummanu.board.backend.board_client", return_value=client):
+                self.assertEqual(BoardSprintSessions(tmp, tmp).sprint(SPRINT).comments, ())
 
 
 if __name__ == "__main__":

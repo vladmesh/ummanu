@@ -4783,10 +4783,14 @@ def _po_entry(entry: dict[str, Any]) -> str:
     role = "agent" if entry.get("role") == "agent" else "owner"
     who = "PO head" if role == "agent" else "owner"
     text = str(entry.get("text") or "")
+    metadata = entry.get("metadata") or {}
+    source = metadata.get("source") if isinstance(metadata, dict) else None
+    if role == "owner" and source in {"dispatcher", "po-service"}:
+        who = source
     shown = (
         f'<div class="md">{markdown.render(text)}</div>'
         if role == "agent"
-        else f'<div class="text">{escape(text)}</div>'
+        else _po_input_text(entry)
     )
     return (
         f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
@@ -4796,11 +4800,26 @@ def _po_entry(entry: dict[str, Any]) -> str:
 
 def _po_queued_entry(entry: dict[str, Any]) -> str:
     """A message on disk in the PO service's queue, waiting for the session's running turn to end."""
+    metadata = entry.get("metadata") or {}
+    source = metadata.get("source") if isinstance(metadata, dict) else None
+    who = source if source in {"dispatcher", "po-service"} else "owner"
     return (
-        f'<li class="po-entry po-owner" data-state="queued"><div class="who">owner · '
+        f'<li class="po-entry po-owner" data-state="queued"><div class="who">{who} · '
         f"{_chip('queued', 'accent')} · {escape(str(entry.get('queued_at') or ''))}</div>"
-        f'<div class="text">{escape(str(entry.get("text") or ""))}</div></li>'
+        f'{_po_input_text(entry)}</li>'
     )
+
+
+def _po_input_text(entry: dict[str, Any]) -> str:
+    """Native classification only. Historical absence stays ordinary expanded text."""
+    text = escape(str(entry.get("text") or ""))
+    metadata = entry.get("metadata")
+    if not isinstance(metadata, dict) or metadata.get("source") not in {"dispatcher", "po-service"}:
+        return f'<div class="text">{text}</div>'
+    summary = escape(str(metadata.get("summary") or "Service input"))
+    return (f'<div class="text">{summary}</div>'
+            '<details class="po-service-input"><summary>Service instructions, comments, rights and full text</summary>'
+            f'<div class="text">{text}</div></details>')
 
 
 def _po_turn_mark(turn: dict[str, Any]) -> str:

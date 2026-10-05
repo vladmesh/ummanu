@@ -63,6 +63,26 @@ from ummanu.tasks import TaskError, TaskWriter, is_significant_card_event, is_si
 
 
 class ClaimAndSubmitTests(DispatcherFixture):
+    def test_large_card_is_excerpted_and_fifty_comments_stay_out_of_frozen_dispatcher_bytes(self):
+        self.start()
+        task = card(description="Which cut?\n" + "x" * 5000)
+        task["url"] = "https://board.test/cards/1900"
+        runtime = self.runtime(task, comments=[f"comment-{index:03d}" for index in range(50)])
+        self.claim(runtime)
+        submission = self.record().po_submission
+        self.settled(submission.session_id, 2)
+        prompt = self.calls()[-1]["prompt"]
+        self.assertLess(len(submission.text), 4000)
+        self.assertIn("Truncated excerpt", prompt)
+        self.assertIn("https://board.test/cards/1900", prompt)
+        self.assertIn(f"python3 -P -m ummanu task show --ref {REF}", prompt)
+        self.assertIn(f"python3 -P -m ummanu sprint show --ref {SPRINT}", prompt)
+        self.assertIn("comment-000", prompt)
+        self.assertIn("comment-049", prompt)
+        self.assertNotIn("comment-000", submission.text)
+        self.assertNotIn("sprint_comments", submission.card)
+        self.assertTrue(submission.card["deliver_sprint_comments"])
+
     def test_the_claim_launches_no_head_and_cuts_no_workspace(self) -> None:
         self.start()
         runtime = self.runtime(card())
@@ -122,7 +142,8 @@ class ClaimAndSubmitTests(DispatcherFixture):
         [session] = self.session_ids()
         self.settled(session, 2)
         prompt = [call["prompt"] for call in self.calls()][-1]
-        self.assertEqual(prompt, submission.text)
+        self.assertTrue(prompt.startswith(submission.text.rstrip()))
+        self.assertTrue(submission.card["deliver_sprint_comments"])
         for expected in (
             REF,
             "decision",

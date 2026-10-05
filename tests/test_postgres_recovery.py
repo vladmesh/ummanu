@@ -367,6 +367,19 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
 
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:
         self._seed()
+        from ummanu.po.store import PoStore
+
+        po = PoStore(self.source_config.for_role("app"))
+        session = po.create_session(session_id="recovery-po-session", cli="claude", model="opus",
+                                    cwd="/tmp/recovery-po", cli_session_id=None, effort="high")
+        metadata = {"source": "dispatcher", "summary": "Which cut?",
+                    "sprint_ref": "sprint:recovery-custom", "comment_position": 50}
+        turn, created = po.claim_turn(session.session_id, "Which cut?", lambda seq: self.root / f"turn-{seq}",
+                                      request_id="recovery-po-input", prompt="Which cut?\n\nFrozen comments",
+                                      metadata=metadata)
+        self.assertTrue(created)
+        self.assertTrue(po.complete_turn(session.session_id, turn.seq, "Answer"))
+        original_feed = po.feed(session.session_id)
         # secretary-1770: owner events are a board table, so the engine dump carries them.
         from ummanu.board.owner_events import OwnerEventStore, record
 
@@ -503,6 +516,13 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertFalse(marker["processes_started"])
         target_probe = SqlCardClient(self.target_config.for_role("read"), self.target_instance)
         self.addCleanup(target_probe.close)
+        restored_po = PoStore(self.target_config.for_role("app"))
+        self.assertEqual(PoStore(self.target_config.for_role("read")).feed(session.session_id), original_feed)
+        replay, created = restored_po.claim_turn(session.session_id, "Which cut?", lambda seq: self.root / f"turn-{seq}",
+                                                 request_id="recovery-po-input", metadata={"source": "web"})
+        self.assertFalse(created)
+        self.assertEqual(replay.seq, turn.seq)
+        self.assertEqual(restored_po.feed(session.session_id), original_feed)
         self.assertEqual(
             target_probe._query(
                 "SELECT request_id FROM sprint_budget_events WHERE sprint_ref = %s",

@@ -147,7 +147,7 @@ class SprintView:
             "ref": SPRINT,
             "status": "open",
             "comments": [
-                {"created_at": f"2026-09-26T10:0{index}:00Z", "body": body}
+                {"created_at": "2026-09-26T10:00:00Z", "body": body}
                 for index, body in enumerate(self.comments)
             ],
         }
@@ -258,6 +258,12 @@ class DispatcherFixture(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def runtime(self, task: dict[str, Any], *, comments: list[str] | None = None, po: Any = None):
+        from dataclasses import replace
+
+        sprint_view = SprintView(comments if comments is not None else ["Opened the sprint.", "Owner: keep it small."])
+        if SPRINT in self.po_sprints.records:
+            self.po_sprints.records[SPRINT] = replace(self.po_sprints.records[SPRINT],
+                comments=tuple(sprint_view.show(SPRINT)["comments"]))
         self.cards = OneCardBoard(task)
         channel = ServicePoChannel(self.data, None)
         channel._store = FakePoStore(self.board)
@@ -267,7 +273,7 @@ class DispatcherFixture(unittest.TestCase):
             reader=self.cards,
             writer=self.cards,
             audit=self.cards,
-            sprints=SprintView(comments if comments is not None else ["Opened the sprint.", "Owner: keep it small."]),
+            sprints=sprint_view,
             po=po or channel,
             host=Forbidden("host"),
             catalog=Forbidden("catalog"),

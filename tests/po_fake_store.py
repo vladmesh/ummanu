@@ -14,6 +14,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
 from ummanu.po.sprints import SprintRecord, WhyDocument
 from ummanu.po.store import (
@@ -43,6 +44,25 @@ from ummanu.po.store import (
     session_title,
 )
 from ummanu.tasks import admit_role
+
+
+def sprint_client(reference: str, comments: Any, *, metadata: dict | None = None):
+    """A mocked native sprint read, with unexpected card/freshness reads refused."""
+    answers = {
+        "getProjectByName": {"id": 1},
+        "getTaskByReference": {"id": 50, "reference": reference},
+        "getTaskMetadata": metadata or {},
+        "getAllComments": comments,
+    }
+
+    def call(method, **_params):
+        if method not in answers:
+            raise AssertionError(f"unexpected sprint read: {method}")
+        return answers[method]
+
+    client = mock.MagicMock()
+    client.call.side_effect = call
+    return client
 
 
 class FakeBoard:
@@ -221,6 +241,7 @@ class FakePoStore:
         request_id: str | None = None,
         card: Any = None,
         prompt: str | None = None,
+        metadata: Any = None,
     ) -> tuple[Turn, bool]:
         board = self._open()
         with board.lock:
@@ -238,7 +259,7 @@ class FakePoStore:
             turn = Turn(session_id, seq, board.now(), None, RUNNING, str(stdout_path(seq)), None, None, None)
             board.turns[(session_id, seq)] = turn
             board.feed.append(
-                FeedEntry(len(board.feed) + 1, session_id, seq, OWNER, text if prompt is None else prompt, board.now())
+                FeedEntry(len(board.feed) + 1, session_id, seq, OWNER, text if prompt is None else prompt, board.now(), metadata)
             )
             if request_id is not None:
                 board.requests[request_id] = PoRequest(

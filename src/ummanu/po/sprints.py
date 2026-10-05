@@ -36,6 +36,7 @@ class SprintRecord:
     # The productions its operation cards may touch (`sprint create --allow-production`).
     allowed_productions: tuple[str, ...] = ()
     owner_decisions: tuple[dict[str, Any], ...] = ()
+    comments: tuple[dict[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -141,7 +142,7 @@ class BoardSprintSessions:
 
         try:
             document = SprintReader(self._client(), data_dir=self.data_dir).show(
-                sprint_ref, include_cards=False, include_resume_freshness=False
+                sprint_ref, include_cards=False, include_comments=True, include_resume_freshness=False
             )
         except TaskError as exc:
             if exc.code == "not_found":
@@ -153,6 +154,7 @@ class BoardSprintSessions:
             document.get("po_session") or None,
             tuple(str(project) for project in document.get("allowed_productions") or ()),
             tuple(document.get("owner_decisions") or ()),
+            tuple(document["comments"]),
         )
 
     def why_documents(self, sprint_ref: str) -> list[WhyDocument]:

@@ -522,6 +522,40 @@ class CompletionClearsTheMarkTests(WriterFixture):
 
 
 class OwnerAnswerDispatchTests(HandedOverFixture):
+    def test_owner_followup_delivers_only_new_sprint_comments_and_preserves_canonical_answer(self):
+        from dataclasses import replace
+
+        self.start()
+        runtime = self.runtime(card(), comments=[f"comment-{index:03d}" for index in range(50)])
+        self.claim(runtime)
+        session = self.record().po_submission.session_id
+        self.settled(session, 2)
+        self.hand_over()
+        self.owner_says("Approved, under the recorded authority.", "evt-delta-answer")
+        row = self.po_sprints.records[SPRINT]
+        self.po_sprints.records[SPRINT] = replace(row, comments=row.comments + (
+            {"created_at": "2026-09-26T10:00:00Z", "body": "comment-050"},
+            {"created_at": "2026-09-26T10:00:00Z", "body": "comment-051"}))
+        self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+        self.settled(session, 3)
+        prompt = self.calls()[-1]["prompt"]
+        self.assertNotIn("comment-049", prompt)
+        self.assertLess(prompt.index("comment-050"), prompt.index("comment-051"))
+        self.assertIn(REASON, prompt)
+        self.assertIn("Approved, under the recorded authority.", prompt)
+        self.assertIn("Recording this answer applies no grant", prompt)
+        self.assertIn(f"task show --ref {REF}", prompt)
+        entry = next(entry for entry in FakePoStore(self.board).feed(session)
+                     if entry.turn_seq == 3 and entry.role == po_store.OWNER)
+        self.assertEqual(entry.metadata["comment_position"], 52)
+        # A retry after a lost readback cannot freeze a different summary from a changed title.
+        self.cards.card["title"] = "Changed after acceptance"
+        with (mock.patch.object(runtime.po, "request", return_value=None),
+              mock.patch.object(runtime.po, "queued", return_value=None)):
+            self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
+        self.assertEqual(len(FakePoStore(self.board).turns(session)), 3)
+        self.assertEqual(entry.text, FakePoStore(self.board).feed(session)[-2].text)
+
     def test_lost_accepted_answer_submission_is_recovered_under_the_same_id(self) -> None:
         runtime, session = self.submitted_card()
         self.hand_over()

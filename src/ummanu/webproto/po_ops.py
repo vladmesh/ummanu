@@ -176,9 +176,10 @@ class PoLayer(ProtocolBoundary):
         return [
             {
                 "request_id": item.request_id,
-                "text": item.text,
+                "text": f"{item.text.rstrip()}\n\n{item.note.strip()}\n" if item.note else item.text,
                 "source": item.source,
                 "queued_at": item.queued_at,
+                "metadata": item.metadata,
             }
             for item in waiting
         ]
@@ -420,6 +421,7 @@ def _entry(entry: FeedEntry) -> dict[str, Any]:
         "role": entry.role,
         "text": entry.text,
         "created_at": _time(entry.created_at),
+        "metadata": entry.metadata,
     }
 
 

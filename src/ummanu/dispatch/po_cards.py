@@ -284,57 +284,38 @@ def render_po_card_input(
     reference = str(task.get("ref") or "")
     kind = submission.kind
     first, second = completion_sections(kind)
-    lines = [
-        (
-            f"The dispatcher hands you {kind} card {reference} {_of_sprint(submission, task)}. Answer it in "
-            "this turn and complete the card before the turn ends; a turn that ends with the card still "
-            "In progress Blocks it, unless you handed it to the owner in this turn."
-        ),
-        "",
-        f"Card: {reference} ({kind}): {task.get('title') or ''}",
-        *_production_lines(submission),
-        "",
-        "## Card body",
-        "",
-        str(task.get("description") or "").strip() or "(empty)",
-        "",
-    ]
-    if sprint is not None:
-        lines += [f"## Comments of {submission.sprint_ref}, in board order", ""]
-        comments = [comment for comment in sprint.get("comments") or [] if isinstance(comment, dict)]
-        if not comments:
-            lines.append("(none)")
-        for comment in comments:
-            lines += [
-                f"### {comment.get('created_at') or 'undated'}",
-                "",
-                str(comment.get("body") or "").rstrip(),
-                "",
-            ]
-    lines += [
-        "",
-        "## Complete the card",
-        "",
-        (
-            f"Write a body file with two non-empty sections, `## {first}` and `## {second}` (a command "
-            "or an observation someone can repeat), then run exactly:"
-        ),
-        "",
-        "    " + complete_command(reference, kind, submission.complete_request_id),
-        "",
-        "## Or hand it to the owner",
-        "",
-        (
-            "Only when a person is needed: money, a key or access only the owner holds, or a product "
-            "decision that is the owner's. An architecture fork is yours to decide. Write the reason "
-            "(what the owner has to decide or do) to a file, run exactly this and end the turn; the card "
-            "stays In progress and waits, and the owner's answer comes back to this session:"
-        ),
-        "",
-        "    " + handover_command(reference, submission.handover_request_id),
-        "",
-        "Keep the turn short; anything long-running becomes a card.",
-    ]
+    from ummanu.po.input_context import excerpt
+
+    lines = [f"Card: {reference} ({kind}): {task.get('title') or ''}", "",
+             excerpt(str(task.get("description") or "")), "",
+             "## Service instructions", "",
+             f"The dispatcher hands you this card {_of_sprint(submission, task)}. "
+             "Answer it in this turn and complete the card before the turn ends; "
+             "a turn that ends with the card still In progress Blocks it, "
+             "unless you handed it to the owner in this turn.", ""]
+    if kind != OPERATION_KIND:
+        lines += ["## Production rights", "",
+                  "This decision input grants no production permission.", ""]
+    else:
+        lines += _production_lines(submission) + [""]
+    lines += ["## Full text", "",
+              f"Card: `python3 -P -m ummanu task show --ref {reference}`"]
+    for label, value in (("Card URL", task.get("url")),
+                         ("Sprint URL", (sprint or {}).get("url"))):
+        if value:
+            lines.append(f"{label}: {value}")
+    if submission.sprint_ref:
+        lines.append(f"Sprint: `python3 -P -m ummanu sprint show --ref {submission.sprint_ref}`")
+    lines += ["", "## Complete the card", "",
+              f"Write two non-empty sections: `## {first}` and `## {second}` "
+              "(repeatable verification). Run exactly:", "",
+              "    " + complete_command(reference, kind, submission.complete_request_id), "",
+              "## Or hand it to the owner", "",
+              "Only for money, owner-only access or an owner product decision; architecture is yours. "
+              "Write the unresolved question to a reason file, run this and end the turn. "
+              "The card waits and the owner's answer returns to this session:", "",
+              "    " + handover_command(reference, submission.handover_request_id), "",
+              "Keep the turn short; anything long-running becomes a card."]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -406,7 +387,15 @@ def render_owner_answer_input(
         ),
         "",
         f"Card: {reference} ({kind}): {task.get('title') or ''}",
+        "",
+        "## Production rights",
         *_production_lines(submission, owner_answer=True),
+        "Recording this answer applies no grant; use the effective recorded authority.",
+        "",
+        "## Full text",
+        f"Card: `python3 -P -m ummanu task show --ref {reference}`",
+        *([f"Sprint: `python3 -P -m ummanu sprint show --ref {submission.sprint_ref}`"]
+          if submission.sprint_ref else []),
         "",
         "## Why you handed it to the owner",
         "",
@@ -617,6 +606,13 @@ def _submit(
                 if submission.sprint_ref
                 else None
             )
+            from ummanu.po.input_context import excerpt
+
+            submission.card["display_summary"] = (
+                f"Card: {ref} ({submission.kind}): {task.get('title') or ''}\n\n"
+                + excerpt(str(task.get("description") or "")))
+            if sprint is not None:
+                submission.card["deliver_sprint_comments"] = True
             submission.text = render_po_card_input(task, sprint, submission)
             runtime.save_records(payload, records)
         current = runtime.reader.show(ref)
@@ -945,8 +941,15 @@ def _await_owner(
     submission.owner_submitted = False
     step = "owner answer"
     try:
+        facts = po_card_facts(task, submission, input=OWNER_ANSWER_INPUT)
+        # The initial frozen facts distinguish this producer from released follow-ups.
+        # Derive display bytes from that snapshot, never a mutable card title on retry.
+        if "display_summary" in submission.card:
+            facts["display_summary"] = "Owner answer for " + submission.card["display_summary"]
+        if submission.card.get("deliver_sprint_comments") is True:
+            facts["deliver_sprint_comments"] = True
         followup = replace(submission, text=submission.owner_text, submit_request_id=request_id,
-                           card=po_card_facts(task, submission, input=OWNER_ANSWER_INPUT))
+                           card=facts)
         _submit_card(runtime, task, origin_field.po_origin(task), followup, records, payload)
         submission.session_id = followup.session_id
     except _SuccessorNotOpen as exc:
