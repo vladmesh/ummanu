@@ -1657,24 +1657,24 @@ class SprintWriter:
         # Only what the caller named: a sprint without either reads as null and empty.
         if intent.po_session:
             values[PO_SESSION_FIELD] = intent.po_session
-        if intent.allowed_productions:
+        entries = list(intent.owner_decisions)
+        productions = owner_decisions.productions(list(intent.allowed_productions), entries)
+        e2e_budget = intent.e2e_budget + sum(entry["value"] for entry in entries if entry["kind"] == "e2e_grant")
+        if productions:
             values[ALLOWED_PRODUCTIONS_FIELD] = json.dumps(
-                list(intent.allowed_productions), separators=(",", ":")
+                productions, separators=(",", ":")
             )
         # Only a budget other than the column's default: the read names it only then.
-        if intent.e2e_budget != DEFAULT_E2E_BUDGET:
-            values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget)
+        if e2e_budget != DEFAULT_E2E_BUDGET:
+            values[sprint_e2e.SPRINT_E2E_BUDGET] = str(e2e_budget)
         if intent.local_run_exceptions:
             values[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps(
                 [entry.to_document() for entry in intent.local_run_exceptions],
                 sort_keys=True, separators=(",", ":"),
             )
-        if intent.owner_decisions:
+        if entries:
             assert event is not None
-            entries = list(intent.owner_decisions)
             values[owner_decisions.FIELD] = json.dumps(owner_decisions.attributed(entries, event), sort_keys=True, separators=(",", ":"))
-            values[ALLOWED_PRODUCTIONS_FIELD] = json.dumps(owner_decisions.productions(list(intent.allowed_productions), entries), separators=(",", ":"))
-            values[sprint_e2e.SPRINT_E2E_BUDGET] = str(intent.e2e_budget + sum(entry["value"] for entry in entries if entry["kind"] == "e2e_grant"))
         # A restored legacy row gets no ownership keys at all; `restore` then writes
         # back exactly the fields its own export carried.
         if intent.product:
