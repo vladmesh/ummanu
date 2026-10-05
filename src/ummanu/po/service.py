@@ -464,7 +464,12 @@ class PoService:
         sprint_ref = card["sprint_ref"]
         if not sprint_ref:
             raise Refused("validation", "deliver_sprint_comments requires a sprint_ref")
-        sprint = self._sprint_sessions().sprint(sprint_ref)
+        try:
+            sprint = self._sprint_sessions().sprint(sprint_ref)
+        except Exception as exc:  # noqa: BLE001 - unreadable comments accept no input
+            raise Refused(
+                "unavailable", f"sprint {sprint_ref} cannot be read for its comments ({type(exc).__name__}: {exc})"
+            ) from None
         if sprint is None:
             raise Refused("unavailable", f"sprint {sprint_ref} cannot be read for its comments")
         comments = list(sprint.comments)

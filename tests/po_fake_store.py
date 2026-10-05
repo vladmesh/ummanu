@@ -14,6 +14,7 @@ import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
 from ummanu.po.sprints import SprintRecord, WhyDocument
 from ummanu.po.store import (
@@ -43,6 +44,25 @@ from ummanu.po.store import (
     session_title,
 )
 from ummanu.tasks import admit_role
+
+
+def sprint_client(reference: str, comments: Any, *, metadata: dict | None = None):
+    """A mocked native sprint read, with unexpected card/freshness reads refused."""
+    answers = {
+        "getProjectByName": {"id": 1},
+        "getTaskByReference": {"id": 50, "reference": reference},
+        "getTaskMetadata": metadata or {},
+        "getAllComments": comments,
+    }
+
+    def call(method, **_params):
+        if method not in answers:
+            raise AssertionError(f"unexpected sprint read: {method}")
+        return answers[method]
+
+    client = mock.MagicMock()
+    client.call.side_effect = call
+    return client
 
 
 class FakeBoard:

@@ -55,7 +55,7 @@ from ummanu.po.runner import (
     still_running,
 )
 from ummanu.po.service import PoService, ServiceStartError, listening
-from ummanu.po.sprints import SprintRecord, WhyDocument, find_why_documents, why_document_label
+from ummanu.po.sprints import BoardSprintSessions, SprintRecord, WhyDocument, find_why_documents, why_document_label
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import (
     NOTHING_WRITTEN,
@@ -71,7 +71,7 @@ from ummanu.webproto.po_auth import PoTokenLayer
 from ummanu.webproto.po_ops import PoLayer
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
-from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
+from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints, sprint_client
 from tests.web_fakes import Recording
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.local_pty.client import LocalPtySpawnError
@@ -222,6 +222,88 @@ class ServiceFixture(unittest.TestCase):
 
 
 class CommentDeliveryTests(ServiceFixture):
+    def test_native_sprint_comments_accept_fifty_then_delta_after_read_recovery(self) -> None:
+        from ummanu.board.production_rights import card_facts
+
+        comments = [{"date_creation": 1700000000, "comment": f"comment-{index:03d}"}
+                    for index in range(50)]
+        client = sprint_client("sprint:50", comments)
+        self.enterContext(mock.patch("ummanu.board.backend.board_client", return_value=client))
+        service = self.service(run=False, sprints=BoardSprintSessions(self.root, self.data))
+        session = self.session(service)
+        facts = card_facts(card_ref="ummanu-50", kind="decision", touches_production=None,
+                           sprint_ref="sprint:50")
+        facts.update(display_summary="Which cut ships?", deliver_sprint_comments=True)
+        native_call = client.call.side_effect
+
+        def unread(method, **params):
+            if method == "getAllComments":
+                raise RuntimeError("comments temporarily unreadable")
+            return native_call(method, **params)
+
+        first_request = dict(op="submit", session_id=session, text="Which cut ships?",
+                             request_id="native-first-50", source="dispatcher", card=facts)
+        with mock.patch.object(client, "call", side_effect=unread):
+            refused = service.handle(first_request)
+        self.assertEqual(refused["error"]["code"], "unavailable")
+        self.assertIsNone(service.queue.find("native-first-50"))
+        self.assertIsNone(service.store.request("native-first-50"))
+        self.assertEqual(self.turns(session), [])
+        self.assertEqual(self.feed(session), [])
+
+        with mock.patch.object(service, "pump"):
+            accepted = service.handle(first_request)
+            self.assertTrue(accepted["ok"], accepted)
+        first = service.queue.find("native-first-50")
+        self.assertEqual(first.metadata["comment_position"], 50)
+        self.assertEqual([line for line in first.note.splitlines() if line.startswith("comment-")],
+                         [row["comment"] for row in comments])
+        frozen = first.document()
+        with mock.patch.object(client, "call", side_effect=unread), mock.patch.object(service, "pump"):
+            replay = service.handle(first_request)
+        self.assertTrue(replay["result"]["repeated"])
+        self.assertEqual(service.queue.find("native-first-50").document(), frozen)
+        service.pump()
+        self.settled(session, 1)
+        text, metadata = self.input_text(service, session, "native-first-50")
+        self.assertEqual(metadata, first.metadata)
+        self.assertEqual(text, f"Which cut ships?\n\n{first.note.strip()}\n")
+
+        comments.extend({"date_creation": 1700000000, "comment": f"comment-{index:03d}"}
+                        for index in range(50, 52))
+        next_request = {**first_request, "text": "Next cut?", "request_id": "native-next-52"}
+
+        def omitted(method, **params):
+            return None if method == "getAllComments" else native_call(method, **params)
+
+        for failure in (unread, omitted):
+            with self.subTest(failure=failure.__name__), mock.patch.object(client, "call", side_effect=failure):
+                refused = service.handle(next_request)
+                self.assertEqual(refused["error"]["code"], "unavailable")
+                self.assertIsNone(service.queue.find("native-next-52"))
+                self.assertIsNone(service.store.request("native-next-52"))
+                self.assertEqual(len(self.turns(session)), 1)
+                self.assertEqual(self.input_text(service, session, "native-first-50"), (text, metadata))
+        with mock.patch.object(service, "pump"):
+            accepted = service.handle(next_request)
+            self.assertTrue(accepted["ok"], accepted)
+        second = service.queue.find("native-next-52")
+        self.assertEqual(second.metadata["comment_position"], 52)
+        self.assertEqual([line for line in second.note.splitlines() if line.startswith("comment-")],
+                         ["comment-050", "comment-051"])
+
+        other = self.session(service)
+        with mock.patch.object(service, "pump"):
+            service.submit(session_id=other, text="Fresh session", request_id="native-other-52",
+                           source="dispatcher", card=facts)
+        other_input = service.queue.find("native-other-52")
+        self.assertEqual(other_input.metadata["comment_position"], 52)
+        self.assertIn("comment-000", other_input.note)
+        self.assertIn("comment-051", other_input.note)
+        client.call.assert_any_call("getAllComments", task_id=50)
+        self.assertEqual({call.args[0] for call in client.call.call_args_list},
+                         {"getProjectByName", "getTaskByReference", "getAllComments", "getTaskMetadata"})
+
     def facts(self, count: int, *, sprint: str = "sprint:50") -> dict:
         from dataclasses import replace
         from ummanu.board.production_rights import card_facts

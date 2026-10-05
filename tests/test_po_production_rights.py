@@ -24,7 +24,7 @@ from typing import Any
 from unittest import mock
 
 from tests.po_card_fakes import OPERATION_BODY, REF, SPRINT, DispatcherFixture, card
-from tests.po_fake_store import FakePoStore
+from tests.po_fake_store import FakePoStore, sprint_client
 from tests.po_handover_fakes import HandedOverFixture
 from ummanu import sprint_commands
 from ummanu.board.owner_handover import HANDED_TO_OWNER, waiting_owner
@@ -695,15 +695,33 @@ class AllowProductionCommandTests(unittest.TestCase):
 
 class SprintRecordTests(unittest.TestCase):
     def test_the_sprint_record_carries_its_allowed_productions(self) -> None:
-        document = {"ref": SPRINT, "status": "open", "po_session": None, "allowed_productions": ["relay"]}
+        comments = [{"date_creation": 1700000000, "comment": f"comment-{index:03d}"}
+                    for index in range(50)]
+        client = sprint_client(SPRINT, comments, metadata={ALLOWED_PRODUCTIONS_FIELD: '["relay"]'})
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("ummanu.sprints.SprintReader.show", return_value=document),
-            mock.patch("ummanu.board.backend.board_client"),
+            mock.patch("ummanu.board.backend.board_client", return_value=client),
+            mock.patch.object(TaskReader, "list") as cards,
         ):
             record = BoardSprintSessions(tmp, tmp).sprint(SPRINT)
-        self.assertEqual(record, SprintRecord(SPRINT, "open", None, ("relay",)))
+        expected = tuple({"created_at": "2023-11-14T22:13:20Z", "body": row["comment"]}
+                         for row in comments)
+        self.assertEqual(record, SprintRecord(SPRINT, "open", None, ("relay",), comments=expected))
+        client.call.assert_any_call("getAllComments", task_id=50)
+        cards.assert_not_called()
         self.assertFalse(hasattr(BoardSprintSessions, "hand_over"))
+
+    def test_native_adapter_distinguishes_empty_from_unreadable_comments(self) -> None:
+        for comments in (None, {}, [None]):
+            with self.subTest(comments=comments), tempfile.TemporaryDirectory() as tmp:
+                client = sprint_client(SPRINT, comments)
+                with mock.patch("ummanu.board.backend.board_client", return_value=client):
+                    with self.assertRaisesRegex(TaskError, "comments could not be read completely"):
+                        BoardSprintSessions(tmp, tmp).sprint(SPRINT)
+        with tempfile.TemporaryDirectory() as tmp:
+            client = sprint_client(SPRINT, [])
+            with mock.patch("ummanu.board.backend.board_client", return_value=client):
+                self.assertEqual(BoardSprintSessions(tmp, tmp).sprint(SPRINT).comments, ())
 
 
 if __name__ == "__main__":
