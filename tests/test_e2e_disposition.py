@@ -442,6 +442,44 @@ class DispositionTests(unittest.TestCase):
             self.assertEqual(e2e_after_merge._disposition(self.runtime, "ummanu", self.carrier, self.run, "Resolve"), "")
         create.assert_not_called()
 
+    def test_released_red_hotfix_with_no_owned_marks_keeps_only_history(self):
+        self.released_unresolved()
+        hotfix = "ummanu-4"
+        self.cards[hotfix] = {"id": 4, "ref": hotfix, "project": "ummanu", "type": "code", "state": "blocked"}
+        state = e2e_record.e2e_state(self.show(self.carrier))
+        state.after_merge_runs[0].resolution, state.after_merge_runs[0].hotfix = "red", hotfix
+        self.cards[self.carrier]["extensions"]["extra"]["e2e"] = state.text()
+        for ref in (self.source, self.carrier):
+            state = e2e_record.e2e_state(self.show(ref))
+            state.after_merge.merge_sha, state.after_merge.dispatch_id = "new", "new-run"
+            self.cards[ref]["extensions"]["extra"]["e2e"] = state.text()
+        before = copy.deepcopy(self.cards)
+        with mock.patch.object(e2e_after_merge, "_create_disposition") as create:
+            e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+            e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+        create.assert_not_called()
+        self.assertEqual(self.cards, before)
+
+    def test_released_red_hotfix_mixed_marks_recovers_one_current_holder(self):
+        operation = self.released_unresolved()
+        hotfix = "ummanu-4"
+        self.cards[hotfix] = {"id": 4, "ref": hotfix, "project": "ummanu", "type": "code", "state": "blocked"}
+        state = e2e_record.e2e_state(self.show(self.carrier))
+        state.after_merge_runs[0].resolution, state.after_merge_runs[0].hotfix = "red", hotfix
+        state.after_merge.merge_sha, state.after_merge.dispatch_id = "new", "new-run"
+        self.cards[self.carrier]["extensions"]["extra"]["e2e"] = state.text()
+        before = self.mark(self.carrier)
+        def create(*args):
+            self.cards[self.operation] = operation
+            self.created = {"ref": self.operation, "actor": {"role": "dispatcher"}, "kind": "created", "outcome": "success"}
+            return self.operation
+        with mock.patch.object(e2e_after_merge, "_create_disposition", side_effect=create) as created:
+            e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+            e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
+        self.assertEqual(created.call_count, 1)
+        self.assertEqual(self.mark(self.carrier), before)
+        self.assertEqual(self.mark(self.source).holder, self.operation)
+
 
 if __name__ == "__main__":
     unittest.main()

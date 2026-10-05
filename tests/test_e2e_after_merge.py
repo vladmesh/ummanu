@@ -1673,13 +1673,18 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
                 e2e_after_merge._remark(runtime, covered["ref"], carrier, state, run=run,
                     state="red", hotfix=run.hotfix, run_url=run.run_url)
 
-        carriers = []
-        self.on_main(_sha("a"), _sha("b"), _sha("f"))
+        carriers, current_source = [], ""
+        self.on_main(_sha("a"), _sha("b"), _sha("c"), _sha("f"))
         with mock.patch.object(e2e_after_merge, "_red", side_effect=released_red):
-            for digit in "ab":
+            for digit in "ac":
                 carrier = self.done_card(sprint="")
                 carriers.append(carrier)
                 self.host.run_answer = ("in_progress", None)
+                if digit == "c":
+                    # The carrier will remerge, but this covered obligation still
+                    # belongs to the released red run and needs its PO route.
+                    current_source = self.done_card(sprint="")
+                    self.merge(current_source, _sha("b"))
                 self.merge(carrier, _sha(digit))
                 self.am_tick()
                 self.conclude("failure", self.run_of(carrier).wait_ref)
@@ -1693,6 +1698,10 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
         state.after_merge = AfterMergeMark(merge_sha=_sha("f"), state="pending",
                                           charged=list(state.after_merge.charged))
         self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=carriers[1], state=state.text())
+        newer = e2e_state(self.reader.show(carriers[1])).after_merge
+        original_run = self.run_of(carriers[1])
+        paid = {ref: list(e2e_state(self.reader.show(ref)).after_merge.charged)
+                for ref in (*carriers, current_source)}
         original = self.reader.show
         def unread_old(ref):
             if ref == carriers[0]:
@@ -1700,12 +1709,34 @@ class DispositionLifecycleTests(AfterMergeFixture, unittest.TestCase):
             return original(ref)
         with mock.patch.object(self.reader, "show", side_effect=unread_old), mock.patch.object(e2e_after_merge, "_start", return_value=None):
             results = self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+            run = self.run_of(carriers[1])
+            self.assertTrue(run.disposition)
+            self.assertEqual(self.mark(current_source)["waiting_on"], run.disposition)
+            self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
+            self.assertEqual(e2e_state(self.reader.show(carriers[1])).after_merge, newer)
+            self.native_complete(carriers[1], "decline")
+            self.am_tick(self._runtime())
+            self.am_tick(self._runtime())
+            self.assertEqual(self.mark(current_source)["state"], "declined")
+            self.assertNotIn("waiting_on", self.mark(current_source))
         self.assertTrue(any(row["status"] == "degraded" and "old carrier unreadable" in row.get("reason", "") for row in results))
         run = self.run_of(carriers[1])
         self.assertTrue(run.disposition)
+        self.assertEqual((run.dispatch_id, run.sha, run.covered, run.result, run.hotfix),
+                         (original_run.dispatch_id, original_run.sha, original_run.covered, original_run.result, original_run.hotfix))
+        self.assertEqual(run.disposition_result["status"], "settled")
+        self.assertEqual(run.disposition_result["action"], "decline")
+        self.assertEqual(e2e_state(self.reader.show(carriers[1])).after_merge, newer)
         self.assertEqual((self.mark(carriers[1])["merge_sha"], self.mark(carriers[1])["state"]), (_sha("f"), "pending"))
         self.assertNotIn("waiting_on", self.mark(carriers[1]))
+        self.assertFalse(self.run_of(carriers[0]).disposition)
+        self.assertEqual({ref: list(e2e_state(self.reader.show(ref)).after_merge.charged)
+                          for ref in (*carriers, current_source)}, paid)
+        self.assertEqual(len(self.hotfixes()), 2)
+        self.assertEqual(len([task for task in self.reader.list() if task["type"] == "operation"]), 1)
         self.assertEqual(len(self.host.dispatches), 2)
+        self.assertFalse(any(event.event_class == "needs_owner" for event in OwnerEventStore(self.board.credentials).events()))
 
 
 if __name__ == "__main__":
