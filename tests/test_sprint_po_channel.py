@@ -239,6 +239,32 @@ class WriterFixture(unittest.TestCase):
 
 
 class CreateCheckTests(WriterFixture):
+    def test_quoted_create_omits_only_effective_native_defaults(self) -> None:
+        stop = {"id": "stop", "scope": "sprint", "kind": "e2e_refusal", "value": "no_more_e2e",
+                "quotation": "  No more e2e.\nKeep this quotation.  "}
+        prod = {**stop, "id": "prod", "scope": "ummanu", "kind": "production", "value": True}
+        deny = {**prod, "id": "deny", "value": False}
+        grant = {**stop, "id": "grant", "kind": "e2e_grant", "value": 2}
+        event = {"actor": {"role": "po", "id": "po"}, "event_id": "event-1",
+                 "request_id": "create-1", "occurred_at": "2026-10-05T00:00:00Z"}
+        for entries, options, expected in (
+            ([stop], {}, {}),
+            ([prod], {}, {ALLOWED_PRODUCTIONS_FIELD: '["ummanu"]'}),
+            ([grant], {}, {"sprint_e2e_budget": "5"}),
+            ([prod, grant], {}, {ALLOWED_PRODUCTIONS_FIELD: '["ummanu"]', "sprint_e2e_budget": "5"}),
+            ([deny], {"allowed_productions": ["ummanu"]}, {}),
+            ([grant], {"e2e_budget": 1}, {}),
+            ([stop], {"e2e_budget": 7}, {"sprint_e2e_budget": "7"}),
+        ):
+            with self.subTest(entries=entries, options=options):
+                intent = self.intent(standing_decisions=entries, **options)
+                values = self.writer._create_values(intent, event=event)
+                self.assertEqual({key: values[key] for key in values.keys() &
+                                  {ALLOWED_PRODUCTIONS_FIELD, "sprint_e2e_budget"}}, expected)
+                stored = json.loads(values["sprint_owner_decisions"])
+                self.assertEqual([{key: entry[key] for key in entries[0]} for entry in stored], entries)
+                self.assertTrue(all(entry["recorded_by"]["event_id"] == event["event_id"] for entry in stored))
+
     def test_an_open_session_and_registered_productions_pass(self) -> None:
         intent = self.intent(po_session=" s-open ", allowed_productions=["site", "ummanu", "site"])
         self.writer._check_po_channel(intent)

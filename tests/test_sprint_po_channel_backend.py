@@ -456,6 +456,104 @@ class SprintPoChannelBackendTests(SprintFixture):
         return {"id": identifier, "scope": scope, "kind": kind, "value": value,
                 "quotation": "  Two more e2e runs.\nOnly this sprint.  "}
 
+    def assert_quoted_create(self, entries, productions, budget, request_id="default-create", **options):
+        request = request_id
+        fields = dict(goal="quoted defaults", reference="sprint:7", standing_decisions=entries,
+                      request_id=request, **options)
+        created = self._create(**fields)
+        sprint = SprintReader(self.client, data_dir=self.tmp.name).show("sprint:7")
+        event = self.writer.audit.committed_event(request)
+        expected = [{**entry, "recorded_by": {"role": "po", "actor": "operator",
+                    "event_id": created["event_id"], "request_id": request,
+                    "at": event["occurred_at"]}} for entry in entries]
+        self.assertEqual(sprint["owner_decisions"], expected)
+        self.assertEqual(sprint["allowed_productions"], productions)
+        self.assertEqual((sprint["e2e"]["budget"], sprint["e2e"]["used"], sprint["e2e"]["charges"]),
+                         (budget, 0, []))
+        stored = self.client._query(
+            "SELECT allowed_productions,e2e_budget,e2e_used,owner_decisions FROM sprints WHERE ref=%s",
+            ("sprint:7",))
+        self.assertEqual(stored, [(productions, budget, 0, expected)])
+        repeated = self._create(**fields)
+        self.assertEqual(repeated["event_id"], created["event_id"])
+        self.assertEqual(repeated["sprint"]["owner_decisions"], expected)
+        self.assertEqual(repeated["sprint"]["e2e"], sprint["e2e"])
+        self.assertEqual(self.sprint_record_count(), 1)
+        self.assertEqual(len(self.writer.audit.events("sprint:7", kind="created")), 1)
+        with self.assertRaises(TaskError):
+            self._create(**{**fields, "standing_decisions": [dict(entries[0], quotation="Changed answer.")]})
+        self.assertEqual(self.client._query(
+            "SELECT allowed_productions,e2e_budget,e2e_used,owner_decisions FROM sprints WHERE ref=%s",
+            ("sprint:7",)), stored)
+        return sprint
+
+    def test_refusal_only_create_uses_native_defaults_and_refuses_e2e_with_room(self):
+        stop = self.decision("stop-1", "e2e_refusal", "no_more_e2e")
+        sprint = self.assert_quoted_create([stop], [], 3)
+        self.assertEqual(self.client.call("getSprintE2eBudget", sprint_ref="sprint:7")["refusal"],
+                         sprint["owner_decisions"][0])
+        charge = self.client.call("chargeSprintE2e", sprint_ref="sprint:7", task_ref="ummanu-1",
+                                  dispatch_id="refused", at="2026-10-05T00:00:00Z")
+        self.assertFalse(charge["charged"])
+        self.assertEqual((charge["budget"], charge["used"], charge["charges"]), (3, 0, []))
+
+    def test_production_only_create_keeps_default_budget(self):
+        self.assert_quoted_create([self.decision("prod", "production", True, "ummanu")], ["ummanu"], 3)
+
+    def test_grant_only_create_keeps_empty_permissions_and_applies_once(self):
+        self.assert_quoted_create([self.decision()], [], 5)
+
+    def test_production_only_create_keeps_nondefault_budget(self):
+        self.assert_quoted_create([self.decision("prod", "production", True, "ummanu")], ["ummanu"], 7,
+                                  e2e_budget=7)
+
+    def test_grant_reaching_default_budget_uses_native_default(self):
+        self.assert_quoted_create([self.decision()], [], 3, e2e_budget=1)
+
+    def test_quoted_denial_revokes_initial_raw_allowance(self):
+        self.assert_quoted_create([self.decision("deny", "production", False, "ummanu")], [], 3,
+                                  allowed_productions=["ummanu"])
+
+    def test_missing_nondefault_or_required_readback_refuses_then_retries(self):
+        entries = [self.decision("prod", "production", True, "ummanu"), self.decision()]
+        options = {"goal": "quoted defaults", "reference": "sprint:7", "standing_decisions": entries,
+                   "request_id": "proof"}
+        original = self.client.sprints.metadata_of
+        for field in ("sprint_allowed_productions", "sprint_e2e_budget", "sprint_goal"):
+            def missing(keys, field=field):
+                rows = original(keys)
+                for values in rows.values():
+                    values.pop(field, None)
+                return rows
+            with self.subTest(field=field), mock.patch.object(self.client.sprints, "metadata_of", side_effect=missing):
+                with self.assertRaises(TaskError) as refusal:
+                    self._create(**options)
+                self.assertEqual(refusal.exception.code, "backend_error")
+                self.assert_nothing_was_written()
+                self.assertEqual(self.client._query("SELECT count(*) FROM requests WHERE request_id='proof'"), [(0,)])
+        self.assert_quoted_create(entries, ["ummanu"], 5, request_id="proof")
+
+    def test_unauthorized_quoted_create_leaves_no_sprint_or_audit_record(self):
+        for role, actor in [("observer", "observer"), ("dispatcher", "dispatcher"), ("po", "observer")]:
+            with self.subTest(role=role, actor=actor), self.assertRaises(TaskError):
+                self._create(role=role, actor=actor, goal="unauthorized", reference="sprint:7",
+                             standing_decisions=[self.decision()], request_id="unauthorized")
+            self.assert_nothing_was_written()
+
+    def test_quoted_create_native_insert_failure_rolls_back_and_retries_once(self):
+        entries = [self.decision()]
+        original = self.client.sprints._replace_relations
+        def fail(*args, **kwargs):
+            original(*args, **kwargs)
+            raise RuntimeError("failure after native sprint insert")
+        with mock.patch.object(self.client.sprints, "_replace_relations", side_effect=fail):
+            with self.assertRaises(TaskError) as refusal:
+                self.assert_quoted_create(entries, [], 5)
+            self.assertEqual(refusal.exception.code, "backend_error")
+        self.assert_nothing_was_written()
+        self.assertEqual(self.client._query("SELECT count(*) FROM requests WHERE request_id='default-create'"), [(0,)])
+        self.assert_quoted_create(entries, [], 5)
+
     def test_quoted_create_append_and_sql_readback_apply_grants_once_and_supersede(self) -> None:
         production = self.decision("prod-1", "production", True, "ummanu")
         grant = self.decision()
