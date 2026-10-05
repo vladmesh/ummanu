@@ -1548,9 +1548,9 @@ class CommandHostRuntime:
         The check and the teardown are one critical section inside the head runtime: this head's
         epoch still where the caller saw it, the turn settled, admission closed, and only then the
         teardown — so a delivery cannot land between deciding the head is finished and taking it
-        away. The teardown itself is `stop_observer` unchanged, because an observer's stop is the
-        whole-worktree teardown plus its pid confirmation; it runs inside that same section rather
-        than after it.
+        away. The worktree teardown is `stop_observer` unchanged, run only once the runtime's stop
+        succeeded: the runtime left admission closed, and this method holds the cleanup ownership
+        lock across both, so nothing can reopen the head in between.
 
         Both facts come from the caller and neither is re-read here. `head_process_alive` is the
         pid-heartbeat answer the caller already had.
@@ -1563,9 +1563,11 @@ class CommandHostRuntime:
             head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
             expected_activity_epoch=expected_activity_epoch,
             head_process_alive=head_process_alive,
-            teardown=lambda: self.stop_observer(record),
         )
-        return receipt.ok
+        if not receipt.ok:
+            return False
+        self.stop_observer(record)
+        return True
 
     def observer_status(self, record: Any) -> dict[str, Any]:
         """Read the observer pane's output clock and whether it is ready for a prompt."""
