@@ -14,8 +14,23 @@ python3 -P -m ummanu doctor --instance INSTANCE --host-fixture DIR
 
 `doctor` is read-only. A normal run checks config, data and live inventory; `--offline` keeps only
 config and data; `--host-fixture` replaces live inventory with a deterministic fixture and cannot be
-combined with `--offline`. Exit `0`: no findings; `1`: findings (or warnings under `--strict`); `2`:
+combined with `--offline`. Exit `0`: no unaccepted findings; `1`: unaccepted findings (or warnings under `--strict`); `2`:
 invalid input or unreachable inventory. Without `--strict`, warnings alone stay green.
+
+`doctor.accepted_findings` in the selected instance accepts an exact raw finding object with a
+nonblank reason. Matching uses full structural equality, independent of object key order. Text
+retains the row with an explicit accepted designation and reason; JSON adds `accepted: true` and
+`acceptance_reason`. JSON `ok` and diagnostic exit `0`/`1` depend on unaccepted rows. Diagnostic
+unavailability still exits `2`, including when its row is accepted. Recorded schema 1/2 documents
+retain these annotations; released unannotated rows remain active. The shared doctor page,
+dashboard and lamp display accepted doctor rows neutrally, without suppressing status faults or
+unusable/stale/stuck recorded reads. See [operator declarations](OPERATIONS.md#known-doctor-findings-and-foreign-project-directories).
+
+`host.foreign_projects` lists immediate child directory names under `host.projects_root`.
+Doctor normalizes each child through the existing project-path convention and excludes it only
+from unmanaged-project parity. Absent foreign children are not required; an overlapping registered
+checkout remains required. These names create no desired resource and change no reconcile install
+or removal operation.
 
 ### Board schema gate
 

@@ -34,6 +34,7 @@ from ummanu.checkpoint import rpo_problem
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import HostError
+from ummanu.infra.doctor_findings import accepted
 from ummanu.status import collect_status
 from ummanu.tasks import TaskError, TaskReader, task_audit_for
 from ummanu.webproto import agents as agent_reads
@@ -848,7 +849,8 @@ def problem_severity(code: str) -> str:
 
 def lamp_colour(findings: Iterable[dict[str, Any]]) -> str:
     """Red if anything red is present, else yellow if anything yellow is, else green."""
-    severities = {problem_severity(_text(finding.get("code"))) for finding in findings}
+    severities = {problem_severity(_text(finding.get("code"))) for finding in findings
+                  if finding.get("source") == "status" or not accepted(finding)}
     if "red" in severities:
         return "red"
     if severities:

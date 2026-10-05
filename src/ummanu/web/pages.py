@@ -34,6 +34,7 @@ from html import escape
 from typing import Any
 from urllib.parse import quote
 
+from ummanu.infra.doctor_findings import accepted
 from ummanu.web import markdown
 from ummanu.web.doctor import DOCTOR_NOT_BUILT
 from ummanu.web.doctor import unreadable as doctor_unreadable
@@ -729,7 +730,8 @@ def _doctor_lamp(section: dict[str, Any] | None) -> str:
         document = doctor_unreadable(reason)
     colour = str(document.get("colour") or "red")
     colour = colour if colour in LAMP_WORDS else "red"
-    problems = [problem for problem in document.get("problems") or [] if isinstance(problem, dict)]
+    problems = [problem for problem in document.get("problems") or [] if isinstance(problem, dict)
+                and (problem.get("source") == "status" or not accepted(problem))]
     count = f' <span class="lamp-count">{len(problems)}</span>' if problems else ""
     title = LAMP_WORDS[colour]
     if problems:
@@ -1360,8 +1362,8 @@ def _health_panel(installation: dict[str, Any]) -> str:
     if recorded.get("state") == "unknown":
         parts.append('<p class="muted">recorded doctor is unknown / not yet collected.</p>')
     problems = [str(item) for item in (health.get("combined") or status).get("problems") or []]
-    if problems:
-        combined = health.get("combined") or {}
+    combined = health.get("combined") or {}
+    if problems or combined.get("findings"):
         parts.append(_doctor_list(combined["findings"]) if combined.get("findings") else
                      '<ul class="problems">' + "".join(f"<li>{escape(item)}</li>" for item in problems) + "</ul>")
     elif recorded.get("state") != "unknown":
@@ -1714,6 +1716,7 @@ def _entity_link(entity: dict[str, Any]) -> str:
 SEVERITY_GROUPS: tuple[tuple[str, str], ...] = (
     ("red", "Red — the installation cannot be trusted to run work"),
     ("yellow", "Yellow — running, but a person should look"),
+    ("neutral", "Accepted findings"),
 )
 
 
@@ -1811,9 +1814,12 @@ def _doctor_list(problems: list[dict[str, Any]]) -> str:
         [
             f"<code>{escape(str(problem.get('code') or '—'))}</code>",
             escape(str(problem.get("message") or "")) + (
+                f"<br>accepted: {escape(str(problem['acceptance_reason']))}"
+                if problem.get("source") == "doctor" and accepted(problem) else ""
+            ) + (
                 "<br><code>" + escape(json.dumps({key: value for key, value in problem.items()
-                                              if key not in {"code", "message", "severity", "source"}}, sort_keys=True)) + "</code>"
-                if any(key not in {"code", "message", "severity", "source"} for key in problem) else ""
+                                              if key not in {"code", "message", "severity", "source", "accepted", "acceptance_reason"}}, sort_keys=True)) + "</code>"
+                if any(key not in {"code", "message", "severity", "source", "accepted", "acceptance_reason"} for key in problem) else ""
             ),
         ]
         for problem in problems

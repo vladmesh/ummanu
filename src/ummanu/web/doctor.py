@@ -31,6 +31,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from ummanu.infra.doctor_findings import accepted
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.reads import lamp_colour, problem_severity
 
@@ -149,7 +150,8 @@ class DoctorLayer:
             if isinstance(snapshot, dict):
                 snapshot["health"]["combined"] = {
                     "colour": document["colour"], "findings": document["problems"],
-                    "problems": [problem["message"] for problem in document["problems"]],
+                    "problems": [problem["message"] for problem in document["problems"]
+                                 if problem.get("source") == "status" or not accepted(problem)],
                 }
             self._cached = HealthReading(observed, snapshot, document)
             return self._cached
@@ -179,7 +181,7 @@ def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:
     }
     problems.extend(
         {**finding, "message": str(finding.get("message") or _finding_identity(finding)),
-         "severity": problem_severity(str(finding.get("code") or "")), "source": "doctor"}
+         "severity": "neutral" if accepted(finding) else problem_severity(str(finding.get("code") or "")), "source": "doctor"}
         for finding in recorded.get("findings") or [] if isinstance(finding, dict)
     )
     if recorded.get("state") not in ("available", "unknown"):
@@ -199,7 +201,8 @@ def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:
             "elapsed_seconds": elapsed, "threshold_seconds": threshold,
             "severity": problem_severity("doctor.collection_stuck"),
         })
-    colour = lamp_colour(problems) if problems or recorded.get("state") != "unknown" else "unknown"
+    active = [problem for problem in problems if problem.get("source") == "status" or not accepted(problem)]
+    colour = lamp_colour(active) if active or recorded.get("state") != "unknown" else "unknown"
     return {
         "kind": "doctor", "observed_at": str(snapshot.get("observed_at") or "") or None,
         "readable": readable, "reason": reason, "colour": colour,
