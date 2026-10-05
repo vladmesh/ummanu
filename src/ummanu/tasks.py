@@ -938,31 +938,34 @@ class TaskReader:
             )
         return result
 
-    def restore_snapshot(self) -> dict[str, dict[str, Any]]:
+    def restore_snapshot(self, *, include_comments: bool = True) -> dict[str, dict[str, Any]]:
         """Read every active or archived card as a normalized, authoritative snapshot.
 
         Recovery uses this after its setup writes and again for final parity.  The
         board rows are one read and metadata/comments share bounded JSON-RPC posts;
         unlike ``show`` this never grows a pair of HTTP reads per card.
+        Dispatcher discovery omits comments; recovery callers retain the default.
         """
         project_id, columns, swimlanes = self._board()
         rows = [row for row in all_project_cards(self.client, project_id) if isinstance(row, dict)]
         task_ids = [_task_number(row) for row in rows]
+        methods = ("getTaskMetadata", "getAllComments") if include_comments else ("getTaskMetadata",)
         answers = self.client.call_batch(
             (method, {"task_id": task_id})
             for task_id in task_ids
-            for method in ("getTaskMetadata", "getAllComments")
+            for method in methods
         )
         result: dict[str, dict[str, Any]] = {}
         for index, row in enumerate(rows):
-            raw_comments = answers[index * 2 + 1] or []
+            offset = index * len(methods)
+            raw_comments = (answers[offset + 1] or []) if include_comments else []
             if not isinstance(raw_comments, list):
                 raise TaskError("backend_error", "board store returned invalid task comments", 1)
             card = self._normalize(
                 row,
                 columns,
                 swimlanes,
-                _task_metadata(answers[index * 2]),
+                _task_metadata(answers[offset]),
                 comments=[_normalize_comment(value) for value in raw_comments if isinstance(value, dict)],
             )
             previous = result.get(card["ref"])
@@ -2770,10 +2773,12 @@ class TaskWriter:
                     if stored.hotfix not in refs:
                         raise TaskError("backend_error", "hotfix changed during mark admission", 1)
                     self._after_merge_hotfix_obligation(self.reader.show(carrier), stored)
+                before = current.text()
                 for name, value in changes.items():
                     setattr(current.after_merge, name, value)
-                self.client.call("saveTaskMetadata", task_id=_task_number(task),
-                                 values={e2e_record.E2E_FIELD: current.text()})
+                if current.text() != before:
+                    self.client.call("saveTaskMetadata", task_id=_task_number(task),
+                                     values={e2e_record.E2E_FIELD: current.text()})
             return current
 
     @contextlib.contextmanager
@@ -2840,7 +2845,7 @@ class TaskWriter:
 
         try:
             return hotfix_obligation(self.reader.show(run.hotfix), run=run,
-                project=carrier["project"], superseded=self._card_superseded(run.hotfix),
+                project=carrier["project"], carrier=carrier["ref"], superseded=self._card_superseded(run.hotfix),
                 created=self.audit.committed_event(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX + run.dispatch_id))
         except ValueError as exc:
             raise TaskError("backend_error", str(exc), 1) from None
@@ -2854,7 +2859,7 @@ class TaskWriter:
         no charge or grant occurs here. Missing evidence clears a dead holder with
         a neutral reason; degraded reads roll back and can be tried again.
         """
-        from ummanu.board.e2e_disposition import disposition_effect, owns_mark
+        from ummanu.board.e2e_disposition import disposition_effect, hotfix_route_effect, owns_mark
         from ummanu.sprints import SprintReader
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
@@ -2940,14 +2945,13 @@ class TaskWriter:
                     events=self.audit.events(run.disposition), read=read_locked,
                     sprint=read_sprint,
                     superseded=self._card_superseded)
-                if hotfix_owned and effect["action"] == "retry":
-                    effect = {"status": "neutral", "action": "", "holder": "",
-                        "reason": "Unowned hotfix needs planned follow_up or explicit decline to resolve its return route"}
             except TaskError as exc:
                 if exc.code != "not_found":
                     raise
                 effect = {"status": "neutral", "action": "", "holder": "",
                           "reason": f"Disposition evidence is missing: {exc.message}; PO must repair the route"}
+            if hotfix_owned:
+                effect = hotfix_route_effect(effect, operation=run.disposition)
             linked = []
             receipt = {"operation": run.disposition, **effect}
             changed = run.disposition_result != receipt
@@ -2986,6 +2990,11 @@ class TaskWriter:
                                 if effect["status"] == "settled" else "PO must repair the same operation.")),
                     request_id="dispatcher-e2e-am-hotfix-disposition-" + dispatch_id + "-"
                         + hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()[:16])
+                if effect["status"] == "neutral":
+                    self.comment(role="dispatcher", actor=actor, reference=run.disposition,
+                        body=f"Hotfix {run.hotfix} return route remains unanswered: {effect['reason']}. No new paid run is authorized.",
+                        request_id="dispatcher-e2e-am-hotfix-repair-" + dispatch_id + "-"
+                            + hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()[:16])
             run.disposition_result = receipt
             for ref in {carrier, *linked}:
                 self.client.call("saveTaskMetadata", task_id=_task_number(tasks[ref]),

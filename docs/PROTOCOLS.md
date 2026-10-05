@@ -4878,7 +4878,8 @@ Retention closure alone never ends an unresolved paid, pending or budget-wait
 obligation. Actual supersession, current merge/run/holder replacement, decline or
 native terminal disposition does. Missing/unreadable evidence degrades rather than
 pretending the question was answered. The existing complete board snapshot read
-includes retained sources/carriers; released0024 hotfix create audit also discovers
+includes retained sources/carriers without comment histories; targeted native reads
+still supply actual completion authority. Released0024 hotfix create audit also discovers
 its actual carrier. No retention exemption or new recovery index is needed.
 
 An actual open, unowned Blocked hotfix is an independent return-route obligation:
@@ -4893,12 +4894,21 @@ native `decline` records the terminal route disposition; `retry` alone cannot an
 its route question. The consumer atomically copies its bound receipt to the actual
 hotfix's `e2e.hotfix_route` (`carrier`, `run`, `result`) and maintains its native
 `blocked_by` dependency, with a dispatcher audit/comment naming the outcome.
-The public e2e view shows that receipt and the single live route holder. Terminal
-or neutral receipts have no Done-holder wait, and terminal receipts suppress the
-otherwise generic Blocked-to-observer wait for this answered route. The code card
+The public e2e view shows that receipt and the single live route holder. Only a
+settled decline or completed follow-up suppresses the unresolved route wait. Neutral
+receipts have no Done-holder dependency: `blocked_by` reads as null and the receipt
+holder is empty. They persist a visible PO repair wait naming the bound operation,
+reason and native reopen/corrected-completion step, including after restart/queue loss.
+The same native operation's reopening restores its live holder; fresh bound native
+completion records corrected decline or real follow-up. Generated hotfix-route
+instructions offer those two actions; general uncertain-result operations still offer
+investigated retry through normal standing/budget admission. Recovered operations
+receive accurate route guidance without rewriting historical completion/audit. The code card
 remains Blocked for its historical code state; no dispatcher impersonates PO or
 fabricates a code completion. Follow-up Done clears its dependency and settles
 both receipts, including retained Done follow-up. Receipt/marks/hotfix publication
 fail together, and repeated ticks/native completion/restarts do not ask or spend
 again. Bare/malformed completion remains neutral with PO repair of the same operation.
+The existing locked mark writer skips identical e2e writes only after rereading and
+validating actual run/ownership; first publication and legitimate changed outcomes remain.
 Superseded pending work cannot be revived by a retained or deleted-queue projection.

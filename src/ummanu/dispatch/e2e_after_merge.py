@@ -257,7 +257,7 @@ def reconcile_after_merge(
     # The board, including drained queues, is authoritative. Isolate each carrier:
     # one unreadable released run must not starve any other disposition.
     try:
-        cards = list(runtime.reader.restore_snapshot().values())
+        cards = list(runtime.reader.restore_snapshot(include_comments=False).values())
     except (TaskError, ValueError, TypeError, KeyError) as exc:
         cards = []
         outcomes.append(_outcome("", "e2e-after-merge-route-unread", status="degraded", reason=str(exc)))
@@ -1162,11 +1162,25 @@ def _disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRun, acti
 
 def _create_disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRun, action: str) -> str:
     """Only called while covered ownership is locked by _disposition."""
+    from ummanu.board.e2e_disposition import HOTFIX_ROUTE_ACTIONS
     request_id = stage_request_id("e2e-am-disposition", run.dispatch_id)
+    carrier = runtime.reader.show(carrier_ref)
+    hotfix_route = bool(run.hotfix and runtime.writer._after_merge_hotfix_obligation(carrier, run))
+    choices = ", ".join(HOTFIX_ROUTE_ACTIONS) if hotfix_route else "retry, decline, follow_up"
+    route_guidance = (
+        "Only explicit decline or a real planned follow_up answers this unowned hotfix return route. "
+        "Retry alone cannot plan or answer this code work; it leaves the route unanswered and needs PO "
+        "native reopening and corrected completion of this same operation. "
+        if hotfix_route else
+        "Retry additionally needs prior_effect: not_started or finished, attesting investigation resolved the prior uncertain effect. "
+    )
     known = runtime.audit.committed_event(request_id)
     if known is not None and known.get("ref"):
+        if hotfix_route:
+            runtime.writer.comment(role="dispatcher", actor=runtime.owner, reference=str(known["ref"]),
+                body=f"Hotfix {run.hotfix} return-route completion: {route_guidance}",
+                request_id=stage_request_id("e2e-am-hotfix-route-guidance", run.dispatch_id))
         return str(known["ref"])
-    carrier = runtime.reader.show(carrier_ref)
     sprint = str(carrier.get("sprint") or "")
     sprint = sprint if _sprint_open(runtime, sprint) else ""
     origin = None if sprint else next((found for ref in [carrier_ref, *(item["ref"] for item in run.covered)]
@@ -1178,9 +1192,8 @@ def _create_disposition(runtime: Any, project: str, carrier_ref: str, run: E2eRu
             *_covered_lines(run), "", run.closing_reason or str(run.result or {}), "",
             "## Completion", "", ("Use native task complete with What was done and How to verify. Add a plain JSON object "
             "under ## E2E disposition: operation (this card ref), carrier, run, covered (the exact ref/merge_sha "
-            "objects below), action (retry, decline, follow_up), evidence (investigation and verification). "
-            "Retry additionally needs prior_effect: not_started or finished, attesting investigation resolved the "
-            "prior uncertain effect. Follow_up additionally needs holder: an actual planned card in an open sprint "
+            f"objects below), action ({choices}), evidence (investigation and verification). "
+            + route_guidance + "Follow_up additionally needs holder: an actual planned card in an open sprint "
             "or from a genuine PO turn; its Done settles this disposition. Other fields are refused by the consumer. "
             "Bare Done/free prose does not retry. A missing/malformed disposition needs PO reopening and corrected "
             "native completion of this same operation. "

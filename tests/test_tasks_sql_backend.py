@@ -79,6 +79,23 @@ class SqlTaskReaderTests(SqlBoardCase):
         self.assertEqual(set(snapshot), {"ummanu-468", "old-1"})
         self.assertIn("comments", snapshot["ummanu-468"])
 
+    def test_comment_free_snapshot_preserves_retained_metadata_without_history_reads(self) -> None:
+        self.client.call("closeTask", task_id=self.client.key_of("ummanu-468"))
+        full = self.reader.restore_snapshot()
+        original = self.client.call_batch
+        batches = []
+        def metadata_only(calls):
+            calls = list(calls)
+            batches.append(calls)
+            self.assertTrue(all(method == "getTaskMetadata" for method, _ in calls))
+            return original(calls)
+        with mock.patch.object(self.client, "call_batch", side_effect=metadata_only):
+            lean = self.reader.restore_snapshot(include_comments=False)
+        self.assertEqual(len(batches), 1)
+        self.assertEqual(len(batches[0]), len(full))
+        self.assertTrue(lean["ummanu-468"]["closed"])
+        self.assertEqual(lean, {ref: {**card, "comments": []} for ref, card in full.items()})
+
     def test_steward_signal_cards_report_the_bounded_view(self) -> None:
         cards = self.reader.steward_signal_cards(project="ummanu")
 

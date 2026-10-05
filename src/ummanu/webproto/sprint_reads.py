@@ -2261,9 +2261,9 @@ def card_waits(card: dict[str, Any]) -> list[dict[str, Any]]:
     elif escalation := attention_record(card, OWNER_ESCALATION):
         said(WAITING_ON_OWNER, str(escalation["reason"]))
     elif route := e2e_state(card).hotfix_route:
-        if route.result["holder"] and route.result["status"] in {"waiting", "follow_up"}:
-            said(WAITING_ON_DEPENDENCY, route.result["reason"])
-            found[-1]["holder"] = route.result["holder"]
+        from ummanu.board.e2e_disposition import hotfix_route_wait
+        if responsibility := hotfix_route_wait(route):
+            found.append({"card": reference, **responsibility})
     elif is_po_executed(card) and state == "in_progress":
         said(WAITING_ON_PO, f"{kind} card with the PO")
     elif state == "blocked" and kind != "wait" and not e2e_state(card).budget_decline:
