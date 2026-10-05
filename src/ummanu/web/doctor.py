@@ -31,9 +31,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from ummanu.infra.doctor_findings import accepted
 from ummanu.webproto.errors import ReadError
-from ummanu.webproto.reads import lamp_colour, problem_severity
+from ummanu.webproto.reads import accepted, lamp_colour, problem_severity
 
 #: How long one health reading serves the lamp. Shorter than the provider window: this reading is
 #: local, and an operator who repaired a unit should see the lamp change within about a minute.

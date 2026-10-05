@@ -34,7 +34,8 @@ from ummanu.checkpoint import rpo_problem
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import HostError
-from ummanu.infra.doctor_findings import accepted
+# Public row disposition for transports, shared with the native doctor evaluator.
+from ummanu.infra.doctor_findings import accepted as accepted
 from ummanu.status import collect_status
 from ummanu.tasks import TaskError, TaskReader, task_audit_for
 from ummanu.webproto import agents as agent_reads
