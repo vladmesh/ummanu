@@ -4378,6 +4378,9 @@ def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str
     else:
         meta.append(f"<span>{_po_when(item.get('last_activity_at'), now)}</span>")
     meta.append(f'<span class="id">{escape(session_id[:8])}</span>')
+    transition = _po_transition(item.get("first_message_metadata"))
+    if transition:
+        meta.append(f'<span>{transition}</span>')
     if closed:
         side = ""
     else:
@@ -4601,6 +4604,11 @@ def po_session(
         if items
         else '<p class="empty" id="po-feed">nothing said yet</p>'
     )
+    budget = document.get("context_budget")
+    if isinstance(budget, dict):
+        feed = (f'<p class="hint">Context budget: {escape(str(budget.get("measured_bytes")))} / '
+                f'{escape(str(budget.get("threshold_bytes")))} {escape(str(budget.get("metric")))}. '
+                'Deterministic proxy; checked on sprint resolution at idle.</p>' + feed)
     running = bool(document.get("running"))
     base = f"/po/sessions/{quote(session_id)}"
     stop = (
@@ -4817,9 +4825,27 @@ def _po_input_text(entry: dict[str, Any]) -> str:
     if not isinstance(metadata, dict) or metadata.get("source") not in {"dispatcher", "po-service"}:
         return f'<div class="text">{text}</div>'
     summary = escape(str(metadata.get("summary") or "Service input"))
+    transition = _po_transition(metadata)
+    if transition:
+        summary += " · " + transition
     return (f'<div class="text">{summary}</div>'
             '<details class="po-service-input"><summary>Service instructions, comments, rights and full text</summary>'
             f'<div class="text">{text}</div></details>')
+
+
+def _po_transition(metadata: Any) -> str:
+    if not isinstance(metadata, dict) or metadata.get("source") != "po-service":
+        return ""
+    transition = metadata.get("transition")
+    if not isinstance(transition, dict) or transition.get("reason") != "context_budget":
+        return ""
+    predecessor = str(transition.get("predecessor") or "")
+    successor = str(transition.get("successor") or "")
+    return (f'Context rollover: {escape(str(transition.get("measured_bytes")))} &gt; '
+            f'{escape(str(transition.get("threshold_bytes")))} '
+            f'{escape(str(transition.get("metric")))} · '
+            f'<a href="/po/sessions/{quote(successor)}">new session</a> · '
+            f'<a href="/po/sessions/{quote(predecessor)}">predecessor history</a>')
 
 
 def _po_turn_mark(turn: dict[str, Any]) -> str:

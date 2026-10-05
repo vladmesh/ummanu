@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -1863,6 +1864,280 @@ class SprintSessionTests(ServiceFixture):
 
     def first_prompt(self, session_id: str) -> str:
         return self.feed(session_id)[0][2]
+
+    def budget_resolver(self, *, threshold=32768, cli="claude"):
+        config = self.root / "instance.yaml"
+        config.write_text(f"po:\n  context_budget_bytes: {threshold}\n", encoding="utf-8")
+        sprints = FakeSprints({})
+        service = self.resolver(sprints, run=False, instance=config)
+        predecessor = self.session(service, cli, MODELS[cli][0])
+        sprints.records["sprint:1"] = SprintRecord("sprint:1", "open", predecessor)
+        return service, sprints, predecessor
+
+    def history(self, service, session_id, text, answer=""):
+        turn, _ = service.store.claim_turn(session_id, text, lambda seq: "/unused")
+        service.store.complete_turn(session_id, turn.seq, answer)
+
+    def test_context_threshold_counts_native_utf8_input_and_answer_once_for_both_clis(self):
+        from ummanu.po.context_budget import conversation_bytes, rollover_request_id
+        for cli in MODELS:
+            for difference in (-1, 0, 1):
+                with self.subTest(cli=cli, difference=difference):
+                    service, sprints, old = self.budget_resolver(cli=cli)
+                    self.history(service, old, "é" * 8192, "界" * 5461 + "x" * (1 + difference))
+                    self.assertEqual(conversation_bytes(service.store.feed(old)), 32768 + difference)
+                    with mock.patch.object(service, "pump"):
+                        answer = service.sprint_session(sprint_ref="sprint:1", request_id=f"r-{cli}-{difference}")
+                    if difference <= 0:
+                        self.assertEqual(answer["session_id"], old)
+                        self.assertFalse(answer["created"])
+                        self.assertEqual(sprints.comments, {})
+                        self.assertEqual(service.queue.pending(), [])
+                    else:
+                        new = answer["session_id"]
+                        self.assertNotEqual(new, old)
+                        chosen = service.store.session(new)
+                        self.assertEqual((chosen.cli, chosen.model, chosen.effort), (cli, MODELS[cli][0], "high"))
+                        self.assertEqual(service.store.session(old).state, "open")
+                        self.assertEqual(len(service.store.feed(old)), 2)
+                        canonical = rollover_request_id("sprint:1", old)
+                        self.assertEqual(service.store.request(canonical).session_id, new)
+                        self.assertEqual(service.store.request(f"r-{cli}-{difference}").session_id, new)
+                        [seed] = service.queue.pending(new)
+                        self.assertLess(len(seed.text.encode("utf-8")), 32768)
+                        self.assertEqual(seed.metadata["transition"]["measured_bytes"], 32769)
+
+    def test_busy_and_pending_input_defer_until_the_next_idle_resolve(self):
+        service, sprints, old = self.budget_resolver()
+        self.history(service, old, "x" * 32769)
+        turn, _ = service.store.claim_turn(old, "running", lambda seq: "/unused")
+        request = dict(sprint_ref="sprint:1", request_id="resolve")
+        self.assertEqual(service.sprint_session(**request)["session_id"], old)
+        service.queue.put(session_id=old, text="frozen card", request_id="pending", source="dispatcher")
+        service.store.complete_turn(old, turn.seq, "done")
+        self.assertEqual(service.sprint_session(**request)["session_id"], old)
+        [pending] = service.queue.pending(old)
+        self.assertEqual((pending.text, pending.session_id), ("frozen card", old))
+        service._hand_over(pending)
+        self.settled(old, turn.seq + 1)
+        with mock.patch.object(service, "pump"):
+            answer = service.sprint_session(**request)
+        self.assertNotEqual(answer["session_id"], old)
+        self.assertEqual(service.store.request("pending").session_id, old)
+        self.assertEqual(service.queue.pending(old), [])
+
+    def test_bad_or_unreadable_budget_and_feed_refuse_before_writes(self):
+        service, sprints, old = self.budget_resolver()
+        for raw in ("0", "-2", "true", "null", "1.5", "'262144'"):
+            with self.subTest(raw=raw):
+                service.instance.write_text(f"po:\n  context_budget_bytes: {raw}\n")
+                answer = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": raw})
+                self.assertEqual(answer["error"]["code"], "validation")
+                self.assertTrue(answer["error"]["nothing_written"])
+        service.instance.write_text("po: []\n")
+        self.assertEqual(service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "bad-po"})["error"]["code"], "validation")
+        service.instance.write_text("po: {}\n")
+        self.assertEqual(service._context_budget(), 262144)
+        with mock.patch.object(service.store, "feed", side_effect=po_store.PoStoreError("unreadable")):
+            answer = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "unreadable"})
+            self.assertEqual(answer["error"]["code"], "unavailable")
+        self.assertEqual(sprints.comments, {})
+        self.assertEqual(list(self.board.sessions), [old])
+        service.instance.unlink()
+        unreadable = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "missing-config"})
+        self.assertEqual(unreadable["error"]["code"], "unavailable")
+        self.assertEqual(list(self.board.sessions), [old])
+
+    def test_default_budget_rolls_over_only_the_sprint_session(self):
+        sprints = FakeSprints({})
+        service = self.resolver(sprints, run=False)
+        old = self.session(service)
+        sprints.records["sprint:1"] = SprintRecord("sprint:1", "open", old)
+        self.history(service, old, "x" * 262145)
+        # Ordinary create/send keeps its own session and request contract.
+        other = self.session(service)
+        self.history(service, other, "x" * 262145)
+        with mock.patch.object(service, "pump"):
+            new = service.sprint_session(sprint_ref="sprint:1", request_id="default-roll")["session_id"]
+            service.submit(session_id=other, text="ordinary input", request_id="ordinary")
+        self.assertNotEqual(new, old)
+        self.assertEqual(service.queue.find("ordinary").session_id, other)
+        self.assertEqual(service.queue.pending(new)[0].metadata["transition"]["threshold_bytes"], 262144)
+
+    def test_too_small_seed_budget_refuses_and_absent_sources_are_explicit(self):
+        service, sprints, old = self.budget_resolver(threshold=1)
+        self.history(service, old, "above")
+        answer = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "tiny"})
+        self.assertEqual(answer["error"]["code"], "validation")
+        self.assertTrue(answer["error"]["nothing_written"])
+        self.assertEqual(list(self.board.sessions), [old])
+        self.assertEqual(service.queue.pending(), [])
+        service.instance.write_text("po: {context_budget_bytes: 8192}\n")
+        self.history(service, old, "x" * 8192)
+        with mock.patch.object(service, "pump"):
+            new = service.sprint_session(sprint_ref="sprint:1", request_id="missing-sources")["session_id"]
+        [seed] = service.queue.pending(new)
+        for expected in ("It is missing", "No standing owner decisions", "No durable sprint summary",
+                         "No why-document", "predecessor's latest"):
+            # The committed empty answer is an actual answer, even though it has no prose.
+            self.assertIn(expected.lower(), seed.text.lower())
+
+    def test_native_durable_seed_has_decisions_summary_bounded_why_answer_and_notes(self):
+        from ummanu.po.context_budget import conversation_bytes
+        from ummanu.web import pages
+        service, sprints, old = self.budget_resolver(threshold=65536)
+        quotation = "No further runs.\nВладелец сказал нет."
+        decisions = [{"id": "grant", "scope": "sprint", "kind": "e2e_grant", "value": 3, "quotation": "Three runs."},
+                     {"id": "stop", "scope": "sprint", "kind": "e2e_refusal", "value": "no_more_e2e", "quotation": quotation}]
+        resume = {"selected_step": "Latest durable step", "selected_why": "Native reason", "current_task": "none",
+                  "dod_state": "pending", "next_safe_step": "Check next item", "rejected_alternatives": "none",
+                  "recorded_at": "2026-10-05T00:00:00Z"}
+        client = sprint_client("sprint:1", [], metadata={"sprint_owner_decisions": json.dumps([
+            {**entry, "recorded_by": {"role": "po", "actor": "po", "request_id": "decisions",
+              "event_id": "event", "at": "2026-10-05T00:00:00Z"}} for entry in decisions]),
+            "sprint_resume": json.dumps(resume), "sprint_po_session": old})
+        with mock.patch("ummanu.board.backend.board_client", return_value=client):
+            record = BoardSprintSessions(self.root, self.data).sprint("sprint:1")
+        self.assertEqual(record.resume, resume)
+        self.assertEqual(record.owner_decisions[-1]["quotation"], quotation)
+        sprints.records["sprint:1"] = replace(record, status="open")
+        sprints.documents["sprint:1"] = [why(self.DOC, "# Why\n" + "界" * 100000)]
+        (service.runner.workspace / "NOTES.md").write_text("Actual durable notes")
+        self.history(service, old, "old input", "Latest PO answer " + "é" * 100000)
+        with mock.patch.object(service, "pump"):
+            new = service.sprint_session(sprint_ref="sprint:1", request_id="roll")["session_id"]
+        [seed] = service.queue.pending(new)
+        for expected in (quotation, "sprint:1/stop", "no_more_e2e", "Latest durable step", "Latest PO answer",
+                         "Read the actual NOTES.md", self.DOC, "[Excerpt;", f"/po/sessions/{old}"):
+            self.assertIn(expected, seed.text)
+        self.assertLess(len(seed.text.encode("utf-8")), 16384)
+        html = pages._po_input_text({"text": seed.text, "metadata": seed.metadata})
+        self.assertIn(f'href="/po/sessions/{old}"', html)
+        self.assertIn(f'href="/po/sessions/{new}"', html)
+        self.assertIn("predecessor history", html)
+        self.assertIn('<details class="po-service-input">', html)
+        self.assertNotIn("<details open", html)
+        from datetime import UTC, datetime
+        row = pages._po_session_row({"session_id": new, "title": "sprint:1", "first_message": seed.text,
+                                     "first_message_metadata": seed.metadata}, closed=False, now=datetime.now(UTC))
+        self.assertIn("Context rollover", row)
+        self.assertIn(f'href="/po/sessions/{old}"', row)
+        # Rollover seed owns no accepted comment position. The first card in the
+        # actual successor gets its own delta, after the service seed in FIFO.
+        from ummanu.board.production_rights import card_facts
+        sprints.records["sprint:1"] = replace(sprints.records["sprint:1"], comments=(
+            {"created_at": "2026-10-05T00:00:00Z", "body": "durable comment"},))
+        facts = card_facts(card_ref="ummanu-50", kind="decision", touches_production=None, sprint_ref="sprint:1")
+        facts.update(display_summary="Next cut", deliver_sprint_comments=True)
+        with mock.patch.object(service, "pump"):
+            first = service.submit(session_id=new, text="Next cut", request_id="first-card", source="dispatcher", card=facts)
+            replay = service.submit(session_id=new, text="Next cut", request_id="first-card", source="dispatcher", card=facts)
+        self.assertFalse(first["repeated"])
+        self.assertTrue(replay["repeated"])
+        self.assertEqual([item.request_id for item in service.queue.pending(new)], [seed.request_id, "first-card"])
+        self.assertEqual(service.queue.find("first-card").metadata["comment_position"], 1)
+        self.assertIn("durable comment", service.queue.find("first-card").note)
+        service.pump()
+        self.settled(new, 1)
+        self.assertEqual(self.first_prompt(new), seed.text)
+        service.pump()
+        self.settled(new, 2)
+        self.assertLess(conversation_bytes(service.store.feed(new)), 65536)
+        layer = PoLayer(self.root, data_dir=self.data, store=service.store)
+        document = layer.po_session(new)
+        self.assertEqual(document["context_budget"]["threshold_bytes"], 65536)
+        self.assertEqual(document["context_budget"]["measured_bytes"], conversation_bytes(service.store.feed(new)))
+        self.assertEqual(layer.po_overview()["sessions"][-1]["first_message_metadata"], seed.metadata)
+        self.assertEqual(service.sprint_session(sprint_ref="sprint:1", request_id="later")["session_id"], new)
+
+    def test_restart_at_each_rollover_write_boundary_converges_with_another_caller(self):
+        from ummanu.po.context_budget import rollover_request_id
+        for boundary in ("create", "seed", "comment", "record"):
+            with self.subTest(boundary=boundary):
+                service, sprints, old = self.budget_resolver()
+                self.history(service, old, "x" * 32769)
+                canonical = rollover_request_id("sprint:1", old)
+                target, name = {"create": (service.runner, "create_session_request"),
+                                "seed": (service.queue, "put"), "comment": (sprints, "comment"),
+                                "record": (sprints, "record_po_session")}[boundary]
+                original = getattr(target, name)
+                def write_then_fail(*args, **kwargs):
+                    original(*args, **kwargs)
+                    raise RuntimeError("lost reply after " + boundary)
+                with mock.patch.object(target, name, side_effect=write_then_fail), mock.patch.object(service, "pump"):
+                    failed = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "first-" + boundary})
+                self.assertEqual(failed["error"]["code"], "outcome_unknown")
+                new = service.store.request(canonical).session_id
+                # Same durable board/queue, fresh service instance. Prevent the fake CLI
+                # from claiming the seed until replay assertions are complete.
+                service.stop()
+                with mock.patch.object(PoService, "pump"):
+                    restarted = self.resolver(sprints, run=False, instance=service.instance)
+                    other = restarted.sprint_session(sprint_ref="sprint:1", request_id="other-" + boundary)
+                    again = restarted.sprint_session(sprint_ref="sprint:1", request_id="first-" + boundary)
+                self.assertEqual((other["session_id"], again["session_id"]), (new, new))
+                self.assertEqual(len(sprints.comments), 1)
+                self.assertEqual(len(restarted.queue.pending(new)), 1)
+                self.assertEqual(len([s for s in self.board.sessions if s in (old, new)]), 2)
+                self.assertEqual(restarted.store.session(old).state, "open")
+                restarted.queue.remove(restarted.queue.pending(new)[0])
+
+    def test_concurrent_rollover_and_released_request_replay_keep_their_targets(self):
+        service, sprints, old = self.budget_resolver()
+        # A released revision's native request names the predecessor.
+        service.store.bind_sprint_session_request("released", "sprint:1", old)
+        self.history(service, old, "x" * 32769)
+        barrier = threading.Barrier(2)
+        answers = []
+        def resolve(request_id):
+            barrier.wait(5)
+            answers.append(service.sprint_session(sprint_ref="sprint:1", request_id=request_id))
+        with mock.patch.object(service, "pump"):
+            threads = [threading.Thread(target=resolve, args=(request_id,)) for request_id in ("a", "b")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual(len(answers), 2)
+        self.assertEqual(len({a["session_id"] for a in answers}), 1)
+        new = answers[0]["session_id"]
+        self.assertNotEqual(new, old)
+        self.assertEqual(len(sprints.comments), 1)
+        self.assertEqual(service.sprint_session(sprint_ref="sprint:1", request_id="released")["session_id"], old)
+        self.assertEqual(sprints.records["sprint:1"].po_session, new)
+
+    def test_partial_rollover_replays_the_same_seed_after_predecessor_closure(self):
+        from ummanu.po.context_budget import rollover_request_id
+        for claimed in (False, True):
+            with self.subTest(claimed=claimed):
+                service, sprints, old = self.budget_resolver()
+                self.history(service, old, "x" * 32769)
+                sprints.fail["record_po_session"] = 1
+                with mock.patch.object(service, "pump"):
+                    failed = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "initial-" + str(claimed)})
+                self.assertEqual(failed["error"]["code"], "outcome_unknown")
+                new = service.store.request(rollover_request_id("sprint:1", old)).session_id
+                [seed] = service.queue.pending(new)
+                if claimed:
+                    service.pump()
+                    self.settled(new, 1)
+                service.close_session(session_id=old, actor="owner")
+                with mock.patch.object(PoService, "pump"):
+                    restarted = self.resolver(sprints, run=False, instance=service.instance)
+                    if claimed:
+                        replay = restarted.sprint_session(sprint_ref="sprint:1", request_id="initial-" + str(claimed))
+                        other = restarted.sprint_session(sprint_ref="sprint:1", request_id="other-" + str(claimed))
+                    else:
+                        other = restarted.sprint_session(sprint_ref="sprint:1", request_id="other-" + str(claimed))
+                        replay = restarted.sprint_session(sprint_ref="sprint:1", request_id="initial-" + str(claimed))
+                self.assertEqual((other["session_id"], replay["session_id"]), (new, new))
+                self.assertEqual(len(sprints.comments), 1)
+                if claimed:
+                    self.assertEqual(len(restarted.store.feed(new)), 2)
+                    self.assertEqual(restarted.store.feed(new)[0].metadata, seed.metadata)
+                else:
+                    self.assertEqual(restarted.queue.pending(new), [seed])
+                    restarted.queue.remove(seed)
 
     def test_an_open_recorded_session_is_the_answer_and_nothing_is_written(self) -> None:
         sprints = FakeSprints({})

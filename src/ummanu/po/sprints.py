@@ -1,8 +1,9 @@
 """The sprint side of the PO service's resolver (`PoService.sprint_session`).
 
 A sprint records the PO session that opened it (`sprint create --po-session`, revision 0016). When
-that session no longer exists or is closed, the resolver opens a fresh one and seeds it from what
-outlives a session: the sprint's why-document in the instance knowledge and the PO workspace's own
+that session no longer exists, is closed, or crosses its declared byte budget at idle, the resolver
+opens a fresh one and seeds it from durable standing decisions, structured observer resume, the
+why-document and a predecessor answer excerpt, with an instruction to read the workspace's actual
 `NOTES.md`. This module is what the resolver needs of the sprint and nothing else: read its recorded
 session, find its why-document, record the fresh session, and say so in the sprint's comments.
 
@@ -17,6 +18,7 @@ board, and a unit test gives the service a fake one.
 from __future__ import annotations
 
 import re
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, Any
@@ -37,6 +39,7 @@ class SprintRecord:
     allowed_productions: tuple[str, ...] = ()
     owner_decisions: tuple[dict[str, Any], ...] = ()
     comments: tuple[dict[str, str], ...] = ()
+    resume: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -87,35 +90,78 @@ def why_document_label(documents: list[WhyDocument]) -> str:
     return "no single why-document (" + ", ".join(document.path for document in documents) + ")"
 
 
-def seed_message(sprint_ref: str, previous: str | None, why: str, documents: list[WhyDocument]) -> str:
-    """The first input of a session the resolver opened: which sprint it serves, why, and its context."""
-    if previous:
-        opened = f"The sprint's recorded PO session {previous} {why}, so the PO service opened this one."
-    else:
-        opened = "The sprint recorded no PO session, so the PO service opened this one."
-    lines = [
-        f"This PO session serves {sprint_ref}. {opened}",
-        "",
-        f"Read NOTES.md in your workspace first. The live sprint is `ummanu sprint show --ref {sprint_ref}`.",
-        "",
-    ]
-    if len(documents) == 1:
-        lines += [f"The sprint's why-document, {documents[0].path}:", "", documents[0].text.rstrip()]
-    elif not documents:
-        lines.append(f"No why-document under {WHY_DOCUMENTS_RELATIVE}/ names {sprint_ref}.")
-    else:
-        lines.append(
-            f"Several documents under {WHY_DOCUMENTS_RELATIVE}/ name {sprint_ref}, so none is quoted here:"
-        )
-        lines += [f"- {document.path}" for document in documents]
-    return "\n".join(lines) + "\n"
-
-
-def reseed_comment(previous: str | None, session_id: str, documents: list[WhyDocument]) -> str:
+def reseed_comment(previous: str | None, session_id: str, documents: list[WhyDocument], *,
+                   reason: str = "no longer exists") -> str:
     return (
-        f"the PO session {previous or 'none'} no longer exists; opened {session_id} seeded with "
+        f"the PO session {previous or 'none'} {reason}; opened {session_id} seeded with "
         f"{why_document_label(documents)} and NOTES.md"
     )
+
+
+def seed_message(sprint: SprintRecord, why: str, documents: list[WhyDocument], *,
+                 threshold: int, measured: int, latest_answer: Any = None,
+                 notes: Path) -> tuple[str, dict[str, Any]]:
+    """Bound durable native sources; no authority or summary is inferred from prose."""
+    from ummanu.po.context_budget import CONTEXT_METRIC, byte_excerpt
+
+    limit = min(16384, threshold // 2)
+    pointer = f"ummanu sprint show --ref {sprint.ref}"
+    previous = sprint.po_session
+    sources = {"sprint": pointer, "why": [doc.path for doc in documents],
+               "notes": str(notes), "notes_present": notes.is_file(),
+               "resume_recorded_at": (sprint.resume or {}).get("recorded_at"),
+               "answer": None if latest_answer is None else
+               {"session_id": previous, "turn_seq": latest_answer.turn_seq,
+                "entry_id": latest_answer.entry_id}}
+    opened = (f"The sprint's recorded PO session {previous} {why}, so the PO service opened this one."
+              if previous else "The sprint recorded no PO session, so the PO service opened this one.")
+    lines = [f"This PO session serves {sprint.ref}. {opened}",
+             f"Context budget: {measured} / {threshold} {CONTEXT_METRIC}; deterministic proxy, not provider tokens.",
+             f"Read the actual NOTES.md in your permanent workspace first ({notes}). "
+             + ("It exists; read its current contents." if sources["notes_present"] else "It is missing; no notes are supplied."),
+             f"Full durable sprint sources: `{pointer}`. Apply current addressable standing owner decisions "
+             "before the observer resume; excerpts grant no additional consent."]
+    sections = []
+    sections.append("Standing owner decisions in owner-answer order (latest applicable answer wins), "
+                    f"with verbatim quotation bases; full list: `{pointer}`:\n"
+                    + ("\n\n".join(
+                        f"Decision {sprint.ref}/{entry['id']}: "
+                        + json.dumps({key: value for key, value in entry.items() if key != "quotation"},
+                                     ensure_ascii=False, sort_keys=True)
+                        + "\nVerbatim owner quotation:\n" + entry["quotation"]
+                        for entry in sprint.owner_decisions)
+                       if sprint.owner_decisions else "No standing owner decisions recorded."))
+    sections.append(f"Latest durable sprint summary: structured observer resume; full source: `{pointer}`:\n"
+                    + (json.dumps(sprint.resume, ensure_ascii=False, indent=2)
+                       if sprint.resume else "No durable sprint summary recorded."))
+    if len(documents) == 1:
+        sections.append(f"The sprint's why-document, {documents[0].path} (read this full file):\n"
+                        + documents[0].text.rstrip())
+    elif not documents:
+        sections.append(f"No why-document under {WHY_DOCUMENTS_RELATIVE}/ names {sprint.ref}.")
+    else:
+        sections.append("No single why-document; none quoted. Full files under "
+                        f"{WHY_DOCUMENTS_RELATIVE}/ naming {sprint.ref}:\n"
+                        + "\n".join(f"- {doc.path}" for doc in documents))
+    if latest_answer is None:
+        sections.append("No predecessor PO answer present.")
+    else:
+        sections.append(f"Predecessor's latest PO answer, turn {latest_answer.turn_seq}, entry "
+                        f"{latest_answer.entry_id}; full history: /po/sessions/{previous}\n"
+                        + latest_answer.text)
+    header = "\n\n".join(lines) + "\n\n"
+    available = limit - len(header.encode("utf-8")) - 16
+    # Refuse a budget that cannot carry even source labels and an honest excerpt.
+    if available < 2048:
+        raise ValueError("po.context_budget_bytes is too small for a durable session seed")
+    decisions = sections[0]
+    remaining = available - len(decisions.encode("utf-8"))
+    if remaining < 1536:
+        raise ValueError("po.context_budget_bytes is too small to preserve standing owner decisions in the seed")
+    text = header + decisions + "\n\n" + "\n\n".join(
+        byte_excerpt(section, remaining // (len(sections) - 1)) for section in sections[1:]
+    ) + "\n"
+    return text, sources
 
 
 class BoardSprintSessions:
@@ -155,6 +201,7 @@ class BoardSprintSessions:
             tuple(str(project) for project in document.get("allowed_productions") or ()),
             tuple(document.get("owner_decisions") or ()),
             tuple(document["comments"]),
+            document.get("resume"),
         )
 
     def why_documents(self, sprint_ref: str) -> list[WhyDocument]:

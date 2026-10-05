@@ -2421,7 +2421,8 @@ PO only extends with `sprint allow-production` ([Production rights](#production-
 (`ummanu.po.client.PoServiceClient.sprint_session`, [Operations](OPERATIONS.md#the-po-service)). It
 answers `{session_id, created, repeated}`:
 
-- the recorded `po_session` exists and is open: that session, `created: false`, nothing written;
+- the recorded `po_session` exists and is open within its context budget, or has a running turn or
+  pending input: that session, `created: false`, nothing written;
 - it is `null`, missing from the store or closed: a fresh session, `created: true`. It takes the recorded
   session's CLI, model and effort when that row exists, else the new-session form's preselection (the
   first CLI offering a model in `po.models`, its first model). Its effort is never `default`: a recorded
@@ -2433,7 +2434,49 @@ answers `{session_id, created, repeated}`:
   word; with none or several it says so and lists the paths — and telling the head to read `NOTES.md`
   in its workspace. The sprint gets a comment (role `po`, actor `po-service`): `the PO session <old or
   none> no longer exists; opened <new> seeded with <why-doc path | no why-document found> and NOTES.md`,
-  and then records the new session as its `po_session`.
+  and then records the new session as its `po_session`. Closed replacements say `is closed`;
+  missing replacements say `no longer exists`.
+
+`po.context_budget_bytes` in `instance.yaml` declares the sprint session budget, default `262144`.
+It must be a positive integer; malformed or unreadable configuration refuses before writes.
+The metric is UTF-8 bytes of stored conversation: each native committed feed input and answer once,
+including historical rows without service metadata. It is a deterministic context-budget proxy for
+both CLIs, not provider-reported tokens/window usage or cumulative billing. An unreadable feed never
+claims a zero measurement. Native PO session readback carries the measurement, threshold and unit.
+At strictly more than the threshold, the next idle normal sprint resolution opens a successor using
+the same CLI/model/explicit effort choice. Exactly at the threshold reuses the session. Running turns
+and pending inputs defer the check until the next normal resolve; nothing is cancelled or moved.
+Ordinary non-sprint session creation and submission do not consult this budget.
+
+Rollover creation uses a deterministic native `po_sprint_session` request identity derived from the
+sprint and predecessor. Each caller request is bound to that same successor in `po_requests` before
+the seed/comment/record writes. Retry, another caller ID and service restart converge on that native
+request. The guard permits intentional open-session replacement only when that exact canonical
+request names the successor and the predecessor is idle. The predecessor remains open and readable;
+its feed, accepted comment position, frozen queued/claimed card targets and follow-up request targets
+are retained. Requests produced by released resolvers still replay their original target and cannot
+replace a different open session. No closure, table, migration or owner handover is introduced.
+If the predecessor is closed during a partial rollover, its canonical request still owns the queued
+or committed first seed and the comment/record IDs; retry does not open another successor.
+
+Fresh resolver seeds use durable structured sprint data: standing owner decisions with their
+addressable IDs and verbatim quotation bases in owner-answer order (latest applicable answer wins),
+the latest structured observer resume identified as the durable sprint summary, the existing
+single why-document selection, and the predecessor's latest native PO answer when present. The head
+must read the actual NOTES.md in the permanent workspace first. Missing notes, why-document,
+summary and predecessor answer are explicit. Large sources are labelled excerpts with full file,
+native sprint-show or predecessor-session pointers; excerpts imply no new consent. The seed is at
+most 16384 bytes and below half the declared threshold. A configured budget too small to carry the
+source labels and a useful bounded seed, or the complete standing decision quotations, refuses before
+opening a session. Standing decisions are preserved in full; summary/document/answer excerpts share
+the remaining seed budget.
+
+Rollover's first service input freezes predecessor/successor, measured size, threshold, unit and seed
+sources in the existing queue/feed metadata. Its audited sprint comment uses that frozen readback,
+then the sprint session is recorded last. `/po` links the successor, whose service input visibly
+explains the byte threshold and links predecessor history; full instructions remain collapsed.
+The new actual session starts its own DoD5 accepted comment boundary. Routine rollover emits no
+`needs_owner` event.
 
 The request id is bound to the sprint (`po_sprint_session` in `po_requests`, an operation the CHECK
 `po_request_operation_in_vocabulary` admits since `0016`; reserved by `PoService._reserve` like every

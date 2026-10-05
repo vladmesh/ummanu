@@ -36,9 +36,9 @@ sprint allows it, or the PO decides under the owner's standing rule and records 
 (`sprint allow-production`) or hands the card to the owner itself.
 
 **A sprint's session.** `sprint_session` answers the live PO session of a sprint: the one the sprint
-recorded (`sprint create --po-session`) while it is open, else a fresh one, opened once, seeded with the
-sprint's why-document and the workspace's `NOTES.md`, recorded on the sprint and announced in its
-comments (:meth:`PoService.sprint_session`).
+recorded (`sprint create --po-session`) while it is open within its byte budget or busy, else a fresh
+one, opened once, seeded from durable native sprint context, announced in the sprint's comments and
+recorded last (:meth:`PoService.sprint_session`).
 """
 
 from __future__ import annotations
@@ -92,6 +92,9 @@ from ummanu.po.queue import (
     QueueError,
 )
 from ummanu.po.runner import PoRunner, RunnerError
+from ummanu.po.context_budget import (
+    CONTEXT_METRIC, context_budget_bytes, conversation_bytes, rollover_request_id,
+)
 from ummanu.po.sprints import (
     BoardSprintSessions,
     SprintRecord,
@@ -587,7 +590,10 @@ class PoService:
     def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]:
         """The live PO session of a sprint: `{session_id, created}`.
 
-        The sprint's recorded `po_session`, open, is the answer (`created: false`, nothing written).
+        The sprint's recorded `po_session`, open and within its byte budget or busy,
+        is the answer (`created: false`, nothing written). An idle over-budget
+        session is replaced under the sprint/predecessor's deterministic request id;
+        callers bind to that successor in native po_requests. History remains open.
         Null, missing from the store or closed, a fresh session is opened under `request_id` with the
         recorded session's CLI, model and effort (or the new-session form's defaults when there is no
         row); a recorded effort that is `default` (or no longer offered) gives way to the first effort
@@ -607,6 +613,7 @@ class PoService:
         fingerprint = sprint_session_fingerprint(sprint_ref)
         with self._lock:
             known = self._reserve(request_id, SPRINT_SESSION, fingerprint)
+            threshold = self._context_budget()
             sprints = self._sprint_sessions()
             sprint = sprints.sprint(sprint_ref)
             if sprint is None:
@@ -622,8 +629,30 @@ class PoService:
                     "validation", f"sprint {sprint_ref} is {sprint.status}; its PO session is not resolved"
                 )
             previous = self._session_or_none(sprint.po_session)
+            rollover = None
+            resolve_id = request_id
             if previous is not None and previous.state == SESSION_OPEN:
-                return {"session_id": previous.session_id, "created": False, "repeated": False}
+                feed = self.store.feed(previous.session_id)
+                measured = conversation_bytes(feed)
+                if measured <= threshold or self._session_busy(previous.session_id):
+                    return {"session_id": previous.session_id, "created": False, "repeated": False}
+                resolve_id = rollover_request_id(sprint.ref, previous.session_id)
+                # Read and bound the sources before the first write. A partially written
+                # canonical resolve is completed below using its frozen first seed.
+                if self._reserve(resolve_id, SPRINT_SESSION, fingerprint) is None:
+                    rollover = self._rollover_seed(sprints, sprint, threshold, feed)
+            else:
+                # Missing/closed replacements use the same bounded durable sources,
+                # while keeping their real reason and released request identity.
+                if sprint.po_session:
+                    canonical_id = rollover_request_id(sprint.ref, sprint.po_session)
+                    canonical = self._reserve(canonical_id, SPRINT_SESSION, fingerprint)
+                    if isinstance(canonical, PoRequest):
+                        resolve_id = canonical_id
+                if resolve_id == request_id:
+                    self._durable_seed(sprints, sprint, threshold,
+                                       self.store.feed(previous.session_id) if previous else [],
+                                       "is closed" if previous else "no longer exists")
             efforts = self._effort_list()
             choice = successor_choice(
                 (previous.cli, previous.model, previous.effort) if previous is not None else None,
@@ -641,14 +670,16 @@ class PoService:
             session, _created = self.runner.create_session_request(
                 cli,
                 model,
-                request_id,
+                resolve_id,
                 effort,
                 efforts=efforts,
                 operation=SPRINT_SESSION,
                 fingerprint=fingerprint,
                 title=sprint.ref,
             )
-            self._reseed(sprints, sprint, session.session_id, request_id)
+            if resolve_id != request_id:
+                self.store.bind_sprint_session_request(request_id, sprint.ref, session.session_id)
+            self._reseed(sprints, sprint, session.session_id, resolve_id, rollover=rollover)
             answer = {"session_id": session.session_id, "created": True, "repeated": False}
             self._accepted(answer)
             # Best effort from here: the seed is queued and the answer above stands.
@@ -656,7 +687,8 @@ class PoService:
             return answer
 
     def _reseed(
-        self, sprints: SprintSessions, sprint: SprintRecord, session_id: str, request_id: str
+        self, sprints: SprintSessions, sprint: SprintRecord, session_id: str, request_id: str,
+        *, rollover: tuple[str, dict[str, Any]] | None = None,
     ) -> None:
         """The steps after a resolver's session exists; each is skipped when done, the record last.
 
@@ -667,26 +699,104 @@ class PoService:
         if sprint.po_session == session_id:
             return
         current = self._session_or_none(sprint.po_session)
+        canonical = None
+        if sprint.po_session:
+            canonical_id = rollover_request_id(sprint.ref, sprint.po_session)
+            canonical = self.store.request(canonical_id)
+            if canonical is not None and (canonical.operation, canonical.fingerprint) != (
+                SPRINT_SESSION, sprint_session_fingerprint(sprint.ref)
+            ):
+                canonical = None
+            if canonical is not None and canonical.session_id == session_id:
+                # The predecessor may have been closed since the first seed or
+                # comment committed. Its canonical write IDs still own replay.
+                request_id = canonical_id
         if current is not None and current.state == SESSION_OPEN:
-            return
+            # Only the native request for this exact predecessor may intentionally
+            # replace an open session. Released requests keep their original replay.
+            if canonical is None or canonical.session_id != session_id:
+                return
+            if self._session_busy(current.session_id):
+                raise Refused("unavailable", "context rollover waits for the predecessor to become idle")
         why = "is closed" if current is not None else "no longer exists"
-        documents = sprints.why_documents(sprint.ref)
         seed_id = f"{request_id}:seed"
         seeded = self.store.request(seed_id) or self.queue.find(seed_id) or self.queue.find_refused(seed_id)
+        metadata = None
+        if isinstance(seeded, PoRequest):
+            metadata = next(entry.metadata for entry in self.store.feed(session_id)
+                            if entry.turn_seq == seeded.seq and entry.role == "owner")
+        elif isinstance(seeded, QueuedInput):
+            metadata = seeded.metadata
         if seeded is None:
+            if current is not None and current.state == SESSION_OPEN:
+                rollover = rollover or self._rollover_seed(
+                    sprints, sprint, self._context_budget(), self.store.feed(current.session_id)
+                )
+            metadata = {"source": SERVICE_SOURCE, "summary": f"Sprint session context for {sprint.ref}"}
+            if rollover is not None:
+                text, transition = rollover
+                transition = {**transition, "successor": session_id}
+                transition["comment"] = (
+                    f"PO context rollover {sprint.po_session} -> {session_id}: "
+                    f"{transition['measured_bytes']} > {transition['threshold_bytes']} {CONTEXT_METRIC}. "
+                    "Predecessor retained as readable history. Seed sources: "
+                    + json.dumps(transition["seed_sources"], ensure_ascii=False, sort_keys=True)
+                )
+                metadata.update(summary=f"Context rollover for {sprint.ref}", transition=transition)
+            else:
+                text, sources = self._durable_seed(
+                    sprints, sprint, self._context_budget(),
+                    self.store.feed(current.session_id) if current else [], why,
+                )
+                metadata["seed_sources"] = sources
             self.queue.put(
                 session_id=session_id,
-                text=seed_message(sprint.ref, sprint.po_session, why, documents),
+                text=text,
                 request_id=seed_id,
                 source=SERVICE_SOURCE,
-                metadata={"source": SERVICE_SOURCE, "summary": f"Sprint session context for {sprint.ref}"},
+                metadata=metadata,
             )
+        transition = (metadata or {}).get("transition")
+        documents = [] if transition else sprints.why_documents(sprint.ref)
         sprints.comment(
             sprint.ref,
-            reseed_comment(sprint.po_session, session_id, documents),
+            transition["comment"] if transition else
+            reseed_comment(sprint.po_session, session_id, documents, reason=why),
             request_id=f"{request_id}:comment",
         )
         sprints.record_po_session(sprint.ref, session_id, request_id=f"{request_id}:record")
+
+    def _context_budget(self) -> int:
+        try:
+            return context_budget_bytes(self._instance_config())
+        except ValueError as exc:
+            raise Refused("validation", str(exc)) from None
+
+    def _session_busy(self, session_id: str) -> bool:
+        return (any(turn.session_id == session_id for turn in self.store.running_turns())
+                or bool(self.queue.pending(session_id)))
+
+    def _rollover_seed(self, sprints: SprintSessions, sprint: SprintRecord,
+                       threshold: int, feed: list[Any]) -> tuple[str, dict[str, Any]]:
+        measured = conversation_bytes(feed)
+        why = f"crossed its context budget ({measured} > {threshold} {CONTEXT_METRIC})"
+        text, sources = self._durable_seed(sprints, sprint, threshold, feed, why)
+        return text, {"reason": "context_budget", "predecessor": sprint.po_session,
+                      "measured_bytes": measured, "threshold_bytes": threshold,
+                      "metric": CONTEXT_METRIC, "seed_sources": sources}
+
+    def _durable_seed(self, sprints: SprintSessions, sprint: SprintRecord, threshold: int,
+                      feed: list[Any], why: str) -> tuple[str, dict[str, Any]]:
+        try:
+            text, sources = seed_message(
+                sprint, why, sprints.why_documents(sprint.ref), threshold=threshold,
+                measured=conversation_bytes(feed), latest_answer=next(
+                    (entry for entry in reversed(feed) if entry.role == "agent"), None),
+                notes=self.runner.workspace / "NOTES.md",
+            )
+        except ValueError as exc:
+            raise Refused("validation", str(exc)) from None
+        return text, sources
 
     def _session_or_none(self, session_id: str | None) -> Session | None:
         if not session_id:
