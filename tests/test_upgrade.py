@@ -177,9 +177,7 @@ class PackagedUnitTests(unittest.TestCase):
         self.assertTrue(units["ummanu-example.timer"].installable)
         # No [Install] section, so enabling it would fail: it is pulled in by the timer.
         self.assertFalse(units["ummanu-example.service"].installable)
-        self.assertNotEqual(
-            units["ummanu-example.timer"].digest, units["ummanu-example.service"].digest
-        )
+        self.assertNotEqual(units["ummanu-example.timer"].digest, units["ummanu-example.service"].digest)
 
     def test_a_unit_outside_our_prefix_is_not_ours(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -793,9 +791,9 @@ class UpgradeStepTests(unittest.TestCase):
             compose.write_text(board_provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
             compose.chmod(0o600)
             before = compose.stat()
-            self.assertTrue(board_provision._write_compose(
-                compose, dry_run=False, privileged_argv=lambda argv: argv
-            ))
+            self.assertTrue(
+                board_provision._write_compose(compose, dry_run=False, privileged_argv=lambda argv: argv)
+            )
             after = compose.stat()
             self.assertNotEqual(before.st_ino, after.st_ino)
             self.assertEqual((after.st_uid, after.st_gid), (before.st_uid, before.st_gid))
@@ -809,14 +807,14 @@ class UpgradeStepTests(unittest.TestCase):
             compose = Path(temporary) / "postgres-compose.yml"
             compose.write_text(board_provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
             compose.chmod(0o600)
-            with mock.patch(
-                "ummanu._fsutil._proc.run",
-                side_effect=[subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)],
-            ) as run:
-                with self.assertRaises(board_provision.BoardStoreError) as raised:
-                    board_provision._write_compose(
-                        compose, dry_run=False, privileged_argv=lambda argv: argv
-                    )
+            with (
+                mock.patch(
+                    "ummanu._fsutil._proc.run",
+                    side_effect=[subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)],
+                ) as run,
+                self.assertRaises(board_provision.BoardStoreError) as raised,
+            ):
+                board_provision._write_compose(compose, dry_run=False, privileged_argv=lambda argv: argv)
             self.assertIn("stage private file", str(raised.exception))
             self.assertEqual(run.call_count, 2)  # failed install, then cleanup
             self.assertEqual(compose.read_text(encoding="utf-8"), board_provision.LEGACY_COMPOSE_TEXT)
@@ -836,11 +834,11 @@ class UpgradeStepTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1)
                 return real_run(argv, **kwargs)
 
-            with mock.patch("ummanu._fsutil._proc.run", side_effect=fail_rename):
-                with self.assertRaises(board_provision.BoardStoreError) as raised:
-                    board_provision._write_compose(
-                        compose, dry_run=False, privileged_argv=lambda argv: argv
-                    )
+            with (
+                mock.patch("ummanu._fsutil._proc.run", side_effect=fail_rename),
+                self.assertRaises(board_provision.BoardStoreError) as raised,
+            ):
+                board_provision._write_compose(compose, dry_run=False, privileged_argv=lambda argv: argv)
             self.assertIn("replace private file", str(raised.exception))
             self.assertEqual(compose.read_text(encoding="utf-8"), board_provision.LEGACY_COMPOSE_TEXT)
             self.assertEqual(list(compose.parent.iterdir()), [compose])
@@ -850,9 +848,14 @@ class UpgradeStepTests(unittest.TestCase):
             instance = Path(temporary)
             report = SimpleNamespace(ok=True, instance_path=instance / "instance.yaml", data_dir=instance)
             args = SimpleNamespace(
-                instance=str(instance), product_root=str(upgrade.running_product_root()),
-                base_branch="main", dry_run=False, no_pull=True, runtime_user=None,
-                host_fixture=None, json=True,
+                instance=str(instance),
+                product_root=str(upgrade.running_product_root()),
+                base_branch="main",
+                dry_run=False,
+                no_pull=True,
+                runtime_user=None,
+                host_fixture=None,
+                json=True,
             )
             calls: list[str] = []
 
@@ -872,21 +875,26 @@ class UpgradeStepTests(unittest.TestCase):
             with (
                 mock.patch("ummanu.upgrade.validate_instance", return_value=report),
                 mock.patch("ummanu.upgrade.resolve_runtime_owner", return_value=("operator", instance)),
-                mock.patch("ummanu.upgrade.provision_board_store", side_effect=RuntimeError(
-                    "could not write export file: Permission denied"
-                )),
-                mock.patch("ummanu.upgrade.run_steps", side_effect=lambda context: original_run_steps(
-                    context, steps=(completed, upgrade.step_board_store_provision, restart)
-                )),
+                mock.patch(
+                    "ummanu.upgrade.provision_board_store",
+                    side_effect=RuntimeError("could not write export file: Permission denied"),
+                ),
+                mock.patch(
+                    "ummanu.upgrade.run_steps",
+                    side_effect=lambda context: original_run_steps(
+                        context, steps=(completed, upgrade.step_board_store_provision, restart)
+                    ),
+                ),
                 contextlib.redirect_stdout(output),
             ):
                 code = upgrade.run_upgrade(args)
             payload = json.loads(output.getvalue())
             self.assertEqual(code, 1)
             self.assertEqual(payload["status"], "failed")
-            self.assertEqual([(step["name"], step["status"]) for step in payload["steps"]], [
-                ("dependencies", "changed"), ("board-store-provision", "failed")
-            ])
+            self.assertEqual(
+                [(step["name"], step["status"]) for step in payload["steps"]],
+                [("dependencies", "changed"), ("board-store-provision", "failed")],
+            )
             self.assertIn("Permission denied", payload["steps"][1]["detail"])
             self.assertNotIn("Traceback", output.getvalue())
             self.assertEqual(calls, ["completed"])
@@ -2136,6 +2144,7 @@ class PipelineStateStepTests(unittest.TestCase):
 
         with (
             mock.patch("ummanu.installation.validate_instance", return_value=SimpleNamespace(ok=True)),
+            mock.patch("ummanu.installation.check_product_runtime"),
             mock.patch(
                 "ummanu.installation.resolve_runtime_owner", return_value=("operator", self.root / "home")
             ),

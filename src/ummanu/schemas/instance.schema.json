@@ -44,16 +44,18 @@
     },
     "persona": {
       "type": "object",
+      "deprecated": true,
       "additionalProperties": false,
-      "description": "Pointer to the installation persona. Rules live in persona/, not here.",
+      "description": "Ignored compatibility metadata. Existing name/style fields still validate but do not configure the persona. Personal instructions come from persona/AGENTS.md in the instance live root.",
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "style": {"type": "string"}
+        "name": {"type": "string", "minLength": 1, "description": "Ignored compatibility label."},
+        "style": {"type": "string", "description": "Ignored compatibility text; personal instructions belong in persona/AGENTS.md."}
       }
     },
     "heads": {
       "type": "array",
-      "description": "Model heads bound to orchestrator roles.",
+      "deprecated": true,
+      "description": "Deprecated compatibility input, ignored. Model profiles and role defaults belong in heads/heads.toml in the instance. These entries do not create systemd services. Previously managed systemd:head:* records are preserved; retiring their services requires an explicit operator action.",
       "items": {"$ref": "#/$defs/head"}
     },
     "sprint_budget": {
@@ -147,6 +149,7 @@
         },
         "orca_repos": {
           "type": "array",
+          "deprecated": true,
           "items": {"type": "string", "minLength": 1},
           "description": "Legacy and ignored. Orca repo registrations are no longer part of the host surface: reconcile, the host step of upgrade, 'restore-reconcile' and doctor neither read this field nor create, check or remove Orca repos. Kept so existing instance files still validate."
         },
@@ -183,13 +186,15 @@
         },
         "memory_reindex_python": {
           "type": "string",
+          "deprecated": true,
           "minLength": 1,
-          "description": "Deprecated compatibility path for an external memory rebuild Python."
+          "description": "Legacy external Python path for explicit 'ummanu memory reindex' only. Must name an executable file and be paired with memory_reindex_script; supplying only one refuses the command. Automatic install/recover ignore both overrides."
         },
         "memory_reindex_script": {
           "type": "string",
+          "deprecated": true,
           "minLength": 1,
-          "description": "Deprecated compatibility path for an external reindex script."
+          "description": "Legacy external script path for explicit 'ummanu memory reindex' only. Must name an existing file and be paired with memory_reindex_python; supplying only one refuses the command. Automatic install/recover ignore both overrides."
         },
         "memory_model": {
           "type": "string",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -12,6 +14,14 @@ from typing import ClassVar
 from unittest import mock
 
 import ummanu.restore as restore_module
+from tests.fakes.tasks import empty_seed
+from tests.restore_fixtures import (
+    _restore_card,
+    _seed_instance_facts,
+    _write_instance_to,
+)
+from tests.runtime_account_fixtures import fixture_runtime_account
+from tests.sql_backend_fixtures import card_store
 from ummanu import restore_commands
 from ummanu.checkpoint import _validate_board
 from ummanu.cli import main as cli_main
@@ -20,7 +30,7 @@ from ummanu.data import (
     init_layout,
     normalize_board_card,
 )
-from ummanu.host import CollectResult, HostInventory, build_plan
+from ummanu.host import SHIPPED_PACKAGING_ROOT, CollectResult, HostInventory, build_plan, load_packaged_units
 from ummanu.host_apply import resolve_packaged
 from ummanu.product_issues import (
     ProductIssueValidationError,
@@ -38,14 +48,6 @@ from ummanu.restore import (
     restore_state,
 )
 from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
-from tests.fakes.tasks import empty_seed
-from tests.runtime_account_fixtures import fixture_runtime_account
-from tests.restore_fixtures import (
-    _restore_card,
-    _seed_instance_facts,
-    _write_instance_to,
-)
-from tests.sql_backend_fixtures import card_store
 
 _UNSET = object()
 
@@ -92,15 +94,16 @@ class RestoreTests(unittest.TestCase):
 
                 client = card_store(self, empty_seed())
                 self.assertEqual(import_normalized_board(data_dir, client=client), 1)
-                self.assertEqual(
-                    task_audit_for(client).committed_event("historical-request"), historical
-                )
+                self.assertEqual(task_audit_for(client).committed_event("historical-request"), historical)
 
     @staticmethod
     def _product_card(*, projects: str = '["ummanu"]') -> dict[str, object]:
         # A Product's lane is its own id on the store (§8.6), which is what its export names.
         card = _restore_card(
-            reference="product:ummanu", title="Ummanu", column="Issues", position=1,
+            reference="product:ummanu",
+            title="Ummanu",
+            column="Issues",
+            position=1,
             swimlane="ummanu",
         )
         card["fields"]["task_type"] = ""
@@ -134,7 +137,10 @@ class RestoreTests(unittest.TestCase):
             export = export_board(
                 data_dir,
                 instance_dir=Path(tmpdir),
-                reader=mock.Mock(export=mock.Mock(return_value=[live_card]), client=(store := card_store(self, empty_seed()))),
+                reader=mock.Mock(
+                    export=mock.Mock(return_value=[live_card]),
+                    client=(store := card_store(self, empty_seed())),
+                ),
                 sprint_client=store,
             )
 
@@ -278,7 +284,8 @@ class RestoreTests(unittest.TestCase):
                     data_dir,
                     instance_dir=Path(tmpdir),
                     reader=mock.Mock(
-                        export=mock.Mock(return_value=[card, duplicate]), client=(store := card_store(self, empty_seed()))
+                        export=mock.Mock(return_value=[card, duplicate]),
+                        client=(store := card_store(self, empty_seed())),
                     ),
                     sprint_client=store,
                 )
@@ -343,7 +350,11 @@ class RestoreTests(unittest.TestCase):
             )
             client = card_store(self, empty_seed())
             client.add_card(
-                99, "ummanu-99", title="Old closed card", closed=True, lane=None,
+                99,
+                "ummanu-99",
+                title="Old closed card",
+                closed=True,
+                lane=None,
                 metadata={"task_type": "code"},
             )
 
@@ -503,9 +514,7 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(client.metadata(12).get("resolved_head", ""), "")
             self.assertEqual(client.metadata(12).get("resolved_review_head", ""), "")
             self.assertEqual(client.row(12)["position"], 1)
-            self.assertEqual(
-                TaskReader(client).show("ummanu-1")["extensions"]["extra"]["swimlane"], "Ummanu"
-            )
+            self.assertEqual(TaskReader(client).show("ummanu-1")["extensions"]["extra"]["swimlane"], "Ummanu")
             self.assertEqual(
                 [call[1]["content"] for call in client.calls if call[0] == "createComment"],
                 ["[worker]\\nfirst", "[report:done]\\nrestored"],
@@ -848,19 +857,41 @@ class RestoreTests(unittest.TestCase):
                         main(["restore-reconcile", "--instance", str(instance)]),
                         0,
                     )
-            self.assertEqual(
-                main(["doctor", "--offline", "--instance", str(instance)]), 0
-            )
+            self.assertEqual(main(["doctor", "--offline", "--instance", str(instance)]), 0)
             self.assertEqual(restore_findings(data_dir), [])
 
     def test_restore_reconcile_fails_closed_before_marking_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
-            instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
+            instance = _write_instance_to(root / "instance", "test", data_dir, host=True)
             bootstrap_empty(instance)
+            unit = next(
+                unit
+                for unit in load_packaged_units(SHIPPED_PACKAGING_ROOT, "ummanu-")
+                if unit.name == "ummanu-memory.service"
+            )
+            before = restore_state(data_dir)
+            output = io.StringIO()
 
-            self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 2)
+            # A duplicated shipped resource is invalid desired state; legacy heads are ignored.
+            with (
+                mock.patch.object(restore_commands, "resolve_installed_packaged", return_value=[unit, unit]),
+                mock.patch.object(restore_commands, "LiveHostSource") as inventory,
+                mock.patch.object(
+                    restore_commands, "mark_reconcile_applied", wraps=mark_reconcile_applied
+                ) as mark,
+                contextlib.redirect_stdout(output),
+            ):
+                self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 2)
+
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"ok": False, "action": "restore-reconcile", "error": "invalid desired state"},
+            )
+            inventory.assert_not_called()
+            mark.assert_not_called()
+            self.assertEqual(restore_state(data_dir), before)
             self.assertEqual(restore_findings(data_dir), ["restore is incomplete"])
 
 
@@ -941,9 +972,9 @@ class PreUpgradeCheckpointBagTests(unittest.TestCase):
     def test_a_pre_upgrade_archive_restores_its_bag_under_the_current_key(self) -> None:
         import tarfile
 
+        from tests.restore_fixtures import _core_archive, _write_checksums, _write_instance
         from ummanu.backup_policy import ARCHIVE_ROOT
         from ummanu.restore import restore_backup
-        from tests.restore_fixtures import _core_archive, _write_checksums, _write_instance
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -1149,7 +1180,9 @@ class RestoredCardKindParityTests(unittest.TestCase):
         self.assertEqual(self._kind(exported), self._kind(live))
 
     def test_a_lost_review_choice_or_flag_is_a_parity_mismatch(self) -> None:
-        exported = self._kind(restore_module._core_from_export(self._export(review="skipped", live_impact="1")))
+        exported = self._kind(
+            restore_module._core_from_export(self._export(review="skipped", live_impact="1"))
+        )
         self.assertEqual(exported, ("skipped", True))
         for review, live_impact in (("required", True), ("skipped", False)):
             live = restore_module._core_from_live(self._live(review=review, live_impact=live_impact))

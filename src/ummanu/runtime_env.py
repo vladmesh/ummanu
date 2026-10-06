@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import stat
 from pathlib import Path
 
@@ -14,6 +15,81 @@ class RuntimeEnvError(RuntimeError):
 
 class RuntimeEnvMissing(RuntimeEnvError):
     """The optional host runtime file is absent."""
+
+
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def parse_env_value(raw: str) -> str:
+    """Decode the supported single-line systemd EnvironmentFile value syntax.
+
+    Unquoted interior spaces and # are literal; backslash quotes the next character.
+    A fully quoted value follows systemd's single/double-quote rules. No expansion,
+    multiline values or quote concatenation is supported. Stored env-file values
+    remain serialized text; only runtime consumers decode them.
+    """
+    if any(
+        char in "\x00\n\r"
+        or ord(char) == 0xFEFF
+        or 0xFDD0 <= ord(char) <= 0xFDEF
+        or ord(char) & 0xFFFF in (0xFFFE, 0xFFFF)
+        for char in raw
+    ):
+        raise RuntimeEnvError("value contains unsupported control characters")
+    value = raw.lstrip(" \t")
+    if not value:
+        return ""
+    quote = value[0] if value[0] in "'\"" else None
+    result: list[str] = []
+    significant = 0
+    index = 1 if quote else 0
+    while index < len(value):
+        char = value[index]
+        if quote and char == quote:
+            if value[index + 1 :].strip(" \t"):
+                raise RuntimeEnvError("quoted value must end on the same line")
+            return "".join(result)
+        if char == "\\" and quote != "'":
+            index += 1
+            if index == len(value):
+                raise RuntimeEnvError("line continuations are unsupported")
+            escaped = value[index]
+            if quote == '"' and escaped not in '"\\\x60$':
+                result.append("\\")
+            result.append(escaped)
+            significant = len(result)
+        else:
+            result.append(char)
+            if char not in " \t":
+                significant = len(result)
+        index += 1
+    if quote:
+        raise RuntimeEnvError("quoted value is not closed")
+    return "".join(result[:significant])
+
+
+def parse_runtime_env(text: str) -> dict[str, str]:
+    """Read one assignment per line with systemd's value interpretation.
+
+    Operator files may have comments, blank lines and repeated names (last wins).
+    The secret importer separately refuses inputs it cannot reproduce byte for byte.
+    """
+    values: dict[str, str] = {}
+    for number, raw in enumerate(text.split("\n"), 1):
+        line = raw.removesuffix("\r").lstrip(" \t")
+        if not line or line.startswith(("#", ";")):
+            continue
+        if "=" not in line or line.startswith("export "):
+            raise RuntimeEnvError(f"runtime.env line {number} must use KEY=VALUE syntax")
+        key, value = line.split("=", 1)
+        key = key.rstrip(" \t")
+        if not _ENV_NAME.fullmatch(key):
+            raise RuntimeEnvError(f"runtime.env line {number} has an invalid variable name")
+        try:
+            values[key] = parse_env_value(value)
+        except RuntimeEnvError as exc:
+            raise RuntimeEnvError(f"runtime.env line {number}: {exc}") from None
+    return values
 
 
 def instance_runtime_env_path(instance_dir: Path, override: str | None = None) -> Path:
@@ -57,18 +133,7 @@ def read_runtime_env(
                 "move it out of the export allowlist"
             )
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeError):
         raise RuntimeEnvError("runtime.env is unreadable") from None
-    values: dict[str, str] = {}
-    for number, raw in enumerate(lines, 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line or line.startswith("export "):
-            raise RuntimeEnvError(f"runtime.env line {number} must use KEY=VALUE syntax")
-        key, value = line.split("=", 1)
-        if not key or not key.replace("_", "a").isalnum() or key[0].isdigit():
-            raise RuntimeEnvError(f"runtime.env line {number} has an invalid variable name")
-        values[key] = value
-    return values
+    return parse_runtime_env(text)

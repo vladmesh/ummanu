@@ -32,20 +32,18 @@ from ummanu.board.backend import CARD, SPRINT, board_client, entity_number
 from ummanu.board.extension_bag import EXTENSION_BAG, fold_extension_bags
 from ummanu.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
-)
-from ummanu.board.legacy_codec import (
     enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
-)
-from ummanu.board.legacy_codec import (
     positive_int as _positive_int,
 )
 from ummanu.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions
-from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
 from ummanu.board.normalized_checkpoint import NormalizedBoardError, validated_normalized_cards
+from ummanu.board.owner_decisions import FIELD as OWNER_DECISIONS_FIELD, stored_decisions
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
 from ummanu.data import init_layout
+from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
+from ummanu.memory.config import DEFAULT_DIM as DEFAULT_MEMORY_DIM
 from ummanu.product_issues import (
     registered_projects,
 )
@@ -136,9 +134,7 @@ def import_normalized_board(
     return _import_normalized_board(data_dir, client=client, instance=instance)
 
 
-def _import_normalized_board(
-    data_dir: Path, *, client: SqlCardClient, instance: Path | None = None
-) -> int:
+def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance: Path | None = None) -> int:
     """Populate an empty board from the normalized export and prove parity on every retry."""
     from ummanu.sprints import sprint_admission_lock
 
@@ -698,7 +694,8 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
         **({"sprint_po_session": str(sprint["po_session"])} if sprint.get("po_session") else {}),
         **(
             {LOCAL_RUN_EXCEPTIONS_FIELD: json.dumps(sprint["local_run_exceptions"], separators=(",", ":"))}
-            if sprint.get("local_run_exceptions") else {}
+            if sprint.get("local_run_exceptions")
+            else {}
         ),
         **(
             {
@@ -709,7 +706,9 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
             if sprint.get("allowed_productions")
             else {}
         ),
-        OWNER_DECISIONS_FIELD: json.dumps(sprint.get("owner_decisions", []), sort_keys=True, separators=(",", ":")),
+        OWNER_DECISIONS_FIELD: json.dumps(
+            sprint.get("owner_decisions", []), sort_keys=True, separators=(",", ":")
+        ),
         # The e2e run budget as exported (secretary-1796); an export without it restores the default.
         **(
             {
@@ -723,10 +722,6 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
             else {}
         ),
     }
-
-
-DEFAULT_MEMORY_MODEL = "intfloat/multilingual-e5-large"
-DEFAULT_MEMORY_DIM = 1024
 
 
 def rebuild_memory_index(
@@ -987,7 +982,9 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise RestoreError(f"normalized sprint export has invalid {field}")
         try:
-            parse_local_run_exceptions(sprint.get("local_run_exceptions", []), projects=sprint.get("reservations", []))
+            parse_local_run_exceptions(
+                sprint.get("local_run_exceptions", []), projects=sprint.get("reservations", [])
+            )
         except ValueError as exc:
             raise RestoreError(f"normalized sprint export has invalid local_run_exceptions: {exc}") from None
         try:
@@ -995,9 +992,14 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
         except (ValueError, TypeError, KeyError) as exc:
             raise RestoreError(f"normalized sprint export has invalid owner_decisions: {exc}") from None
         e2e = sprint.get("e2e", {"budget": 3, "used": 0, "charges": []})
-        if (not isinstance(e2e, dict) or set(e2e) != {"budget", "used", "charges"}
-                or any(type(e2e[key]) is not int or not 0 <= e2e[key] <= 2_147_483_647 for key in ("budget", "used"))
-                or not isinstance(e2e["charges"], list)):
+        if (
+            not isinstance(e2e, dict)
+            or set(e2e) != {"budget", "used", "charges"}
+            or any(
+                type(e2e[key]) is not int or not 0 <= e2e[key] <= 2_147_483_647 for key in ("budget", "used")
+            )
+            or not isinstance(e2e["charges"], list)
+        ):
             raise RestoreError("normalized sprint export has invalid e2e budget/counters/charges")
         budget = sprint.get("budget")
         if (
@@ -1025,9 +1027,7 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
     return sorted(sprints, key=lambda sprint: str(sprint["reference"]))
 
 
-def _check_sql_sprint_current_tasks(
-    cards: list[dict[str, Any]], sprints: list[dict[str, Any]]
-) -> None:
+def _check_sql_sprint_current_tasks(cards: list[dict[str, Any]], sprints: list[dict[str, Any]]) -> None:
     """Refuse a normalized cursor that the scoped SQL relation cannot represent.
 
     A cursor is a pointer, never an instruction to attach or reparent a Card.  Checking the two
@@ -1035,8 +1035,7 @@ def _check_sql_sprint_current_tasks(
     the operator a stable restore error instead of a commit-time foreign-key diagnostic.
     """
     linked = {
-        (str(card["reference"]), str(card.get("metadata", {}).get("sprint_ref") or ""))
-        for card in cards
+        (str(card["reference"]), str(card.get("metadata", {}).get("sprint_ref") or "")) for card in cards
     }
     for sprint in sprints:
         current = str(sprint.get("current_task") or "")
@@ -1092,28 +1091,18 @@ def _namespace_is_exported(data_dir: Path, token: str) -> bool:
             ndjson = board / "audit.ndjson"
             if not ndjson.is_file():
                 return False
-            events = [
-                json.loads(line) for line in ndjson_lines(ndjson.read_text(encoding="utf-8")) if line
-            ]
+            events = [json.loads(line) for line in ndjson_lines(ndjson.read_text(encoding="utf-8")) if line]
     except (OSError, ValueError):
         return False
     return isinstance(events, list) and any(
-        isinstance(event, dict) and str(event.get("request_id") or "").startswith(prefix)
-        for event in events
+        isinstance(event, dict) and str(event.get("request_id") or "").startswith(prefix) for event in events
     )
 
 
 def _namespace_is_local(audit: SqlTaskAudit, token: str, live_refs: set[str]) -> bool:
     prefix = f"restore:{token}:"
-    events = [
-        event
-        for event in audit.events()
-        if str(event.get("request_id") or "").startswith(prefix)
-    ]
-    return all(
-        str(event.get("ref") or "") in live_refs
-        for event in events
-    )
+    events = [event for event in audit.events() if str(event.get("request_id") or "").startswith(prefix)]
+    return all(str(event.get("ref") or "") in live_refs for event in events)
 
 
 def _restore_board_metadata(card: dict[str, Any]) -> dict[str, str]:
@@ -1227,8 +1216,6 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
         # Legacy `exec` reads as no mode; live modes round-trip unchanged.
         "codex_launch_mode": typed.routing.codex_launch_mode or "",
     }
-
-
 
 
 def _fold_checkpoint_extensions(card: dict[str, Any]) -> None:

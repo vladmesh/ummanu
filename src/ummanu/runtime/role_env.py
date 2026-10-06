@@ -19,6 +19,7 @@ from pathlib import Path
 from ummanu.board.local_run import parse_local_run_policy
 from ummanu.runtime import docker_guard
 from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path
+from ummanu.runtime_env import RuntimeEnvError, parse_runtime_env
 
 # The one module every launcher runs as `python3 -P -m <this> exec --role ...`.
 ENTRY_POINT = "ummanu.runtime.role_env"
@@ -191,7 +192,6 @@ def dispatcher_workspace_namespace(root: Path | str) -> Path | None:
 
 # Gates the synthetic BOARD_ROLE. po and dispatcher have no allowlist entry and are rejected earlier.
 BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
-_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_ENV_NAME_RE = re.compile(
     r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL|AUTH|WEBHOOK)(_|$)",
     re.IGNORECASE,
@@ -246,41 +246,19 @@ def _require_docker_guard(env: dict[str, str]) -> None:
         raise RoleEnvError("native Docker backend is unavailable; repair the role launch PATH")
 
 
-def _parse_assignment(line: str) -> tuple[str, str] | None:
-    line = line.strip()
-    if not line or line.startswith("#"):
-        return None
-    if line.startswith("export "):
-        line = line[len("export ") :].lstrip()
-    if "=" not in line:
-        return None
-    key, raw_value = line.split("=", 1)
-    key = key.strip()
-    if not _KEY_RE.match(key):
-        return None
-    try:
-        parts = shlex.split(f"x={raw_value}", comments=True, posix=True)
-    except ValueError:
-        value = raw_value.strip().strip("'\"")
-    else:
-        value = parts[0].split("=", 1)[1] if parts else ""
-    return key, value
-
-
 def load_env_file(path: Path | str | None = None) -> dict[str, str]:
     """Read simple KEY=value lines from the control-panel env file without logging values."""
     env_path = Path(path) if path is not None else runtime_env_path()
     try:
-        lines = env_path.read_text(encoding="utf-8").splitlines()
+        text = env_path.read_bytes().decode("utf-8")
     except FileNotFoundError:
         return {}
-    out: dict[str, str] = {}
-    for line in lines:
-        item = _parse_assignment(line)
-        if item is not None:
-            key, value = item
-            out[key] = value
-    return out
+    except (OSError, UnicodeError):
+        raise RoleEnvError("runtime.env is unreadable") from None
+    try:
+        return parse_runtime_env(text)
+    except RuntimeEnvError as exc:
+        raise RoleEnvError(str(exc)) from None
 
 
 def allowlist(role: str) -> tuple[str, ...]:

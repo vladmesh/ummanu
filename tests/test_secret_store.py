@@ -1,8 +1,11 @@
 import contextlib
+import copy
 import io
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,12 +14,13 @@ from unittest import mock
 import yaml
 
 from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
-from ummanu import _fsutil, installation, secret_commands, secret_store, state_repo
+from ummanu import _fsutil, installation, runtime_env, secret_commands, secret_store, state_repo
 from ummanu.cli import main
 from ummanu.config import validate
 from ummanu.infra import export_allowlist
 from ummanu.infra.export_allowlist import is_exported
 from ummanu.memory.canon import CanonTransaction
+from ummanu.runtime import role_env
 from ummanu.secret_store import (
     CATALOG_NAME,
     KEY_NAME,
@@ -111,7 +115,9 @@ class InitCase(SecretStoreCase):
         self.assertEqual(result.commit, store_revision(self.instance_dir))
         self.assertEqual(result.catalog_path, self.instance_dir / "secrets" / CATALOG_NAME)
         self.assertEqual(self.catalog(), {"version": secret_store.CATALOG_VERSION, "secrets": []})
-        self.assertEqual(self.exported(), ["instance.yaml", "secrets/catalog.yaml", "secrets/installation-key.json"])
+        self.assertEqual(
+            self.exported(), ["instance.yaml", "secrets/catalog.yaml", "secrets/installation-key.json"]
+        )
         self.assertFalse((self.instance_dir / ".gitignore").exists())
         self.assertFalse((self.instance_dir / ".git").exists())
 
@@ -197,6 +203,123 @@ class RecoveryPhraseCase(SecretStoreCase):
         params = json.loads((self.instance_dir / "secrets" / "installation-key.json").read_text("utf-8"))
         wrong = secret_store._derive_key(" ".join(RECOVERY_WORDS[32:48]), params)
         self.assertNotEqual(wrong, good)
+
+    def test_invalid_or_expensive_scrypt_parameters_are_refused_before_derivation(self) -> None:
+        self.initialize()
+        params_path = secret_store.key_params_path(self.instance_dir)
+        original = json.loads(params_path.read_text(encoding="utf-8"))
+        mutations = (
+            {"length": 16},
+            {"length": "32"},
+            {"n": True},
+            {"n": 3},
+            {"r": 0},
+            {"r": 64},
+            {"p": -1},
+            {"p": 32},
+            {"n": 2**19, "r": 8},
+            {"n": 2**16, "r": 8, "p": 5},
+            {"salt": ""},
+            {"id": "sentinel-secret-do-not-leak"},
+        )
+        for mutation in mutations:
+            with self.subTest(parameters=mutation):
+                params = copy.deepcopy(original)
+                params["kdf"].update(mutation)
+                params_path.write_text(json.dumps(params), encoding="utf-8")
+                before = self.store_state()
+                with mock.patch.object(secret_store, "Scrypt") as scrypt:
+                    with self.assertRaises(SecretStoreStateError) as caught:
+                        restore_installation_key(self.instance_dir, self.phrase)
+                    scrypt.assert_not_called()
+                self.assertNotIn("sentinel-secret-do-not-leak", str(caught.exception))
+                self.assertEqual(self.store_state(), before)
+
+    def test_recovery_uses_supported_recorded_scrypt_parameters(self) -> None:
+        self.initialize()
+        params = fast_key_params()
+        params["kdf"].update(n=512, r=4, p=2)
+        expected = secret_store.Scrypt(salt=b"0123456789abcdef", length=32, n=512, r=4, p=2).derive(
+            self.phrase.encode("utf-8")
+        )
+        params["verifier"] = secret_store._seal_verifier(expected)
+        secret_store.key_params_path(self.instance_dir).write_text(json.dumps(params), encoding="utf-8")
+        secret_store.key_path(self.instance_dir).unlink()
+
+        restore_installation_key(self.instance_dir, self.phrase)
+
+        self.assertEqual(load_installation_key(self.instance_dir), expected)
+
+    def test_a_kdf_runtime_failure_is_a_content_free_state_error(self) -> None:
+        params = fast_key_params()
+        with mock.patch.object(secret_store, "Scrypt") as scrypt:
+            scrypt.return_value.derive.side_effect = ValueError("sentinel-secret-do-not-leak")
+            with self.assertRaises(SecretStoreStateError) as caught:
+                secret_store._derive_key(self.phrase, params)
+        self.assertNotIn("sentinel-secret-do-not-leak", str(caught.exception))
+
+    def test_malformed_verifier_is_a_state_error_and_keeps_the_key(self) -> None:
+        self.initialize()
+        params_path = secret_store.key_params_path(self.instance_dir)
+        original = json.loads(params_path.read_text(encoding="utf-8"))
+        for mutation in (
+            {"nonce": secret_store._b64(b"x")},
+            {"nonce": None},
+            {"ciphertext": {"secret": "sentinel-secret-do-not-leak"}},
+        ):
+            with self.subTest(verifier=mutation):
+                params = copy.deepcopy(original)
+                params["verifier"].update(mutation)
+                params_path.write_text(json.dumps(params), encoding="utf-8")
+                before = self.store_state()
+                with self.assertRaises(SecretStoreStateError) as caught:
+                    restore_installation_key(self.instance_dir, self.phrase)
+                self.assertNotIn("sentinel-secret-do-not-leak", str(caught.exception))
+                self.assertEqual(self.store_state(), before)
+
+    def test_restoring_a_key_ignores_a_preexisting_temporary_symlink(self) -> None:
+        self.initialize()
+        key_file = secret_store.key_path(self.instance_dir)
+        original = key_file.read_bytes()
+        victim = Path(self.tmpdir.name) / "leave-alone"
+        victim.write_bytes(b"unchanged")
+        victim.chmod(0o644)
+        old_temporary = key_file.with_name(f".{key_file.name}.tmp")
+        old_temporary.symlink_to(victim)
+
+        restore_installation_key(self.instance_dir, self.phrase)
+
+        self.assertEqual(victim.read_bytes(), b"unchanged")
+        self.assertEqual(victim.stat().st_mode & 0o777, 0o644)
+        self.assertFalse(key_file.is_symlink())
+        self.assertEqual(key_file.read_bytes(), original)
+        self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(list(key_file.parent.glob(".installation.key.*.tmp")), [])
+
+    def test_interrupted_key_publication_keeps_the_old_key_and_removes_its_temporary(self) -> None:
+        self.initialize()
+        key_file = secret_store.key_path(self.instance_dir)
+        before = self.store_state()
+        real_replace = os.replace
+
+        def fail_key_replace(source, destination):
+            if Path(destination) == key_file:
+                temporary = Path(source)
+                self.assertFalse(temporary.is_symlink())
+                self.assertEqual(temporary.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(temporary.parent, key_file.parent)
+                raise OSError(5, "injected")
+            return real_replace(source, destination)
+
+        for name, failure in (("replace", fail_key_replace), ("fsync", OSError(5, "injected"))):
+            with self.subTest(stage=name):
+                with (
+                    mock.patch.object(secret_store.os, name, side_effect=failure),
+                    self.assertRaises(SecretStoreError),
+                ):
+                    restore_installation_key(self.instance_dir, self.phrase)
+                self.assertEqual(self.store_state(), before)
+                self.assertEqual(list(key_file.parent.glob(".installation.key.*.tmp")), [])
 
 
 class RoundTripCase(SecretStoreCase):
@@ -303,6 +426,82 @@ class RoundTripCase(SecretStoreCase):
         envelope["id"] = "y"
         with self.assertRaises(SecretStoreStateError):
             secret_store.open_value(key, envelope)
+
+    def test_corrupt_envelopes_are_content_free_state_errors(self) -> None:
+        key = load_installation_key(self.instance_dir)
+        sentinel = "sentinel-secret-do-not-leak"
+        original = secret_store.seal_value(key, "x", sentinel.encode())
+        mutations = (
+            (("version",), sentinel),
+            (("id",), sentinel),
+            (("aead",), {"id": sentinel}),
+            (("kdf",), {"id": sentinel}),
+            (("aead", "nonce"), secret_store._b64(b"x")),
+            (("aead", "nonce"), None),
+            (("ciphertext",), {"secret": sentinel}),
+            (("ciphertext",), ""),
+            (("kdf", "length"), 16),
+            (("kdf", "length"), "32"),
+            (("kdf", "length"), True),
+            (("kdf", "salt"), ""),
+            (("kdf", "info"), {"secret": sentinel}),
+        )
+        for fields, value in mutations:
+            with self.subTest(fields=fields, value=value):
+                envelope = copy.deepcopy(original)
+                target = envelope if len(fields) == 1 else envelope[fields[0]]
+                target[fields[-1]] = value
+                with self.assertRaises(SecretStoreStateError) as caught:
+                    secret_store.open_value(key, envelope)
+                self.assertNotIn(sentinel, str(caught.exception))
+
+    def test_whole_envelope_substitution_is_refused_on_read_and_materialization(self) -> None:
+        target = Path(self.tmpdir.name) / "runtime.env"
+        for secret_id, value in (("a", b"alpha"), ("b", b"beta")):
+            set_secret(
+                self.instance_dir,
+                secret_id=secret_id,
+                value=value,
+                scope="installation",
+                purpose="service credential",
+                actor="tester",
+                environment=secret_id.upper(),
+                materialize={"target": "file", "path": str(target)},
+            )
+        a_path = secret_store.value_path(self.instance_dir, "a")
+        b_path = secret_store.value_path(self.instance_dir, "b")
+        a_bytes, b_bytes = a_path.read_bytes(), b_path.read_bytes()
+        a_path.write_bytes(b_bytes)
+        b_path.write_bytes(a_bytes)
+        target.write_bytes(b"UNCHANGED=value\n")
+
+        # Both envelopes are intact; it is their relationship to the requested id that is wrong.
+        key = load_installation_key(self.instance_dir)
+        self.assertEqual(secret_store.open_value(key, json.loads(a_path.read_text())), b"beta")
+        for secret_id in ("a", "b"):
+            with self.subTest(secret_id=secret_id), self.assertRaises(SecretStoreStateError):
+                read_secret(self.instance_dir, secret_id)
+        with self.assertRaises(SecretStoreStateError):
+            materialize_secrets(self.instance_dir)
+        self.assertEqual(target.read_bytes(), b"UNCHANGED=value\n")
+
+    def test_setting_a_secret_can_replace_a_damaged_envelope(self) -> None:
+        arguments = {
+            "secret_id": "x",
+            "scope": "installation",
+            "purpose": "service credential",
+            "actor": "tester",
+        }
+        set_secret(self.instance_dir, value=b"old-value", **arguments)
+        path = secret_store.value_path(self.instance_dir, "x")
+        envelope = json.loads(path.read_text(encoding="utf-8"))
+        envelope["aead"]["nonce"] = secret_store._b64(b"x")
+        path.write_text(json.dumps(envelope), encoding="utf-8")
+
+        set_secret(self.instance_dir, value=b"new-value", **arguments)
+
+        self.assertEqual(read_secret(self.instance_dir, "x"), b"new-value")
+        self.assertEqual(len(list_secrets(self.instance_dir)), 1)
 
     def test_updating_a_secret_keeps_created_at_and_one_catalog_entry(self) -> None:
         first = set_secret(
@@ -430,16 +629,18 @@ class InterruptedWriteCase(SecretStoreCase):
                 raise OSError("interrupted between the value and the catalog")
             return real_replace(source, destination)
 
-        with mock.patch.object(_fsutil.os, "replace", side_effect=failing_replace):
-            with self.assertRaises(SecretStoreError):
-                set_secret(
-                    self.instance_dir,
-                    secret_id="second.secret",
-                    value=b"second",
-                    scope="installation",
-                    purpose="interrupted",
-                    actor="tester",
-                )
+        with (
+            mock.patch.object(_fsutil.os, "replace", side_effect=failing_replace),
+            self.assertRaises(SecretStoreError),
+        ):
+            set_secret(
+                self.instance_dir,
+                secret_id="second.secret",
+                value=b"second",
+                scope="installation",
+                purpose="interrupted",
+                actor="tester",
+            )
         self.assertEqual(self.store_state(), head)
         self.assert_consistent()
         self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)], ["first.secret"])
@@ -456,7 +657,10 @@ class InterruptedWriteCase(SecretStoreCase):
             if len(calls) == 2:
                 raise RuntimeError("interrupted after the catalog")
 
-        with mock.patch.object(CanonTransaction, "write", write_then_fail), self.assertRaises(SecretStoreError):
+        with (
+            mock.patch.object(CanonTransaction, "write", write_then_fail),
+            self.assertRaises(SecretStoreError),
+        ):
             set_secret(
                 self.instance_dir,
                 secret_id="second.secret",
@@ -580,7 +784,101 @@ class EnvStoreCase(SecretStoreCase):
         return import_env_file(self.instance_dir, **request)
 
 
+class RuntimeEnvRoundTripTests(EnvStoreCase):
+    def test_import_materialize_and_process_keep_bytes_and_runtime_meaning(self) -> None:
+        payload = (
+            'UMMANU_DATA_DIR="data root"\n'
+            "EXAMPLE_TOKEN=opaque\\-value\\-sentinel\n"
+            "EXAMPLE_HASH=a#b\n"
+            "EXAMPLE_SPACE=a b\n"
+        )
+        self.source.write_text(payload, encoding="utf-8")
+        self.do_import()
+        before = self.store_state()
+        secret_store.materialize_secrets(self.instance_dir)
+        self.assertEqual(self.target.read_bytes(), payload.encode())
+        self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.store_state(), before)
+        self.assertEqual(secret_store.read_secret(self.instance_dir, "ummanu_data_dir"), b'"data root"')
+        expected = {
+            "UMMANU_DATA_DIR": "data root",
+            "EXAMPLE_TOKEN": "opaque-value-sentinel",
+            "EXAMPLE_HASH": "a#b",
+            "EXAMPLE_SPACE": "a b",
+        }
+        self.assertEqual(runtime_env.read_runtime_env(self.instance_dir, str(self.target)), expected)
+        self.assertEqual(role_env.load_env_file(self.target), expected)
+        env = role_env.runtime_env(
+            "pipeline",
+            base_env={"PATH": os.defpath, "EXAMPLE_TOKEN": "ambient", "UMMANU_DATA_DIR": "ambient"},
+            env_file=self.target,
+        )
+        self.assertEqual(env["UMMANU_DATA_DIR"], "data root")
+        self.assertNotIn("EXAMPLE_TOKEN", env)
+        child = subprocess.run(
+            [sys.executable, "-c", "import json,os; print(json.dumps(os.environ['UMMANU_DATA_DIR']))"],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(json.loads(child.stdout), "data root")
+
+    def test_unsupported_import_does_not_change_store_or_previous_materialization(self) -> None:
+        self.do_import()
+        secret_store.materialize_secrets(self.instance_dir)
+        before_store, before_env = self.store_state(), self.target.read_bytes()
+        for value in ('"unclosed-sentinel', "unclosed-sentinel\\", "'x'concatenated-sentinel"):
+            with self.subTest(value=value):
+                self.source.write_text(f"EXAMPLE_URL={value}\n", encoding="utf-8")
+                with self.assertRaises(secret_store.SecretStoreValidationError) as caught:
+                    self.do_import()
+                self.assertNotIn("sentinel", str(caught.exception))
+                self.assertEqual(self.store_state(), before_store)
+                self.assertEqual(self.target.read_bytes(), before_env)
+
+    def test_unrenderable_stored_value_preserves_previous_env_file(self) -> None:
+        self.do_import()
+        secret_store.materialize_secrets(self.instance_dir)
+        before = self.target.read_bytes()
+        secret_store.set_secret(
+            self.instance_dir,
+            secret_id="example_url",
+            value=b'"unclosed-sentinel',
+            scope="installation",
+            purpose="synthetic configuration",
+            environment="EXAMPLE_URL",
+            materialize={"target": "runtime-env", "order": 0},
+            actor="tester",
+        )
+        with self.assertRaises(secret_store.SecretStoreValidationError) as caught:
+            secret_store.materialize_secrets(self.instance_dir)
+        self.assertNotIn("unclosed-sentinel", str(caught.exception))
+        self.assertEqual(self.target.read_bytes(), before)
+        self.assertEqual(sorted(self.target.parent.iterdir()), [self.target])
+
+
 class ImportCase(EnvStoreCase):
+    def test_imported_escaped_secret_redacts_the_runtime_value_without_an_env_file(self) -> None:
+        serialized = r"opaque\-credential\-sentinel"
+        self.source.write_text(f"API_TOKEN={serialized}\n", encoding="utf-8")
+        self.do_import()
+        materialize_secrets(self.instance_dir)
+        self.assertEqual(self.target.read_bytes(), self.source.read_bytes())
+        decoded = secret_store.role_env.load_env_file(self.target)["API_TOKEN"]
+        self.assertEqual(decoded, "opaque-credential-sentinel")
+        values = secret_store.redaction_values(self.instance_dir)
+        self.assertIn(serialized, values)
+        self.assertIn(decoded, values)
+        self.source.unlink()
+        self.target.unlink()
+
+        with mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", []):
+            output = secret_store.redact(f"runtime: {decoded}\nfile: {serialized}", secret_values=values)
+
+        self.assertNotIn(decoded, output)
+        self.assertNotIn(serialized, output)
+
     def test_import_makes_one_secret_per_variable(self) -> None:
         result = self.do_import()
         self.assertEqual(result.created, ("example_url", "example_api_user", "example_api_token"))
@@ -826,9 +1124,11 @@ class MaterializeCase(EnvStoreCase):
         pinned = Path(self.tmpdir.name) / "recovery" / "runtime.env"
         ambient = Path(self.tmpdir.name) / "live" / "runtime.env"
         entry = {"materialize": {"target": "runtime-env"}}
-        with mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": str(ambient)}, clear=True):
-            with installation._runtime_environment({"UMMANU_RUNTIME_ENV_FILE": str(pinned)}):
-                self.assertEqual(secret_store.materialize_path(self.instance_dir, entry), pinned)
+        with (
+            mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": str(ambient)}, clear=True),
+            installation._runtime_environment({"UMMANU_RUNTIME_ENV_FILE": str(pinned)}),
+        ):
+            self.assertEqual(secret_store.materialize_path(self.instance_dir, entry), pinned)
 
     def test_a_second_run_leaves_the_file_byte_for_byte_the_same(self) -> None:
         materialize_secrets(self.instance_dir)
@@ -857,9 +1157,11 @@ class MaterializeCase(EnvStoreCase):
         def fail_replace(source, destination):
             raise OSError("interrupted between the temporary file and the target")
 
-        with mock.patch.object(secret_store.os, "replace", side_effect=fail_replace):
-            with self.assertRaises(SecretStoreError):
-                materialize_secrets(self.instance_dir)
+        with (
+            mock.patch.object(secret_store.os, "replace", side_effect=fail_replace),
+            self.assertRaises(SecretStoreError),
+        ):
+            materialize_secrets(self.instance_dir)
 
         self.assertEqual(self.target.read_bytes(), before)
         self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
@@ -1280,6 +1582,39 @@ class SecretCliCase(SecretStoreCase):
             code = main(argv)
         return code, out.getvalue(), err.getvalue()
 
+    def test_corrupt_envelope_and_verifier_return_state_json_without_touching_the_target(self) -> None:
+        self.initialize()
+        target = Path(self.tmpdir.name) / "runtime.env"
+        set_secret(
+            self.instance_dir,
+            secret_id="x",
+            value=b"sentinel-secret-do-not-leak",
+            scope="installation",
+            purpose="service credential",
+            actor="tester",
+            environment="TOKEN",
+            materialize={"target": "file", "path": str(target)},
+        )
+        target.write_bytes(b"UNCHANGED=value\n")
+        value_path = secret_store.value_path(self.instance_dir, "x")
+        params_path = secret_store.key_params_path(self.instance_dir)
+        for path, section in ((value_path, "aead"), (params_path, "verifier")):
+            with self.subTest(file=path.name):
+                original = path.read_bytes()
+                document = json.loads(original)
+                document[section]["nonce"] = secret_store._b64(b"x")
+                path.write_text(json.dumps(document), encoding="utf-8")
+                code, output, errors = self.run_cli(
+                    ["secret", "materialize", "--instance", str(self.instance_dir)]
+                )
+                self.assertEqual(code, 3)
+                self.assertEqual(json.loads(output)["error"], "state")
+                self.assertFalse(json.loads(output)["ok"])
+                self.assertEqual(errors, "")
+                self.assertNotIn("sentinel-secret-do-not-leak", output)
+                self.assertEqual(target.read_bytes(), b"UNCHANGED=value\n")
+                path.write_bytes(original)
+
     def test_init_shows_the_phrase_once_and_needs_it_confirmed(self) -> None:
         answers: list[str] = []
         phrase = " ".join(RECOVERY_WORDS[64:80])
@@ -1291,9 +1626,11 @@ class SecretCliCase(SecretStoreCase):
             position = int(prompt.split()[1].rstrip(":")) - 1
             return phrase.split()[position]
 
-        with mock.patch.object(secret_commands, "generate_recovery_phrase", return_value=phrase):
-            with mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line):
-                code, out, err = self.run_cli(["secret", "init", "--instance", str(self.instance_dir)])
+        with (
+            mock.patch.object(secret_commands, "generate_recovery_phrase", return_value=phrase),
+            mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line),
+        ):
+            code, out, err = self.run_cli(["secret", "init", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 0)
         # One "written it down" acknowledgement plus one question per confirmed word.
         self.assertEqual(len(answers), secret_store.CONFIRM_WORDS + 1)
@@ -1378,11 +1715,13 @@ class SecretCliCase(SecretStoreCase):
         def fake_read_line(prompt: str) -> str:
             return "yes"
 
-        with mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line):
-            with mock.patch.object(secret_commands, "_clear_screen_and_scrollback", return_value=False):
-                code, out, _ = self.run_cli(
-                    ["secret", "init", "--instance", str(self.instance_dir)], clear_ok=False
-                )
+        with (
+            mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line),
+            mock.patch.object(secret_commands, "_clear_screen_and_scrollback", return_value=False),
+        ):
+            code, out, _ = self.run_cli(
+                ["secret", "init", "--instance", str(self.instance_dir)], clear_ok=False
+            )
         self.assertEqual(code, 2)
         payload = json.loads(out)
         self.assertFalse(payload["ok"])
@@ -1472,7 +1811,7 @@ class SecretCliCase(SecretStoreCase):
         blob = bytes(range(256))
         source = Path(self.tmpdir.name) / "value.bin"
         source.write_bytes(blob)
-        code, out, _ = self.run_cli(
+        code, _out, _ = self.run_cli(
             [
                 "secret",
                 "set",

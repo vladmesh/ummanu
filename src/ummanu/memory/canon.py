@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import uuid
@@ -27,14 +28,20 @@ from typing import Any
 
 import yaml
 
-from ummanu._fsutil import REVISION_PREFIX as REVISION_PREFIX
-from ummanu._fsutil import content_revision as content_revision
-from ummanu._fsutil import regular_files_under, write_bytes_atomic, write_text_atomic
+from ummanu._fsutil import (
+    REVISION_PREFIX as REVISION_PREFIX,
+    content_revision as content_revision,
+    regular_files_under,
+    write_bytes_atomic,
+    write_text_atomic,
+)
 from ummanu.memory import access as memory_access
+from ummanu.memory_errors import MemoryValidationError
 
 UNDO_DIR = ".undo"
 UNDO_JOURNAL = "journal.json"
 UNDO_VERSION = 1
+FRONTMATTER_DELIMITER = re.compile(r"^---(?:\r?\n|\Z)", re.MULTILINE)
 
 
 # ── The fact set and its revision ─────────────────────────────────────────────
@@ -88,12 +95,28 @@ def scope_for_relative(path: Path) -> str:
     return "global" if top == "global" else f"project:{top}"
 
 
-def parse_frontmatter(raw: str) -> tuple[dict, str]:
-    meta, body = {}, raw
-    if raw.startswith("---"):
-        _, front, body = raw.split("---", 2)
-        meta = yaml.safe_load(front) or {}
-    return meta, body
+def parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
+    """Split a fact on whole ``---`` lines, preserving the body's line endings.
+
+    Delimiters use LF or CRLF; the closing delimiter may also end at EOF. A fact without an
+    opening delimiter is plain Markdown. Once a block is opened it must close and contain a
+    YAML mapping (an empty block is allowed), otherwise writers and indexers refuse it.
+    """
+    opening = FRONTMATTER_DELIMITER.match(raw)
+    if opening is None:
+        return {}, raw
+    closing = FRONTMATTER_DELIMITER.search(raw, opening.end())
+    if closing is None:
+        raise MemoryValidationError("fact frontmatter is not closed")
+    try:
+        loaded = yaml.safe_load(raw[opening.end() : closing.start()])
+    except (yaml.YAMLError, ValueError):
+        raise MemoryValidationError("fact frontmatter is invalid YAML") from None
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        raise MemoryValidationError("fact frontmatter must be a mapping")
+    return {str(key): value for key, value in loaded.items()}, raw[closing.end() :]
 
 
 def parse_fact_text(raw: str, path: str | Path, fact_id: str | None = None) -> dict:
@@ -195,7 +218,9 @@ class CanonTransaction:
             try:
                 self.undo.mkdir(parents=True)
             except OSError as exc:
-                raise RuntimeError(f"could not create the {self.label} undo area {self.undo}: {exc}") from None
+                raise RuntimeError(
+                    f"could not create the {self.label} undo area {self.undo}: {exc}"
+                ) from None
         if info is None:
             entry["state"] = "absent"
         elif stat.S_ISLNK(info.st_mode):
@@ -284,7 +309,9 @@ def recover_canon_undo(memory_dir: Path) -> tuple[str, ...]:
 
 def _write_journal(undo: Path, root: Path, entries: list[dict[str, Any]]) -> None:
     payload = {"version": UNDO_VERSION, "root": str(root), "entries": entries}
-    write_bytes_atomic(undo / UNDO_JOURNAL, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+    write_bytes_atomic(
+        undo / UNDO_JOURNAL, (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    )
 
 
 def _read_journal(undo: Path) -> tuple[Path, list[dict[str, Any]]]:

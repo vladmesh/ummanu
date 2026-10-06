@@ -35,8 +35,7 @@ from unittest import mock
 from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
-from ummanu import bootstrap as bootstrap_module
-from ummanu import installation, upgrade
+from ummanu import bootstrap as bootstrap_module, installation, upgrade
 from ummanu.board import store
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
@@ -396,6 +395,7 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
                 mock.patch("ummanu.installation.provision_codex_home", return_value=0),
                 mock.patch("ummanu.installation.run_steps", side_effect=head_registry_only),
+                mock.patch("ummanu.installation.check_product_runtime"),
                 # The fixture enables the web front; the host's Caddy is not this test's (ummanu-49 P4).
                 mock.patch("ummanu.installation.caddy_installed", return_value=True),
                 mock.patch("ummanu.memory_service.build_document_embedder", return_value=_Embedder()),
@@ -441,7 +441,10 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 self.assertEqual(restored_kinds[kind], source_kinds[kind])
         self.assertEqual(restored_kinds["issue"]["priority"], "P0")
         self.assertEqual(
-            {reference: status for reference, (status, _goal, _comments) in restored_kinds["sprints"].items()},
+            {
+                reference: status
+                for reference, (status, _goal, _comments) in restored_kinds["sprints"].items()
+            },
             {"sprint:snapshot": "closed", "sprint:snapshot-open": "open"},
         )
         self.assertTrue(all(comments for *_rest, comments in restored_kinds["sprints"].values()))

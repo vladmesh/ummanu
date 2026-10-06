@@ -153,6 +153,15 @@ and `<data>/locks/onboarding/`. Copies an older version left in the live root (`
 `.locks/`) are never read. `policies/` is dead configuration that no code reads; the cutover leaves it
 out of the live root.
 
+`data-manifest.json` is generated descriptive inventory, not a path-configuration file. Component
+paths are relative to `data_dir`, except `memory.facts`: `state/memory/facts` is relative to the live
+root. Older manifests remain readable; editing a manifest does not relocate data.
+
+Memory facts use optional YAML mapping frontmatter between exact, unindented `---` lines (LF or CRLF;
+the closing line may end at EOF). The writer and indexer report malformed frontmatter as a controlled error. Snapshot
+export preserves the original fact text, including malformed facts, so a checkpoint does not discard
+material that needs repair.
+
 ### Snapshot repository
 
 The snapshot repository is the exporter's derived artifact, not a working tree: a **bare**
@@ -638,11 +647,32 @@ A clean host is recovered with two commands, `bootstrap` then `recover`, whateve
 [shape](#two-remote-shapes). The code is `bootstrap.bootstrap` and `installation.install` (`recover`
 is `install` with `--recover`).
 
+**Prepare the product first.** These commands assume Ubuntu 24.04 and a product checkout owned by
+`USER`, the dedicated installation account. Create that account and checkout first if they do not
+exist; bootstrap reuses the account. Keep the checkout and its `.venv` readable and executable by
+`USER`, and create the environment as that user. Install the OS prerequisite with an administrator's
+account, then run the environment setup from the product checkout:
+
 ```bash
-python3 -m pip install -e '.[memory]'
-sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+sudo apt-get update
+sudo apt-get install --yes python3-venv
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[memory,dev]'
+ummanu_product_root=$(pwd -P)
+```
+
+The editable install preserves checkout-owned deployment assets. The memory extra supplies the
+embedding runtime; dev supplies the pinned linter used by upgrade and project checks. The shipped
+units always use `PRODUCT_ROOT/.venv/bin/…`. Root commands therefore use an absolute CLI path and
+recovery names its product root explicitly; neither depends on `sudo` preserving PATH or HOME:
+
+```bash
+sudo "$ummanu_product_root/.venv/bin/ummanu" bootstrap \
+  --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
   --bootstrap-credential-file TOKEN_FILE
-sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+sudo "$ummanu_product_root/.venv/bin/ummanu" recover \
+  --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+  --product-root "$ummanu_product_root" \
   --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
 ```
 
@@ -652,8 +682,29 @@ Both commands clone a private remote, so both take the same external
 removed on success or failure; a local/file remote needs none.
 
 `INSTANCE` is the live root to create, by default `~/ummanu-data/instance`. Heads run on local-pty,
-which ships with the product; no session manager is installed. A new installation runs `sudo ummanu
-install` with the same arguments instead of `recover` ([Guards](#bootstrap)).
+which ships with the product; no session manager is installed. A new installation runs `install`
+through the same absolute CLI path and with the same arguments instead of `recover` ([Guards](#bootstrap)).
+
+**Memory configuration.** `host.memory_model`, `host.memory_dim` and `host.memory_threads` choose the
+model, dimension and inference threads together. Their defaults are `intfloat/multilingual-e5-large`,
+`1024` and `1`; a custom model must name its matching dimension. Both recovery paths, including
+recovery with locked credentials, use these settings, as do explicit reindex and the rendered memory
+service. A retry reuses only an index whose metadata matches the model and dimension. A missing,
+legacy, corrupt or incompatible index is rebuilt; completed board recovery is retained.
+
+The legacy `host.memory_reindex_python` and `host.memory_reindex_script` fields apply only to
+explicit `ummanu memory reindex --instance INSTANCE`. With neither set, that command uses the
+product indexer. Setting either requires both an executable Python and an existing script; a lone
+override is refused. Install and recover ignore the pair and use the product indexer. The external
+script's arguments and environment are described in [Operations](OPERATIONS.md#system-requirements).
+
+Legacy `instance.yaml` `heads` arrays remain readable and are ignored. Configure actual profiles in
+`heads/heads.toml`; existing managed head units retain their ownership until explicitly resolved
+([Operations](OPERATIONS.md#the-installations-head-registry)).
+
+The legacy `persona.name` and `persona.style` fields also remain readable and ignored. Personal
+instructions come from `persona/AGENTS.md` in the live root. `host.orca_repos` is retained only for
+compatibility and does not create, check or remove Orca registrations.
 
 **Memory.** A host needs at least **4 GB of RAM** (8 GB recommended; production runs 8 GB with 6 GB
 of swap). The embedding model is about 1.5-1.7 GB resident in the one process that holds it. Recover
@@ -695,6 +746,10 @@ installation user or checkout and names the choice: `--recover` for the same ins
 separate adopt workflow for a live host. The first `install` of a bootstrapped target is the one
 exception: it runs the [sequence](#sequence), removes `.ummanu-bootstrap` at the end, and after that
 `install` refuses the target and names `--recover`.
+
+Before host materialization starts, both commands check the chosen checkout's `.venv` entry points
+and editable import provenance. A missing interpreter or entry point, snapshot install or environment
+pointing at another checkout is refused with the setup instructions; no host materializer step runs.
 
 **Web-front sites.** The front's Caddyfile (`<data>/webfront/Caddyfile`) holds the password hash, so
 it is data-directory state that no snapshot carries. What survives is instance config: the https

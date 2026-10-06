@@ -12,28 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from ummanu import state_repo
 from ummanu._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
-)
-from ummanu._fsutil import (
     copy_tree as _copy_tree,
-)
-from ummanu._fsutil import (
     ensure_dir as _ensure_dir,
-)
-from ummanu._fsutil import (
     publish_component_entries as _publish_component_entries,
-)
-from ummanu._fsutil import (
     regular_files_under as _regular_files_under,
-)
-from ummanu._fsutil import (
     write_json as _write_json,
-)
-from ummanu._fsutil import (
     write_ndjson as _write_ndjson,
 )
 from ummanu.memory.canon import (
@@ -41,11 +27,12 @@ from ummanu.memory.canon import (
     fact_content_hash,
     fact_files,
     parse_fact_text,
+    parse_frontmatter,
     pending_undo,
     recover_canon_undo,
     text_digest,
 )
-from ummanu.memory_errors import MemoryLockError, MemoryProtocolError
+from ummanu.memory_errors import MemoryLockError, MemoryProtocolError, MemoryValidationError
 
 MEMORY_LOCK_NAME = ".write.lock"
 
@@ -219,7 +206,9 @@ def verify_memory_journal(data_dir: Path, instance_dir: Path) -> MemoryVerify:
             export_count = len(export_rows)
             findings.extend(_duplicate_findings("export", [fact_id for fact_id, _text in export_rows]))
             if canon_texts is not None:
-                findings.extend(_set_findings("export", canon_texts, {fact_id for fact_id, _text in export_rows}))
+                findings.extend(
+                    _set_findings("export", canon_texts, {fact_id for fact_id, _text in export_rows})
+                )
                 # Every row is compared, so a stale duplicate beside a current row stays red.
                 changed = sorted(
                     {
@@ -241,7 +230,9 @@ def verify_memory_journal(data_dir: Path, instance_dir: Path) -> MemoryVerify:
             if index_rows is not None:
                 findings.extend(_duplicate_findings("index", [fact_id for fact_id, _row in index_rows]))
             if index_rows is not None and canon_texts is not None:
-                findings.extend(_set_findings("index", canon_texts, {fact_id for fact_id, _row in index_rows}))
+                findings.extend(
+                    _set_findings("index", canon_texts, {fact_id for fact_id, _row in index_rows})
+                )
                 findings.extend(_index_content_findings(canon_texts, index_rows))
 
     return MemoryVerify(
@@ -291,7 +282,9 @@ def _set_findings(label: str, canon: dict[str, Any], other: set[str]) -> list[st
     return findings
 
 
-def _index_content_findings(canon_texts: dict[str, str], index_rows: list[tuple[str, dict[str, Any]]]) -> list[str]:
+def _index_content_findings(
+    canon_texts: dict[str, str], index_rows: list[tuple[str, dict[str, Any]]]
+) -> list[str]:
     """An index row matches its fact when both its stored hash and its stored fields hash to the canon."""
     changed: set[str] = set()
     unparsed: set[str] = set()
@@ -301,7 +294,7 @@ def _index_content_findings(canon_texts: dict[str, str], index_rows: list[tuple[
             continue
         try:
             expected = fact_content_hash(parse_fact_text(text, f"{fact_id}.md", fact_id=fact_id))
-        except (ValueError, yaml.YAMLError):
+        except (ValueError, MemoryValidationError):
             unparsed.add(fact_id)
             continue
         if row["content_hash"] != expected or fact_content_hash(row) != expected:
@@ -357,7 +350,9 @@ def _read_export_fact_texts(path: Path) -> list[tuple[str, str]]:
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"invalid memory export JSON at line {number}: {exc}") from None
         if not isinstance(payload, dict):
-            raise RuntimeError(f"invalid memory export row at line {number}: not an object")
+            raise RuntimeError(  # noqa: TRY004  # Invalid persisted data uses the export error boundary.
+                f"invalid memory export row at line {number}: not an object"
+            )
         fact_id = payload.get("id")
         if not isinstance(fact_id, str) or not fact_id:
             raise RuntimeError(f"invalid memory export row at line {number}: missing id")
@@ -385,16 +380,10 @@ def _read_index_rows(path: Path) -> tuple[list[tuple[str, dict[str, Any]]] | Non
 
 
 def _memory_fact_metadata(text: str) -> dict[str, Any]:
-    if not text.startswith("---\n"):
-        return {}
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        return {}
     try:
-        loaded = yaml.safe_load(text[4:end]) or {}
-    except yaml.YAMLError:
-        return {}
-    if not isinstance(loaded, dict):
+        loaded, _ = parse_frontmatter(text)
+    except MemoryValidationError:
+        # A backup must retain a malformed fact's original text even when it cannot be indexed.
         return {}
     return {str(key): _jsonable_metadata(value) for key, value in sorted(loaded.items())}
 

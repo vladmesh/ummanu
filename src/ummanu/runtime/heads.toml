@@ -6,8 +6,8 @@
 #
 # A resource is a shared account/limit a head draws from (probe is a health-check command for that
 # resource, run on a TTL by ummanu.head_health — red lives on the resource, every profile drawing
-# from it inherits that redness). A profile names its resource, an adapter (which render_<adapter>
-# in heads.py turns role+prompt into a launch command), and an ordered fallback chain of other
+# from it inherits that redness). A profile names its resource, an adapter (rendered by
+# runtime.head.command into a role+prompt launch command), and an ordered fallback chain of other
 # profile ids walked at claim time when the preferred profile's resource is red or spent — by
 # head_health.resolve_head_chain, for the triggered agents and for cards alike. It walks it
 # breadth-first and stops at one answer: nothing launchable in the chain means the
@@ -16,9 +16,8 @@
 # reviewer and observer routing and the curator/retro/steward launch selection — reads that one
 # table, so no two of them can disagree about which head a role is on.
 #
-# Adding a head (another model, another runtime) is a new [profiles.<id>] entry plus, only if its
-# launch shape is genuinely new, one more render_<adapter> function in heads.py — the dispatcher
-# and worker.py never change.
+# Adding a model on an existing adapter needs a new [profiles.<id>] entry. A new adapter also
+# needs command rendering in runtime.head.command and the corresponding launch validation.
 # Each launched profile runs in its own transient systemd system scope with MemoryMax set before
 # the head starts. memory_limit_mib defaults to 8192 MiB; high tiers pin 12288 MiB below.
 

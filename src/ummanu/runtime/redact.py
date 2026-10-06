@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from contextlib import suppress
 from pathlib import Path
 
 from ummanu.runtime.paths import default_instance_path
 from ummanu.runtime.role_env import is_sensitive_env_name
+from ummanu.runtime_env import RuntimeEnvError, parse_env_value
 
 # .env files whose secret-named values are scrubbed verbatim.
 DEFAULT_ENV_FILES = [
@@ -66,17 +68,20 @@ def _load_env_values(env_files: Iterable[Path | str]) -> list[str]:
         p = Path(path)
         if not p.is_file():
             continue
-        for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
+        for raw in p.read_bytes().decode("utf-8", errors="replace").split("\n"):
+            line = raw.removesuffix("\r").lstrip(" \t")
+            if not line or line.startswith(("#", ";")) or "=" not in line:
                 continue
             name, _, val = line.partition("=")
             name = name.strip()
-            val = val.strip().strip('"').strip("'")
-            if len(val) >= MIN_ENV_VALUE_LEN and (
-                is_sensitive_env_name(name) or _URL_WITH_USERINFO_RE.match(val)
-            ):
-                values.append(val)
+            serialized = val.strip()
+            # Keep the old conservative matches even for malformed operator files;
+            # supported values also contribute exactly what the process receives.
+            forms = {serialized, serialized.strip('"').strip("'")}
+            with suppress(RuntimeEnvError):
+                forms.add(parse_env_value(val))
+            if is_sensitive_env_name(name) or any(_URL_WITH_USERINFO_RE.match(value) for value in forms):
+                values.extend(value for value in forms if len(value) >= MIN_ENV_VALUE_LEN)
     # Longest first so a value that contains another gets scrubbed whole.
     return sorted(set(values), key=len, reverse=True)
 

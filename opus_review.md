@@ -1,17 +1,27 @@
 # opus_review — аудит репозитория `vladmesh/ummanu`
 
-> Отчёт только для чтения. Код, тесты, документация и конфигурация **не изменялись**; этот файл — единственное изменение ветки.
+> В этом PR изменяется только `opus_review.md`. Исправления кода, тестов и продуктовой документации поставляются отдельными PR; ссылки и результаты проверок приведены ниже.
 
-## Статус на 2026-10-06 (main `c29bfed67b75482288f6b8cf3e991a69cc596e85`)
+## Статус на 2026-10-06 (main `7741b6d9c94754a785366afdd993af4664cdfbb9`)
 
-После аудита в `main` влиты #669–#678. Пункты #677/#678 сверены с кодом и регрессионными проверками; результаты CI приведены ниже. Ранее закрытые пункты были перепроверены по `8e79450` (`grep` и чтение указанного места), а не только по описанию PR. **✅** — закрыто, **◐** — закрыто частично.
+После аудита в `main` влиты #669–#680. Пункты #677/#678/#680 сверены с кодом и регрессионными проверками; результаты CI приведены ниже. #679 влит отдельно и частично продвинул слот 4, не закрыв BUG-11/16 целиком. Ранее закрытые пункты были перепроверены по `8e79450` (`grep` и чтение указанного места), а не только по описанию PR. **✅** — закрыто, **◐** — закрыто частично. #680 закрывает 10 ID; DOC-15 остаётся частичным только из-за ROADMAP. CON-01/16 закрыты с явными совместимыми контрактами, а не удалением всех legacy-полей или добавлением настройки произвольных путей.
 
-Исторические ссылки `file:line` относятся к `e310833`; в `runtime/`, `web/`, `webproto/` после сжатия прозы #675/#676 они пересчитаны на `8e79450` по скелету кода (AST тогда не менялся). Изменения #677/#678 описаны отдельно; старые ссылки и размеры не выдаются за строки текущего main.
+Исторические ссылки `file:line` относятся к `e310833`; в `runtime/`, `web/`, `webproto/` после сжатия прозы #675/#676 они пересчитаны на `8e79450` по скелету кода (AST тогда не менялся). Изменения #677/#678/#680 описаны отдельно; старые ссылки и размеры не выдаются за строки текущего main. Исторические наблюдения production в §12 сохранены.
 
 **Закрыто (✅):**
 
 | ID | PR | Что сделано |
 |---|---|---|
+| BUG-02 | [#680](https://github.com/vladmesh/ummanu/pull/680) | Явная editable `PRODUCT_ROOT/.venv`, абсолютный CLI под sudo и явный product root. До host materialization проверяются interpreter, entry points и editable provenance. Disposable packaging smoke не выдаётся за clean-host VPS drill |
+| DOC-02 | #672, #680 | README, CONTRIBUTING, OPERATIONS и RECOVERY содержат процедуру создания `.venv` и editable install; устранён остаток после #672 |
+| BUG-06 | #680 | Gate проверяет object shape result и input_revision. Повреждённый текущий result даёт conflict, исторический пропускается; malformed input не меняет binding/draft и enabled state |
+| BUG-08 | #680 | Некорректная структура envelope/verifier и неверные длины криптографических параметров дают контролируемый отказ; CLI не раскрывает содержимое секрета и сохраняет прежний target |
+| BUG-09 | #680 | Один parser frontmatter для writer/index/journal: целые delimiter lines, LF/CRLF и closing-at-EOF. Writer/index контролируемо отвергают malformed facts, а snapshot сохраняет их исходный текст |
+| BUG-13 | #680 | Обычный и locked-credentials recovery, service layout и explicit reindex используют общий model/dim/threads resolver. Retry проверяет model/dimension metadata и при несовместимости пересобирает только память; board progress и child isolation сохранены |
+| BUG-21 | #680 | Requested secret ID сверяется с envelope ID; параметры scrypt ограничены до запуска KDF; ключ публикуется через случайный exclusive temporary file и atomic replace. Формат v1 сохранён в поддерживаемых пределах |
+| CON-01 | #680 | Legacy heads больше не создают вымышленные services; действующие profiles берутся из heads/heads.toml. Старые head units/ownership сохраняются, коллизия с packaged unit требует явного разрешения. persona.name/style и host.orca_repos объявлены ignored compatibility; персональные инструкции — persona/AGENTS.md. Memory settings и legacy external reindex документированы: overrides действуют только для явного `ummanu memory reindex`, требуют пару Python+script и игнорируются автоматическим install/recover |
+| CON-09 | #680 | Runtime readers разделяют parser поддерживаемого однострочного EnvironmentFile-синтаксиса. Secret importer валидирует тот же синтаксис, сохраняя serialized RHS и byte-for-byte materialization; unsupported syntax отвергается, redaction учитывает decoded значение. Importer намеренно строже runtime readers |
+| CON-16 | #680 | Data-manifest явно описывает фиксированные пути и не конфигурирует их. Пример, schema и docs согласованы: facts разрешаются от instance root, остальные пути от data_dir; legacy manifests остаются читаемыми |
 | BUG-03 | [#678](https://github.com/vladmesh/ummanu/pull/678) | `--fast` выполняет шесть настоящих проверок под network/subprocess guard. Offline board-refusal перенесён в unit; SQL injection proof сохранён в отдельном integration-board модуле. Разрешён только точный дополнительный read `git config --get remote.origin.url`; config-write по-прежнему запрещён |
 | BUG-23 (тесты) | #678 | Suite-owned HOME, отсутствие BASH_ENV/ENV и настоящий Bash через test-owned `--noprofile --norc` wrapper изолируют startup stdout/exit status. Продуктовый renderer не изменён; исторический результат §12.9 сохранён |
 | CI-01 | #674, #678 | Changed-file Ruff 0.16.4 и typecheck входят в агрегат `test` и гейт публикации baseline; fail/cancel/skip не дают success. Unit ставит `.[ci,dev]` без memory-extra; shared composite setup и `contents: read`; cache/concurrency сохранены. Branch protection не добавлялась |
@@ -39,9 +49,8 @@
 | ARCH-01 | #675, #676 | Сжаты `runtime/` с `head/` (−138 тыс. символов прозы) и `web/` с `webproto/` (−211 тыс.). Проза `src` (`.py`): 1,99 млн → 1,64 млн символов, 26,7 % → 23,3 % | `dispatch` (крупнейшая зона; vitality-кластер теперь не блокирован, DOC-09 закрыт), `board`, ядро (`tasks`/`sprints`), установка, `po`, `automations`, `projects`, тесты (TDUP-05). Остаточный потенциал ≈−250…350 тыс. символов (**О**) |
 | DEAD-19 | #673 | Удалены `ProductIssueRecords.key_of/metadata/comments` и `SqlSprintRecords.comments` | `SqlBoardHost._sprint_data` **жив** (`sql_host.py:813`): аудит ошибся. Остаются `SqlAuditError` (в `__all__`), `SqlTaskAudit.refusals()` (нужен тесту), `ProductIssueRecords.row` |
 | DEAD-23 | #673 | Удалены `_feed`, `_project_table`, `_task_table`, `_start_form`, `_review_form`, `_DASHBOARD_SCRIPT` | review-блок `_TASK_SCRIPT`, ветка `compact`, CSS-классы, публичные `FORM_TYPE`/`FEED_LIMIT`/`DEFAULT_SITES`/`RUN_ROLES`/`CLOSE_STATES`/`ProductRun.at_phase`, `_BOARD_SETTLED_STATES` |
-| DOC-02 | #672 | Везде `pip install -e`; README и OPERATIONS говорят, что юниты требуют `PRODUCT_ROOT/.venv` | Процедуры создания `.venv` нет: это решение по BUG-02 |
 | DOC-10 | #672 | Ревизии `0001`–`0030`, `wait` в CHECK, 14 owner event kinds, `body` с `[marker]` | DDL `po_*`/`owner_events`/`origin_returns`; `e2e_refusal`; `committed`; триггер 0028; комментарии в коде (`schema.py:20` «eight jsonb», `sql_cards.py:5` «eleven-method», `backend.py:175` `task_number`) |
-| DOC-15 | #672, #674 | `pyproject` description, `SECURITY.md`, `packaging/systemd/README.md`, docstring `runtime/head/local_pty/__init__.py` | `examples/instance/instance.yaml:20` (`ummanu-pipeline.service`), `heads.toml:9,20-21` (`render_<adapter>`, `worker.py`), `ROADMAP.md` (**Г**) |
+| DOC-15 | #672, #674, #680 | Прежние description/docstring исправления; shipped instance example больше не ссылается на ummanu-pipeline.service, heads.toml называет текущий runtime.head.command вместо render_<adapter>/worker.py | `docs/ROADMAP.md`: гипотеза об уже поставленных пунктах не проверена по полному acceptance и не исправлена; остаётся **Г**, слот 17 |
 | CON-13 | #675 (попутно) | docstring `next_event` теперь честно говорит, что `None` — и тишина, и конец потока | Неиспользуемые опкоды и события; `SUN_PATH_MAX` 100 против 107; комментарий «under 256 bytes» всё ещё ложен (`journal.py:22-23`) |
 | CON-14 | #675 (попутно) | Из docstring `agent_prompt_transport` убрано ложное «Every prompt is checked here» | local-pty по-прежнему доставляет prompt без проверки. Противоречия больше нет, но решение «проверять или нет» осталось |
 
@@ -51,10 +60,9 @@
 
 **Что осталось, по убыванию ценности.**
 1. P0/P1-дефекты, которых не коснулся ни один PR:
-   - BUG-02 вместе с остатком DOC-02 (`.venv`);
    - DOC-06 (подтверждён на проде, §12.1);
    - BUG-10 (подтверждён, §12.5).
-2. Следующий связанный кластер — свежая установка и конфигурация данных (слот 3): BUG-02/06/08/09/13/21, CON-01/09/16, DOC-02 и примеры DOC-15. CI-кластер завершён в своей согласованной границе; его тестовые хвосты сохранены в слоте 16, остаток импортов ARCH-06 — в соответствующих подсистемах. Подробные границы — §10.
+2. Следующий связанный кластер — остаток постоянных ролей и identity повторного запуска (слот 4, частично продвинут влитым #679): DOC-06/12, BUG-10/11/16, CON-13/14/15 и остаток standing-agent token exposure из #671. BUG-11 сначала воспроизвести на main после #679: история prod его не подтвердила, idle-retirement policy не закрывает общий механизм. Слот 3 завершён в согласованной границе; ROADMAP из DOC-15 сохранён в слоте 17. Тестовые хвосты CI-кластера остаются в слоте 16, остаток импортов ARCH-06 — в соответствующих подсистемах. Подробные границы — §10.
 3. Разбиения DEC-01/02/05/07. После #675/#676 DEC-05 и DEC-07 стали дешевле: `local_pty_head.py` уменьшился со 180 до 124 тыс. символов, `pages.py` — с 250 до 224 тыс.
 4. Остаток ARCH-01, начиная с `dispatch`.
 5. TEST-01, DOC-01.
@@ -77,6 +85,21 @@
 - Второй CI выявил ошибочное ожидание новой doctor exit assertion: отключённый example project не обязан иметь checkout. Ожидание и старый комментарий исправлены; здоровый unit fixture требует exit 0, тест отсутствующих host resources отдельно требует exit 1.
 - Broad на первоначальном дереве: 3 171 тест, 39 failures, 156 errors, 7 skips, 550 с. Среди просмотренных причин — отсутствие Docker/ensurepip, запрет Unix sockets, PID namespace `/proc` и root-only проверки; это не green evidence и не доказательство отсутствия иных дефектов. После guard/doctor-поправок broad не повторялся: эти сценарии проверены focused и полным exact-SHA CI. Встроенный Python 3.12 не экспортирует fcntl seal constants; focused/broad проверялись системным Python 3.12.3. Полный поддерживаемый контракт доказывает exact-SHA CI.
 - 25 файлов, +492/−195 строки. Продуктовые shell renderers и runtime поведение не менялись. Два исходных board сценария сохранены; AST-инвентаризация: 7 365 → 7 375 определённых test methods (+10). Кроме переноса SQL proof и замены host canary на fixed pairs прежние сценарии не удалялись; новые модули явно внесены в manifest.
+
+**Проверки #680.**
+- Кандидат после исправлений `4feaf928fe9b43c4c4285c15e8415b0b5ca9cc57`, tree `e9aaabe791271a31c7be85abc3efd9737b638afb`, уже включает main `46773ab580cddc0ecfbd9672ba941c9268c218eb` с #679: [CI candidate](https://github.com/vladmesh/ummanu/actions/runs/37472469550), **success**: lint, typecheck, все 9 suites и агрегат `test` зелёные. Unit: 2 598 tests, 6 прежних skips; recovery: 240 tests, 1 прежний skip. Три env round-trip tests перенесены из unit в component; сценарии сохранены.
+- Первый candidate `ba395c575d334c0e9736d988e9344556ade8d042`, tree `2e07b66d13097953c5496965cc6fcf53afe09836` (API tree совпал с локально проверенным деревом): [первый CI](https://github.com/vladmesh/ummanu/actions/runs/37469674414). В `integration-recovery`: 240 tests, 1 failure, 1 skip; `test_restore_reconcile_fails_closed_before_marking_state` ожидал CLI exit 2, но получил 1. Причина — fixture считала legacy heads невалидным desired state, хотя они теперь ignored compatibility. Fixture заменена настоящим конфликтом: дублированным shipped `ummanu-memory.service`. Exit 2 сохранён; добавлены проверки JSON `invalid desired state`, отсутствия inventory/mark calls и неизменности restore-state.
+- В том же первом CI `unit`: 2 601 tests, 1 failure, 6 skips. Архитектурный `test_test_support_never_imports_a_test_module` выявил cross-test imports. Четыре memory-класса перенесены из test_memory_formats в владеющий fixture модуль test_memory_canon, один env-класс — из test_runtime_env в test_secret_store. Source-only AST-сравнение подтвердило идентичность всех 5 классов / 10 test methods; manifest синхронизирован. Guard и assertions не ослаблялись; исправленный candidate прошёл полный CI.
+- Влит как main `7741b6d9c94754a785366afdd993af4664cdfbb9`, tree совпадает с candidate: [CI main](https://github.com/vladmesh/ummanu/actions/runs/37473697698), **success**: lint, typecheck, все 9 suites, агрегат `test` и публикация main coverage baseline. Фактический main проверен отдельно от candidate.
+- Локально на первом дереве зелёные: сводный focused-прогон — 272 теста; host + ApplyHostTests — 100; schema и настоящий dry-run shipped example — 62. Эти группы **перекрываются и не суммируются** и не отменяют последующее падение CI. Отдельный guarded `--fast`: 6 tests. Ruff 0.16.4 check и format — 32 изменённых Python paths; mypy — 65 source files; manifest и diff-check прошли.
+- Более поздняя попытка локального aggregate (2026-10-06, 13:28 UTC) отклонена автоматической проверкой разрешений из-за обращения к Microsoft telemetry с неизвестным payload. Этот запуск заблокирован и **не считается green evidence**; отклонённый aggregate не повторялся. Source review установленного ONNX Runtime 1.30.0 подтвердил такой endpoint и документированный preinit opt-out: [Privacy.md v1.30.0](https://github.com/microsoft/onnxruntime/blob/v1.30.0/docs/Privacy.md). `ORT_DISABLE_TELEMETRY=1` добавлен в test bootstrap до импорта test modules и в CI env. PID и payload конкретного обращения неизвестны; отключение найденного источника ORT telemetry не доказывает отсутствие любых иных egress. Исключение для telemetry egress не добавлялось.
+- После исправлений узкий focused-прогон с `ORT_DISABLE_TELEMETRY=1` в environment до старта Python прошёл: **17 tests** — оба первоначально упавших CI tests, 7 перенесённых memory tests, 5 runtime syntax и 3 env round-trip. Отклонённый aggregate не повторялся. Ruff 0.16.4 check и format на обновлённых 34 Python paths зелёные; полный CI этого candidate прошёл, см. выше.
+- Проверка регрессий на baseline: три installation scenarios дали четыре ожидаемых assertion failures; два env test methods — 15 ожидаемых assertion failures. Исправленное дерево проходит соответствующие проверки.
+- Сопоставление с настоящим systemd 255: 19 env-векторов, 0 расхождений в поддерживаемом синтаксисе. Это не обещание поддержки всей грамматики EnvironmentFile или shell.
+- Native offline editable install в disposable `.venv` проверил packaging, console entry points и runtime provenance; отдельный smoke проверил metadata на настоящем SQLite + sqlite-vec индексе. Загрузки embedding-модели и clean-host VPS drill не было; packaging smoke не устанавливал весь dependency closure.
+- Независимое ревью выявило и устранило два дополнительных случая: redaction значения с escaped trailing whitespace и экспорт fact с невалидным YAML timestamp. Они покрыты регрессиями; исходный текст malformed fact остаётся доступен backup.
+- Ограничения среды: native Docker недоступен; две root/chown проверки получают `EINVAL` в namespace. Полный candidate/main CI подтвердил поддерживаемые suites; локальные ограничения не считаются зелёной проверкой и **не закрывают root-only coverage BUG-22**.
+- Первое дерево: 43 файла, +2 032/−559 строк. Исправленный candidate относительно main с #679: **46 файлов, +2 149/−618 строк**. Installation/upgrade decomposition из слота 15 в этот PR не входила; runtime форматы и совместимые legacy-поля не удалялись ради закрытия ID.
 
 ## 1. Ревизия, резюме и главные находки
 
@@ -156,10 +179,10 @@
    | Дефект | Суть | Статус |
    |---|---|---|
    | BUG-01 | Request smuggling через keep-alive после ответа 413 в `web/server.py` | **Ф**, воспроизведено, **✔** |
-   | BUG-02 | Невыполнимые инструкции свежей установки (нет `.venv`, PEP 668) | **Ф** |
+   | BUG-02 ✅ #680 | Невыполнимые инструкции свежей установки (нет `.venv`, PEP 668) | Исторический дефект **Ф**; теперь явная editable `.venv` и runtime preflight |
    | BUG-03 ✅ #678 | На исходном HEAD `--fast` падал | Историческое воспроизведение; закрыто actual execution |
-   | BUG-04…08 | Несколько крэшей CLI и падение дашборда целиком при ошибке одного источника | **Ф** |
-   | BUG-09 | Расхождение двух парсеров frontmatter памяти | **Ф ✔** |
+   | BUG-04…08 | Несколько крэшей CLI и падение дашборда целиком при ошибке одного источника | Исторически **Ф**; BUG-06/08 закрыты #680, BUG-07 — #677; BUG-04/05 открыты |
+   | BUG-09 ✅ #680 | Расхождение двух парсеров frontmatter памяти | Исторический дефект **Ф ✔**; writer/index/journal теперь используют общий parser |
    | BUG-10 | Пустой обход orphan-workspace у steward | **Ф ✔** |
    | BUG-11 | Повторный подъём головы на старом `head.pid` | **Г**, сильные основания в коде |
 
@@ -173,7 +196,7 @@
 | # | ID | Приоритет | Суть | Где подробно |
 |---|---|---|---|---|
 | 1 | BUG-01 ✅ | P0 | ✅ #677; исходный приоритет: HTTP/1.1 keep-alive: тело, отвергнутое с 413, не дочитывается, и соединение не закрывается. Остаток тела разбирается как новый запрос | §9 |
-| 2 | BUG-02 | P0 | Свежая установка по README/OPERATIONS не создаёт `PRODUCT_ROOT/.venv`, который требуют все systemd-юниты | §9, §8 |
+| 2 | BUG-02 ✅ | P0 | ✅ #680: явная editable `.venv` и preflight до host materialization. Исходный приоритет: свежая установка по README/OPERATIONS не создаёт `PRODUCT_ROOT/.venv`, который требуют все systemd-юниты | §9, §8 |
 | 3 | ARCH-01 ◐ | P1 | ◐ #675/#676: `runtime`, `web`, `webproto` сделаны. Сжать прозу в `src/` (≈27 %): историю перенести в git/docs, в коде оставить инварианты | §5.8, §10 |
 | 4 | DEC-01 | P1 | Разделить `tasks.py`: чистые помощники → `board/card_rows.py`; диспетчерские записи → mixin. Сейчас 51 приватный импорт из `ummanu.tasks` | §5.1 |
 | 5 | DEC-02 | P1 | Разделить `dispatch/host.py` на mixin-модули. Именно mixin: тесты патчат методы через `self` | §5.2 |
@@ -183,7 +206,7 @@
 | 9 | DOC-01 | P1 | Разбить `PROTOCOLS.md` (365 тыс.) и `OPERATIONS.md` (220 тыс.) на тематические файлы; удалить закрытую историю (≈90–100 тыс.) | §8 |
 | 10 ✅ | CI-01 | P1 | #674/#678: cache/concurrency, changed-file Ruff, permissions, общий setup, лёгкий unit и typecheck/lint в агрегате | §8.4; evidence выше |
 | 11 | DEAD-T | P2 | Вывести из эксплуатации одноразовую миграцию `transition/` и скрипты переименования (≈159 тыс. символов в src+scripts и 83 тыс. в тестах). Нужно решение владельца | §6.2 |
-| 12 | CON-01 | P2 | Две вымышленные/вымершие части схемы инстанса: блок `heads` (ломает `apply_host`) и `orca_repos` | §7 |
+| 12 | CON-01 ✅ | P2 | ✅ #680: heads не создают вымышленные units; legacy heads/persona/orca явно сохранены как ignored compatibility, memory overrides документированы. Исходно: блок `heads` ломает `apply_host`, `orca_repos` не имеет читателей | §7 |
 | 13 | CON-02 | P2 | Ответ `product_runs` не проходит собственную схему `web-run`; у ряда JSON-маршрутов схемы нет вовсе | §7 |
 | 14 | ARCH-04 | P2 | `board` зависит от верхнего слоя (`tasks`, `sprints`, `product_issues`), в том числе через приватные имена | §4, §5.3 |
 | 15 | INEF-01 | P2 | `DispatcherRuntime.save_records` на каждое сохранение делает чтение доски и ≈6 `git rev-parse` на каждую активную запись; 144 точки вызова | §9 |
@@ -322,12 +345,12 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | Исходы шага тика (`{"status": …, "to": …}`) | `gate_lifecycle`, `wait_vitality`, `worker_report`, `worker_launch` | `production.py:1225` (fence) | dict | Блокировка возвращается как `"status":"ok"`, и fence её не видит (CON-03, **Ф ✔**) |
 | Request id протокола | `watchdog.py:281`, `wait_vitality`, `review.py` | `claim.py:626-651` | строка | 4 из 21 действий получают суффикс цикла, и поиск в claim по ним никогда не совпадает (CON-04) |
 | Журнал головы и протокол сокета | `head/local_pty/supervisor.py`, `journal.py` | `client.py`, `local_pty_head.py`, `po/runner.py` | JSONL + Unix socket | Неиспользуемые `OP_RESIZE`/`OP_ATTACH`/push-события. Неверный комментарий про запись «< 256 байт». Журнал без ротации (INEF-05) |
-| `head.pid` (launch identity) | heartbeat-обёртка головы | `client._identity_written`, `local_pty_head._identity_says_dead` | JSON | Файл не удаляется между инкарнациями с тем же `run_id` (BUG-11, **Г**) |
-| JSON-схемы `schemas/*.json` | `config.py`, `webproto/*`, `gate.py`, `provision.py` | валидаторы, тесты | JSON Schema | `web-run` не принимает `product_runs` (**Ф**). У ряда маршрутов нет схемы. `instance.heads`/`orca_repos` устарели. `data-manifest.components` пишется, но не читается |
+| `head.pid` (launch identity) | heartbeat-обёртка головы | `client._identity_written`, `local_pty_head._identity_says_dead` | JSON | ◐ #679 очищает старую launch identity при idle retirement. Общий повторный запуск с тем же `run_id` и исходная гипотеза BUG-11 (**Г**) требуют проверки на обновлённом main |
+| JSON-схемы `schemas/*.json` | `config.py`, `webproto/*`, `gate.py`, `provision.py` | валидаторы, тесты | JSON Schema | `web-run` не принимает `product_runs` (**Ф**). У ряда маршрутов нет схемы. ✅ #680: legacy `instance.heads`/`orca_repos` — ignored compatibility; `data-manifest.components` — описательный inventory фиксированных путей, не их настройка |
 | HTTP API (43 маршрута) | `web/app.py ROUTES` | браузер, Caddy, тесты | HTTP + JSON | Таблица маршрутов совпадает с `PROTOCOLS.md` (**Ф**). Коды ошибок «неверный конфиг инстанса» расходятся: 503 против 400 (CON-07) |
 | Чекпоинт и снапшот | `checkpoint.py` (exporter) | `restore.py`, `installation.recover` | git-дерево плюс manifest | Унаследованный режим «live root — git work tree» ещё живёт в коде (≈450 строк), хотя по документации запрещён (ARCH-09) |
-| `runtime.env` | установщик, оператор | `runtime_env.read_runtime_env`, `runtime/role_env.load_env_file`, `secret_store` | `KEY=VAL` | Три парсера с разной семантикой кавычек и `export` (CON-09) |
-| Факты памяти (frontmatter) | `memory_write._split_fact` | `memory/canon.parse_frontmatter`, `memory_journal` | Markdown + YAML | Парсеры расходятся (BUG-09, **Ф ✔**) |
+| `runtime.env` | установщик, оператор | `runtime_env.read_runtime_env`, `runtime/role_env.load_env_file`, `secret_store` | `KEY=VAL` | ✅ #680: общий runtime parser, importer сохраняет serialized RHS и намеренно строже. Исходно: три парсера с разной семантикой кавычек и `export` (CON-09) |
+| Факты памяти (frontmatter) | `memory_write._split_fact` | `memory/canon.parse_frontmatter`, `memory_journal` | Markdown + YAML | ✅ #680: writer/index/journal используют общий parser. Исходно: парсеры расходились (BUG-09, **Ф ✔**) |
 | Skills и prompts | `skills/manifest.toml`, `role_skills.py` | Claude/Codex-головы | `SKILL.md` | Codex-skills доставляются в старый Orca `CODEX_HOME` (DOC-06, **Г** по влиянию) |
 | Юниты systemd | `packaging/systemd/*` | `host_apply`, `upgrade` | шаблоны | Все `ExecStart` существуют (**Ф**). Steward: в skill написано «hourly», таймер — раз в 3 часа (DOC-05) |
 
@@ -835,7 +858,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 | ID | Контракт | Расхождение | Доказательство | Приор. | Метка |
 |---|---|---|---|---|---|
-| CON-01 | `instance.schema.json` и `examples/instance` | Блок `heads` проходит схему (`instance.schema.json:54`) и есть в примере. Но `host.build_plan:207-218` превращает каждую голову в юнит `{prefix}{role}.service`, а таких юнитов нет. Dry-run `apply_host` на примере выдаёт `no unit file is shipped for: ummanu-reviewer.service, ummanu-worker.service`; без `heads` — `[]`. Кроме того: `orca_repos` («legacy and ignored», 0 читателей), `persona.name/style` (0 читателей); ключи `host.memory_reindex_*`/`memory_model`/`dim` не документированы | воспроизведено субагентом | P2 | Ф |
+| CON-01 ✅ #680 | `instance.schema.json` и `examples/instance` | **Текущий контракт:** legacy heads/persona/orca принимаются как ignored compatibility; heads не создают services, существующие head ownership сохраняются. Profiles — heads/heads.toml, персональные инструкции — persona/AGENTS.md. Memory settings и explicit-only external reindex документированы. **Исходное расхождение:** блок `heads` проходит схему (`instance.schema.json:54`) и есть в примере. Но `host.build_plan:207-218` превращает каждую голову в юнит `{prefix}{role}.service`, а таких юнитов нет. Dry-run `apply_host` на примере выдаёт `no unit file is shipped for: ummanu-reviewer.service, ummanu-worker.service`; без `heads` — `[]`. Кроме того: `orca_repos` («legacy and ignored», 0 читателей), `persona.name/style` (0 читателей); ключи `host.memory_reindex_*`/`memory_model`/`dim` не документированы | исходно воспроизведено субагентом; теперь regression на shipped dry-run и legacy compatibility | P2 | Ф |
 | CON-02 | `web-run.schema.json` | `ops.run_list` выдаёт `kind: "product_runs"` (`ops.py:401`). `validate(doc, "web-run")` → `failed oneOf constraint`, хотя `PROTOCOLS.md:3775` утверждает, что каждый документ web-run валиден. Схем вообще нет у `head_view`, `owner_events*`, `po_*`, `health`, ответа codex reset, ответов `task_comment`/`task_move`. У `po_*` и `owner_event_read` нет `schema_version`/`observed_at`. Ни у одной схемы нет `additionalProperties: false` на верхнем уровне, поэтому дрейф не ловится | воспроизведено | P2 | Ф |
 | CON-03 | Исход шага тика | `gate_lifecycle.py:833` (stall gate-pending) и `wait_vitality.py:1460` (эскалация watchdog) возвращают `{"status":"ok", "to":"blocked"}`, остальные пути блокировки — `"status":"blocked"`. Потребитель `production.py:1225` ставит fence на спринт и проект только при `status == "blocked"`, поэтому эти блокировки в том же цикле не огораживаются. Та же форма в `worker_report.py:239`, `worker_launch.py:818` | ✔ код прочитан | P2 | Ф (намеренность — Г) |
 | CON-04 | Request id «своих блоков» в claim | `claim.py:626-651` ищет `_attempt_request_id(attempt_id, action, ref)` без суффикса. Производители `worker-wait-stall`/`review-wait-stall` (`wait_vitality.py:1435-1437`), `worker-respawn-blocked` (`:1331-1332`), `review-blocked` (`review.py:200-204,1029-1031`) добавляют суффикс цикла (`watchdog.py:281-290`). На главном пути attempt id новый (`production.py:1697`), так что ни один из 42 поисков не совпадает (INEF-03) | — | P2 | Ф |
@@ -843,14 +866,14 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | CON-06 | Роль ревьюера | `REVIEW_ROLE = "review"` (`launch.py:83`) против `"reviewer"` (HeadRun, heartbeat). ≥ 6 конвертеров: `host.py:4960`, `heartbeat.py:19`, `launch.py:533,615`, `host.py:1762,1795,2433`, `provider_failure.py:247`. `_launch` принимает оба (`host.py:3124,3327`) | — | P3 | Ф |
 | CON-07 | Код ошибки «конфиг инстанса невалиден» | `sprint_reads`, `reads`, `ops`, `card_ops`, `sprint_ops` → `InstallationUnavailable` (503); `pause_reads:468`, `command_reads:518` → `ValidationRefused` (400); docstring называл это «compatibility promise» (после #676 этой формулировки нет, расхождение кодов осталось) | — | P3 | Ф |
 | CON-08 | Формат времени | `record_e2e_intent`/`record_after_merge_intent` пишут `datetime.now(UTC).isoformat()` (микросекунды, `+00:00`; `tasks.py:2596,2694`), остальное — `_now()` (секунды, `Z`). Board: микросекунды у спринтов (`sql_sprints.py:35`) против усечения у карточек (`sql_cards.py:251`) против `strftime` в audit (`sql_audit.py:108,559`) | — | P3 | Ф (влияние на сравнение строк — Г) |
-| CON-09 | `runtime.env` | `runtime_env.read_runtime_env` (`:23-74`) отвергает `export` и оставляет кавычки; `role_env.load_env_file` (`:279-313`; на `8e79450`: `:249-283`) принимает `export` и снимает кавычки через shlex; третий парсер — `secret_store.py:969`. `KEY="a b"` читается по-разному | — | P2 | Ф (наличие таких значений — Г) |
+| CON-09 ✅ #680 | `runtime.env` | **Текущий контракт:** runtime readers одинаково декодируют поддерживаемый однострочный EnvironmentFile-синтаксис; importer валидирует его, сохраняя serialized RHS и byte-for-byte materialization. `export` и multiline отвергаются. **Исходное расхождение:** `runtime_env.read_runtime_env` (`:23-74`) отвергает `export` и оставляет кавычки; `role_env.load_env_file` (`:279-313`; на `8e79450`: `:249-283`) принимает `export` и снимает кавычки через shlex; третий парсер — `secret_store.py:969`. `KEY="a b"` читается по-разному | regression и 19 векторов против systemd 255, без расхождений; исходное наблюдение production сохранено в §12.12 | P2 | Ф (наличие таких значений на исходном хосте — Г) |
 | CON-10 | Вывод CLI | JSON задач — `ensure_ascii=False` (`cli_output.py:11`), спринтов — по умолчанию (`sprint_commands.py:320,336`). Голые группы `data`/`memory`/`config` печатают «not implemented in Phase 1 skeleton» и выходят с кодом 1 (`cli.py:120,2260`), а `task`/`sprint`/`product`/`check` дают JSON usage и код 2. `--data-dir` по умолчанию берёт `UMMANU_DATA_DIR` только у task/product. Коды ошибок `run_owner_decisions`/`run_resume` различаются (`sprint_commands.py:509-511,606-611`) | — | P3 | Ф |
 | CON-11 | Чтение с записью | `SprintReader.show` → `ensure_sprint_board` может выполнить `createProject` (`sprints.py:638`); `list()` по умолчанию `create=True` (`:581`) | — | P3 | Ф |
 | CON-12 | Fake против SQL | У `FakeBoardHost` нет `marker_comment`/`recover_*`; `transition` без role authority; нет автоматических связанных ref; close Issue не ставит `close_reason`; event-id без payload; `occurred_at` усечён до секунд; create/replace разрешены для любого kind; `MemoryAudit` бросает `TaskError`, fake host — `ValueError` | — | P3 | Ф |
 | CON-13 ◐ | Протокол local-pty | `OP_RESIZE`, `OP_ATTACH`, `EVENT_OUTPUT/DROPPED/EXITED` не используются продуктом. ~~`next_event` возвращает `None` и на тишину, и на закрытие, а docstring обещает их различать (`client.py:537-570`).~~ ✅ #675: docstring (`client.py:496`) теперь описывает это поведение. `SUN_PATH_MAX = 100` против `po/service.MAX_SOCKET_PATH_BYTES = 107`. Комментарий `journal.py:30-36` (на `8e79450`: `:22-23`, «under 256 bytes») ложен: `run.started` с heartbeat-обёрткой ≥ 2,1 КБ (измерено 2 175) | — | P3 | Ф |
 | CON-14 ◐ | Prompt-транспорт | `agent_prompt_transport` декларировал «каждый prompt проверяется здесь» (◐ #675 убрал это утверждение), но local-pty доставляет `pointer.text + "\n"` без проверки (на `8e79450`: `local_pty_head.py:2365-2367`, `operations.py:97-100`) | — | P3 | Ф (риск — Г: входы доверенные) |
 | CON-15 | Префиксы env | Смешаны `TA_*` и `UMMANU_*`: `TA_RUNTIME_ENV_FILE`/`UMMANU_RUNTIME_ENV_FILE` (`role_env.py:26-30` на `8e79450`), `TA_CODEX_SESSIONS` против `UMMANU_CODEX_SESSIONS`, `TA_WORKSPACES_ROOT`, `TA_STEWARD_STALE_HOURS`. Литерал `"UMMANU_INSTANCE"` — 4 раза | — | P3 | Ф |
-| CON-16 | `data-manifest.json` | Блок `components` валидируется, но не читается (`data.py:66`). В примере `facts: memory/facts`, а код пишет `state/memory/facts` | — | P3 | Ф |
+| CON-16 ✅ #680 | `data-manifest.json` | **Текущий контракт:** descriptive inventory фиксированных путей; редактирование components не перемещает данные. Пример/schema/docs согласованы, legacy manifests читаются. **Исходное расхождение:** блок `components` валидируется, но не читается (`data.py:66`). В примере `facts: memory/facts`, а код пишет `state/memory/facts` | schema/generated-manifest regression; custom-path configuration не добавлялась | P3 | Ф |
 | CON-17 | Blocked-reason gate | `merge_terminal_reason` классифицирует по подстроке `"gate"` (`release_lifecycle.py:44-48`). Нечитаемый merge-gate на пути review — `merge-gate-blocked` → `gate` (`review_verdict.py:360`), а на пути release — `release-failed-blocked` → `implementation` (`release_lifecycle.py:372`) | — | P3 | Ф (намеренность — Г) |
 | CON-18 | Политика восстановления | Эскалация детерминированного отказа срабатывает в фазе gate (`gate_lifecycle.py:796`), но на тике HealthyQuiet/HealthyActive `_run_recovery_policy` (`wait_vitality.py:591-629`) сохраняет `rung=4` и молча теряет намерение ESCALATE. `RecoveryIntent.NUDGE` (rung 1) никогда не исполняется через политику | — | P2 | Ф (непреднамеренность — Г) |
 
@@ -877,7 +900,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 | ID | Документ | Расхождение | Приор. |
 |---|---|---|---|
-| DOC-02 ◐ #672: везде `pip install -e`, требование `.venv` названо; процедуры создания `.venv` нет (BUG-02) | README, CONTRIBUTING, OPERATIONS, RECOVERY | Противоречивые инструкции установки: `pip install -e` (README:35, CONTRIBUTING:15) против `pip install .` (OPERATIONS:19–21, RECOVERY:638). Нигде не сказано создать `.venv` (см. BUG-02) | P0 |
+| DOC-02 ✅ #672, #680 | README, CONTRIBUTING, OPERATIONS, RECOVERY | **Текущий статус:** явная процедура editable `.venv`, абсолютный CLI под sudo и явный product root. **Исходное расхождение:** противоречивые инструкции установки: `pip install -e` (README:35, CONTRIBUTING:15) против `pip install .` (OPERATIONS:19–21, RECOVERY:638). Нигде не сказано создать `.venv` (см. BUG-02) | P0 |
 | DOC-03 ✅ #672 | `README.md:15-26` | В индексе нет `HEAD_SCOPES`, `OWNED_CLEANUP`, `REQUESTS_GROWTH`. Строка `:26` — «ummanu → ummanu»: артефакт скрипта переименования, должно быть «secretary → ummanu» (**✔**) | P3 |
 | DOC-04 ✅ #672 | `OWNED_CLEANUP.md:93` | Описан `--residue-replay --limit 20` и граница 1..100. Флага `--limit` нет; `cli.py:2094-2107` требует `--project` и `--target`/`--manifest` (не больше 20). `OPERATIONS.md:1681-1683` верен. Catch-up — мёртвый код (DEAD-08) | P2 |
 | DOC-05 ✅ #672 | `skills/roles/steward/steward/SKILL.md:3,135,172,175-181` | Написано «hourly», таймер — `OnCalendar=00/3:00:00`. Велено читать шаг `automations` у `upgrade --dry-run`, но такого шага нет: в `STEPS` 26 имён, `OPERATIONS.md:3126` подтверждает. В описаниях curate/retro/steward осталось «Launched by a session-manager automation» | P2 |
@@ -890,7 +913,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | DOC-12 | `packaging/interactive-workspace/AGENTS.md` | Инструкции полномочий PO («The PO can supply… `--role po`») в контексте interactive-головы | P2 |
 | DOC-13 ✅ #672 | `ARCHITECTURE.md` | `:18` в списке пакетов нет `transition` (**✔**). `:37` пробы реестра включают `openrouter`, а `heads.toml` поставляет только `claude-sub`/`openai-sub`. `:345` список страниц без `/po`, `/doctor`, `/owner-events`. `:375` и `PROTOCOLS.md:4622` «`basicauth *` covers every path», а Caddyfile содержит cookie-bearer bypass плюс `handle { route { basicauth } }` (`caddyfile.py:116-136`) | P3 |
 | DOC-14 ✅ #672/#674/#678 (ниже исходные доказательства) | `TESTING.md`, `tests/README.md`, `tests/broad.py`, `CONTRIBUTING.md` | `TESTING.md:168` относит `test_web_transport`/`read_protocol`/`run_protocol` к `unit`, а в манифесте они `integration-board`. `:117` про PTY в `runtime-component` противоречит `:186`. `:28` «never a green skip», но `test_memory_service.py:17,234` и `test_memory_health.py:245` пропускают зелёным. `broad.py:9-10` пишет «1440 tests / 3782 tests», а статически сейчас 3 131 и 7 335; локальный прогон дал 3 136 (**✔**). `broad.py:28` и `CONTRIBUTING.md:27` упоминают Orca. `tests/README.md` не перечисляет `TMPDIR`-guard, `TA_CODEX_HOME`, `GIT_CONFIG_*`. `test_head_vitality_legacy_path.py:8` обещает `expectedFailure`, которого нет | P3 |
-| DOC-15 ◐ #672, #674: открыты `instance.yaml:20`, `heads.toml:9,20-21`, `ROADMAP.md` (**Г**) | Мелкое | `pyproject.toml:141` «Portable ummanu appliance CLI skeleton.»; `SECURITY.md:30` («previously read runtime.env», «gitignored» — экспорт теперь по allowlist, `RECOVERY.md:389-399`); `examples/instance/instance.yaml:20` ссылается на несуществующий `ummanu-pipeline.service`; `packaging/systemd/README.md:3` без `ummanu-doctor.*`; `ROADMAP.md:10-16` числит в остатке, по-видимому, уже поставленные пункты (**Г**); `heads.toml:9-10,19-21` упоминает несуществующие `render_<adapter>` и `worker.py`; `head/local_pty/__init__.py:1-15` «no HeadRuntime here» | P3 |
+| DOC-15 ◐ #672, #674, #680: открыт только `docs/ROADMAP.md` (**Г**) | Мелкое | **Текущий статус:** shipped instance unit и heads.toml исправлены #680; ROADMAP не менялся, гипотеза остаётся в слоте 17. **Исходные места:** `pyproject.toml:141` «Portable ummanu appliance CLI skeleton.»; `SECURITY.md:30` («previously read runtime.env», «gitignored» — экспорт теперь по allowlist, `RECOVERY.md:389-399`); `examples/instance/instance.yaml:20` ссылается на несуществующий `ummanu-pipeline.service`; `packaging/systemd/README.md:3` без `ummanu-doctor.*`; `ROADMAP.md:10-16` числит в остатке, по-видимому, уже поставленные пункты (**Г**); `heads.toml:9-10,19-21` упоминает несуществующие `render_<adapter>` и `worker.py`; `head/local_pty/__init__.py:1-15` «no HeadRuntime here» | P3 |
 
 ### 8.3 План сжатия документации
 
@@ -938,6 +961,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Последствие (Г): контрабандный запрос несёт заголовки атакующего. Без `Origin` он проходит `cross_origin_reason` (`app.py:1283`; на `8e79450`: `:1171`). Поэтому межсайтовая форма на loopback может дойти, например, до `POST /api/pause/drain`. За Caddy возможна путаница ответов в пуле upstream-соединений.
 
 **BUG-02 — P0. Свежая установка по документации не даёт рабочего хоста.**
+- Текущий статус: ✅ #680. Во всех инструкциях явно создаётся editable `.venv`; до host materialization проверяются её entry points и provenance. Native disposable packaging smoke пройден; clean-host VPS drill не заявляется.
+- Далее — исходное описание до исправления.
 - Метка: Ф.
 - Все юниты запускают `{{UMMANU_PRODUCT_ROOT}}/.venv/bin/…`.
 - Ни `bootstrap`, ни `install` не создают `.venv`. Его создаёт только подсказка transition (`transition/steps.py:401`).
@@ -962,6 +987,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Получается необработанный `TaskError` и код 1. Остальные команды в этой ситуации отдают JSON-ошибку и код 2.
 
 **BUG-06 — P3. `ummanu gate` (онбординг) падает на `result.json`, который не является объектом.**
+- Текущий статус: ✅ #680. Result и input_revision проверяются как объекты; текущий malformed result даёт conflict, исторический пропускается, binding/draft сохраняются.
+- Далее — исходное описание до исправления.
 - Метка: Ф ✔.
 - Строка `src/ummanu/gate.py:97` вызывает `candidate.get(...)` без `isinstance`-защиты, которая есть в строке `:95`.
 - Строки `:133` и `:135` вызывают `previous.get(...)` без защиты (сравните с `:85`).
@@ -976,11 +1003,15 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Падают `/`, `/projects`, `/projects/{p}`, `/api/system`. Сам `sources.py:49-53` (на `8e79450`: `:23-26`) фиксирует, что этот дрейф исправлен только в `pause_reads`.
 
 **BUG-08 — P3. Повреждённый конверт секрета выходит наружу как `ValueError`.**
+- Текущий статус: ✅ #680. Структура envelope/verifier и длины параметров валидируются, повреждения дают контролируемый отказ без содержимого секрета; предыдущая materialization сохраняется. Неверный AEAD tag verifier остаётся `RecoveryPhraseError`, поскольку неотличим от неправильной recovery phrase.
+- Далее — исходное описание до исправления.
 - Метка: Ф, воспроизведено.
 - `open_value` ловит только `InvalidTag/KeyError/TypeError` (`secret_store.py:395-421`).
 - Неверная длина nonce или KDF `length≠32` даёт `ValueError`, а `_stored_value` (`:1066`) ловит только `SecretStoreStateError`.
 
 **BUG-09 — P2. Два парсера frontmatter памяти расходятся.**
+- Текущий статус: ✅ #680. Writer, индексатор и journal используют один parser целых delimiter lines; controlled refusal сохраняет прежний index, snapshot оставляет исходный malformed fact доступным для ремонта.
+- Далее — исходное описание до исправления.
 - Метка: Ф ✔, воспроизведено.
 - Писатель `memory_write._split_fact` (`:364`) ищет строку `"\n---\n"`. Индексатор `memory/canon.parse_frontmatter` (`:91-96`) режет по первым двум сырым `---`.
 - Пример: `title: a---b` писатель сохраняет как `{'title':'a---b'}`, индексатор читает как `{'title':'a'}`, а остаток метаданных попадает в тело.
@@ -1008,6 +1039,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Отремонтированная operation-карточка теряет маркер production.
 
 **BUG-13 — P2. `install`/`recover` перестраивают индекс памяти моделью по умолчанию.**
+- Текущий статус: ✅ #680. Общий model/dim/threads resolver используется service layout, explicit reindex и обоими recovery путями. Retry сверяет index metadata и повторяет только memory phase; child isolation сохранена. Исторический факт «на этом production host была default-модель» (§12.7) не меняется.
+- Далее — исходное описание до исправления.
 - Метка: Ф, трассировка кода.
 - `installation.py:2152` и окрестности `:1880` берут `intfloat/multilingual-e5-large` (1024) и игнорируют `host.memory_model`.
 - Юнит (`host_apply.py:404`) и `restore memory-reindex` (`restore_commands.py:213`) модель учитывают.
@@ -1051,6 +1084,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Шрифты не загружаются, каждая страница пишет CSP violation.
 
 **BUG-21 — P3 (безопасность, узко). `_read_value` не сверяет `envelope["id"] == secret_id`.**
+- Текущий статус: ✅ #680. ID сверяется до открытия envelope; scrypt получает проверенные bounded parameters; случайный exclusive temporary file заменяет предсказуемое имя при публикации ключа. Swap, excessive KDF, symlink и interrupted-publication случаи покрыты регрессиями.
+- Далее — исходное описание до исправления.
 - Метка: Ф, проверено.
 - Где: `secret_store.py:1053`.
 - Тот, кто может писать в экспорт или remote, может поменять местами `values/a.enc.json` и `b.enc.json`.
@@ -1116,18 +1151,46 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 начиная с web-блока #677. Ранее влитые #669–#676 и открытый PR с этим отчётом #668 в этот бюджет
 не входят. Ни один частично закрытый пункт не считается завершённым по названию PR.
 
-Выполнено 2 слота (#677/#678), остаётся 15. Ниже — 17 логических слотов; компактные соседние шаги можно объединить до 15–16 только при общей
-границе поведения. Малые удаления, импорты, проза и документальные хвосты закрываются вместе со своей
-подсистемой, а не отдельными PR на каждый ID. Оценка числа PR не разрешает смешивать независимые
+Выполнено 3 из 17 логических слотов (#677/#678/#680), а слот 4 частично продвинут параллельным #679.
+В бюджет вошли **4 реализационных PR (#677–#680)**; остаются 14 логических scope,
+включая остаток слота 4, и **11–13 PR** из исходного бюджета 15–17. Рабочая раскладка целится в
+верхнюю границу: **17 PR всего = 4 учтённых + 13 оставшихся поставок**, соответствующих слотам
+**4–15 и 17**. Слот 16 сохраняется как отслеживаемый логический scope и выполняется внутри связанных
+декомпозиций; отдельная поставка ему пока не отведена. Новый слот для #679 не добавляется. Малые удаления, импорты, проза
+и документальные хвосты закрываются вместе со своей подсистемой, а не отдельными PR на каждый ID.
+Оценка числа PR не разрешает смешивать независимые
 переработки ради арифметики: если характеризационные проверки покажут, что разрез слишком велик,
 раскладку нужно пересмотреть явно, с сохранением всех открытых пунктов.
+
+**Рабочая группировка остатка слота 16 (план, не выполненная работа):**
+
+| Тестовый scope | В какой поставке выполняется |
+|---|---|
+| Разбиение крупного test_dispatcher, его fixtures и снятие Docker-гейта с классов без PostgreSQL | 7/8 — соответствующие host/dispatcher/observer разрезы |
+| SQL test-support и относящиеся к нему дубли fixtures | 10 — SQL board и спринты |
+| PTY/process lifecycle tests | 12 — Local-PTY |
+| Recovery/install/upgrade tests и root-only остаток BUG-22 | 14/15 — соответствующий владелец backup/recovery либо installation/upgrade |
+| Timing/flakiness | 7/8/12 — фактический владелец подтверждённого сбоя; заранее исправленным не считается |
+
+Docs и manifest обновляются при каждом переносе, сценарии и оставшиеся обязательства слота 16
+продолжают отслеживаться. Если размер или риск потребует отдельного PR для слота 16, сначала нужно
+явно пересчитать группировку, а не автоматически расширять бюджет. Крупные независимые слоты 14
+и 15 механически не объединяются.
+
+**Перед продолжением слота 4:** [#679](https://github.com/vladmesh/ummanu/pull/679) уже влит,
+merge/main `46773ab580cddc0ecfbd9672ba941c9268c218eb` (candidate
+`b3c11c31847283411ae63282e87ba021d731a0fd`, [CI candidate](https://github.com/vladmesh/ummanu/actions/runs/37468297342)
+success; [CI main после #679](https://github.com/vladmesh/ummanu/actions/runs/37469909958) success).
+Его idle-retirement policy пересекается с run_id reuse и очисткой старой launch identity/
+подтверждением остановки, но **не закрывает BUG-11/16 целиком** или остальные ID слота. Продолжать
+от main, включающего этот merge, и не дублировать уже поставленную политику. Слот остаётся частичным.
 
 | № | Кластер | Пункты и граница | Проверка / зависимость |
 |---|---|---|---|
 | 1 ✅ | Надёжность web, #677 | BUG-01/07/20, ARCH-16; **только часть** DUP-W2 (общий source-read wrapper). Отказ HTTP закрывает соединение; источник отказывает отдельно от сборки документа; шрифты не требуют внешнего доступа | HTTP-регрессии на реальном сокете, PostgreSQL-backed проверка страниц, exact-SHA CI |
 | 2 ✅ | CI и герметичность тестовой инфраструктуры, #678 | BUG-03/23 (тесты), CI-01 и DOC-14 закрыты. BUG-22 — env/catalogue/assertions; ARCH-06 — config и затронутые paths; небольшие support helpers переиспользованы. TDEAD-01–06, массовые TDUP/TORG, root-only и timing остаются в слоте 16; остальные импортные блоки ARCH-06 идут со своими подсистемами | Реальный guarded fast в CI; unit без memory-extra; lint/typecheck и все suites входят в агрегат; состав manifest сохранён с явным переносом SQL proof |
-| 3 | Рабочая свежая установка и конфигурация данных | BUG-02/06/08/09/13/21, CON-01/09/16, DOC-02 и примеры DOC-15. Явная editable `.venv`, единый выбор модели памяти, согласованный frontmatter/env, контролируемые отказы повреждённых результатов и секретов | Свежая установка в disposable layout, round-trip форматов, несовместимые/повреждённые входы |
-| 4 | Постоянные роли и identity повторного запуска | DOC-06/12, BUG-10/11/16, CON-13/14/15 и остаток утечки standing-agent токена из #671. BUG-11 сначала воспроизвести локальным тестом: история prod его не подтвердила. Старый `run.exited` не подтверждает остановку новой инкарнации; steward читает текущий workspace root | Две инкарнации одного run, роль видит свои skills, scope и prompt identity; без убийства prod-голов |
+| 3 ✅ | Свежая установка и конфигурация данных, #680 | BUG-02/06/08/09/13/21, CON-01/09/16 и DOC-02 закрыты. Явная editable `.venv`, единый memory config и metadata-aware retry, согласованные frontmatter/env, controlled malformed-input refusals. CON-01/16 закрепляют совместимость legacy-полей и descriptive manifest. В DOC-15 закрыты shipped examples; только ROADMAP остаётся Г в слоте 17. Decomposition installation/upgrade остаётся в слоте 15 | Native disposable editable packaging/provenance smoke; recovery retry без повторного board import; round-trip форматов и повреждённые входы; exact-SHA CI. Clean-host VPS drill не заявляется |
+| 4 ◐ #679 | Постоянные роли и identity повторного запуска | #679 уже поставил idle-retirement policy; остаток: DOC-06/12, BUG-10/11/16, CON-13/14/15 и утечка standing-agent токена из #671. BUG-11 сначала воспроизвести локальным тестом на main после #679: история prod его не подтвердила. Старый `run.exited` не подтверждает остановку новой инкарнации; steward читает текущий workspace root | Две инкарнации одного run, роль видит свои skills, scope и prompt identity; BUG-11/16 не считать закрытыми одной idle-retirement policy; без убийства prod-голов |
 | 5 | Контракты тика, vitality и остановки | BUG-15/17/18/19, CON-03/04/06/17/18; INEF-03, DUP-D14/15/16/19 в части уже разошедшихся правил, остаток комментариев DOC-09. Единые привязки курсоров, outcomes, blocked fence и reason; ошибка остановки reviewer не пропускает worker | Сценарии respawn, pause/freeze, gate/healthy tick и отказов; причины и request id фиксируются до упрощения |
 | 6 | Горячий путь диспетчера и cleanup-журнала | INEF-01/07 и дополнение §12.17: курсор provider-ingress не запускает полное чтение/сохранение cleanup на каждую строку rollout; `_recover_pending` не перечисляет всю доску ради одной ссылки. Разрез `cleanup_journal`/`cleanup_inventory` только внутри этой задачи | Счётчики I/O и запросов на production-shaped fixture; crash/replay и долговечность cursor/cleanup сохраняются; без обещания нового prod-тайминга до измерения |
 | 7 | Host, prompt-документы и GitHub CI API | DEC-02, ARCH-07/08/15, DUP-D4/5/6/11/13/18; DEAD-04/05/12 и относящиеся к host части DEAD-10/16. Листовой parser worktree, host catalogue, prompt/heads/git/workspace части. Сжатие ARCH-01 в этих файлах | Патчи через `self` работают; сообщения, request id, git-команды и CI-результаты те же; после поведенческих шагов 4/5 |
@@ -1139,8 +1202,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | 13 | Web pages и sprint read contracts | DEC-06/07, CON-02/07, DUP-W1/3/4/5 и остаток W2 (installation read), DEAD-23, INEF-04/11/15/17. Сначала static и листовые значения, затем части страниц/снимков; схемы отражают текущие документы, компрессия не ослабляет CSP | Пакетные assets входят в wheel, page/transport/schema/source-isolation tests; ошибки и readonly/read-write границы явно сохранены |
 | 14 | Backup, checkpoint и restore | Разрезы checkpoint/restore из §5.10, DUP-I2/3/4/5, INEF-08/09, backup/checkpoint часть BUG-24, относящийся сюда DEAD-16. Проверить горячий `redact` из §12.17; не добавлять cache без доказательства сохранения редактирования секретов. ARCH-01 в backup/recovery | Snapshot/restore round-trip, оборванный git payload, разные файловые системы, секреты, archive validation и byte-stable formats |
 | 15 | Installation и upgrade как пакеты | Разрезы installation/bootstrap/upgrade из §5.10, DUP-I1 и остаток I2–5, ARCH-09 и DEAD-T в части решения о поддержке старых хостов; остаток ARCH-01 в установке. Process receipts сохраняют формат, проверки размера и no-follow | Disposable install/upgrade/recover, golden receipts, runtime provenance; совместимость старого live-root/remote имеет явное решение |
-| 16 | Разбиение крупных тестов и оставшиеся повторы | TEST-01, остаток TEST-02, BUG-22 (root-only coverage и timing/flakiness), TDUP-01/02/05 и остаток TDEAD/TORG, массовые TDUP-03/04 из слота 2. Выделить классы dispatcher без Postgres из Docker-гейта; дробить крупные тесты по жизненному циклу; helpers — support/fakes, не ещё одна продуктовая реализация | Множество тестов и их сценарии не меняются, кроме доказанных дублей; каждый модуль ровно раз в `ci-shards.txt`; docs описывают реальные шарды |
-| 17 | Документация и окончательная сверка аудита | DOC-01/08 и оставшиеся DOC-10/15; сжатие PROTOCOLS/OPERATIONS и prompt-skills, оставшаяся ARCH-01 вне предыдущих кластеров. DEAD-24: разовые scripts разобрать по живым вызовам, shim `role_skills.py` используется steward и не удаляется по одному basename. Сверить все DEAD-T/R/H1/22/25 и неподтверждённые гипотезы: удалить только доказанно ненужное либо явно записать, почему совместимость/поведение оставлено | Живые заголовки рантайма и ссылки сохраняются; closed/not-taken/open различаются; отсутствие staged-строк сегодня само по себе не доказывает недостижимость всех будущих recovery-путей |
+| 16 | Разбиение крупных тестов и оставшиеся повторы, внутри связанных поставок | TEST-01, остаток TEST-02, BUG-22 (root-only coverage и timing/flakiness), TDUP-01/02/05 и остаток TDEAD/TORG, массовые TDUP-03/04 из слота 2. Scope распределён по 7/8/10/12/14/15 согласно группировке выше, но не считается выполненным. Выделить классы dispatcher без Postgres из Docker-гейта; дробить крупные тесты по жизненному циклу; helpers — support/fakes, не ещё одна продуктовая реализация | Множество тестов и их сценарии не меняются, кроме доказанных дублей; каждый модуль ровно раз в `ci-shards.txt`; docs сопровождают каждый перенос. Отдельный PR потребует явного пересчёта группировки |
+| 17 | Документация и окончательная сверка аудита | DOC-01/08, остаток DOC-10 и только ROADMAP из DOC-15 (непроверенная Г); сжатие PROTOCOLS/OPERATIONS и prompt-skills, оставшаяся ARCH-01 вне предыдущих кластеров. DEAD-24: разовые scripts разобрать по живым вызовам, shim `role_skills.py` используется steward и не удаляется по одному basename. Сверить все DEAD-T/R/H1/22/25 и неподтверждённые гипотезы: удалить только доказанно ненужное либо явно записать, почему совместимость/поведение оставлено | Живые заголовки рантайма и ссылки сохраняются; closed/not-taken/open различаются; отсутствие staged-строк сегодня само по себе не доказывает недостижимость всех будущих recovery-путей |
 
 **Правила исполнения.**
 1. Один PR — связанный кластер одной подсистемы. Поведенческий дефект сначала воспроизводится и

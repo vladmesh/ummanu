@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "data-manifest.schema.json",
   "title": "Data manifest",
-  "description": "Describes the ummanu-data directory layout for backup/restore.",
+  "description": "Generated inventory of the fixed installation layout for backup/restore, not path configuration. Components do not relocate data. Paths are relative to data_dir except memory.facts, which is relative to the instance live root. Older descriptive manifests remain readable.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "data_dir", "components"],
@@ -15,6 +15,7 @@
     },
     "components": {
       "type": "object",
+      "description": "Locations recorded by the product. Editing these fields does not change the paths used by readers or writers.",
       "additionalProperties": false,
       "required": ["board", "memory", "runs", "transcripts", "artifacts", "backups"],
       "properties": {
@@ -45,21 +46,21 @@
       "additionalProperties": false,
       "required": ["path", "facts", "export", "index"],
       "properties": {
-        "path": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1, "description": "Derived memory files directory, relative to data_dir."},
         "facts": {
           "type": "string",
           "minLength": 1,
-          "description": "Local git journal of markdown facts."
+          "description": "Canonical Markdown facts at state/memory/facts, relative to the instance live root, not data_dir. Older manifests may describe the retired memory/facts layout; the manifest does not migrate or configure it."
         },
         "export": {
           "type": "string",
           "minLength": 1,
-          "description": "Canonical ndjson export."
+          "description": "Derived NDJSON snapshot at memory/export.ndjson, relative to data_dir."
         },
         "index": {
           "type": "string",
           "minLength": 1,
-          "description": "Derived sqlite index, rebuilt from facts."
+          "description": "Derived SQLite index at memory/index.sqlite, relative to data_dir; rebuilt from facts."
         }
       }
     }
