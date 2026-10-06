@@ -1151,7 +1151,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 **Проверки #681/#683.**
 - #681: candidate `e7a7e05241b910666a8fb9b3f05ac319cc54c03d`, merge/main `4ab97357178b017408a91dc8f27674756e8d796b`; закрывает DOC-06 фактической доставкой role skills standing Codex heads.
 - #683: candidate `a64d5a053c06a73588940d44cee344a26d358afd`, exact-SHA CI run `37527062690` — **success**: lint, typecheck, unit, component/runtime-component, integration-dispatcher/board/heads/recovery/memory, packaging и агрегат `test`.
-- #683 merge/main: `72f7849478882ec160b1f305463a0e545ea0bd04`; post-merge CI проверяется отдельно по фактическому main. Scope #683: 8 файлов, без CON-13/14/15 и без расширения в provider fallback #682.
+- #683 merge/main: `72f7849478882ec160b1f305463a0e545ea0bd04`; post-merge CI run `37528487367` — **success**: lint, typecheck, все suites и агрегат `test` зелёные. Scope #683: 8 файлов, без CON-13/14/15 и без расширения в provider fallback #682.
 
 ## 10. План следующих 15–17 PR (отсчёт с #677)
 
