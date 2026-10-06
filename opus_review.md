@@ -2,9 +2,9 @@
 
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
-## Статус на 2026-10-06 (main `7741b6d9c94754a785366afdd993af4664cdfbb9`)
+## Статус на 2026-10-06 (main `72f7849478882ec160b1f305463a0e545ea0bd04`)
 
-После аудита в `main` влиты #669–#680. Пункты #677/#678/#680 сверены с кодом и регрессионными проверками; результаты CI приведены ниже. #679 влит отдельно и частично продвинул слот 4, не закрыв BUG-11/16 целиком. Ранее закрытые пункты были перепроверены по `8e79450` (`grep` и чтение указанного места), а не только по описанию PR. **✅** — закрыто, **◐** — закрыто частично. #680 закрывает 10 ID; DOC-15 остаётся частичным только из-за ROADMAP. CON-01/16 закрыты с явными совместимыми контрактами, а не удалением всех legacy-полей или добавлением настройки произвольных путей.
+После аудита в `main` влиты #669–#683. Слот 4 закрыт последовательностью #679/#681/#683: #679 поставил idle-retirement, #681 доставил standing-role skills в фактические Codex workspaces (DOC-06), #683 закрыл BUG-10/11/16, DOC-12 и остаточную передачу memory bearer через argv. CON-13/14 перенесены в слот 12 (Local-PTY), CON-15 — в слот 11 (CLI/role-env), поэтому они больше не держат слот 4 открытым. #682 — отдельная продуктовая работа по provider fallback; она учтена как изменение текущего main, но не как remediation-PR этого аудита. **✅** — закрыто, **◐** — закрыто частично. Исторические production-наблюдения ниже сохранены и помечаются как история, если дефект уже закрыт.
 
 Исторические ссылки `file:line` относятся к `e310833`; в `runtime/`, `web/`, `webproto/` после сжатия прозы #675/#676 они пересчитаны на `8e79450` по скелету кода (AST тогда не менялся). Изменения #677/#678/#680 описаны отдельно; старые ссылки и размеры не выдаются за строки текущего main. Исторические наблюдения production в §12 сохранены.
 
@@ -12,6 +12,11 @@
 
 | ID | PR | Что сделано |
 |---|---|---|
+| DOC-06 | [#681](https://github.com/vladmesh/ummanu/pull/681) | Standing-role skills для Codex синхронизируются в workspace `.agents/skills`, то есть в путь, который реально читает Codex с `<data>/codex-home`; исторически подтверждённая слепота curator закрыта |
+| BUG-10 | [#683](https://github.com/vladmesh/ummanu/pull/683) | Steward сканирует dispatcher-owned `<data_dir>/workspaces`, использует текущие full-reference worker/reviewer names и исключает observer namespace; обе подтверждённые слепые зоны закрыты регрессией |
+| BUG-11 | #683 | Живой supervisor является авторитетным свидетелем текущей инкарнации; stale dead launch identity прошлой инкарнации больше не закрывает admission в узком same-run relaunch race. История prod по-прежнему показывает 2/2 успешных запуска; закрыт именно кодовый race |
+| BUG-16 | #683 | `run.exited` подтверждает stop только после последнего `run.started`; exit прошлой инкарнации не может подтвердить остановку текущей |
+| DOC-12 | #683 | PO-only owner-decision блок удалён из interactive `AGENTS.md`; interactive role явно передаёт такие операции PO, а источник полномочий остаётся в PO/open-sprint контексте |
 | BUG-02 | [#680](https://github.com/vladmesh/ummanu/pull/680) | Явная editable `PRODUCT_ROOT/.venv`, абсолютный CLI под sudo и явный product root. До host materialization проверяются interpreter, entry points и editable provenance. Disposable packaging smoke не выдаётся за clean-host VPS drill |
 | DOC-02 | #672, #680 | README, CONTRIBUTING, OPERATIONS и RECOVERY содержат процедуру создания `.venv` и editable install; устранён остаток после #672 |
 | BUG-06 | #680 | Gate проверяет object shape result и input_revision. Повреждённый текущий result даёт conflict, исторический пропускается; malformed input не меняет binding/draft и enabled state |
@@ -55,21 +60,16 @@
 | CON-14 | #675 (попутно) | Из docstring `agent_prompt_transport` убрано ложное «Every prompt is checked here» | local-pty по-прежнему доставляет prompt без проверки. Противоречия больше нет, но решение «проверять или нет» осталось |
 
 **Вне ID аудита:**
-- **#671** убрал memory bearer из текста команды запуска головы: sudo писал его в `journalctl`. Аудит эту утечку **не нашёл**. Остаток по описанию PR: standing-агенты передают токен через `env $(grant_env …)`, поэтому он виден в `ps` короткоживущего `env`.
+- **#671** убрал memory bearer из текста команды запуска головы: sudo писал его в `journalctl`. Остаток закрыт #683: grant сначала попадает в shell-переменную и экспортируется builtin-командой перед `exec`, поэтому bearer больше не становится argv короткоживущего `env`.
 - **#670** (живые умолчания `--instance`, литеральный `--reason`, `issue list --closed`, `issue edit`) ID аудита не закрывает. BUG-04 открыт: `run_pause` по-прежнему вызывает `_read_optional` вне обработчика (`dispatch/commands.py:188`, `cli.py:173`).
 
 **Что осталось, по убыванию ценности.**
-1. P0/P1-дефекты, которых не коснулся ни один PR:
-   - DOC-06 (подтверждён на проде, §12.1);
-   - BUG-10 (подтверждён, §12.5).
-2. Следующий связанный кластер — остаток постоянных ролей и identity повторного запуска (слот 4, частично продвинут влитым #679): DOC-06/12, BUG-10/11/16, CON-13/14/15 и остаток standing-agent token exposure из #671. BUG-11 сначала воспроизвести на main после #679: история prod его не подтвердила, idle-retirement policy не закрывает общий механизм. Слот 3 завершён в согласованной границе; ROADMAP из DOC-15 сохранён в слоте 17. Тестовые хвосты CI-кластера остаются в слоте 16, остаток импортов ARCH-06 — в соответствующих подсистемах. Подробные границы — §10.
-3. Разбиения DEC-01/02/05/07. После #675/#676 DEC-05 и DEC-07 стали дешевле: `local_pty_head.py` уменьшился со 180 до 124 тыс. символов, `pages.py` — с 250 до 224 тыс.
-4. Остаток ARCH-01, начиная с `dispatch`.
-5. TEST-01, DOC-01.
-6. INEF-01/07/13 по результатам §12.17.
-7. Решения владельца по выводу из эксплуатации: DEAD-T, DEAD-R, DEAD-H1 (последние два подтверждены на проде, §12) и DEAD-22.
-8. Мелочи: остатки DOC-10/15, DEAD-19/23.
-
+1. **Слот 5 — контракты тика, vitality и остановки:** BUG-15/17/18/19, CON-03/04/06/17/18, связанные DUP-D14/15/16/19, INEF-03 и остаточные комментарии DOC-09. Это следующий логичный scope после закрытого slot 4.
+2. **Слот 6 — горячий путь dispatcher/cleanup:** INEF-01/07 и профилированные находки §12.17 (`cleanup.json` на каждом provider-ingress cursor update, `_recover_pending`/board scans).
+3. Затем структурные разрезы DEC-01/02/04/05/07 и остаток ARCH-01 в соответствующих подсистемах; CON-15 идёт со slot 11, CON-13/14 — со slot 12.
+4. TEST-01/остаток TEST-02, root-only BUG-22 и TDUP/TORG выполняются внутри владельцев slot 7/8/10/12/14/15 (логический slot 16 остаётся без отдельной поставки).
+5. Решения владельца по выводу из эксплуатации DEAD-T/R/H1/22 и мелкие DOC-10/15, DEAD-19/23 закрываются вместе с владельцем либо в финальной сверке.
+6. Отдельный продуктовый PR для slot 17 больше не планируется: документация обновляется по ходу реализаций, а финальная сверка живёт в этом открытом audit PR #668.
 **Проверки #677 и ограничения среды.**
 - Candidate `0e7906e9db380594e7d973c0d9ced53ed223c896`: [CI](https://github.com/vladmesh/ummanu/actions/runs/37452777211), **success**: typecheck, все 9 suite jobs и агрегат `test` зелёные.
 - После мержа: main `2f6544ed372841ffabe455fe7db944b400d594ab`, [CI](https://github.com/vladmesh/ummanu/actions/runs/37453841512), **success**: typecheck, все 9 suite jobs и агрегат `test` зелёные.
@@ -907,13 +907,13 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | DOC-03 ✅ #672 | `README.md:15-26` | В индексе нет `HEAD_SCOPES`, `OWNED_CLEANUP`, `REQUESTS_GROWTH`. Строка `:26` — «ummanu → ummanu»: артефакт скрипта переименования, должно быть «secretary → ummanu» (**✔**) | P3 |
 | DOC-04 ✅ #672 | `OWNED_CLEANUP.md:93` | Описан `--residue-replay --limit 20` и граница 1..100. Флага `--limit` нет; `cli.py:2094-2107` требует `--project` и `--target`/`--manifest` (не больше 20). `OPERATIONS.md:1681-1683` верен. Catch-up — мёртвый код (DEAD-08) | P2 |
 | DOC-05 ✅ #672 | `skills/roles/steward/steward/SKILL.md:3,135,172,175-181` | Написано «hourly», таймер — `OnCalendar=00/3:00:00`. Велено читать шаг `automations` у `upgrade --dry-run`, но такого шага нет: в `STEPS` 26 имён, `OPERATIONS.md:3126` подтверждает. В описаниях curate/retro/steward осталось «Launched by a session-manager automation» | P2 |
-| DOC-06 (открыт; подтверждён на проде, §12.1) | `skills/manifest.toml:50,83` | Codex-skills доставляются в `~/.config/orca/codex-runtime-home/home/skills`, хотя Orca-уровень `CODEX_HOME` удалён (A20 шаг 7), а Codex-головы используют `<data_dir>/codex-home` (`session.py:204`, `codex_home.py`). **Г:** Codex-головы interactive/curator/retro/steward не видят свои role-skills. Наблюдатели не затронуты (`observer.py:3373-3376` передаёт путь явно) | P1, если подтвердится |
+| DOC-06 ✅ #681 (исторически подтверждён, §12.1) | `skills/manifest.toml:50,83` | Codex-skills доставляются в `~/.config/orca/codex-runtime-home/home/skills`, хотя Orca-уровень `CODEX_HOME` удалён (A20 шаг 7), а Codex-головы используют `<data_dir>/codex-home` (`session.py:204`, `codex_home.py`). **Г:** Codex-головы interactive/curator/retro/steward не видят свои role-skills. Наблюдатели не затронуты (`observer.py:3373-3376` передаёт путь явно) | P1, если подтвердится |
 | DOC-07 ✅ #672 | `packaging/codex-home/AGENTS.md:5` | Сервер памяти назван `memory`, а это `LEGACY_SERVER`; живой — `po_memory` (`memory/client_config.py:22-23`). **Поправка (#672):** находка была неточной. Головы диспетчера получают HTTP-сервер `memory` (`runtime/head/command.py`), а `po_memory` — мост для остальных сессий; теперь в файле названы оба | P2 |
 | DOC-08 | `packaging/memory/product-ummanu/sprints-and-reservations.md:8` | Факт «execution card принадлежит открытому спринту, override — исключение» противоречит текущему контракту (`PROTOCOLS.md:813` «Cards outside a sprint»; `po-workspace/AGENTS.md:19`). Через `memory_search` этот факт попадает во все головы. При правке обновить digest манифеста | P2 |
 | DOC-09 ✅ #672, #674 (кроме таблицы rung 1 — это CON-18; комментарии `dispatch/state.py:24,1306` всё ещё называют `dispatcher_watchdog`) | `HEAD_VITALITY.md` | Устаревшие имена: `DispatcherRuntime._trigger_wait_watchdog`/`_sigcont_head` (`:430,481`) теперь функции модуля; `_reduce_and_store_vitality_episode` стал публичным; `dispatcher_watchdog`/`dispatcher_tui` → `dispatch.watchdog`/`dispatch.tui` (то же в docstring `head_vitality.py:282,341`). Ложное утверждение `:429-430`: «`_stop_worker_confirmed` … run only beneath a guarded entry» — на деле 25 точек вызова, из них охраняются 4. Таблица rung 1 расходится с CON-18 | P2 |
 | DOC-10 ◐ #672: ревизии, `wait`, 14 kinds, `body` исправлены; DDL `po_*`/`owner_events`/`origin_returns`, `e2e_refusal`, `committed`, триггер 0028 и комментарии в коде открыты | `BOARD_STORE.md` | Ревизии «0001–0027», а head — 0030. CHECK `task_type` без `wait`. «nine owner event kinds», а их 14. Нет DDL для `po_sessions`/`po_turns`/`po_feed`/`po_requests`/`owner_events`/`origin_returns`. `body` будто бы без `[marker]`, хотя все три писателя хранят полный текст. Предикат charge не упоминает `e2e_refusal`. `committed` будто бы что-то значит. В коде: `schema.py:20` «eight jsonb columns», а их 11; «eleven-method vocabulary» (`sql_cards.py:5`), а их 14/18; `backend.py:174` называет `n` в `entity_id` `task_number`, а на деле это `board_key`. Триггер 0028 описан только в миграции | P3 |
 | DOC-11 ✅ #672 | `OPERATIONS.md:3087-3107` | Таблица шагов upgrade — 19 шагов, в коде 26 (нет `runtime-owner`, `po-workspace`, `pipeline-state`, `po-workspace-owner`, `po-token`, `web-front-config`, `po`). `:2420` документирует метку «reset already passed», которую тест `test_web_status_bar.py:863` запрещает | P3 |
-| DOC-12 | `packaging/interactive-workspace/AGENTS.md` | Инструкции полномочий PO («The PO can supply… `--role po`») в контексте interactive-головы | P2 |
+| DOC-12 ✅ #683 | `packaging/interactive-workspace/AGENTS.md` | Инструкции полномочий PO («The PO can supply… `--role po`») в контексте interactive-головы | P2 |
 | DOC-13 ✅ #672 | `ARCHITECTURE.md` | `:18` в списке пакетов нет `transition` (**✔**). `:37` пробы реестра включают `openrouter`, а `heads.toml` поставляет только `claude-sub`/`openai-sub`. `:345` список страниц без `/po`, `/doctor`, `/owner-events`. `:375` и `PROTOCOLS.md:4622` «`basicauth *` covers every path», а Caddyfile содержит cookie-bearer bypass плюс `handle { route { basicauth } }` (`caddyfile.py:116-136`) | P3 |
 | DOC-14 ✅ #672/#674/#678 (ниже исходные доказательства) | `TESTING.md`, `tests/README.md`, `tests/broad.py`, `CONTRIBUTING.md` | `TESTING.md:168` относит `test_web_transport`/`read_protocol`/`run_protocol` к `unit`, а в манифесте они `integration-board`. `:117` про PTY в `runtime-component` противоречит `:186`. `:28` «never a green skip», но `test_memory_service.py:17,234` и `test_memory_health.py:245` пропускают зелёным. `broad.py:9-10` пишет «1440 tests / 3782 tests», а статически сейчас 3 131 и 7 335; локальный прогон дал 3 136 (**✔**). `broad.py:28` и `CONTRIBUTING.md:27` упоминают Orca. `tests/README.md` не перечисляет `TMPDIR`-guard, `TA_CODEX_HOME`, `GIT_CONFIG_*`. `test_head_vitality_legacy_path.py:8` обещает `expectedFailure`, которого нет | P3 |
 | DOC-15 ◐ #672, #674, #680: открыт только `docs/ROADMAP.md` (**Г**) | Мелкое | **Текущий статус:** shipped instance unit и heads.toml исправлены #680; ROADMAP не менялся, гипотеза остаётся в слоте 17. **Исходные места:** `pyproject.toml:141` «Portable ummanu appliance CLI skeleton.»; `SECURITY.md:30` («previously read runtime.env», «gitignored» — экспорт теперь по allowlist, `RECOVERY.md:389-399`); `examples/instance/instance.yaml:20` ссылается на несуществующий `ummanu-pipeline.service`; `packaging/systemd/README.md:3` без `ummanu-doctor.*`; `ROADMAP.md:10-16` числит в остатке, по-видимому, уже поставленные пункты (**Г**); `heads.toml:9-10,19-21` упоминает несуществующие `render_<adapter>` и `worker.py`; `head/local_pty/__init__.py:1-15` «no HeadRuntime here» | P3 |
@@ -1021,13 +1021,13 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Незакрытый frontmatter даёт `ValueError` в индексаторе.
 - Третья копия — `memory_journal._memory_fact_metadata:387`.
 
-**BUG-10 — P2. Steward ищет осиротевшие workspace в Orca-корне.**
+**BUG-10 — ✅ #683. Историческая находка: steward искал осиротевшие workspace в Orca-корне.**
 - Метка: Ф ✔; оговорка — конфигурация хоста.
 - `steward/signals.py:42,452-470` сканирует `shared_state.WORKSPACES_ROOT`, то есть `TA_WORKSPACES_ROOT` или `~/orca/workspaces` (`shared_state.py:8`).
 - Карточные worktree теперь лежат в `<data_dir>/workspaces/<project>/<worker>` (`dispatch/git_workspace.py:23-31,64-67`).
 - Юнит `ummanu-steward.service` не задаёт `TA_WORKSPACES_ROOT`, поэтому `new_orphan_workspaces` слеп к текущим workspace.
 
-**BUG-11 — P1, если подтвердится. Повторный подъём головы на том же `run_id` с устаревшим `head.pid`.**
+**BUG-11 — ✅ #683. Историческая гипотеза: узкая гонка повторного подъёма на том же `run_id` с устаревшим `head.pid`.**
 - Метка: Г, сильные основания в коде.
 - Цепочка:
   1. Постоянные роли переиспользуют `run_id` (`automations/runtime/dispatch.py:824`), а `head.pid` не удаляется.
@@ -1059,7 +1059,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - `wait_vitality.py:1062-1066` передаёт предыдущий **provider**-курсор без проверки run. Курсоры child и journal к run привязаны (`:1067-1079`), а `head_status` привязывает все.
 - На первом тике после respawn курсор нового run сравнивается со старым, отсюда ложные `ADVANCING`/`HealthyActive`.
 
-**BUG-16 — P3. Подтверждение остановки может принять выход прошлой инкарнации.**
+**BUG-16 — ✅ #683. Историческая находка: подтверждение остановки могло принять выход прошлой инкарнации.**
 - Метка: Ф; достижимость — Г.
 - `_await_head_gone`/`_has_exited` (`local_pty_head.py:2392-2410,3133-3141`; на `8e79450`: `:1820-1835,2470-2475`) принимают любую мёртвую запись или любой `run.exited` в хвосте журнала, без нижней границы `run.started`.
 - В переиспользованном каталоге run выход прошлой инкарнации подтверждает остановку текущей.
@@ -1148,22 +1148,18 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | INEF-17 | `web/app.py:507`, `pages.py:1115` (на `8e79450`) | Дашборд читает `limits` провайдеров и тут же делает `del limits` | Ф |
 | INEF-18 | `cli.py:1-118` | Импорт 275 модулей на каждый вызов CLI (см. ARCH-12). Supervisor на голову — 44 модуля, +10 МБ (ARCH-11) | Ф |
 
+**Проверки #681/#683.**
+- #681: candidate `e7a7e05241b910666a8fb9b3f05ac319cc54c03d`, merge/main `4ab97357178b017408a91dc8f27674756e8d796b`; закрывает DOC-06 фактической доставкой role skills standing Codex heads.
+- #683: candidate `a64d5a053c06a73588940d44cee344a26d358afd`, exact-SHA CI run `37527062690` — **success**: lint, typecheck, unit, component/runtime-component, integration-dispatcher/board/heads/recovery/memory, packaging и агрегат `test`.
+- #683 merge/main: `72f7849478882ec160b1f305463a0e545ea0bd04`; post-merge CI проверяется отдельно по фактическому main. Scope #683: 8 файлов, без CON-13/14/15 и без расширения в provider fallback #682.
+
 ## 10. План следующих 15–17 PR (отсчёт с #677)
 
 **Бюджет уточнён владельцем 2026-10-06:** 15–17 реализационных PR **с текущего момента**,
 начиная с web-блока #677. Ранее влитые #669–#676 и открытый PR с этим отчётом #668 в этот бюджет
 не входят. Ни один частично закрытый пункт не считается завершённым по названию PR.
 
-Выполнено 3 из 17 логических слотов (#677/#678/#680), а слот 4 частично продвинут параллельным #679.
-В бюджет вошли **4 реализационных PR (#677–#680)**; остаются 14 логических scope,
-включая остаток слота 4, и **11–13 PR** из исходного бюджета 15–17. Рабочая раскладка целится в
-верхнюю границу: **17 PR всего = 4 учтённых + 13 оставшихся поставок**, соответствующих слотам
-**4–15 и 17**. Слот 16 сохраняется как отслеживаемый логический scope и выполняется внутри связанных
-декомпозиций; отдельная поставка ему пока не отведена. Новый слот для #679 не добавляется. Малые удаления, импорты, проза
-и документальные хвосты закрываются вместе со своей подсистемой, а не отдельными PR на каждый ID.
-Оценка числа PR не разрешает смешивать независимые
-переработки ради арифметики: если характеризационные проверки покажут, что разрез слишком велик,
-раскладку нужно пересмотреть явно, с сохранением всех открытых пунктов.
+Выполнены логические слоты **1–4**. В remediation-бюджет аудита вошли **6 реализационных PR: #677, #678, #679, #680, #681 и #683**; #682 — отдельная продуктовая работа и в этот счёт не входит. Остаются **11 продуктовых поставок**, по одной на слоты **5–15**. Слот 16 по-прежнему распределён внутрь владельцев, а slot 17 становится не отдельным продуктовым PR, а финальной документационной сверкой в #668 после инкрементальных doc-правок. При текущей нарезке это даёт **17 remediation-PR всего = 6 выполненных + 11 оставшихся**, то есть верхнюю границу согласованного бюджета 15–17. Если один из оставшихся разрезов потребует деления, бюджет пересчитывается явно; независимые подсистемы ради арифметики не смешиваются.
 
 **Рабочая группировка остатка слота 16 (план, не выполненная работа):**
 
@@ -1180,33 +1176,26 @@ Docs и manifest обновляются при каждом переносе, с
 явно пересчитать группировку, а не автоматически расширять бюджет. Крупные независимые слоты 14
 и 15 механически не объединяются.
 
-**Перед продолжением слота 4:** [#679](https://github.com/vladmesh/ummanu/pull/679) уже влит,
-merge/main `46773ab580cddc0ecfbd9672ba941c9268c218eb` (candidate
-`b3c11c31847283411ae63282e87ba021d731a0fd`, [CI candidate](https://github.com/vladmesh/ummanu/actions/runs/37468297342)
-success; [CI main после #679](https://github.com/vladmesh/ummanu/actions/runs/37469909958) success).
-Его idle-retirement policy пересекается с run_id reuse и очисткой старой launch identity/
-подтверждением остановки, но **не закрывает BUG-11/16 целиком** или остальные ID слота. Продолжать
-от main, включающего этот merge, и не дублировать уже поставленную политику. Слот остаётся частичным.
-
+**Слот 4 завершён.** #679 поставил idle-retirement; #681 закрыл DOC-06 и корректный scope-stop для unloaded unit; #683 закрыл BUG-10/11/16, DOC-12 и остаточную argv-экспозицию standing memory bearer. Candidate #683 `a64d5a053c06a73588940d44cee344a26d358afd` прошёл exact-SHA CI (lint, typecheck, все suite jobs и агрегат `test`). Merge/main #683 — `72f7849478882ec160b1f305463a0e545ea0bd04`. CON-13/14 сознательно остаются в slot 12, CON-15 — в slot 11; они не являются незавершённым хвостом standing-role scope.
 | № | Кластер | Пункты и граница | Проверка / зависимость |
 |---|---|---|---|
 | 1 ✅ | Надёжность web, #677 | BUG-01/07/20, ARCH-16; **только часть** DUP-W2 (общий source-read wrapper). Отказ HTTP закрывает соединение; источник отказывает отдельно от сборки документа; шрифты не требуют внешнего доступа | HTTP-регрессии на реальном сокете, PostgreSQL-backed проверка страниц, exact-SHA CI |
 | 2 ✅ | CI и герметичность тестовой инфраструктуры, #678 | BUG-03/23 (тесты), CI-01 и DOC-14 закрыты. BUG-22 — env/catalogue/assertions; ARCH-06 — config и затронутые paths; небольшие support helpers переиспользованы. TDEAD-01–06, массовые TDUP/TORG, root-only и timing остаются в слоте 16; остальные импортные блоки ARCH-06 идут со своими подсистемами | Реальный guarded fast в CI; unit без memory-extra; lint/typecheck и все suites входят в агрегат; состав manifest сохранён с явным переносом SQL proof |
 | 3 ✅ | Свежая установка и конфигурация данных, #680 | BUG-02/06/08/09/13/21, CON-01/09/16 и DOC-02 закрыты. Явная editable `.venv`, единый memory config и metadata-aware retry, согласованные frontmatter/env, controlled malformed-input refusals. CON-01/16 закрепляют совместимость legacy-полей и descriptive manifest. В DOC-15 закрыты shipped examples; только ROADMAP остаётся Г в слоте 17. Decomposition installation/upgrade остаётся в слоте 15 | Native disposable editable packaging/provenance smoke; recovery retry без повторного board import; round-trip форматов и повреждённые входы; exact-SHA CI. Clean-host VPS drill не заявляется |
-| 4 ◐ #679 | Постоянные роли и identity повторного запуска | #679 уже поставил idle-retirement policy; остаток: DOC-06/12, BUG-10/11/16, CON-13/14/15 и утечка standing-agent токена из #671. BUG-11 сначала воспроизвести локальным тестом на main после #679: история prod его не подтвердила. Старый `run.exited` не подтверждает остановку новой инкарнации; steward читает текущий workspace root | Две инкарнации одного run, роль видит свои skills, scope и prompt identity; BUG-11/16 не считать закрытыми одной idle-retirement policy; без убийства prod-голов |
+| 4 ✅ #679/#681/#683 | Постоянные роли и identity повторного запуска | Idle-retirement (#679), фактическая доставка standing-role skills в Codex workspaces (DOC-06, #681), steward workspace discovery (BUG-10), incarnation-safe admission/stop acknowledgement (BUG-11/16), removal PO-only interactive authority (DOC-12) и отсутствие bearer в argv (#683). CON-13/14 перенесены в slot 12, CON-15 — в slot 11 | Регрессии двух инкарнаций одного run, current-layout orphan discovery, interactive-role authority и argv shape; exact-SHA CI #683 зелёный |
 | 5 | Контракты тика, vitality и остановки | BUG-15/17/18/19, CON-03/04/06/17/18; INEF-03, DUP-D14/15/16/19 в части уже разошедшихся правил, остаток комментариев DOC-09. Единые привязки курсоров, outcomes, blocked fence и reason; ошибка остановки reviewer не пропускает worker | Сценарии respawn, pause/freeze, gate/healthy tick и отказов; причины и request id фиксируются до упрощения |
 | 6 | Горячий путь диспетчера и cleanup-журнала | INEF-01/07 и дополнение §12.17: курсор provider-ingress не запускает полное чтение/сохранение cleanup на каждую строку rollout; `_recover_pending` не перечисляет всю доску ради одной ссылки. Разрез `cleanup_journal`/`cleanup_inventory` только внутри этой задачи | Счётчики I/O и запросов на production-shaped fixture; crash/replay и долговечность cursor/cleanup сохраняются; без обещания нового prod-тайминга до измерения |
 | 7 | Host, prompt-документы и GitHub CI API | DEC-02, ARCH-07/08/15, DUP-D4/5/6/11/13/18; DEAD-04/05/12 и относящиеся к host части DEAD-10/16. Листовой parser worktree, host catalogue, prompt/heads/git/workspace части. Сжатие ARCH-01 в этих файлах | Патчи через `self` работают; сообщения, request id, git-команды и CI-результаты те же; после поведенческих шагов 4/5 |
 | 8 | Observer, persisted records и чистая vitality-декомпозиция | DEC-04, DUP-D1/2/3/7/8/9/10/17 и остатки D14–19; DEAD-06/09/11 по доказанным потребителям. `_PersistedMapping`, сериализация и чистые ветви редуктора; остаток ARCH-01 в dispatch. Намеренный stdlib-only дубль не удалять в неверную сторону | Golden JSON round-trip с порядком ключей, все vitality verdicts; баги политики уже закрыты шагом 5 |
 | 9 | Ядро карточек и TaskWriter | DEC-01, ARCH-02/03/04, BUG-12, DUP-C2/4/5/6/7, DEAD-15 и относящиеся к tasks части DEAD-16. `TaskError` и row/event helpers — листовые; dispatcher writes, sprint guard и recovery — отдельные части без нового API. ARCH-01 в tasks | Обычный create и repair дают одинаковую метаинформацию; replay/transaction/authority и прежние импортные пути сохранены |
 | 10 | SQL board и спринты | DEC-03 и разрезы `sprints.py`; ARCH-05/13, CON-05/08/11/12, DUP-B1–6/C8, INEF-02/06/10/16, SQL-часть BUG-24, остаток DEAD-19/20. Fake переходит в test-support, различия timestamp не стираются молча, живой `_sprint_data` сохраняется. Проверить живой импорт ключа в миграции 0004. ARCH-01 в board/sprints | Настоящий PostgreSQL, число запросов, семантика read без write, схема/свежая БД/upgrade; без переписывания замороженных миграций ради чистки |
-| 11 | CLI и границы PO-сервиса | BUG-04/05, CON-10, ARCH-12/14/17, DUP-C1/3, INEF-12/18; doctor и регистрация CLI отделяются от тяжёлых импортов; PO session/server/output/launch части отделяются по §5.10. ARCH-01 в po/automations/projects; относящиеся сюда остатки DEAD-16/21 и INEF-14 | JSON/exit code ошибок, CLI importtime; PO queue/turn idempotency и блокировки при запуске; ускорение соединений — только после измерения |
+| 11 | CLI, role-env и границы PO-сервиса | BUG-04/05, CON-10/15, ARCH-12/14/17, DUP-C1/3, INEF-12/18; нормализовать/явно закрепить TA_* против UMMANU_* без скрытого разрыва совместимости. Doctor и регистрация CLI отделяются от тяжёлых импортов; PO session/server/output/launch части отделяются по §5.10. ARCH-01 в po/automations/projects; относящиеся сюда остатки DEAD-16/21 и INEF-14 | JSON/exit code ошибок, CLI importtime; PO queue/turn idempotency и блокировки при запуске; ускорение соединений — только после измерения |
 | 12 | Local-PTY как пакет и лёгкий supervisor | DEC-05, ARCH-10/11, DUP-R1–7, INEF-05/13, остаток CON-13/14 и DEAD-21. `head/procfs`, heartbeat leaf, lazy head exports, lifecycle/receipts/waits/socket части. DEAD-22 — отдельное решение внутри этого направления, не автоматическое удаление публичного глагола | Реальный PTY/socket/process lifecycle, identity инкарнации, импорт supervisor; отсутствие `_await_*` в профиле тика не означает отсутствие стоимости вне тика |
 | 13 | Web pages и sprint read contracts | DEC-06/07, CON-02/07, DUP-W1/3/4/5 и остаток W2 (installation read), DEAD-23, INEF-04/11/15/17. Сначала static и листовые значения, затем части страниц/снимков; схемы отражают текущие документы, компрессия не ослабляет CSP | Пакетные assets входят в wheel, page/transport/schema/source-isolation tests; ошибки и readonly/read-write границы явно сохранены |
 | 14 | Backup, checkpoint и restore | Разрезы checkpoint/restore из §5.10, DUP-I2/3/4/5, INEF-08/09, backup/checkpoint часть BUG-24, относящийся сюда DEAD-16. Проверить горячий `redact` из §12.17; не добавлять cache без доказательства сохранения редактирования секретов. ARCH-01 в backup/recovery | Snapshot/restore round-trip, оборванный git payload, разные файловые системы, секреты, archive validation и byte-stable formats |
 | 15 | Installation и upgrade как пакеты | Разрезы installation/bootstrap/upgrade из §5.10, DUP-I1 и остаток I2–5, ARCH-09 и DEAD-T в части решения о поддержке старых хостов; остаток ARCH-01 в установке. Process receipts сохраняют формат, проверки размера и no-follow | Disposable install/upgrade/recover, golden receipts, runtime provenance; совместимость старого live-root/remote имеет явное решение |
 | 16 | Разбиение крупных тестов и оставшиеся повторы, внутри связанных поставок | TEST-01, остаток TEST-02, BUG-22 (root-only coverage и timing/flakiness), TDUP-01/02/05 и остаток TDEAD/TORG, массовые TDUP-03/04 из слота 2. Scope распределён по 7/8/10/12/14/15 согласно группировке выше, но не считается выполненным. Выделить классы dispatcher без Postgres из Docker-гейта; дробить крупные тесты по жизненному циклу; helpers — support/fakes, не ещё одна продуктовая реализация | Множество тестов и их сценарии не меняются, кроме доказанных дублей; каждый модуль ровно раз в `ci-shards.txt`; docs сопровождают каждый перенос. Отдельный PR потребует явного пересчёта группировки |
-| 17 | Документация и окончательная сверка аудита | DOC-01/08, остаток DOC-10 и только ROADMAP из DOC-15 (непроверенная Г); сжатие PROTOCOLS/OPERATIONS и prompt-skills, оставшаяся ARCH-01 вне предыдущих кластеров. DEAD-24: разовые scripts разобрать по живым вызовам, shim `role_skills.py` используется steward и не удаляется по одному basename. Сверить все DEAD-T/R/H1/22/25 и неподтверждённые гипотезы: удалить только доказанно ненужное либо явно записать, почему совместимость/поведение оставлено | Живые заголовки рантайма и ссылки сохраняются; closed/not-taken/open различаются; отсутствие staged-строк сегодня само по себе не доказывает недостижимость всех будущих recovery-путей |
+| 17 (без отдельного implementation PR) | Документация и окончательная сверка аудита | DOC-01/08, остаток DOC-10 и только ROADMAP из DOC-15 (непроверенная Г); сжатие PROTOCOLS/OPERATIONS и prompt-skills, оставшаяся ARCH-01 вне предыдущих кластеров. DEAD-24: разовые scripts разобрать по живым вызовам, shim `role_skills.py` используется steward и не удаляется по одному basename. Сверить все DEAD-T/R/H1/22/25 и неподтверждённые гипотезы. Инкрементальные doc-правки идут с владельцами; финальная сверка остаётся в #668 | Живые заголовки рантайма и ссылки сохраняются; closed/not-taken/open различаются; отсутствие staged-строк сегодня само по себе не доказывает недостижимость всех будущих recovery-путей |
 
 **Правила исполнения.**
 1. Один PR — связанный кластер одной подсистемы. Поведенческий дефект сначала воспроизводится и
@@ -1274,10 +1263,10 @@ INEF-13 опровергнут как причина горячего тика (
 | Пункт | Вердикт |
 |---|---|
 | DOC-06 | **подтверждено** (curator) |
-| BUG-11 | **опровергнуто по истории** (2 из 2 реальных повторных подъёмов прошли) |
+| BUG-11 | **опровергнуто по истории** (2 из 2 реальных повторных подъёмов прошли); узкий кодовый race закрыт #683 |
 | DEAD-H1 | **подтверждено** (staged-строк не было и нет; settle и recover работы не находили) |
 | DEAD-R | **подтверждено** (дублей нет, pending-ремонтов нет) |
-| BUG-10 | **подтверждено**, плюс вторая слепая зона: регэксп имён |
+| BUG-10 | **подтверждено исторически; закрыто #683**, включая вторую слепую зону: регэксп имён |
 | BUG-14 | **подтверждено** (failed с 2026-10-05); ✅ исправлено в #669 |
 | BUG-13 | **опровергнуто для этого хоста** (настроена модель по умолчанию) |
 | BUG-20 | **подтверждено** |
@@ -1572,7 +1561,7 @@ INEF-13 опровергнут как причина горячего тика (
 | Доли INEF-01/07/13 в CPU тика (72 %, 100–466 с 05.10) | `py-spy record --pid <tick> --duration 120 --rate 20 --nonblocking` на одном тике; альтернатива — `cProfile` через тот же `ummanu dispatcher production-tick` на стенде-реплике | `--nonblocking` не останавливает процесс, тик удлиняется на ≈1–3 %. Это профилировщик на живом процессе, поэтому нужно разрешение владельца; на стенде риска нет |
 | Перезаписи state и cleanup по тикам и вызывающим (INEF-01/07): 300-секундного окна мало | inotify на `dispatcher/` (только чтение) на 1 ч, сопоставить с границами тиков в journald; вызывающих показывает py-spy из строки выше | Нулевой: процессы не трогаются |
 | Темп `sessions` по процессам (INEF-12) | Включить `log_connections` или задать `application_name` в DSN | Включение `log_connections` требует reload Postgres: доска не прерывается, но это запись в конфиг БД, поэтому только окно владельца. Через DSN — правка кода |
-| Узкая гонка BUG-11 | Unit-тест: Codex-TUI профиль, `head.pid` прошлой инкарнации с тем же `run_id` и мёртвым pid, `start` возвращает до записи новой identity | Нулевой, локальный тест |
+| Узкая гонка BUG-11 ✅ #683 | Выполнено: регрессия моделирует live supervisor текущей инкарнации при stale dead identity прошлой; admission остаётся у текущей инкарнации | Нулевой, локальный тест |
 
 Временные файлы были в `/tmp/research-ummanu-90` и удалены; фоновых процессов не осталось.
 
