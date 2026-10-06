@@ -271,7 +271,7 @@ class CliTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = self.seed_probe_instance(Path(tmpdir), recorded=recorded)
-            with mock.patch("ummanu.cli.run_probe") as run:
+            with mock.patch("ummanu.infra.recovery_inventory.run_probe") as run:
                 code, output = self.run_cli(
                     ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
                 )

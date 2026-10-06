@@ -48,7 +48,7 @@ from typing import Any
 
 from ummanu.board.attempt_usage import AttemptUsagePayload, AttemptUsagePhase, TokenAccount
 from ummanu.board.events import AttemptUsageOccurrence
-from ummanu.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome, EventKind
+from ummanu.board.models import TOKEN_DIMENSIONS, AttemptUsageOutcome
 from ummanu.board.roles import Role
 from ummanu.runtime.provider_models import (
     ProviderModels,
@@ -60,7 +60,6 @@ CODEX_ADAPTER = "codex"
 CLAUDE_ADAPTER = "claude"
 CODEX_SOURCE_KIND = "codex_session_event_jsonl"
 CLAUDE_SOURCE_KIND = "claude_session_jsonl"
-ATTEMPT_USAGE_KIND = EventKind.ATTEMPT_USAGE.value
 # Which fan-out policy key holds the structured record source for each adapter. The same split the
 # routing journal uses to resolve a session id, so both read one run the same way.
 SOURCE_POLICY_KEYS = {

@@ -1654,13 +1654,6 @@ def _budget_line(budget: dict[str, Any]) -> str:
 # -- the command feed -----------------------------------------------------------------------------
 
 
-def _feed(section: dict[str, Any] | None, *, compact: bool = False) -> str:
-    document, refused = _beside(section, what="the last commands")
-    if document is None:
-        return refused
-    return _feed_table(document, compact=compact)
-
-
 def _feed_table(document: dict[str, Any], *, compact: bool = False) -> str:
     commands = document.get("commands") or {}
     items = [item for item in commands.get("items") or [] if isinstance(item, dict)]
@@ -2190,64 +2183,6 @@ def _installation(installation: dict[str, Any]) -> str:
     elif (health.get("source") or {}).get("state") == "available":
         parts.append('<p class="empty">the health collector answered with nothing.</p>')
     return "\n".join(part for part in parts if part)
-
-
-def _project_table(items: list[dict[str, Any]]) -> str:
-    return _rows(
-        ["project", "repo", "adapter", "branch", "enabled"],
-        [
-            [
-                escape(str(item.get("id") or "")),
-                _or_dash(item.get("repo")),
-                _or_dash(item.get("adapter")),
-                _or_dash(item.get("default_branch")),
-                "yes" if item.get("enabled") else "no",
-            ]
-            for item in items
-        ],
-    )
-
-
-def _task_table(items: list[dict[str, Any]]) -> str:
-    return _rows(
-        ["card", "state", "project", "title"],
-        [
-            [
-                _link(str(item.get("ref") or "")),
-                _state_chip(item.get("state")),
-                _or_dash(item.get("project")),
-                _or_dash(item.get("title")),
-            ]
-            for item in items
-        ],
-    )
-
-
-def _start_form(projects: list[dict[str, Any]], tasks: list[dict[str, Any]]) -> str:
-    if not projects:
-        return '<p class="empty">no registered project, so there is nothing to start a run in.</p>'
-    options = "".join(
-        f'<option value="{escape(str(item.get("id")))}">{escape(str(item.get("id")))}</option>'
-        for item in projects
-    )
-    cards = "".join(
-        f'<option value="{escape(str(item.get("ref")))}" data-project="{escape(str(item.get("project") or ""))}">'
-        f"{escape(str(item.get('ref')))} — {escape(str(item.get('title') or ''))}</option>"
-        for item in tasks
-    )
-    return (
-        '<form id="start-form" class="inline">'
-        f'<div><label for="project">project</label><select id="project" name="project">{options}</select></div>'
-        f'<div><label for="ref">card</label><select id="ref" name="ref">{cards}</select></div>'
-        '<div><label for="profile">head profile</label>'
-        '<input id="profile" name="profile" placeholder="a profile from the head registry" required></div>'
-        '<div><label for="instruction">extra instruction</label>'
-        '<input id="instruction" name="instruction" placeholder="optional"></div>'
-        '<button type="submit">Start a worker run</button>'
-        "</form>"
-        '<p class="empty">a repeated submission of the same card and profile carries the same request '
-        "id, and the operation behind it answers it with the run that already exists.</p>"
-    )
 
 
 # -- the task page ------------------------------------------------------------------------------
@@ -2960,21 +2895,6 @@ def _summary_of(value: Any) -> str:
     return ""
 
 
-def _review_form(ref: str, worker: dict[str, Any] | None) -> str:
-    if worker is None:
-        return '<p class="empty">there is no worker run to review yet.</p>'
-    return (
-        '<form id="review-form">'
-        f'<input type="hidden" id="worker-run" value="{escape(str(worker.get("run_id") or ""))}">'
-        '<div><label for="review-profile">reviewer profile</label>'
-        '<input id="review-profile" placeholder="a profile from the head registry" required></div>'
-        f'<button type="submit">review {escape(str(worker.get("run_id") or ""))}</button>'
-        "</form>"
-        '<p class="empty">a review is refused while its worker run is still open, and a repeated '
-        "submission returns the review that already exists.</p>"
-    )
-
-
 def _work(work: dict[str, Any]) -> str:
     parts = []
     for slot, title in (
@@ -3242,50 +3162,6 @@ def _js(value: str) -> str:
     """A string safe to paste into the script literal: no quote, no backslash, no tag opener."""
     return escape(value).replace("\\", "").replace("'", "").replace('"', "")
 
-
-_DASHBOARD_SCRIPT = """
-const feedback = document.getElementById('feedback');
-const form = document.getElementById('start-form');
-function say(text, bad) { feedback.textContent = text; feedback.className = bad ? 'bad' : ''; }
-function requestId(key) {
-  const stored = sessionStorage.getItem(key);
-  if (stored) return stored;
-  const made = 'web-' + (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
-  sessionStorage.setItem(key, made);
-  return made;
-}
-const project = document.getElementById('project');
-const ref = document.getElementById('ref');
-function filter() {
-  let first = null;
-  for (const option of ref.options) {
-    const owned = !option.dataset.project || option.dataset.project === project.value;
-    option.hidden = !owned;
-    if (owned && first === null) first = option;
-  }
-  if (first && ref.selectedOptions[0] && ref.selectedOptions[0].hidden) ref.value = first.value;
-}
-if (project && ref) { project.addEventListener('change', filter); filter(); }
-if (form) form.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const profile = document.getElementById('profile').value.trim();
-  const instruction = document.getElementById('instruction').value;
-  const card = ref.value;
-  // The request id is the client's and it is kept: a repeated submission, a reload and a
-  // reconnection all carry the same one, and the operation answers them with the same run.
-  const id = requestId('ummanu.web.start.' + card + '.' + profile);
-  say('starting...', false);
-  const response = await fetch('/api/runs/start', {
-    method: 'POST',
-    headers: {'content-type': 'application/json'},
-    body: JSON.stringify({ref: card, request_id: id, profile: profile, instruction: instruction}),
-  });
-  const document_ = await response.json();
-  if (!response.ok) { say(document_.error.code + ': ' + document_.error.message, true); return; }
-  say('run ' + document_.run.run_id + ' — ' + document_.state.value, false);
-  window.location.href = '/tasks/' + encodeURIComponent(card);
-});
-"""
 
 _ACTIONS_SCRIPT = """
 // The owner's actions: every form with a data-action posts a JSON body to that route, and shows

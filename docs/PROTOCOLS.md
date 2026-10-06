@@ -4655,7 +4655,9 @@ python3 -P -m ummanu web-front check --instance INSTANCE [--config FILE]
 
 The front is the only listener on a public interface; the application refuses non-loopback addresses
 before a socket exists. The rendered upstream is checked with the same loopback predicate as `--host`.
-`basicauth *` covers every path. `ummanu.webfront.guard` parses the rendered file and asks, for every
+A request carrying the owner-session cookie (`__Host-ummanu_front`, 30 days, minted only after
+`basicauth` admitted a request; its value derives from a secret rotated with the password) is proxied
+directly; every other request on every path goes through `basicauth`. `ummanu.webfront.guard` parses the rendered file and asks, for every
 entry of `ummanu.web.app.ROUTES`, whether anything answers that path before a password check;
 `tests/test_web_front.py` runs it over the shipped renderer and over counter-examples that must be
 reported.

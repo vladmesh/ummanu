@@ -1093,17 +1093,16 @@ class CleanupOwner:
         return "archive" if task.get("closed") else "done"
 
     @serialized
-    def inventory(self, *, catch_up: bool = False, project: str | None = None) -> dict[str, Any]:
+    def inventory(self, *, project: str | None = None) -> dict[str, Any]:
         """Read actual registered Git residue, including archived cards with no record.
 
-        Catch-up adopts only branch-only residue with a matching archived/Done
-        card and audited dispatcher claim. Old workspaces lacking exact runtime
-        identity remain visible and preserved, rather than guessed from a glob.
+        Old workspaces lacking exact runtime identity remain visible and preserved,
+        rather than guessed from a glob.
 
-        Without catch-up it writes nothing and carries the effect manifest: for every
-        row and journaled intent, its target id with the effects a replay would perform,
-        in order, or its refusal, and a digest the targeted replay must match. A named
-        project is read alone; an unregistered one is refused before any read.
+        It writes nothing and carries the effect manifest: for every row and journaled
+        intent, its target id with the effects a replay would perform, in order, or its
+        refusal, and a digest the targeted replay must match. A named project is read
+        alone; an unregistered one is refused before any read.
         """
         bindings = self._bindings(project)
         rows = []
@@ -1117,12 +1116,11 @@ class CleanupOwner:
                 refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/pipeline/")
                 for line in refs.splitlines():
                     ref, tip = line.split(" ", 1)
-                    row, admitted = self._residue_row(name, binding, repo, worktrees, ref, tip, recorded,
-                                                      catch_up=catch_up)
-                    if not catch_up and "recorded_owners" not in row:
+                    row, admitted = self._residue_row(name, binding, repo, worktrees, ref, tip, recorded)
+                    if "recorded_owners" not in row:
                         row["target"] = ref + "@" + tip
                         manifest.append(self._branch_manifest(name, row, admitted, value))
-                    elif not catch_up and "cleanup_ids" not in row:
+                    elif "cleanup_ids" not in row:
                         # Conflicting recorded owners: a scoped refusal, never an admitted target.
                         row["target"] = ref + "@" + tip
                         manifest.append(_conflict_entry(name, row))
@@ -1131,25 +1129,22 @@ class CleanupOwner:
                     if not worktree.get("branch", "").startswith("refs/heads/pipeline/") and worktree.get("worktree") != str(repo):
                         row = {"project": name, "repo": str(repo), "worktree": worktree,
                                "status": "preserved", "reason": "foreign, detached or legacy workspace"}
-                        if not catch_up:
-                            row["target"] = "worktree:" + str(worktree.get("worktree", ""))
-                            manifest.append(_manifest_entry(row["target"], name, "preserved", row["reason"],
-                                                            [], {"worktree": worktree}))
+                        row["target"] = "worktree:" + str(worktree.get("worktree", ""))
+                        manifest.append(_manifest_entry(row["target"], name, "preserved", row["reason"],
+                                                        [], {"worktree": worktree}))
                         rows.append(row)
             except Exception as exc:
                 rows.append({"project": name, "status": "pending", "reason": str(exc)[:500]})
         result: dict[str, Any] = {"intents": self.journal.summary(project=project or ""), "residue": rows}
-        if not catch_up:
-            for key in sorted(recorded):
-                if project is None or _project_intent(recorded[key], project):
-                    manifest.append(self._intent_manifest(key, value))
-            result["manifest"] = manifest
+        for key in sorted(recorded):
+            if project is None or _project_intent(recorded[key], project):
+                manifest.append(self._intent_manifest(key, value))
+        result["manifest"] = manifest
         return result
 
     def _residue_row(self, project: str, binding: dict[str, Any], repo: Path, worktrees: list[dict[str, str]],
-                     ref: str, tip: str, recorded: dict[str, Any], *,
-                     catch_up: bool) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """One branch row, and its card when catch-up admits branch-only ownership."""
+                     ref: str, tip: str, recorded: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """One branch row, and its card when branch-only ownership is admitted."""
         card_ref = ref.removeprefix("refs/heads/pipeline/")
         row = {"project": project, "repo": str(repo), "ref": ref, "tip": tip,
                "status": "preserved", "reason": "ownership not proven",
@@ -1181,11 +1176,6 @@ class CleanupOwner:
                     raise Preserved("recorded ownership conflicts with current ref; retained current tip " + tip)
                 row["reason"] = "retained exact owner; replay existing cleanup obligations"
                 row["cleanup_ids"] = list(owners)
-                if catch_up:
-                    task = self.runtime.reader.show(card_ref)
-                    for intent in owners.values():
-                        if intent["status"] == "owned":
-                            self.journal.request(task, self._settlement_request(task), intent["record"])
                 if any(intent["status"] == "completed" for intent in owners.values()):
                     row["reason"] = "ref present after completed cleanup; retained recorded provenance"
                 return row, None
@@ -1201,8 +1191,6 @@ class CleanupOwner:
             if row["worktrees"]:
                 raise Preserved("historical worktree needs exact attempt and head ownership evidence")
             row["reason"] = "owned branch-only residue; eligible for exact-tip replay"
-            if catch_up:
-                row["cleanup_id"] = self._adopt_branch(task, repo, ref, tip)
             return row, task
         except Exception as exc:
             row["reason"] = str(exc)[:500]
@@ -1297,8 +1285,7 @@ class CleanupOwner:
         repo = _canonical(binding["repo"])
         if _ref_tip(repo, ref) != tip:
             return None
-        row, task = self._residue_row(project, binding, repo, _registered(repo), ref, tip, value["intents"],
-                                      catch_up=False)
+        row, task = self._residue_row(project, binding, repo, _registered(repo), ref, tip, value["intents"])
         key = _intent_key(ref.removeprefix("refs/heads/pipeline/"), _archived_record(tip)["attempt_id"])
         if "recorded_owners" in row:
             return (_conflict_entry(project, row), None, key) if "cleanup_ids" not in row else None

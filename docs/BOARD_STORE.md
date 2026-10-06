@@ -30,7 +30,7 @@ outside it (§3.11).
 | Module | Role |
 |---|---|
 | `board/schema.py` | SQLAlchemy models; the source of truth for §3 |
-| `board/migrations/` | Alembic environment and revisions `0001`–`0027` (§7.4) |
+| `board/migrations/` | Alembic environment and revisions `0001`–`0030` (§7.4) |
 | `board/migrate.py` | migration runner: advisory lock, owner connection, role passwords (§7.4) |
 | `board/release_migrations.py` | the release's target bundle, its eligibility and bounded apply (§7.4) |
 | `board/schema_gate.py` | the schema gate every operational connection and doctor read (§7.4) |
@@ -331,7 +331,7 @@ CREATE TABLE tasks (
     description    text NOT NULL DEFAULT '',
     task_type      text CONSTRAINT task_type_is_a_known_type_or_nothing
                      CHECK (task_type IS NULL OR task_type IN ('code','research','infra',
-                                                               'decision','operation')),
+                                                               'decision','operation','wait')),
     review         text CONSTRAINT task_review_is_a_known_choice_or_nothing
                      CHECK (review IS NULL OR review IN ('required','skipped')),  -- NULL reads as required
     live_impact    boolean NOT NULL DEFAULT false,    -- research only (task_live_impact_is_research_only)
@@ -484,7 +484,8 @@ CREATE TABLE product_comments (
 CREATE INDEX product_comments_by_product ON product_comments (product_id, created_at);
 ```
 
-`marker` is a column; `body` is the prose without the `[marker]` prefix line (§8.1).
+`marker` is a column holding the parsed marker token; `body` keeps the whole comment text, the
+`[marker]` line included (§8.1).
 
 ### 3.8 Sprint decisions
 
@@ -687,7 +688,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `issues.close_reason` | `resolved`, `invalid`, `duplicate`, `wont_do` | `product_issues.ISSUE_CLOSE_REASONS` |
 | `sprints.status` | `open`, `closed`, `stopped` | `SprintState` |
 | `tasks.state` | the seven card states | `CardState` |
-| `tasks.task_type` | `code`, `research`, `infra`, or NULL | `board.task_routing.TaskType` |
+| `tasks.task_type` | `code`, `research`, `infra`, `decision`, `operation`, `wait`, or NULL | `board.task_routing.TaskType` |
 | `tasks.review` | `required`, `skipped`, or NULL (legacy, read as `required`) | `board.task_routing.TaskReview` |
 | `tasks.complexity` | `cheap`, `standard`, `hard`, `frontier` | `board.task_routing.TaskComplexity` |
 | `tasks.family_preference` | `auto`, `claude`, `codex` | `board.task_routing.FamilyPreference` |
@@ -698,7 +699,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `board_events.kind` | the 23 `EventKind` values (§3.9) | `board/models.py:EventKind` |
 | `board_events.entity_kind`, `requests.entity_kind` | `product`, `issue`, `sprint`, `card` | `EntityKind` |
 | `repositories.role` | `primary`, `curator_root` | this schema (§3.1) |
-| `owner_events.kind` | the nine owner event kinds | `board.owner_events.KINDS` |
+| `owner_events.kind` | the 14 owner event kinds | `board.owner_events.KINDS` |
 | `owner_events.class` | `needs_owner`, `notice`, derived from the kind (`owner_event_class_follows_kind`) | `board.owner_events.KIND_CLASS` |
 
 A retired `codex_launch_mode` reads as NULL (`tasks.py`); an audit record whose kind is not an
@@ -1190,7 +1191,7 @@ kind is refused.
 The first line of a comment is a marker only when it is a complete `[token]` line and the token
 is a role in `_ROLES`, one of the prefixes `report:`, `review:`, `decision:`, `issue:`,
 `validate:`, `claim:`, `watchdog:`, or one of `sprint:resume`, `archive`, `rejected`,
-`steward:blocked-done`, `provision:request`. Otherwise the body is kept whole and `marker` is NULL.
+`steward:blocked-done`, `provision:request`. Otherwise `marker` is NULL; the body is kept whole either way.
 `steward:blocked-done` is not the role `steward`.
 
 ### 8.2 The extension bag

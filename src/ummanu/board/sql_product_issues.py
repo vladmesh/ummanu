@@ -95,12 +95,6 @@ class ProductIssueRecords:
         text = str(reference or "")
         return text.split(":", 1)[1] if ":" in text else text
 
-    def key_of(self, reference: str) -> int:
-        kind = self.kind_of_reference(reference)
-        if kind is None:
-            raise self._error(f"{reference!r} is not a Product or Issue reference")
-        return record_key(kind, self.identifier_of(reference))
-
     def _error(self, message: str) -> Exception:
         from ummanu.board.sql_cards import SqlCardError
 
@@ -320,9 +314,6 @@ class ProductIssueRecords:
             (_now(), identifier),
         )
         return True
-
-    def metadata(self, task_id: int) -> dict[str, str]:
-        return self.metadata_of([int(task_id)])[int(task_id)]
 
     def _stored(self, kind: str, keys: list[int], columns: str) -> dict[int, tuple[Any, ...]]:
         """`identifier_for` for many keys: each key's row, its identity checked against the key."""
@@ -579,9 +570,6 @@ class ProductIssueRecords:
             if match is not None:
                 return match.group(1)
         return None
-
-    def comments(self, task_id: int) -> list[dict[str, Any]]:
-        return self.comments_of([int(task_id)])[int(task_id)]
 
     def comments_of(self, task_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
         """Product and Issue comments for every key, in one read per table."""

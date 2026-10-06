@@ -26,7 +26,9 @@ manifest invalid before any suite starts. When changing the runner or manifest, 
 
 ## Required setup
 
-A missing required dependency is an infrastructure failure, never a green skip:
+A missing required dependency is an infrastructure failure, never a green skip. The one exception:
+the daemon suites of `tests.test_memory_service` and `tests.test_memory_health` skip when
+`ummanu[memory]` is not installed, so CI installs it for every suite run.
 
 - `integration-memory` needs `ummanu[memory]`;
 - PostgreSQL tests (for example `tests.test_board_store_schema`, `tests.test_postgres_recovery`,
@@ -165,7 +167,8 @@ Where a change's tests live. Behaviour contracts are in [Recovery](RECOVERY.md),
 | Post-close order reconciliation, restore | `tests.test_restore` | integration-recovery |
 | Cold archive and PostgreSQL restore | `tests.test_backup`, `tests.test_postgres_recovery` | integration-recovery |
 | PostgreSQL schema, roles, privileges | `tests.test_board_store_schema` | integration-board |
-| Published web path | `tests.test_web_front`, `tests.test_web_transport`, `tests.test_web_read_protocol`, `tests.test_web_run_protocol` | unit |
+| Published web path | `tests.test_web_front` | unit |
+| | `tests.test_web_transport`, `tests.test_web_read_protocol`, `tests.test_web_run_protocol` | integration-board |
 
 Notes:
 
@@ -183,8 +186,8 @@ Notes:
     tests.test_bulk_comment_restore.DurableAuditBenchmark.test_full_production_shape_real_audit
   ```
 
-- `tests.test_web_run_protocol` has two suites that start real processes on real terminals under
-  `LocalPtyHeadRuntime`: `RealHeadOwnershipTests` (a head stopped from a `HeadRun` rebuilt from the
+- `tests.test_web_run_protocol` (in `integration-board`, not `runtime-component`) has two suites that
+  start real processes on real terminals under `LocalPtyHeadRuntime`: `RealHeadOwnershipTests` (a head stopped from a `HeadRun` rebuilt from the
   write-ahead record) and `RealBackendContractTests` (`run_start`/`run_review` against the real backend;
   only the head binary is substituted).
 - Whether the installed web service works is a host check, not a test:

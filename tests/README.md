@@ -4,8 +4,16 @@ Every test run (a CI suite, `python3 -m tests.broad`, a named module) must produ
 same result whether or not the host running it has a live installation. `tests/__init__.py`
 installs the defaults below before any `test_*` module is imported: `python -m unittest`'s
 discovery imports `tests/__init__.py` first, so they are live before any test can reach a
-production call path. The product no longer discovers an Orca executable at all (A20 step 9,
-secretary-1726), so there is no Orca seam to patch.
+production call path:
+
+- `TMPDIR` (and `tempfile.tempdir`) point at one throwaway root the run owns and removes at exit; an
+  `ummanu-*` or `orca-*` entry still in it then fails the run, naming the leak
+  (`tests/test_suite_tmp_guard.py`);
+- `TA_CODEX_HOME` is a throwaway Codex home, so a Codex bring-up never writes a directory-trust grant
+  into the installation's home (`tests/test_hermetic_codex.py`);
+- `TA_PIPELINE_STATE_DIR` is a throwaway pipeline state dir (below);
+- `GIT_CONFIG_*` turns off `gc.auto` and `maintenance.auto` for every git the suite starts, so no
+  detached gc writes into a temporary repository after its test returns.
 
 ## The pipeline pause flag is read from a state dir this run owns
 

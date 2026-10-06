@@ -21,7 +21,6 @@ from ummanu.runtime.codex_home import managed_codex_homes
 MEMORY_URL = "http://127.0.0.1:8077/mcp"
 LEGACY_SERVER = "memory"
 PO_SERVER = "po_memory"
-TOKEN_ENV = "UMMANU_MEMORY_ACCESS_TOKEN"
 _SECTION = re.compile(r"^\s*\[([^]]+)]\s*(?:#.*)?$")
 
 
