@@ -142,7 +142,9 @@ runtime other than `local-pty` (so an `orca-legacy` pin fails closed too). The t
 else: it creates no steward report card, stops no head, leaves `head_run.json` and `active_report.json`
 as they are and closes no report, and exits 1. A head an earlier tick raised finishes its turn under its
 own supervisor; the next tick with a usable profile finds it through `head_run.json` (busy-skip, or a
-bring-up over a head that has ended). To see the reason, read the last entry of
+bring-up over a head that has ended). A head whose turn ended but whose process stays up idle is ended
+by that tick through `stop_if_quiescent` once it has been quiet for `IDLE_HEAD_GRACE_SECONDS`
+(`action="supervised-idle-stop"`), and the tick then brings up a fresh one. To see the reason, read the last entry of
 `automation-state/<agent>/runs.jsonl` (under `TA_STATE`, by default
 `~/ummanu-data/automation-state`): `action="no-supervised-head"`, `result="error"`, the cause in
 `error`. The unit's journal (`journalctl -u ummanu-<agent>.service`) has the same reason on stderr. A

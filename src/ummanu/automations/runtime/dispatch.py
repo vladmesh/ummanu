@@ -35,7 +35,9 @@ it through, and handing that record back to `start` is what makes a bring-up ove
 still working a refusal (`HEAD_BUSY`) rather than a second head. A failed-closed tick changes
 nothing: it raises no head and stops none, leaves `head_run.json` and `active_report.json` as they
 are and closes no report. A head an earlier tick raised finishes its turn under its own supervisor,
-and the next tick with a usable profile finds it through `head_run.json` as usual.
+and the next tick with a usable profile finds it through `head_run.json` as usual. A head that
+finished its turn and stayed up idle is retired by the next tick (`_retire_idle_head`), so a role is
+not held off duty by a head with nothing left to do.
 
 One role, one owner of its head. A `terminal_handle.json` left over from the retired pane backend
 names a pane as this role's owner. The fence is the file's existence, not its parsed content, so an
@@ -58,6 +60,7 @@ import json
 import os
 import shlex
 import sys
+import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -162,7 +165,7 @@ def _pipeline_paused() -> bool:
         from ..agents.pipeline import pause as pipeline_pause
 
         return pipeline_pause.is_paused()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - an unreadable pause state refuses the dispatch
         print(
             f"dispatch: pipeline pause state is unreadable; refusing dispatch ({type(exc).__name__}: {exc})",
             file=sys.stderr,
@@ -198,7 +201,7 @@ def _registry_snapshot() -> RegistrySnapshot:
         from ummanu.runtime import heads as pipeline_heads
 
         return RegistrySnapshot(pipeline_heads.load_registry())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry is reported, not raised
         return RegistrySnapshot(None, f"{type(exc).__name__}: {exc}")
 
 
@@ -294,7 +297,7 @@ def _resolve_launch(
         raise NoSupervisedHead(f"the head registry would not load ({snapshot.error or 'unreadable'})")
     try:
         head = _preferred_head(agent, spec, snapshot)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any routing failure is no supervised head
         raise NoSupervisedHead(f"no head profile is routed to {agent} ({exc})") from None
     if not head:
         raise NoSupervisedHead(f"no head profile is routed to {agent}")
@@ -303,12 +306,12 @@ def _resolve_launch(
         choice = resolve_head_chain(head, health.check, lambda pid: _head_fallback(registry, pid))
         resolved = choice.head or head
         profile = dict(registry.profile(resolved))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any profile failure is no supervised head
         raise NoSupervisedHead(f"head {head!r} could not be resolved to a profile ({exc})") from None
     try:
         # `from_profile` refuses every runtime but `local-pty`, so a spec is a supervised head.
         HeadSpec.from_profile(resolved, profile)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any spec failure is no supervised head
         raise NoSupervisedHead(f"head profile {resolved!r} will not make a head spec ({exc})") from None
     resolution = LaunchResolution(skill, resolved, profile)
     # Rendered once here, without a card, so a profile whose command will not render is refused
@@ -338,7 +341,7 @@ def _render_launch(
             workspace=_workspace(agent),
             binding=STANDING_BINDING,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any render failure is no supervised head
         raise NoSupervisedHead(
             f"the command for head profile {resolution.profile!r} will not render ({exc})"
         ) from None
@@ -478,7 +481,7 @@ def _recover_steward_dispatch_failure(
             raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=cmd.card_ref, target="done", reason=body)
         state.log_run(event, action="dispatch-recovery", result="done", reference=cmd.card_ref)
-    except Exception as recovery_error:
+    except Exception as recovery_error:  # noqa: BLE001 - a failed recovery is logged, not raised
         state.log_run(
             event,
             action="dispatch-recovery",
@@ -510,7 +513,7 @@ def _release_steward_report(
             raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=cmd.card_ref, target="done", reason=note)
         state.log_run(event, action="dispatch-release", result="done", reference=cmd.card_ref)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - a failed release is logged, not raised
         state.log_run(
             event, action="dispatch-release", result="failed", reference=cmd.card_ref, error=str(error)
         )
@@ -547,7 +550,7 @@ def _escalate_steward_preflight_failure(
         state.log_run(
             event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref, error=str(failure)
         )
-    except Exception as escalation_error:
+    except Exception as escalation_error:  # noqa: BLE001 - a failed escalation is logged, not raised
         state.log_run(
             event,
             action="dispatch-preflight",
@@ -581,7 +584,7 @@ def _release_standing_report(
             raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=reference, target="done", reason=note)
         state.log_run(event, action="owner-report-release", result="done", reference=reference)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - a failed release is logged, not raised
         state.log_run(
             event, action="owner-report-release", result="failed", reference=reference, error=str(error)
         )
@@ -626,7 +629,7 @@ class _TickReports:
         #: Set by a refused tick: it leaves every standing record and report as it found them.
         self.hold_still = False
 
-    def __enter__(self) -> _TickReports:
+    def __enter__(self) -> _TickReports:  # noqa: PYI034 - a final class; Self buys nothing here
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -707,7 +710,7 @@ class _TickReports:
                 return
             if self.state.load_head_run() is not None:
                 return
-        except Exception:
+        except Exception:  # noqa: BLE001 - an unreadable head record leaves the report alone
             return
         _release_standing_report(
             self.state,
@@ -753,6 +756,19 @@ def _local_pty_runtime() -> Any:
 #: driver makes.
 HANDOVER_INITIATOR = "triggered-agent-dispatch"
 FAILED_BRING_UP_REASON = "this tick's bring-up failed, so the head it raised is nobody's"
+IDLE_HEAD_REASON = "its turn ended and it sat idle, so this tick retires it and raises a fresh head"
+#: The `runs.jsonl` action of a tick that retired the previous tick's finished, idle head.
+SUPERVISED_IDLE_STOP = "supervised-idle-stop"
+#: How long a standing head's turn must have been over before a tick may retire it. A head whose
+#: adapter never exits on its own (Codex's TUI) otherwise holds its role off duty for good: every
+#: later tick is a busy-skip over a head that has nothing left to do. The grace keeps a head that
+#: only paused inside its turn from being taken for finished.
+IDLE_HEAD_GRACE_SECONDS = 600.0
+#: How long the tick waits for a retired head's supervisor to release its socket.
+IDLE_STOP_SUPERVISOR_EXIT_SECONDS = 10.0
+#: The launch identity a supervised head writes beside its socket in its run directory (the
+#: substrate's `PID_FILE_NAME`, which this driver may not import).
+HEAD_PID_FILE_NAME = "head.pid"
 
 
 @dataclass(frozen=True)
@@ -788,6 +804,77 @@ def _fail_closed(
     return REFUSED_EXIT
 
 
+def _retire_idle_head(
+    agent: str, runtime: Any, prior: dict | None, state: AgentState, event: str, reports: _TickReports
+) -> None:
+    """End the head an earlier tick raised once its turn is over and it has sat idle since.
+
+    A tick is one head raised with its own skill, and the run is meant to end when that head exits.
+    An adapter whose head does not exit after its turn (Codex's TUI keeps its composer open) left
+    the head up with nothing to do, and the bring-up below refused every later tick over it
+    (`supervised-busy-skip head_already_up`) until someone stopped it by hand.
+
+    Only a head the supervisor positively reads as quiet is ended: alive, no turn open, no delivery
+    in flight, and nothing new in its journal for `IDLE_HEAD_GRACE_SECONDS`. The stop is the
+    runtime's own `stop_if_quiescent`, so a turn that starts between this look and the stop refuses
+    it. Anything else — a working head, an unreadable record, a refused stop — changes nothing,
+    and the bring-up decides as before. A steward report the retired head was writing is closed,
+    because no head is writing it any more.
+    """
+    if not prior:
+        return
+    try:
+        run = HeadRun.from_json(prior)
+        seen = runtime.observe(run)
+    except Exception as exc:  # noqa: BLE001 - an unreadable head is the bring-up's to refuse
+        print(f"dispatch[{agent}]: could not observe the recorded head ({type(exc).__name__}: {exc})")
+        return
+    if not seen.ok or seen.busy is not False or not seen.last_output_at:
+        return
+    idle = datetime.now(UTC).timestamp() - float(seen.last_output_at)
+    if idle < IDLE_HEAD_GRACE_SECONDS:
+        return
+    stopped = runtime.stop_if_quiescent(
+        run,
+        StopInitiator(actor=HANDOVER_INITIATOR, reason=IDLE_HEAD_REASON),
+        expected_activity_epoch=seen.epoch,
+        head_process_alive=True,
+    )
+    if not stopped.ok:
+        print(
+            f"dispatch[{agent}]: the idle head {run.run_id} was not stopped ({stopped.reason or stopped.status})"
+        )
+        return
+    # The stop left this runtime holding the head's admission closed; the bring-up that follows
+    # reuses the run id, exactly as it does over a head that ended on its own.
+    runtime.forget_head(run.run_id)
+    # The stop confirms the head's exit; its supervisor unlinks the socket a moment later. The
+    # bring-up reuses the run directory, so it waits for that rather than probing the old socket.
+    socket = Path(run.handle) if run.handle else None
+    deadline = time.monotonic() + IDLE_STOP_SUPERVISOR_EXIT_SECONDS
+    while socket is not None and socket.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    # The bring-up reuses this run id and directory, and its launch is confirmed by a launch identity
+    # naming that run id: the dead head's record would confirm it before the new head wrote its own.
+    # The stop has confirmed that process gone, so its identity records are debris.
+    for record in (
+        socket.parent / HEAD_PID_FILE_NAME if socket is not None else None,
+        Path(run.pid_file) if run.pid_file else None,
+    ):
+        if record is not None:
+            for path in (record, Path(f"{record}.leaf")):
+                path.unlink(missing_ok=True)
+    state.log_run(event, action=SUPERVISED_IDLE_STOP, reference=run.run_id, idle_seconds=int(idle))
+    print(f"dispatch[{agent}]: retired the idle head {run.run_id} after {int(idle)}s")
+    _release_standing_report(
+        state,
+        event,
+        "the head that was writing this report finished its turn and was retired idle, "
+        "so the report was closed by the tick that raised its successor.",
+        report_board=reports.report_board,
+    )
+
+
 def _supervised_bring_up(
     agent: str,
     ws: str,
@@ -815,6 +902,7 @@ def _supervised_bring_up(
         raise
     runtime = _local_pty_runtime()
     prior = state.load_head_run()
+    _retire_idle_head(agent, runtime, prior, state, event, reports)
     spec = HeadSpec.from_profile(str(cmd.profile or agent), dict(cmd.head_profile or {}))
     # A standing duty, not a card. The run id and the task binding have to be the same facts every
     # tick, because they are what the head's own launch-identity record is compared against when a
