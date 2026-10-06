@@ -317,7 +317,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
                 mock.patch.object(steward_signals, "resolve_reader", return_value=EMPTY_STEWARD_READER)
             )
             stack.enter_context(
-                mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
+                mock.patch.object(steward_signals, "_workspaces_root", return_value=self.data_dir / "no-workspaces")
             )
             stack.enter_context(
                 mock.patch.dict(
@@ -494,7 +494,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
                 mock.patch.object(steward_signals, "resolve_reader", return_value=EMPTY_STEWARD_READER)
             )
             stack.enter_context(
-                mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
+                mock.patch.object(steward_signals, "_workspaces_root", return_value=self.data_dir / "no-workspaces")
             )
             stack.enter_context(
                 mock.patch.dict(
@@ -1052,7 +1052,7 @@ class StewardResourceSignalTests(unittest.TestCase):
             "TA_PIPELINE_STATE_DIR",
         ):
             os.environ.pop(name, None)
-        workspaces = mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.root / "workspaces")
+        workspaces = mock.patch.object(steward_signals, "_workspaces_root", return_value=self.root / "workspaces")
         workspaces.start()
         self.addCleanup(workspaces.stop)
 
@@ -1526,7 +1526,9 @@ class StewardPipelineSignalTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(
-                    steward_signals, "WORKSPACES_ROOT", Path(self.tmpdir.name) / "no-workspaces"
+                    steward_signals,
+                    "_workspaces_root",
+                    return_value=Path(self.tmpdir.name) / "no-workspaces",
                 )
             )
             stack.enter_context(
