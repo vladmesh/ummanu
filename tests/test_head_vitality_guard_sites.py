@@ -18,12 +18,8 @@ Two questions, both answered structurally so they stay true when the code moves:
 
 from __future__ import annotations
 
-import os
-import tempfile
 import unittest
 from unittest import mock
-
-os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture
 from ummanu.dispatch import wait_vitality as wait_vitality_module

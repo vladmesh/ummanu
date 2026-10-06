@@ -28,7 +28,9 @@ manifest invalid before any suite starts. When changing the runner or manifest, 
 
 A missing required dependency is an infrastructure failure, never a green skip. The one exception:
 the daemon suites of `tests.test_memory_service` and `tests.test_memory_health` skip when
-`ummanu[memory]` is not installed, so CI installs it for every suite run.
+`ummanu[memory]` is not installed. CI installs memory extras for the suites that can reach those
+proofs. `unit` installs only `.[ci,dev]`: coverage and the pinned Ruff used by lint-runner tests.
+The shared Python setup lives in `.github/actions/python-setup`.
 
 - `integration-memory` needs `ummanu[memory]`;
 - PostgreSQL tests (for example `tests.test_board_store_schema`, `tests.test_postgres_recovery`,
@@ -64,7 +66,9 @@ aggregate as `ci-coverage-baseline-<sha>` for 90 days. There is no coverage thre
 coverage collection.
 
 The `test` job is the required aggregate result and succeeds only when every applicable suite
-succeeds. Its summary lists each suite as `success`, `product_failure`, `infrastructure_failure`,
+succeeds, coverage evidence combines, and both `typecheck` and changed-file `lint` succeed.
+A failed, skipped or cancelled typecheck/lint cannot produce a green aggregate or publish a main
+coverage baseline. Its summary lists each suite as `success`, `product_failure`, `infrastructure_failure`,
 `cancelled` or `not_applicable`:
 
 - a failing test is a product failure;
@@ -78,7 +82,9 @@ succeeds. Its summary lists each suite as `success`, `product_failure`, `infrast
     python3 scripts/ci_test_shards.py --fast
 
 The one fast profile for worker feedback. It validates a fixed module list (`FAST_MODULES`) and runs
-only hermetic board and pipeline-state proofs. It is not a CI suite and does not
+only hermetic board-refusal and pipeline-state proofs. The explicit SQL board injection
+proof is `tests.test_hermetic_board_integration` in `integration-board`, outside the fast profile.
+CI executes the real fast profile in the unit job. It is not a CI suite and does not
 read `tests/ci-shards.txt` or use discovery.
 
 The child process group has a 120-second ceiling; on timeout the runner reports failure, terminates the
@@ -125,6 +131,13 @@ the production local-PTY substrate and runtime without overrides and checks the 
 deadline, grace and stop-confirmation wiring. It belongs only to `runtime-component`.
 
 ## Changed Python lint
+
+CI runs pinned Ruff 0.16.4 through `scripts/ci_lint.py`, using exact PR base/head SHAs or the push's
+before/head pair. Manual runs compare the candidate with its parent. Missing revisions or a checkout
+that differs from the candidate fail; non-deleted changed Python paths are passed explicitly, and an
+empty set succeeds without invoking Ruff. Renames and names containing spaces are supported. CI
+checks lint only; local format verification remains scoped to edited code below.
+
 
 The dispatcher-owned `.ummanu-task-env/venv` installs the candidate's `.[dev]` extra when its adapter
 declares `broad_check` without `broad_check.interpreter`, and puts its tools on worker and reviewer

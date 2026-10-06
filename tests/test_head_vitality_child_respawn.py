@@ -15,8 +15,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
-
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture
 from ummanu.runtime.head.children import read_head_children
 

@@ -105,7 +105,13 @@ def _guarded_popen(args, *positional, **keyword):
         if not (
             os.path.basename(os.fspath(command)) == "git"
             and isinstance(args, (list, tuple))
-            and any(action in args for action in ("log", "ls-files", "check-ignore"))
+            and (
+                any(action in args for action in ("log", "ls-files", "check-ignore"))
+                or (
+                    "config" in args
+                    and list(args[args.index("config") + 1:]) == ["--get", "remote.origin.url"]
+                )
+            )
         ):
             _deny("external command execution")
     return _popen(args, *positional, **keyword)

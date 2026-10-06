@@ -2,16 +2,20 @@
 
 > Отчёт только для чтения. Код, тесты, документация и конфигурация **не изменялись**; этот файл — единственное изменение ветки.
 
-## Статус на 2026-10-06 (main `2f6544ed372841ffabe455fe7db944b400d594ab`)
+## Статус на 2026-10-06 (main `c29bfed67b75482288f6b8cf3e991a69cc596e85`)
 
-После аудита в `main` влиты #669–#677. Пункты #677 сверены с кодом и регрессионными проверками; результаты CI приведены ниже. Ранее закрытые пункты были перепроверены по `8e79450` (`grep` и чтение указанного места), а не только по описанию PR. **✅** — закрыто, **◐** — закрыто частично.
+После аудита в `main` влиты #669–#678. Пункты #677/#678 сверены с кодом и регрессионными проверками; результаты CI приведены ниже. Ранее закрытые пункты были перепроверены по `8e79450` (`grep` и чтение указанного места), а не только по описанию PR. **✅** — закрыто, **◐** — закрыто частично.
 
-Исторические ссылки `file:line` относятся к `e310833`; в `runtime/`, `web/`, `webproto/` после сжатия прозы #675/#676 они пересчитаны на `8e79450` по скелету кода (AST тогда не менялся). Изменения #677 описаны отдельно; старые ссылки и размеры не выдаются за строки текущего main.
+Исторические ссылки `file:line` относятся к `e310833`; в `runtime/`, `web/`, `webproto/` после сжатия прозы #675/#676 они пересчитаны на `8e79450` по скелету кода (AST тогда не менялся). Изменения #677/#678 описаны отдельно; старые ссылки и размеры не выдаются за строки текущего main.
 
 **Закрыто (✅):**
 
 | ID | PR | Что сделано |
 |---|---|---|
+| BUG-03 | [#678](https://github.com/vladmesh/ummanu/pull/678) | `--fast` выполняет шесть настоящих проверок под network/subprocess guard. Offline board-refusal перенесён в unit; SQL injection proof сохранён в отдельном integration-board модуле. Разрешён только точный дополнительный read `git config --get remote.origin.url`; config-write по-прежнему запрещён |
+| BUG-23 (тесты) | #678 | Suite-owned HOME, отсутствие BASH_ENV/ENV и настоящий Bash через test-owned `--noprofile --norc` wrapper изолируют startup stdout/exit status. Продуктовый renderer не изменён; исторический результат §12.9 сохранён |
+| CI-01 | #674, #678 | Changed-file Ruff 0.16.4 и typecheck входят в агрегат `test` и гейт публикации baseline; fail/cancel/skip не дают success. Unit ставит `.[ci,dev]` без memory-extra; shared composite setup и `contents: read`; cache/concurrency сохранены. Branch protection не добавлялась |
+| DOC-14 | #672, #674, #678 | Удалены устаревшие счётчики из `broad.py` и обещание expectedFailure из legacy vitality docstring; документация отражает новый fast/SQL разрез и реальные CI-гейты |
 | BUG-01 | [#677](https://github.com/vladmesh/ummanu/pull/677) | `_BodyRefused` закрывает соединение при 400/413; неподдерживаемый Transfer-Encoding, неоднозначный/невалидный Content-Length не допускают повторного разбора остатка тела. Нормальный keep-alive сохранён |
 | BUG-07 | #677 | `_agents`/`_attempt` локализуют отказ чтения и разбора записей диспетчера. PostgreSQL-backed регрессия проверяет HTTP 200 у `/`, `/projects`, `/projects/ummanu`, `/api/system`; у system agents unavailable, независимые projects/tasks available |
 | BUG-20 | #677 | Удалены Google Fonts stylesheet/preconnect; используются уже существующие системные fallback-шрифты. CSP не расширена |
@@ -28,14 +32,15 @@
 
 | ID | PR | Сделано | Осталось |
 |---|---|---|---|
+| BUG-22 | #678 | Module-level setdefault/mkdtemp в пяти vitality-модулях удалены; body-dir задан до импортов и fixtures восстанавливают overrides. Host-Claude canary заменён fixed examples, OOM-attribution и doctor exit assertions восстановлены | Root-only CI coverage и timing/flakiness-гипотезы остаются открыты; не выдаются за закрытые |
+| ARCH-06 | #678 | `combine-as-imports = true`; импортные блоки затронутых файлов выровнены pinned Ruff | Оценочные 400–500 строк импортов во всём dispatch не удалялись; консолидация остальных paths идёт вместе с их будущими изменениями |
+| TEST-02 / TDUP-03/04 / TORG-01 | #678 | CI fixture переиспользует `tests/support/git.py`; instance/shell helpers вынесены в `tests/support/`; один явный список suites сохранён | Массовая миграция helpers, дубли fixtures и разбиение больших тестов перенесены в слот 16. TDEAD-01–06 не удалялись и не считаются закрытыми |
 | DUP-W2 | #677 | Два `_source` в pause/history заменены одним `section.read_source`; этим же helper читаются dispatcher records и sprint production state | Дублирование `_installation()` в pause/history пока остаётся; пункт не закрыт целиком |
 | ARCH-01 | #675, #676 | Сжаты `runtime/` с `head/` (−138 тыс. символов прозы) и `web/` с `webproto/` (−211 тыс.). Проза `src` (`.py`): 1,99 млн → 1,64 млн символов, 26,7 % → 23,3 % | `dispatch` (крупнейшая зона; vitality-кластер теперь не блокирован, DOC-09 закрыт), `board`, ядро (`tasks`/`sprints`), установка, `po`, `automations`, `projects`, тесты (TDUP-05). Остаточный потенциал ≈−250…350 тыс. символов (**О**) |
-| CI-01 | #674 | `cache: pip` во всех трёх `setup-python`; `concurrency` (отмена только для `pull_request`) | ruff в CI, `permissions`, `.[memory,ci]` для `unit`, composite action, `typecheck` в агрегате |
 | DEAD-19 | #673 | Удалены `ProductIssueRecords.key_of/metadata/comments` и `SqlSprintRecords.comments` | `SqlBoardHost._sprint_data` **жив** (`sql_host.py:813`): аудит ошибся. Остаются `SqlAuditError` (в `__all__`), `SqlTaskAudit.refusals()` (нужен тесту), `ProductIssueRecords.row` |
 | DEAD-23 | #673 | Удалены `_feed`, `_project_table`, `_task_table`, `_start_form`, `_review_form`, `_DASHBOARD_SCRIPT` | review-блок `_TASK_SCRIPT`, ветка `compact`, CSS-классы, публичные `FORM_TYPE`/`FEED_LIMIT`/`DEFAULT_SITES`/`RUN_ROLES`/`CLOSE_STATES`/`ProductRun.at_phase`, `_BOARD_SETTLED_STATES` |
 | DOC-02 | #672 | Везде `pip install -e`; README и OPERATIONS говорят, что юниты требуют `PRODUCT_ROOT/.venv` | Процедуры создания `.venv` нет: это решение по BUG-02 |
 | DOC-10 | #672 | Ревизии `0001`–`0030`, `wait` в CHECK, 14 owner event kinds, `body` с `[marker]` | DDL `po_*`/`owner_events`/`origin_returns`; `e2e_refusal`; `committed`; триггер 0028; комментарии в коде (`schema.py:20` «eight jsonb», `sql_cards.py:5` «eleven-method», `backend.py:175` `task_number`) |
-| DOC-14 | #672, #674 | Шарды в `TESTING.md`, исключение green-skip, умолчания в `tests/README.md`; Orca убрана из `CONTRIBUTING.md` и `broad.py` | Счётчики «1440 / 3782» в `tests/broad.py:7,11`; обещание `expectedFailure` в `test_head_vitality_legacy_path.py:8` |
 | DOC-15 | #672, #674 | `pyproject` description, `SECURITY.md`, `packaging/systemd/README.md`, docstring `runtime/head/local_pty/__init__.py` | `examples/instance/instance.yaml:20` (`ummanu-pipeline.service`), `heads.toml:9,20-21` (`render_<adapter>`, `worker.py`), `ROADMAP.md` (**Г**) |
 | CON-13 | #675 (попутно) | docstring `next_event` теперь честно говорит, что `None` — и тишина, и конец потока | Неиспользуемые опкоды и события; `SUN_PATH_MAX` 100 против 107; комментарий «under 256 bytes» всё ещё ложен (`journal.py:22-23`) |
 | CON-14 | #675 (попутно) | Из docstring `agent_prompt_transport` убрано ложное «Every prompt is checked here» | local-pty по-прежнему доставляет prompt без проверки. Противоречия больше нет, но решение «проверять или нет» осталось |
@@ -47,23 +52,31 @@
 **Что осталось, по убыванию ценности.**
 1. P0/P1-дефекты, которых не коснулся ни один PR:
    - BUG-02 вместе с остатком DOC-02 (`.venv`);
-   - BUG-03 (`--fast`);
    - DOC-06 (подтверждён на проде, §12.1);
    - BUG-10 (подтверждён, §12.5).
-2. Следующий связанный кластер — CI и герметичность: BUG-03, BUG-22/23, остаток CI-01, ARCH-06, общая тестовая инфраструктура. Подробные границы всех 17 слотов — §10.
+2. Следующий связанный кластер — свежая установка и конфигурация данных (слот 3): BUG-02/06/08/09/13/21, CON-01/09/16, DOC-02 и примеры DOC-15. CI-кластер завершён в своей согласованной границе; его тестовые хвосты сохранены в слоте 16, остаток импортов ARCH-06 — в соответствующих подсистемах. Подробные границы — §10.
 3. Разбиения DEC-01/02/05/07. После #675/#676 DEC-05 и DEC-07 стали дешевле: `local_pty_head.py` уменьшился со 180 до 124 тыс. символов, `pages.py` — с 250 до 224 тыс.
 4. Остаток ARCH-01, начиная с `dispatch`.
 5. TEST-01, DOC-01.
 6. INEF-01/07/13 по результатам §12.17.
 7. Решения владельца по выводу из эксплуатации: DEAD-T, DEAD-R, DEAD-H1 (последние два подтверждены на проде, §12) и DEAD-22.
-8. Мелочи: остатки DOC-10/14/15, DEAD-19/23.
+8. Мелочи: остатки DOC-10/15, DEAD-19/23.
 
 **Проверки #677 и ограничения среды.**
 - Candidate `0e7906e9db380594e7d973c0d9ced53ed223c896`: [CI](https://github.com/vladmesh/ummanu/actions/runs/37452777211), **success**: typecheck, все 9 suite jobs и агрегат `test` зелёные.
 - После мержа: main `2f6544ed372841ffabe455fe7db944b400d594ab`, [CI](https://github.com/vladmesh/ummanu/actions/runs/37453841512), **success**: typecheck, все 9 suite jobs и агрегат `test` зелёные.
 - Локально прошли 146 focused tests, Ruff 0.16.4 на изменённых Python paths и `git diff --check`; манифест шардов валиден. Новые HTTP-регрессии на исходном main падали.
 - Локальный broad-прогон: 3 161 тест, 40 failures, 171 errors, 7 skips. Среди просмотренных причин — ограничения Unix sockets, недоступные PID в `/proc`, отсутствие native Docker. Это **не** зелёный результат и **не** доказательство отсутствия всех иных ошибок; итоговый candidate проверяется GitHub CI в поддерживаемой среде.
-- BUG-03 перепроверен: `--fast` по-прежнему вызывает запрещённый Docker subprocess. Пункт открыт и включён в следующий PR. Проверка установленных role-skills локально ограничена отсутствием live layout; DOC-06 не закрыт.
+- На базе #677 BUG-03 воспроизводился через запрещённый Docker subprocess. #678 устранил его и дополнительный непривилегированный read-only Git отказ; реальный `--fast` проходит локально и в exact-SHA CI. Проверка установленных role-skills локально ограничена отсутствием live layout; DOC-06 не закрыт.
+
+**Проверки #678.**
+- Candidate `799ae20fddae2d8897256f3cb7d9f4ae60db5abb`, tree `86f295238b5e6d36c885e269bdc3ef2ee5be9200`: [CI](https://github.com/vladmesh/ummanu/actions/runs/37458524815), **success**: lint, typecheck, все 9 suites и агрегат `test`.
+- После мержа: main `c29bfed67b75482288f6b8cf3e991a69cc596e85`, [CI](https://github.com/vladmesh/ummanu/actions/runs/37459520442), **success**.
+- Локально: 93 focused tests на первоначальном дереве; после точной guard-поправки 47 проверок CI/lint/shell прошли, включая config-read/config-write регрессию. После doctor-поправки две связанные проверки прошли: здоровый fixture с отключённым проектом возвращает 0, а неполный host — 1. Отдельный `--fast`: 6 tests, success. Mypy: 65 source files; Ruff 0.16.4: все 19 изменённых Python paths; manifest и diff-check прошли.
+- Первый CI нашёл дополнительный отказ guard: non-root checkpoint делает `git config --get remote.origin.url`, тогда как root-ветвь локального временного layout до этого не доходит. Принято точное read-only исключение; Docker/network и config-write запреты не сняты.
+- Второй CI выявил ошибочное ожидание новой doctor exit assertion: отключённый example project не обязан иметь checkout. Ожидание и старый комментарий исправлены; здоровый unit fixture требует exit 0, тест отсутствующих host resources отдельно требует exit 1.
+- Broad на первоначальном дереве: 3 171 тест, 39 failures, 156 errors, 7 skips, 550 с. Среди просмотренных причин — отсутствие Docker/ensurepip, запрет Unix sockets, PID namespace `/proc` и root-only проверки; это не green evidence и не доказательство отсутствия иных дефектов. После guard/doctor-поправок broad не повторялся: эти сценарии проверены focused и полным exact-SHA CI. Встроенный Python 3.12 не экспортирует fcntl seal constants; focused/broad проверялись системным Python 3.12.3. Полный поддерживаемый контракт доказывает exact-SHA CI.
+- 25 файлов, +492/−195 строки. Продуктовые shell renderers и runtime поведение не менялись. Два исходных board сценария сохранены; AST-инвентаризация: 7 365 → 7 375 определённых test methods (+10). Кроме переноса SQL proof и замены host canary на fixed pairs прежние сценарии не удалялись; новые модули явно внесены в manifest.
 
 ## 1. Ревизия, резюме и главные находки
 
@@ -144,7 +157,7 @@
    |---|---|---|
    | BUG-01 | Request smuggling через keep-alive после ответа 413 в `web/server.py` | **Ф**, воспроизведено, **✔** |
    | BUG-02 | Невыполнимые инструкции свежей установки (нет `.venv`, PEP 668) | **Ф** |
-   | BUG-03 | Профиль `--fast` падает на текущем HEAD | **Ф ✔**, воспроизведено |
+   | BUG-03 ✅ #678 | На исходном HEAD `--fast` падал | Историческое воспроизведение; закрыто actual execution |
    | BUG-04…08 | Несколько крэшей CLI и падение дашборда целиком при ошибке одного источника | **Ф** |
    | BUG-09 | Расхождение двух парсеров frontmatter памяти | **Ф ✔** |
    | BUG-10 | Пустой обход orphan-workspace у steward | **Ф ✔** |
@@ -168,7 +181,7 @@
 | 7 | DEC-07 | P1 | Вынести CSS/JS (≈58 тыс. символов, 23 %) из `web/pages.py` в package-data и разбить страницы на модули | §5.7 |
 | 8 | TEST-01 | P1 | Разделить `test_dispatcher.py`; снять Docker-гейт с 12 классов без Postgres; урезать фикстуру на 1 440 строк до 40 | §5.9, §6.4 |
 | 9 | DOC-01 | P1 | Разбить `PROTOCOLS.md` (365 тыс.) и `OPERATIONS.md` (220 тыс.) на тематические файлы; удалить закрытую историю (≈90–100 тыс.) | §8 |
-| 10 | CI-01 ◐ | P1 | ◐ #674: pip-cache и `concurrency` есть. Добавить в CI ruff (check по изменённым файлам), pip-cache, `concurrency`, `permissions` | §8.4 |
+| 10 ✅ | CI-01 | P1 | #674/#678: cache/concurrency, changed-file Ruff, permissions, общий setup, лёгкий unit и typecheck/lint в агрегате | §8.4; evidence выше |
 | 11 | DEAD-T | P2 | Вывести из эксплуатации одноразовую миграцию `transition/` и скрипты переименования (≈159 тыс. символов в src+scripts и 83 тыс. в тестах). Нужно решение владельца | §6.2 |
 | 12 | CON-01 | P2 | Две вымышленные/вымершие части схемы инстанса: блок `heads` (ломает `apply_host`) и `orca_repos` | §7 |
 | 13 | CON-02 | P2 | Ответ `product_runs` не проходит собственную схему `web-run`; у ряда JSON-маршрутов схемы нет вовсе | §7 |
@@ -334,7 +347,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | ARCH-03 | P2 | весь `src/` | 336 функционально-локальных импортов. `task_restore.py`: 23 из 24 не нужны — `import ummanu.tasks` не загружает `task_restore` (проверено по `sys.modules`). В `po_cards.py:158-236` 6 локальных импортов модулей, уже импортированных в шапке (`:90-92`). Повторные локальные импорты в `host.py:1827,2422,3027,3845`, `local_pty_head.py:3320,3372` (на `8e79450`: `:2638,2690`), `po/service.py:901` | Шум и ложные сигналы «здесь цикл» | S (каждый проверять тестом импорта) | S | Ф |
 | ARCH-04 | P2 | `board` | `board` импортирует `tasks`/`sprints`/`product_issues` (`sql_host.py:45-55`; `done_retention.py:9`, `steward_reports.py:8`, `reference_repair.py:15`, `normalized_checkpoint.py:10`). Ещё 14 локальных `from ummanu.tasks import TaskError` | Инверсия слоёв, циклы | S: перенести `TaskError` (`tasks.py:159`, 8 строк) в `board/errors.py` и реэкспортировать | S | Ф |
 | ARCH-05 | P2 | `board` | Модули не в своём пакете: `owner_event_commands.py` (CLI), `done_retention.py`, `steward_reports.py` (их импортирует только `automations/composition.py`), `import_order.py` (импортирует только `task_restore.py`) | ≈14 тыс. символов лишнего контекста `board` | S | S | Ф |
-| ARCH-06 | P2 | `pyproject.toml` / ruff | Ruff isort без `combine-as-imports`: каждый `as`-импорт отдельным оператором. `host.py` — 123 строки, `runtime.py` — 107, `worker_launch.py` — 57; в зоне dispatch B 655 строк импортов | ≈−400…500 строк, чисто механически | нулевой | S | Ф/О |
+| ARCH-06 ◐ #678 (config/затронутые paths; без mass import rewrite) | P2 | `pyproject.toml` / ruff | Ruff isort без `combine-as-imports`: каждый `as`-импорт отдельным оператором. `host.py` — 123 строки, `runtime.py` — 107, `worker_launch.py` — 57; в зоне dispatch B 655 строк импортов | ≈−400…500 строк, чисто механически | нулевой | S | Ф/О |
 | ARCH-07 | P2 | `dispatch/runtime.py`, `host.py` | 31 «compatibility re-export» (`runtime.py:20-22,41-64,155-165`; `host.py:166-167`). AST-скан всех импортов и атрибутных обращений в src/tests/scripts не нашёл ни одного потребителя | ≈−45 строк, меньше ложных путей | нулевой | S | Ф |
 | ARCH-08 | P2 | dispatch | 13 импортов приватных имён `dispatch/gate.py` из e2e, e2e_stage, e2e_after_merge, post_merge, wait_cards, gate_lifecycle (`_rollup`, `_backend_call`, `_failed_log`, `_gh_api`, `_HTTP_STATUS_RE`, `_LogFragment`, `_fingerprint`) | Фактически публичный API GitHub CI спрятан в `gate.py` | S | M | Ф |
 | ARCH-09 | P2 | установка | Унаследованный режим «live root — git work tree»: неиспользуемые методы `CheckpointWriter` (164 строки), клонирование в `installation.py:294-467`, `state_repo.PACKING_CONTROLS`, `upgrade.step_instance_packing`. `ARCHITECTURE.md:108` такой режим запрещает, но `RECOVERY.md:714-716` обещает восстановление с legacy-tip | ≈−450 строк | M–H (нужно решение владельца) | M | Ф |
@@ -346,7 +359,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | ARCH-15 | P2 | dispatch | 17 «утиных» проб `getattr(runtime.host, "...", None)` под тестовые фейки (`observer.py:1640,1859,2059,2778`, `worker_launch.py:284`, `host.py:439,1487,2210,2782` и др.). У реального host эти атрибуты есть всегда | Мёртвые fallback-ветки, неуверенность при чтении | M (фейки придётся дополнить) | M | Ф/Г |
 | ARCH-16 ✅ | P2 | web | ✅ #677: единая политика source-read spans; ниже исходная находка. Два противоположных правила перехвата ошибок источников: фиксированный кортеж `SOURCE_FAILURES` (`reads`, `sprint_reads`) и «span ловит всё» (`pause_reads`, `command_reads`). Следствие — BUG-07 | Нестабильная деградация дашборда | S | S | Ф |
 | ARCH-17 | P3 | `po/service.py` | `PoService.pump` держит `_lock` сервиса и `_lock` runner во время `spawn_head` (до 20 с + systemd-run), а `submit()` вызывает `pump()` прямо в своём потоке | Сериализация всех PO-операций | M | M | Ф/Г (влияние) |
-| CI-01 ◐ | P1 | `.github/workflows/ci.yml` | ◐ #674 добавил `cache: pip` и `concurrency`; остальное открыто. Нет ни одного шага ruff. ~~Нет `cache: pip`.~~ ~~Нет `concurrency`~~ и нет `permissions`. 9 suite-джобов ставят `.[memory,ci]` (fastembed/onnxruntime) даже для `unit` | Нет гейта линтера; лишние минуты CI | S | S | Ф |
+| CI-01 ✅ #678 | P1 | `.github/workflows/ci.yml` | Исходные проблемы закрыты #674/#678: pinned Ruff по изменённым paths, cache/concurrency, permissions, shared setup; unit без memory-extra, typecheck/lint в общем гейте | Исходный эффект: отсутствовал lint gate; лишние зависимости CI | S | S | Ф |
 | TEST-01 | P1 | tests | `test_dispatcher.py`: 725 тыс. символов; `setUpModule:195` требует Docker для всех 27 классов, хотя 12 из них Postgres не используют (например, `DispatcherGateTests` — 86 тестов, только git) | Самый большой файл ≈181 тыс. токенов; лишний Docker-шард | S–M | M | Ф |
 | TEST-02 | P2 | tests | 38 копий `git(cwd,*args)` при готовом `tests/support/git.py:7`. 8 копий `_dead_pid` с двумя стратегиями. 7 копий `_alive`, 5 — `_kill`. 20 литералов `"version: 1\nname: test\n"`. 8 копий setUp диспетчера | ≈1 400 строк повторов | S | M | Ф |
 | DOC-01 | P1 | docs | `PROTOCOLS.md` 365 тыс., `OPERATIONS.md` 220 тыс. — монолиты. ≈90–100 тыс. символов закрытой истории. Разделы дописываются в конец файла вне структуры (`PROTOCOLS.md:4710-4964`, `BOARD_STORE.md:1297`, `OPERATIONS.md:3199`) | −30 % объёма docs; −80…95 % контекста на один вопрос | M (37 тестов читают текст docs; рантайм цитирует заголовки) | L | Ф/О |
@@ -876,7 +889,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | DOC-11 ✅ #672 | `OPERATIONS.md:3087-3107` | Таблица шагов upgrade — 19 шагов, в коде 26 (нет `runtime-owner`, `po-workspace`, `pipeline-state`, `po-workspace-owner`, `po-token`, `web-front-config`, `po`). `:2420` документирует метку «reset already passed», которую тест `test_web_status_bar.py:863` запрещает | P3 |
 | DOC-12 | `packaging/interactive-workspace/AGENTS.md` | Инструкции полномочий PO («The PO can supply… `--role po`») в контексте interactive-головы | P2 |
 | DOC-13 ✅ #672 | `ARCHITECTURE.md` | `:18` в списке пакетов нет `transition` (**✔**). `:37` пробы реестра включают `openrouter`, а `heads.toml` поставляет только `claude-sub`/`openai-sub`. `:345` список страниц без `/po`, `/doctor`, `/owner-events`. `:375` и `PROTOCOLS.md:4622` «`basicauth *` covers every path», а Caddyfile содержит cookie-bearer bypass плюс `handle { route { basicauth } }` (`caddyfile.py:116-136`) | P3 |
-| DOC-14 ◐ #672, #674: открыты счётчики в `broad.py:7,11` и `expectedFailure` в `test_head_vitality_legacy_path.py:8` | `TESTING.md`, `tests/README.md`, `tests/broad.py`, `CONTRIBUTING.md` | `TESTING.md:168` относит `test_web_transport`/`read_protocol`/`run_protocol` к `unit`, а в манифесте они `integration-board`. `:117` про PTY в `runtime-component` противоречит `:186`. `:28` «never a green skip», но `test_memory_service.py:17,234` и `test_memory_health.py:245` пропускают зелёным. `broad.py:9-10` пишет «1440 tests / 3782 tests», а статически сейчас 3 131 и 7 335; локальный прогон дал 3 136 (**✔**). `broad.py:28` и `CONTRIBUTING.md:27` упоминают Orca. `tests/README.md` не перечисляет `TMPDIR`-guard, `TA_CODEX_HOME`, `GIT_CONFIG_*`. `test_head_vitality_legacy_path.py:8` обещает `expectedFailure`, которого нет | P3 |
+| DOC-14 ✅ #672/#674/#678 (ниже исходные доказательства) | `TESTING.md`, `tests/README.md`, `tests/broad.py`, `CONTRIBUTING.md` | `TESTING.md:168` относит `test_web_transport`/`read_protocol`/`run_protocol` к `unit`, а в манифесте они `integration-board`. `:117` про PTY в `runtime-component` противоречит `:186`. `:28` «never a green skip», но `test_memory_service.py:17,234` и `test_memory_health.py:245` пропускают зелёным. `broad.py:9-10` пишет «1440 tests / 3782 tests», а статически сейчас 3 131 и 7 335; локальный прогон дал 3 136 (**✔**). `broad.py:28` и `CONTRIBUTING.md:27` упоминают Orca. `tests/README.md` не перечисляет `TMPDIR`-guard, `TA_CODEX_HOME`, `GIT_CONFIG_*`. `test_head_vitality_legacy_path.py:8` обещает `expectedFailure`, которого нет | P3 |
 | DOC-15 ◐ #672, #674: открыты `instance.yaml:20`, `heads.toml:9,20-21`, `ROADMAP.md` (**Г**) | Мелкое | `pyproject.toml:141` «Portable ummanu appliance CLI skeleton.»; `SECURITY.md:30` («previously read runtime.env», «gitignored» — экспорт теперь по allowlist, `RECOVERY.md:389-399`); `examples/instance/instance.yaml:20` ссылается на несуществующий `ummanu-pipeline.service`; `packaging/systemd/README.md:3` без `ummanu-doctor.*`; `ROADMAP.md:10-16` числит в остатке, по-видимому, уже поставленные пункты (**Г**); `heads.toml:9-10,19-21` упоминает несуществующие `render_<adapter>` и `worker.py`; `head/local_pty/__init__.py:1-15` «no HeadRuntime here» | P3 |
 
 ### 8.3 План сжатия документации
@@ -899,13 +912,13 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - **package-data** полон: JSON-схемы, `script.py.mako`, `heads.toml`, `docker-bin/docker`, 4 `automation.toml` (**Ф**).
 - **mypy**: 65 файлов в списке, все существуют, но список ручной.
 - **Зависимости:** ~~`referencing` импортируется напрямую (`config.py`), но объявлен только транзитивно через `jsonschema>=4.18`~~ (✅ #674: `referencing>=0.28.4`); `pyte` (в скрипте) не объявлен.
-- **CI-01** ◐, подробно:
+- **CI-01** ✅ #674/#678: pinned Ruff проверяет exact-SHA изменённые paths; lint/typecheck входят в агрегат, unit без memory-extra, setup общий, permissions/cache/concurrency заданы. Ниже исходные и промежуточные доказательства:
   - ruff нет в CI: 461 замечание, 344 файла не отформатированы (**✔**);
   - ~~нет `cache: pip`~~ ✅ #674;
   - ~~нет `concurrency`~~ ✅ #674 и нет `permissions`;
   - агрегирующий `test` ставит весь пакет `.[ci]` только ради `scripts/ci_test_shards.py`;
-  - `typecheck` не входит в агрегат `test`. Обязателен ли он в branch protection, из репозитория проверить нельзя;
-  - checkout, setup-python и pip повторены 3 раза; composite action уберёт ≈25 строк;
+  - на исходном HEAD `typecheck` не входил в агрегат; #678 включает его вместе с lint. Защиты main по замеру §12.15 нет; этот PR её не добавляет;
+  - повторный setup-python/pip заменён composite action #678; checkout остаётся отдельным шагом каждого job;
   - `e2e-synthetic.yml` назван временным (sprint:1469).
 - **`scripts/ummanu-agent-gate.sh`** на каждый пропущенный тик запускает `dispatch --cleanup-only`, который его же комментарий называет «no-op exit 0 for every agent»: лишний процесс Python на каждый тихий тик.
 
@@ -932,7 +945,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - `_snapshot_install` (`upgrade.py:368`) считает не-editable установку дрейфом, а `OPERATIONS`/`RECOVERY` предлагают именно её.
 - На Ubuntu 24.04, единственной поддерживаемой ОС, системный `pip install` отвергается (PEP 668).
 
-**BUG-03 — P1. Профиль `--fast` не проходит на HEAD.**
+**BUG-03 — P1. ✅ #678: профиль `--fast` выполняется; ниже исходное воспроизведение.**
 - Метка: Ф ✔, воспроизведено оркестратором.
 - `FAST_MODULES` (`scripts/ci_test_shards.py:36`) включает `tests.test_hermetic_board`. Его тест `test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape` (`:59`) идёт через `sql_backend_fixtures.PostgresBoard.shared()` → `docker` (`:44`).
 - Guard профиля запрещает внешние процессы, поэтому результат `RuntimeError: fast test profile forbids external command execution`, `FAILED (errors=1)`, `EXIT=1`.
@@ -1044,7 +1057,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - `_derive_key` берёт `n/r/p/length` scrypt из экспортного файла без ограничений.
 - `_write_key_file:336` использует фиксированное временное имя без `O_EXCL`/`O_NOFOLLOW` (под lock, риск низкий).
 
-**BUG-22 — P3 (тесты).**
+**BUG-22 — P3 (тесты). ◐ #678: исправлены assertions, host catalogue и module env; root-only/timing остаток открыт. Ниже исходные доказательства.**
 - `test_head_memory.py:361-368`: счётчики `before`/`child_only` строятся и не используются; сценарий из имени теста не проверяется (Ф).
 - `test_status.py:637`: код выхода `doctor` захвачен, но не проверяется (Ф).
 - `test_dispatcher_tui.py:463` читает `~/.claude/projects` хоста, в CI всегда пропускается и нарушает контракт `tests/README.md:3-4` (Ф).
@@ -1052,7 +1065,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Стенные часы в утверждениях: `test_ci_shards.py:338`, `test_doctor_record.py:341`, `sleep(0.5)` в `test_local_pty_dispatcher_launch.py:188` (Г, флейки).
 - Тесты только для root (`test_github_credential.py:477`, `test_installation.py:201,1565`, `test_memory_health.py:185`) в GitHub CI не выполняются (Ф по конфигурации CI).
 
-**BUG-23 — P3 (герметичность). Тесты зависят от login-профиля хоста.**
+**BUG-23 — P3 (герметичность). ✅ #678 для тестов: suite-owned home/startup fixture; ниже исходные наблюдения.**
 - Метка: Ф ✔, наблюдалось.
 - Локальный `python -m tests.broad`: 3 136 тестов, 55 failures, 2 errors.
 - Не меньше 44 сообщений об ошибке — лишняя строка `nvm` в захваченном stdout, например `'nvm\nnative stdout\n' != 'native stdout\n'`. Источник: `~/.bashrc` контейнера, который подтягивается через `bash -l`/`-lc` (`runtime/role_env.py:507` (на `8e79450`: `:469`), `broad_check.py:287,301`, `dispatch/gate.py:400`, `dispatch/host.py:4834`).
@@ -1103,7 +1116,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 начиная с web-блока #677. Ранее влитые #669–#676 и открытый PR с этим отчётом #668 в этот бюджет
 не входят. Ни один частично закрытый пункт не считается завершённым по названию PR.
 
-Ниже — 17 логических слотов; компактные соседние шаги можно объединить до 15–16 только при общей
+Выполнено 2 слота (#677/#678), остаётся 15. Ниже — 17 логических слотов; компактные соседние шаги можно объединить до 15–16 только при общей
 границе поведения. Малые удаления, импорты, проза и документальные хвосты закрываются вместе со своей
 подсистемой, а не отдельными PR на каждый ID. Оценка числа PR не разрешает смешивать независимые
 переработки ради арифметики: если характеризационные проверки покажут, что разрез слишком велик,
@@ -1112,7 +1125,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | № | Кластер | Пункты и граница | Проверка / зависимость |
 |---|---|---|---|
 | 1 ✅ | Надёжность web, #677 | BUG-01/07/20, ARCH-16; **только часть** DUP-W2 (общий source-read wrapper). Отказ HTTP закрывает соединение; источник отказывает отдельно от сборки документа; шрифты не требуют внешнего доступа | HTTP-регрессии на реальном сокете, PostgreSQL-backed проверка страниц, exact-SHA CI |
-| 2 | CI и герметичность тестовой инфраструктуры | BUG-03, BUG-22/23, остаток CI-01, ARCH-06; TDEAD-01–06 после доказательства, TDUP-03/04, TORG-01 и инфраструктурная часть TEST-02; DOC-14. Починить настоящий `--fast`, подключить ruff, включить typecheck в агрегат, убрать необязательные зависимости `unit`, общую настройку оформить один раз. Не форматировать весь repo ради гейта | `--fast` реально выполняется, тесты не зависят от login-профиля, манифест и множество тестов; без green-skip |
+| 2 ✅ | CI и герметичность тестовой инфраструктуры, #678 | BUG-03/23 (тесты), CI-01 и DOC-14 закрыты. BUG-22 — env/catalogue/assertions; ARCH-06 — config и затронутые paths; небольшие support helpers переиспользованы. TDEAD-01–06, массовые TDUP/TORG, root-only и timing остаются в слоте 16; остальные импортные блоки ARCH-06 идут со своими подсистемами | Реальный guarded fast в CI; unit без memory-extra; lint/typecheck и все suites входят в агрегат; состав manifest сохранён с явным переносом SQL proof |
 | 3 | Рабочая свежая установка и конфигурация данных | BUG-02/06/08/09/13/21, CON-01/09/16, DOC-02 и примеры DOC-15. Явная editable `.venv`, единый выбор модели памяти, согласованный frontmatter/env, контролируемые отказы повреждённых результатов и секретов | Свежая установка в disposable layout, round-trip форматов, несовместимые/повреждённые входы |
 | 4 | Постоянные роли и identity повторного запуска | DOC-06/12, BUG-10/11/16, CON-13/14/15 и остаток утечки standing-agent токена из #671. BUG-11 сначала воспроизвести локальным тестом: история prod его не подтвердила. Старый `run.exited` не подтверждает остановку новой инкарнации; steward читает текущий workspace root | Две инкарнации одного run, роль видит свои skills, scope и prompt identity; без убийства prod-голов |
 | 5 | Контракты тика, vitality и остановки | BUG-15/17/18/19, CON-03/04/06/17/18; INEF-03, DUP-D14/15/16/19 в части уже разошедшихся правил, остаток комментариев DOC-09. Единые привязки курсоров, outcomes, blocked fence и reason; ошибка остановки reviewer не пропускает worker | Сценарии respawn, pause/freeze, gate/healthy tick и отказов; причины и request id фиксируются до упрощения |
@@ -1126,8 +1139,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | 13 | Web pages и sprint read contracts | DEC-06/07, CON-02/07, DUP-W1/3/4/5 и остаток W2 (installation read), DEAD-23, INEF-04/11/15/17. Сначала static и листовые значения, затем части страниц/снимков; схемы отражают текущие документы, компрессия не ослабляет CSP | Пакетные assets входят в wheel, page/transport/schema/source-isolation tests; ошибки и readonly/read-write границы явно сохранены |
 | 14 | Backup, checkpoint и restore | Разрезы checkpoint/restore из §5.10, DUP-I2/3/4/5, INEF-08/09, backup/checkpoint часть BUG-24, относящийся сюда DEAD-16. Проверить горячий `redact` из §12.17; не добавлять cache без доказательства сохранения редактирования секретов. ARCH-01 в backup/recovery | Snapshot/restore round-trip, оборванный git payload, разные файловые системы, секреты, archive validation и byte-stable formats |
 | 15 | Installation и upgrade как пакеты | Разрезы installation/bootstrap/upgrade из §5.10, DUP-I1 и остаток I2–5, ARCH-09 и DEAD-T в части решения о поддержке старых хостов; остаток ARCH-01 в установке. Process receipts сохраняют формат, проверки размера и no-follow | Disposable install/upgrade/recover, golden receipts, runtime provenance; совместимость старого live-root/remote имеет явное решение |
-| 16 | Разбиение крупных тестов и оставшиеся повторы | TEST-01, остаток TEST-02, TDUP-01/02/05 и остаток TDEAD/TORG. Выделить классы dispatcher без Postgres из Docker-гейта; дробить крупные тесты по жизненному циклу; helpers — support/fakes, не ещё одна продуктовая реализация | Множество тестов и их сценарии не меняются, кроме доказанных дублей; каждый модуль ровно раз в `ci-shards.txt`; docs описывают реальные шарды |
-| 17 | Документация и окончательная сверка аудита | DOC-01/08 и оставшиеся DOC-10/14/15; сжатие PROTOCOLS/OPERATIONS и prompt-skills, оставшаяся ARCH-01 вне предыдущих кластеров. DEAD-24: разовые scripts разобрать по живым вызовам, shim `role_skills.py` используется steward и не удаляется по одному basename. Сверить все DEAD-T/R/H1/22/25 и неподтверждённые гипотезы: удалить только доказанно ненужное либо явно записать, почему совместимость/поведение оставлено | Живые заголовки рантайма и ссылки сохраняются; closed/not-taken/open различаются; отсутствие staged-строк сегодня само по себе не доказывает недостижимость всех будущих recovery-путей |
+| 16 | Разбиение крупных тестов и оставшиеся повторы | TEST-01, остаток TEST-02, BUG-22 (root-only coverage и timing/flakiness), TDUP-01/02/05 и остаток TDEAD/TORG, массовые TDUP-03/04 из слота 2. Выделить классы dispatcher без Postgres из Docker-гейта; дробить крупные тесты по жизненному циклу; helpers — support/fakes, не ещё одна продуктовая реализация | Множество тестов и их сценарии не меняются, кроме доказанных дублей; каждый модуль ровно раз в `ci-shards.txt`; docs описывают реальные шарды |
+| 17 | Документация и окончательная сверка аудита | DOC-01/08 и оставшиеся DOC-10/15; сжатие PROTOCOLS/OPERATIONS и prompt-skills, оставшаяся ARCH-01 вне предыдущих кластеров. DEAD-24: разовые scripts разобрать по живым вызовам, shim `role_skills.py` используется steward и не удаляется по одному basename. Сверить все DEAD-T/R/H1/22/25 и неподтверждённые гипотезы: удалить только доказанно ненужное либо явно записать, почему совместимость/поведение оставлено | Живые заголовки рантайма и ссылки сохраняются; closed/not-taken/open различаются; отсутствие staged-строк сегодня само по себе не доказывает недостижимость всех будущих recovery-путей |
 
 **Правила исполнения.**
 1. Один PR — связанный кластер одной подсистемы. Поведенческий дефект сначала воспроизводится и
@@ -1345,7 +1358,7 @@ INEF-13 опровергнут как причина горячего тика (
 
 **Найдено (Ф):** login-shell печатает только `MARK`, в профилях `nvm` нет, совпадений в gate-runs и receipts — 0.
 
-**Вердикт: опровергнуто для этого хоста.** Утечка из §9 BUG-23 — свойство контейнера аудитора. Негерметичность тестов при этом остаётся (Ф).
+**Вердикт: опровергнуто для этого хоста.** Утечка из §9 BUG-23 — свойство контейнера аудитора. На момент исходного эксперимента негерметичность тестов оставалась (Ф); тестовая часть исправлена #678, продуктовый renderer не менялся.
 
 ### 12.10 BUG-07: HTTP 500 от устаревшей записи диспетчера
 
@@ -1479,7 +1492,7 @@ INEF-13 опровергнут как причина горячего тика (
 **Что проверено:** `gh api repos/vladmesh/ummanu/branches/main/protection`, `…/rules/branches/main`, `…/rulesets`; `instance/adapters/*.yaml`; запуски workflow `e2e-synthetic.yml`.
 
 **Найдено (Ф):**
-- **Защиты `main` нет:** protection отвечает 404 «Branch not protected», rules и rulesets — `[]`. Значит, `typecheck` (как и любой другой check) не обязателен (CI-01).
+- **Защиты `main` нет:** protection отвечает 404 «Branch not protected», rules и rulesets — `[]`. На момент замера ни один check не был обязательным для GitHub merge. #678 включает typecheck/lint в workflow-агрегат `test`, но branch protection не меняет.
 - **`e2e-synthetic.yml`** — workflow без тестов: на `workflow_dispatch` он спит заданное число минут и завершается с заданным `outcome`, его писали для live proof sprint:1469.
   - Ни один из 16 адаптеров инстанса на него не ссылается.
   - Единственный адаптер с `validation.e2e` — `codegen-orchestrator.yaml` (`stand-e2e.yml`, `after_merge`, `mega-noop`).

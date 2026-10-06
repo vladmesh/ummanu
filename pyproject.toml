@@ -51,6 +51,9 @@ select = [
 # protocol prose and command examples intact instead of wrapping them for a column limit.
 ignore = ["E501", "S101"]
 
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
 [tool.mypy]
 python_version = "3.12"
 mypy_path = "src"

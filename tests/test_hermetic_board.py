@@ -1,9 +1,4 @@
-"""Status reads fail closed and accept an explicit in-memory board seam.
-
-secretary-1026: ambient database credentials must never make a unit test read
-or write a live board.  Tests that need sprint data pass their own store
-through `collect_status(..., sprint_client=...)`.
-"""
+"""Offline status refuses ambient database credentials before any network access."""
 
 from __future__ import annotations
 
@@ -12,20 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes.sprints import sprint_store, status_seed
-from ummanu.config import validate_instance
+from tests.support.instance import status_instance
 from ummanu.status import collect_status
-
-
-def _report(root: Path):
-    instance = root / "instance.yaml"
-    instance.write_text(
-        "version: 1\nname: test\n"
-        f"data_dir: {root / 'data'}\n"
-        "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
-        encoding="utf-8",
-    )
-    return validate_instance(instance)
 
 
 class HermeticBoardTests(unittest.TestCase):
@@ -35,7 +18,7 @@ class HermeticBoardTests(unittest.TestCase):
         # network request; urlopen makes an accidental dial-out loud.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = _report(root)
+            report = status_instance(root)
             with (
                 mock.patch.dict(
                     "os.environ",
@@ -56,17 +39,6 @@ class HermeticBoardTests(unittest.TestCase):
         self.assertEqual(snapshot["installation"]["sprints"]["error"]["code"], "backend_unavailable")
         self.assertEqual(snapshot["installation"]["sprints"]["items"], [])
 
-    def test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape(self):
-        # The explicit board is the status injection seam; the board is a store of the test's own.
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            report = _report(root)
-            board = sprint_store(self, status_seed())
-            board.add_sprint("sprint:1")
-            snapshot = collect_status(report, offline=True, sprint_client=board)
-
-        self.assertIsNone(snapshot["installation"]["sprints"]["error"])
-        self.assertEqual(len(snapshot["installation"]["sprints"]["items"]), 1)
 
 
 if __name__ == "__main__":

@@ -14,27 +14,26 @@ from unittest import mock
 
 from ummanu.dispatch import review, wait_vitality
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
+from ummanu.runtime.head.command import with_pid_heartbeat
 from ummanu.runtime.head.local_pty import protocol, scope_bootstrap, scope_launcher
 from ummanu.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
 from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
-from ummanu.runtime.head.command import with_pid_heartbeat
 from ummanu.runtime.head.memory import (
     DEFAULT_MEMORY_LIMIT_MIB,
-    ScopeEvidence,
-    read_oom_victim,
     OOM_STREAM_ENV,
+    MemoryScopeError,
+    ScopeEvidence,
     memory_events,
+    read_oom_victim,
     scope_argv,
     scope_unit,
 )
-from ummanu.runtime.head.spec import HeadSpec, HeadSpecError
-from ummanu.runtime.local_pty_head import head_run_loss_reason
-from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 from ummanu.runtime.head.run import HeadRun, StopInitiator
+from ummanu.runtime.head.spec import HeadSpec, HeadSpecError
 from ummanu.runtime.head.task_ref import TaskRef
-from ummanu.runtime.head.memory import MemoryScopeError
+from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime, head_run_loss_reason
 from ummanu.webproto.run_state import _exit_status
 
 
@@ -160,9 +159,9 @@ class HeadMemoryTests(unittest.TestCase):
             (root / "system.slice" / scope_unit(owner.run_id)).mkdir(parents=True)
             with (mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
                   mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
-                             return_value=SimpleNamespace(returncode=0, stderr=b""))):
-                with self.assertRaisesRegex(MemoryScopeError, "no membership evidence"):
-                    owner.stop_and_prove_empty()
+                             return_value=SimpleNamespace(returncode=0, stderr=b"")),
+                  self.assertRaisesRegex(MemoryScopeError, "no membership evidence")):
+                owner.stop_and_prove_empty()
             self.assertFalse(json.loads((root / "scope-owner.json").read_text())["cleanup_complete"])
 
     def test_scoped_heartbeat_writes_identity_in_head_process_before_exec(self) -> None:
@@ -359,13 +358,20 @@ class HeadMemoryTests(unittest.TestCase):
             self.assertNotIn("head_loss_reason", exited)
 
     def test_child_oom_then_unrelated_head_kill_is_not_attributed(self) -> None:
-        before = {"max": 0, "oom_kill": 0, "oom_group_kill": 0}
-        child_only = {"max": 1, "oom_kill": 1, "oom_group_kill": 0}
-        with mock.patch("ummanu.runtime.head.memory.os.read", side_effect=[
-            b"3,22,1000,-;Memory cgroup out of memory: Killed process 222 (child) total-vm:1\n",
-            BlockingIOError(),
-        ]):
-            self.assertIsNone(read_oom_victim(99, 111))
+        with tempfile.TemporaryDirectory() as temp:
+            cgroup = Path(temp)
+            evidence = ScopeEvidence(cgroup, {"max": 0, "oom_kill": 0, "oom_group_kill": 0})
+            (cgroup / "memory.events.local").write_text("max 1\noom_kill 1\noom_group_kill 0\n")
+            with mock.patch("ummanu.runtime.head.memory.os.read", side_effect=[
+                b"3,22,1000,-;Memory cgroup out of memory: Killed process 222 (child) total-vm:1\n",
+                BlockingIOError(),
+            ]):
+                victim = read_oom_victim(99, 111)
+            self.assertIsNone(victim)
+            fields = ScopedHeadLifecycle.exit_fields(signal.SIGKILL, evidence, oom_victim=victim)
+            self.assertEqual(fields["signal"], signal.SIGKILL)
+            self.assertNotIn("head_loss_reason", fields)
+            self.assertNotIn("oom_victim", fields)
 
     def test_prestart_timeout_stops_scope_and_proves_empty(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -384,10 +390,10 @@ class HeadMemoryTests(unittest.TestCase):
                            return_value=SimpleNamespace(wait=lambda: 0)),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop) as systemctl,
+                self.assertRaises(LocalPtySpawnError) as failure,
             ):
-                with self.assertRaises(LocalPtySpawnError) as failure:
-                    spawn_head(root=root / "runs", run_id=run_id, role="worker", task="card:1",
-                               command="true", memory_limit_mib=1, timeout=0)
+                spawn_head(root=root / "runs", run_id=run_id, role="worker", task="card:1",
+                           command="true", memory_limit_mib=1, timeout=0)
             self.assertEqual(failure.exception.reason, "timeout")
             self.assertTrue(failure.exception.cleanup_complete)
             self.assertEqual(systemctl.call_count, 1)
@@ -407,10 +413,10 @@ class HeadMemoryTests(unittest.TestCase):
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                            return_value=SimpleNamespace(returncode=1, stderr=b"failed")),
+                self.assertRaises(LocalPtySpawnError) as failure,
             ):
-                with self.assertRaises(LocalPtySpawnError) as failure:
-                    spawn_head(root=root / "runs", run_id=run_id, role="po", task="turn:1",
-                               command="true", memory_limit_mib=1, timeout=0)
+                spawn_head(root=root / "runs", run_id=run_id, role="po", task="turn:1",
+                           command="true", memory_limit_mib=1, timeout=0)
             self.assertEqual(failure.exception.reason, "cleanup_failed")
             self.assertFalse(failure.exception.cleanup_complete)
             owner = ScopedHeadLifecycle.from_run_dir(run_dir)
@@ -438,9 +444,9 @@ class HeadMemoryTests(unittest.TestCase):
                            return_value=SimpleNamespace(returncode=0, stderr=b"")),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.time.monotonic",
                            side_effect=[0, 11]),
+                self.assertRaisesRegex(RuntimeError, "still has members"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "still has members"):
-                    owner.stop_and_prove_empty()
+                owner.stop_and_prove_empty()
 
     def test_scoped_startup_cancellation_waits_for_supervisor_reap(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
