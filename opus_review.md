@@ -2,6 +2,56 @@
 
 > Отчёт только для чтения. Код, тесты, документация и конфигурация **не изменялись**; этот файл — единственное изменение ветки.
 
+## Статус на 2026-10-06 (main `8e79450`)
+
+После аудита в `main` влиты #669–#676. Каждый пункт ниже перепроверен по `origin/main` (`grep` и чтение указанного места), а не по описанию PR. Пометки в теле: **✅** — закрыто, **◐** — закрыто частично. Ссылки `file:line` по-прежнему указывают на `e310833`. Исключение — открытые пункты в файлах `runtime/`, `web/`, `webproto/`: после сжатия прозы в #675/#676 их ссылки и размеры пересчитаны на `8e79450` (AST кода не менялся, поэтому строки сопоставлены по скелету кода).
+
+**Закрыто (✅):**
+
+| ID | PR | Что сделано |
+|---|---|---|
+| BUG-14 | #669 | На обычном live root `instance-maintenance` пакует bare snapshot repo (`--git-dir`), а при его отсутствии отвечает `skipped` вместо exit 1 (`infra/instance_maintenance.py:257-286`). На проде вступит в силу после деплоя |
+| DEAD-01, -02, -03, -07, -08, -13, -14, -17, -18 | #673 | Удалено; `grep` по `src/` даёт 0 совпадений. `_PYTHONPATH_PREFIX` в `dispatch/host.py:321` — другой, живой символ |
+| DUP-D12 | #673 | `dispatch_workflow` вызывает `_gh_status` (`e2e.py:261`) |
+| DOC-03, DOC-04, DOC-05, DOC-11, DOC-13 | #672 | Проверено по тексту docs и skills на `main` |
+| DOC-07 | #672 | Закрыто с поправкой: аудит ошибся. Головы, запущенные диспетчером, получают HTTP-сервер `memory` (`runtime/head/command.py`), а `po_memory` — мост для остальных сессий. `AGENTS.md` теперь называет оба |
+| DOC-09 | #672, #674 | `HEAD_VITALITY.md` и docstring `head_vitality.py` используют текущие имена; ложное «guarded entry» убрано. Остаток — в двух других местах: таблица rung 1 (это CON-18) и комментарии `dispatch/state.py:24,1306` со старым `dispatcher_watchdog` |
+| §8.4 `referencing` | #674 | Зависимость объявлена: `referencing>=0.28.4` |
+
+**Закрыто частично (◐):**
+
+| ID | PR | Сделано | Осталось |
+|---|---|---|---|
+| ARCH-01 | #675, #676 | Сжаты `runtime/` с `head/` (−138 тыс. символов прозы) и `web/` с `webproto/` (−211 тыс.). Проза `src` (`.py`): 1,99 млн → 1,64 млн символов, 26,7 % → 23,3 % | `dispatch` (крупнейшая зона; vitality-кластер теперь не блокирован, DOC-09 закрыт), `board`, ядро (`tasks`/`sprints`), установка, `po`, `automations`, `projects`, тесты (TDUP-05). Остаточный потенциал ≈−250…350 тыс. символов (**О**) |
+| CI-01 | #674 | `cache: pip` во всех трёх `setup-python`; `concurrency` (отмена только для `pull_request`) | ruff в CI, `permissions`, `.[memory,ci]` для `unit`, composite action, `typecheck` в агрегате |
+| DEAD-19 | #673 | Удалены `ProductIssueRecords.key_of/metadata/comments` и `SqlSprintRecords.comments` | `SqlBoardHost._sprint_data` **жив** (`sql_host.py:813`): аудит ошибся. Остаются `SqlAuditError` (в `__all__`), `SqlTaskAudit.refusals()` (нужен тесту), `ProductIssueRecords.row` |
+| DEAD-23 | #673 | Удалены `_feed`, `_project_table`, `_task_table`, `_start_form`, `_review_form`, `_DASHBOARD_SCRIPT` | review-блок `_TASK_SCRIPT`, ветка `compact`, CSS-классы, публичные `FORM_TYPE`/`FEED_LIMIT`/`DEFAULT_SITES`/`RUN_ROLES`/`CLOSE_STATES`/`ProductRun.at_phase`, `_BOARD_SETTLED_STATES` |
+| DOC-02 | #672 | Везде `pip install -e`; README и OPERATIONS говорят, что юниты требуют `PRODUCT_ROOT/.venv` | Процедуры создания `.venv` нет: это решение по BUG-02 |
+| DOC-10 | #672 | Ревизии `0001`–`0030`, `wait` в CHECK, 14 owner event kinds, `body` с `[marker]` | DDL `po_*`/`owner_events`/`origin_returns`; `e2e_refusal`; `committed`; триггер 0028; комментарии в коде (`schema.py:20` «eight jsonb», `sql_cards.py:5` «eleven-method», `backend.py:175` `task_number`) |
+| DOC-14 | #672, #674 | Шарды в `TESTING.md`, исключение green-skip, умолчания в `tests/README.md`; Orca убрана из `CONTRIBUTING.md` и `broad.py` | Счётчики «1440 / 3782» в `tests/broad.py:7,11`; обещание `expectedFailure` в `test_head_vitality_legacy_path.py:8` |
+| DOC-15 | #672, #674 | `pyproject` description, `SECURITY.md`, `packaging/systemd/README.md`, docstring `runtime/head/local_pty/__init__.py` | `examples/instance/instance.yaml:20` (`ummanu-pipeline.service`), `heads.toml:9,20-21` (`render_<adapter>`, `worker.py`), `ROADMAP.md` (**Г**) |
+| CON-13 | #675 (попутно) | docstring `next_event` теперь честно говорит, что `None` — и тишина, и конец потока | Неиспользуемые опкоды и события; `SUN_PATH_MAX` 100 против 107; комментарий «under 256 bytes» всё ещё ложен (`journal.py:22-23`) |
+| CON-14 | #675 (попутно) | Из docstring `agent_prompt_transport` убрано ложное «Every prompt is checked here» | local-pty по-прежнему доставляет prompt без проверки. Противоречия больше нет, но решение «проверять или нет» осталось |
+
+**Вне ID аудита:**
+- **#671** убрал memory bearer из текста команды запуска головы: sudo писал его в `journalctl`. Аудит эту утечку **не нашёл**. Остаток по описанию PR: standing-агенты передают токен через `env $(grant_env …)`, поэтому он виден в `ps` короткоживущего `env`.
+- **#670** (живые умолчания `--instance`, литеральный `--reason`, `issue list --closed`, `issue edit`) ID аудита не закрывает. BUG-04 открыт: `run_pause` по-прежнему вызывает `_read_optional` вне обработчика (`dispatch/commands.py:188`, `cli.py:173`).
+
+**Что осталось, по убыванию ценности.**
+1. P0/P1-дефекты, которых не коснулся ни один PR:
+   - BUG-01 (smuggling после 413, `web/server.py:150-156`);
+   - BUG-02 вместе с остатком DOC-02 (`.venv`);
+   - BUG-03 (`--fast`);
+   - DOC-06 (подтверждён на проде, §12.1);
+   - BUG-10 (подтверждён, §12.5).
+2. Гейт линтера (CI-01, остаток) и `combine-as-imports` (ARCH-06).
+3. Разбиения DEC-01/02/05/07. После #675/#676 DEC-05 и DEC-07 стали дешевле: `local_pty_head.py` уменьшился со 180 до 124 тыс. символов, `pages.py` — с 250 до 224 тыс.
+4. Остаток ARCH-01, начиная с `dispatch`.
+5. TEST-01, DOC-01.
+6. INEF-01/07/13 по результатам §12.17.
+7. Решения владельца по выводу из эксплуатации: DEAD-T, DEAD-R, DEAD-H1 (последние два подтверждены на проде, §12) и DEAD-22.
+8. Мелочи: остатки DOC-10/14/15, DEAD-19/23.
+
 ## 1. Ревизия, резюме и главные находки
 
 ### 1.1 Что проверялось
@@ -40,16 +90,17 @@
    - Комментарии и docstring составляют **26,7 % символов `src/`**: 535 тыс. символов комментариев и 1,43 млн символов docstring, итого ≈1,96 млн символов, или ≈490 тыс. токенов (**Ф**).
    - Самые «прозаичные» пакеты:
 
-     | Пакет | Доля прозы |
-     |---|---|
-     | `webproto` | 47 % |
-     | `runtime` | 44 % |
-     | `runtime/head` | 35 % |
-     | `projects` | 53 % |
+     | Пакет | Доля прозы | На `8e79450` |
+     |---|---|---|
+     | `webproto` | 47 % | 28 % (#676) |
+     | `runtime` | 44 % | 29 % (#675) |
+     | `runtime/head` | 35 % | 24 % (#675) |
+     | `projects` | 53 % | без изменений |
 
-   - В отдельных файлах доля выше: `runtime/local_pty_head.py` — 52 %, `dispatch/head_vitality_policy.py` — 56 %, `runtime/head/runtime.py` — 67 % (**Ф**).
+   - В отдельных файлах доля выше: `runtime/local_pty_head.py` — 52 %, `dispatch/head_vitality_policy.py` — 56 %, `runtime/head/runtime.py` — 67 % (**Ф**). ◐ После #675: `local_pty_head.py` — 33 %, `head/runtime.py` — 51 %; `head_vitality_policy.py` не тронут.
    - Большая часть этой прозы — история инцидентов, номера карточек `secretary-NNNN`/`issue:…`, «раньше было так». Сама история уже есть в git и в `docs/`.
    - Сжатие до инварианта плюс одна строка «почему» уберёт **≈450–650 тыс. символов (≈110–160 тыс. токенов) из `src/`** без изменения поведения (**О**, ±30 %).
+   - ◐ #675/#676 сняли ≈349 тыс. символов (`runtime`, `web`, `webproto`); проза `src` теперь 23,3 %.
 2. **Точного дублирования кода мало.**
    - Структурно одинаковых функций верхнего уровня всего на ≈244 строки (40 групп, **Ф**).
    - Окна по 8 нормализованных строк, повторяющиеся между разными файлами, — сотни строк, в основном внутри одного файла (**Ф**).
@@ -59,12 +110,12 @@
    | Файл | Строк | Символов | ≈Токенов |
    |---|---|---|---|
    | `tasks.py` | 5 934 | 286 тыс. | 71 тыс. |
-   | `web/pages.py` | 4 996 | 250 тыс. | — |
+   | `web/pages.py` | 4 996 (на `8e79450`: 4 585) | 250 тыс. (224 тыс.) | — |
    | `dispatch/host.py` | 5 004 | 240 тыс. | — |
-   | `runtime/local_pty_head.py` | 3 445 | 180 тыс. | — |
+   | `runtime/local_pty_head.py` | 3 445 (на `8e79450`: 2 763) | 180 тыс. (124 тыс.) | — |
    | `sprints.py` | 3 824 | 174 тыс. | — |
    | `dispatch/observer.py` | 3 603 | 160 тыс. | — |
-   | `webproto/sprint_reads.py` | 2 773 | 135 тыс. | — |
+   | `webproto/sprint_reads.py` | 2 773 (на `8e79450`: 2 313) | 135 тыс. (100 тыс.) | — |
 
    - Ещё есть класс `CommandHostRuntime` на 4 021 строку (≈175 методов) и `TaskWriter` на 4 668 строк.
    - Разделение почти не уменьшает общий объём, но сокращает контекст типовой задачи в **2–7 раз** (**О**).
@@ -97,14 +148,14 @@
 |---|---|---|---|---|
 | 1 | BUG-01 | P0 | HTTP/1.1 keep-alive: тело, отвергнутое с 413, не дочитывается, и соединение не закрывается. Остаток тела разбирается как новый запрос | §9 |
 | 2 | BUG-02 | P0 | Свежая установка по README/OPERATIONS не создаёт `PRODUCT_ROOT/.venv`, который требуют все systemd-юниты | §9, §8 |
-| 3 | ARCH-01 | P1 | Сжать прозу в `src/` (≈27 %): историю перенести в git/docs, в коде оставить инварианты | §5.8, §10 |
+| 3 | ARCH-01 ◐ | P1 | ◐ #675/#676: `runtime`, `web`, `webproto` сделаны. Сжать прозу в `src/` (≈27 %): историю перенести в git/docs, в коде оставить инварианты | §5.8, §10 |
 | 4 | DEC-01 | P1 | Разделить `tasks.py`: чистые помощники → `board/card_rows.py`; диспетчерские записи → mixin. Сейчас 51 приватный импорт из `ummanu.tasks` | §5.1 |
 | 5 | DEC-02 | P1 | Разделить `dispatch/host.py` на mixin-модули. Именно mixin: тесты патчат методы через `self` | §5.2 |
 | 6 | DEC-05 | P1 | `runtime/local_pty_head.py` → пакет из 5 модулей; ридеры журнала и аренды — к `journal.py` | §5.5 |
 | 7 | DEC-07 | P1 | Вынести CSS/JS (≈58 тыс. символов, 23 %) из `web/pages.py` в package-data и разбить страницы на модули | §5.7 |
 | 8 | TEST-01 | P1 | Разделить `test_dispatcher.py`; снять Docker-гейт с 12 классов без Postgres; урезать фикстуру на 1 440 строк до 40 | §5.9, §6.4 |
 | 9 | DOC-01 | P1 | Разбить `PROTOCOLS.md` (365 тыс.) и `OPERATIONS.md` (220 тыс.) на тематические файлы; удалить закрытую историю (≈90–100 тыс.) | §8 |
-| 10 | CI-01 | P1 | Добавить в CI ruff (check по изменённым файлам), pip-cache, `concurrency`, `permissions` | §8.4 |
+| 10 | CI-01 ◐ | P1 | ◐ #674: pip-cache и `concurrency` есть. Добавить в CI ruff (check по изменённым файлам), pip-cache, `concurrency`, `permissions` | §8.4 |
 | 11 | DEAD-T | P2 | Вывести из эксплуатации одноразовую миграцию `transition/` и скрипты переименования (≈159 тыс. символов в src+scripts и 83 тыс. в тестах). Нужно решение владельца | §6.2 |
 | 12 | CON-01 | P2 | Две вымышленные/вымершие части схемы инстанса: блок `heads` (ломает `apply_host`) и `orca_repos` | §7 |
 | 13 | CON-02 | P2 | Ответ `product_runs` не проходит собственную схему `web-run`; у ряда JSON-маршрутов схемы нет вовсе | §7 |
@@ -115,17 +166,17 @@
 
 ### 2.1 Размеры пакетов `src/ummanu`
 
-Измерено по `git ls-files`; «проза» = комментарии + docstring как доля символов (**Ф**).
+Измерено по `git ls-files`; «проза» = комментарии + docstring как доля символов (**Ф**). Через «→» даны значения на `8e79450` для пакетов, которые сжали #675/#676.
 
 | Пакет | Файлов | Строк | Символов | ≈Токенов | Проза |
 |---|---|---|---|---|---|
 | `dispatch` | 58 | 44 216 | 1 967 853 | 491 963 | 27 % |
 | корень `ummanu/*.py` | 57 | 44 641 | 1 911 500 | 477 875 | 18 % |
 | `board` (без миграций) | 57 | 18 427 | 800 494 | 200 123 | 21 % |
-| `webproto` | 30 | 13 089 | 628 604 | 157 151 | 47 % |
-| `runtime` (без `head/`) | 28 | 8 709 | 406 945 | 101 736 | 44 % |
-| `web` | 10 | 8 189 | 397 280 | 99 320 | 24 % |
-| `runtime/head` (+ `local_pty`) | 21 | 6 656 | 297 625 | 74 406 | 35 % |
+| `webproto` | 30 | 13 089 → 10 822 | 628 604 → 455 276 | 157 151 → 113 819 | 47 % → 28 % (#676) |
+| `runtime` (без `head/`) | 28 | 8 709 → 7 582 | 406 945 → 315 285 | 101 736 → 78 821 | 44 % → 29 % (#675) |
+| `web` | 10 | 8 189 → 7 552 | 397 280 → 352 357 | 99 320 → 88 089 | 24 % → 16 % (#676) |
+| `runtime/head` (+ `local_pty`) | 21 | 6 656 → 6 043 | 297 625 → 249 778 | 74 406 → 62 444 | 35 % → 24 % (#675) |
 | `automations` | 30 | 5 687 | 243 869 | 60 967 | 31 % |
 | `po` | 13 | 4 255 | 191 001 | 47 750 | 27 % |
 | `schemas` (JSON) | 16 | 5 122 | 178 368 | 44 592 | — |
@@ -141,12 +192,12 @@
 | Файл | Строк | Символов | Проза | Крупнейшая функция или класс |
 |---|---|---|---|---|
 | `tasks.py` | 5 934 | 285 875 | 19 % | `TaskWriter` (1105–5772, 4 668 строк); `_create` — 495 строк (`:1260`) |
-| `web/pages.py` | 4 996 | 250 050 | 16 % (+23 % CSS/JS, +11 % HTML-литералы) | `po_session` — 145 |
+| `web/pages.py` | 4 996 → 4 585 | 250 050 → 224 217 | 16 % → 9 % (+CSS/JS и HTML-литералы без изменений) | `po_session` — 145 |
 | `dispatch/host.py` | 5 004 | 240 543 | 24 % | `CommandHostRuntime` (837–4857); `_worker_task_doc` — 300 |
-| `runtime/local_pty_head.py` | 3 445 | 180 579 | 52 % | `LocalPtyHeadRuntime` — 1 983 |
+| `runtime/local_pty_head.py` | 3 445 → 2 763 | 180 579 → 123 842 | 52 % → 33 % | `LocalPtyHeadRuntime` — 1 983 (с docstring; код не менялся) |
 | `sprints.py` | 3 824 | 174 100 | 18 % | `SprintWriter` — 2 691 |
 | `dispatch/observer.py` | 3 603 | 159 617 | 32 % | `_reconcile_open_sprint` — 363; `_launch_observer` — 345 |
-| `webproto/sprint_reads.py` | 2 773 | 135 048 | 42 % | `SprintSections.waiting` — 117 |
+| `webproto/sprint_reads.py` | 2 773 → 2 313 | 135 048 → 100 119 | 42 % → 23 % | `SprintSections.waiting` — 117 |
 | `upgrade.py` | 2 852 | 128 709 | 21 % | `step_web` — 137 |
 | `checkpoint.py` | 2 617 | 119 950 | 19 % | `checkpoint_snapshot` — 129 |
 | `installation.py` | 2 349 | 105 107 | 17 % | `install` — 349 |
@@ -157,9 +208,11 @@
 | `restore.py` | 1 676 | 72 934 | 13 % | 22 функционально-локальных импорта |
 | `dispatch/head_vitality_episode.py` | 1 293 | 70 927 | 43 % | **`reduce_vitality` — 501** (самая длинная функция в репозитории) |
 | `dispatch/state.py` | 1 435 | 68 322 | 31 % | `DispatcherRecord.from_json` — 147 |
-| `web/app.py` | 1 421 | 67 970 | 36 % | — |
+| `web/app.py` | 1 421 → 1 288 | 67 970 → 56 551 | 36 % → 24 % | — |
 | `dispatch/gate.py` | 1 401 | 65 358 | 38 % | — |
 | `board/sql_host.py` | 1 451 | 64 904 | 7 % | `_transition_issue` — 104 |
+
+Значения через «→» даны на `8e79450` (#675/#676).
 
 Другие функции длиннее 200 строк (**Ф**, по `ast`):
 
@@ -263,16 +316,16 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 | ID | Приор. | Компонент | Доказательство | Эффект | Риск | Трудоёмк. | Метка |
 |---|---|---|---|---|---|---|---|
-| ARCH-01 | P1 | весь `src/` | Комментарии и docstring — 26,7 % символов. Худшие файлы: `local_pty_head.py` 52 %, `head_vitality_policy.py` 56 %, `head_vitality_guard.py` 52 %, `head_health.py` 51 %, `webproto/lifecycle.py` 57 %, `dispatch/types.py` 70 %, `projects/contract.py` 54 %. Ссылки на карточки и инциденты: 74 в зоне dispatch A, 51 в ядре задач, 71 в web | −450…650 тыс. символов в `src` | нулевой для runtime; тесты, которые ищут текст в исходниках, — см. §10 | M–L, механически, по файлам | Ф/О |
+| ARCH-01 ◐ | P1 | весь `src/` | ◐ #675/#676: `runtime`, `web`, `webproto` сжаты (−349 тыс. символов, проза `src` 23,3 %); `local_pty_head.py` теперь 33 %, `webproto/lifecycle.py` — см. §2.1. Остальные файлы из списка не тронуты. Исходно: комментарии и docstring — 26,7 % символов. Худшие файлы: `local_pty_head.py` 52 %, `head_vitality_policy.py` 56 %, `head_vitality_guard.py` 52 %, `head_health.py` 51 %, `webproto/lifecycle.py` 57 %, `dispatch/types.py` 70 %, `projects/contract.py` 54 %. Ссылки на карточки и инциденты: 74 в зоне dispatch A, 51 в ядре задач, 71 в web | −450…650 тыс. символов в `src` | нулевой для runtime; тесты, которые ищут текст в исходниках, — см. §10 | M–L, механически, по файлам | Ф/О |
 | ARCH-02 | P1 | `tasks.py` | 51 импорт приватных имён `ummanu.tasks` из других модулей (`sprints.py:89-101`, `product_issues.py:19-28`, `task_restore.py` — 14 имён, `board/sql_host.py:45-55`) | `tasks.py` стал библиотекой утилит: любому потребителю `_text`/`_digest` приходится открывать 286 тыс. символов | S | S | Ф |
-| ARCH-03 | P2 | весь `src/` | 336 функционально-локальных импортов. `task_restore.py`: 23 из 24 не нужны — `import ummanu.tasks` не загружает `task_restore` (проверено по `sys.modules`). В `po_cards.py:158-236` 6 локальных импортов модулей, уже импортированных в шапке (`:90-92`). Повторные локальные импорты в `host.py:1827,2422,3027,3845`, `local_pty_head.py:3320,3372`, `po/service.py:901` | Шум и ложные сигналы «здесь цикл» | S (каждый проверять тестом импорта) | S | Ф |
+| ARCH-03 | P2 | весь `src/` | 336 функционально-локальных импортов. `task_restore.py`: 23 из 24 не нужны — `import ummanu.tasks` не загружает `task_restore` (проверено по `sys.modules`). В `po_cards.py:158-236` 6 локальных импортов модулей, уже импортированных в шапке (`:90-92`). Повторные локальные импорты в `host.py:1827,2422,3027,3845`, `local_pty_head.py:3320,3372` (на `8e79450`: `:2638,2690`), `po/service.py:901` | Шум и ложные сигналы «здесь цикл» | S (каждый проверять тестом импорта) | S | Ф |
 | ARCH-04 | P2 | `board` | `board` импортирует `tasks`/`sprints`/`product_issues` (`sql_host.py:45-55`; `done_retention.py:9`, `steward_reports.py:8`, `reference_repair.py:15`, `normalized_checkpoint.py:10`). Ещё 14 локальных `from ummanu.tasks import TaskError` | Инверсия слоёв, циклы | S: перенести `TaskError` (`tasks.py:159`, 8 строк) в `board/errors.py` и реэкспортировать | S | Ф |
 | ARCH-05 | P2 | `board` | Модули не в своём пакете: `owner_event_commands.py` (CLI), `done_retention.py`, `steward_reports.py` (их импортирует только `automations/composition.py`), `import_order.py` (импортирует только `task_restore.py`) | ≈14 тыс. символов лишнего контекста `board` | S | S | Ф |
 | ARCH-06 | P2 | `pyproject.toml` / ruff | Ruff isort без `combine-as-imports`: каждый `as`-импорт отдельным оператором. `host.py` — 123 строки, `runtime.py` — 107, `worker_launch.py` — 57; в зоне dispatch B 655 строк импортов | ≈−400…500 строк, чисто механически | нулевой | S | Ф/О |
 | ARCH-07 | P2 | `dispatch/runtime.py`, `host.py` | 31 «compatibility re-export» (`runtime.py:20-22,41-64,155-165`; `host.py:166-167`). AST-скан всех импортов и атрибутных обращений в src/tests/scripts не нашёл ни одного потребителя | ≈−45 строк, меньше ложных путей | нулевой | S | Ф |
 | ARCH-08 | P2 | dispatch | 13 импортов приватных имён `dispatch/gate.py` из e2e, e2e_stage, e2e_after_merge, post_merge, wait_cards, gate_lifecycle (`_rollup`, `_backend_call`, `_failed_log`, `_gh_api`, `_HTTP_STATUS_RE`, `_LogFragment`, `_fingerprint`) | Фактически публичный API GitHub CI спрятан в `gate.py` | S | M | Ф |
 | ARCH-09 | P2 | установка | Унаследованный режим «live root — git work tree»: неиспользуемые методы `CheckpointWriter` (164 строки), клонирование в `installation.py:294-467`, `state_repo.PACKING_CONTROLS`, `upgrade.step_instance_packing`. `ARCHITECTURE.md:108` такой режим запрещает, но `RECOVERY.md:714-716` обещает восстановление с legacy-tip | ≈−450 строк | M–H (нужно решение владельца) | M | Ф |
-| ARCH-10 | P2 | `runtime` | Остатки Orca-эпохи: pane-словарь `OBSERVE_PANE_*` (`head/runtime.py:66-70`), который единственный backend не порождает, хотя на него ветвится `host.py:1580-1583`. Pane-методы `AgentState`; `agent_prompt_transport` (используются 2 константы из 107 строк); модуль `pipeline/codex_sessions.py` нужен только тестам; умолчание `~/orca/workspaces` встречается в 5 местах | ≈−22 тыс. символов кода плюс шум | S | S–M | Ф |
+| ARCH-10 | P2 | `runtime` | Остатки Orca-эпохи: pane-словарь `OBSERVE_PANE_*` (`head/runtime.py:66-70`, на `8e79450`: `:36-40`), который единственный backend не порождает, хотя на него ветвится `host.py:1580-1583`. Pane-методы `AgentState`; `agent_prompt_transport` (используются 2 константы из 107 строк); модуль `pipeline/codex_sessions.py` нужен только тестам; умолчание `~/orca/workspaces` встречается в 5 местах | ≈−22 тыс. символов кода плюс шум | S | S–M | Ф |
 | ARCH-11 | P2 | `head/local_pty/supervisor.py` | Импорт supervisor тянет 44 модуля `ummanu`, из них 13 `board.*`. Цепочка: `head/__init__` → `command` → `role_env` → `docker_guard` → `board.local_run`. Это ≈225 мс и +10 МБ RSS на каждую живую голову | Память и время старта на каждую голову | S: `with_pid_heartbeat` вынести в лист, реэкспорт в `head/__init__` сделать ленивым (PEP 562) | S | Ф (измерено) |
 | ARCH-12 | P3 | `cli.py` | Любой вызов `ummanu …`, включая частый `task show`, импортирует 275 модулей, ≈0,64 с по `-X importtime`. `web/server` тянет ≈508 модулей | Латентность каждого вызова CLI агентами | M | M | Ф (изм.) / Г (выигрыш) |
 | ARCH-13 | P2 | `board/fake.py` | `FakeBoardHost`/`MemoryAudit` (16 тыс. символов) лежат в `src`, но используются только тестами; `MemoryAudit` скопирован ещё в 2 тестовых файла. Fake расходится с SQL по семантике (§7, CON-12) | −16 тыс. символов из `src` | S (убрать из `__all__`) | S | Ф |
@@ -280,7 +333,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | ARCH-15 | P2 | dispatch | 17 «утиных» проб `getattr(runtime.host, "...", None)` под тестовые фейки (`observer.py:1640,1859,2059,2778`, `worker_launch.py:284`, `host.py:439,1487,2210,2782` и др.). У реального host эти атрибуты есть всегда | Мёртвые fallback-ветки, неуверенность при чтении | M (фейки придётся дополнить) | M | Ф/Г |
 | ARCH-16 | P2 | web | Два противоположных правила перехвата ошибок источников: фиксированный кортеж `SOURCE_FAILURES` (`reads`, `sprint_reads`) и «span ловит всё» (`pause_reads`, `command_reads`). Следствие — BUG-07 | Нестабильная деградация дашборда | S | S | Ф |
 | ARCH-17 | P3 | `po/service.py` | `PoService.pump` держит `_lock` сервиса и `_lock` runner во время `spawn_head` (до 20 с + systemd-run), а `submit()` вызывает `pump()` прямо в своём потоке | Сериализация всех PO-операций | M | M | Ф/Г (влияние) |
-| CI-01 | P1 | `.github/workflows/ci.yml` | Нет ни одного шага ruff. Нет `cache: pip`. Нет `concurrency` и `permissions`. 9 suite-джобов ставят `.[memory,ci]` (fastembed/onnxruntime) даже для `unit` | Нет гейта линтера; лишние минуты CI | S | S | Ф |
+| CI-01 ◐ | P1 | `.github/workflows/ci.yml` | ◐ #674 добавил `cache: pip` и `concurrency`; остальное открыто. Нет ни одного шага ruff. ~~Нет `cache: pip`.~~ ~~Нет `concurrency`~~ и нет `permissions`. 9 suite-джобов ставят `.[memory,ci]` (fastembed/onnxruntime) даже для `unit` | Нет гейта линтера; лишние минуты CI | S | S | Ф |
 | TEST-01 | P1 | tests | `test_dispatcher.py`: 725 тыс. символов; `setUpModule:195` требует Docker для всех 27 классов, хотя 12 из них Postgres не используют (например, `DispatcherGateTests` — 86 тестов, только git) | Самый большой файл ≈181 тыс. токенов; лишний Docker-шард | S–M | M | Ф |
 | TEST-02 | P2 | tests | 38 копий `git(cwd,*args)` при готовом `tests/support/git.py:7`. 8 копий `_dead_pid` с двумя стратегиями. 7 копий `_alive`, 5 — `_kill`. 20 литералов `"version: 1\nname: test\n"`. 8 копий setUp диспетчера | ≈1 400 строк повторов | S | M | Ф |
 | DOC-01 | P1 | docs | `PROTOCOLS.md` 365 тыс., `OPERATIONS.md` 220 тыс. — монолиты. ≈90–100 тыс. символов закрытой истории. Разделы дописываются в конец файла вне структуры (`PROTOCOLS.md:4710-4964`, `BOARD_STORE.md:1297`, `OPERATIONS.md:3199`) | −30 % объёма docs; −80…95 % контекста на один вопрос | M (37 тестов читают текст docs; рантайм цитирует заголовки) | L | Ф/О |
@@ -413,12 +466,14 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 ### 5.5 `runtime/local_pty_head.py` (3 445 строк, 180 тыс., проза 52 %) — DEC-05
 
+> На `8e79450` (после #675): 2 763 строки, 124 тыс. символов, проза 33 %. Диапазоны строк ниже пересчитаны на `8e79450`; оценки «после сжатия прозы» частично уже реализованы.
+
 Это не наследник `head/local_pty/*`, а другой слой: backend над substrate (**Ф**). Предложение — пакет `runtime/local_pty_head/`, в `__init__` реэкспорт текущих имён.
 
 | Модуль | Содержимое | Символов |
 |---|---|---|
-| `runtime.py` | `LocalPtyHeadRuntime`, `AttachedStream` | 107 тыс. → ≈60 тыс. после сжатия прозы |
-| `delivery.py` | Словарь исходов и отказов (243–377), `DeliveryReport`, классификаторы отказов | ≈25 тыс. |
+| `runtime.py` | `LocalPtyHeadRuntime`, `AttachedStream` | 107 тыс. → ≈60 тыс. после сжатия прозы (◐ сжатие сделано в #675) |
+| `delivery.py` | Словарь исходов и отказов (133–250), `DeliveryReport`, классификаторы отказов | ≈25 тыс. |
 | `durable.py` | `_DurableHead`, `_journal_state`, `_supervisor_state`, `_Probe`, `_Address` | ≈8 тыс. |
 | `journal_view.py` | `_JournalReplay`, `head_run_turn_reading`, `head_run_screen_lines`, `head_run_journal*`, `head_run_loss_reason` | ≈20 тыс. |
 | `inspect.py` | `SupervisorLease`, `head_run_supervisor_lease`, `fence_cleanup_scopes`, `runtime_scope_inventory`, `head_scope_owner_*` | ≈14 тыс. |
@@ -439,13 +494,15 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 ### 5.6 `webproto/sprint_reads.py` (2 773 строки, 135 тыс.) — DEC-06
 
+> На `8e79450` (после #676): 2 313 строк, 100 тыс. символов, проза 23 %. Диапазоны пересчитаны на `8e79450`; объёмы модулей — исходные оценки, после сжатия они ≈на четверть меньше.
+
 | Модуль | Содержимое | Символов |
 |---|---|---|
-| `sprint_vocab.py` | 100–372 | ≈20 тыс. |
-| `sprint_sections.py` | `SprintSections`, 395–1209 | ≈40 тыс. |
-| `sprint_reads.py` | `SprintReadLayer`, 1217–1931 | ≈36 тыс. |
-| `sprint_waits.py` | 2117–2324 | ≈12 тыс. |
-| `sprint_derive.py` | 2341–2718 | ≈20 тыс. |
+| `sprint_vocab.py` | 24–239 | ≈20 тыс. |
+| `sprint_sections.py` | `SprintSections`, 261–969 | ≈40 тыс. |
+| `sprint_reads.py` | `SprintReadLayer`, 976–1565 | ≈36 тыс. |
+| `sprint_waits.py` | 1725–1915 | ≈12 тыс. |
+| `sprint_derive.py` | 1930–2259 | ≈20 тыс. |
 
 **Ограничения:**
 - тесты патчат `sprint_reads.observer_snapshot`, `board_client`, `task_audit_for`, `_SOURCE_FAILURES`, поэтому вызывающие должны остаться в `sprint_reads`;
@@ -458,6 +515,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Риск: `ProtocolBoundary.__init_subclass__` оборачивает публичные методы; тест должен подтвердить, что обёртка сохраняется.
 
 ### 5.7 `web/pages.py` (4 996 строк, 250 тыс.) и `web/app.py` — DEC-07
+
+> На `8e79450` (после #673/#676): `pages.py` — 4 585 строк, 224 тыс. (docstring и комментарии ≈20 тыс. вместо ≈40 тыс.; CSS/JS/HTML не тронуты); `app.py` — 1 288 строк, 57 тыс. Диапазоны в таблице шага 2 и ссылки на `app.py` пересчитаны на `8e79450`.
 
 **Состав `pages.py`:**
 
@@ -476,24 +535,26 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 | Модуль | Строки | Символов |
 |---|---|---|
-| `shell.py` | 518–999 | 22 тыс. |
-| `parts.py` | 1000–1189 | 9 тыс. |
-| `dashboard.py` | 1190–1653 | 22 тыс. |
-| `history.py` | 1654–2118 | 21 тыс. |
-| `card.py` | 2119–3240 | 52 тыс. |
-| `sprint.py` | 3519–4238 | 33 тыс. |
-| `po.py` | 4239–4996 | 36 тыс. |
+| `shell.py` | 502–934 | 22 тыс. |
+| `parts.py` | 940–1094 | 9 тыс. |
+| `dashboard.py` | 1100–1515 | 22 тыс. |
+| `history.py` | 1521–1967 | 21 тыс. |
+| `card.py` | 1973–2962 | 52 тыс. |
+| `sprint.py` | 3203–3857 | 33 тыс. |
+| `po.py` | 3862–4585 | 36 тыс. |
 
 Типовая задача на одну страницу: 70–90 тыс. символов вместо 250 тыс. (−40…45 тыс. токенов).
 
 **`app.py`** (68 тыс.):
 - `web/routes.py`: `Route`, `ROUTES`, наборы полей, ≈9 тыс.;
-- `web/forms.py`: 1039–1270, ≈10 тыс.;
-- в `app.py` остаются обработчики; помощник `_po_refused()` для трёх почти одинаковых блоков обработки отказа PO в `_po_send`/`_po_close`/`_po_rename` (`app.py:940-1013`), −25 строк.
+- `web/forms.py`: 940–1159, ≈10 тыс.;
+- в `app.py` остаются обработчики; помощник `_po_refused()` для трёх почти одинаковых блоков обработки отказа PO в `_po_send`/`_po_close`/`_po_rename` (`app.py:842-914`), −25 строк.
 
-**Сокращение.** Мёртвый код ≈8,5 тыс. (§6.1, DEAD-23). Дубли DUP-W1…W5 ≈20 тыс.
+**Сокращение.** Мёртвый код ≈8,5 тыс. (§6.1, DEAD-23; ◐ приватные помощники удалены в #673). Дубли DUP-W1…W5 ≈20 тыс.
 
 ### 5.8 Сжатие прозы как отдельная «декомпозиция» — ARCH-01
+
+**◐ Статус:** #675 (`runtime`, −138 тыс. символов прозы) и #676 (`web`/`webproto`, −211 тыс.) применили это правило с проверкой AST-эквивалентности. Строки «`runtime`» и «`web`/`webproto`» таблицы ниже выполнены (для `runtime` — без `po`/`automations`); остальные зоны открыты.
 
 **Это самый крупный рычаг.** Рекомендуемое правило:
 - docstring модуля и функции — инвариант и контракт в 1–3 строки плюс ссылка на раздел docs;
@@ -511,7 +572,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | Установка | −20…30 тыс. | |
 | **Итого `src`** | **≈−450…650 тыс. символов** | ≈−110…160 тыс. токенов |
 
-**Предусловие для vitality-кластера.** Сначала исправить расхождения кода и `HEAD_VITALITY.md` (§8, DOC-09), потому что документ станет единственным источником.
+**Предусловие для vitality-кластера.** Сначала исправить расхождения кода и `HEAD_VITALITY.md` (§8, DOC-09), потому что документ станет единственным источником. ✅ Выполнено в #672/#674.
 
 ### 5.9 Тесты — TEST-01
 
@@ -569,7 +630,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 Ниже то, что `vulture` пометил, но что **на самом деле живо**:
 - `_rpc_*` вызываются через `getattr(self, f"_rpc_{method}")` (`sql_cards.py:643`);
-- `WebApp._*` — через `getattr(self, f"_{route.handler}")` (`app.py:375`);
+- `WebApp._*` — через `getattr(self, f"_{route.handler}")` (`app.py:375`, на `8e79450`: `:324`);
 - `do_GET`/`do_POST` — хуки `http.server`;
 - `@mcp.tool` (`memory_search`/`get`/`list`) и `verify_token`;
 - поля TypedDict (`pause.py:46,67`);
@@ -580,29 +641,29 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 | ID | Что | Где | Доказательство | Сокращение | Риск |
 |---|---|---|---|---|---|
-| DEAD-01 | `GATE_NAME_FOR_TASK_CLASS` | `dispatch/launch.py:627` | есть только определение | 1 строка | — |
-| DEAD-02 | `_run_snapshot()` | `dispatch/state.py:1302-1303` | только определение | 2 | — |
-| DEAD-03 | `_PYTHONPATH_PREFIX`, `_CONTROL_PLANE_TASK_COMMAND` | `dispatch/runtime.py:238-239` | не читаются, но держат импорты `:226,231` | 2 + импорты | — |
+| DEAD-01 ✅ #673 | `GATE_NAME_FOR_TASK_CLASS` | `dispatch/launch.py:627` | есть только определение | 1 строка | — |
+| DEAD-02 ✅ #673 | `_run_snapshot()` | `dispatch/state.py:1302-1303` | только определение | 2 | — |
+| DEAD-03 ✅ #673 | `_PYTHONPATH_PREFIX`, `_CONTROL_PLANE_TASK_COMMAND` | `dispatch/runtime.py:238-239` | не читаются, но держат импорты `:226,231` | 2 + импорты | — |
 | DEAD-04 | 31 compatibility re-export | `dispatch/runtime.py`, `host.py` | у них нет потребителей (AST-скан) | ≈45 строк | низкий |
 | DEAD-05 | свойство `CommandHostRuntime.head_runtime` | `host.py:3450-3461` | всегда бросает `LegacyDispatcherRecord`; используется только в тесте, который проверяет именно это | 12 + тест | низкий |
 | DEAD-06 | состояние `"idle-recovering"` | `observer.py:880` | проверяется, но нигде не присваивается | 1 ветка | низкий |
-| DEAD-07 | `ATTEMPT_USAGE_KIND`; `DispatchedRun.html_url` | `attempt_usage.py:63`; `e2e.py:224` | не читаются: вызывающие (`e2e_stage.py:309-331`, `e2e_after_merge.py:693-713`) строят `run_url` сами | ≈5 | — |
-| DEAD-08 | ветки `inventory(catch_up=True)` и параметр `_residue_row(catch_up)` | `cleanup.py:1122,1125,1134,1142,1184-1188,1204-1205` | никто не передаёт `True`; единственная явная передача — `catch_up=False` (`:1301`) | ≈20 + docstring | низкий |
+| DEAD-07 ✅ #673 | `ATTEMPT_USAGE_KIND`; `DispatchedRun.html_url` | `attempt_usage.py:63`; `e2e.py:224` | не читаются: вызывающие (`e2e_stage.py:309-331`, `e2e_after_merge.py:693-713`) строят `run_url` сами | ≈5 | — |
+| DEAD-08 ✅ #673 | ветки `inventory(catch_up=True)` и параметр `_residue_row(catch_up)` | `cleanup.py:1122,1125,1134,1142,1184-1188,1204-1205` | никто не передаёт `True`; единственная явная передача — `catch_up=False` (`:1301`) | ≈20 + docstring | низкий |
 | DEAD-09 | pane-advisory путь в vitality | `from_pane_readiness` (`head_vitality.py:606-641`), обработка `"idle"` (`:809`), advisory-блоки редуктора (episode 666–689, 963–992), `"idle"` в `wait_vitality.py:1047` и `gate_lifecycle.py:863` | ни один редуцируемый производитель статуса не выдаёт `"idle"`; единственный источник — `host.observer_status` (`host.py:1591`), но он не попадает в `snapshots_from_status`. Поля `last_turn`/`turn_ended_at` в `from_json` оставить читаемыми | ≈110 + тесты | средний |
 | DEAD-10 | 13 неиспользуемых параметров | `wait_vitality._recovery_thresholds(runtime)`:495, `_recovery_policy_decision(kind)`:511, `_sigcont_head(now)`:741, `_escalate_recovery_to_operator(now)`:833, `_vitality_guard_decision(runtime)`:875, `_guard_or_wait(records,payload,now)`:901, `_trigger_wait_watchdog(stall=)`:1182, `release_parked(reason)`:222, `reslice_parked(reason)`:216, `gate._local_gate(record)`:393, `e2e_stage._block(attempt_id)`:708, `_attempt_outcome_obligation(disposition)`:75, `post_merge.open_watch(runtime)`:103 | ruff ARG, проверено вручную | ≈30 | низкий |
 | DEAD-11 | `head_vitality.SnapshotSource.EXECUTION_RECEIPT`, `RecoveryIntent.REQUEST_DRAIN/RESPAWN/BLOCK`; `ProgressState.STAGNANT` (только в одном `assertNotEqual`) | `head_vitality.py:138`, `head_vitality_policy.py:90-96` | только определения; в docstring названы «словарём» | ≈6 | решение владельца |
 | DEAD-12 | `AcceptedGreenGate.persisted_payload` (используется только в тестах); `.valid` — чистый алиас | `gate_receipt.py` | — | ≈10 | низкий |
-| DEAD-13 | `resource_probe_readiness`, `_recorded_readiness`, `print_resource_probes` и импорты `PROBE_TTL_SECONDS`, `HeadHealth`, `run_probe` | `cli.py:1348-1430`, `:45-48` | ссылок нет; doctor строит пробы через `collect_recovery_inventory` (`cli.py:895`). Нужно поправить `tests/test_cli.py:274`, который патчит `run_probe` | ≈70 строк / 3,2 тыс. | низкий |
-| DEAD-14 | `_closeout_result`, `_source_audit`, `_resume`; импорт `SprintSourceAudit` | `sprints.py:3669,3809,3815-3824`, `:52` | ноль ссылок; `_resume` дублирует логику `:2474-2480` | ≈1 тыс. | — |
+| DEAD-13 ✅ #673 | `resource_probe_readiness`, `_recorded_readiness`, `print_resource_probes` и импорты `PROBE_TTL_SECONDS`, `HeadHealth`, `run_probe` | `cli.py:1348-1430`, `:45-48` | ссылок нет; doctor строит пробы через `collect_recovery_inventory` (`cli.py:895`). Нужно поправить `tests/test_cli.py:274`, который патчит `run_probe` | ≈70 строк / 3,2 тыс. | низкий |
+| DEAD-14 ✅ #673 | `_closeout_result`, `_source_audit`, `_resume`; импорт `SprintSourceAudit` | `sprints.py:3669,3809,3815-3824`, `:52` | ноль ссылок; `_resume` дублирует логику `:2474-2480` | ≈1 тыс. | — |
 | DEAD-15 | 4 алиаса «released private compatibility»; реэкспорт `BUDGET_UNCHARGED_*` | `tasks.py:44-61`, `restore.py:37`; `sprints.py:55-60` | существование алиасов проверяет только `tests/test_tasks.py:5755-5761`; `BUDGET_*` используют только тесты | ≈0,7 тыс. | низкий |
 | DEAD-16 | API, используемое только тестами | `broad_check.parse_unittest_summary`, `result_refusal`; `product_issues._transaction_event`; `onboarding.compatibility_manifests`; `SprintReader.status`; `DispatcherRuntime.resume_pipeline` (`runtime.py:429`); `watchdog.idle_stall_seconds`; `GitWorkspaceManager.teardown` (всегда бросает); `upgrade.running_product_root`; `host.SHIPPED_PACKAGING_ROOT`; `state_repo.MEMORY_PATHSPEC` | — | ≈100 | перенести в test-support или оставить |
-| DEAD-17 | `memory/client_config.TOKEN_ENV` | `:24` | 0 ссылок; дублирует `runtime/role_env.py:127` | 1 | — |
-| DEAD-18 | `events.marker_comment_lock` (файловый lock) с импортами `fcntl`/`hashlib`/`Path` | `board/events.py:50-65` | все вызовы идут в SQL-версию `.audit.marker_comment_lock` | ≈19 | — |
-| DEAD-19 | `SqlAuditError`; `SqlTaskAudit.refusals()`; `ProductIssueRecords.key_of/row/metadata/comments`; `SqlSprintRecords.comments`; `SqlBoardHost._sprint_data` | `sql_audit.py:93,576`; `sql_product_issues.py:98,214,324,583`; `sql_sprints.py:639`; `sql_host.py:767` | ноль ссылок, кроме собственных копий в фикстурах | ≈35 | — |
+| DEAD-17 ✅ #673 | `memory/client_config.TOKEN_ENV` | `:24` | 0 ссылок; дублирует `runtime/role_env.py:127` | 1 | — |
+| DEAD-18 ✅ #673 | `events.marker_comment_lock` (файловый lock) с импортами `fcntl`/`hashlib`/`Path` | `board/events.py:50-65` | все вызовы идут в SQL-версию `.audit.marker_comment_lock` | ≈19 | — |
+| DEAD-19 ◐ #673: удалены `key_of`/`metadata`/`comments` и `SqlSprintRecords.comments`; `_sprint_data` жив (`sql_host.py:813`, ошибка аудита); `SqlAuditError`, `refusals()`, `row` остались | `SqlAuditError`; `SqlTaskAudit.refusals()`; `ProductIssueRecords.key_of/row/metadata/comments`; `SqlSprintRecords.comments`; `SqlBoardHost._sprint_data` | `sql_audit.py:93,576`; `sql_product_issues.py:98,214,324,583`; `sql_sprints.py:639`; `sql_host.py:767` | ноль ссылок, кроме собственных копий в фикстурах | ≈35 | — |
 | DEAD-20 | `BoardHost` Protocol | `board/host.py:193-206` | нигде не используется как тип; `FakeBoardHost` ему не удовлетворяет | 14 | низкий |
-| DEAD-21 | Orca-эпоха в `runtime` | `AgentState.next_terminal_generation`/`load_terminal_*`/`terminal_generation_file` (`state.py:137,189-241`); `load_terminal_handle`/`save_terminal_handle` (`:180-187,243-276`, только тесты); `head_profile.json` (пишется в `dispatch.py:887`, не читается); модуль `automations/agents/pipeline/codex_sessions.py` (125 строк); `pipeline/naming.SLUG_RE`, `pause.MODES`/`PUBLIC_MODES`; бо́льшая часть `agent_prompt_transport` (≈85 из 107 строк); `OBSERVE_INVENTORY_UNREADABLE`/`OBSERVE_PANE_ABSENT`; `HeadActivity.acted/observed/_output_marks/busy`, `HeadReceipt.left_alive/unsupported`; тестовый API клиента (`wait_for_delivery`, `next_event`, `stream`, `resize`, `HeadHandle.connect/events/identity`, `journal.events_since`); `heads.profile_info`; `PoStore.begin_turn`; `PoService.exiting` | разные | `grep` | ≈22 тыс. символов | низкий |
-| DEAD-22 | Неиспользуемые продуктовые глаголы `LocalPtyHeadRuntime.attach` (1382–1472) с `AttachedStream` и `request_drain` (1243–1285); push-attach в supervisor (`:1091-1114,1167-1194`) | — | нет ни одного вызова в `src` | ≈300 строк / 14 тыс. | **продуктовое решение**: глаголы входят в Protocol, на них ≈19 тестов |
-| DEAD-23 | Web | `_DASHBOARD_SCRIPT` (`pages.py:3246-3288`), `_start_form` (2226–2250), `_review_form` (2963–2975) и review-блок `_TASK_SCRIPT` (3487–3516), `_feed` (1657–1661) и ветка `compact`, `_project_table`/`_task_table` (2195–2223), CSS `.sprint-card`/`.stack`/`#feedback`, `FORM_TYPE`, `FEED_LIMIT`, `DEFAULT_SITES`, `RUN_ROLES`, `ProductRun.at_phase`, `CLOSE_STATES`, `_BOARD_SETTLED_STATES` | — | ноль ссылок; составные классы CSS проверены | ≈8,5 тыс. | — |
+| DEAD-21 | Orca-эпоха в `runtime` | `AgentState.next_terminal_generation`/`load_terminal_*`/`terminal_generation_file` (`state.py:137,189-241`; на `8e79450`: `:129,178-223`); `load_terminal_handle`/`save_terminal_handle` (`:180-187,243-276`; на `8e79450`: `:169-176,225-249`, только тесты); `head_profile.json` (пишется в `dispatch.py:887`, не читается); модуль `automations/agents/pipeline/codex_sessions.py` (125 строк); `pipeline/naming.SLUG_RE`, `pause.MODES`/`PUBLIC_MODES`; бо́льшая часть `agent_prompt_transport` (≈85 из 107 строк); `OBSERVE_INVENTORY_UNREADABLE`/`OBSERVE_PANE_ABSENT`; `HeadActivity.acted/observed/_output_marks/busy`, `HeadReceipt.left_alive/unsupported`; тестовый API клиента (`wait_for_delivery`, `next_event`, `stream`, `resize`, `HeadHandle.connect/events/identity`, `journal.events_since`); `heads.profile_info`; `PoStore.begin_turn`; `PoService.exiting` | разные | `grep` | ≈22 тыс. символов | низкий |
+| DEAD-22 | Неиспользуемые продуктовые глаголы `LocalPtyHeadRuntime.attach` (1382–1472; на `8e79450`: 1081–1163) с `AttachedStream` и `request_drain` (1243–1285; 962–990); push-attach в supervisor (`:1091-1114,1167-1194`; `:1008-1031,1084-1107`) | — | нет ни одного вызова в `src` | ≈300 строк / 14 тыс. | **продуктовое решение**: глаголы входят в Protocol, на них ≈19 тестов |
+| DEAD-23 ◐ #673: удалены `_DASHBOARD_SCRIPT`, `_start_form`, `_review_form`, `_feed`, `_project_table`, `_task_table`; остальное открыто | Web | ~~`_DASHBOARD_SCRIPT` (`pages.py:3246-3288`), `_start_form` (2226–2250), `_review_form` (2963–2975)~~ и review-блок `_TASK_SCRIPT` (3487–3516; на `8e79450`: 3167–3196), ~~`_feed` (1657–1661)~~ и ветка `compact`, ~~`_project_table`/`_task_table` (2195–2223)~~, CSS `.sprint-card`/`.stack`/`#feedback`, `FORM_TYPE`, `FEED_LIMIT`, `DEFAULT_SITES`, `RUN_ROLES`, `ProductRun.at_phase`, `CLOSE_STATES`, `_BOARD_SETTLED_STATES` | — | ноль ссылок; составные классы CSS проверены | ≈8,5 тыс. | — |
 | DEAD-24 | Скрипты | `scripts/ummanu-start.sh` («Pinned Orca entry point», есть только в `test_pipeline_paths.py:65`); `check_memory_mcp_restore_e2e.py` (нигде не запускается, не исполняемый); `repro_local_pty_retained_continuation.py` (разовый repro, зависит от необъявленного `pyte`); `scripts/role_skills.py` (8-строчный shim, используется subprocess-ом из `steward/cli.py:41,170`) | — | — | ≈18 тыс. символов | низкий |
 | DEAD-25 | `backup create --no-copy-transcripts` | `cli.py:366-370` | принимается и не читается. **Уточнение оркестратора ✔**: флаг скрыт (`argparse.SUPPRESS`), то есть это намеренный no-op для совместимости, а не забытый флаг | 5 строк | решение владельца |
 
@@ -655,7 +716,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | DUP-D9 | `worker_report.py` | — | Блок `_stop_worker_confirmed → return → terminal_effect(blocked…)` повторён 8 раз; сброс gate «fresh code state» — `177-184` ≡ `353-360` | 50 |
 | DUP-D10 | `production.py:457-492` | — | 6 одинаковых `try/except → _unexpected_error`; `skipped.append({...})` 10 раз в `_production_claim_ready` (1609–1736) | 45 |
 | DUP-D11 | `e2e_stage.py:336-477` `_identify`/`_create_wait` | `e2e_after_merge.py:814-946` | Сходство по diff 0,70/0,76. Различаются 4 точки: `run.branch`/`git_ref`, текст, persist-функция, префикс request id (`e2e-recovered` против `e2e-am-recovered`). Параметризовать, байты сообщений и request id сохранить. Обработка dispatch-result (`e2e_stage.py:308-331` ≡ `e2e_after_merge.py:692-713`) — туда же | ≈120 |
-| DUP-D12 | `e2e.py:260-263` | `e2e.py:328-332` | `dispatch_workflow` переписывает `_gh_status` | 4 |
+| DUP-D12 ✅ #673 | `e2e.py:260-263` | `e2e.py:328-332` | `dispatch_workflow` переписывает `_gh_status` | 4 |
 | DUP-D13 | `gate.py:799-809` `_actions_run_id` | `gate.py:1323-1331` | Плюс `(x.stderr or x.stdout or '').strip()` 15 раз и чтение HEAD sha (`:596` и `:1208-1216`) | ≈25 |
 | DUP-D14 | `wait_vitality.py:1059-1081` | `head_status.py:216-231` | Извлечение предыдущего курсора. Общий `snapshots_for_episode(...)` заодно чинит BUG-15 | ≈20 |
 | DUP-D15 | `wait_vitality.py:1044-1050` (5 ключей) | `gate_lifecycle.py:860-864` (3 ключа) | Предикат «ничего не наблюдалось» **уже разошёлся**. Копию в gate удалить: `reduce_and_store_vitality_episode` повторяет проверку | 5 |
@@ -698,22 +759,22 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | ID | Где | Комментарий | Сокращение |
 |---|---|---|---|
 | DUP-R1 | `automations/runtime/dispatch.py:463-488,491-516,519-557,560-587` | 4 функции одной формы. Сводятся к `_move_report(...)` | 70 |
-| DUP-R2 | `/proc/<pid>/stat` + `boot_id` разбирается 6 раз: `identity.py:55-59`, `supervisor.py:1320-1354`, `scoped_lifecycle.py:65-73`, `po/runner.py:96-111`, `scope_inventory.py:150,174`, `children.py:52` | Седьмая копия (встроенный writer в `command.py:268-275`) **должна остаться inline**. Лист `head/procfs.py` на stdlib | 60 |
-| DUP-R3 | `supervisor.py:326-335` `_socket_answers` ≡ `client.py:317-326` `_answers` | В `protocol` | 10 |
-| DUP-R4 | fsync каталога ×5 (`client.py:190-194`, `supervisor.py:512-516`, `po/runner.py:383-387`, `scoped_lifecycle.py:212`, `po/queue.py:82`) | Помощник | 20 |
-| DUP-R5 | `local_pty_head.py:795-796` ≡ `828-836` (дважды `HeadRun`); 3 `AttachReceipt` (1413–1456); `HEAD_GONE` (1205–1220 ≡ 2461–2473) | Помощник `_receipt_at` | 50 |
-| DUP-R6 | Поиск `run.exited` ×4 (`local_pty_head.py:3133-3141,3370-3388`, `po/runner.py:282-287`, `ScopedHeadLifecycle.started_or_exited`) | Один журнальный помощник с нижней границей `run.started` (чинит BUG-16) | 25 |
-| DUP-R7 | `tui_delivery.DeliveryEvidence.to_json` (179–226) перечисляет 48 полей вручную | `asdict`; сначала проверить, что хеширование не зависит от порядка | 45 |
+| DUP-R2 | `/proc/<pid>/stat` + `boot_id` разбирается 6 раз: `identity.py:40-44`, `supervisor.py:1233-1266`, `scoped_lifecycle.py:65-73`, `po/runner.py:96-111`, `scope_inventory.py:150,174`, `children.py:39` | Седьмая копия (встроенный writer в `command.py:233-240`) **должна остаться inline**. Лист `head/procfs.py` на stdlib | 60 |
+| DUP-R3 | `supervisor.py:317-326` `_socket_answers` ≡ `client.py:307-316` `_answers` | В `protocol` | 10 |
+| DUP-R4 | fsync каталога ×5 (`client.py:182-186`, `supervisor.py:475-479`, `po/runner.py:383-387`, `scoped_lifecycle.py:212`, `po/queue.py:82`) | Помощник | 20 |
+| DUP-R5 | `local_pty_head.py:566-567` ≡ `599-607` (дважды `HeadRun`); 3 `AttachReceipt` (1107–1147); `HEAD_GONE` (924–939 ≡ 1877–1889) | Помощник `_receipt_at` | 50 |
+| DUP-R6 | Поиск `run.exited` ×4 (`local_pty_head.py:2470-2475,2688-2706`, `po/runner.py:282-287`, `ScopedHeadLifecycle.started_or_exited`) | Один журнальный помощник с нижней границей `run.started` (чинит BUG-16) | 25 |
+| DUP-R7 | `tui_delivery.DeliveryEvidence.to_json` (150–196) перечисляет 48 полей вручную | `asdict`; сначала проверить, что хеширование не зависит от порядка | 45 |
 
 **Web**
 
 | ID | Где | Комментарий | Сокращение |
 |---|---|---|---|
 | DUP-W1 | Базовая обвязка слоёв (§5.6) | — | 150 |
-| DUP-W2 | `command_reads.py:247-271` ≡ `pause_reads.py:170-199` (`_source`); `_installation()` (`command_reads.py:611-646` ≈ `pause_reads.py:545-590`) | — | 70 |
+| DUP-W2 | `command_reads.py:177-194` ≡ `pause_reads.py:115-133` (`_source`); `_installation()` (`command_reads.py:486-519` ≈ `pause_reads.py:433-469`) | — | 70 |
 | DUP-W3 | `_reason` ×5, `_text` ×6 (webproto), `_float` ×2 | `webproto/_values.py` | 30 |
-| DUP-W4 | `SprintRequestStore` (`sprint_requests.py:88-186`) и `RunStore` (`runs.py:345-430`) | Общий `RequestIndex`. Форматы на диске различаются (`reference` против `run_id`), поэтому классы записей оставить раздельными | 60 |
-| DUP-W5 | `pages.py`: `_mapping` (`:2520`) ≡ `_block` (`:2608`); 33 повтора `x.get(k) if isinstance(...) else {}`; 5 context-manager-ов, различающихся только переменной (`:584-658`); 4 JS-fallback `crypto.randomUUID` | — | ≈2,5 тыс. |
+| DUP-W4 | `SprintRequestStore` (`sprint_requests.py:66-152`) и `RunStore` (`runs.py:281-361`) | Общий `RequestIndex`. Форматы на диске различаются (`reference` против `run_id`), поэтому классы записей оставить раздельными | 60 |
+| DUP-W5 | `pages.py`: `_mapping` (`:2297`) ≡ `_block` (`:2385`); 33 повтора `x.get(k) if isinstance(...) else {}`; 5 context-manager-ов, различающихся только переменной (`:551-625`); 4 JS-fallback `crypto.randomUUID` | — | ≈2,5 тыс. |
 
 **Намеренное дублирование, которое оставить:**
 - `runtime_preflight` обязан быть stdlib-only;
@@ -749,20 +810,20 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | ID | Контракт | Расхождение | Доказательство | Приор. | Метка |
 |---|---|---|---|---|---|
 | CON-01 | `instance.schema.json` и `examples/instance` | Блок `heads` проходит схему (`instance.schema.json:54`) и есть в примере. Но `host.build_plan:207-218` превращает каждую голову в юнит `{prefix}{role}.service`, а таких юнитов нет. Dry-run `apply_host` на примере выдаёт `no unit file is shipped for: ummanu-reviewer.service, ummanu-worker.service`; без `heads` — `[]`. Кроме того: `orca_repos` («legacy and ignored», 0 читателей), `persona.name/style` (0 читателей); ключи `host.memory_reindex_*`/`memory_model`/`dim` не документированы | воспроизведено субагентом | P2 | Ф |
-| CON-02 | `web-run.schema.json` | `ops.run_list` выдаёт `kind: "product_runs"` (`ops.py:494`). `validate(doc, "web-run")` → `failed oneOf constraint`, хотя `PROTOCOLS.md:3775` утверждает, что каждый документ web-run валиден. Схем вообще нет у `head_view`, `owner_events*`, `po_*`, `health`, ответа codex reset, ответов `task_comment`/`task_move`. У `po_*` и `owner_event_read` нет `schema_version`/`observed_at`. Ни у одной схемы нет `additionalProperties: false` на верхнем уровне, поэтому дрейф не ловится | воспроизведено | P2 | Ф |
+| CON-02 | `web-run.schema.json` | `ops.run_list` выдаёт `kind: "product_runs"` (`ops.py:401`). `validate(doc, "web-run")` → `failed oneOf constraint`, хотя `PROTOCOLS.md:3775` утверждает, что каждый документ web-run валиден. Схем вообще нет у `head_view`, `owner_events*`, `po_*`, `health`, ответа codex reset, ответов `task_comment`/`task_move`. У `po_*` и `owner_event_read` нет `schema_version`/`observed_at`. Ни у одной схемы нет `additionalProperties: false` на верхнем уровне, поэтому дрейф не ловится | воспроизведено | P2 | Ф |
 | CON-03 | Исход шага тика | `gate_lifecycle.py:833` (stall gate-pending) и `wait_vitality.py:1460` (эскалация watchdog) возвращают `{"status":"ok", "to":"blocked"}`, остальные пути блокировки — `"status":"blocked"`. Потребитель `production.py:1225` ставит fence на спринт и проект только при `status == "blocked"`, поэтому эти блокировки в том же цикле не огораживаются. Та же форма в `worker_report.py:239`, `worker_launch.py:818` | ✔ код прочитан | P2 | Ф (намеренность — Г) |
 | CON-04 | Request id «своих блоков» в claim | `claim.py:626-651` ищет `_attempt_request_id(attempt_id, action, ref)` без суффикса. Производители `worker-wait-stall`/`review-wait-stall` (`wait_vitality.py:1435-1437`), `worker-respawn-blocked` (`:1331-1332`), `review-blocked` (`review.py:200-204,1029-1031`) добавляют суффикс цикла (`watchdog.py:281-290`). На главном пути attempt id новый (`production.py:1697`), так что ни один из 42 поисков не совпадает (INEF-03) | — | P2 | Ф |
 | CON-05 | Словари доски | Issue kind/priority/close-reason: enum `models.py:125-143`, наборы в `product_issues.py:43-45`, литералы в `sql_host.py:217,934-935`. Маркеры: `models.py:545-559` ≡ `events.py:79-93`; набор `{CARD_REPORTED, CARD_VERDICTED, CARD_DECIDED}` — трижды. ≈66 литералов состояний карточек вне `board` | — | P3 | Ф |
 | CON-06 | Роль ревьюера | `REVIEW_ROLE = "review"` (`launch.py:83`) против `"reviewer"` (HeadRun, heartbeat). ≥ 6 конвертеров: `host.py:4960`, `heartbeat.py:19`, `launch.py:533,615`, `host.py:1762,1795,2433`, `provider_failure.py:247`. `_launch` принимает оба (`host.py:3124,3327`) | — | P3 | Ф |
-| CON-07 | Код ошибки «конфиг инстанса невалиден» | `sprint_reads`, `reads`, `ops`, `card_ops`, `sprint_ops` → `InstallationUnavailable` (503); `pause_reads:589`, `command_reads:645` → `ValidationRefused` (400), и docstring называет это «compatibility promise» | — | P3 | Ф |
+| CON-07 | Код ошибки «конфиг инстанса невалиден» | `sprint_reads`, `reads`, `ops`, `card_ops`, `sprint_ops` → `InstallationUnavailable` (503); `pause_reads:468`, `command_reads:518` → `ValidationRefused` (400); docstring называл это «compatibility promise» (после #676 этой формулировки нет, расхождение кодов осталось) | — | P3 | Ф |
 | CON-08 | Формат времени | `record_e2e_intent`/`record_after_merge_intent` пишут `datetime.now(UTC).isoformat()` (микросекунды, `+00:00`; `tasks.py:2596,2694`), остальное — `_now()` (секунды, `Z`). Board: микросекунды у спринтов (`sql_sprints.py:35`) против усечения у карточек (`sql_cards.py:251`) против `strftime` в audit (`sql_audit.py:108,559`) | — | P3 | Ф (влияние на сравнение строк — Г) |
-| CON-09 | `runtime.env` | `runtime_env.read_runtime_env` (`:23-74`) отвергает `export` и оставляет кавычки; `role_env.load_env_file` (`:279-313`) принимает `export` и снимает кавычки через shlex; третий парсер — `secret_store.py:969`. `KEY="a b"` читается по-разному | — | P2 | Ф (наличие таких значений — Г) |
+| CON-09 | `runtime.env` | `runtime_env.read_runtime_env` (`:23-74`) отвергает `export` и оставляет кавычки; `role_env.load_env_file` (`:279-313`; на `8e79450`: `:249-283`) принимает `export` и снимает кавычки через shlex; третий парсер — `secret_store.py:969`. `KEY="a b"` читается по-разному | — | P2 | Ф (наличие таких значений — Г) |
 | CON-10 | Вывод CLI | JSON задач — `ensure_ascii=False` (`cli_output.py:11`), спринтов — по умолчанию (`sprint_commands.py:320,336`). Голые группы `data`/`memory`/`config` печатают «not implemented in Phase 1 skeleton» и выходят с кодом 1 (`cli.py:120,2260`), а `task`/`sprint`/`product`/`check` дают JSON usage и код 2. `--data-dir` по умолчанию берёт `UMMANU_DATA_DIR` только у task/product. Коды ошибок `run_owner_decisions`/`run_resume` различаются (`sprint_commands.py:509-511,606-611`) | — | P3 | Ф |
 | CON-11 | Чтение с записью | `SprintReader.show` → `ensure_sprint_board` может выполнить `createProject` (`sprints.py:638`); `list()` по умолчанию `create=True` (`:581`) | — | P3 | Ф |
 | CON-12 | Fake против SQL | У `FakeBoardHost` нет `marker_comment`/`recover_*`; `transition` без role authority; нет автоматических связанных ref; close Issue не ставит `close_reason`; event-id без payload; `occurred_at` усечён до секунд; create/replace разрешены для любого kind; `MemoryAudit` бросает `TaskError`, fake host — `ValueError` | — | P3 | Ф |
-| CON-13 | Протокол local-pty | `OP_RESIZE`, `OP_ATTACH`, `EVENT_OUTPUT/DROPPED/EXITED` не используются продуктом. `next_event` возвращает `None` и на тишину, и на закрытие, а docstring обещает их различать (`client.py:537-570`). `SUN_PATH_MAX = 100` против `po/service.MAX_SOCKET_PATH_BYTES = 107`. Комментарий `journal.py:30-36` («< 256 байт») ложен: `run.started` с heartbeat-обёрткой ≥ 2,1 КБ (измерено 2 175) | — | P3 | Ф |
-| CON-14 | Prompt-транспорт | `agent_prompt_transport` декларирует «каждый prompt проверяется здесь», но local-pty доставляет `pointer.text + "\n"` без проверки (`local_pty_head.py:3023-3025`, `operations.py:118-121`) | — | P3 | Ф (риск — Г: входы доверенные) |
-| CON-15 | Префиксы env | Смешаны `TA_*` и `UMMANU_*`: `TA_RUNTIME_ENV_FILE`/`UMMANU_RUNTIME_ENV_FILE` (`role_env.py:26-31`), `TA_CODEX_SESSIONS` против `UMMANU_CODEX_SESSIONS`, `TA_WORKSPACES_ROOT`, `TA_STEWARD_STALE_HOURS`. Литерал `"UMMANU_INSTANCE"` — 4 раза | — | P3 | Ф |
+| CON-13 ◐ | Протокол local-pty | `OP_RESIZE`, `OP_ATTACH`, `EVENT_OUTPUT/DROPPED/EXITED` не используются продуктом. ~~`next_event` возвращает `None` и на тишину, и на закрытие, а docstring обещает их различать (`client.py:537-570`).~~ ✅ #675: docstring (`client.py:496`) теперь описывает это поведение. `SUN_PATH_MAX = 100` против `po/service.MAX_SOCKET_PATH_BYTES = 107`. Комментарий `journal.py:30-36` (на `8e79450`: `:22-23`, «under 256 bytes») ложен: `run.started` с heartbeat-обёрткой ≥ 2,1 КБ (измерено 2 175) | — | P3 | Ф |
+| CON-14 ◐ | Prompt-транспорт | `agent_prompt_transport` декларировал «каждый prompt проверяется здесь» (◐ #675 убрал это утверждение), но local-pty доставляет `pointer.text + "\n"` без проверки (на `8e79450`: `local_pty_head.py:2365-2367`, `operations.py:97-100`) | — | P3 | Ф (риск — Г: входы доверенные) |
+| CON-15 | Префиксы env | Смешаны `TA_*` и `UMMANU_*`: `TA_RUNTIME_ENV_FILE`/`UMMANU_RUNTIME_ENV_FILE` (`role_env.py:26-30` на `8e79450`), `TA_CODEX_SESSIONS` против `UMMANU_CODEX_SESSIONS`, `TA_WORKSPACES_ROOT`, `TA_STEWARD_STALE_HOURS`. Литерал `"UMMANU_INSTANCE"` — 4 раза | — | P3 | Ф |
 | CON-16 | `data-manifest.json` | Блок `components` валидируется, но не читается (`data.py:66`). В примере `facts: memory/facts`, а код пишет `state/memory/facts` | — | P3 | Ф |
 | CON-17 | Blocked-reason gate | `merge_terminal_reason` классифицирует по подстроке `"gate"` (`release_lifecycle.py:44-48`). Нечитаемый merge-gate на пути review — `merge-gate-blocked` → `gate` (`review_verdict.py:360`), а на пути release — `release-failed-blocked` → `implementation` (`release_lifecycle.py:372`) | — | P3 | Ф (намеренность — Г) |
 | CON-18 | Политика восстановления | Эскалация детерминированного отказа срабатывает в фазе gate (`gate_lifecycle.py:796`), но на тике HealthyQuiet/HealthyActive `_run_recovery_policy` (`wait_vitality.py:591-629`) сохраняет `rung=4` и молча теряет намерение ESCALATE. `RecoveryIntent.NUDGE` (rung 1) никогда не исполняется через политику | — | P2 | Ф (непреднамеренность — Г) |
@@ -790,20 +851,20 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 | ID | Документ | Расхождение | Приор. |
 |---|---|---|---|
-| DOC-02 | README, CONTRIBUTING, OPERATIONS, RECOVERY | Противоречивые инструкции установки: `pip install -e` (README:35, CONTRIBUTING:15) против `pip install .` (OPERATIONS:19–21, RECOVERY:638). Нигде не сказано создать `.venv` (см. BUG-02) | P0 |
-| DOC-03 | `README.md:15-26` | В индексе нет `HEAD_SCOPES`, `OWNED_CLEANUP`, `REQUESTS_GROWTH`. Строка `:26` — «ummanu → ummanu»: артефакт скрипта переименования, должно быть «secretary → ummanu» (**✔**) | P3 |
-| DOC-04 | `OWNED_CLEANUP.md:93` | Описан `--residue-replay --limit 20` и граница 1..100. Флага `--limit` нет; `cli.py:2094-2107` требует `--project` и `--target`/`--manifest` (не больше 20). `OPERATIONS.md:1681-1683` верен. Catch-up — мёртвый код (DEAD-08) | P2 |
-| DOC-05 | `skills/roles/steward/steward/SKILL.md:3,135,172,175-181` | Написано «hourly», таймер — `OnCalendar=00/3:00:00`. Велено читать шаг `automations` у `upgrade --dry-run`, но такого шага нет: в `STEPS` 26 имён, `OPERATIONS.md:3126` подтверждает. В описаниях curate/retro/steward осталось «Launched by a session-manager automation» | P2 |
-| DOC-06 | `skills/manifest.toml:50,83` | Codex-skills доставляются в `~/.config/orca/codex-runtime-home/home/skills`, хотя Orca-уровень `CODEX_HOME` удалён (A20 шаг 7), а Codex-головы используют `<data_dir>/codex-home` (`session.py:204`, `codex_home.py`). **Г:** Codex-головы interactive/curator/retro/steward не видят свои role-skills. Наблюдатели не затронуты (`observer.py:3373-3376` передаёт путь явно) | P1, если подтвердится |
-| DOC-07 | `packaging/codex-home/AGENTS.md:5` | Сервер памяти назван `memory`, а это `LEGACY_SERVER`; живой — `po_memory` (`memory/client_config.py:22-23`) | P2 |
+| DOC-02 ◐ #672: везде `pip install -e`, требование `.venv` названо; процедуры создания `.venv` нет (BUG-02) | README, CONTRIBUTING, OPERATIONS, RECOVERY | Противоречивые инструкции установки: `pip install -e` (README:35, CONTRIBUTING:15) против `pip install .` (OPERATIONS:19–21, RECOVERY:638). Нигде не сказано создать `.venv` (см. BUG-02) | P0 |
+| DOC-03 ✅ #672 | `README.md:15-26` | В индексе нет `HEAD_SCOPES`, `OWNED_CLEANUP`, `REQUESTS_GROWTH`. Строка `:26` — «ummanu → ummanu»: артефакт скрипта переименования, должно быть «secretary → ummanu» (**✔**) | P3 |
+| DOC-04 ✅ #672 | `OWNED_CLEANUP.md:93` | Описан `--residue-replay --limit 20` и граница 1..100. Флага `--limit` нет; `cli.py:2094-2107` требует `--project` и `--target`/`--manifest` (не больше 20). `OPERATIONS.md:1681-1683` верен. Catch-up — мёртвый код (DEAD-08) | P2 |
+| DOC-05 ✅ #672 | `skills/roles/steward/steward/SKILL.md:3,135,172,175-181` | Написано «hourly», таймер — `OnCalendar=00/3:00:00`. Велено читать шаг `automations` у `upgrade --dry-run`, но такого шага нет: в `STEPS` 26 имён, `OPERATIONS.md:3126` подтверждает. В описаниях curate/retro/steward осталось «Launched by a session-manager automation» | P2 |
+| DOC-06 (открыт; подтверждён на проде, §12.1) | `skills/manifest.toml:50,83` | Codex-skills доставляются в `~/.config/orca/codex-runtime-home/home/skills`, хотя Orca-уровень `CODEX_HOME` удалён (A20 шаг 7), а Codex-головы используют `<data_dir>/codex-home` (`session.py:204`, `codex_home.py`). **Г:** Codex-головы interactive/curator/retro/steward не видят свои role-skills. Наблюдатели не затронуты (`observer.py:3373-3376` передаёт путь явно) | P1, если подтвердится |
+| DOC-07 ✅ #672 | `packaging/codex-home/AGENTS.md:5` | Сервер памяти назван `memory`, а это `LEGACY_SERVER`; живой — `po_memory` (`memory/client_config.py:22-23`). **Поправка (#672):** находка была неточной. Головы диспетчера получают HTTP-сервер `memory` (`runtime/head/command.py`), а `po_memory` — мост для остальных сессий; теперь в файле названы оба | P2 |
 | DOC-08 | `packaging/memory/product-ummanu/sprints-and-reservations.md:8` | Факт «execution card принадлежит открытому спринту, override — исключение» противоречит текущему контракту (`PROTOCOLS.md:813` «Cards outside a sprint»; `po-workspace/AGENTS.md:19`). Через `memory_search` этот факт попадает во все головы. При правке обновить digest манифеста | P2 |
-| DOC-09 | `HEAD_VITALITY.md` | Устаревшие имена: `DispatcherRuntime._trigger_wait_watchdog`/`_sigcont_head` (`:430,481`) теперь функции модуля; `_reduce_and_store_vitality_episode` стал публичным; `dispatcher_watchdog`/`dispatcher_tui` → `dispatch.watchdog`/`dispatch.tui` (то же в docstring `head_vitality.py:282,341`). Ложное утверждение `:429-430`: «`_stop_worker_confirmed` … run only beneath a guarded entry» — на деле 25 точек вызова, из них охраняются 4. Таблица rung 1 расходится с CON-18 | P2 |
-| DOC-10 | `BOARD_STORE.md` | Ревизии «0001–0027», а head — 0030. CHECK `task_type` без `wait`. «nine owner event kinds», а их 14. Нет DDL для `po_sessions`/`po_turns`/`po_feed`/`po_requests`/`owner_events`/`origin_returns`. `body` будто бы без `[marker]`, хотя все три писателя хранят полный текст. Предикат charge не упоминает `e2e_refusal`. `committed` будто бы что-то значит. В коде: `schema.py:20` «eight jsonb columns», а их 11; «eleven-method vocabulary» (`sql_cards.py:5`), а их 14/18; `backend.py:174` называет `n` в `entity_id` `task_number`, а на деле это `board_key`. Триггер 0028 описан только в миграции | P3 |
-| DOC-11 | `OPERATIONS.md:3087-3107` | Таблица шагов upgrade — 19 шагов, в коде 26 (нет `runtime-owner`, `po-workspace`, `pipeline-state`, `po-workspace-owner`, `po-token`, `web-front-config`, `po`). `:2420` документирует метку «reset already passed», которую тест `test_web_status_bar.py:863` запрещает | P3 |
+| DOC-09 ✅ #672, #674 (кроме таблицы rung 1 — это CON-18; комментарии `dispatch/state.py:24,1306` всё ещё называют `dispatcher_watchdog`) | `HEAD_VITALITY.md` | Устаревшие имена: `DispatcherRuntime._trigger_wait_watchdog`/`_sigcont_head` (`:430,481`) теперь функции модуля; `_reduce_and_store_vitality_episode` стал публичным; `dispatcher_watchdog`/`dispatcher_tui` → `dispatch.watchdog`/`dispatch.tui` (то же в docstring `head_vitality.py:282,341`). Ложное утверждение `:429-430`: «`_stop_worker_confirmed` … run only beneath a guarded entry» — на деле 25 точек вызова, из них охраняются 4. Таблица rung 1 расходится с CON-18 | P2 |
+| DOC-10 ◐ #672: ревизии, `wait`, 14 kinds, `body` исправлены; DDL `po_*`/`owner_events`/`origin_returns`, `e2e_refusal`, `committed`, триггер 0028 и комментарии в коде открыты | `BOARD_STORE.md` | Ревизии «0001–0027», а head — 0030. CHECK `task_type` без `wait`. «nine owner event kinds», а их 14. Нет DDL для `po_sessions`/`po_turns`/`po_feed`/`po_requests`/`owner_events`/`origin_returns`. `body` будто бы без `[marker]`, хотя все три писателя хранят полный текст. Предикат charge не упоминает `e2e_refusal`. `committed` будто бы что-то значит. В коде: `schema.py:20` «eight jsonb columns», а их 11; «eleven-method vocabulary» (`sql_cards.py:5`), а их 14/18; `backend.py:174` называет `n` в `entity_id` `task_number`, а на деле это `board_key`. Триггер 0028 описан только в миграции | P3 |
+| DOC-11 ✅ #672 | `OPERATIONS.md:3087-3107` | Таблица шагов upgrade — 19 шагов, в коде 26 (нет `runtime-owner`, `po-workspace`, `pipeline-state`, `po-workspace-owner`, `po-token`, `web-front-config`, `po`). `:2420` документирует метку «reset already passed», которую тест `test_web_status_bar.py:863` запрещает | P3 |
 | DOC-12 | `packaging/interactive-workspace/AGENTS.md` | Инструкции полномочий PO («The PO can supply… `--role po`») в контексте interactive-головы | P2 |
-| DOC-13 | `ARCHITECTURE.md` | `:18` в списке пакетов нет `transition` (**✔**). `:37` пробы реестра включают `openrouter`, а `heads.toml` поставляет только `claude-sub`/`openai-sub`. `:345` список страниц без `/po`, `/doctor`, `/owner-events`. `:375` и `PROTOCOLS.md:4622` «`basicauth *` covers every path», а Caddyfile содержит cookie-bearer bypass плюс `handle { route { basicauth } }` (`caddyfile.py:116-136`) | P3 |
-| DOC-14 | `TESTING.md`, `tests/README.md`, `tests/broad.py`, `CONTRIBUTING.md` | `TESTING.md:168` относит `test_web_transport`/`read_protocol`/`run_protocol` к `unit`, а в манифесте они `integration-board`. `:117` про PTY в `runtime-component` противоречит `:186`. `:28` «never a green skip», но `test_memory_service.py:17,234` и `test_memory_health.py:245` пропускают зелёным. `broad.py:9-10` пишет «1440 tests / 3782 tests», а статически сейчас 3 131 и 7 335; локальный прогон дал 3 136 (**✔**). `broad.py:28` и `CONTRIBUTING.md:27` упоминают Orca. `tests/README.md` не перечисляет `TMPDIR`-guard, `TA_CODEX_HOME`, `GIT_CONFIG_*`. `test_head_vitality_legacy_path.py:8` обещает `expectedFailure`, которого нет | P3 |
-| DOC-15 | Мелкое | `pyproject.toml:141` «Portable ummanu appliance CLI skeleton.»; `SECURITY.md:30` («previously read runtime.env», «gitignored» — экспорт теперь по allowlist, `RECOVERY.md:389-399`); `examples/instance/instance.yaml:20` ссылается на несуществующий `ummanu-pipeline.service`; `packaging/systemd/README.md:3` без `ummanu-doctor.*`; `ROADMAP.md:10-16` числит в остатке, по-видимому, уже поставленные пункты (**Г**); `heads.toml:9-10,19-21` упоминает несуществующие `render_<adapter>` и `worker.py`; `head/local_pty/__init__.py:1-15` «no HeadRuntime here» | P3 |
+| DOC-13 ✅ #672 | `ARCHITECTURE.md` | `:18` в списке пакетов нет `transition` (**✔**). `:37` пробы реестра включают `openrouter`, а `heads.toml` поставляет только `claude-sub`/`openai-sub`. `:345` список страниц без `/po`, `/doctor`, `/owner-events`. `:375` и `PROTOCOLS.md:4622` «`basicauth *` covers every path», а Caddyfile содержит cookie-bearer bypass плюс `handle { route { basicauth } }` (`caddyfile.py:116-136`) | P3 |
+| DOC-14 ◐ #672, #674: открыты счётчики в `broad.py:7,11` и `expectedFailure` в `test_head_vitality_legacy_path.py:8` | `TESTING.md`, `tests/README.md`, `tests/broad.py`, `CONTRIBUTING.md` | `TESTING.md:168` относит `test_web_transport`/`read_protocol`/`run_protocol` к `unit`, а в манифесте они `integration-board`. `:117` про PTY в `runtime-component` противоречит `:186`. `:28` «never a green skip», но `test_memory_service.py:17,234` и `test_memory_health.py:245` пропускают зелёным. `broad.py:9-10` пишет «1440 tests / 3782 tests», а статически сейчас 3 131 и 7 335; локальный прогон дал 3 136 (**✔**). `broad.py:28` и `CONTRIBUTING.md:27` упоминают Orca. `tests/README.md` не перечисляет `TMPDIR`-guard, `TA_CODEX_HOME`, `GIT_CONFIG_*`. `test_head_vitality_legacy_path.py:8` обещает `expectedFailure`, которого нет | P3 |
+| DOC-15 ◐ #672, #674: открыты `instance.yaml:20`, `heads.toml:9,20-21`, `ROADMAP.md` (**Г**) | Мелкое | `pyproject.toml:141` «Portable ummanu appliance CLI skeleton.»; `SECURITY.md:30` («previously read runtime.env», «gitignored» — экспорт теперь по allowlist, `RECOVERY.md:389-399`); `examples/instance/instance.yaml:20` ссылается на несуществующий `ummanu-pipeline.service`; `packaging/systemd/README.md:3` без `ummanu-doctor.*`; `ROADMAP.md:10-16` числит в остатке, по-видимому, уже поставленные пункты (**Г**); `heads.toml:9-10,19-21` упоминает несуществующие `render_<adapter>` и `worker.py`; `head/local_pty/__init__.py:1-15` «no HeadRuntime here» | P3 |
 
 ### 8.3 План сжатия документации
 
@@ -824,11 +885,11 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 - **package-data** полон: JSON-схемы, `script.py.mako`, `heads.toml`, `docker-bin/docker`, 4 `automation.toml` (**Ф**).
 - **mypy**: 65 файлов в списке, все существуют, но список ручной.
-- **Зависимости:** `referencing` импортируется напрямую (`config.py`), но объявлен только транзитивно через `jsonschema>=4.18`; `pyte` (в скрипте) не объявлен.
-- **CI-01**, подробно:
+- **Зависимости:** ~~`referencing` импортируется напрямую (`config.py`), но объявлен только транзитивно через `jsonschema>=4.18`~~ (✅ #674: `referencing>=0.28.4`); `pyte` (в скрипте) не объявлен.
+- **CI-01** ◐, подробно:
   - ruff нет в CI: 461 замечание, 344 файла не отформатированы (**✔**);
-  - нет `cache: pip`;
-  - нет `concurrency` и `permissions`;
+  - ~~нет `cache: pip`~~ ✅ #674;
+  - ~~нет `concurrency`~~ ✅ #674 и нет `permissions`;
   - агрегирующий `test` ставит весь пакет `.[ci]` только ради `scripts/ci_test_shards.py`;
   - `typecheck` не входит в агрегат `test`. Обязателен ли он в branch protection, из репозитория проверить нельзя;
   - checkout, setup-python и pip повторены 3 раза; composite action уберёт ≈25 строк;
@@ -843,10 +904,10 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 **BUG-01 — P0. Request smuggling после 413 на keep-alive.**
 - Метка: Ф, воспроизведено субагентом. ✔ код подтверждён.
-- Где: `web/server.py:182-188`, `protocol_version = "HTTP/1.1"` (`:138`).
+- Где: `web/server.py:182-188`, `protocol_version = "HTTP/1.1"` (`:138`). На `8e79450` (код не менялся): `:150-156`, `:113`.
 - Что происходит: когда `_read_body` бросает `ValueError` (тело больше 64 КБ), обработчик пишет 413 и выходит. Тело он не дочитывает и `close_connection` не выставляет.
 - Как воспроизведено: `POST /api/x` с телом 65 546 байт, начинающимся с `GET /smuggled HTTP/1.1…`. В ответ пришли 413, а затем `HTTP/1.1 200 … handled GET /smuggled`.
-- Последствие (Г): контрабандный запрос несёт заголовки атакующего. Без `Origin` он проходит `cross_origin_reason` (`app.py:1283`). Поэтому межсайтовая форма на loopback может дойти, например, до `POST /api/pause/drain`. За Caddy возможна путаница ответов в пуле upstream-соединений.
+- Последствие (Г): контрабандный запрос несёт заголовки атакующего. Без `Origin` он проходит `cross_origin_reason` (`app.py:1283`; на `8e79450`: `:1171`). Поэтому межсайтовая форма на loopback может дойти, например, до `POST /api/pause/drain`. За Caddy возможна путаница ответов в пуле upstream-соединений.
 
 **BUG-02 — P0. Свежая установка по документации не даёт рабочего хоста.**
 - Метка: Ф.
@@ -881,8 +942,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 **BUG-07 — P2. Устаревшая запись диспетчера роняет весь дашборд в HTTP 500.**
 - Метка: Ф по коду.
 - `reads._records` → `DispatcherRecord.from_json` бросает `DispatcherError` (`dispatch/state.py:1166`).
-- `_agents` ловит только `SOURCE_FAILURES` (`sources.py:56`), граница — только `IMPLEMENTATION_FAILURES` (`boundary.py:60`).
-- Падают `/`, `/projects`, `/projects/{p}`, `/api/system`. Сам `sources.py:49-53` фиксирует, что этот дрейф исправлен только в `pause_reads`.
+- `_agents` ловит только `SOURCE_FAILURES` (`sources.py:56`; на `8e79450`: `:28`), граница — только `IMPLEMENTATION_FAILURES` (`boundary.py:60`; `:27`).
+- Падают `/`, `/projects`, `/projects/{p}`, `/api/system`. Сам `sources.py:49-53` (на `8e79450`: `:23-26`) фиксирует, что этот дрейф исправлен только в `pause_reads`.
 
 **BUG-08 — P3. Повреждённый конверт секрета выходит наружу как `ValueError`.**
 - Метка: Ф, воспроизведено.
@@ -906,8 +967,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Метка: Г, сильные основания в коде.
 - Цепочка:
   1. Постоянные роли переиспользуют `run_id` (`automations/runtime/dispatch.py:824`), а `head.pid` не удаляется.
-  2. `client._identity_written` (`client.py:294-306`) принимает старую запись: её `run_id` совпадает.
-  3. Голове, которой prompt передаётся после старта (Codex TUI: `curator` → `codex-sol-medium`, `steward` → `codex-sol-high`), `_rehydrate` проверяет `_identity_says_dead(address)`, даже когда supervisor только что ответил «alive» (`local_pty_head.py:1667`).
+  2. `client._identity_written` (`client.py:294-306`; на `8e79450`: `:286-296`) принимает старую запись: её `run_id` совпадает.
+  3. Голове, которой prompt передаётся после старта (Codex TUI: `curator` → `codex-sol-medium`, `steward` → `codex-sol-high`), `_rehydrate` проверяет `_identity_says_dead(address)`, даже когда supervisor только что ответил «alive» (`local_pty_head.py:1667`; на `8e79450`: `:1281`).
   4. Старый pid мёртв → admission закрыт с `DELIVER_HEAD_ENDED` → prompt отвергнут → `_abandon_bring_up` останавливает здоровую голову.
 - Существующий тест `test_a_dead_head_is_an_ordinary_bring_up` (`tests/test_automations_dispatch_local_pty.py:700`), вероятно, этот путь не проходит.
 
@@ -922,7 +983,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - Юнит (`host_apply.py:404`) и `restore memory-reindex` (`restore_commands.py:213`) модель учитывают.
 - Итог: несовместимый индекс и повторный полный embed.
 
-**BUG-14 — P2. Ежедневный `ummanu-instance-maintenance` падает на штатной раскладке.**
+**BUG-14 — P2. Ежедневный `ummanu-instance-maintenance` падает на штатной раскладке.** ✅ Исправлено в #669: на обычном live root пакуется bare snapshot repo, при его отсутствии — `skipped` (`infra/instance_maintenance.py:257-286` на `8e79450`).
 - Метка: Ф ✔.
 - `infra/instance_maintenance.run` начинается с `state_repo.require_repo(instance_dir)` (`:254`), а live root по умолчанию — обычный каталог.
 - `RECOVERY.md:448-450` документирует exit 1. Побочные эффекты, по-видимому, не задуманы: Docker-cleanup после этого не выполняется, bare snapshot repo не пакуется, юнит постоянно в состоянии `failed`.
@@ -934,7 +995,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 **BUG-16 — P3. Подтверждение остановки может принять выход прошлой инкарнации.**
 - Метка: Ф; достижимость — Г.
-- `_await_head_gone`/`_has_exited` (`local_pty_head.py:2392-2410,3133-3141`) принимают любую мёртвую запись или любой `run.exited` в хвосте журнала, без нижней границы `run.started`.
+- `_await_head_gone`/`_has_exited` (`local_pty_head.py:2392-2410,3133-3141`; на `8e79450`: `:1820-1835,2470-2475`) принимают любую мёртвую запись или любой `run.exited` в хвосте журнала, без нижней границы `run.started`.
 - В переиспользованном каталоге run выход прошлой инкарнации подтверждает остановку текущей.
 
 **BUG-17 — P3. `_set_observer_state` теряет `reason`.**
@@ -954,7 +1015,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 
 **BUG-20 — P3. Шрифты не грузятся из-за собственной CSP.**
 - Метка: Ф.
-- `pages.py:530,897-898` подключают Google Fonts, а CSP (`server.py:293`) — `default-src 'none'; style-src 'unsafe-inline'`.
+- `pages.py:530,897-898` (на `8e79450`: `:509,839-840`) подключают Google Fonts, а CSP (`server.py:293`; `:240`) — `default-src 'none'; style-src 'unsafe-inline'`.
 - Шрифты не загружаются, каждая страница пишет CSP violation.
 
 **BUG-21 — P3 (безопасность, узко). `_read_value` не сверяет `envelope["id"] == secret_id`.**
@@ -975,7 +1036,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 **BUG-23 — P3 (герметичность). Тесты зависят от login-профиля хоста.**
 - Метка: Ф ✔, наблюдалось.
 - Локальный `python -m tests.broad`: 3 136 тестов, 55 failures, 2 errors.
-- Не меньше 44 сообщений об ошибке — лишняя строка `nvm` в захваченном stdout, например `'nvm\nnative stdout\n' != 'native stdout\n'`. Источник: `~/.bashrc` контейнера, который подтягивается через `bash -l`/`-lc` (`runtime/role_env.py:507`, `broad_check.py:287,301`, `dispatch/gate.py:400`, `dispatch/host.py:4834`).
+- Не меньше 44 сообщений об ошибке — лишняя строка `nvm` в захваченном stdout, например `'nvm\nnative stdout\n' != 'native stdout\n'`. Источник: `~/.bashrc` контейнера, который подтягивается через `bash -l`/`-lc` (`runtime/role_env.py:507` (на `8e79450`: `:469`), `broad_check.py:287,301`, `dispatch/gate.py:400`, `dispatch/host.py:4834`).
 - Остальные падения связаны с окружением: не-editable установка даёт `production runtime provenance refused`. Детально не разбирались.
 - Это противоречит заявлению «unit suite is hermetic» (`CONTRIBUTING.md`, `tests/README.md`).
 - Для продукта (Г): вывод login-профиля пользователя установки попадает в stdout gate и ролевых команд.
@@ -987,7 +1048,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - `report()` в 4 слоях webproto даёт обрезанное «does not validate: » при пустом списке ошибок (Ф).
 - `sprint_ops._reads()` без `owner_events`, поэтому `attention` при create всегда `unknown` (Ф).
 - `config.py:196-203` повторяет одно сообщение схемы 4 раза (Ф).
-- Supervisor считает таймеры по `time.time()` (`supervisor.py:610-635,1159,1262`), а не по монотонным часам (Ф).
+- Supervisor считает таймеры по `time.time()` (`supervisor.py:610-635,1159,1262`; на `8e79450`: `:569-593,1076,1175`), а не по монотонным часам (Ф).
 - `host.teardown` упадёт на `task_ref: null` (`host.py:2787-2789`) (Г).
 - Предсказуемые `/tmp/ummanu-<kind>-<ref>-<round>.md` (`host.py:4972`) на общем хосте (Г, безопасность).
 - `memory/access.py:325` закрывает fd после `os.fdopen` (двойной close; Г).
@@ -1001,8 +1062,8 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | INEF-01 | `dispatch/runtime.py:994-1002`, `cleanup.py:383-396` | `save_records` в реальном режиме на **каждую** запись с workspace делает `reader.show(ref)` (чтение доски) и `CleanupOwner.remember` (≈6 `git rev-parse` плюс чтение и запись журнала). 144 точки вызова. `observer_provider_progress` (`host.py:1655-1657`) запускает полное сохранение, хотя наблюдатель в этот payload не входит | Ф (масштаб — Г) |
 | INEF-02 | `board/sql_cards.py:1191-1197`; `sql_audit.py:154-156,304-311`; `events.py:149-154`; `sql_host.py:391-452` | `_rpc_saveTaskMetadata`: 1 UPDATE плюс по UPDATE на каждый ключ (≈11 операторов на create). `SqlTaskAudit` до 3 раз читает одну строку `requests` по PK, `commit` повторяет stage. `marker_comment` — до 6 полных `TaskReader.show`, по ≈8 запросов каждый (≈−24 запроса на маркер возможны) | Ф |
 | INEF-03 | `claim.py:626-651` | 42 бесполезных `committed_event` на каждую попытку claim (см. CON-04) | Ф |
-| INEF-04 | `web/app._runs_or_reason` → `ops.run_list` (`ops.py:475-498`) → `RunStore.for_ref` (`runs.py:424-441`) → `run_state` (`ops.py:592-599`) | Рендер страницы карточки читает все run-записи всех карточек. На каждый run: валидация конфига, `observe` и **две идемпотентные записи в audit** (`publish_started`/`publish_finished`). Страница перезагружается каждые 30 с | Ф (стоимость — Г) |
-| INEF-05 | `head/local_pty/client.py:138,234`; `journal.py:184-190`; `po/runner.py:282` | Журналы голов без ротации, переживают инкарнации; читаются целиком, в `spawn_head` — каждые 20 мс до 20 с, в `ScopedPoProcess.wait` — каждые 50 мс весь turn. Оценка роста ≈1,4 МБ/ч активного вывода | Ф (рост — Г) |
+| INEF-04 | `web/app._runs_or_reason` → `ops.run_list` (`ops.py:391-405` на `8e79450`) → `RunStore.for_ref` (`runs.py:356-372`) → `run_state` (`ops.py:477-484`) | Рендер страницы карточки читает все run-записи всех карточек. На каждый run: валидация конфига, `observe` и **две идемпотентные записи в audit** (`publish_started`/`publish_finished`). Страница перезагружается каждые 30 с | Ф (стоимость — Г) |
+| INEF-05 | `head/local_pty/client.py:130,226`; `journal.py:160-166` (на `8e79450`); `po/runner.py:282` | Журналы голов без ротации, переживают инкарнации; читаются целиком, в `spawn_head` — каждые 20 мс до 20 с, в `ScopedPoProcess.wait` — каждые 50 мс весь turn. Оценка роста ≈1,4 МБ/ч активного вывода | Ф (рост — Г) |
 | INEF-06 | `tasks.py:982-986,677-682`; `4858,4915,5500,5524` | `TaskReader.show_id` делает два полных `SELECT … FROM tasks` (включая архив) плюс все product/issue. Платит каждый create под lock ссылок. `retire_done` — 4·N·M | Ф |
 | INEF-07 | `wait_vitality.py:1123-1125,362-363,669`; `review_verdict.py:224,309`; `e2e_after_merge.py:260-282` | Production state переписывается 2–4 раза за wait-тик на карточку. `parks_for_decision` читает спринт дважды. `reconcile_after_merge` на каждом тике читает всю доску (`restore_snapshot`) | Ф / Г (масштаб) |
 | INEF-08 | `checkpoint.py:2337` | См. BUG-24; менее устойчивый близнец `snapshot_tree._blobs` | Г |
@@ -1010,11 +1071,11 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | INEF-10 | `board/sql_sprints.py:35`, `sql_cards.py:251`, `sql_audit.py:108,559` | Разная точность времени (см. CON-08) | Ф |
 | INEF-11 | `web/pages.py`, `webfront/caddyfile.py:86-138` | Каждая HTML-страница — ≈45 КБ (10,9 КБ в gzip) со всем CSS и JS. В Caddyfile нет `encode`. Обновление каждые 30 с: одна открытая вкладка ≈130 МБ/сутки | Ф (арифметика) |
 | INEF-12 | `po/store.py:228-245` | `PoStore._transaction` открывает новое соединение Postgres и выполняет запрос schema-gate на **каждую** операцию | Ф |
-| INEF-13 | `local_pty_head.py:1112-1160,2122` | `_await_settled`/`_await_idle`/`_await_turn` опрашивают `observe` каждые 0,25 с до 90+ с (новое соединение, `/proc`, хвост 64 КиБ и JSON). `_follow` опрашивает каждые 20 мс | Ф |
+| INEF-13 | `local_pty_head.py:840-886,1598` (на `8e79450`) | `_await_settled`/`_await_idle`/`_await_turn` опрашивают `observe` каждые 0,25 с до 90+ с (новое соединение, `/proc`, хвост 64 КиБ и JSON). `_follow` опрашивает каждые 20 мс | Ф |
 | INEF-14 | `scripts/ummanu-agent-gate.sh` | На каждый пропущенный тик — лишний процесс Python `dispatch --cleanup-only` (no-op) | Ф |
 | INEF-15 | `webproto/owner_events.py:76-87` | `snapshot()` глубоко копирует весь список событий на каждый спринт в листинге: O(спринты × события) | Ф |
 | INEF-16 | `board/sql_cards.py:1205-1238`, `sql_sprints.py:363-414,550-568`, `sql_product_issues.py:480-491` | N+1 вставки (малые N). Подойдут `executemany` или `unnest` | Ф |
-| INEF-17 | `web/app.py:565`, `pages.py:1214` | Дашборд читает `limits` провайдеров и тут же делает `del limits` | Ф |
+| INEF-17 | `web/app.py:507`, `pages.py:1115` (на `8e79450`) | Дашборд читает `limits` провайдеров и тут же делает `del limits` | Ф |
 | INEF-18 | `cli.py:1-118` | Импорт 275 модулей на каждый вызов CLI (см. ARCH-12). Supervisor на голову — 44 модуля, +10 МБ (ARCH-11) | Ф |
 
 ## 10. Безопасный план будущих рефакторингов
@@ -1032,15 +1093,15 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | Шаг | Содержание | Зависит от | Совместимость и ограничения | Нужные тесты (характеризационные или регрессионные) | Граница отката | Критерий приёмки | Ожидаемое сокращение (О) |
 |---|---|---|---|---|---|---|---|
 | 0 | Исправления P0/P1 из §9: BUG-01, BUG-02 (решение по `.venv`), BUG-03, BUG-11 после подтверждения, BUG-10, DOC-06 после проверки на хосте | — | Поведенческие изменения; нужна договорённость с владельцем | Регрессионные: keep-alive после 413; повторный тик роли с prompt после старта над мёртвой головой; `ci_test_shards.py --fast` в CI | Один PR на баг | Тест воспроизводит проблему до фикса и проходит после | — |
-| 1 | Инструменты: ruff check (только изменённые файлы) в CI; `combine-as-imports = true`, затем `ruff --fix` **только** I001 по затронутым пакетам; pip-cache, `concurrency`, `permissions` | — | Без изменения семантики; конфликты слияния с параллельными PR, поэтому делать пакет за пакетом | Полный CI | Каждый пакет отдельным коммитом | Ноль новых замечаний на изменённых файлах; diff — только импорты | −400…500 строк |
-| 2 | Удаление мёртвого кода с низким риском: DEAD-01…08, 10, 12–21, 23, 24; DEAD-25 и DEAD-11 — с решением владельца | 1 | Публичные экспорты (`board.__all__`, `FakeBoardHost`) убирать вместе с тестами; на старые имена смотрит `test_old_name_guard` | Полный CI; `grep` на имя в репозитории = 0 | По одному коммиту на группу | Тесты зелёные; доказательство `grep` в описании PR | −1,8…2,5 тыс. строк, ≈−70…90 тыс. символов |
+| 1 ◐ (#674: pip-cache, `concurrency`) | Инструменты: ruff check (только изменённые файлы) в CI; `combine-as-imports = true`, затем `ruff --fix` **только** I001 по затронутым пакетам; pip-cache, `concurrency`, `permissions` | — | Без изменения семантики; конфликты слияния с параллельными PR, поэтому делать пакет за пакетом | Полный CI | Каждый пакет отдельным коммитом | Ноль новых замечаний на изменённых файлах; diff — только импорты | −400…500 строк |
+| 2 ◐ (#673: DEAD-01–03, 07, 08, 13, 14, 17, 18, часть 19 и 23) | Удаление мёртвого кода с низким риском: DEAD-01…08, 10, 12–21, 23, 24; DEAD-25 и DEAD-11 — с решением владельца | 1 | Публичные экспорты (`board.__all__`, `FakeBoardHost`) убирать вместе с тестами; на старые имена смотрит `test_old_name_guard` | Полный CI; `grep` на имя в репозитории = 0 | По одному коммиту на группу | Тесты зелёные; доказательство `grep` в описании PR | −1,8…2,5 тыс. строк, ≈−70…90 тыс. символов |
 | 3 | Тестовые данные и помощники: TDEAD-01…04; TDUP-03/04 (`tests/support/process.py`, `tests/support/instance.py`, использование `support/git.py`); TDEAD-05 (листовые классы) | — | Ничего продуктового; число тестов меняется только на 1 дубль и 8 лишних прогонов | Сравнить множество имён тестов до и после (`unittest` discovery) | Коммит на файл помощника | Множество тестов то же (кроме удалённого дубля); покрытие не падает | −266 КБ данных, −650 строк |
 | 4 | Листовые извлечения, ломающие циклы: `board/errors.py` (`TaskError`), `board/sql_rows.py`, `webproto/_values.py`, `head/procfs.py`, перенос `with_pid_heartbeat` в лист и ленивый `head/__init__` (ARCH-11), `infra.git_worktree` парсер | 2 | Старые имена реэкспортировать; цели патчей в тестах сохранить | Тест импорта (`python -c 'import …'` для каждого модуля); `-X importtime` для supervisor | Коммит на лист | Локальных импортов меньше; supervisor ≤ 20 модулей `ummanu` | −200…300 строк; −10 МБ RSS на голову |
-| 5 | Волна сжатия прозы (ARCH-01) по пакетам: `webproto` → `runtime` → `dispatch` (vitality — после исправления DOC-09) → `board` → корень → `tests`. Историю инцидентов в docstring не переносить, она в git | 1 | Тесты, ищущие текст в исходниках (`test_web_status_bar.py:864`, `test_web_po_transport.py:627`, `test_architecture`), проверить заранее | Критерий AST-эквивалентности без docstring; полный CI | Пакет за пакетом | AST-эквивалентность; доля прозы в пакете ≤ 15 % | **−450…650 тыс. символов в `src`**, −250…350 тыс. в `tests` |
+| 5 ◐ (#675 `runtime`, #676 `web`/`webproto`) | Волна сжатия прозы (ARCH-01) по пакетам: `webproto` → `runtime` → `dispatch` (vitality — после исправления DOC-09) → `board` → корень → `tests`. Историю инцидентов в docstring не переносить, она в git | 1 | Тесты, ищущие текст в исходниках (`test_web_status_bar.py:864`, `test_web_po_transport.py:627`, `test_architecture`), проверить заранее | Критерий AST-эквивалентности без docstring; полный CI | Пакет за пакетом | AST-эквивалентность; доля прозы в пакете ≤ 15 % | **−450…650 тыс. символов в `src`**, −250…350 тыс. в `tests` |
 | 6 | Разбиения через mixin и модули без изменения API: `tasks.py` (сначала помощники, затем mixin), `dispatch/host.py`, `observer.py` (чистые разрезы), `sprints.py`, doctor из `cli.py`, `dispatch/gate.py` → `github_ci.py`, `local_pty_head` → пакет, `sprint_reads`, `web/pages` (сначала static, затем пакет), `upgrade`/`checkpoint`/`installation` → пакеты по целевой раскладке `ARCHITECTURE.md` (сократить `LEGACY_FLAT_MODULES`) | 4, 5 (проза меньше — diff меньше) | Реэкспорт всех используемых тестами имён; строковые цели `mock.patch` перенацелить там, где вызывающий переехал; обновить whitelist в `test_local_pty_head_runtime.py:2187` и `test_architecture.py:868`; package-data для `web/static` | Существующий набор плюс тест, что все прежние публичные имена импортируются из старых путей | Модуль за модулем | Крупнейший файл `src` ≤ 2 000 строк; поведение то же (полный CI) | ≈0 в объёме; контекст типовой задачи −60…85 % |
 | 7 | Устранение дублирования со средним риском: DUP-D3 (`_PersistedMapping`), сериализация по таблице полей, DUP-I1 (`ProcessReceipt`), DUP-D11 (e2e), DUP-B6, DUP-W1/W4, DUP-D4 (таблица ролей, заодно CON-06), DUP-D9/D10/D19 | 6 | Байт-совместимость JSON на диске (порядок ключей, `sort_keys`); тексты сообщений и request id | **Golden round-trip** для `DispatcherRecord`/`ObserverRecord`/receipts по реальным образцам; снапшот-тесты текстов ошибок | Один дубль — один PR | Golden-тесты байт-в-байт | −1,2…1,6 тыс. строк, ≈−50…70 тыс. символов |
 | 8 | Вывод одноразового и унаследованного кода (решение владельца): DEAD-T (`transition/`, скрипты, тесты, `RENAME.md`), ARCH-09 (live root как git work tree), DEAD-R (`reference_repair`), DEAD-22 (`attach`/`request_drain`), DEAD-H1 (`recover_*` после доказательства) | 2, 6 | Невозможность rollback перехода; восстановление с legacy-remote | Тест `old_name_guard` с новым allowlist; восстановление снапшота end-to-end (`integration-recovery`) | Каждое направление отдельно | Владелец подтвердил, что старых хостов и remote нет | −170…200 тыс. символов `src`+`scripts`, −83 тыс. тестов, −56 тыс. docs |
-| 9 | Документация: удалить историю (§8.3), разбить `PROTOCOLS`/`OPERATIONS`, исправить DOC-02…15, сжать prompt-skills | 5 (пересказ кода переносится в docstring синхронно) | Заголовки, которые цитирует рантайм (`release_lifecycle.py:194,516`, `release_activation.py:224`, `entrypoint_guard.py:26`); 37 тестов, читающих docs; якоря | Проверка якорей и ссылок; тесты docs | Файл за файлом | Нет битых ссылок; docs ≤ 650 тыс. | −320 тыс. символов docs; −80…95 % контекста на вопрос |
+| 9 ◐ (#672: DOC-03…05, 07, 09, 11, 13 и части 02, 10, 14, 15) | Документация: удалить историю (§8.3), разбить `PROTOCOLS`/`OPERATIONS`, исправить DOC-02…15, сжать prompt-skills | 5 (пересказ кода переносится в docstring синхронно) | Заголовки, которые цитирует рантайм (`release_lifecycle.py:194,516`, `release_activation.py:224`, `entrypoint_guard.py:26`); 37 тестов, читающих docs; якоря | Проверка якорей и ссылок; тесты docs | Файл за файлом | Нет битых ссылок; docs ≤ 650 тыс. | −320 тыс. символов docs; −80…95 % контекста на вопрос |
 | 10 | Разбиение тестовых файлов (§5.9) и снятие Docker-гейта с классов без Postgres | 3 | `ci-shards.txt`: каждый файл ровно один раз; история JUnit по старым классам прервётся | Валидатор манифеста; сравнение множества тестов | Файл за файлом | Крупнейший тестовый файл ≤ 40 тыс. токенов; 86+ тестов уходят из Docker-шарда | ≈0 строк; −145 тыс. токенов на крупнейший файл |
 
 **Сводная оценка** (**О**, ±30 %):
@@ -1104,7 +1165,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | DEAD-H1 | **подтверждено** (staged-строк не было и нет; settle и recover работы не находили) |
 | DEAD-R | **подтверждено** (дублей нет, pending-ремонтов нет) |
 | BUG-10 | **подтверждено**, плюс вторая слепая зона: регэксп имён |
-| BUG-14 | **подтверждено** (failed с 2026-10-05) |
+| BUG-14 | **подтверждено** (failed с 2026-10-05); ✅ исправлено в #669 |
 | BUG-13 | **опровергнуто для этого хоста** (настроена модель по умолчанию) |
 | BUG-20 | **подтверждено** |
 | BUG-23 (продукт) | **опровергнуто для этого хоста** |
