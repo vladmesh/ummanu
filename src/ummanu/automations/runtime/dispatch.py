@@ -60,6 +60,7 @@ import json
 import os
 import shlex
 import sys
+import time
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -87,6 +88,7 @@ from ummanu.runtime.head import (
     with_pid_heartbeat,
 )
 from ummanu.runtime.head.identity import head_process_status
+from ummanu.runtime.head.local_pty.protocol import PID_FILE_NAME as HEAD_PID_FILE_NAME
 from ummanu.runtime.head_runtime_backends import build_head_runtime
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.state import AgentState
@@ -763,6 +765,8 @@ SUPERVISED_IDLE_STOP = "supervised-idle-stop"
 #: later tick is a busy-skip over a head that has nothing left to do. The grace keeps a head that
 #: only paused inside its turn from being taken for finished.
 IDLE_HEAD_GRACE_SECONDS = 600.0
+#: How long the tick waits for a retired head's supervisor to release its socket.
+IDLE_STOP_SUPERVISOR_EXIT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -842,6 +846,22 @@ def _retire_idle_head(
     # The stop left this runtime holding the head's admission closed; the bring-up that follows
     # reuses the run id, exactly as it does over a head that ended on its own.
     runtime.forget_head(run.run_id)
+    # The stop confirms the head's exit; its supervisor unlinks the socket a moment later. The
+    # bring-up reuses the run directory, so it waits for that rather than probing the old socket.
+    socket = Path(run.handle) if run.handle else None
+    deadline = time.monotonic() + IDLE_STOP_SUPERVISOR_EXIT_SECONDS
+    while socket is not None and socket.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    # The bring-up reuses this run id and directory, and its launch is confirmed by a launch identity
+    # naming that run id: the dead head's record would confirm it before the new head wrote its own.
+    # The stop has confirmed that process gone, so its identity records are debris.
+    for record in (
+        socket.parent / HEAD_PID_FILE_NAME if socket is not None else None,
+        Path(run.pid_file) if run.pid_file else None,
+    ):
+        if record is not None:
+            for path in (record, Path(f"{record}.leaf")):
+                path.unlink(missing_ok=True)
     state.log_run(event, action=SUPERVISED_IDLE_STOP, reference=run.run_id, idle_seconds=int(idle))
     print(f"dispatch[{agent}]: retired the idle head {run.run_id} after {int(idle)}s")
     _release_standing_report(
