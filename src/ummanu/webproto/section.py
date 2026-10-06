@@ -25,6 +25,7 @@ import functools
 import inspect
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ummanu.webproto import sources
@@ -56,6 +57,23 @@ class Reading:
     @property
     def answered(self) -> bool:
         return self.source.state == sources.AVAILABLE
+
+
+def read_source(
+    key: str,
+    produce: Callable[[], Any],
+    *,
+    refusal: Callable[[Exception], str],
+    now: float,
+    evidence: Path | None,
+) -> Reading:
+    """Read and convert one source; assembly and refusal formatting stay outside the catch."""
+    try:
+        value = produce()
+    except Exception as exc:  # noqa: BLE001 -- only this source's read and conversion are guarded
+        source = sources.unavailable(refusal(exc), now=now, evidence=evidence)
+        return Reading(key, source, None)
+    return Reading(key, sources.available(now), value)
 
 
 @dataclass(frozen=True, slots=True)

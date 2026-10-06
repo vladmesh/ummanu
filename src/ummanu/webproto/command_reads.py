@@ -32,6 +32,7 @@ from ummanu.webproto.cursor import Cursor, decode
 from ummanu.webproto.errors import InvalidCursor, ValidationRefused
 from ummanu.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from ummanu.webproto.section import Reading, Section, SectionSet, SourceSet, render, rule
+from ummanu.webproto.section import read_source as _source
 
 SCHEMA_VERSION = 1
 
@@ -172,26 +173,6 @@ COMMAND_ERRORS: dict[str, tuple[str, ...]] = {
 
 class _Unreadable(Exception):
     """Inside one source read: the durable document could not be read at all."""
-
-
-def _source(
-    key: str,
-    produce: Callable[[], Any],
-    *,
-    refusal: Callable[[Exception], str],
-    now: float,
-    evidence: Path | None,
-) -> Reading:
-    """Read one source's durable document, or answer with an unavailable `Reading`.
-
-    The broad catch is deliberate and this span is its whole extent (the rule of
-    :mod:`ummanu.webproto.pause_reads`): no exception types are enumerated. Failures outside it
-    (sections, paging, document assembly) are defects and propagate.
-    """
-    try:
-        return Reading(key, sources.available(now), produce())
-    except Exception as exc:  # noqa: BLE001 -- the span above is the reason this is broad
-        return Reading(key, sources.unavailable(refusal(exc), now=now, evidence=evidence), None)
 
 
 @dataclass(frozen=True, slots=True)

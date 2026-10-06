@@ -506,7 +506,6 @@ NAV: tuple[tuple[str, str, str], ...] = (
     ("po", "/po", "PO"),
 )
 
-FONTS = "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
 
 
 # -- the bottom status bar ------------------------------------------------------------------------
@@ -836,8 +835,6 @@ def _page(
             '<html lang="en"><head><meta charset="utf-8">',
             '<meta name="viewport" content="width=device-width, initial-scale=1">',
             f"<title>{escape(title)} · {escape(TITLE)}</title>",
-            '<link rel="preconnect" href="https://fonts.googleapis.com">',
-            f'<link rel="stylesheet" href="{FONTS}">',
             f"<style>{STYLE}</style>",
             "<script>try{const theme=localStorage.getItem('ummanu.web.theme');if(theme==='light'||theme==='dark')document.documentElement.dataset.theme=theme;}catch(error){}</script>",
             "</head><body>",

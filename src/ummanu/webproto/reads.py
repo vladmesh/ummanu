@@ -23,7 +23,7 @@ from ummanu.board.production_rights import touches_production
 from ummanu.checkpoint import rpo_problem
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.dispatch.state import DispatcherRecord
-from ummanu.dispatch.types import HostError
+
 # Public row disposition for transports, shared with the native doctor evaluator.
 from ummanu.infra.doctor_findings import accepted as accepted
 from ummanu.status import collect_status
@@ -41,6 +41,7 @@ from ummanu.webproto.errors import (
     TaskNotFound,
 )
 from ummanu.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventPage
+from ummanu.webproto.section import read_source
 
 SCHEMA_VERSION = 1
 
@@ -49,10 +50,6 @@ CURRENT_TASK_STATES = ("ready", "in_progress", "validate", "assessment", "blocke
 
 #: How many of a card's most recent events its task snapshot opens with.
 TASK_SNAPSHOT_EVENTS = 20
-
-#: Failures a source read may answer with, caught per section and never around the whole snapshot.
-_SOURCE_FAILURES = (TaskError, HostError, OSError, ValueError, KeyError, TypeError, AssertionError)
-
 
 def hold_store_exclusion(instance: str | Path) -> str | None:
     """Run the board store's exclusion guard once for this process; the refusal, if it refused.
@@ -252,7 +249,7 @@ class ReadLayer(ProtocolBoundary):
         data_dir = self.data_dir(report)
         try:
             cards = TaskReader(self._client()).list()
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return {
                 "kind": "po_delegated",
                 "session": session,
@@ -305,7 +302,7 @@ class ReadLayer(ProtocolBoundary):
         data_dir = self.data_dir()
         try:
             reader = self._events(data_dir)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             page = self._unselected(reference, cursor, exc, data_dir, now=now)
             return _events_document(reference, page, now=now, cursor=cursor)
         position: Cursor | None = (
@@ -331,13 +328,13 @@ class ReadLayer(ProtocolBoundary):
         self._card_exists(reference)
         try:
             history: tuple[dict[str, Any], ...] | None = self._events(data_dir).history(reference)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             raise InstallationUnavailable(
                 f"this card's history could not be read, so its head runs are not known: {_reason(exc)}"
             ) from None
         try:
             record = self._records(data_dir).get(reference)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             raise InstallationUnavailable(
                 f"the dispatcher production state could not be read: {_reason(exc)}"
             ) from None
@@ -358,7 +355,7 @@ class ReadLayer(ProtocolBoundary):
         """
         try:
             reader = self._events(data_dir)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return self._unselected(ref, None, exc, data_dir, now=now), None
         return reader.tail_with_history(ref, limit=limit, now=now)
 
@@ -407,7 +404,7 @@ class ReadLayer(ProtocolBoundary):
             if exc.code == "not_found":
                 raise TaskNotFound(f"the board holds no card {ref!r}") from None
             raise InstallationUnavailable(f"the board could not be read: {exc.message}") from None
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             raise InstallationUnavailable(f"the board could not be read: {_reason(exc)}") from None
 
     # -- sections --------------------------------------------------------------------------
@@ -418,7 +415,7 @@ class ReadLayer(ProtocolBoundary):
             return self._health(report, data_dir, now=now)
         try:
             section = self._health_reader().get("health")
-        except (ReadError, *_SOURCE_FAILURES) as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             reason = exc.message if isinstance(exc, ReadError) else str(exc)
             section = {
                 "source": sources.unavailable(
@@ -434,7 +431,7 @@ class ReadLayer(ProtocolBoundary):
         """Installation health from `ummanu status`'s own collector; never a second health model."""
         try:
             status = self._read_status(report)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return {
                 "source": sources.unavailable(
                     f"installation health could not be collected: {exc}",
@@ -503,7 +500,7 @@ class ReadLayer(ProtocolBoundary):
         """The cards the pipeline is carrying, as `ummanu task list` reads them."""
         try:
             rows = TaskReader(self._client()).list(states=set(CURRENT_TASK_STATES))
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return {
                 "source": sources.unavailable(
                     f"the board could not be read: {_reason(exc)}",
@@ -531,19 +528,20 @@ class ReadLayer(ProtocolBoundary):
 
         An unreadable production state is an unavailable source, never an empty list.
         """
-        try:
-            records = self._records(data_dir)
-        except _SOURCE_FAILURES as exc:
+        reading = read_source(
+            "agents",
+            lambda: self._records(data_dir),
+            refusal=lambda exc: f"the dispatcher production state could not be read: {exc}",
+            now=now,
+            evidence=self._production_path(data_dir),
+        )
+        if not reading.answered:
             return {
-                "source": sources.unavailable(
-                    f"the dispatcher production state could not be read: {exc}",
-                    now=now,
-                    evidence=self._production_path(data_dir),
-                ).to_json(),
+                "source": reading.source.to_json(),
                 "items": [],
             }
         items: list[dict[str, Any]] = []
-        for reference, record in records.items():
+        for reference, record in reading.value.items():
             for row in agent_reads.agent_rows(record, reference):
                 row["project"] = projects_by_ref.get(reference)
                 items.append(row)
@@ -560,7 +558,7 @@ class ReadLayer(ProtocolBoundary):
                 now=now,
                 evidence=data_dir / "board" / "cards.ndjson",
             )
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return None, sources.unavailable(
                 f"the board could not be read: {_reason(exc)}",
                 now=now,
@@ -571,18 +569,16 @@ class ReadLayer(ProtocolBoundary):
         self, ref: str, data_dir: Path, *, now: float
     ) -> tuple[dict[str, Any] | None, DispatcherRecord | None, sources.Source]:
         """What the dispatcher durably holds for this card, if it holds anything."""
-        try:
-            record = self._records(data_dir).get(ref)
-        except _SOURCE_FAILURES as exc:
-            return (
-                None,
-                None,
-                sources.unavailable(
-                    f"the dispatcher production state could not be read: {exc}",
-                    now=now,
-                    evidence=self._production_path(data_dir),
-                ),
-            )
+        reading = read_source(
+            "attempt",
+            lambda: self._records(data_dir).get(ref),
+            refusal=lambda exc: f"the dispatcher production state could not be read: {exc}",
+            now=now,
+            evidence=self._production_path(data_dir),
+        )
+        if not reading.answered:
+            return None, None, reading.source
+        record = reading.value
         if record is None:
             return None, None, sources.available(now)
         return (

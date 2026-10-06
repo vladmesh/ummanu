@@ -13,27 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ummanu.head_registry import HeadRegistryConfigError
-from ummanu.sprint_observer import ObserverMetadataError
-from ummanu.tasks import TaskError
-
 AVAILABLE = "available"
 UNAVAILABLE = "unavailable"
-
-#: What a source read may raise instead of answering; each becomes an unavailable `Source`, never an
-#: exception. Wider than missing/unparsable files: a readable document whose fields do not convert
-#: raises `ValueError`, `TypeError` or `KeyError`. Read by `ummanu.webproto.sprint_reads`; note it
-#: omits `DispatcherError`, which is why `pause_reads` catches everything within one document's read.
-SOURCE_FAILURES: tuple[type[BaseException], ...] = (
-    TaskError,
-    HeadRegistryConfigError,
-    ObserverMetadataError,
-    OSError,
-    ValueError,
-    KeyError,
-    TypeError,
-)
-
 
 def isoformat(moment: float) -> str:
     """The journal's own UTC spelling, so timestamps compare as strings across snapshots."""

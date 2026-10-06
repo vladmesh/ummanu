@@ -3706,6 +3706,11 @@ the board could not be read.
 
 ### Sources fail apart
 
+Reading and converting one source catches any source exception, including a dispatcher record whose
+shape this release refuses. It marks that source unavailable and leaves independent sections readable.
+The shared `webproto.section.read_source` boundary does not cover section or document assembly, or
+formatting a refusal; defects there propagate. Cancellation is not a source refusal.
+
 Each section of each document always carries a source record: `state` (`available` or `unavailable`),
 `reason`, `observed_at` and `data_age_seconds`. An answering source is stamped with the read time and age
 0; a refusing one carries why and dates the newest evidence still on disk. An empty list therefore always
@@ -4448,6 +4453,12 @@ python3 -P -m ummanu web-serve --instance INSTANCE [--data-dir DIR] \
 the literal resolved address is bound. External access goes only through the guarded front
 ([below](#publishing-the-pipeline-the-guarded-front)). Pages call operations in-process, so there is no
 second internal HTTP surface.
+
+HTTP/1.1 requests accept at most 64 KiB of body with one decimal `Content-Length`;
+`Transfer-Encoding` and ambiguous or malformed lengths are refused with 400, oversized bodies with
+413. Every framing or size refusal closes the connection and advertises `Connection: close`, so unread
+body bytes cannot become another request. Successfully read requests retain ordinary keep-alive.
+Pages use inline styles and system font fallbacks, with no external font or stylesheet requests.
 
 ### Routes
 

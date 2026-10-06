@@ -39,6 +39,7 @@ from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import ValidationRefused
 from ummanu.webproto.section import Reading, Section, SectionSet, SourceSet, render, rule
+from ummanu.webproto.section import read_source as _source
 
 SCHEMA_VERSION = 1
 
@@ -110,27 +111,6 @@ class _Unreadable(Exception):
     Lets the refusal say what the tick does with an unreadable file (e.g. a flag read as a freeze),
     a sentence a parseable-but-malformed document must not borrow.
     """
-
-
-def _source(
-    key: str,
-    produce: Callable[[], Any],
-    *,
-    refusal: Callable[[Exception], str],
-    now: float,
-    evidence: Path | None,
-) -> Reading:
-    """Read and convert one source's durable document, or answer with an unavailable `Reading`.
-
-    The broad catch is deliberate: this span is the only place a failure becomes a refusal, and it
-    enumerates no exception types (`DispatcherError` from `DispatcherRecord.from_json` included).
-    Conversions belong in `produce`; anything outside it is a defect and propagates. `refusal`
-    builds the reason from the cause, so it is not swallowed.
-    """
-    try:
-        return Reading(key, sources.available(now), produce())
-    except Exception as exc:  # noqa: BLE001 -- the span above is the reason this is broad
-        return Reading(key, sources.unavailable(refusal(exc), now=now, evidence=evidence), None)
 
 
 @dataclass(frozen=True, slots=True)

@@ -80,7 +80,7 @@ from ummanu.webproto.errors import (
     TaskNotFound,
     ValidationRefused,
 )
-from ummanu.webproto.section import Reading, Rule, Section, SectionSet, SourceSet, render, rule
+from ummanu.webproto.section import Reading, Rule, Section, SectionSet, SourceSet, read_source, render, rule
 
 SCHEMA_VERSION = 1
 
@@ -233,11 +233,6 @@ CLOSE_ABSENT = "absent"
 CLOSE_UNKNOWN = "unknown"
 
 CLOSE_STATES = (CLOSE_RECORDED, CLOSE_ABSENT, CLOSE_UNKNOWN)
-
-#: Failures a source read may raise instead of a value, caught per section; shared with the pause
-#: reads via :data:`ummanu.webproto.sources.SOURCE_FAILURES`.
-_SOURCE_FAILURES = sources.SOURCE_FAILURES
-
 
 @dataclass(frozen=True, slots=True)
 class _Production:
@@ -1283,7 +1278,7 @@ class SprintReadLayer(ProtocolBoundary):
         refused: Exception | None = None
         try:
             rows = reader.list(statuses=set(listing or ()), create=False)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             refused = exc
         journal = self._journal(
             data_dir,
@@ -1305,7 +1300,7 @@ class SprintReadLayer(ProtocolBoundary):
                 audit=audit_traversal(journal.value if journal.answered else []),
             )
             sprints = Reading(SOURCE_SPRINTS, sources.available(now), (rows, views))
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             sprints = Reading(
                 SOURCE_SPRINTS,
                 sources.unavailable(
@@ -1336,7 +1331,7 @@ class SprintReadLayer(ProtocolBoundary):
         path = data_dir / "sprints" / "active-repositories.json"
         try:
             index = require_active_sprint_projects(data_dir)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return Reading(
                 SOURCE_RESERVATIONS,
                 sources.unavailable(
@@ -1351,22 +1346,20 @@ class SprintReadLayer(ProtocolBoundary):
     def _production(self, data_dir: Path, *, now: float) -> Reading:
         """The dispatcher's production state, read and classified once; a refusal is never "nothing runs"."""
         path = data_dir / "dispatcher" / "production-state.json"
-        try:
+
+        def produce() -> _Production:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload, dict):
                 raise TypeError("the dispatcher production state is not an object")
-            production = _Production(payload, _observer_rows(payload))
-        except _SOURCE_FAILURES as exc:
-            return Reading(
-                SOURCE_LIVENESS,
-                sources.unavailable(
-                    f"the dispatcher production state could not be read: {_reason(exc)}",
-                    now=now,
-                    evidence=path,
-                ),
-                None,
-            )
-        return Reading(SOURCE_LIVENESS, sources.available(now), production)
+            return _Production(payload, _observer_rows(payload))
+
+        return read_source(
+            SOURCE_LIVENESS,
+            produce,
+            refusal=lambda exc: f"the dispatcher production state could not be read: {_reason(exc)}",
+            now=now,
+            evidence=path,
+        )
 
     def _journal(
         self,
@@ -1384,7 +1377,7 @@ class SprintReadLayer(ProtocolBoundary):
         try:
             audit = task_audit_for(client)
             events = audit.events() if references is None else audit.events(references=references)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return Reading(
                 SOURCE_JOURNAL,
                 sources.unavailable(
@@ -1400,7 +1393,7 @@ class SprintReadLayer(ProtocolBoundary):
         """Every sprint's cards, in one Pipeline listing, or the reason there are none to show."""
         try:
             linked = reader.linked_cards()
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return Reading(
                 SOURCE_CARDS,
                 sources.unavailable(
@@ -1439,7 +1432,7 @@ class SprintReadLayer(ProtocolBoundary):
                 for issue in raw_issues
                 if str(issue.get("ref") or "")
             ]
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return Reading(
                 SOURCE_CATALOGUE,
                 sources.unavailable(
@@ -1464,7 +1457,7 @@ class SprintReadLayer(ProtocolBoundary):
         """
         try:
             registered = sorted(registered_projects(self.instance))
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return Reading(
                 SOURCE_REGISTRY,
                 sources.unavailable(
@@ -1496,7 +1489,7 @@ class SprintReadLayer(ProtocolBoundary):
         try:
             registry = installed_heads(self.instance)
             eligible = installed_head_profiles(self.instance)
-        except _SOURCE_FAILURES as exc:
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
             return Reading(
                 SOURCE_HEADS,
                 sources.unavailable(

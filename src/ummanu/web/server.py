@@ -65,6 +65,14 @@ class LoopbackOnly(Exception):
     """A bind this transport refuses. Raised before a socket exists, never after."""
 
 
+class _BodyRefused(ValueError):
+    """A body whose framing or size prevents safe reuse of the connection."""
+
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def resolve_bind(host: str) -> tuple[int, str]:
     """The socket family and the literal address to bind, or a refusal, before any socket exists.
 
@@ -151,8 +159,16 @@ class _Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         try:
             body = self._read_body()
-        except ValueError as exc:
-            self._write(413, str(exc).encode("utf-8"), "text/plain; charset=utf-8", head=False)
+        except _BodyRefused as exc:
+            # Unread bytes must never be parsed as a second request on this connection.
+            self.close_connection = True
+            self._write(
+                exc.status,
+                str(exc).encode("utf-8"),
+                "text/plain; charset=utf-8",
+                head=head,
+                extra={"Connection": "close"},
+            )
             return
         try:
             response = self.server.app.handle(method, path, query=query, body=body, headers=self.headers)
@@ -211,12 +227,23 @@ class _Handler(BaseHTTPRequestHandler):
         self._write(500, body, "text/plain; charset=utf-8", head=head)
 
     def _read_body(self) -> bytes:
+        if self.headers.get_all("Transfer-Encoding"):
+            raise _BodyRefused("this service does not accept Transfer-Encoding")
+        lengths = self.headers.get_all("Content-Length") or []
+        if len(lengths) > 1:
+            raise _BodyRefused("this request declares more than one Content-Length")
+        declared = lengths[0].strip() if lengths else "0"
+        if not declared.isascii() or not declared.isdecimal():
+            raise _BodyRefused("this request declares an invalid Content-Length")
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = int(declared)
         except ValueError:
-            raise ValueError("this request declares a Content-Length that is not a number") from None
+            raise _BodyRefused("this request declares an invalid Content-Length") from None
         if length > MAX_BODY_BYTES:
-            raise ValueError(f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here")
+            raise _BodyRefused(
+                f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here",
+                413,
+            )
         return self.rfile.read(length) if length > 0 else b""
 
     def _write(
