@@ -1990,14 +1990,19 @@ class StewardSignalPortTests(unittest.TestCase):
         reader = self.Reader()
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState("steward", state_dir=Path(tmp) / "state")
-            workspace = Path(tmp) / "workspaces" / "other-project"
-            (workspace / "999-orphan").mkdir(parents=True)
+            root = Path(tmp) / "workspaces"
+            workspace = root / "ummanu"
+            active_worker = workspace / "ummanu-2-live"
+            active_reviewer = workspace / "review-ummanu-1-live"
+            orphan = workspace / "ummanu-999-orphan"
+            active_worker.mkdir(parents=True)
+            active_reviewer.mkdir()
+            orphan.mkdir()
+            (root / "observers" / "sprint-1").mkdir(parents=True)
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
                 stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
-                stack.enter_context(
-                    mock.patch.object(steward_signals, "WORKSPACES_ROOT", Path(tmp) / "workspaces")
-                )
+                stack.enter_context(mock.patch.object(steward_signals, "_workspaces_root", return_value=root))
                 stack.enter_context(
                     mock.patch.object(
                         steward_signals,
@@ -2014,12 +2019,12 @@ class StewardSignalPortTests(unittest.TestCase):
                     {"reference": "ummanu-2", "column": "Ready", "since": _LONG_AGO},
                     batch["signals"]["stale"],
                 )
-                self.assertEqual(batch["signals"]["new_orphan_workspaces"], [str(workspace / "999-orphan")])
+                self.assertEqual(batch["signals"]["new_orphan_workspaces"], [str(orphan)])
                 state.ensure_dir()
                 state.pending_file.write_text(json.dumps({"notified_blocked": []}), encoding="utf-8")
                 self.assertEqual(steward_cli.cmd_advance(reader), 0)
             self.assertEqual(state.load_watermark()["notified_blocked"], ["ummanu-1"])
-        self.assertIn((None, "other-project"), reader.calls)
+        self.assertIn((None, "ummanu"), reader.calls)
 
 
 if __name__ == "__main__":

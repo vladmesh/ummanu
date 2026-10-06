@@ -16,17 +16,14 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from collections import defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol, TypedDict
-
-from ummanu.runtime import shared_state
 from ummanu.runtime.state import AgentState
 
 from ...runtime import production_telemetry
-from ..pipeline import naming as pipeline_naming
 
 STATE = AgentState("steward")
 
@@ -39,8 +36,14 @@ STATE = AgentState("steward")
 STALE_COLUMNS = ("Ready", "In progress", "Validate", "Assessment", "Blocked")
 STALE_HOURS = float(os.environ.get("TA_STEWARD_STALE_HOURS", "24"))
 
-WORKSPACES_ROOT = shared_state.WORKSPACES_ROOT
-_AGENTS_PROJECT = shared_state.AGENTS_PROJECT
+def _workspaces_root() -> Path:
+    """Card workspaces owned by the production dispatcher on this installation.
+
+    Standing-role worktrees still live under ~/orca/workspaces; card worktrees moved to the
+    installation data plane in A20. Resolve per scan so a rendered agent unit follows the same
+    UMMANU_DATA_DIR / instance data_dir that production_telemetry already uses.
+    """
+    return production_telemetry.data_dir() / "workspaces"
 
 
 class StewardSignalCard(TypedDict):
@@ -421,57 +424,43 @@ def _resource_signals(mark: dict) -> tuple[dict, dict]:
     return changed, current
 
 
-def _active_card_id_prefixes(project: str, reader: StewardSignalReader | None = None) -> set[str]:
-    """id-prefixes (`<id>-`, `review-<id>-`) for every active card of `project`, in ANY column —
-    including Blocked. The pipeline deliberately leaves a card's worker/reviewer workspace on disk
-    with NO cards.json record at all once it reaches Blocked (ummanu/dispatch/worker_report.py's report:blocked path,
-    validate.py's Blocked-from-Validate/contrib paths — "left alive for a human to inspect"), so
-    matching against cards.json would flag every one of those as a false-positive orphan
-    (2026-07-04 review, triggered-agents-244 blocker B1). The board itself, not the dispatcher's
-    local cache, is the source of truth for "does an active card still own this workspace" — a
-    dedup suffix on a re-claim (`<id>-<slug>-2`) still starts with the plain `<id>-` prefix, so
-    prefix match survives that without needing the exact slug or dedup count."""
-    prefixes = set()
+def _active_card_prefixes(project: str, reader: StewardSignalReader | None = None) -> set[str]:
+    """Workspace-name prefixes for every active card of `project`, including Blocked.
+
+    Git-managed card workspaces are named from the full board reference
+    (`<project>-<id>-<slug>`), not the numeric-only Orca-era id. A review workspace keeps the
+    same reference behind `review-`. The board remains the source of truth: Blocked cards keep
+    their workspaces for human inspection and therefore must still suppress an orphan signal.
+    """
+    prefixes: set[str] = set()
     for card in resolve_reader(reader).active_cards(project=project):
-        cid = pipeline_naming.card_id(card["reference"])
-        prefixes.add(f"{cid}-")
-        prefixes.add(f"review-{cid}-")
+        reference = str(card["reference"])
+        prefixes.add(f"{reference}-")
+        prefixes.add(f"review-{reference}-")
     return prefixes
 
 
-# Only names the pipeline itself would have produced (`<id>-<slug>` for a worker workspace,
-# `review-<id>-<slug>` for a reviewer one) are orphan candidates. A human
-# freely creates worktrees under the same project directory by hand (2026-07-04:
-# dnd-simulator/hook-path-filter etc., live sessions with uncommitted work) — those carry no
-# card-id prefix by construction, so flagging every non-matching name woke the steward on each
-# manual worktree.
-_PIPELINE_WS_RE = re.compile(r"^(review-)?\d+-")
-
-
 def _orphan_signals(mark: dict, reader: StewardSignalReader | None = None) -> tuple[list[str], list[str]]:
-    """(new orphan workspace paths, every orphan path found this scan) — a directory under
-    WORKSPACES_ROOT/<project>/* that is named like a pipeline workspace (_PIPELINE_WS_RE) but
-    matches no active card of that project by id-prefix (see _active_card_id_prefixes): a tick
-    killed between workspace-create and the cards.json save, a teardown that failed partway, a
-    workspace whose card left the board entirely."""
-    if not WORKSPACES_ROOT.is_dir():
+    """(new orphan workspace paths, every orphan path found this scan).
+
+    The production namespace is `<data_dir>/workspaces/<project>/<worker>`; unlike the legacy Orca
+    root it is dispatcher-owned, so every child worktree of a project must belong to an active card.
+    `workspaces/observers` is a separate sprint-observer namespace and is deliberately excluded.
+    """
+    root = _workspaces_root()
+    if not root.is_dir():
         return [], []
     orphans = []
-    for project_dir in sorted(WORKSPACES_ROOT.iterdir()):
-        if not project_dir.is_dir() or project_dir.name == _AGENTS_PROJECT:
+    for project_dir in sorted(root.iterdir()):
+        if not project_dir.is_dir() or project_dir.name == "observers":
             continue
-        prefixes = _active_card_id_prefixes(project_dir.name, reader)
+        prefixes = _active_card_prefixes(project_dir.name, reader)
         for ws in sorted(project_dir.iterdir()):
-            if (
-                ws.is_dir()
-                and _PIPELINE_WS_RE.match(ws.name)
-                and not any(ws.name.startswith(p) for p in prefixes)
-            ):
+            if ws.is_dir() and not any(ws.name.startswith(prefix) for prefix in prefixes):
                 orphans.append(str(ws))
     notified = set(mark["notified_orphans"])
     new = [o for o in orphans if o not in notified]
     return new, orphans
-
 
 def scan(reader: StewardSignalReader | None = None) -> dict:
     """Everything precheck/the skill need: signals since the watermark, plus the raw state to

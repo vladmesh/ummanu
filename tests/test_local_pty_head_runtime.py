@@ -38,6 +38,7 @@ import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from unittest import mock
 
 from ummanu.dispatch.watchdog import clear_head_heartbeat, head_process_status
 from ummanu.runtime.head import (
@@ -99,6 +100,7 @@ from ummanu.runtime.local_pty_head import (
     LocalPtyHeadRuntime,
     LocalPtyRuntimeError,
     _declared_bound,
+    _has_exited,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -946,6 +948,36 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         }
         record.update(fields)
         return json.dumps(record, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    def test_a_live_supervisor_wins_over_a_stale_dead_launch_identity(self) -> None:
+        """BUG-11: the supervisor that answered is the current incarnation's witness."""
+        run = self.live_run()
+        runtime = self.next_tick()
+        with mock.patch.object(runtime, "_identity", return_value={"state": "dead"}):
+            runtime._rehydrate(run)
+
+        self.assertTrue(
+            runtime.activity.admits(run.run_id),
+            "a stale dead launch identity overruled the live supervisor",
+        )
+        self.assertNotEqual(runtime._admission_notes.get(run.run_id), DELIVER_HEAD_ENDED)
+
+    def test_an_old_exit_does_not_confirm_the_new_incarnation_stopped(self) -> None:
+        """BUG-16: stop acknowledgement is floored by the latest run.started."""
+
+        def write(journal, _path) -> None:
+            journal.append(RUN_STARTED, head_pid=1)
+            journal.append(RUN_EXITED, exit_code=0)
+            journal.append(RUN_STARTED, head_pid=2)
+
+        run, path = self._journal_run("stop-ack-reused-run", write)
+        address = self.next_tick()._address(run)
+        assert address is not None
+        self.assertFalse(_has_exited(address), "an older exit confirmed the current incarnation")
+
+        with JournalWriter(path, run.run_id) as journal:
+            journal.append(RUN_EXITED, exit_code=0)
+        self.assertTrue(_has_exited(address), "the current incarnation's exit was not accepted")
 
     def test_a_reused_run_directory_is_answered_by_the_incarnation_that_exists(self) -> None:
         """A whole window replayed in sequence order, and `run.started` resetting what precedes it.

@@ -78,6 +78,8 @@ class TriggeredDispatchTests(unittest.TestCase):
         self.assertIn("ummanu.memory.grant_env", command)
         self.assertIn(str(Path(run.pid_file)), command)
         self.assertNotIn("UMMANU_MEMORY_ACCESS_TOKEN=", command)
+        self.assertNotIn("env $(", command, "the bearer must not become an argv entry")
+        self.assertIn('export "$grant"', command)
 
     def test_unreadable_pause_state_blocks_dispatch_and_is_reported(self) -> None:
         output = io.StringIO()
