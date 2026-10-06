@@ -1,24 +1,9 @@
-"""The owner's two writes on one card, transport-independent like every other operation here.
+"""The owner's two writes on one card: a comment and a move, as `ummanu task` makes them.
 
-A dashboard that can watch a card park in Assessment and cannot say anything about it is a
-dashboard whose operator opens a terminal. The two things the owner does to a card from outside a
-head are both writes `ummanu task` already makes, under the same writer and the same rules:
-
-* :meth:`CardOperationLayer.task_comment` -- a comment on the card, which is how the owner talks to
-  the head working it;
-* :meth:`CardOperationLayer.task_move` -- a transition, which is how the owner intervenes: a card
-  parked in Assessment is released, sent back or dropped by *moving* it, with a reason, and a card of
-  an open sprint is moved past the sprint's reservation only with `sprint_override` and a reason for
-  that as well.
-
-Neither is `task decide`. A decision is the observer's and nobody else's (`TaskWriter.decide`
-refuses every other role), and this layer does not impersonate an observer to record one: the
-owner's intervention is a move, and the audit says so.
-
-Every rule about what a comment or a move *is* stays in `TaskWriter`: which roles may write, which
-transitions are permitted from which state, what a sprint reservation refuses, how a request id is
-replayed. This layer names the request, hands it down, and translates the writer's vocabulary into
-this package's typed codes.
+Neither is `task decide`: a decision is the observer's alone, so the owner intervenes by moving a
+card (with a reason, and `sprint_override` plus its own reason past an open sprint's reservation).
+Every rule about comments and moves stays in `TaskWriter`; this layer names the request, hands it
+down and maps the writer's codes to typed failures.
 """
 
 from __future__ import annotations
@@ -44,13 +29,12 @@ from ummanu.webproto.errors import (
 
 SCHEMA_VERSION = 1
 
-#: The states a move from outside a head may name, in the spelling `TaskWriter.move` takes. Not a
-#: rule of this layer -- the writer decides which of them a given card may go to -- but the whole
-#: vocabulary, so a client can offer the choice and a misspelling is refused before the board.
+#: The whole move vocabulary in `TaskWriter.move` spelling, so a client can offer it and a misspelling
+#: is refused before the board; which target a given card may take is the writer's decision.
 MOVE_TARGETS = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
-#: The writer's own codes, as this layer's typed failures. `transition_forbidden` is a refusal on
-#: the state of the card and not on the shape of the request, which is what `owner_conflict` means.
+#: The writer's codes as typed failures. `transition_forbidden` refuses on card state, not request
+#: shape, hence `owner_conflict`.
 _CODES: dict[str, Any] = {
     "validation": ValidationRefused,
     "role_forbidden": ValidationRefused,
@@ -65,8 +49,7 @@ _CODES: dict[str, Any] = {
 class CardOperationLayer(ProtocolBoundary):
     """One installation's owner-side card writes, with no knowledge of who is asking.
 
-    Construction does no I/O: the instance, the board and the writer are resolved when an
-    operation is called. `board_client` and `clock` are the seams a test supplies directly.
+    Construction does no I/O; `board_client` and `clock` are test seams.
     """
 
     def __init__(
@@ -107,8 +90,7 @@ class CardOperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Put one comment on a card, under the request id the caller names.
 
-        A repeat of the same request id is the writer's to answer, exactly as a CLI retry is: it
-        hands back the event the id already owns and writes nothing.
+        A repeated request id is answered by the writer with the event it already owns.
         """
         now = self._clock()
         _named(request_id, "a card operation names the request it is made under")
@@ -139,11 +121,9 @@ class CardOperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Move one card to a named state, with the reason the audit will carry.
 
-        `sprint_override` is the owner stepping past an open sprint's reservation of the card, and
-        the writer requires a reason for that step separately from the reason for the move. The
-        target is checked against :data:`MOVE_TARGETS` here only so a misspelling is a `validation`
-        refusal naming the choices; whether *this* card may go there is the writer's judgement, and
-        its refusal comes back as `owner_conflict`.
+        `sprint_override` steps past an open sprint's reservation and needs its own reason. The
+        :data:`MOVE_TARGETS` check only catches misspellings; the writer's refusal comes back as
+        `owner_conflict`.
         """
         now = self._clock()
         _named(request_id, "a card operation names the request it is made under")
@@ -198,7 +178,7 @@ class CardOperationLayer(ProtocolBoundary):
             "request_id": request_id,
             "ref": reference,
             "event_id": str(written.get("event_id") or "") or None,
-            # What the writer answered, as it answered it: the CLI prints this same object.
+            # What the writer answered, unchanged: the CLI prints this same object.
             "result": written,
         }
 
@@ -206,10 +186,9 @@ class CardOperationLayer(ProtocolBoundary):
 def _comment_role(writer: TaskWriter, role: str, reference: str, request_id: str) -> str:
     """The role the dashboard's comment is written as: the owner's on a card that waits for the owner.
 
-    The web front is behind the owner's password, so a comment on a card carrying `waiting_owner` is
-    the owner's answer (`task comment --role owner`), which the dispatcher forwards to the PO; as
-    `po` it would never be (secretary-1770). A repeat of a request id keeps the role its first
-    comment was written as, so a card completed in between does not turn the replay into a conflict.
+    The web front is behind the owner's password, so a comment on a `waiting_owner` card is the
+    owner's answer (forwarded to the PO), never a `po` comment. A repeated request id keeps its first
+    comment's role, so a card completed in between does not turn the replay into a conflict.
     """
     if role != "po":
         return role

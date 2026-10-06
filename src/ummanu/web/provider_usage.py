@@ -1,8 +1,8 @@
 """Read-only subscription usage snapshots for the local dashboard.
 
-Credentials are read only long enough to make the providers' own usage request.  They are never
-returned, logged, cached, or included in an error message.  Codex session events are also a useful
-fallback: the CLI records the same rate-limit document on normal turns.
+Credentials are used only for the providers' own usage request: never returned, logged, cached or
+put in an error message. Codex session rollouts are a fallback, since the CLI records the same
+rate-limit document on normal turns.
 """
 
 from __future__ import annotations
@@ -23,18 +23,15 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
 CODEX_RESET_CONSUME_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
-#: Spending a credit is a person's explicit act, not a background poll, so the provider gets the room
-#: Orca's `REDEEM_BACKEND_TIMEOUT_MS` gives it.
+#: Spending a credit is an explicit owner act, not a background poll, so the provider gets more time.
 CODEX_RESET_TIMEOUT = 30.0
-#: What the consume answer's `code` can say, each spelled as the outcome it is recorded as. Anything
-#: else is no outcome this layer knows, and is recorded as an error rather than guessed at.
+#: The consume answer's known `code`s, each recorded as that outcome; any other code is an error.
 CODEX_RESET_CODES = frozenset({"reset", "nothing_to_reset", "no_credit", "already_redeemed"})
 STALE_AFTER_SECONDS = 15 * 60
 CACHE_SECONDS = 5 * 60
-# The Codex fallback reads a fixed amount however large ~/.codex/sessions grows: it descends the
+# The Codex fallback reads a bounded amount however large ~/.codex/sessions grows: it descends the
 # sessions/YYYY/MM/DD directories newest-first, opens at most CODEX_FALLBACK_FILES rollouts and reads
-# only the last CODEX_TAIL_BYTES of each.  On the production tree (2,478 rollouts, 2026-09-21) the
-# last rate-limit line sat at most 157 KB before the end of a file, the median 1.4 KB.
+# only the last CODEX_TAIL_BYTES of each.
 CODEX_FALLBACK_FILES = 20
 CODEX_FALLBACK_LISTINGS = 32
 CODEX_TAIL_BYTES = 256 * 1024
@@ -56,20 +53,17 @@ def _number(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-#: The largest reset-credit count a reading is believed to carry. A larger one is no count this
-#: account could hold, and is read as a malformed field rather than drawn as a figure.
+#: The largest reset-credit count believed possible; larger is a malformed field, not a figure.
 MAX_RESET_CREDITS = 1_000_000
-#: A numeric credit moment below this is unix seconds, at or above it unix milliseconds (as Orca's
-#: `parseCreditTimestamp` reads them).
+#: A numeric credit moment below this is unix seconds, at or above it unix milliseconds.
 CREDIT_MILLISECONDS_FROM = 10_000_000_000
 
 
 def credit_count(value: Any) -> int | None:
     """A reset-credit count, floored and clamped at 0, or `None` when the value is not a count.
 
-    The one normaliser of every count the reset-credit fields carry, for the layer and the bar
-    alike. A bool, a string, a non-finite number or one beyond :data:`MAX_RESET_CREDITS` is not a
-    count: it is `None`, never zero, because no reading is not a reading of none.
+    The one normaliser for reset-credit counts. A bool, string, non-finite number or one beyond
+    :data:`MAX_RESET_CREDITS` is `None`, never zero: no reading is not a reading of none.
     """
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return None
@@ -83,8 +77,7 @@ def credit_count(value: Any) -> int | None:
 def credit_moment(value: Any) -> datetime | None:
     """A reset-credit moment as an aware UTC datetime, or `None` when it is not one.
 
-    The one normaliser of every moment the reset-credit fields carry. It reads an ISO-8601 string
-    (one without an offset is UTC) or unix seconds or milliseconds, as a number or a numeric string.
+    Reads ISO-8601 (no offset means UTC) or unix seconds/milliseconds, as a number or numeric string.
     """
     if isinstance(value, str):
         text = value.strip()
@@ -201,9 +194,8 @@ class ProviderUsageLayer:
         codex_home: str | os.PathLike[str] | Callable[[], Path | None] | None = None,
     ) -> None:
         self.home = Path(home) if home is not None else Path.home()
-        # The CODEX_HOME the installation's heads run with (`<data_dir>/codex-home`). Its login is
-        # the one the heads keep refreshed and its `sessions/` the one they write; `~/.codex` is
-        # only the fallback for a process with no installation to resolve one from.
+        # The CODEX_HOME the installation's heads run with (`<data_dir>/codex-home`): its login is kept
+        # refreshed and its `sessions/` written by the heads. `~/.codex` is only the fallback.
         self._codex_home = codex_home
         self.fetch_json = fetch_json
         self.post_json = post_json
@@ -228,11 +220,9 @@ class ProviderUsageLayer:
     def consume_codex_reset(self, redeem_request_id: str) -> tuple[str, str | None]:
         """Spend one Codex rate-limit reset credit under `redeem_request_id`: `(outcome, reason)`.
 
-        The outcome is a code of :data:`CODEX_RESET_CODES` with no reason, or `error` with one. It
-        never raises: a missing login, a transport failure, a timeout, an HTTP error, an answer that
-        is not a JSON object and a code nobody knows are each an `error` with its reason. The provider
-        deduplicates on `redeem_request_id`, so a repeat under the same id spends nothing twice.
-        The token goes into the header and nowhere else; no reason carries it.
+        The outcome is a :data:`CODEX_RESET_CODES` code with no reason, or `error` with one; it never
+        raises. The provider deduplicates on `redeem_request_id`. The token goes only into the header;
+        no reason carries it.
         """
         auth = self.codex_dir / "auth.json"
         token = self._auth(auth, ("tokens", "access_token"))
@@ -358,9 +348,8 @@ class ProviderUsageLayer:
     def _codex_reset_credits(self, raw: dict[str, Any], headers: dict[str, str]) -> dict[str, Any] | None:
         """The live reading's reset credits, or `None` when it carries no count this layer can read.
 
-        The credits list is asked for only when there is a credit to list, inside the same uncached
-        refresh and with the same timeout. Whatever goes wrong with it keeps the counts and drops
-        the expiry: it never makes the Codex reading unavailable.
+        The credits list is fetched only when a credit is available; any failure there only drops
+        the expiry and never makes the Codex reading unavailable.
         """
         summary = raw.get("rate_limit_reset_credits")
         if not isinstance(summary, dict):

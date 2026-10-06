@@ -1,27 +1,10 @@
 """Paged, resumable reading of one card's slice of the committed board audit.
 
-`CommittedAudit` reads the card canon through the traversal its audit owner publishes, because
-`requests`/`board_events` is not a file to seek in (`docs/BOARD_STORE.md` §7.3). The caller resolves
-its card client and asks :func:`ummanu.tasks.task_audit_for` for that client's audit owner,
-exactly as every other live audit reader does. The file journal under `<data>/board` is not a card
-audit owner any more; read beside a PostgreSQL client, a card's history answered from a projection
-that backend never writes -- unavailable where the file was swept, and a successful empty or stale
-history where an old one was left behind, with the committed records invisible.
-
-The cursor counts the card's committed records and says so (``pos``). A released cursor that names
-a byte offset into the pre-2026-09-10 file journal is refused rather than seeked with
-(:mod:`ummanu.webproto.cursor`).
-
-Both record shapes the audit holds are returned -- the typed board protocol events (``record_type``
-of ``board.protocol_event``) and the released generic audit records beside them -- because a client
-asking "what happened to this card" must not be shown a history with the transitions in it and the
-creations missing. ``typed`` says which shape each row came from, and a record whose typed payload
-does not parse is still returned as the row it is rather than dropped: losing a written event is
-the one failure this reader may not have.
-
-Pending (staged, not yet committed) records are not events yet: they describe an effect whose
-backend write may still fail. They are not on the page, and no cursor can be positioned inside
-them.
+Reads through the audit owner :func:`ummanu.tasks.task_audit_for` returns for the card client
+(`docs/BOARD_STORE.md` §7.3), never the file projection under `<data>/board`. Both record shapes
+are returned (typed protocol events and generic audit records, told apart by ``typed``); a record
+whose typed payload does not parse is still returned, never dropped. Uncommitted staged records are
+not events and no cursor lands inside them. See docs/PROTOCOLS.md "Continuing a read".
 """
 
 from __future__ import annotations
@@ -37,8 +20,7 @@ from ummanu.webproto.sources import Source
 
 #: What a caller gets when it asks for a page without saying how big.
 DEFAULT_LIMIT = 50
-#: The ceiling a caller cannot raise. A page is a page; a client that wants the whole history pages
-#: through it with the cursor it is given.
+#: The ceiling a caller cannot raise; a client pages through longer histories with the cursor.
 MAX_LIMIT = 500
 
 
@@ -55,20 +37,13 @@ class EventPage:
 class CommittedAudit:
     """The read-only reader of a card's committed history in the store its audit owner holds.
 
-    Takes the audit owner itself -- `SqlTaskAudit` for a PostgreSQL client -- and pages
-    :meth:`~ummanu.board.sql_audit.SqlTaskAudit.events`, the traversal every other reader of this
-    installation's audit already uses. It opens no store of its own, holds no index and caches
-    nothing: one page is one traversal, filtered to this card by the audit's own predicate.
-
-    A *position* here is an ordinal: how many of this card's committed records stand before the next
-    one. That is frozen for the reason a byte offset is -- the audit only gains records, and a
-    committed record's place in claim order never changes -- so reading the same cursor twice returns
-    the same page and a cursor issued before newer records returns exactly those.
+    Pages :meth:`~ummanu.board.sql_audit.SqlTaskAudit.events` with no store, index or cache of its
+    own. A position is an ordinal (this card's committed records before the next one); the audit
+    only grows and claim order never changes, so a cursor always reads back the same page.
     """
 
-    #: The vocabulary a store that cannot answer raises in. `TaskError` is what `SqlTaskAudit`
-    #: translates a driver failure into; the rest are the shapes a record the traversal cannot
-    #: convert arrives as. An audit nobody could read is a source fact and never an empty history.
+    #: `TaskError` is a translated driver failure; the rest are records the traversal cannot
+    #: convert. An unreadable audit is a source fact, never an empty history.
     _FAILURES = (OSError, ValueError, KeyError, TypeError)
 
     def __init__(self, audit: Any, *, backend: str = "postgres") -> None:
@@ -103,8 +78,7 @@ class CommittedAudit:
     def tail(self, ref: str, *, limit: int, now: float) -> EventPage:
         """The last ``limit`` committed records for ``ref``, and the cursor that continues them.
 
-        As in the file reader, the cursor is the end of the history rather than the end of the page,
-        so a client that polls with it is never handed an event it has just been shown.
+        The cursor is the end of the history, so a polling client is never re-handed an event.
         """
         return self.tail_with_history(ref, limit=limit, now=now)[0]
 
@@ -113,9 +87,7 @@ class CommittedAudit:
     ) -> tuple[EventPage, tuple[dict[str, Any], ...] | None]:
         """`tail`, and every committed record of the card as its `kind` and `data`, from one traversal.
 
-        For a reader that needs something out of the whole history -- which head runs a card has
-        had -- beside the page it shows, without reading the audit twice. The history is `None`
-        when the audit did not answer, which the page's source already says.
+        The history is `None` when the audit did not answer, which the page's source already says.
         """
         bounded = max(1, min(int(limit), MAX_LIMIT))
         try:
@@ -139,13 +111,7 @@ class CommittedAudit:
         return tuple(_brief(record) for record in self._records(ref))
 
     def _records(self, ref: str) -> tuple[dict[str, Any], ...]:
-        """This card's committed records in claim order, as the audit owner traverses them.
-
-        Both record shapes come back, exactly as they do off the file: the typed board protocol
-        events and the generic audit records beside them -- a product run's `product_run.started`
-        among the latter. A client asking what happened to a card may not be shown a history with
-        the transitions in it and the creations missing.
-        """
+        """This card's committed records in claim order, both record shapes, as the owner traverses them."""
         return tuple(
             record for record in self.audit.events(ref) if isinstance(record, dict)
         )
@@ -159,12 +125,9 @@ class CommittedAudit:
         return (TaskError, *self._FAILURES)
 
     def _unreadable(self, ref: str, cursor: Cursor | None, exc: Exception, *, now: float) -> EventPage:
-        """An audit that would not answer, said as the source fact it is.
+        """An audit that would not answer, as a source fact, never an empty page.
 
-        The same rule the file reader holds, for the same reason: the cursor handed back is the one
-        the caller came with, so a client that keeps polling resumes where it stopped instead of
-        restarting at the beginning of a history it has already read -- and an empty page is never
-        published for a store that did not answer.
+        Hands back the caller's own cursor, so a polling client resumes where it stopped.
         """
         return EventPage(
             items=(),

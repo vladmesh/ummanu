@@ -1,34 +1,10 @@
 """Which agents are running, decided from process state and from nothing else.
 
-This module is the reason criterion 3 of secretary-1561 exists. An operator dashboard that draws a
-green dot next to a card because a terminal exists is worse than one that draws nothing: the pane
-is a fact about a window, and windows outlive the processes drawn in them, get aliased, get
-detached and get redrawn empty while the head behind them works
-(`ummanu.dispatch.head_status`, issue:84c0ae4f796f994a7c1d).
-
-So liveness here comes from one place: the launch-identity heartbeat the head's own shell writes
-before it `exec`s, classified by :func:`head_run_process_status` against the durable ``HeadRun``
-the dispatcher recorded for that role. Nothing in this file opens a terminal, lists a pane, asks a
-session manager anything or imports a module that could -- which is checked by a test, not only
-promised here.
-
-Five values, and they are five because collapsing any two of them is what makes a dashboard lie:
-
-``running``             a live process whose identity matches the recorded run
-``finished``            the run's own lifecycle says its stop was confirmed, or its process ended
-                        after a stop had been asked for. This is an ending, not a failure
-``process_failed``      the run still expects a process behind it and the heartbeat says that
-                        process is gone. Nobody asked it to stop; it is not there
-``source_unavailable``  the heartbeat could not be read at all -- unreadable file, a process this
-                        user may not inspect, a record written by a scheme this reader does not
-                        know. Nothing is proven either way, and the reason says which
-``unknown``             no evidence exists yet: the dispatcher holds an identity for this role but
-                        no durable run, or the head has not published its heartbeat yet, or the
-                        live process under that pid is somebody else's
-
-PID reuse is not trusted anywhere in this: `head_process_status` compares the boot id and the
-process start ticks recorded in the heartbeat, so a recycled pid reads as the dead head it belongs
-to rather than as a live one.
+Liveness comes only from the launch-identity heartbeat the head's shell writes before it `exec`s,
+classified by :func:`head_run_process_status` against the dispatcher's durable ``HeadRun``; no
+terminal, pane or session manager is consulted (a test enforces it). PID reuse is caught by the
+recorded boot id and start ticks. The five states (`AGENT_STATES`) are in docs/PROTOCOLS.md
+"The four states of an agent".
 """
 
 from __future__ import annotations
@@ -37,9 +13,8 @@ from typing import Any
 
 from ummanu.dispatch.state import DispatcherRecord
 
-# The control plane's own seam onto the heartbeat reader and its vocabulary: `dispatcher_watchdog`
-# re-exports every one of these names, so this layer reads process state through the same door the
-# dispatcher does rather than opening a second one onto the runtime package.
+# The control plane's seam onto the heartbeat reader, so this layer reads process state through the
+# same door the dispatcher does.
 from ummanu.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_IDENTITY_MISMATCH,
@@ -50,8 +25,7 @@ from ummanu.dispatch.watchdog import (
     pid_file_path,
 )
 
-# The lifecycle vocabulary of the run itself, from the module that defines it. Spelling these two
-# states as string literals here would be a second copy of a contract that already has one owner.
+# The run lifecycle vocabulary, from its one owner.
 from ummanu.runtime.head import EXITED, FINISHING
 
 RUNNING = "running"
@@ -66,7 +40,7 @@ AGENT_STATES = (RUNNING, FINISHED, PROCESS_FAILED, SOURCE_UNAVAILABLE, UNKNOWN)
 #: The two roles the dispatcher runs per card, and the record prefix each of them is kept under.
 ROLES = (("worker", "worker"), ("review", "reviewer"))
 
-#: Stated in every row. A client that renders a row must not have to know this module to read it.
+#: Stated in every row, so a client needs no knowledge of this module to read it.
 LIVENESS_INVARIANT = (
     "liveness is the head's process state, read from its launch-identity heartbeat; a terminal, "
     "pane or window says nothing about whether an agent is running and is not consulted here"
@@ -112,11 +86,8 @@ def _row(record: DispatcherRecord, ref: str, *, kind: str, role: str) -> dict[st
 def _state(heartbeat: dict[str, Any], *, lifecycle: str, run_id: str) -> tuple[str, str]:
     """Map one heartbeat classification onto the vocabulary, given what the run expected.
 
-    The run's lifecycle is what tells an ending from a failure, and it is the only thing that can:
-    an ended process looks identical from the outside whether somebody asked it to stop or it died.
-    ``EXITED`` is a confirmed stop and ``FINISHING`` is a stop that was asked for, so a process
-    missing under either of them is an agent that finished; a process missing under a run that
-    still expects one is a process that failed.
+    Only the run's lifecycle tells an ending from a failure: a missing process under ``EXITED``
+    (stop confirmed) or ``FINISHING`` (stop asked for) finished; under any other lifecycle it failed.
     """
     state = str(heartbeat.get("state") or "")
     if lifecycle == EXITED:

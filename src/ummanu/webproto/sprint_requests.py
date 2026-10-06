@@ -1,32 +1,11 @@
 """What a request id owns when the thing it asked for is a sprint.
 
-`run_start` made a request id own a run: the record is written before anything is provisioned, so a
-repeat finds it and returns the same run instead of raising a second head. A sprint create needs the
-same property for the same reason -- a retried command, a client that reconnected -- and it is the
-same mechanism here, deliberately, rather than a second idea about idempotency.
-
-What is different is what the record points at. A run is this layer's own object, so `RunStore`
-holds the whole of it. A sprint is not: the sprint entity on the board is the one source of truth
-about goals, issues, reservations and observers, and `SprintWriter.create` owns every rule about
-it. So the record here holds exactly two things this layer cannot get anywhere else -- the request
-this id was claimed under, and the reference of the sprint that request produced -- and nothing
-about the sprint itself. Reading a sprint means reading the sprint.
-
-That leaves the partial failure honest without a second store of truth. Between the claim and the
-reference there is a window in which a sprint may exist while nothing here names it, and the
-repair for it is not this record: the same request id is handed down to `SprintWriter.create`,
-whose own staged transaction resumes the row it already began. This record's `reference` is
-therefore a *shortcut* -- a repeat that finds it answers without touching the writer at all -- and
-never the only thing standing between a repeat and a second sprint.
-
-The failure vocabulary is the layer's own on purpose. `RunStoreError` and `RequestMismatch` are
-already what this layer's durable stores speak, already in
-:data:`ummanu.webproto.boundary.IMPLEMENTATION_FAILURES`, and already translated by the
-boundary; a private exception type here would mean a second entry in that tuple and a second thing
-for the next operation to remember. For the same reason the write itself goes through
-:func:`ummanu.webproto.store_io.write_document` -- the one seam where this layer meets the
-filesystem -- rather than calling the atomic writer directly: a store that called it directly would
-raise the writer's own `RuntimeError`, which the boundary translates for nobody.
+The same claim-before-act idempotency as `RunStore`, but the record holds only what this layer
+cannot get elsewhere: the claimed request and the reference of the sprint it produced. The sprint
+itself is read from the board. The reference is a shortcut, not the guard against a second sprint:
+the same request id is passed to `SprintWriter.create`, whose staged transaction resumes a
+half-written row. Failures use the layer's existing `RunStoreError` / `RequestMismatch`, and writes
+go through :func:`ummanu.webproto.store_io.write_document`, so the boundary translates them.
 """
 
 from __future__ import annotations
@@ -42,13 +21,11 @@ from ummanu._fsutil import file_lock
 from ummanu.webproto.runs import RequestMismatch
 from ummanu.webproto.store_io import RunStoreError, write_document
 
-#: The one operation a record here can be claimed under today. It is stored rather than assumed for
-#: the same reason `RunStore` stores it: a request id is the idempotency key of *one* operation, and
-#: an id reused for another one has to be refused rather than answered with this operation's sprint.
+#: The one operation a record can be claimed under. Stored, so an id reused for another operation is
+#: refused rather than answered with this one's sprint.
 SPRINT_CREATE_OPERATION = "sprint_create"
 
-#: Where this layer keeps the request index, inside the installation's own data plane and beside
-#: the product runs'.
+#: Where the request index lives in the installation's data plane, beside the product runs.
 SPRINT_REQUESTS_RELATIVE = Path("webproto") / "sprint-requests"
 
 
@@ -59,8 +36,8 @@ class SprintRequest:
     request_id: str
     operation: str
     fingerprint: str
-    #: The sprint this request created, recorded after the create returned it. Empty means the
-    #: request is claimed and its outcome is not established here -- never that it created nothing.
+    #: The sprint this request created. Empty means claimed with the outcome not established here,
+    #: never that nothing was created.
     reference: str = ""
     claimed_at: float = 0.0
 
@@ -89,10 +66,8 @@ class SprintRequest:
 class SprintRequestStore:
     """Every sprint request of one installation, keyed by the request id that made it.
 
-    One directory and one lock, exactly as `RunStore` has: the id is digested rather than used
-    verbatim so a caller's request id never becomes a path here, and the lock is held across
-    read-decide-write because "does this request id already own a sprint" is only a decision if
-    nobody can answer it twice at once.
+    Ids are digested so a caller's id never becomes a path; the lock is held across
+    read-decide-write so a request id cannot be claimed twice.
     """
 
     def __init__(self, data_dir: str | os.PathLike[str]) -> None:
@@ -116,11 +91,9 @@ class SprintRequestStore:
     def by_request(
         self, request_id: str, *, operation: str = "", fingerprint: str = ""
     ) -> SprintRequest | None:
-        """The request this id already owns, if it owns one *and this is the same request*.
+        """The request this id already owns, if it owns one and this is the same request.
 
-        Naming the operation and the fingerprint is what makes the answer a retry rather than an
-        alias: a repeat that disagrees with either is a :class:`RequestMismatch`, never a document
-        about a sprint somebody else asked for.
+        A repeat with a different operation or fingerprint is a :class:`RequestMismatch`.
         """
         path = self._path(request_id)
         try:
@@ -150,9 +123,7 @@ class SprintRequestStore:
     ) -> tuple[SprintRequest, bool]:
         """The request this id owns, claiming it under the lock when it owns none yet.
 
-        The boolean says whether this call claimed it. `False` is the idempotency contract: the
-        second caller of the same request finds the first one's record, whether or not the first
-        one ever got as far as a sprint.
+        The boolean says whether this call claimed it; `False` means a repeat found the first record.
         """
         self._prepare()
         with file_lock(self.lock_path):
@@ -169,12 +140,7 @@ class SprintRequestStore:
             return record, True
 
     def record_reference(self, request_id: str, reference: str) -> SprintRequest:
-        """Name the sprint this request produced, once. A recorded reference is never replaced.
-
-        Never replaced because a request owns one outcome: a second reference under the same id
-        could only come from a create that made a second sprint, and this store would be the last
-        place able to notice it.
-        """
+        """Name the sprint this request produced, once; a recorded reference is never replaced."""
         self._prepare()
         with file_lock(self.lock_path):
             record = self.by_request(request_id)

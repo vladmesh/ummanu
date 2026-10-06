@@ -1,35 +1,15 @@
-"""The resumable position in a card's event history, and why it is a count of committed records.
+"""The resumable position in a card's event history: a count of committed records.
 
-A card's history is the ordered traversal its audit owner publishes (`requests`/`board_events`,
-`docs/BOARD_STORE.md` §7.3): committed records only ever join the end of it and none is ever
-rewritten. A count of the records that stand before the next one is therefore the only thing that
-can answer "give me what I have not read yet" without either losing an event or replaying one:
+The audit owner's traversal (`docs/BOARD_STORE.md` §7.3) only appends and never rewrites, so the
+number of records before the next one neither loses nor replays an event. Not a timestamp (seconds
+collide, clocks go back, ``occurred_at`` is writer-stamped) and not an index into a filtered list.
 
-* it is not a timestamp. Two events can share a wall-clock second, a clock can go backwards, and
-  ``occurred_at`` is stamped by the writer rather than by the commit -- so a time cursor either
-  drops the second event of a pair or repeats the first;
-* it is not an index into a filtered list the client saw. That list is recomputed on every read,
-  so an event committed for another card would shift every position in it.
-
-A cursor is opaque to the client: base64 of a small versioned document, carrying that count, the
-card it belongs to, and ``pos`` -- :data:`POSITION_ORDINAL`, the one position this reader
-continues. The ref binding is what makes a cursor from another card an error rather than a
-plausible-looking wrong answer.
-
-Opaque, but not encrypted or signed: it names a position in a history the caller may already read,
-so there is nothing in it to protect. Tampering with one gets a client an
-:class:`~ummanu.webproto.errors.InvalidCursor`, never another card's history.
-
-A document without ``pos``, or with any other spelling, is not a cursor this reader issued. That is
-also what a cursor from the pre-2026-09-10 file journal is -- a byte offset into a file, with no
-``pos`` -- so it is refused like any other malformed cursor rather than read as a count. What a
-client does after such a refusal is read a fresh task snapshot, whose `next_cursor` continues here.
-
-**One reader pages the whole audit rather than one card, and its position is the same count.**
-:meth:`~ummanu.webproto.command_reads.CommandReadLayer.command_history` is a cross-entity page
-built on the same traversal, so its ``offset`` is how many committed records stand before the row
-the next page continues at. The ref binding keeps the two apart with no second codec: a card's
-cursor names its card, and a cross-entity one names no entity at all.
+The cursor is opaque base64 of a versioned document with the count, the card's ref (a cursor from
+another card is refused) and ``pos`` = :data:`POSITION_ORDINAL`. Not signed: tampering only yields
+:class:`~ummanu.webproto.errors.InvalidCursor`. A document without that ``pos`` (e.g. a legacy
+file-journal byte offset) is refused; the client reads a fresh task snapshot instead.
+:meth:`~ummanu.webproto.command_reads.CommandReadLayer.command_history` pages the whole audit with
+the same count and no ref.
 """
 
 from __future__ import annotations
@@ -41,8 +21,8 @@ from dataclasses import dataclass
 
 from ummanu.webproto.errors import InvalidCursor
 
-#: Bumped when the document below changes shape. An older or newer spelling is refused rather than
-#: guessed at, because a misread position is a silently skipped event.
+#: Bumped when the document changes shape; other versions are refused, since a misread position
+#: silently skips events.
 CURSOR_VERSION = 1
 
 #: How many committed records stand before the next one, in the traversal the audit owner
@@ -69,12 +49,7 @@ class Cursor:
 
 
 def decode(value: str, *, ref: str) -> Cursor:
-    """Read a cursor this layer issued for ``ref``, or refuse it by name.
-
-    A document that does not say it carries :data:`POSITION_ORDINAL` -- a released byte-offset
-    cursor of the pre-2026-09-10 file journal among them -- is refused rather than read as a count
-    of records it was not measured in.
-    """
+    """Read a cursor this layer issued for ``ref``, or refuse it by name."""
     if not isinstance(value, str) or not value:
         raise InvalidCursor("a cursor is a non-empty string")
     padding = "=" * (-len(value) % 4)

@@ -1,32 +1,17 @@
 """A card's heads, and a read-only view of one local-pty head's journal.
 
-The web half of the sprint's "diagnostics without Orca" item (secretary-1703). An operator who
-wants to know what a card's worker or reviewer is doing -- or what it did before it ended -- reads
-it here from the head's journal, through `ummanu.runtime.local_pty_head`.
+Read-only like `head-status`: nothing here delivers, attaches, drains, stops or writes.
 
-Read-only, in the sense `head-status` is: nothing here delivers, attaches, drains, stops or writes.
-
-**Which runs are the card's.** The ones the card itself recorded, and nothing else: the worker and
-reviewer runs the dispatcher record holds for it now, and every `launch_id` its own history's
-`routing` and `attempt.usage` events name. A run id asked for that is not among them is not found,
-so a path is only ever built from a run id the card recorded -- never from what a request carried.
-A local-pty run directory whose journal says it belongs to another card is not read either.
-
-**What a run says about itself.** The same two events are the one record of what a head was and
-what it ran on: the `routing` snapshot of its launch carries the configuration (`head`, `adapter`,
-`model` as configured, `model_source`, `effort`, `attempt`), and the `attempt.usage` occurrences of
-that same `launch_id` carry what the provider journal says the CLI resolved (`resolved_model`,
-`resolved_models`, `resolved_effort`; :mod:`ummanu.runtime.provider_models`). A row joins them
-by run id, so a model resolved for one launch is never shown beside another, and a retained worker
-resumed for a second round stays one row. Neither fills a gap: an occurrence written before the
-resolved fields existed reads as unknown, and a head with no configured model is one the CLI picked.
-
-**What is shown is untrusted.** The journal is shown through the same key whitelist `head-status`
-uses: its first record carries the head's command, and the command carries the head's memory token.
-
-**No source can fail the read.** Each is read under `_source`, the pattern of
-`ummanu.dispatch.head_status._source`: whatever a dead supervisor, an unreadable file or a
-damaged journal raises is that source not answering, said as such, and never an error page.
+- A card's runs are only the ones it recorded: the dispatcher record's current worker/reviewer runs
+  and every `launch_id` named by its `routing` and `attempt.usage` history events. Any other run id
+  is not found, so a path is only built from a recorded run id; a run directory whose journal names
+  another card is not read.
+- A row joins, by run id, the `routing` launch configuration with what the latest `attempt.usage`
+  occurrence says the CLI resolved (:mod:`ummanu.runtime.provider_models`). Neither fills the
+  other's gaps.
+- The journal is untrusted (its first record holds the head's memory token): only `JOURNAL_KEYS`
+  are shown, through `journal_record`.
+- No source can fail the read: each is read under `_source`.
 """
 
 from __future__ import annotations
@@ -141,9 +126,7 @@ def recorded_heads(record: Any, history: Iterable[dict[str, Any]] | None) -> lis
     """The card's head runs, oldest first: its history's, then the dispatcher's current ones.
 
     `record` is the card's `DispatcherRecord` or `None`; `history` is the card's committed records
-    as `kind` and `data`. A run both name is one row, carrying the runtime the durable run says. A
-    `routing` event gives a run its launch configuration; an `attempt.usage` event of the same run
-    gives it what it resolved.
+    as `kind` and `data`. A run both name is one row, carrying the runtime the durable run says.
     """
     found: dict[str, RecordedHead] = {}
     for event in history or ():
@@ -202,8 +185,7 @@ def head_view(
 ) -> dict[str, Any] | None:
     """The read-only view of one of the card's heads, or `None` when the card recorded no such run.
 
-    `run_id` is compared with the card's recorded runs and used for nothing else: the run directory
-    is built from the recorded value it matched.
+    The run directory is built from the matched recorded value, never from `run_id` itself.
     """
     head = next((head for head in heads if head.run_id == run_id), None)
     if head is None:
@@ -265,8 +247,8 @@ def _row(ref: str, head: RecordedHead, root: Path) -> dict[str, Any]:
                 "local_pty": True,
                 "reason": "the run directory holds no journal yet, so this head has said nothing",
             }
-        # Nothing but the card's history names this run, and no local-pty supervisor ever held it:
-        # every local-pty run leaves its journal under the heads root and nothing sweeps it.
+        # Only the card's history names this run and no local-pty journal exists; local-pty runs
+        # always leave one (never swept), so this is a legacy run.
         return {**row, "runtime": ORCA_LEGACY_RUNTIME, "legacy_record": True, "reason": LEGACY_NOTICE}
     if identity.get("task") != f"card:{ref}":
         return {
@@ -329,8 +311,7 @@ def _journal(run_dir: Path) -> dict[str, Any]:
 
 #: The latest time `datetime.fromtimestamp(..., UTC)` renders: the start of the year 10000.
 _LAST_TIME = 253402300800.0
-#: The largest count a journal integer field may carry and still be shown: 2**53, the last integer a
-#: JSON reader in a browser holds exactly.
+#: The largest count shown: 2**53, the last integer a browser JSON reader holds exactly.
 _LAST_COUNT = 2**53
 _COUNTS = ("seq", "turn", "bytes", "output_bytes", "folded_windows")
 
@@ -338,11 +319,9 @@ _COUNTS = ("seq", "turn", "bytes", "output_bytes", "folded_windows")
 def journal_record(event: Any) -> tuple[dict[str, Any], int]:
     """One journal record as the view shows it, and how many of its whitelisted values were dropped.
 
-    The one normaliser every record the view returns goes through, so the page and the JSON route
-    only ever hold values of the shape they expect: `at` a float the page can turn into a date
-    (0 < at < year 10000), count fields as ints in 0..2**53, and `kind`, `reason` and
-    `subject` strings, scrubbed and bounded. A value of any other shape is left out and counted,
-    never passed on and never raised about.
+    The one normaliser for every returned record: `at` a float in (0, year 10000), counts ints in
+    0..2**53, `kind`/`reason`/`subject` scrubbed bounded strings. Anything else is left out and
+    counted, never passed on or raised about.
     """
     record: dict[str, Any] = {}
     lost = 0
@@ -375,9 +354,8 @@ def _not_applicable(reason: str) -> dict[str, Any]:
 def _source(name: str, read: Callable[[], dict[str, Any]], **empty: Any) -> dict[str, Any]:
     """One source's answer, or the uniform shape of a source that did not answer; never raises.
 
-    `ummanu.dispatch.head_status._source`, for the same reason: a supervisor, a lock file,
-    and a journal are outside this process's control, so anything their read raises
-    is that source not answering and never a failed page.
+    Mirrors `ummanu.dispatch.head_status._source`: supervisors, lock files and journals are
+    untrusted, so anything their read raises is that source not answering.
     """
     try:
         return read()

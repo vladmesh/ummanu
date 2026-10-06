@@ -1,23 +1,13 @@
 """The doctor lamp's reading: recorded installation health, classified by code, and cached.
 
-Red when the installation cannot be trusted to run work or when
-its health could not be read at all, which is the case a lamp must never draw as green; yellow when
-it runs but somebody should look; green when health was read and reports no problem. The rule lives
-in :data:`ummanu.webproto.reads.PROBLEM_SEVERITY` beside the codes it classifies, and this module
-only applies it and adds recorded-read and stuck-collection problems. An expected first result
-is unknown until collected; independent status problems retain their severity.
+Red when the installation cannot run work or its health could not be read (never green then);
+yellow when someone should look; green when read with no problem. Severity comes from
+:data:`ummanu.webproto.reads.PROBLEM_SEVERITY`; this module adds recorded-read and stuck-collection
+problems. Recorded state only (status health plus the doctor timer's latest result): nothing is
+probed. An expected missing first result is unknown, not red.
 
-Recorded state only: status health and the latest result of the packaged doctor timer.
-The reader launches no doctor, SSH or provider probe. Doctor's run time remains separate
-from the time the web collected its cached reading. Unusable results are explicit problems;
-an expected missing first result is unknown. Neither source can hide the other's findings.
-
-Cached for the same reason the provider layer is (:mod:`ummanu.web.provider_usage`, whose shape
-this copies): the bar is rendered by every page, and the collection behind it is not cheap, so one
-in-process cache with its own TTL and an injectable clock decides how often it actually runs. It is
-the only health cache of the process: the dashboard's health panel reads the same cached reading
-(:meth:`DoctorLayer.health_snapshot`), so it is up to `CACHE_SECONDS` stale exactly as the lamp is,
-and within one window the two are one reading.
+The process's only health cache, with its own TTL and injectable clock: the dashboard's health
+panel reads the same reading (:meth:`DoctorLayer.health_snapshot`), so panel and lamp never differ.
 """
 
 from __future__ import annotations
@@ -34,16 +24,14 @@ from typing import Any
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.reads import accepted, lamp_colour, problem_severity
 
-#: How long one health reading serves the lamp. Shorter than the provider window: this reading is
-#: local, and an operator who repaired a unit should see the lamp change within about a minute.
+#: How long one health reading serves the lamp; short so a repaired unit shows within about a minute.
 CACHE_SECONDS = 60
 
-#: The problem a reading that did not happen carries. It is a problem like any other, with a code
-#: like any other, so that "health is unknown" is classified by the same table as everything else.
+#: The problem a reading that did not happen carries, so "health is unknown" is classified by the
+#: same table as everything else.
 UNREADABLE_CODE = "health.unreadable"
 
-#: Said when this web process was built without a doctor layer at all. Health is then unknown,
-#: which is red -- a lamp that stayed green because nothing was wired would be the worst kind.
+#: Said when this web process has no doctor layer: health is unknown, hence red, never green.
 DOCTOR_NOT_BUILT = "this web process was built without the doctor layer"
 
 
@@ -51,9 +39,7 @@ DOCTOR_NOT_BUILT = "this web process was built without the doctor layer"
 class HealthReading:
     """One published reading: when it was collected, what it was, and the lamp's document for it.
 
-    Published once and never changed: nothing is written into it after the cache holds it, and a
-    caller receives copies of its documents (:meth:`DoctorLayer.health_snapshot`), so no reader can
-    change what another reader of the same window sees.
+    Immutable once cached; callers receive copies, so no reader changes what another sees.
     """
 
     observed: float
@@ -73,20 +59,13 @@ class _Pin:
 class DoctorLayer:
     """One cached reading of recorded health, as the lamp, the doctor page and the dashboard read it.
 
-    The cache holds the reading itself -- the read layer's health snapshot, or the refusal it
-    raised -- beside the lamp's classification of it. :meth:`health_snapshot` hands out that
-    reading, which is how the dashboard's health panel reads this same cache (`ReadLayer`'s
-    `health_reader`): one collection, one window, so the panel and the lamp cannot disagree.
+    The cache holds the read layer's health snapshot (or its refusal) beside the lamp's
+    classification. Under a threaded server:
 
-    Two rules make that hold under a threaded server:
-
-    * **At most one collection in flight.** A miss or an expiry collects under a lock; a request
-      arriving meanwhile waits for that collection and receives its reading instead of starting
-      its own.
-    * **One reading per response.** Inside :meth:`one_reading` -- which the transport opens around
-      every request -- the first lookup pins its reading and every later lookup of that request
-      answers with it, so a panel and a lamp rendered on either side of an expiry are still one
-      reading.
+    * at most one collection in flight: a miss collects under a lock, and concurrent requests wait
+      for its reading;
+    * one reading per response: inside :meth:`one_reading` (opened by the transport around every
+      request) the first lookup is pinned for the rest of the request, even across an expiry.
     """
 
     def __init__(
@@ -116,7 +95,7 @@ class DoctorLayer:
     def one_reading(self) -> Iterator[None]:
         """Pin one reading for the span of one request: every lookup inside answers with the first.
 
-        Lazy: a request that never asks for health -- a JSON route -- takes and pins nothing.
+        Lazy: a request that never asks for health pins nothing.
         """
         token = self._pin.set(_Pin())
         try:
