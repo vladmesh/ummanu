@@ -1,28 +1,15 @@
-"""The owner's one write on a provider: spend a Codex rate-limit reset credit.
+"""The owner's one write on a provider: spend a Codex rate-limit reset credit, never twice.
 
-The account holds few credits -- one, on 2026-09-26 -- so the operation is built around never
-spending one twice. Whether a reset applies right now is left to the provider: its
-`applicable_available_count` follows a rule it does not document, and its own client offers the
-reset on any available credit and shows the provider's answer. Everything is decided in
-:meth:`ProviderOperationLayer.codex_reset_limit`, in this order:
+:meth:`ProviderOperationLayer.codex_reset_limit` decides in order:
 
-1. **A committed record for the request id is the answer.** A repeat, a retry and a reload of the
-   same press read what the first one recorded and ask the provider nothing.
-2. **The live reading decides whether there is anything to spend.** The Codex usage is read again
-   past the bar's five-minute cache. No available credit is refused -- recorded, and no consume.
-3. **Otherwise the press is staged, consume is sent, and the mapped outcome is committed.** The
-   request id is the provider's `redeem_request_id`, so even a consume sent twice under it spends at
-   most one credit.
+1. a committed audit record for the request id is the answer (the provider is not asked);
+2. a live usage read (past the bar's cache) with no available credit is recorded as refused;
+3. otherwise the press is staged, consume is sent with the request id as the provider's
+   `redeem_request_id` (so at most one credit is spent under it), and the outcome is committed.
 
-**The record is the board audit's own**: a generic, record-only `requests` row (`backend.revision`
-`not_written`, as the sprint guard's records are), so `/history` lists it and `GET
-/api/history/<request_id>` answers for it with no second journal and no schema change. It names no
-entity: `ref` is empty, which `requests.ref` allows and the history renders as `—`. A press that was
-staged and never committed -- the process stopped while the provider was being asked -- carries the
-outcome `unknown`, and the audit's stale-row settlement commits it as that rather than guessing.
-
-No token reaches the record, the answer or an error: the provider layer puts it in a header and
-nowhere else, and the outcome it hands back is a closed code with a reason it wrote itself.
+The record is a generic, record-only `requests` row of the board audit (`ref` empty, revision
+`not_written`), so `/history` shows it with no second journal. A press staged and never committed
+settles as `unknown`. No token reaches the record, the answer or an error.
 """
 
 from __future__ import annotations
@@ -46,14 +33,13 @@ SCHEMA_VERSION = 1
 #: The audit record's `kind`, and the action `/history` shows for it.
 CODEX_RESET_KIND = "codex_reset_limit"
 
-#: The one refusal the live reading can force, as the history and the page show it. Whether a reset
-#: applies is not judged here: the provider's `applicable_available_count` follows a rule it does not
-#: document, and its own client offers the reset on any available credit, so the consume is sent and
-#: the provider's answer (`nothing_to_reset` among them) is recorded as the outcome.
+#: The one refusal the live reading can force. Applicability is not judged here (the provider's
+#: `applicable_available_count` rule is undocumented): the consume is sent and the provider's answer,
+#: `nothing_to_reset` included, is recorded.
 NO_CREDIT = "no Codex reset credit"
 
-#: The outcome a staged press carries until the provider's answer replaces it. Seen only when the
-#: process stopped between the two, which is exactly when nobody knows what the provider did.
+#: The outcome a staged press carries until the provider's answer replaces it; seen only if the
+#: process stopped in between.
 STAGED_OUTCOME = "unknown"
 STAGED_REASON = (
     "the consume call was sent and its answer was never recorded; the provider deduplicates on "
@@ -66,9 +52,8 @@ _CODES: dict[str, Any] = {"validation": ValidationRefused}
 class ProviderOperationLayer(ProtocolBoundary):
     """One installation's owner-side provider writes, with no knowledge of who is asking.
 
-    Construction does no I/O. `usage` is the provider layer the bar reads -- the same object, so a
-    reset clears the cache the next render reads -- and `board_client` and `clock` are the seams a
-    test supplies directly.
+    Construction does no I/O. `usage` is the same provider layer the bar reads, so a reset clears
+    its cache; `board_client` and `clock` are test seams.
     """
 
     def __init__(
@@ -83,8 +68,7 @@ class ProviderOperationLayer(ProtocolBoundary):
         self.usage = usage
         self._board_client = board_client
         self._clock = clock
-        # Two presses inside this process -- a double click that got past the page -- are one after
-        # the other, so the second finds the first one's committed record.
+        # Serialises presses in this process, so a double click finds the first one's committed record.
         self._lock = threading.Lock()
 
     def codex_reset_limit(self, *, request_id: str, actor: str, role: str = "po") -> dict[str, Any]:
@@ -196,7 +180,7 @@ def _count(value: Any) -> int | None:
 def codex_usage_home(data_dir: str | None) -> Callable[[], Path | None]:
     """The web usage layer's Codex home: the CODEX_HOME this installation's heads run on.
 
-    Resolved on every read (`installation_codex_dir`), so a re-login or a data-dir move is seen
-    without a restart; None, and so `~/.codex`, only when the installation holds no Codex login.
+    Resolved on every read, so a re-login or data-dir move is seen without a restart; None (so
+    `~/.codex`) only when the installation holds no Codex login.
     """
     return lambda: installation_codex_dir(data_dir)

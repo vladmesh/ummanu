@@ -1,82 +1,20 @@
 """The operations that open a sprint, comment on one and close one, and nothing else about what a
 sprint is.
 
-secretary-1562 gave this package operations over a product run. These are the operations over a
-sprint. `sprint_create`: a client -- the web transport, `ummanu sprint create` today, a Telegram
-head later -- states a product, a goal, a definition of done, the issues the sprint serves, the
-projects it reserves, the head that observes it and, optionally, the heads its cards run on, and a
-sprint entity exists. `sprint_comment`: the one way a PO intervenes in a *running* sprint, by
-commenting on the entity -- there is deliberately no path here to edit the sprint's cards.
-`sprint_close`: the owner states why the sprint is ending, what became of every issue it declared
-and every card it still holds, and the account of the outcome the close writes into
-`state/knowledge`, and the sprint ends.
+Every rule stays in `SprintWriter` (`create`, `comment`, `close`); this layer adds only a typed
+refusal in place of a `TaskError` and a request id that owns the outcome. There is no "start" verb:
+the production tick raises the observer of an open sprint (`ummanu.dispatch.observer`).
 
-**A close is not a completed Definition of Done.** The answer says so in a field of its own, the
-closeout the close writes says so in its first paragraph, and neither the operation nor the writer
-has a spelling that means the goal was reached. A sprint may close with its contract only partly
-satisfied -- that is the ordinary case, and it is why the decisions file exists. See
-:data:`ummanu.sprint_close.CLOSE_NOT_DONE`.
+- Create: the request id is claimed in :mod:`ummanu.webproto.sprint_requests` before the writer
+  runs and the sprint reference is recorded under it after; a repeat answers from the record, and a
+  claim without a reference resumes the writer's staged create under the same id. Any failure after
+  the row exists is an `OperationPending` (see :meth:`SprintOperationLayer._after_create`).
+- Comment and close need no request index here: the writer's audit claim (comment) or staged close
+  transaction already makes a repeat idempotent. A comment answer says saved, never read or accepted
+  by the observer (`ummanu.webproto.sprint_reads.ACCEPTANCE_ISSUE`).
+- A close is not a completed Definition of Done (:data:`ummanu.sprint_close.CLOSE_NOT_DONE`).
 
-**A close needs no request index of this layer's own either**, and for a stronger reason than a
-comment: `SprintWriter.close` stages the whole close under its request id, so a repeat resumes that
-staged transaction, repeats no step whose derived id already carries a committed event, and refuses
-one that states other decisions. An index here would be a second answer to that, and it could not
-carry the one amendment a `close_conflict` retry is allowed to make. What this module adds is the
-same two things it adds everywhere: a typed refusal instead of a `TaskError` with an exit status,
-and a readable result -- which for a close is the read below, not a second description of what the
-writer just did.
-
-**A comment needs no request index of this layer's own.** `SprintWriter._write` already claims
-`request_id` in the committed audit, and a repeat is answered from that claim *without the mutation
-being called*: no board comment, no second event, and therefore nothing new for a delivery batch to
-carry and no second observer wake. Building a second index beside it would be a second answer to a
-question already answered. The one thing the audit does not do is refuse a repeat that reuses an id
-over *different* inputs, and that -- and only that -- is added here, in the shape `sprint_create`
-already refuses one.
-
-**What a comment answers with is saved, not accepted.** The identifier is the audit event id, the
-`saved` flag says whether this call wrote it, and the delivery status is
-:meth:`~ummanu.webproto.sprint_reads.SprintReadLayer.sprint_comment_delivery` -- a read over the
-dispatcher's own cursors. None of the three says the observer read, accepted or took the comment
-into account; that mechanism is deferred by the owner and tracked as
-`ummanu.webproto.sprint_reads.ACCEPTANCE_ISSUE`.
-
-**Every rule stays where it already is.** `SprintWriter.create` owns all of them -- the product
-must exist, at least one of the named issues must be an open issue of *that* product, every named
-project must be registered, no open sprint may already hold one of those projects, the observer
-must be a profile of this installation's head registry or the word `none`, and each executor pin
-must be a profile too -- and this operation calls it rather than restating any of it. There is no
-second admission gate here, no second audit and no second reservation index. What this module adds
-is the two things a transport-independent layer needs and the writer does not have: a typed
-refusal instead of a `TaskError` with an exit status, and a request id that owns the outcome.
-
-**"Start" is not a verb here, and that is deliberate.** There is no operation that launches a
-sprint observer, because there is no such action in this product: the production tick reconciles
-open sprints against the observer records it holds and raises one head per sprint that lacks one
-(`ummanu.dispatch.observer`). So opening a sprint *with* an observer is the whole of starting
-it, and a scheduler of this layer's own would be a second thing racing the tick for the same head.
-What this module does instead is tell the caller where the sprint is: the document it returns
-carries the launch state :mod:`ummanu.webproto.sprint_reads` reads off the dispatcher's own
-production state, which right after a create says the entity is saved and no observer is up yet.
-
-**A request id owns a sprint.** The same property `run_start` has, by the same mechanism: the id is
-claimed in this layer's own request index (:mod:`ummanu.webproto.sprint_requests`) before the
-writer is called, and the reference of the sprint the create produced is recorded under it after.
-A repeat of the same request answers from that record without touching the writer, so it can raise
-no second entity and no second observer. The window between the two writes -- a sprint created and
-not yet named here -- is exactly the partial failure criterion 4 is about, and it is closed by the
-*same* id being handed down to `SprintWriter.create`, whose staged transaction resumes the row it
-already began instead of opening another. Neither half is a distributed lock: what this defends
-against is one operator's retry.
-
-**And once a row exists, the answer is fixed whatever fails.** Any failure after
-`SprintWriter.create` returns reaches the caller as an `OperationPending` carrying
-`backend_unavailable`, the request id and the action "repeat this same request" -- whichever
-primitive raised it, and with the durable fact stated before the cause. That rule is enforced over
-the whole region rather than at any one primitive (:meth:`SprintOperationLayer._after_create`),
-because two earlier rounds of this card fixed it at a primitive and watched it reappear at the next
-one: the atomic writer's `RuntimeError`, then the lock's bare `OSError`. A region cannot grow a
-third hole by acquiring a third primitive.
+See docs/PROTOCOLS.md, "Opening and watching a sprint".
 """
 
 from __future__ import annotations
@@ -110,67 +48,43 @@ from ummanu.webproto.sprint_requests import SPRINT_CREATE_OPERATION, SprintReque
 
 SCHEMA_VERSION = 1
 
-#: The roles that may open a sprint, as `SprintWriter.create` already restricts them. Named here so
-#: a client can offer the choice; the refusal for anything else is still the writer's own.
+#: Roles `SprintWriter.create` admits, named so a client can offer the choice.
 SPRINT_CREATE_ROLES = ("po", "steward")
 
-#: The reason token an :class:`~ummanu.webproto.errors.OperationPending` carries, so a client
-#: branches on a value rather than on a sentence. One per operation, because the safe action is
-#: about *that* operation's request id and a client that repeated the wrong one would be repeating
-#: somebody else's half-finished write.
+#: The reason token on an :class:`~ummanu.webproto.errors.OperationPending`, one per operation so a
+#: client repeats the right request id.
 PENDING_REASON = "sprint_create_pending_repair"
 COMMENT_PENDING_REASON = "sprint_comment_pending_repair"
 
-#: The name a comment operation is known by on a pending action. Deliberately not a record in
-#: :mod:`ummanu.webproto.sprint_requests`: a comment needs no second request index, because the
-#: audit's own committed/pending claim on `request_id` is already what makes a repeat idempotent.
+#: The comment operation's name on a pending action; no record in `sprint_requests` (the audit claim
+#: on `request_id` already makes a repeat idempotent).
 SPRINT_COMMENT_OPERATION = "sprint_comment"
 
-#: The name a close is known by on a pending action, and deliberately not a record in
-#: :mod:`ummanu.webproto.sprint_requests` either. `SprintWriter.close` already stages the whole
-#: close under its request id and resumes it there; a second index here would be a second answer to
-#: a question the staged transaction has already answered, and a second thing to keep in step with
-#: the amendment a `close_conflict` retry is allowed to carry.
+#: The close operation's name on a pending action; no record in `sprint_requests` (`SprintWriter.close`
+#: stages and resumes the close under its request id).
 SPRINT_CLOSE_OPERATION = "sprint_close"
 CLOSE_PENDING_REASON = "sprint_close_pending_repair"
 
-#: The roles that may close a sprint, as `SprintWriter.close` already restricts them: the PO any
-#: sprint, the observer only the sprint it was launched for (the writer's identity guard).
+#: Roles `SprintWriter.close` admits: the PO any sprint, the observer only its own sprint.
 SPRINT_CLOSE_ROLES = ("po", "observer")
 
-#: The roles `SprintWriter.comment` admits, named here so a client can offer the choice. The refusal
-#: for anything else is still the writer's own, and the operation restates none of it.
+#: Roles `SprintWriter.comment` admits, named so a client can offer the choice.
 SPRINT_COMMENT_ROLES = ("po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro")
 
-#: The kind of audit event a sprint comment is, as `SprintWriter.comment` writes it. Read here only
-#: to tell a repeat of *this* request from a request id that already owns some other sprint write.
+#: The audit event kind of a sprint comment; used to tell a repeat from an id owning another write.
 COMMENT_EVENT_KIND = "commented"
 
-#: How a `TaskError` from the sprint writer becomes a code of this layer. The writer's vocabulary is
-#: the task protocol's, and every entry below is a mapping and never a re-decision: what was refused
-#: and why is the writer's answer, and this only says which of *this* layer's four codes carries it.
-#:
-#: `sprint_conflict` and `resource_conflict` are `owner_conflict` for the reason that code exists:
-#: the request was well formed and is refused on the state of the world -- another open sprint holds
-#: the project, or the installation is at its open-sprint limit -- and the same request made after
-#: that sprint closes is admitted.
+#: Maps a sprint writer `TaskError` code to this layer's code; a mapping, never a re-decision.
+#: Refusals on the state of the world (another sprint holds the project, open-sprint limit, closed
+#: sprint, live work, concurrent move) are `owner_conflict`: the same request may succeed later.
 _CODES: dict[str, Any] = {
     "validation": ValidationRefused,
     "role_forbidden": ValidationRefused,
     "not_found": TaskNotFound,
     "sprint_conflict": OwnerConflict,
     "resource_conflict": OwnerConflict,
-    # A closed or stopped sprint refusing a write is the same kind of thing: the request is well
-    # formed and refused on the state of the world. This layer only says which of its codes carries
-    # the writer's answer -- what `SprintWriter._write` refuses, and when, is unchanged.
     "closed": OwnerConflict,
-    # The two refusals a close makes on the state of the world, and the same reading: the request
-    # is well formed, and it is refused because something outside it holds -- a card whose head is
-    # still running, or an object somebody else moved while this close ran. Both are answered by
-    # settling that thing and repeating the close, which is what `owner_conflict` means here.
     "live_work": OwnerConflict,
-    # A close whose role may not make one of its disposition moves: settled by deciding or moving
-    # that card first and repeating the close, like `live_work`.
     "close_plan_forbidden": OwnerConflict,
     "close_conflict": OwnerConflict,
     "backend_error": RuntimeUnavailable,
@@ -180,11 +94,7 @@ _CODES: dict[str, Any] = {
 class SprintOperationLayer(ProtocolBoundary):
     """One installation's sprint operations, with no knowledge of who is asking.
 
-    Construction does no I/O, exactly as the other two layers' does not: the instance, the board and
-    the writer are resolved when an operation is called.
-
-    `board_client` and `clock` are the seams a test -- or a transport with its own connection policy
-    -- supplies directly. Neither is a mode: the same code path runs with the live board.
+    Construction does no I/O. `board_client` and `clock` are seams for tests or transports, not modes.
     """
 
     def __init__(
@@ -240,26 +150,13 @@ class SprintOperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Open one sprint, or hand back the sprint this request id already opened.
 
-        The order is the contract, and it is the order idempotency needs: the request id is claimed
-        first, before anything on the board exists; the writer -- with every rule in it -- is called
-        with that same id; and the reference it produced is recorded under the id afterwards. A
-        repeat that finds a recorded reference answers from it and calls no writer at all, so it
-        cannot create a second entity or a second observer. A repeat that finds a claim with no
-        reference is the partial failure, and it resolves itself: the writer is called again with
-        the same request id, resumes its own staged create and returns the sprint that already
-        exists.
+        Order: claim the request id, call the writer with the same id, record the reference. A repeat
+        with a recorded reference never calls the writer; one with a bare claim re-calls it and the
+        writer resumes its staged create.
 
-        `worker` and `reviewer` are optional in the full sense. `None` is the caller saying nothing
-        about that role, it travels as `None` all the way into `SprintWriter._executor_intent`, and
-        the row is written with no field for it -- which is what makes an unpinned role readable as
-        unpinned rather than as pinned to the empty string or to a default nobody chose. There is
-        deliberately no spelling that means "unpin": the empty string and `none` are refused below
-        this layer rather than folded into absence.
-
-        `observer` is the one word an operator must say: a profile id, or `none` for a sprint that
-        runs without an observer. It is turned into the tagged value the entity stores by
-        :func:`ummanu.sprint_observer.observer_choice`, the same function the CLI uses, and every
-        judgement about it -- unknown profile included -- is made by the writer.
+        `worker`/`reviewer` `None` means unpinned and is stored as an absent field; there is no
+        "unpin" spelling (empty string and `none` are refused below). `observer` is a profile id or
+        `none`, converted by :func:`ummanu.sprint_observer.observer_choice`; the writer judges it.
         """
         now = self._clock()
         if not str(request_id or "").strip():
@@ -288,14 +185,12 @@ class SprintOperationLayer(ProtocolBoundary):
                 "definition_of_done": definition_of_done,
                 "reference": reference,
                 "observer": observer,
-                # JSON rather than the values themselves, because `request_fingerprint` digests
-                # strings: a list handed to it bare would fingerprint as the empty string, and two
-                # requests differing only in their issues would look like one retry.
+                # JSON-encoded: `request_fingerprint` digests strings, and a bare list would
+                # fingerprint as the empty string.
                 "issues": json.dumps(issue_refs),
                 "projects": json.dumps(project_ids),
                 "repositories": json.dumps(repository_roots),
-                # `null` and `"codex"` and `""` are three different requests, and the spelling has
-                # to keep them apart here as carefully as the entity does.
+                # `null`, `"codex"` and `""` are three different requests.
                 "worker": json.dumps(worker),
                 "reviewer": json.dumps(reviewer),
                 # Omit the empty default: old claimed web requests keep their fingerprint.
@@ -326,8 +221,7 @@ class SprintOperationLayer(ProtocolBoundary):
             )
         except TaskError as exc:
             raise self._refusal(exc, request_id=request_id) from None
-        # From here on a sprint row exists on the board, and everything below is inside the one
-        # region that says so however it fails. See :meth:`_after_create`.
+        # A sprint row exists from here; every failure goes through :meth:`_after_create`.
         return self._after_create(store, created, request_id=request_id, claimed=claimed, now=now)
 
     def sprint_comment(
@@ -341,29 +235,11 @@ class SprintOperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Put one comment on a sprint, and say where it got to without saying more than that.
 
-        This is how a PO intervenes in a running sprint: a comment on the *entity*. There is
-        deliberately no path here to edit the sprint's cards.
-
-        **The identifier is the audit event id**, which is what makes it stable: it is minted once
-        by `SprintWriter._write`, a repeat of the same request hands back the same one, and it is
-        the identifier :meth:`~ummanu.webproto.sprint_reads.SprintReadLayer.sprint_comment_delivery`
-        takes back. It is not a board row number: a caller never has to know how to interpret it.
-
-        **A repeat is idempotent by the audit's own claim, and by no second mechanism.**
-        `SprintWriter._write` sees the committed event this request id already owns and returns it
-        *without calling the mutation* -- so there is no second comment on the board, no second
-        audit event, and therefore nothing new for a delivery batch to carry and no second observer
-        wake. A second request index here would be a second answer to a question already answered;
-        the one thing the audit does not do is refuse a repeat that reuses the id over *different*
-        inputs, and that is what :meth:`_same_comment` adds, in exactly the shape `sprint_create`
-        refuses one.
-
-        `saved` says whether *this* call is the one that wrote it. False is the idempotency contract
-        stated on the document rather than only in a test.
-
-        `delivery` is the read below, embedded exactly as a create embeds the sprint: a caller that
-        has just commented and a caller asking an hour later read the same document, and right after
-        this call it honestly says the comment is saved and no batch carries it yet.
+        A comment on the entity is how a PO intervenes in a running sprint; no path here edits its
+        cards. `comment_id` is the audit event id minted by `SprintWriter._write`, stable across
+        repeats. A repeat is answered from the audit's committed claim without re-running the
+        mutation (no second comment, event or observer wake); :meth:`_same_comment` refuses a reused
+        id over different inputs. `saved` is false on a repeat. `delivery` is the shared read.
         """
         now = self._clock()
         if not str(request_id or "").strip():
@@ -399,8 +275,7 @@ class SprintOperationLayer(ProtocolBoundary):
             "request_id": request_id,
             "ref": reference,
             "comment_id": comment_id,
-            # Whether this call saved it, or found it already saved. A repeat answers `false` and
-            # writes nothing at all.
+            # False on a repeat, which writes nothing.
             "saved": owned is None,
             "delivery": self._reads().sprint_comment_delivery(reference, comment_id),
         }
@@ -418,34 +293,12 @@ class SprintOperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Close one sprint, and answer with what became of its work.
 
-        `decisions` is the normalized document `SprintWriter.close` takes, or the text of the
-        decisions file `ummanu sprint close --decisions-file` reads, or nothing. Text is parsed
-        here by the parser that file has (`sprint_close.parse_close_decisions`), so a transport
-        that carries the owner's file as typed refuses exactly what the CLI refuses.
-
-        The operation beside `sprint_create` and `sprint_comment`, and a client of
-        `SprintWriter.close` in exactly the sense those two are clients of their writers: every rule
-        about what a close *is* -- the decision each declared issue and each remaining card needs,
-        the order of the terminal phase, the admission lock, the per-step request ids, `live_work`,
-        `close_conflict`, the `already_closed`/`already_moved` confirmations and the `audit_pending`
-        retry -- stays in `SprintWriter.close` and :mod:`ummanu.sprint_close`. Nothing is
-        re-decided here.
-
-        **The closeout is required here and nowhere below.** The closing PO states what became of
-        the work; the operation owns the document's path, its link to this sprint and the fact that
-        it is written exactly once, and it invents none of its content. `SprintWriter.close` takes
-        it as an option so that the callers that merely need a closed sprint -- recovery, tests, the
-        dispatcher's own fixtures -- are not made to invent an account of one.
-
-        **A repeat needs no request index of this layer's own.** The close is staged under its
-        request id by the writer's own transaction: a repeat resumes that staged close, repeats no
-        step it already committed, and is refused when it states other decisions. A second index
-        here would be a second answer to that, and it could not carry the one amendment a
-        `close_conflict` retry is allowed to make.
-
-        **A close is not a completed Definition of Done**, and the document says so
-        (:data:`ummanu.sprint_close.CLOSE_NOT_DONE`) rather than leaving a reader to take
-        `closed` for `done`.
+        `decisions` is the normalized document, or decisions-file text parsed by
+        `sprint_close.parse_close_decisions` (so the transport refuses what the CLI refuses), or
+        nothing. Every close rule stays in `SprintWriter.close` and :mod:`ummanu.sprint_close`.
+        The closeout is required here only (the writer takes it as optional for recovery and tests).
+        Repeats resume the writer's staged close. The answer states the Definition of Done is not
+        satisfied (:data:`ummanu.sprint_close.CLOSE_NOT_DONE`).
         """
         from ummanu.sprint_close import CLOSE_NOT_DONE, parse_close_decisions
 
@@ -488,12 +341,9 @@ class SprintOperationLayer(ProtocolBoundary):
             "request_id": request_id,
             "ref": reference,
             "event_id": str(closed.get("event_id") or ""),
-            # Said on the answer to the write as well as on the read below, because this is the
-            # document a closing PO actually reads.
+            # Also on the read below; this is the document a closing PO actually reads.
             "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
-            # The result, read back through the protocol exactly as a comment reads its delivery:
-            # a caller that has just closed a sprint and one asking an hour later read the same
-            # document, built from the sources that own each half of it.
+            # Read back through the protocol, the same document a later read returns.
             "result": self._reads().sprint_close_result(reference, str(closed.get("event_id") or "")),
         }
 
@@ -502,9 +352,7 @@ class SprintOperationLayer(ProtocolBoundary):
     def _existing(self, store: SprintRequestStore, request_id: str, *, fingerprint: str) -> Any:
         """The request this exact id already owns, or nothing, or a typed refusal.
 
-        The refusal is the point, and it is `run_start`'s: a request id is the idempotency key of
-        one operation made with one set of inputs, so a repeat naming a different product, goal or
-        pin is a validation conflict rather than a document about somebody else's sprint.
+        Reusing an id over different inputs is a validation conflict, as in `run_start`.
         """
         try:
             return store.by_request(
@@ -538,27 +386,11 @@ class SprintOperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Everything this operation does once a sprint row exists, and the one answer it fails with.
 
-        This region is the enforcement point of one invariant, and it is deliberately a *region*
-        rather than a primitive: **any** failure after `SprintWriter.create` has returned reaches
-        the caller as an :class:`~ummanu.webproto.errors.OperationPending` carrying
-        `backend_unavailable`, the request id and the action "repeat this same request" -- whatever
-        raised it. Two rounds of this card were spent chasing that answer from one primitive to the
-        next, because the rule was written about the primitive: first the atomic writer's
-        `RuntimeError` (fixed at :mod:`ummanu.webproto.store_io`, which stays), then the lock's
-        bare `OSError` out of `file_lock`'s `mkdir`, `open` and `flock`. A third primitive added to
-        this region tomorrow would have been a third hole. It is not, because nothing here is
-        allowed to leave except through the one `except` below.
-
-        What is caught is `Exception` and not a list of vocabularies, for exactly that reason: a
-        list is the thing that has to be kept in step, and the failure this region must not have is
-        one nobody thought to list. The cause is not lost -- it is chained (`raise ... from exc`),
-        so a traceback still names the primitive and a defect of this layer is still visible where
-        it happened; what changes is that the caller is *first* told the durable fact.
-
-        And that ordering is the second half of the rule. The fact that the entity exists outranks
-        the reason the step failed: the message opens with the sprint that was created and the safe
-        move, and only then says what went wrong, because a caller that reads the cause first and
-        acts on it opens a second sprint.
+        Any failure here, whatever primitive raised it, becomes an
+        :class:`~ummanu.webproto.errors.OperationPending` (`backend_unavailable`, the request id,
+        "repeat this same request"). `Exception` is caught on purpose: a list of types would miss the
+        next primitive. The cause is chained. The message states the created sprint and the safe move
+        before the cause, so a caller does not open a second sprint.
         """
         reference = ""
         try:
@@ -575,7 +407,7 @@ class SprintOperationLayer(ProtocolBoundary):
 
     @staticmethod
     def _pending_message(reference: str, cause: Exception) -> str:
-        """The durable fact first, the cause after it. Both, in that order, always."""
+        """The durable fact first, the cause after it."""
         subject = f"sprint {reference}" if reference else "this sprint"
         return (
             f"{subject} was created and the request that made it did not finish; repeat the same "
@@ -595,13 +427,7 @@ class SprintOperationLayer(ProtocolBoundary):
     ) -> None:
         """Refuse a repeat that reuses this id over different inputs, rather than answering it.
 
-        The refusal `sprint_create` already makes, over the record that already exists rather than
-        over a second index of this layer's own: a request id is the idempotency key of *one*
-        request, so a repeat naming another sprint, another role or another body is a `validation`
-        conflict and never a document about the comment somebody else wrote. The comparison is made
-        against the audit event the id owns -- its kind, its sprint, its actor and the body digest
-        `SprintWriter.comment` puts on it -- because that record is what the writer would otherwise
-        hand straight back.
+        Compares the audit event the id owns (kind, sprint, actor, `body_sha256`) with this request.
         """
         actor_of = owned.get("actor") if isinstance(owned.get("actor"), dict) else {}
         payload = owned.get("payload") if isinstance(owned.get("payload"), dict) else {}
@@ -619,12 +445,7 @@ class SprintOperationLayer(ProtocolBoundary):
             )
 
     def _comment_refusal(self, exc: TaskError, *, request_id: str) -> Exception:
-        """One `TaskError` from `SprintWriter.comment`, as this layer's own typed failure.
-
-        The same mapping the create uses -- it is the writer's vocabulary either way -- with the
-        pending action naming *this* operation and *this* request id, because that is the id whose
-        repeat resumes the write that did not finish.
-        """
+        """One `TaskError` from `SprintWriter.comment`, as this layer's typed failure."""
         return self._refusal(
             exc,
             request_id=request_id,
@@ -633,13 +454,9 @@ class SprintOperationLayer(ProtocolBoundary):
         )
 
     def _close_refusal(self, exc: TaskError, *, request_id: str) -> Exception:
-        """One `TaskError` from `SprintWriter.close`, as this layer's own typed failure.
+        """One `TaskError` from `SprintWriter.close`, as this layer's typed failure.
 
-        The same mapping every sprint write uses. `audit_pending` is the one that is not a plain
-        refusal: a close that has performed a step is never thrown away, so the answer is a pending
-        action naming *this* request id -- the id whose repeat resumes the staged close, keeps its
-        plan and repeats no step it already committed. A new id would open a second close beside a
-        half-finished one.
+        `audit_pending` names this request id: repeating it resumes the staged close.
         """
         return self._refusal(
             exc,
@@ -658,11 +475,8 @@ class SprintOperationLayer(ProtocolBoundary):
     ) -> Exception:
         """One `TaskError` from the sprint writer, as this layer's own typed failure.
 
-        `audit_pending` is the one that is not a plain mapping, because it is not a plain refusal:
-        it says the create is part-done and durably repairable, and the only safe move is to repeat
-        *this* request, which resumes the row that may already exist. A new request id would open a
-        second sprint beside the half-written one, so the action is data on the failure rather than
-        a sentence a client has to read.
+        `audit_pending` (part-done, repairable) becomes an `OperationPending` whose data says to
+        repeat this request id; a new id would open a second write beside the half-written one.
         """
         if exc.code == "audit_pending":
             return OperationPending(
@@ -685,17 +499,15 @@ class SprintOperationLayer(ProtocolBoundary):
                 "operation": operation,
                 "repeat_request": True,
                 "request_id": request_id,
-                # Present only when this layer knows which sprint the half-finished request holds.
+                # Only when this layer knows which sprint the half-finished request holds.
                 "reference": reference or None,
             },
         }
 
     def _writer(self, report: InstanceReport, data_dir: Path) -> SprintWriter:
-        """The sprint writer of this installation, built per call as every other source is.
+        """The sprint writer of this installation, built per call.
 
-        The budget thresholds come off the instance config this operation already validated, rather
-        than from a second read of the same file: two reads could disagree across an edit, and the
-        sprint would then be opened with thresholds nothing else on this installation uses.
+        Budget thresholds come from the already-validated instance config, not a second read.
         """
         thresholds = report.instance.get("sprint_budget") if isinstance(report.instance, dict) else None
         return SprintWriter(
@@ -719,19 +531,14 @@ class SprintOperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """What a create answers with: the request, and the sprint as the read layer reads it.
 
-        The sprint is not described a second time here. A client that has just opened one and a
-        client watching one an hour later read the same document, which is why the observer's launch
-        state is on the answer to a create at all: right after this call it says the entity is saved
-        and the production tick has raised nothing for it yet, and that is the honest state rather
-        than a claim that something was started.
+        Right after a create the launch state honestly says the entity is saved and no observer is up.
         """
         return {
             "schema_version": SCHEMA_VERSION,
             "kind": "sprint_created",
             "observed_at": sources.isoformat(now),
             "request_id": request_id,
-            # Whether *this* call claimed the request. A repeat answers `false` and creates nothing,
-            # which is the idempotency contract stated on the document rather than only in a test.
+            # False on a repeat, which creates nothing.
             "created": claimed,
             "sprint": self._reads().sprint_state(reference),
         }

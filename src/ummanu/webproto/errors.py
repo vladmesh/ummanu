@@ -1,15 +1,9 @@
-"""Typed failures of the read layer.
+"""Typed failures of the read and operation layer.
 
-The layer answers callers that are not HTTP: a Telegram head, a CLI command, a future web
-transport. So a failure is an exception with a stable ``code``, never a status number, and the
-transport is what maps a code onto whatever its protocol says "not found" in. The codes are the
-ones the task protocol already uses (``not_found``, ``validation``, ``backend_unavailable``), so a
-caller that already reads `ummanu task` errors reads these without a second table.
-
-Not every failure is an exception. A source that cannot answer *part* of a snapshot -- the board,
-the dispatcher's own state, the installation health collector -- is a field of the result instead
-(:mod:`ummanu.webproto.sources`): a dashboard must still render the parts that did answer, and
-raising would turn one dead source into a blank page.
+A failure is an exception with a stable ``code`` (the task protocol's ``not_found``, ``validation``,
+``backend_unavailable``, ...), never a status number; the transport maps codes onto its protocol.
+A source that cannot answer part of a snapshot is a field of the result instead
+(:mod:`ummanu.webproto.sources`), so the parts that did answer still render.
 """
 
 from __future__ import annotations
@@ -18,13 +12,10 @@ from typing import Any
 
 
 class ReadError(Exception):
-    """A read the layer refused, with the protocol code its callers already know.
+    """A refused read or operation, with the protocol code its callers already know.
 
-    A refusal may also carry ``data``: the machine-readable half of it, for the cases where a
-    caller has to *do* something and the sentence would otherwise be the only place saying what.
-    It is a plain JSON object with a `reason` token and, where one exists, the safe action the
-    caller may take, so a transport hands the caller a decision rather than a string to display.
-    A refusal with nothing to add carries no `data` key at all.
+    Optional ``data`` is a JSON object with a `reason` token and, where one exists, the safe action
+    the caller may take. A refusal with nothing to add carries no `data` key.
     """
 
     code = "read_error"
@@ -48,11 +39,9 @@ class TaskNotFound(ReadError):
 
 
 class InvalidCursor(ReadError):
-    """A cursor this layer did not issue, or one the journal can no longer honour.
+    """A cursor this layer did not issue, or one the journal can no longer place.
 
-    Deliberately not "start from the beginning": a client that resumes from a cursor the journal
-    cannot place would silently re-read or skip events, which is the one thing the cursor exists to
-    prevent. It is told, and it decides.
+    Never silently restarted from the beginning: that would re-read or skip events.
     """
 
     code = "validation"
@@ -64,12 +53,7 @@ class InstallationUnavailable(ReadError):
     code = "backend_unavailable"
 
 
-# -- the operation half (secretary-1562) --------------------------------------------------------
-#
-# The operations return the same kind of failure the reads do, and deliberately from the same base:
-# a transport that already maps `ReadError.code` onto its own vocabulary maps these with no second
-# table, and a caller that catches `ReadError` around a whole request catches both halves. What is
-# added is the two refusals only a mutation can make.
+# -- operations: same base, so one `ReadError` code table and one catch cover reads and writes ----
 
 
 class ValidationRefused(ReadError):
@@ -91,12 +75,10 @@ class HeadRunNotFound(ReadError):
 
 
 class OwnerConflict(ReadError):
-    """Somebody else owns this card, or this run, and a second owner is not created.
+    """Somebody else owns this card or run; a second owner is not created.
 
-    Its own code rather than `validation` because it is not a malformed request: the request was
-    well formed and is refused on the state of the world, and a caller that retries it after the
-    other owner has finished will be admitted. See :mod:`ummanu.webproto.admission` for the one
-    place this is decided and the order it decides in.
+    Not `validation`: the request is well formed, refused on current state, and admitted on retry
+    once the other owner finishes. Decided in :mod:`ummanu.webproto.admission`.
     """
 
     code = "owner_conflict"
@@ -105,41 +87,33 @@ class OwnerConflict(ReadError):
 class RuntimeUnavailable(ReadError):
     """The product runtime could not raise, reach or record a head, and says which.
 
-    Deliberately not a run outcome: a run that exists and whose head died has a state
-    (`process_failed`), and only a failure that leaves *no* run behind is reported as an error.
+    Only a failure that leaves no run behind is an error; a run whose head died has the state
+    `process_failed`.
     """
 
     code = "backend_unavailable"
 
 
-# -- the sprint half (secretary-1569) -----------------------------------------------------------
+# -- sprints ------------------------------------------------------------------------------------
 
 
 class OperationPending(ReadError):
-    """An operation that is part-done, durably repairable, and repeated with the same request id.
+    """A part-done, durably repairable operation; repeat it with the same request id.
 
-    A sprint create writes a board row, its fields and its reference in that order, and the writer
-    below this layer keeps the staged intent that resumes an attempt which stopped between them. So
-    "it did not finish" is not "it did not happen", and the two must not answer the same way: the
-    safe move is to repeat *this* request, which resumes the row that exists, and inventing a new
-    request id would open a second sprint beside the half-written one.
-
-    It carries no code of its own. The transport table maps `backend_unavailable` already, and the
-    thing that could not answer really is a durable source of this installation; what is added is
-    :attr:`~ReadError.data`, which says the reason and the action in a shape a client can act on
-    rather than parse out of a sentence.
+    The writer keeps the staged intent of a sprint create (row, fields, reference), so repeating
+    this request resumes the existing row; a new request id would open a second sprint. Uses the
+    `backend_unavailable` code; :attr:`~ReadError.data` carries the reason and action.
     """
 
     code = "backend_unavailable"
 
 
 class IdentityRefused(ReadError):
-    """A write refused on who is asking, under the writer's own code rather than folded.
+    """A write refused on who is asking, carrying the writer's own code unchanged.
 
-    Not `validation`: the request is well formed, and the answer is about the caller. Each subclass
-    carries one of the writer's codes unchanged, so a caller that reads `role_masquerade` is told to
-    write as the observer, and one that reads `observer_identity_unbound` or
-    `observer_sprint_mismatch` is a head writing outside the sprint it was launched for.
+    Not `validation`: the request is well formed. `role_masquerade` means write as the observer;
+    `observer_identity_unbound` / `observer_sprint_mismatch` mean a head writing outside the sprint
+    it was launched for.
     """
 
     code = "forbidden"
@@ -170,12 +144,12 @@ IDENTITY_REFUSALS: dict[str, type[IdentityRefused]] = {
 
 
 class OwnerEventMissing(ReadError):
-    """The board store answered and holds no owner event under this id (secretary-1770)."""
+    """The board store answered and holds no owner event under this id."""
 
     code = "not_found"
 
 
-# -- the PO head half (secretary-1631) ----------------------------------------------------------
+# -- PO head ------------------------------------------------------------------------------------
 
 
 class PoSessionNotFound(ReadError):
@@ -193,26 +167,23 @@ class PoTurnInProgress(ReadError):
 class PoRequestConflict(ReadError):
     """A /po request id already belongs to another operation or other inputs; nothing was written.
 
-    Its own code: the request is well formed and not about a running turn, and repeating it can never
-    succeed, so a client must not read it as `owner_conflict` and wait.
+    Not `owner_conflict`: repeating it can never succeed, so a client must not wait and retry.
     """
 
     code = "request_conflict"
 
 
-#: The `data` of a /po refusal known to have written nothing, set where the refusal is raised. A web
-#: form that took a request id gets a fresh one only after such a refusal; every other refusal of it
-#: keeps its id, so a resend is a replay (`ummanu.web.app._keeps_request_id`).
+#: `data` of a /po refusal known to have written nothing. Only after such a refusal does a web form
+#: get a fresh request id; any other refusal keeps it, so a resend is a replay
+#: (`ummanu.web.app._keeps_request_id`).
 NOTHING_WRITTEN: dict[str, Any] = {"nothing_written": True}
 
 
 class PoOutcomeUnknown(ReadError):
     """A /po write reached the PO service and no answer came back, so it may have been carried out.
 
-    Not "nothing was written": the request was delivered. The safe move is the same request again —
-    the same form with the same request id, which the service answers as a replay, or the same stop or
-    close, which are idempotent — and never a new request id. `data` says so for a client:
-    ``{"reason": "outcome_unknown", "action": "repeat_same_request"}``.
+    The safe move is the same request again (same request id, answered as a replay; stop and close
+    are idempotent), never a new request id; `data` says so.
     """
 
     code = "backend_unavailable"
@@ -224,7 +195,7 @@ class PoOutcomeUnknown(ReadError):
 class PoSessionClosed(ReadError):
     """The owner closed this PO session; a message into it starts no turn and nothing was written.
 
-    Its own code: unlike `owner_conflict` it never clears by waiting, since a closed session is not reopened.
+    Unlike `owner_conflict` it never clears by waiting: a closed session is not reopened.
     """
 
     code = "session_closed"

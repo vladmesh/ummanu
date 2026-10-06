@@ -1,80 +1,13 @@
 """The one place a product run changes phase, and the order that makes a run safe to own.
 
-Three rounds of this card produced three defects of the same shape, and the shape is the point:
-
-* a head was spawned and its `product_run.started` was lost, because the spawn and the event were
-  two writes and only one of them was retried;
-* an ending was settled and its `product_run.finished` was lost, for the same reason;
-* a head was spawned and `RunStore.save` failed, so a **live head was left with no owner** while
-  the record settled as `process_failed` and admission let a second run onto the same card;
-* an ending that was confirmed but could not be *classified* was recorded as `process_failed`,
-  because the vocabulary the gate read had no way to say "over, and how is not established"
-  (secretary-1563; point 4 below).
-
-Each of those was repaired where it was found, and each repair moved the seam one step along. What
-they have in common is that the order between "a process may now exist" and "the durable record
-says so" was decided in three different places -- `_raise`, the bring-up's failure handler, and
-`run_state` -- and each of them was free to decide it differently. This module is that decision,
-made once.
-
-**The phases.** `claimed → raising → raised → settled`, with `unresolved` as the honest branch out
-of the last step, and their meanings are in :mod:`ummanu.webproto.runs`.
-
-**The order, and why it is this order.**
-
-1. **Write-ahead.** A durable record by which a head can be *found and stopped* exists **before** a
-   spawn can put a process into the world. Not a handle in memory -- the process that spawns is not
-   always the process that must clean up -- but what lies on disk: the run directory and the pid
-   path, which `local-pty` derives anyway, plus enough of a head description to address one. So
-   the order is `claim → durable raising → spawn → bind the handle`, and a failure to bind after a
-   successful spawn no longer orphans anything: the record already points at it.
-
-2. **Ownership is recovered from disk, not from the spawn's return value.**
-   `LocalPtyHeadRuntime.stop` addresses a head through `_address`, which derives the run directory
-   from `root/run_id` and the pid file from the run's own `pid_file`, and it confirms the ending
-   from the launch identity on that path. It never consults anything this process remembers. That
-   is what makes the write-ahead record sufficient on its own, and it is *executed* rather than
-   argued: `RealHeadOwnershipTests` raises a real head through this path, throws the handle away,
-   rebuilds a `HeadRun` out of the write-ahead record, stops the head with a runtime object that
-   never started anything, and confirms the ending from the launch identity, the supervisor's
-   `run.exited` and the process table.
-
-3. **The truth about a possibly-live process outranks closing the record.** A cleanup that was not
-   confirmed may not settle. `_close` therefore ends the head *first* and settles only on a
-   confirmed ending; when the ending cannot be confirmed the run goes to `unresolved`, which:
-
-   * reads through :mod:`ummanu.webproto.run_state` as `unknown` -- one of the five words the
-     read layer already has, never `finished` or `process_failed` -- and as **not over**;
-   * keeps the run **unsettled**, which is exactly what makes `admission.admit`'s existing sixth
-     condition refuse a second run on that card. No new rule and no new register: the gate already
-     refuses a card that carries a run that is not over, and the previous code got past it only by
-     settling a run it had no right to settle.
-
-   An unresolved run is not a dead end. Every later `_close` -- a `run_state` of that run -- retries
-   the stop from the same disk record, and settles the moment the ending is confirmed. What it
-   settles *as* is read off the process at that moment and never off the run's own `unresolved`
-   record: a head that survived one unconfirmed stop may have gone on to publish its result and
-   end normally, and recording that as `process_failed` would make a success indistinguishable
-   from a failure on the one path where it matters most.
-
-4. **"This run is over" and "this is how it ended" are two facts, kept apart** (secretary-1563).
-   The first is a boolean on the record, written only by a settle and only from something that
-   establishes it: a stop this product confirmed, a launch identity that says the process is gone,
-   or a spawn that provably never happened. The second is one of the read layer's same five values,
-   derived from whatever evidence there is. Only the first frees a card; the second is never asked
-   to stand in for it.
-
-   They were one value before, and the cost is on the record: because a card was freed by the value
-   being `finished` or `process_failed`, a run that was confirmed over while its journal could not
-   be read had no true value to settle as, and `_ending` invented `process_failed` for it -- an
-   accusation against a process nobody watched fail, published into the card's history where no
-   later read can withdraw it. Apart, such a run settles `source_unavailable` with the reason,
-   which is the truth: it is over, and how it ended was not established.
-
-**What "one place" means as a check.** Every path that can put a process into the world, and every
-path that can close a run, calls :meth:`RunLifecycle.advance` and nothing else. Within
-`ummanu.webproto` the backend's `start` and `stop` verbs and `RunStore.settle` are called from
-this module and from no other, and `tests/test_web_run_protocol.py` fails if that stops being true.
+Phases `claimed → raising → raised → settled`, with `unresolved` for an unconfirmed ending (meanings
+in :mod:`ummanu.webproto.runs`). Invariants: a write-ahead record can address and stop a head before
+any spawn; ownership is recovered from disk, never from the spawn's return value; a run settles only
+on a confirmed ending, otherwise it stays `unresolved` (unsettled, so admission fences the card) and
+every later close retries the stop; "is over" and "how it ended" are separate facts. Within
+`ummanu.webproto` the backend's `start`/`stop` and `RunStore.settle` are called only from this module
+(enforced by `tests/test_web_run_protocol.py`). See docs/PROTOCOLS.md, "The lifecycle of a run, and
+the order it holds".
 """
 
 from __future__ import annotations
@@ -112,44 +45,30 @@ from ummanu.webproto.runs import (
     RunStoreError,
 )
 
-#: Who this product says ended a head it owns. A stop names its initiator, and this is ours.
+#: The initiator this product names on every stop of a head it owns.
 INITIATOR = "ummanu.webproto"
 
-#: Where a Claude head's first-run answers live. The same file and the same environment override the
-#: pipeline's own pane driver uses, so an operator has one place to look and one place to clear.
+#: Where a Claude head's first-run answers live; same file and env override as the pipeline's pane driver.
 CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 
-#: The key an interactive composer reads as "send this", delivered on its own after the line it
-#: sends. Two facts make it a second delivery rather than a suffix, and both were established
-#: against a real Codex TUI:
-#:
-#: * the Enter key of a terminal is a **carriage return**. A TUI in raw mode reads a bare line feed
-#:   -- which is all the substrate appends -- as a newline *inside* the message being composed, so a
-#:   line delivered that way sits in the composer, gains one blank line per attempt, and the head
-#:   never starts a turn;
-#: * a composer treats one burst of bytes as a **paste**. Text and its carriage return written in a
-#:   single payload are inserted together as text, so the return does not send anything either.
-#:
-#: So the line goes first and the return follows as its own payload, which is the shape a keyboard
-#: has: the message, then Enter.
+#: The composer's "send" key, delivered as its own payload after the line. A raw-mode TUI reads a bare
+#: line feed as a newline inside the message, and reads text plus carriage return in one burst as a
+#: paste, so neither would submit.
 SUBMIT_KEY = "\r"
 
-#: How long a bring-up waits for an interactive head to stop printing before it puts the task in
-#: front of it, how much quiet counts as ready, and how often that is asked. A TUI that is drawing
-#: its banner and starting its MCP servers is not ready for a line.
+#: Bring-up waits for an interactive head to stop printing (bound, quiet span, poll interval) before
+#: putting the task in front of it.
 SETTLE_SECONDS = 90.0
 SETTLE_QUIET_SECONDS = 4.0
 SETTLE_POLL_SECONDS = 0.5
 
-#: Why the product ends a head it owns. Each is the `reason` on the stop's initiator, so an
-#: operator reading a supervisor journal sees which of them happened.
+#: Stop reasons recorded on the initiator, visible in the supervisor journal.
 STOP_RESULT_IN = "this run published its result, so the product that owns its process ended it"
 STOP_DEADLINE = "this run passed its deadline without publishing a result"
 STOP_ENDED = "this run reached a terminal state, so the product ended the head it owned"
 STOP_BRING_UP_FAILED = "this run's bring-up failed, so the product ended whatever it had raised"
 
-#: The transitions this lifecycle allows. Anything else is a defect of a caller, not a refusal to
-#: report to a user, so it is raised as a runtime failure with the pair that was asked for.
+#: Allowed phase transitions. Anything else is a caller defect, raised as a runtime failure.
 ALLOWED: dict[str, frozenset[str]] = {
     CLAIMED: frozenset({RAISING, SETTLED}),
     RAISING: frozenset({RAISED, SETTLED, UNRESOLVED}),
@@ -162,9 +81,7 @@ ALLOWED: dict[str, frozenset[str]] = {
 class RunLifecycle:
     """One installation's product runs, moving between phases and nowhere else.
 
-    Holds the store and the backend, and no policy: *when* a run should be closed is the operation
-    layer's decision (a published result, a passed deadline, a failed bring-up), and *how* a run is
-    closed without lying about it is this.
+    Holds no policy: *when* to close is the operation layer's decision; *how* to close honestly is this.
     """
 
     def __init__(
@@ -189,17 +106,10 @@ class RunLifecycle:
     def advance(self, run: ProductRun, to: str, *, now: float, **evidence: Any) -> ProductRun:
         """Move one run to its next phase, durably, in the order the phases require.
 
-        Every path in this package that can put a process into the world or close a run comes
-        through here, and the three targets are the whole of it:
-
-        ``raising``  prepare the head's workspace and write the record that can address it. After
-                     this returns, and only after, may a spawn be attempted;
-        ``raised``   attempt that spawn, point the head at its task, and bind what came back. Any
-                     failure from here is compensated by a close, not by a raised exception alone;
-        ``settled``  close the run: end whatever head it may hold, confirm that ending from disk,
-                     and settle once. An ending that cannot be confirmed lands in ``unresolved``
-                     instead of settling, so the answer this returns is not always the one asked
-                     for -- refusing to lie about a possibly-live process is the point of it.
+        ``raising``: prepare the workspace and write the record that can address the head; only then
+        may a spawn be attempted. ``raised``: spawn, point the head at its task, bind the handle; any
+        failure is compensated by a close. ``settled``: end any head, confirm the ending from disk,
+        settle once; an unconfirmed ending lands in ``unresolved`` instead.
         """
         if to not in ALLOWED.get(run.phase, frozenset()):
             raise RuntimeUnavailable(
@@ -217,11 +127,8 @@ class RunLifecycle:
     def _prepare(self, run: ProductRun, *, spec: HeadSpec, profile: dict[str, Any], document: Path) -> ProductRun:
         """The write-ahead. After this the record can address and stop a head; before it, nothing can.
 
-        The head description written here is the same one the backend would build for itself:
-        `LocalPtyHeadRuntime.start` constructs a `HeadRun` out of the run id, the spec, the
-        workspace, the task ref and the role, and every address it later derives -- run directory,
-        socket, journal, pid file -- comes from the run id and this `pid_file`. So a record written
-        *before* the spawn addresses the very head that spawn produces.
+        The `HeadRun` written here is the one `LocalPtyHeadRuntime.start` would build, and every
+        address it derives comes from the run id and `pid_file`, so it addresses the head the spawn produces.
         """
         try:
             Path(run.run_dir).mkdir(parents=True, exist_ok=True)
@@ -254,20 +161,14 @@ class RunLifecycle:
     ) -> ProductRun:
         """Bring one head up for this run, and close the run if anything about that goes wrong.
 
-        The compensation is not a nicety here. Every exit from this method other than a bound, saved
-        run goes through :meth:`_close`, and what it carries there is `spawned` -- whether the
-        backend returned a **successful receipt** for this start. That is the line, and it is drawn
-        where the backend draws it: a start the backend itself reports as failed left no process
-        (`LocalPtyHeadRuntime` turns a spawn failure into a receipt rather than a half-raised head),
-        while everything after a successful receipt -- the prompt delivery, the submit, the save --
-        happens over a process that is provably there. A close carrying `spawned` may not settle
-        until that head has been ended and confirmed gone. Raising the original failure afterwards
-        is what the caller sees; the run's own record is honest by then, one way or the other.
+        Every exit other than a bound, saved run goes through :meth:`_close` carrying `spawned`:
+        whether the backend returned a successful receipt. A failed receipt left no process; after a
+        successful one, the close may not settle until the head is ended and confirmed gone. The
+        original failure is re-raised.
         """
         pointer = NudgePointer.at_document(str(document), note)
-        # An adapter that takes its prompt on its command line is launched with it; one that comes
-        # up with an empty composer is pointed at the same document afterwards. The difference is
-        # the adapter's, and `HeadSpec.prompt_after_start` is where the product already records it.
+        # Adapters that take the prompt on the command line get it at launch; the others
+        # (`HeadSpec.prompt_after_start`) are pointed at the document afterwards.
         prompt = None if spec.prompt_after_start else pointer.text
         spawned = False
         try:
@@ -298,8 +199,7 @@ class RunLifecycle:
                     "the product runtime could not raise this run's head: "
                     f"{receipt.reason or receipt.status}"
                 )
-            # From here a process provably exists: the backend said so about this very run, and
-            # nothing below may close this run without ending that process and confirming it.
+            # A process provably exists from here; no close may skip ending and confirming it.
             spawned = True
             live = receipt.run
             if spec.prompt_after_start:
@@ -315,8 +215,7 @@ class RunLifecycle:
             )
         except BaseException as exc:
             with contextlib.suppress(ReadError, RunStoreError):
-                # Through `advance` and not straight into `_close`: this is a close like any other,
-                # and the claim that one function owns every close has to be true of this one too.
+                # Through `advance` so that one function owns every close.
                 self.advance(
                     run,
                     SETTLED,
@@ -341,27 +240,12 @@ class RunLifecycle:
     ) -> ProductRun:
         """End whatever head this run may hold, confirm it, and settle exactly once.
 
-        The order is the invariant. The head is ended and the ending is **confirmed from disk**
-        before anything terminal is written, because a record that says `process_failed` over a
-        process that is still running is worse than a record that says it does not know: the first
-        frees the card for a second run beside a live head, and the second does not.
-
-        And what is written then is read off the **process**, not off this run's own last record.
-        The distinction only shows on the recovery path and it is the whole difference between a
-        normal ending and a failure there: a run that went to `unresolved` because one stop could
-        not be confirmed may have gone on to publish its result and end cleanly, and the read that
-        finally confirms the stop is holding positive evidence of exactly that. Classifying it
-        through the record's own `unresolved` shortcut would find `unknown` and settle a published
-        success as an ending nothing could establish. So the classification comes from
-        :func:`ummanu.webproto.run_state.from_evidence`.
-
-        **The two facts meet here, and only here.** Reaching the settle below means fact one is
-        true and says exactly why: either this run could hold no process at all (`spawned` false
-        over a record with no trace, so none was ever put into the world), or its head was ended
-        and that ending was *confirmed* from the launch identity. Fact one is therefore established
-        by control flow that cannot be fooled by missing evidence, and fact two -- how the run
-        ended -- is read off whatever evidence there is, with no obligation to name a failure when
-        there is none. Before this card the two were one value, and this method had to invent one.
+        The head is ended and the ending confirmed from disk before anything terminal is written;
+        otherwise the run goes `unresolved` and the card stays fenced. Reaching the settle means the
+        run is over (no process was ever spawned, or its ending was confirmed). How it ended is read
+        off the process via :func:`ummanu.webproto.run_state.from_evidence`, never off the run's own
+        `unresolved` record, so a head that published its result before a later confirmed stop
+        settles as a success.
         """
         if self._may_hold_a_process(run, spawned=spawned):
             confirmed, detail = self._end_the_head(run, reason)
@@ -379,30 +263,18 @@ class RunLifecycle:
         return settled
 
     def _evidence(self, run: ProductRun, *, now: float) -> dict[str, Any]:
-        """What the process says right now. A settled run is the one thing that is history already."""
+        """What the process says right now; a settled run is read as history."""
         if run.ended:
             return run_state_reads.observe(run, now=now)
         return run_state_reads.from_evidence(run, now=now)
 
     def _ending(self, state: dict[str, Any], *, failure: str, reason: str) -> tuple[str, str]:
-        """How this run is recorded as having ended, and why. Fact two, and only it.
+        """How this run is recorded as having ended, and why. Whether it is over is decided by the caller.
 
-        Whether the run is over was decided by :meth:`_close` before this is called, so nothing
-        here has to produce a value that *means* "over". That is the whole change: this method used
-        to fall back to `process_failed` for evidence that named no ending, which turned "I could
-        not establish how this ended" into "its process failed" and published that accusation into
-        the card's history, where no later read can take it back.
-
-        Three answers, and no fourth:
-
-        * a **bring-up that failed** says so in its own words. The product tried to raise a head and
-          the attempt failed with a named cause, so the failure is established rather than assumed;
-        * evidence that **names an ending** -- `finished`, `process_failed` or `source_unavailable`
-          -- is recorded as it stands, with the reason it gave;
-        * evidence that names none (`running`, which a confirmed stop contradicts, or `unknown`)
-          is recorded as `source_unavailable`: the run is over, and how it ended is not
-          established. That is a statement about the *evidence*, which is what was missing, and not
-          about the process, which nobody watched fail.
+        * a failed bring-up: `process_failed` with its named cause;
+        * evidence naming an ending (`finished`, `process_failed`, `source_unavailable`): as it stands;
+        * anything else (`running`, `unknown`): `source_unavailable` -- over, ending not established.
+          Never invent `process_failed` for missing evidence.
         """
         if failure:
             return run_state_reads.PROCESS_FAILED, failure
@@ -418,19 +290,10 @@ class RunLifecycle:
     def _may_hold_a_process(self, run: ProductRun, *, spawned: bool) -> bool:
         """Whether a head may exist under this run, decided conservatively and from disk.
 
-        Three witnesses, and any one of them is enough:
-
-        * `spawned` -- the backend returned a successful receipt for this start, in *this* call.
-          The one fact no later reader could reconstruct, and the reason the caller passes it down;
-        * the **phase** -- `raised` or `unresolved` on disk is the durable form of the same fact,
-          for a run some other process raised;
-        * the **trace** -- a scope owner, pid file or supervisor journal in the run directory.
-          An owner precedes launch work; cleanup can fail before the head publishes either of
-          the other records. Its presence alone requires the matching scope's empty proof.
-
-        A start the backend itself reported as failed, over a run directory holding none of these
-        artefacts, is the one case answered "no", and it is answered from two independent witnesses
-        rather than from control flow alone.
+        Any one witness suffices: `spawned` (a successful receipt in this call); the phase (`raised`
+        or `unresolved`); or a trace in the run directory (scope owner, pid file, supervisor
+        journal). A scope owner precedes launch work, so its presence alone requires the scope's
+        empty proof.
         """
         if not run.addressable:
             return False
@@ -447,8 +310,7 @@ class RunLifecycle:
     def _end_the_head(self, run: ProductRun, reason: str) -> tuple[bool, str]:
         """Stop this run's head from the record alone, and say whether the ending was confirmed.
 
-        Confirmation is the backend's, and it is the launch identity going dead rather than a
-        socket disappearing. Nothing here is believed on the strength of having asked.
+        Confirmation is the backend's: the launch identity going dead, not a socket disappearing.
         """
         try:
             head = HeadRun.from_json(run.head_run)
@@ -478,13 +340,10 @@ class RunLifecycle:
         return TaskRef.card(run.ref, document=str(document))
 
     def _preflight(self, run: ProductRun, *, spec: HeadSpec, profile: dict[str, Any]) -> None:
-        """Prepare the workspace for the head about to be raised into it, on its own runtime.
+        """Prepare the workspace for the head, before any spawn.
 
-        The same two preparations the pipeline makes, reached directly rather than through the
-        pane driver that also makes them: Codex' workspace trust is a hard precondition without
-        which the TUI never reaches readiness, and Claude's trust and theme are best-effort. Both
-        happen in the write-ahead phase, before a spawn, so a preparation that fails closes a run
-        that provably holds no process.
+        Codex workspace trust is a hard precondition (the TUI never reaches readiness without it);
+        Claude trust and theme are best-effort. A failure here closes a run that holds no process.
         """
         if spec.adapter == "codex":
             try:
@@ -511,38 +370,18 @@ class RunLifecycle:
                 claude_env.ensure_trust(CLAUDE_JSON, run.workspace)
                 claude_env.ensure_theme(CLAUDE_JSON)
             except claude_env.ClaudeConfigError:
-                # Best-effort, exactly as it is on the pipeline's path: a head that lands on the
-                # trust dialog is a delivery that does not arrive, and that is reported by the
-                # receipt rather than guessed at here.
+                # Best-effort, as on the pipeline's path: a head stuck on the trust dialog shows
+                # up as an undelivered receipt.
                 pass
 
     def _point_at_the_task(self, live: HeadRun, run: ProductRun, pointer: NudgePointer) -> HeadRun:
         """Hand an interactive head its task, once it is actually ready to read one.
 
-        The `start` verb can carry the pointer itself, and for this product it must not: an
-        interactive TUI comes up over several seconds -- it draws its banner, starts its MCP servers
-        and only then owns its composer -- and a line delivered into it before that lands in the
-        composer *without being submitted*. The delivery is then perfectly true (every byte reached
-        the terminal, and the substrate says so) and the head sits idle with its prompt unsent in
-        front of it, which is exactly the failure this product runtime exists not to have: a run
-        that reads as started and is not.
-
-        So the head is raised bare and then driven the way a keyboard drives one, in four steps:
-
-        1. **wait until it stops printing.** Read through the backend's own `observe`, off the
-           supervisor's count of the bytes the head has produced -- the only thing that moves while
-           a TUI draws itself, because no turn is open yet and the journal records none;
-        2. **deliver the line.** It lands in the composer, whole, and sends nothing;
-        3. **wait until the backend says the head is idle again.** The substrate opens a turn of its
-           own for every payload it carries and closes it when the head goes quiet, so a second
-           delivery made straight away is refused `HEAD_BUSY` by a turn that is about the bytes
-           rather than about the agent -- and a refusal accepted as success is a prompt nobody sent;
-        4. **deliver `SUBMIT_KEY` as its own payload.** One burst carrying the line and its
-           carriage return is read as a paste and sends nothing, so Enter has to arrive by itself.
-
-        `settle_seconds` bounds both waits. A head that never quietens still gets its line and its
-        Enter, and the receipts are what say whether either landed: holding a run open with nothing
-        in it is not the better failure.
+        A line delivered while the TUI is still starting lands in the composer unsubmitted, and the
+        delivery still reads as successful. So: wait until the head stops printing (supervisor
+        `output_bytes`); deliver the line; wait until the backend reports it idle (otherwise the
+        substrate's own turn refuses the next payload `HEAD_BUSY`); deliver `SUBMIT_KEY` alone.
+        `settle_seconds` bounds both waits; on timeout the deliveries proceed and their receipts decide.
         """
         subject = f"product-run:{run.run_id}"
         self._wait_until_quiet(live)
@@ -581,10 +420,8 @@ class RunLifecycle:
     def _wait_until_idle(self, live: HeadRun) -> None:
         """Wait until the backend will take another payload for this head.
 
-        `busy` is the backend's own answer and covers both halves of what would refuse the next
-        delivery: the substrate's turn over the payload just carried, and the turn lease this
-        runtime granted for it. A backend that cannot say (`busy` is `None`) is not waited on --
-        an unknown is not a yes, and the delivery below reports its own refusal if there is one.
+        `busy` covers the substrate's turn and this runtime's turn lease. `None` (unknown) is not
+        waited on; the next delivery reports its own refusal.
         """
         deadline = time.monotonic() + self.settle_seconds
         while time.monotonic() < deadline:
@@ -614,10 +451,9 @@ def _supervisor_pid_of(run: ProductRun) -> int:
 
 
 def _identity_field(run: ProductRun, name: str) -> int:
-    """One integer out of the head's own launch-identity record, or zero when it has not landed.
+    """One integer out of the head's launch-identity record, or zero when it has not landed.
 
-    Diagnostic: the pid recorded on a run is what an operator greps for, and it is never what
-    decides whether the run is alive -- that is the classified heartbeat, in `run_state`.
+    Diagnostic only; liveness is decided by the classified heartbeat in `run_state`.
     """
     try:
         record = json.loads(Path(run.pid_file).read_text(encoding="utf-8"))

@@ -1,25 +1,9 @@
-"""The pages, rendered from the layer's own documents and from nothing else.
+"""Server-rendered pages, built only from the layer's `web-read` and `web-run` documents.
 
-Every value on a page comes out of a `web-read` or `web-run` document. Nothing here recomputes a
-state, decides whether an agent is alive, or fills a gap with a plausible value — a section whose
-source refused says so, in its own words, where the list would have been.
-
-That is the one rendering rule worth stating twice, because it is criterion 2: **an empty list and
-"I could not find out" are different things, and they look different.** An empty section is a quiet
-line saying there is nothing; an unavailable one is a marked block carrying the reason the source
-gave and the age of whatever is being shown instead. A dashboard that drew both as blank space
-would tell an operator that the pipeline is idle at the exact moment it has lost sight of it.
-
-The pages are server-rendered, so what a source said is in the markup rather than assembled later
-by a script that may not run. The only thing the script does is tail a card's events from a cursor
-the client itself holds, and narrow the issue list to the product a sprint form has selected -- both
-of which leave a page that works when it does not run.
-
-The sprint form obeys the same rule twice over. Every choice on it is an entry of `sprint_options`,
-so a registry or a board that holds something else offers something else, and nothing about a
-product, an issue, a project or a head profile is written into this module. And a refused
-submission is rendered from the very object that was submitted, so what a person typed comes back
-on the screen exactly as they typed it.
+Nothing is recomputed or filled in: an empty section is a quiet line, a refused source is a marked
+block with its reason and the age of what is shown instead. Pages work without the client script
+(event tail, issue filter); a refused sprint form is re-rendered from what was submitted.
+See docs/PROTOCOLS.md "Serving the pipeline locally".
 """
 
 from __future__ import annotations
@@ -42,11 +26,8 @@ from ummanu.webproto.reads import accepted
 
 TITLE = "ummanu"
 
-#: Said on every page. This application still has no authentication of any kind of its own, so
-#: where it may listen is not a deployment preference; see :mod:`ummanu.web.server`. What
-#: changed with DoD 5 is what stands in front of it, not what it is: a request that arrived from
-#: off this host passed TLS and a password at the front (:mod:`ummanu.webfront`) before it
-#: reached this process, and there is no path here that does not.
+#: Said on every page. The app has no authentication of its own (see :mod:`ummanu.web.server`);
+#: off-host requests pass TLS and a password at :mod:`ummanu.webfront` first.
 LOOPBACK_NOTICE = (
     "local only — this application has no password, no TLS and no authorisation of its own and is "
     "refused a non-loopback address; anything reaching it from outside came through the guarded "
@@ -498,8 +479,7 @@ body { padding-bottom: var(--bar-height); }
 @media (prefers-reduced-motion: no-preference) { .light::before { transition: background .2s; } }
 """
 
-#: How many tabs one strip may hold. The stylesheet has no counter for "the n-th radio shows the
-#: n-th panel", so the rule is written out once per position.
+#: Most tabs one strip may hold: the stylesheet spells the radio-to-panel rule once per position.
 MAX_TABS = 6
 
 STYLE = STYLE.replace(
@@ -518,8 +498,7 @@ STYLE = STYLE.replace(
 # -- the shell ----------------------------------------------------------------------------------
 
 
-#: The primary navigation: where a person can go from anywhere. Keys are what a page names itself
-#: as, so the current one is marked; the order is the order of use.
+#: Primary navigation in order of use; keys are page names, so the current page is marked.
 NAV: tuple[tuple[str, str, str], ...] = (
     ("dashboard", "/", "Dashboard"),
     ("sprints", "/sprints", "Sprints"),
@@ -532,57 +511,45 @@ FONTS = "https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600
 
 # -- the bottom status bar ------------------------------------------------------------------------
 #
-# The bar belongs to the shell, not to any page: it is rendered once, inside :func:`_page`, so a
-# page function added tomorrow gets it without knowing it exists and cannot grow a provider read of
-# its own. What it draws is handed in by the transport, which is the only thing here that may talk
-# to a layer -- and it is handed in *lazily*, as a callable, so a JSON route that never renders a
-# page never causes a provider read at all.
-#
-# The value is a context variable and not module state: it is set for the span of one request and
-# reset when that span ends, so two requests answered on two threads never see each other's.
+# Rendered once in :func:`_page`. Its inputs are lazy callables in per-request context variables
+# (never module state): a JSON route causes no provider read, concurrent requests never mix.
 
-#: The read the bar draws, for the span of one request: a `{"available", "reason", "document"}`
-#: section, or `None` when this process was built without the provider usage layer.
+#: The bar's read, per request: a `{"available", "reason", "document"}` section, or `None` when
+#: the provider usage layer was not built.
 _LIMITS_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = ContextVar(
     "ummanu.web.limits_source", default=None
 )
 
-#: The doctor reading the lamp draws, for the span of one request: a `{"available", "reason",
-#: "document"}` section, or `None` when this process was built without the doctor layer. Fed the
-#: same way and for the same reason as the limits: lazily, per request, and never module state.
+#: The lamp's doctor read, per request: a section like the bar's, or `None` without that layer.
 _DOCTOR_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = ContextVar(
     "ummanu.web.doctor_source", default=None
 )
 
-#: The bell's reading for the span of one request: a `{"state", "reason", "count"}` document from the
-#: owner events layer, or `None` when this process was built without it. Fed like the doctor lamp:
-#: lazily, per request, never module state, so the count is the board's at the moment of the render.
+#: The bell's read, per request: a `{"state", "reason", "count"}` document, or `None` without it.
 _BELL_SOURCE: ContextVar[Callable[[], dict[str, Any] | None] | None] = ContextVar(
     "ummanu.web.bell_source", default=None
 )
 
-#: Said when nothing fed the bar: no provider layer was built into this process at all.
+#: Said when no provider layer was built into this process.
 LIMITS_NOT_BUILT = "this web process was built without the provider usage layer"
-#: Said when the reading came back but carries nothing about this provider.
+#: Said when the reading carries nothing about this provider.
 LIMITS_NOT_IN_READING = "this reading carried nothing about this provider"
 
-#: The providers the bar always keeps a place for, in this order, whatever a reading holds.
+#: Providers the bar always shows, in this order, whatever a reading holds.
 BAR_PROVIDERS: tuple[tuple[str, str], ...] = (("claude", "Claude"), ("codex", "Codex"))
 
-#: The clock a countdown on a page is measured against, for the span of one render. Unset -- which
-#: is every real request -- means this host's wall clock; a test sets it to render deterministically.
+#: The countdown clock, per render; unset (every real request) means wall clock, tests set it.
 _RENDER_CLOCK: ContextVar[Callable[[], datetime] | None] = ContextVar(
     "ummanu.web.render_clock", default=None
 )
 
-#: Whether the page being rendered is the answer to a POST, for the span of one request. A page
-#: reached that way must not reload itself: the browser would offer to send the submission again.
+#: Whether this request answers a POST; such a page must not reload (the browser would resubmit).
 _FROM_POST: ContextVar[bool] = ContextVar("ummanu.web.from_post", default=False)
 
 
 @contextmanager
 def limits_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[None]:
-    """Feed the bottom bar for the span of one request, and stop feeding it when that span ends."""
+    """Feed the bottom bar for the span of one request."""
     token = _LIMITS_SOURCE.set(read)
     try:
         yield
@@ -592,7 +559,7 @@ def limits_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[
 
 @contextmanager
 def doctor_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[None]:
-    """Feed the doctor lamp for the span of one request, and stop feeding it when that span ends."""
+    """Feed the doctor lamp for the span of one request."""
     token = _DOCTOR_SOURCE.set(read)
     try:
         yield
@@ -602,7 +569,7 @@ def doctor_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[
 
 @contextmanager
 def bell_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[None]:
-    """Feed the header bell for the span of one request, and stop feeding it when that span ends."""
+    """Feed the header bell for the span of one request."""
     token = _BELL_SOURCE.set(read)
     try:
         yield
@@ -611,7 +578,7 @@ def bell_source(read: Callable[[], dict[str, Any] | None] | None) -> Iterator[No
 
 
 def _bell() -> str:
-    """The bell in the header: the unread owner events, or `?` when the board could not count them."""
+    """The header bell: unread owner events, or `?` when the board could not count them."""
     read = _BELL_SOURCE.get()
     if read is None:
         return ""
@@ -640,7 +607,7 @@ def _bell() -> str:
 
 @contextmanager
 def render_clock(now: Callable[[], datetime] | None) -> Iterator[None]:
-    """Fix the clock this render measures a countdown against, so a test can assert one exactly."""
+    """Fix this render's countdown clock, for deterministic tests."""
     token = _RENDER_CLOCK.set(now)
     try:
         yield
@@ -650,7 +617,7 @@ def render_clock(now: Callable[[], datetime] | None) -> Iterator[None]:
 
 @contextmanager
 def from_post(value: bool) -> Iterator[None]:
-    """Mark the span of one request as answering a POST, so its pages carry no auto-reload."""
+    """Mark one request as answering a POST, so its pages carry no auto-reload."""
     token = _FROM_POST.set(value)
     try:
         yield
@@ -659,7 +626,7 @@ def from_post(value: bool) -> Iterator[None]:
 
 
 def _limits_bar() -> str:
-    """The bar, from whatever the transport is feeding it -- which may be nothing at all."""
+    """The bar, from whatever the transport feeds it (possibly nothing)."""
     read = _LIMITS_SOURCE.get()
     doctor_read = _DOCTOR_SOURCE.get()
     return _limits_bar_of(
@@ -669,12 +636,7 @@ def _limits_bar() -> str:
 
 
 def _limits_bar_of(section: dict[str, Any] | None, *, doctor: dict[str, Any] | None = None) -> str:
-    """The bar for one section, kept apart from where the section comes from so a test can hand one in.
-
-    Three things are never confused here, in the same way every section of a page keeps them
-    apart: a current reading, a reading that is not current, and no reading at all. Only the
-    first draws a percentage, because a number on a bar is read as what is left *now*.
-    """
+    """The bar for one section (test seam); only a current reading draws a percentage."""
     document = section.get("document") if isinstance(section, dict) and section.get("available") else None
     document = document if isinstance(document, dict) else None
     if document is not None:
@@ -715,11 +677,7 @@ LAMP_WORDS: dict[str, str] = {
 
 
 def _doctor_lamp(section: dict[str, Any] | None) -> str:
-    """The lamp: one colour out of the recorded health, and a link to the problems behind it.
-
-    It is a link from every page and not a panel on one, so the colour is never a dead end: what
-    makes it red is one click away wherever a person happens to be.
-    """
+    """The lamp: one colour from the recorded health, linking to the problems behind it."""
     document = section.get("document") if isinstance(section, dict) and section.get("available") else None
     if not isinstance(document, dict):
         reason = (
@@ -767,11 +725,7 @@ def _bar_provider(label: str, provider: dict[str, Any] | None, refused: str) -> 
 
 
 def _bar_window(window: dict[str, Any]) -> str:
-    """One usage window's chip: its name, what is left, and the time to its next reset.
-
-    A reading whose reset has come and gone describes a window that no longer runs, so its
-    percentage is drawn as stale rather than as a figure somebody would read as what is left now.
-    """
+    """One usage window's chip: name, what is left, time to reset; stale once its window reset."""
     countdown, predates_reset = _reset_reading(window.get("resets_at"), window.get("window_minutes"))
     if predates_reset:
         figure = f'<b class="stale" title="{escape(READING_PREDATES_RESET)}">stale</b>'
@@ -784,13 +738,10 @@ def _bar_window(window: dict[str, Any]) -> str:
 
 
 def _bar_reset_credits(credits: Any) -> str:
-    """The Codex rate-limit reset credits a reading carries, folded into one small label.
+    """The Codex reset credits folded into one `<details>` label (`1 reset`) with the spend button.
 
-    The bar shows only the count (`1 reset`), a `<details>` summary the reader opens for the rest:
-    the nearest expiry, whether the provider counts a reset as applicable right now, and the button
-    that spends one. Nothing at all when the reading carries no credits or none are available: a label
-    saying zero would be read as a limit, and there is no credit to spend. Every value is read through
-    the same normalisers the layer wrote it with, so a hand-made document cannot make the bar fail.
+    Empty when no credit is available. Values go through the layer's normalisers, so a hand-made
+    document cannot break the bar.
     """
     if not isinstance(credits, dict):
         return ""
@@ -824,8 +775,7 @@ def _bar_reset_credits(credits: Any) -> str:
 RESET_SUMMARY_TITLE = "Codex rate-limit reset credits: open for details and the reset"
 #: The provider counts a reset as applicable now (`applicable_available_count` above zero).
 RESET_APPLICABLE = "the provider counts a reset as applicable now"
-#: The provider does not (`applicable_available_count` zero or unknown). The rule behind that count is
-#: the provider's and undocumented; the button stays, and the provider's own answer decides.
+#: The provider does not (count zero or unknown); its rule is undocumented, so its answer decides.
 RESET_NOT_APPLICABLE = (
     "the provider does not count a reset as applicable now: a press may answer nothing to reset, "
     "or refill windows that still have usage left"
@@ -833,13 +783,10 @@ RESET_NOT_APPLICABLE = (
 
 
 def _bar_reset_button(credits: Any) -> str:
-    """The button that spends one Codex reset credit, drawn inside the credits popover.
+    """The button spending one Codex reset credit; absent when none is available.
 
-    No button when the reading carries no credits or none is available -- a fallback reading never
-    carries any. Enabled whenever one is available: whether a reset applies is the provider's call,
-    made when the consume is sent, and its answer is shown in words. The click asks the person first,
-    naming what it spends; the operation behind it re-reads the provider and refuses with no credit
-    anyway, so a stale page cannot spend a credit this markup offered.
+    Whether a reset applies is the provider's call at consume time. The operation re-reads the
+    provider and refuses without a credit, so a stale page cannot spend one.
     """
     if not isinstance(credits, dict):
         return ""
@@ -856,7 +803,7 @@ def _bar_reset_button(credits: Any) -> str:
 
 
 def _bar_no_reading(reason: str) -> str:
-    """The stand-in for a percentage. It is words, never a number: no reading is not a low reading."""
+    """The stand-in for a percentage: words, never a number (no reading is not a low reading)."""
     return f'<span class="reason">no current reading — {escape(reason)}</span>'
 
 
@@ -868,12 +815,7 @@ def _page(
     nav: str = "",
     crumbs: tuple[tuple[str, str], ...] = (),
 ) -> str:
-    """The shell every page shares: the top bar with the product, the navigation and the crumbs.
-
-    `nav` names the primary entry this page belongs to, and the navigation marks it; `crumbs` is
-    what is open under it -- normally one identifier, the card or the sprint -- shown beside the
-    navigation and never repeating it.
-    """
+    """The shared shell: top bar, navigation with `nav` marked, and `crumbs` (what is open under it)."""
     current = ' aria-current="page"'
     links = "".join(
         f'<a href="{escape(href)}"{current if key == nav else ""}>{escape(label)}</a>'
@@ -935,10 +877,8 @@ def _page(
   });
   showTheme();
 })();</script>""",
-            # The refresh is the shell's, like the bar it keeps current, so every page has it and
-            # every page obeys the one rule: nothing reloads while a form holds typed text. One
-            # page never carries it at all: the answer to a POST, where a reload is the browser
-            # re-sending the submission and asking the reader to confirm it.
+            # Every page refreshes (never while a form holds typed text) except a POST answer,
+            # where a reload would make the browser re-send the submission.
             f"<script>{script}{'' if _FROM_POST.get() else _REFRESH_SCRIPT}{_RESET_SCRIPT}</script>",
             "</body></html>",
         ]
@@ -946,10 +886,7 @@ def _page(
 
 
 def _panel(title: str, body: str, *, count: Any = None, more: str = "", open_: bool | None = None) -> str:
-    """One surface for one subject: a header naming it, a count when there is one, and the body.
-
-    `open_` turns the panel into a disclosure that starts open or closed; `None` is a plain panel.
-    """
+    """One titled panel with an optional count; `open_` makes it a disclosure (`None`: plain)."""
     counted = "" if count is None else f'<span class="count">{escape(str(count))}</span>'
     if open_ is None:
         return (
@@ -967,7 +904,7 @@ def _chip(text: str, tone: str = "") -> str:
     return f'<span class="chip{tone_class}">{escape(text)}</span>'
 
 
-#: The tone a card state reads in. Semantic colour beside the state's own word, never instead.
+#: The tone of each card state, shown beside the state's word, never instead of it.
 STATE_TONES: dict[str, str] = {
     "in_progress": "accent",
     "validate": "accent",
@@ -1012,11 +949,7 @@ def _source_block(source: dict[str, Any] | None, *, what: str) -> str:
 
 
 def _section(source: dict[str, Any] | None, items: list[Any], *, what: str, empty: str, table: str) -> str:
-    """One section: the source's refusal if it refused, then the rows, or the empty line.
-
-    Both are rendered when a source refused and stale rows are still worth showing, and the two are
-    never confused: the refusal is above the rows, so nobody reads an old list as a current one.
-    """
+    """One section: the source's refusal above any stale rows, then the rows or the empty line."""
     parts = [_source_block(source, what=what)]
     if items:
         parts.append(table)
@@ -1037,8 +970,7 @@ def _age(seconds: Any) -> str:
     return f"{int(value // 3600)}h"
 
 
-#: Said where a countdown would be when the reading carries no reset moment, or one this process
-#: cannot read. It is words, for the same reason a missing percentage is: nothing is not zero.
+#: Said in place of a countdown with no readable reset moment: nothing is not zero.
 NO_RESET_RECORDED = "no reset time recorded"
 
 
@@ -1050,16 +982,14 @@ def _reset_moment(value: Any) -> datetime | None:
         moment = datetime.fromisoformat(value.strip())
     except ValueError:
         return None
-    # `provider_usage._iso` always writes UTC; a moment without an offset is read as UTC rather
-    # than as this host's local time, which would silently shift the countdown by the offset.
+    # `provider_usage._iso` writes UTC; an offset-less moment is UTC, not host local time.
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
 
-#: The hover title of a percentage that is not drawn, because the window it measured has reset since.
+#: Hover title of a percentage not drawn because its window has reset since.
 READING_PREDATES_RESET = "this reading predates the last reset of its window, so what is left now is unknown"
 
-#: The longest window a reset is rolled forward by. A longer one is no usage window this bar knows,
-#: and is treated as no window length at all rather than counted down over centuries.
+#: The longest window a reset is rolled forward by; a longer one counts as no window length.
 LONGEST_WINDOW_MINUTES = 366 * 24 * 60
 
 
@@ -1069,16 +999,11 @@ def _time_left(seconds: float) -> str:
 
 
 def _duration(seconds: float) -> str:
-    """A span still ahead, in the one spelling this module uses for every countdown.
-
-    It is only ever asked about a moment still ahead -- `_reset_reading` rolls a past one forward
-    first -- so anything under a minute, a rounded-down zero included, is less than a minute.
-    """
+    """A future span in this module's one countdown spelling; under a minute is "less than a minute"."""
     total = int(seconds)
     if total < 60:
         return "less than a minute"
-    # A unit belongs to the number in front of it: `1h 6m`, never `1 h 6 m`, where the spaces make
-    # four things out of two and the reader has to pair them up again.
+    # Units attach to their number: `1h 6m`, never `1 h 6 m`.
     minutes = total // 60
     if minutes < 60:
         return f"{minutes}m"
@@ -1090,14 +1015,14 @@ def _duration(seconds: float) -> str:
 
 
 def _render_now() -> datetime:
-    """The clock of this render, as an aware moment: every countdown is measured from it."""
+    """This render's clock as an aware moment; every countdown is measured from it."""
     clock = _RENDER_CLOCK.get()
     now = clock() if clock is not None else datetime.now(UTC)
     return now if now.tzinfo is not None else now.replace(tzinfo=UTC)
 
 
 def _window_length(value: Any) -> int | None:
-    """A window's length in minutes when it is one a reset can be rolled forward by, else `None`."""
+    """A window length in minutes usable for rolling a reset forward, else `None`."""
     if not isinstance(value, int) or isinstance(value, bool):
         return None
     return value if 0 < value <= LONGEST_WINDOW_MINUTES else None
@@ -1109,23 +1034,12 @@ def _reset(resets_at: Any, window_minutes: Any = None) -> str:
 
 
 def _reset_reading(resets_at: Any, window_minutes: Any = None) -> tuple[str, bool]:
-    """A usage window's reset, and whether the reading predates it: the one place both are decided.
+    """A usage window's reset as time left, and whether the reading predates it.
 
-    What is shown is how long is left, because that is what a reader of a usage window wants and
-    an ISO moment is not it. The moment is not lost: it is the element's hover title, wherever
-    there is one to carry -- a reading with no moment carries no title at all rather than a
-    misleading one.
-
-    The countdown is measured against the clock of *this render* and never against the reading's
-    `observed_at`. The reading is served from a cache that may be up to `CACHE_SECONDS` old, so
-    counting from when it was observed would keep showing the time that was left then and overstate
-    what is left now; the page is drawn now, so now is what it counts from.
-
-    A reset at or before now has happened, so the window running now resets whole window lengths
-    later: the moment is rolled forward to the first of those still ahead, and the second value is
-    true because the reading's percentage belongs to the window before. The number of lengths is
-    divided out, never stepped, so a far-past moment costs the same as a recent one. A past reset
-    with no usable window length cannot be rolled, and is said as no reset recorded.
+    The ISO moment is the hover title (none without a moment). The countdown runs from this render's
+    clock, never the reading's `observed_at` (the cache may be `CACHE_SECONDS` old). A past reset is
+    rolled forward by whole window lengths (divided out, not stepped) and flags the percentage as the
+    previous window's; a past reset without a usable window length reads as no reset recorded.
     """
     moment = _reset_moment(resets_at)
     if moment is None:
@@ -1149,14 +1063,7 @@ def _reset_reading(resets_at: Any, window_minutes: Any = None) -> tuple[str, boo
 
 
 def _percent(remaining: Any) -> str:
-    """A usage window's percentage, drawn once for both the bar and the dashboard panel.
-
-    The reading is rounded to a tenth by the layer, and a tenth that is zero is noise beside a
-    countdown: it is drawn as `73%`. A reading that really is fractional keeps its one digit rather
-    than being rounded away here, because the layer's precision is not this module's to drop.
-    A value that is no number at all is a dash and never a `0%`, for the reason a missing countdown
-    is words: nothing is not zero.
-    """
+    """A usage window's percentage (`73%`; a real tenth kept); a non-number is a dash, never `0%`."""
     if not isinstance(remaining, (int, float)) or isinstance(remaining, bool):
         return "—"
     return f"{remaining:.1f}".removesuffix(".0") + "%"
@@ -1198,19 +1105,13 @@ def dashboard(
     limits: dict[str, Any] | None = None,
     po: dict[str, Any] | None = None,
 ) -> str:
-    """The operator's one screen: the pipeline's state, the open sprints, what is in flight, and
-    what happened last.
+    """The operator's one screen: pipeline state, open sprints, work in flight, recent history.
 
-    Three of the four sections come from reads beside the snapshot, each handed in as
-    ``{"available", "reason", "document"}`` by the transport; one that is not available is drawn
-    as the marked block every unreadable source gets, and never as an empty section.
+    An unavailable side read (``{"available", "reason", "document"}``) is the marked block, not empty.
     """
     installation = snapshot.get("installation") or {}
     open_items = _sprint_items(sprints)
-    # Each fact is drawn once. The usage windows are the bottom bar's and the lamp is the doctor's
-    # colour on every page, so neither has a panel here; what this page adds is the problem itself,
-    # and only while there is one. `limits` is still accepted: the transport hands every page the
-    # same reads, and a caller is not told to stop reading what the bar draws.
+    # Usage windows and health colour belong to the bar and lamp; `limits` is accepted but unused.
     del limits
     body = "\n".join(
         part
@@ -1266,12 +1167,7 @@ PAUSE_WORDS: dict[str, tuple[str, str]] = {
 def _pipeline_strip(
     section: dict[str, Any] | None, installation: dict[str, Any], *, po: dict[str, Any] | None = None
 ) -> str:
-    """The first thing on the screen: is the pipeline running, and how to stop it.
-
-    Health is not repeated here: the lamp on the bottom bar is its colour on every page, and the
-    dashboard names the problem itself under this strip while there is one. `installation` is kept
-    for the refused branch, which has nothing else to show.
-    """
+    """Is the pipeline running, and how to stop it; `installation` serves only the refused branch."""
     document, refused = _beside(section, what="whether the pipeline is paused")
     if document is None:
         return f'<div class="strip">{refused}{_po_indicator(po)}</div>'
@@ -1298,7 +1194,7 @@ def _pipeline_strip(
             '<button type="submit">Resume</button></form>'
         )
     else:
-        # Draining is rare and stops the pipeline, so it is one click further away than reading.
+        # Draining is rare and stops the pipeline, so it is one click further away.
         action = (
             '<details class="drain"><summary>Drain…</summary>'
             '<form class="pause inline" data-action="/api/pause/drain" data-confirm="Drain the pipeline? No '
@@ -1319,13 +1215,7 @@ def _pipeline_strip(
 
 
 def _attention(installation: dict[str, Any]) -> str:
-    """The installation's problem, named under the strip while there is one, and nothing otherwise.
-
-    The lamp on the bottom bar already says the colour on every page; this is the sentence behind
-    it, where the operator is looking. Health that could not be read is not silence: it is the
-    marked block every unreadable source gets. The facts behind the verdict -- checkpoint, disk,
-    memory, load -- stay one click away in the collapsed installation panel.
-    """
+    """The installation's problem under the strip while there is one; unreadable health is marked."""
     health = installation.get("health") or {}
     status = health.get("status")
     source = _source_block(health.get("source"), what="whether this installation is healthy")
@@ -1346,10 +1236,7 @@ def _attention(installation: dict[str, Any]) -> str:
 
 
 def _health_panel(installation: dict[str, Any]) -> str:
-    """Health as the read layer summarizes it: the problems by name, then the facts.
-
-    Whether the source answered at all is said once, above the panel, by :func:`_attention`.
-    """
+    """Health as the read layer summarizes it: problems by name, then facts."""
     health = installation.get("health") or {}
     status = health.get("status")
     parts: list[str] = []
@@ -1447,7 +1334,7 @@ def _open_sprints(section: dict[str, Any] | None) -> str:
 
 
 def _compact_sprint_card(item: dict[str, Any]) -> str:
-    """One open sprint as the dashboard shows it: the goal, the card in hand, who works it, the spend."""
+    """One open sprint on the dashboard: goal, current card, heads, spend."""
     ref = str(item.get("ref") or "")
     projects = item.get("projects") if isinstance(item.get("projects"), list) else []
     project = ", ".join(str(value) for value in projects) or str(item.get("product") or "—")
@@ -1502,12 +1389,7 @@ def _current_card_box(item: dict[str, Any]) -> str:
 
 
 def _sprint_heads(item: dict[str, Any], *, compact: bool = False) -> str:
-    """The heads a sprint runs on -- observer, worker, reviewer -- each with its model and effort.
-
-    They are the read layer's `head_profiles`, joined against the registry there and not here. A
-    role that section leaves unset (a worker or reviewer the dispatcher picks per card) is not drawn:
-    its model is a card's fact, on the card page, and not one of the sprint's.
-    """
+    """The sprint's heads from `head_profiles`, with model and effort; unset roles are not drawn."""
     heads = _heads_of(item)
     drawn = [
         _head(role, heads[role], compact=compact)
@@ -1520,10 +1402,7 @@ def _sprint_heads(item: dict[str, Any], *, compact: bool = False) -> str:
 
 
 def _heads_of(item: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Each role's profile with its model and effort, and for the observer whether it is up.
-
-    Whether the observer is up is the launch's to say, laid over the profile, never the reverse.
-    """
+    """Each role's profile with model and effort; the observer's up-state comes from its launch."""
     profiles = item.get("head_profiles") if isinstance(item.get("head_profiles"), dict) else {}
     heads = {
         role: dict(profiles[role])
@@ -1556,11 +1435,7 @@ def _waiting_chip(item: dict[str, Any]) -> str:
 
 
 def _waiting_line(item: dict[str, Any]) -> str:
-    """What a waiting sprint waits on, in words and with the card it points at.
-
-    The chip carries the same reason only as a hover title; a sprint whose decision or operation card
-    is with the PO, or handed to the owner, has to say so where it can be read at a glance.
-    """
+    """What a waiting sprint waits on, in words, with its card (the chip has only a hover title)."""
     waiting = item.get("waiting") if isinstance(item.get("waiting"), dict) else {}
     if waiting.get("state") != "waiting" or not waiting.get("reason"):
         return ""
@@ -1569,21 +1444,14 @@ def _waiting_line(item: dict[str, Any]) -> str:
     return f'<div class="reason">waiting: {escape(_short(waiting.get("reason"), 160))}{pointer}</div>'
 
 
-#: Said where a duration would be when the committed audit dates no transition of the current card.
-#: Words, and never a zero age: "0s" beside a board state reads as a card that moved as the page was
-#: drawn, which is the opposite of a card nothing has moved at all.
+#: Said instead of a duration when no transition of the current card is dated; never a zero age.
 NO_TRANSITION_RECORDED = "no transition recorded"
 
 
 def _card_standing(item: dict[str, Any]) -> str:
-    """Where a sprint's current card stands and how long it has stood there, drawn once.
+    """Where a sprint's current card stands and since when; the one renderer for every surface.
 
-    Every surface that shows it -- the row of `/sprints`, the dashboard's sprint card and the
-    "Now" panel of `/sprints/{ref}` -- is this one function, so they cannot say it differently. The wording follows `_reset`: the
-    duration is what a reader wants in the text, and the exact ISO moment is the hover title of the
-    element carrying it. An answer with no moment carries no title at all rather than a misleading
-    one, and a sprint that has ended carries no duration at all: its card is where the sprint
-    stopped, not something that is still ageing.
+    Duration in the text, ISO moment as hover title (none without one); an ended sprint has none.
     """
     carried = item.get("current_card_state")
     section = carried if isinstance(carried, dict) else {}
@@ -1626,11 +1494,7 @@ def _budget(budget: dict[str, Any]) -> str:
 
 
 def _budget_line(budget: dict[str, Any]) -> str:
-    """The card budget as a thin secondary line: how much of it is spent, and where the signal is.
-
-    It is a spend, not progress -- a sprint that is going in circles fills it faster than one that
-    is going well -- so it is drawn small and quiet, under whatever says how far the work got.
-    """
+    """The card budget as a thin, quiet line: a spend, not progress."""
     total = int(budget.get("total") or 0)
     thresholds = budget.get("thresholds") or {}
     hard = int(thresholds.get("hard") or 0)
@@ -1704,8 +1568,7 @@ def _entity_link(entity: dict[str, Any]) -> str:
     return _link(ref)
 
 
-#: How a severity is spoken on the doctor page, and the order the groups are read in: what makes
-#: the lamp red first, because that is what the page is opened for.
+#: Doctor page severity groups, in reading order: what makes the lamp red first.
 SEVERITY_GROUPS: tuple[tuple[str, str], ...] = (
     ("red", "Red — the installation cannot be trusted to run work"),
     ("yellow", "Yellow — running, but a person should look"),
@@ -1714,12 +1577,7 @@ SEVERITY_GROUPS: tuple[tuple[str, str], ...] = (
 
 
 def doctor(section: dict[str, Any] | None) -> str:
-    """The page behind the lamp: what is wrong, by code, grouped by what it does to the colour.
-
-    Three answers and never two: problems, no problem at all, or health that could not be read --
-    which is said as itself, with the reason, rather than drawn as an empty list. An unreadable
-    installation showing "nothing is wrong" is the one failure this page exists to prevent.
-    """
+    """The page behind the lamp: problems by code and severity, none, or unreadable health and why."""
     document = section.get("document") if isinstance(section, dict) and section.get("available") else None
     if not isinstance(document, dict):
         reason = (
@@ -1858,10 +1716,10 @@ def owner_event_subject(subject: str) -> str:
 
 
 def owner_events(document: dict[str, Any]) -> str:
-    """The bell's list: the unread by default, or every event, newest first, open `needs_owner` pinned.
+    """The bell's list: unread by default or all, newest first, open `needs_owner` pinned.
 
-    A notice is marked read by its own button, and "Mark all read" takes the notices only. A
-    `needs_owner` event whose card still waits for the owner has no button: its card clears it.
+    "Mark all read" takes notices only; a `needs_owner` event whose card still waits for the owner
+    has no button (its card clears it).
     """
     unread_only = bool(document.get("unread_only"))
     events = [event for event in document.get("events") or [] if isinstance(event, dict)]
@@ -2160,7 +2018,7 @@ def _close_form(ref: str) -> str:
     )
 
 
-#: The states a move may name, in the layer's spelling. Kept beside the form that offers them.
+#: The states a move may name, in the layer's spelling.
 MOVE_TARGETS = ("ready", "in_progress", "done", "blocked", "issues", "validate", "assessment")
 
 
@@ -2189,13 +2047,7 @@ def _installation(installation: dict[str, Any]) -> str:
 
 
 def task(snapshot: dict[str, Any], *, runs: dict[str, Any], sessions: dict[str, Any] | None = None) -> str:
-    """Criterion 3: state, recent events, the worker's and reviewer's output, and the result.
-
-    The card is read as a task first: its title is the heading and its full text -- what the
-    observer asked for -- is the first tab, because that is what nobody could see before. Each fact
-    is drawn once: the chips under the title are the card's state, and the side panel carries only
-    what they do not.
-    """
+    """The card page: task text first, state chips, events, head output and result, each drawn once."""
     ref = str(snapshot.get("ref") or "")
     card = snapshot.get("card") or {}
     value = card.get("value") or {}
@@ -2259,8 +2111,8 @@ def task(snapshot: dict[str, Any], *, runs: dict[str, Any], sessions: dict[str, 
                 _card(card.get("value"), project) + _attempt(snapshot.get("attempt") or {}),
             ),
             _panel(
-                # A card handed to the owner is answered here: the comment is written as the owner's
-                # and reaches the PO (`card_ops._comment_role`).
+                # A handed card's comment is written as the owner's and reaches the PO
+                # (`card_ops._comment_role`).
                 "Answer the PO as the owner" if handed else "Tell the head working this card",
                 _comment_form(
                     f"/api/tasks/{quote(ref)}/comment",
@@ -2297,12 +2149,10 @@ def _task_text(card: dict[str, Any] | None) -> str:
 
 
 def _card_heads_panel(ref: str, heads: dict[str, Any], agents: dict[str, Any]) -> str:
-    """Every head run the card recorded, by role: the latest run large, the runs before it beneath.
+    """Every head run the card recorded, by role: the latest large, earlier ones beneath.
 
-    `heads` is the read layer's one row per run: launch configuration, what the run reported, and
-    whether a local-pty supervisor still holds it. `agents` is the dispatcher's view of the process
-    behind the current run of each role, joined by run id (by role when the run is not named), and
-    it decides the pulse: a run the dispatcher no longer holds is drawn from what its row says.
+    `agents` (the dispatcher's process per run id, or role) decides the pulse; a run it no longer
+    holds is drawn from its own row.
     """
     runs = [item for item in heads.get("items") or [] if isinstance(item, dict)]
     live = {
@@ -2315,7 +2165,7 @@ def _card_heads_panel(ref: str, heads: dict[str, Any], agents: dict[str, Any]) -
         by_role.setdefault(str(item.get("role") or "head"), []).append(item)
     known = {str(item.get("run_id") or "") for item in runs}
     for key, item in live.items():
-        # A process the dispatcher holds under no run the card recorded: drawn from what it says.
+        # A process held under no run the card recorded is drawn from what it says.
         if key not in known:
             by_role.setdefault(str(item.get("role") or "head"), []).append(item)
     parts = [
@@ -2332,8 +2182,7 @@ def _card_heads_panel(ref: str, heads: dict[str, Any], agents: dict[str, Any]) -
         process = live.get(str(latest.get("run_id") or ""))
         if process is None and latest.get("current"):
             process = live.get(role)
-        # The process decides the pulse; the run's own reason (a legacy runtime, a lock that could
-        # not be read) stays beside it, because it is what the run said and the process cannot.
+        # The process decides the pulse; the run's own reason (legacy runtime, unreadable lock) stays.
         row = {**latest, "state": process.get("state") if process else latest.get("state")}
         if process and process.get("reason"):
             row["process_reason"] = process["reason"]
@@ -2353,7 +2202,7 @@ ROLE_ORDER = {"worker": 0, "reviewer": 1}
 
 
 def _head_facts(ref: str, item: dict[str, Any]) -> str:
-    """The line under a head: the exact model id, the profile, the run, and why its state is what it is."""
+    """The line under a head: exact model id, profile, run, and why its state is what it is."""
     facts = []
     if item.get("resolved_model"):
         facts.append(f'<span class="ref">{escape(str(item["resolved_model"]))}</span>')
@@ -2399,14 +2248,7 @@ def _head_href(ref: str, run_id: str) -> str:
 
 
 def head_view(document: dict[str, Any]) -> str:
-    """One local-pty head, read-only: the tail of its journal.
-
-    There is no form on this page and no script of its own.
-
-    The layer hands over normalised values only, and each section is still drawn under
-    `_shown`: whatever a head's run directory held, a section that cannot be drawn says so in its
-    own place and the rest of the page is served.
-    """
+    """One local-pty head's journal tail, read-only; each section is drawn under `_shown`."""
     ref = str(document.get("ref") or "")
     run_id = str(document.get("run_id") or "")
     head = _mapping(document.get("head"))
@@ -2531,7 +2373,7 @@ def _card(card: dict[str, Any] | None, project: dict[str, Any]) -> str:
     return _rows(["", ""], rows)
 
 
-# -- delegation, waits and e2e on a card (secretary-1811) -----------------------------------------
+# -- delegation, waits and e2e on a card ----------------------------------------------------------
 
 #: The prefix a wait's PO return address carries (`board/wait_card.PO_SESSION_PREFIX`).
 PO_ADDRESS_PREFIX = "po-session:"
@@ -2549,7 +2391,7 @@ def _entries(value: Any) -> list[dict[str, Any]]:
 
 
 def po_sessions_named(snapshot: dict[str, Any]) -> list[str]:
-    """Every PO session a card page links to: the origin, its successor, the returns, the wait's addresses."""
+    """Every PO session a card page links to: origin, successor, returns, the wait's addresses."""
     value = _block(_block(snapshot.get("card")).get("value"))
     origin = _block(value.get("origin"))
     named = [origin.get("po_session"), origin.get("current_session")]
@@ -2667,7 +2509,7 @@ def _wait_address(address: str, status: str, wait: dict[str, Any], known: dict[s
 
 
 def _wait_panel(wait: dict[str, Any], sessions: dict[str, Any] | None) -> str:
-    """What this wait waits for, since when and until when, where it stands and where its result went."""
+    """A wait: its target, since and until when, its state, and where its result went."""
     state = str(wait.get("state") or "unknown")
     if state == "malformed" or not isinstance(wait.get("target"), dict):
         reason = str(wait.get("reason") or "the card carries no well-formed wait spec")
@@ -2734,7 +2576,7 @@ def _e2e_run_rows(runs: list[dict[str, Any]]) -> list[list[str]]:
 
 
 def _e2e_panel(e2e: dict[str, Any]) -> str:
-    """Each e2e run of this card with its wait card, the budget it spends, and where after-merge stands."""
+    """Each e2e run of the card with its wait card, budget spend, and after-merge state."""
     parts = []
     spent = (
         f"{e2e.get('runs_dispatched') if e2e.get('runs_dispatched') is not None else '?'} run(s) dispatched"
@@ -2826,10 +2668,8 @@ def _runs(ref: str, runs: dict[str, Any]) -> str:
         return '<p class="empty">this card has no product run.</p>'
     rows = []
     for item in items:
-        # Both facts, never one standing in for the other: `state` is what the evidence says this
-        # run is — running, finished, failed, its source unreadable, or unknown — and `ended` is
-        # whether it is over. A run that reads `unknown` while still open is a run nobody may treat
-        # as running, so it must not look like one here.
+        # `state` (running, finished, failed, unreadable, unknown) and `ended` are both shown; an
+        # open `unknown` run must not look like a running one.
         run = item.get("run") or {}
         state = item.get("state") or {}
         value = str(state.get("value") or "unknown")
@@ -2849,18 +2689,9 @@ def _runs(ref: str, runs: dict[str, Any]) -> str:
 
 
 def _outcome_cell(state: dict[str, Any]) -> str:
-    """What this run produced: the verdict it carries, its result, and the status it exited with.
+    """What this run produced: its verdict (`state.result.verdict`, never re-derived), result, exit.
 
-    The state word beside this says how a run *ended*; this says what came of it, and the two are
-    not the same question. A reviewer run that ended normally and a reviewer run that ended
-    normally having called the work `red` read identically in the state column, which is the one
-    thing a card page is read to find out — so the verdict is drawn here, off `state.result.verdict`
-    (the field :func:`ummanu.webproto.run_state.verdict_of` already publishes), and never
-    re-derived from the result body by this module.
-
-    The rule of this file applies unchanged: a result that is absent and a result that could not be
-    read are different things and say different words. An open run has produced nothing yet and
-    says exactly that, rather than borrowing the vocabulary of a run that finished empty.
+    An absent result and an unreadable one say different words; an open run has produced nothing.
     """
     result = state.get("result") or {}
     exit_status = state.get("exit") or {}
@@ -2943,13 +2774,7 @@ def _event(item: dict[str, Any]) -> str:
 
 
 def _long(text: Any, *, chars: int = 160) -> str:
-    """Long text held to two lines, opened in place on a click. Short text is shown as it is.
-
-    The text is in the page exactly once. The fold used to repeat the first line as its summary and
-    then print the whole text again below it, in the code face; a reader saw the opening sentence
-    twice and the prose as if it were a log. Now the one copy is the summary, clamped by the
-    stylesheet until the disclosure opens, so opening it only lets the same block grow.
-    """
+    """Long text clamped to two lines, opened in place; the text is in the page once."""
     value = str(text or "").strip()
     if not value:
         return '<span class="empty">—</span>'
@@ -2959,12 +2784,7 @@ def _long(text: Any, *, chars: int = 160) -> str:
 
 
 def _tabs(name: str, tabs: list[tuple[str, str, Any]]) -> str:
-    """A strip of tabs over panels: `(label, body, count)` each, the first one shown.
-
-    Radios and labels rather than a script: every panel is in the markup, so a search, a reader
-    with scripts off and a test all see what the page holds. `name` keeps two strips on one page
-    apart. A strip holds at most :data:`MAX_TABS` tabs; a longer list is a page to rethink.
-    """
+    """A no-script radio tab strip of `(label, body, count)`; `name` keeps strips apart."""
     if len(tabs) > MAX_TABS:
         raise ValueError(f"a tab strip holds at most {MAX_TABS} tabs, not {len(tabs)}")
     radios = "".join(
@@ -2982,8 +2802,7 @@ def _tabs(name: str, tabs: list[tuple[str, str, Any]]) -> str:
     return f'<div class="tabs">{radios}<div class="tab-bar" role="presentation">{labels}</div>{panels}</div>'
 
 
-#: Effort as a count of lit bars. `extra` is Codex's older spelling of `xhigh`; anything else a
-#: profile says is shown as its own word beside empty bars rather than guessed onto the scale.
+#: Effort as lit bars (`extra` is Codex's old `xhigh`); an unknown word gets empty bars.
 EFFORT_BARS: dict[str, int] = {
     "minimal": 1,
     "low": 1,
@@ -2995,19 +2814,16 @@ EFFORT_BARS: dict[str, int] = {
 }
 #: How many bars the scale has.
 EFFORT_SCALE = 5
-#: The efforts that mean "no flag was passed": the CLI's own default decides. A PO session stored
-#: with one of them was opened before an effort had to be chosen, and reads "not set".
+#: Efforts meaning "no flag passed" (the CLI default decides); a PO session stored so reads "not set".
 EFFORT_DEFAULT = {"", "default", "none"}
 #: What a PO session stored with no explicit effort says in place of an effort.
 PO_EFFORT_UNSET = "not set"
 
 
 def _model_name(model: Any) -> str:
-    """A model id as people say it: `claude-opus-5-5` is Opus 5.5, `gpt-6-sol` is GPT-6 Sol.
+    """A model id as people say it (`claude-opus-5-5` is Opus 5.5, `gpt-6-sol` is GPT-6 Sol).
 
-    Only ids of a shape it recognises are renamed, and only by moving their own parts around; an
-    alias (`opus`) or an id of any other shape is returned as it is, because a name made up here
-    would claim a version nobody recorded.
+    Only recognised shapes are renamed, from their own parts; anything else is returned as is.
     """
     value = str(model or "").strip()
     claude = re.fullmatch(r"claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?", value)
@@ -3058,19 +2874,14 @@ PULSE_OF: dict[str, str] = {
 
 
 def _head_effort(head: dict[str, Any]) -> Any:
-    """The effort a run reported, else the one it was configured with -- the same rule as the model."""
+    """The effort a run reported, else the configured one (same rule as the model)."""
     return head.get("resolved_effort") or head.get("effort")
 
 
 def _head(
     role: str, head: dict[str, Any] | None, *, compact: bool = False, unset_effort: str = "CLI default"
 ) -> str:
-    """One head: the role, the model that runs it, its effort, and whether its process is alive.
-
-    `head` carries what the read layer says about it -- `profile`, `adapter`, `model`,
-    `resolved_model`, `effort`, `state` -- and nothing here fills a gap: a head with no model is
-    called an unknown model, not the likeliest one. `unset_effort` is what no effort reads as.
-    """
+    """One head: role, model, effort and process liveness; a missing model reads as unknown."""
     head = head or {}
     name, said = _head_model(head)
     profile = str(head.get("profile") or head.get("head") or "")
@@ -3095,8 +2906,7 @@ def _head(
     )
 
 
-#: The event kinds whose `data.body` is a record somebody wrote about the card: what a transition
-#: is made of, read beside it.
+#: Event kinds whose `data.body` is a record about the card, shown under the transition it led to.
 RECORD_KINDS = {
     "card.reported": "worker report",
     "card.verdict": "reviewer verdict",
@@ -3105,13 +2915,7 @@ RECORD_KINDS = {
 
 
 def _timeline(items: list[dict[str, Any]]) -> str:
-    """Every transition of the card, oldest first, each opening on the records that made it.
-
-    A transition is an event carrying `transition` (source and target). The records between the
-    previous transition and this one -- the worker's report before a submit, the verdict before
-    a park in Assessment, the decision before a rework -- are what made it, and they are read
-    under it rather than found in the flat history.
-    """
+    """Every card transition, oldest first, each opening on the records since the previous one."""
     ordered = sorted(items, key=lambda item: str(item.get("occurred_at") or ""))
     steps: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     pending: list[dict[str, Any]] = []
@@ -3394,12 +3198,8 @@ if (reviewForm) reviewForm.addEventListener('submit', async (event) => {
 
 # -- the sprint form ------------------------------------------------------------------------------
 
-#: What the observer's launch state is called on the page, in words. The colour is a second reading
-#: of the same fact and never the only one: three of these -- saved and not yet raised, really
-#: running, and nothing could be established -- are the three an operator opens this page to tell
-#: apart, and a page that drew them as three shades would be unreadable to half the people who open
-#: it and to every screen reader. The words come from here; the sentence beside them is the layer's
-#: own reason and is never rewritten.
+#: The observer's launch state in words; colour is a second reading only. The sentence beside it
+#: is the layer's reason, never rewritten.
 LAUNCH_WORDS: dict[str, str] = {
     "not_started": "saved — no observer is up for it yet",
     "running": "running — an observer head is up",
@@ -3408,15 +3208,13 @@ LAUNCH_WORDS: dict[str, str] = {
     "not_declared": "no observer — this sprint declared none, so none is raised",
 }
 
-#: Said under the submit button, because it is the one thing about this form that surprises people:
-#: there is no second "start" action anywhere. See `ummanu.webproto.sprint_ops`.
+#: Said under the submit button: there is no separate "start" action (`ummanu.webproto.sprint_ops`).
 START_NOTICE = (
     "starting a sprint is opening it with an observer: there is no separate launch action, and the "
     "production tick raises one observer head for each open sprint that has none"
 )
 
-#: The word on the empty option of the two executor selects, and the answer that leaves the role
-#: unpinned. Submitting it sends the layer nothing about that role at all.
+#: The empty option of the executor selects: leaves the role unpinned (nothing sent for it).
 EXECUTOR_CHOICE = "the observer chooses"
 
 
@@ -3437,13 +3235,7 @@ def sprint_form(
     catalogue: str | None = None,
     reissued: bool = False,
 ) -> str:
-    """The "new sprint" form, on this installation's own catalogue and on what was typed into it.
-
-    `options` is a `sprint_options` document, or `None` when the catalogue could not be read at all
-    while a refusal was being shown — the refusal is the thing being answered, so it is rendered
-    over a form that says its choices are missing rather than replaced by a page about the
-    catalogue.
-    """
+    """The "new sprint" form; `options` is `None` when the catalogue was unreadable during a refusal."""
     options = options or {}
     heads = options.get("heads") or {}
     products = options.get("products") or {}
@@ -3507,15 +3299,8 @@ def sprint_form(
 def _refusal_block(refusal: dict[str, Any] | None, *, reissued: bool = False) -> str:
     """What the layer said about this submission, and what may safely be done about it.
 
-    Two refusals, two opposite instructions, and the page has to give the right one. A part-done
-    create is the one that is not simply "no": a sprint exists, and the only safe move is to submit
-    this same form again, which carries the same request id and therefore picks that sprint up
-    instead of opening a second one.
-
-    Everything else left no sprint behind and has spent its request id below this transport, so the
-    form now carries a new one. That is said out loud rather than done quietly, because it is the
-    difference between "fix the field and send this again" and "send exactly this again", and a
-    person who read the wrong one either opens a second sprint or reaches a dead end.
+    A part-done create left a sprint: resubmit this form unchanged (same request id). Any other
+    refusal left nothing and spent its id, so the form carries a new one and says so.
     """
     if not refusal:
         return ""
@@ -3588,12 +3373,7 @@ def _product_field(products: dict[str, Any], submitted: dict[str, Any], errors: 
 
 
 def _issue_field(issues: dict[str, Any], submitted: dict[str, Any], errors: dict[str, str]) -> str:
-    """The open issues, each carrying the product that owns it.
-
-    The product is on every row rather than only in a script's memory: the list is narrowed to the
-    selected product by the page's own script, and when that script does not run the whole list is
-    there with each row saying whose it is, which is a usable form rather than a blank one.
-    """
+    """The open issues, each naming its product so the list works without the narrowing script."""
     items = list(issues.get("items") or [])
     chosen = set(submitted.get("issues") or [])
     unavailable = _source_block(issues.get("source"), what="which issues are open")
@@ -3620,12 +3400,9 @@ def _issue_field(issues: dict[str, Any], submitted: dict[str, Any], errors: dict
 
 
 def _project_field(projects: dict[str, Any], submitted: dict[str, Any], errors: dict[str, str]) -> str:
-    """The registered projects, each saying whether an open sprint already holds it.
+    """The registered projects, each saying whether an open sprint holds it.
 
-    `reserved_by` is three answers and not two: a list of sprints, an empty list, and `null` for a
-    reservation index nobody could read. The third is said in its own words, because "held by
-    nobody" and "nobody could say" would otherwise look identical on the one row where the
-    difference decides whether a create is about to be refused.
+    `reserved_by` `null` (index unreadable) is said apart from an empty list.
     """
     items = list(projects.get("items") or [])
     chosen = set(submitted.get("projects") or [])
@@ -3660,16 +3437,9 @@ def _project_field(projects: dict[str, Any], submitted: dict[str, Any], errors: 
 
 
 def _observer_field(heads: dict[str, Any], submitted: dict[str, Any], errors: dict[str, str]) -> str:
-    """The observer, which is the one head an operator must name, chosen and never typed.
+    """The observer select: only profiles passing `check_observer_profile`.
 
-    Only the profiles the layer marked as observers are offered, because that flag is
-    `check_observer_profile` — the create's own check — asked of each profile rather than a rule
-    restated here.
-
-    The one answer that is not a profile is deliberately *not* offered. `none` opens a sprint the
-    production tick raises no observer for, so on a page whose button says "start this sprint" it
-    would be an option that starts nothing; it stays a legal answer for `ummanu sprint create`
-    and for the rows that already carry it, which the sprint page renders unchanged.
+    `none` (no observer, so nothing starts) is not offered; it stays legal for `ummanu sprint create`.
     """
     items = [item for item in (heads.get("items") or []) if item.get("observer")]
     chosen = str(submitted.get("observer") or "")
@@ -3688,13 +3458,7 @@ def _observer_field(heads: dict[str, Any], submitted: dict[str, Any], errors: di
 
 
 def _executor_field(name: str, label: str, heads: dict[str, Any], submitted: dict[str, Any]) -> str:
-    """One optional pin, whose first and default answer is that the observer picks the head.
-
-    The empty option is not decoration: it is submitted as the empty string and the transport turns
-    it into `None`, which is how the row is written with no field for this role at all. That is a
-    different thing from a role pinned to a profile and a different thing again from one pinned to
-    nothing, and the three must not be able to look alike here.
-    """
+    """One optional executor pin; the empty default (the observer picks) writes no field for the role."""
     items = list(heads.get("items") or [])
     chosen = str(submitted.get(name) or "")
     options = [f'<option value=""{_selected(not chosen)}>{escape(EXECUTOR_CHOICE)}</option>']
@@ -3711,12 +3475,7 @@ def _executor_field(name: str, label: str, heads: dict[str, Any], submitted: dic
 
 
 def _profile_option(item: dict[str, Any], chosen: str) -> str:
-    """One head profile as a person picks it: what it is called, its model and its effort.
-
-    None of the three is composed here from a rule about naming: `label`, `model` and `effort` are
-    fields of the profile the registry actually holds, and a profile that pins neither says so in
-    the words the layer used rather than showing an empty column.
-    """
+    """One head profile option: the registry's own `label`, `model` and `effort`."""
     value = str(item.get("id") or "")
     model = str(item.get("model") or "") or "the adapter's default model"
     effort = str(item.get("effort") or "") or "the adapter's default effort"
@@ -3727,10 +3486,7 @@ def _profile_option(item: dict[str, Any], chosen: str) -> str:
     )
 
 
-#: Said beside a value that was submitted and that the catalogue no longer offers. It is kept on
-#: the form rather than dropped for one reason: a form that quietly changed a submitted choice
-#: would then be asking for a repeat of something the person never sent -- which is exactly wrong
-#: after a part-done create, where the safe move is to submit *this* form again unchanged.
+#: Said beside a submitted value no longer offered; kept so a resubmission is never silently changed.
 NO_LONGER_OFFERED = "this installation no longer offers this choice"
 
 
@@ -3783,12 +3539,9 @@ if (product) { product.addEventListener('change', narrow); narrow(); }
 
 
 def sprint(document: dict[str, Any]) -> str:
-    """One sprint: what it is after, the card in hand, who works it, and what the observer decided.
+    """One sprint: its goal, the card in hand, who works it, and what the observer decided.
 
-    Each fact is drawn once. The status, the product and whether the observer is working are the
-    header's chips and are not repeated in a panel; the current card is the "Now" panel's and is not
-    listed again among the cards; the resume's decision and next step are the "Observer's call"
-    and the resume tab carries only what that panel does not.
+    Each fact is drawn once (header chips, "Now" panel, "Observer's call", then the tabs).
     """
     ref = str(document.get("ref") or "")
     sprint_section = document.get("sprint") or {}
@@ -3883,7 +3636,7 @@ WAITING_ON_LABELS = {"run": "a run", "owner": "the owner", "po": "the PO", "depe
 
 
 def _waiting_on(items: Any) -> str:
-    """What the sprint waits for, one line per card, each pointing at its card; nothing when nothing is."""
+    """What the sprint waits for, one line per card linking it; nothing when nothing is."""
     entries = _entries(items)
     if not entries:
         return ""
@@ -3971,7 +3724,7 @@ CALL_FIELDS = {"selected_step", "selected_why", "rejected_alternatives", "next_s
 
 
 def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -> str:
-    """What is worth a look but not always: the cards, the Definition of Done, the resume, the issues."""
+    """The secondary tabs: cards, Definition of Done, resume, issues."""
     if value is None:
         return '<div class="body"><p class="empty">no sprint was read, so there is nothing to show here.</p></div>'
     cards = work.get("cards") if isinstance(work.get("cards"), dict) else {}
@@ -4053,11 +3806,7 @@ def _listed(values: Any, empty: str) -> str:
 
 
 def _observer_line(observer: dict[str, Any]) -> str:
-    """The declared observer, and separately whether one is up. Two sources, said apart.
-
-    The head the dispatcher holds is named only when it is not the declared one: the same profile
-    printed three times said nothing the first one had not.
-    """
+    """The declared observer and, separately, whether one is up; the held head only if different."""
     declared = observer.get("declared") or {}
     launch = observer.get("launch") or {}
     state = str(launch.get("state") or "")
@@ -4093,11 +3842,7 @@ def _observer_line(observer: dict[str, Any]) -> str:
 
 
 def _executor_rows(executors: dict[str, Any]) -> list[list[str]]:
-    """Both roles, always, and each in the state it is really in.
-
-    A role nobody pinned is not a blank cell: it is the observer's to choose, which is a decision
-    somebody made, and the page says so in those words.
-    """
+    """Both roles, always; an unpinned role reads as the observer's choice."""
     rows = []
     for role in ("worker", "reviewer"):
         entry = executors.get(role) if isinstance(executors.get(role), dict) else {}
@@ -4129,7 +3874,7 @@ TURN_MARKS: dict[str, tuple[str, str]] = {
 
 
 def _po_indicator(section: dict[str, Any] | None) -> str:
-    """The dashboard's PO panel: how many turns run, and the way in. Only a number, never a session."""
+    """The dashboard's PO panel: how many turns run, and the way in; a count, never a session."""
     if section is None:
         return ""
     if not section.get("available"):
@@ -4206,11 +3951,7 @@ def po_page(
     submitted: dict[str, Any] | None = None,
     now: datetime | None = None,
 ) -> str:
-    """The PO head: the bar that opens a new session, then open sessions (or, with `closed`, the closed ones).
-
-    A session is a row of two lines, its first message and what it runs on, rather than a table: the
-    list owns the page's whole width and never scrolls sideways, whatever the window's width.
-    """
+    """The PO head: new-session bar, then open (or `closed`) sessions as two-line rows, not a table."""
     sessions = overview.get("sessions") or []
     models = overview.get("models") or {}
     submitted = submitted or {}
@@ -4245,10 +3986,7 @@ def po_page(
 
 
 def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str:
-    """One session: its title when set, its first message, then CLI · model · effort ("not set" when none was chosen) · when · id.
-
-    An untitled session's first line is its first message, as before titles existed.
-    """
+    """One session row: title, first message, then CLI, model, effort ("not set"), when, id."""
     session_id = str(item.get("session_id") or "")
     name, said = _head_model(_po_head(item))
     meta = [
@@ -4284,7 +4022,7 @@ def _po_session_row(item: dict[str, Any], *, closed: bool, now: datetime) -> str
 
 
 def _po_when(value: Any, now: datetime) -> str:
-    """A moment as how long ago it was, with the moment itself on hover; a date once it is days old."""
+    """A moment as time ago (the moment on hover); a date once it is days old."""
     if value in (None, ""):
         return "—"
     text = value.isoformat() if isinstance(value, datetime) else str(value)
@@ -4309,22 +4047,11 @@ def _po_close_form(session_id: str) -> str:
 def _po_new_session_form_for(
     session: dict[str, Any], efforts: dict[str, Any] | None = None, *, request_id: str
 ) -> str:
-    """Open another session from the one being read, with this session's CLI, model and effort.
+    """Open another session with this one's CLI, model and effort via the `/po` form's own route.
 
-    It is the `/po` form's own route and its own fields (`POST /po/sessions` with a request id, a CLI,
-    a model and an effort), reduced to hidden inputs: there is no second way of creating a session, and
-    nothing about the session being read changes. The pair is copied from that session because it is
-    the pair the owner chose; an installation that no longer offers it refuses the create the way the
-    `/po` form's does, on `/po`, with the list of what it does offer to pick from.
-
-    The effort is copied when the session has an explicit one. A session stored with `default` was
-    opened before an effort had to be chosen, and `default` is never sent: the new session opens at
-    the first effort `efforts` offers for that CLI, and the button says so beside it. With none
-    offered the effort is left out, and the create is refused with the reason.
-
-    The request id is the page's own with a suffix. One page mints one id and an id belongs to one
-    operation for good (`po_requests`), so a page whose message was sent must not offer the same id
-    again for a create — that would be `request_conflict` rather than a new session.
+    `default` effort is never sent: the first effort `efforts` offers is used and named. The
+    request id is the page's own with a suffix, since an id belongs to one operation for good
+    (`po_requests`) and reuse would be `request_conflict`.
     """
     cli, model = str(session.get("cli") or "").strip(), str(session.get("model") or "").strip()
     if not cli or not model:
@@ -4355,7 +4082,7 @@ def _po_new_session_form_for(
 
 #: How many characters of a session's first owner message its row on `/po` shows, ellipsis included.
 PO_FIRST_MESSAGE_CHARS = 80
-#: The title input's length; the store's `MAX_TITLE_LENGTH` is the rule, this only stops typing past it.
+#: The title input's length; the store's `MAX_TITLE_LENGTH` is the rule, this only stops typing.
 PO_TITLE_MAX_CHARS = 120
 
 
@@ -4454,17 +4181,11 @@ def po_session(
     refused: str = "send",
     title_draft: str | None = None,
 ) -> str:
-    """One session: its newest-first feed, the message box, turn state, stop while running, close otherwise.
+    """One session: newest-first feed, message box, turn state and controls.
 
-    Its title, when set, heads the page, and a small form under the header renames it (an empty one
-    clears it), open or closed. `title_draft` is what a refused rename submitted, kept in that form.
-
-    The feed runs newest first and the message box sits above it, so every control the owner needs
-    belongs to the box and not to the end of the feed: `send`, and at the far end of the same row
-    `stop turn` while a turn runs, `close` while none does, and `new session` always.
-
-    A closed session stays readable: its feed and who closed it when, with no message box and no
-    close, but with `new session` — that is what the owner does next, and it touches nothing here.
+    The control row above the feed holds `send`, `stop turn` or `close`, and `new session`. A title
+    heads the page with a rename form (`title_draft` keeps a refused rename). A closed session stays
+    readable with only `new session`.
     """
     session = document.get("session") or {}
     session_id = str(session.get("session_id") or "")
@@ -4474,7 +4195,7 @@ def po_session(
     for entry in document.get("feed") or []:
         by_turn.setdefault(entry.get("turn_seq"), []).append(entry)
     queued = document.get("queued") or []
-    # Messages the PO service holds until the session's running turn ends; newest first, above the turns.
+    # Messages queued until the running turn ends; newest first, above the turns.
     items: list[str] = [_po_queued_entry(entry) for entry in reversed(queued)]
     for turn in reversed(turns):
         items.extend(_po_entry(entry) for entry in reversed(by_turn.get(turn.get("seq"), [])))
@@ -4501,8 +4222,7 @@ def po_session(
         else ""
     )
     close = _po_close_form(session_id) if not running and not closed else ""
-    # `send` belongs to the message form and the other three are forms of their own; HTML has no
-    # nested form, so the row holds them side by side and `send` reaches its form by `form=`.
+    # HTML has no nested forms, so the row holds the forms side by side and `send` uses `form=`.
     controls = "".join(
         [
             '<div class="po-controls">',
@@ -4537,8 +4257,7 @@ def po_session(
     if queued:
         turn_state += " " + _chip(f"{len(queued)} queued", "accent")
     last = turns[-1] if turns else {}
-    # What this page shows, as the session script's polling baseline: read from the page at load and
-    # from the page swapped in after that, never from the JSON that only says something changed.
+    # The script's polling baseline is read from the page (initial or swapped in), never the JSON.
     polled = (
         f'data-turns="{len(turns)}" data-last="{escape(str(last.get("state") or ""))}" '
         f'data-queued="{len(queued)}" data-running="{"true" if running else "false"}"'
@@ -4593,14 +4312,10 @@ def po_session(
 
 
 def _po_delegated(section: Any) -> str:
-    """The cards this session delegated, or whose results now come to it, with their states (secretary-1811).
+    """The cards this session delegated or receives results from, as a collapsed disclosure.
 
-    A collapsed disclosure at the head of the page, by the title (secretary-1818): its summary alone
-    says the count, the columns the cards are in and how many results are not returned yet, and the
-    table opens under it. It is outside every block the session script swaps (PO_SESSION_BLOCKS), so
-    an in-place update never closes or moves it. Nothing when the document carries no such block (a
-    poll that did not ask for it); the reason when the board could not be read; `none` when the
-    session delegated nothing.
+    Outside every `PO_SESSION_BLOCKS` block, so an in-place update never closes it. Empty when the
+    document lacks the block; the reason when unreadable; `none` when nothing was delegated.
     """
     if not isinstance(section, dict):
         return ""
@@ -4661,7 +4376,7 @@ def _po_delegated_state(state: str) -> str:
 
 
 def _po_delegated_details(summary: str, body: str) -> str:
-    """The delegated-cards disclosure: closed on every render, so the owner opens it when they want it."""
+    """The delegated-cards disclosure, closed on every render."""
     return (
         f'<details class="panel po-delegated" id="po-delegated"><summary>{escape(summary)}</summary>'
         f'<div class="body">{body}</div></details>'
@@ -4689,7 +4404,7 @@ def _po_entry(entry: dict[str, Any]) -> str:
 
 
 def _po_queued_entry(entry: dict[str, Any]) -> str:
-    """A message on disk in the PO service's queue, waiting for the session's running turn to end."""
+    """A message in the PO service's queue, waiting for the running turn to end."""
     metadata = entry.get("metadata") or {}
     source = metadata.get("source") if isinstance(metadata, dict) else None
     who = source if source in {"dispatcher", "po-service"} else "owner"
@@ -4758,9 +4473,7 @@ function narrow() {
 if (cli) { cli.addEventListener('change', narrow); narrow(); }
 """
 
-#: The ids of the session page's blocks a turn's end changes: the head with its turn state, the stop
-#: and close slots of the control row, and the feed with its queued messages. The session script
-#: replaces exactly these with the ones of the page read again; the composer is in none of them.
+#: Session page blocks a turn's end changes; the session script swaps exactly these (not the composer).
 PO_SESSION_BLOCKS = ("po-head", "po-stop", "po-close", "po-feed")
 
 _PO_SESSION_SCRIPT = """

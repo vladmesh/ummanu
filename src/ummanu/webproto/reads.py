@@ -1,22 +1,12 @@
-"""The read operations every transport of this installation answers from.
+"""The read operations every transport of this installation answers from. Nothing here writes.
 
-`system_snapshot`, `task_snapshot` and `task_events` are the surface every transport shares. A
-dashboard is one system snapshot; a card page is one task snapshot plus a cursor it polls; a
-Telegram head asking "what is running" is the same system snapshot rendered as a message.
-`head_view` is the one read added for a need that arrived (secretary-1703): what one of a card's
-local-pty heads printed and journalled, without Orca (:mod:`ummanu.webproto.head_view`). No
-operation here writes anything at all.
-
-Everything below is assembled from sources that already exist and already own their meaning --
-`collect_status` for installation health, the validated project bindings for the registry,
-`TaskReader` for cards, the audit owner of the installation's own card client for history, the
-dispatcher's durable production state plus the launch heartbeats for agents. Nothing here is a
-second collector of a fact somebody already collects, and nothing here writes: no dispatcher tick,
-no repair, no board mutation, not even a cache file.
-
-The sources fail independently, so each section of a snapshot carries its own availability record
-(:mod:`ummanu.webproto.sources`) instead of the whole read failing. A dead board store must not
-blank out the agent list, and an unreadable dispatcher state must not hide the cards.
+`system_snapshot`, `task_snapshot` and `task_events` are the shared surface; `head_view` shows one
+local-pty head's terminal tail and journal without Orca (:mod:`ummanu.webproto.head_view`).
+Everything is assembled from existing owners (`collect_status`, the validated project bindings,
+`TaskReader`, the card client's audit owner, the dispatcher production state plus launch
+heartbeats); no second collector, no cache file. Each section carries its own availability
+(:mod:`ummanu.webproto.sources`), so one failed source never blanks another.
+See docs/PROTOCOLS.md, "Reading the pipeline".
 """
 
 from __future__ import annotations
@@ -54,25 +44,21 @@ from ummanu.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventPage
 
 SCHEMA_VERSION = 1
 
-#: The states a card is "current" in: everything the pipeline is carrying right now. `issues` is
-#: the backlog and `done` is history, and a dashboard that mixed either into "current tasks" would
-#: report a thousand-card board as a thousand cards in flight.
+#: The states a card is "current" in: what the pipeline carries now (not `issues` backlog or `done`).
 CURRENT_TASK_STATES = ("ready", "in_progress", "validate", "assessment", "blocked")
 
 #: How many of a card's most recent events its task snapshot opens with.
 TASK_SNAPSHOT_EVENTS = 20
 
-#: Failures a source read may answer with instead of a value. They are caught per section, never
-#: around the whole snapshot: a section that fails records why, and the rest of the read continues.
+#: Failures a source read may answer with, caught per section and never around the whole snapshot.
 _SOURCE_FAILURES = (TaskError, HostError, OSError, ValueError, KeyError, TypeError, AssertionError)
 
 
 def hold_store_exclusion(instance: str | Path) -> str | None:
     """Run the board store's exclusion guard once for this process; the refusal, if it refused.
 
-    For a long-lived reader, called before it serves: from then on every read of the store in this
-    process resolves it without running the guard again (:func:`ummanu.board.store.hold_exclusion`). A refusal is held as well, and is returned here
-    so the caller can say it once; the reads that follow answer with it.
+    Called by a long-lived reader before it serves (:func:`ummanu.board.store.hold_exclusion`). A
+    refusal is held too, so later reads answer with it.
     """
     from ummanu.board.store import BoardStoreError, hold_exclusion
 
@@ -86,18 +72,10 @@ def hold_store_exclusion(instance: str | Path) -> str | None:
 class ReadLayer(ProtocolBoundary):
     """One installation, read three ways, with no knowledge of who is asking.
 
-    Construction is cheap and does no I/O: every operation reads what it needs when it is called,
-    so a long-lived transport holding one of these never serves a value it cached at start-up.
-
-    ``board_client`` and ``status_reader`` exist so a test -- or a transport with its own
-    connection policy -- can supply those two sources directly. Neither is a mode: the same code
-    path runs with the live client as with a fake one.
-
-    ``health_reader`` is where :meth:`system_snapshot` takes its health section from instead of
-    collecting it: a transport that already holds a cached reading of :meth:`health_snapshot` --
-    the web process's doctor lamp -- hands that reading in, so the dashboard's panel and the lamp
-    are one collection in one window rather than two answers to one question. Without it, the
-    section is collected on every call, as before.
+    Construction does no I/O; every operation reads at call time, so nothing is cached from start-up.
+    ``board_client`` and ``status_reader`` inject those sources (tests, transports); not a mode.
+    ``health_reader`` supplies a cached :meth:`health_snapshot` reading (the web doctor lamp) for
+    :meth:`system_snapshot`, so panel and lamp are one collection; without it health is collected per call.
     """
 
     def __init__(
@@ -123,12 +101,7 @@ class ReadLayer(ProtocolBoundary):
     # -- shared plumbing -------------------------------------------------------------------
 
     def report(self) -> InstanceReport:
-        """The validated instance, or a refusal naming what does not validate.
-
-        An instance whose config is invalid is not a source outage that a snapshot can report
-        around: without it there is no data directory to read anything else from, and a snapshot
-        built on a guess would be a fabrication.
-        """
+        """The validated instance, or `InstallationUnavailable`: without it there is no data plane to read."""
         report = validate_instance(self.instance)
         if not report.ok or report.data_dir is None:
             raise InstallationUnavailable(
@@ -138,12 +111,7 @@ class ReadLayer(ProtocolBoundary):
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
-        """The data plane this installation reads from, overridden explicitly or taken from config.
-
-        Every operation resolves the config exactly once and threads the result through its
-        sections, so one snapshot cannot be assembled half from a config read before an edit and
-        half from one read after it.
-        """
+        """The data plane, overridden or from config. Resolved once per operation and threaded through."""
         if self._data_dir is not None:
             return self._data_dir
         report = report if report is not None else self.report()
@@ -151,13 +119,7 @@ class ReadLayer(ProtocolBoundary):
         return report.data_dir
 
     def _client(self) -> Any:
-        """The board client of this installation: an injected one, or the switch's (§2.2).
-
-        Resolved once per layer and kept, so one operation cannot be assembled half from one
-        backend's client and half from another's -- and so a read that consults the card and its
-        history asks the switch a single time. A construction that failed is not kept: the next
-        operation asks again rather than replaying a refusal.
-        """
+        """The board client: injected, or the switch's (§2.2). Kept once built; a failed build is retried."""
         if self._resolved_client is None:
             self._resolved_client = self._board_client or board_client(
                 self.instance.parent if self.instance.is_file() else self.instance, serves=(CARD,)
@@ -165,31 +127,19 @@ class ReadLayer(ProtocolBoundary):
         return self._resolved_client
 
     def _events(self, data_dir: Path) -> CommittedAudit:
-        """The reader of this card's history.
+        """The reader of a card's history: the client's audit owner via :func:`ummanu.tasks.task_audit_for`.
 
-        The one place this layer decides where a card's events come from, and it decides it the way
-        every other live audit reader of this installation does: resolve the card client, ask
-        :func:`ummanu.tasks.task_audit_for` for that client's audit owner, and page that owner's
-        ordered traversal (`requests`/`board_events`, `docs/BOARD_STORE.md` §7.3). The file
-        projection under `<data>/board` is not consulted at all.
-
-        Until this existed, `task_snapshot` and `task_events` opened `board/events.ndjson` whatever
-        the installation was, so a migrated one answered a card's history from a file its writers do
-        not touch: unavailable where the projection was swept, and a successful empty or stale page
-        where an old one was left behind -- with every committed record, a product run's included,
-        invisible.
+        It pages the committed `requests`/`board_events` traversal (`docs/BOARD_STORE.md` §7.3); the
+        file projection under `<data>/board` is never consulted.
         """
         return CommittedAudit(task_audit_for(self._client(), data_dir))
 
     def _unselected(
         self, ref: str, cursor: str | None, exc: Exception, data_dir: Path, *, now: float
     ) -> EventPage:
-        """A card backend that could not be established, said as the source fact it is.
+        """A card backend that could not be established, as an unavailable source (never an empty page).
 
-        Not an empty history and not a fall back to the file: which store holds this card's events is
-        the client's answer, and without a client there is no answer to read. The cursor the caller
-        came with is handed back untouched when it parses at all, so a client that keeps polling
-        resumes where it stopped once the backend answers again.
+        A cursor that parses is handed back untouched, so a polling client resumes once the backend answers.
         """
         position: Cursor | None = None
         if cursor not in (None, ""):
@@ -239,12 +189,7 @@ class ReadLayer(ProtocolBoundary):
         }
 
     def health_snapshot(self) -> dict[str, Any]:
-        """Installation health alone: the section `system_snapshot` carries, without the rest.
-
-        The same `_health` call over the same recorded state, so the dashboard's panel and the
-        doctor lamp cannot answer the question differently. It is a separate operation only so that
-        a reader who wants health does not pay for the projects, the cards and the agents too.
-        """
+        """Installation health alone: the same `_health` `system_snapshot` carries, without the rest."""
         now = self._clock()
         report = self.report()
         from ummanu.infra.doctor_record import read_latest
@@ -296,11 +241,10 @@ class ReadLayer(ProtocolBoundary):
     def po_delegated(self, session_id: str) -> dict[str, Any]:
         """The cards a PO session delegated, or whose results now go to it, from one board listing.
 
-        One `TaskReader.list` for the whole answer (secretary-1811): the listing, the metadata of its
-        rows and their outbox returns are each one batched read, and nothing here reads per card. A
-        card counts when its `origin.po_session` is this session (`delegated`) or when this session is
-        the successor its results go to now (`current_session`, `inherited`). `items` is null, never
-        `[]`, when the board could not be read.
+        One batched `TaskReader.list`, nothing per card. A card counts when its `origin.po_session`
+        is this session (`delegated`), its `po_execution.executor` is (`assigned`), or its results now
+        go here (`origin.current_session`, `inherited`). `items` is null, never `[]`, when the board
+        could not be read.
         """
         now = self._clock()
         session = str(session_id or "")
@@ -349,16 +293,10 @@ class ReadLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """One page of a card's history and the cursor that continues it.
 
-        The cursor is the whole contract: read with the ``next_cursor`` of a page and you get what
-        was appended after it, exactly once; read the same cursor twice and you get the same page.
-        Both hold because the position is a place in an append-only history rather than a time or a
-        recomputed index -- see :mod:`ummanu.webproto.cursor`.
-
-        The history is the card audit's (:meth:`_events`): an ordinal in the committed `requests`
-        traversal. A cursor says what it measures, so a byte offset into the pre-2026-09-10 file journal --
-        kept by a client across an installation's migration, say -- is refused by name instead of
-        read as a position here, and the caller gets its continuation from a fresh
-        :meth:`task_snapshot`.
+        Reading a page's ``next_cursor`` returns exactly what was appended after it; the same cursor
+        twice returns the same page (:mod:`ummanu.webproto.cursor`). Positions are ordinals in the
+        committed `requests` traversal; a byte-offset cursor from the old file journal is refused by
+        name, and the caller restarts from :meth:`task_snapshot`.
         """
         now = self._clock()
         reference = str(ref or "")
@@ -381,9 +319,8 @@ class ReadLayer(ProtocolBoundary):
     def head_view(self, ref: str, run_id: str) -> dict[str, Any]:
         """A read-only view of one of the card's local-pty heads: its terminal's tail and its journal.
 
-        `run_id` has to be one the card recorded -- the dispatcher's current worker or reviewer run,
-        or a launch its own history names -- and any other is not found, whatever it looks like. Past
-        that, nothing refuses: every source is read under a guard and a dead one is said as such
+        `run_id` must be one the card recorded (current worker or reviewer run, or a launch its history
+        names); any other is not found. Each source is then read under a guard
         (:mod:`ummanu.webproto.head_view`).
         """
         now = self._clock()
@@ -415,11 +352,9 @@ class ReadLayer(ProtocolBoundary):
     def _tail(
         self, ref: str, data_dir: Path, *, limit: int, now: float
     ) -> tuple[EventPage, tuple[dict[str, Any], ...] | None]:
-        """The opening page of a card's history, and the whole of it briefly, from one traversal.
+        """The opening page of a card's history, plus the whole history (for head runs), from one traversal.
 
-        A backend that cannot be established takes this section away and nothing else, exactly as an
-        unreadable journal does: a snapshot whose events are unavailable still carries the card, the
-        project and the attempt. The whole history is what the card's head runs are read from.
+        A backend that cannot be established blanks only this section.
         """
         try:
             reader = self._events(data_dir)
@@ -444,8 +379,8 @@ class ReadLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """The card's head runs, each with its state and whether it has a view.
 
-        Read from the dispatcher record and the card's history; when either could not be read the
-        section says so, and still lists what the other one named.
+        Read from the dispatcher record and the card's history; if either is unreadable the section
+        says so and still lists what the other named.
         """
         missing = [
             source.reason or "unreadable"
@@ -478,12 +413,7 @@ class ReadLayer(ProtocolBoundary):
     # -- sections --------------------------------------------------------------------------
 
     def _system_health(self, report: InstanceReport, data_dir: Path, *, now: float) -> dict[str, Any]:
-        """The snapshot's health section: the shared reading when there is one, else collected.
-
-        The shared reading is a :meth:`health_snapshot`, so its section is this same `_health` over
-        the same recorded state -- only collected when the holder's window says so, and dated by
-        its own `source.observed_at` rather than by this snapshot's.
-        """
+        """The health section: the shared :meth:`health_snapshot` reading if there is one, else collected."""
         if self._health_reader is None:
             return self._health(report, data_dir, now=now)
         try:
@@ -501,13 +431,7 @@ class ReadLayer(ProtocolBoundary):
         return section
 
     def _health(self, report: InstanceReport, data_dir: Path, *, now: float) -> dict[str, Any]:
-        """Installation health, straight from `ummanu status`'s own collector.
-
-        Deliberately not a second health model. `collect_status` already owns what "healthy" means
-        for units, heads, sprints, checkpoint lag and host resources, and a dashboard that answered
-        that question differently from `ummanu status --json` would make an operator debug the
-        difference between two answers instead of the installation.
-        """
+        """Installation health from `ummanu status`'s own collector; never a second health model."""
         try:
             status = self._read_status(report)
         except _SOURCE_FAILURES as exc:
@@ -522,13 +446,10 @@ class ReadLayer(ProtocolBoundary):
         return {"source": sources.available(now).to_json(), "status": health_summary(status)}
 
     def _read_status(self, report: InstanceReport) -> dict[str, Any]:
-        """`ummanu status`'s own collector, asked for the host and not for every sprint.
+        """`ummanu status`'s collector for the host only: sprints and runtime panels are read elsewhere.
 
-        The sprints are not read here and the runtime panels are not probed: the snapshot's own
-        `agents` section answers liveness from process state, and the sprint protocol
-        (`sprint_reads.sprint_list`) answers the sprints. Reading them here as well is what made a
-        live dashboard read take over ten seconds and carry the full status of every sprint the
-        board has ever held.
+        Liveness comes from the `agents` section and sprints from `sprint_reads.sprint_list`; reading
+        them here made a dashboard read slow.
         """
         if self._status_reader is not None:
             return self._status_reader()
@@ -597,8 +518,7 @@ class ReadLayer(ProtocolBoundary):
         payload = json.loads(self._production_path(data_dir).read_text(encoding="utf-8"))
         records = payload.get("records") if isinstance(payload, dict) else None
         if not isinstance(records, dict):
-            # Reported as an unavailable source, like every other unreadable input here: a state
-            # file whose shape this reader does not recognise proves nothing about the agents.
+            # An unrecognised state file proves nothing about the agents: report the source unavailable.
             raise TypeError("the dispatcher production state carries no records object")
         return {
             reference: DispatcherRecord.from_json(record)
@@ -607,11 +527,9 @@ class ReadLayer(ProtocolBoundary):
         }
 
     def _agents(self, data_dir: Path, *, now: float, projects_by_ref: dict[str, str]) -> dict[str, Any]:
-        """Every head the dispatcher holds, with its liveness taken from process state.
+        """Every head the dispatcher holds, with liveness from process state.
 
-        An unreadable or absent production state is reported as an unavailable source rather than
-        as an empty list: "the dispatcher is running nothing" and "nobody could tell me what the
-        dispatcher is running" are opposite answers for an operator.
+        An unreadable production state is an unavailable source, never an empty list.
         """
         try:
             records = self._records(data_dir)
@@ -734,8 +652,8 @@ def _card_value(card: dict[str, Any] | None) -> dict[str, Any] | None:
     value["waiting_owner"] = waiting_owner(card)
     # The production an operation card touches (`none` included), else null.
     value["touches_production"] = touches_production(card)
-    # The blocks `task show` carries (secretary-1811): the PO session a card was delegated from and
-    # its returns, a wait card's target and outcome, a code card's e2e runs. Null for a card without.
+    # The `task show` blocks: PO delegation origin and returns, wait target/outcome, e2e runs,
+    # PO execution. Null when absent.
     for block in ("origin", "wait", "e2e", "po_execution"):
         value[block] = card.get(block) if isinstance(card.get(block), dict) else None
     return value
@@ -744,10 +662,8 @@ def _card_value(card: dict[str, Any] | None) -> dict[str, Any] | None:
 def _work(card: dict[str, Any] | None) -> dict[str, Any]:
     """The worker's report, the reviewer's verdict, the observer's decision, and the result.
 
-    All four come from the card's own marker comments, which are the protocol's public record of
-    those events (`ummanu.board.events.render_marker_comment`) -- not from a transcript, a pane
-    or a log file. A card with no marker of a kind has null there, which is different from an empty
-    body: the round has not produced that answer yet.
+    All from the card's marker comments (`ummanu.board.events.render_marker_comment`), never a
+    transcript, pane or log. Null means the round has not produced that answer yet.
     """
     empty = {"worker_report": None, "review_verdict": None, "decision": None, "outcome": None}
     if card is None:
@@ -778,9 +694,7 @@ def _work(card: dict[str, Any] | None) -> dict[str, Any]:
         latest = {"kind": family, "value": value, "at": entry["at"]}
     result = dict(empty)
     result.update(found)
-    # The result of the work is the last answer the card has, whatever kind it is: a decision on an
-    # assessed card, a verdict on one in review, a report on one still being validated. `terminal`
-    # is the only thing that says the card is finished, and it comes from the card's state.
+    # The outcome is the card's latest answer of any kind; only `terminal` (state `done`) says it is finished.
     if latest is not None:
         latest["terminal"] = _text(card.get("state")) == "done"
         result["outcome"] = latest
@@ -805,11 +719,8 @@ def _text(value: Any) -> str:
 
 # -- installation health, summarized ---------------------------------------------------------------
 
-#: The severity every problem code carries, and the whole of the colour rule. A lamp is red if any
-#: red problem is present, otherwise yellow if any yellow one is, otherwise green -- so the table
-#: below, and not the wording of a sentence, is what decides a colour. A code is classified once,
-#: here, beside the place the code is minted, so a problem added to :func:`health_summary` meets
-#: this table in the same file rather than landing in a colour by accident.
+#: The severity of every problem code, and the whole colour rule: red if any red problem, else yellow
+#: if any yellow, else green. Codes are classified here, beside :func:`health_summary`, never by wording.
 PROBLEM_SEVERITY: dict[str, str] = {
     # Red: the installation cannot be trusted to run work, or its health is unknown.
     "unit.failed": "red",
@@ -821,8 +732,7 @@ PROBLEM_SEVERITY: dict[str, str] = {
     # The snapshot branch holds a commit the exporter did not make (`snapshot_foreign_commits`).
     "snapshot.foreign_commit": "red",
     "secret_store.key_unusable": "red",
-    # Minted by the reader of this summary rather than here: health that could not be read at all
-    # is not an absence of problems, so it carries a code of its own and the gravest severity.
+    # Minted by the reader of this summary: unreadable health is not an absence of problems.
     "health.unreadable": "red",
     "doctor.collection_stuck": "red",
     # Yellow: the installation is running, but a person should look.
@@ -838,8 +748,7 @@ CHECKPOINT_RPO_EXCEEDED = "checkpoint.rpo_exceeded"
 #: The code `ummanu doctor` reports foreign history on the snapshot branch under, classified above.
 SNAPSHOT_FOREIGN_COMMIT = "snapshot.foreign_commit"
 
-#: What an unclassified code is worth. Deliberately not green: a problem somebody adds tomorrow and
-#: forgets to classify must show as something to look at, never as a clean installation.
+#: Deliberately not green: a code nobody classified must still show as something to look at.
 UNCLASSIFIED_SEVERITY = "yellow"
 
 
@@ -860,18 +769,12 @@ def lamp_colour(findings: Iterable[dict[str, Any]]) -> str:
 
 
 def health_summary(status: dict[str, Any]) -> dict[str, Any]:
-    """The operator's view of `collect_status`: what is wrong, said by name, over the same facts.
+    """The operator's view of `collect_status`: what is wrong, by name, over the same facts.
 
-    Not a second health model. Every problem listed here is a field the collector already marks as
-    a failure -- a unit that failed or is missing, a paused pipeline, a checkpoint that is blocked
-    or last failed, a store finding -- restated in a sentence, so a dashboard header can say "ok" or
-    name what needs attention without a person reading the whole status document. No threshold is
-    invented here: a value the collector reports without judging it (free disk, load, lag) is
-    carried as data for the page to show, and is not a problem until the collector says so.
-
-    Every problem also carries a stable code (:data:`PROBLEM_SEVERITY`), which is what a colour is
-    decided from: a sentence is for a person to read and may be reworded, a code may not. `state`
-    and `problems` keep their shape and meaning, so a reader written against them is unaffected.
+    Not a second health model: every problem is a field the collector already marks as a failure,
+    restated as a sentence plus a stable code (:data:`PROBLEM_SEVERITY`) that decides the colour.
+    Unjudged values (disk, load, lag) are carried as data, never turned into problems here.
+    `state` and `problems` keep their shape.
     """
     installation = _object(status.get("installation"))
     host = _object(status.get("host"))
@@ -935,8 +838,7 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
     return {
         "state": "ok" if not problems else "attention",
         "problems": problems,
-        # Added beside `problems` rather than instead of it: the same sentences, in the same order,
-        # each with the code a colour is decided from. See :data:`PROBLEM_SEVERITY`.
+        # The same sentences as `problems`, in order, each with its code (see :data:`PROBLEM_SEVERITY`).
         "findings": findings,
         "colour": lamp_colour(findings),
         "dispatcher": {
