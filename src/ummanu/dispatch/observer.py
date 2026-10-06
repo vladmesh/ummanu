@@ -1144,7 +1144,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
 
 def _timestamp(value: str) -> datetime | None:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
@@ -1653,7 +1653,7 @@ def _observe_observer_wake_progress(record: ObserverRecord, runtime: Any, *, now
             if callable(probe)
             else {"state": "unavailable", "reason": "host has no observer provider-progress probe"}
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
         evidence = {"state": "unavailable", "reason": f"provider-progress probe failed: {exc}"}
     return liveness.observe_provider(evidence, now, head_run=record.head_run)
 
@@ -2228,7 +2228,7 @@ def _abandon_launch_intent(runtime: Any, ref: str, record: ObserverRecord) -> No
         return
     try:
         committed = audit.committed_event(request_id) is not None
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         committed = False
     if committed:
         record.launches = max(record.launches, attempt)
@@ -2488,7 +2488,7 @@ def _launch_observer(
                 "head": record.head,
                 "reason": "retiring observer wake-liveness outcome could not be persisted",
             }
-    if _head_may_be_running(record):
+    if _head_may_be_running(record):  # noqa: SIM102 - the inner stop is commented on its own
         # The pid is dead but the pane it ran in can still be there, the shell left behind that
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
         # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
@@ -2869,7 +2869,7 @@ def _write_launch_intent(
     try:
         workspace = record.workspace or str(runtime.host.observer_workspace(ref))
         pid_file = record.pid_file or str(runtime.host.observer_pid_file(ref))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
         # Without the workspace the head could not be found again, and without the pid file its
         # liveness could not be read: an intent that names neither is not worth launching against.
         return f"{type(exc).__name__}: {exc}"
@@ -2886,7 +2886,7 @@ def _write_launch_intent(
                 pid_file=pid_file,
                 run_id=run_id,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
             return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
         preflight_run = candidate.to_json()
     record.head = head
@@ -2916,7 +2916,7 @@ def _write_launch_intent(
     try:
         put_observers(payload, observers)
         runtime.production_state.save(payload)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
         for name, value in previous.items():
             if name == "delivery":
                 record.delivery = ObserverDelivery.from_json(value)
@@ -3358,7 +3358,7 @@ def _persist_quietly(runtime: Any, payload: dict[str, Any], observers: dict[str,
     put_observers(payload, observers)
     try:
         runtime.production_state.save(payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         return False
     return True
 
@@ -3379,7 +3379,7 @@ def commit_staged_event(runtime: Any, request_id: str) -> bool:
         if event is None:
             return False
         audit.append(request_id, event)
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         return False
     return True
 
@@ -3400,7 +3400,7 @@ def commit_event(runtime: Any, event: dict[str, Any] | None) -> bool:
         # pass writes the same line this commit would have.
         audit.stage(request_id, event)
         audit.append(request_id, event)
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         return False
     return True
 

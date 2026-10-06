@@ -1750,7 +1750,7 @@ def run_memory_propose(args: argparse.Namespace) -> int:
             pinned=args.pinned,
             supersedes=_split_csv(args.supersedes),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("propose", exc)
     _print_json(
         {
@@ -1778,7 +1778,7 @@ def run_memory_commit(args: argparse.Namespace) -> int:
             actor=args.actor,
             propose_id=args.propose_id,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("commit", exc)
     _print_memory_write_result(result)
     return 0
@@ -1801,7 +1801,7 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
             tags=_split_csv(args.tags),
             pinned=args.pinned,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("supersede", exc)
     _print_memory_write_result(result)
     return 0

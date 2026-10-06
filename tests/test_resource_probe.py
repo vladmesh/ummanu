@@ -80,6 +80,7 @@ class CliContractTests(unittest.TestCase):
             text=True,
             timeout=60,
             cwd=ROOT,
+            check=False,
             env={"PYTHONPATH": str(ROOT / "src"), "PATH": "/usr/bin:/bin"},
         )
         self.assertEqual(completed.returncode, 2, completed.stderr)

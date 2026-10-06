@@ -114,7 +114,7 @@ class FakePoStore:
             )
 
     def bind_sprint_session_request(self, request_id: str, sprint_ref: str, session_id: str) -> None:
-        from ummanu.po.store import sprint_session_fingerprint, SPRINT_SESSION
+        from ummanu.po.store import SPRINT_SESSION, sprint_session_fingerprint
         board = self._open()
         fingerprint = sprint_session_fingerprint(sprint_ref)
         with board.lock:

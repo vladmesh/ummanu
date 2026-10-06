@@ -17,8 +17,8 @@ set, so a test never writes into a real Codex home.
 
 from __future__ import annotations
 
-import time
 import subprocess
+import time
 
 
 def unscoped_test_launch(session, seq, argv, files, environment, spec):

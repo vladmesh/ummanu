@@ -128,7 +128,7 @@ def _run_subprocess_probe(
     shown = display_command or _display_command(command)
     timeout = timeout_s or PROBE_TIMEOUT_S
     try:
-        p = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=env)
+        p = subprocess.run(command, capture_output=True, text=True, timeout=timeout, env=env)  # noqa: PLW1510
     except subprocess.TimeoutExpired as e:
         return ProbeResult(
             False,
@@ -250,7 +250,7 @@ def _http_failure_status(status: int | None) -> str:
 def _read_http_error_body(err: urllib.error.HTTPError) -> bytes | None:
     try:
         return err.read()
-    except Exception:
+    except Exception:  # noqa: BLE001 - a probe that cannot run is a failure, never an exception
         return None
 
 

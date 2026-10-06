@@ -277,7 +277,7 @@ class PoService:
             try:
                 if not self.runner.orphaned_turns():
                     return
-            except Exception:  # noqa: BLE001 - an unreadable store also needs bounded recovery
+            except Exception:  # noqa: BLE001, S110 - an unreadable store also needs bounded recovery
                 pass
             self._recovered = False
             if self._next_recovery <= time.monotonic():

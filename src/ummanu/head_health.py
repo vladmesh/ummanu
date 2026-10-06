@@ -178,7 +178,7 @@ def run_probe(resource: str, probe: str, now: float, *, timeout: float | None = 
         return HeadReadiness(resource, PROBE_TIMED_OUT, f"probe timed out after {int(limit)}s", now)
     except OSError as exc:
         return HeadReadiness(resource, PROBE_BROKEN, f"probe could not be started: {type(exc).__name__}", now)
-    except Exception as exc:  # a broken probe must not turn into a false resource outage
+    except Exception as exc:  # a broken probe must not turn into a false resource outage  # noqa: BLE001 - a broken probe must not turn into a false outage
         return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
     if completed.returncode == 0:
         return HeadReadiness(resource, "ready", "probe succeeded", now)

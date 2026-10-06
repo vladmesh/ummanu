@@ -29,6 +29,10 @@ from typing import ClassVar
 from unittest import mock
 from urllib.parse import urlencode
 
+from tests.fakes.upgrade import FakeUnitInstaller
+from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
+from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints, sprint_client
+from tests.web_fakes import Recording
 from ummanu import upgrade
 from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
 from ummanu.host import (
@@ -40,11 +44,13 @@ from ummanu.host import (
     render_systemd_unit,
 )
 from ummanu.host_apply import UnitProcessIdentity
-from ummanu.po import client as po_client
-from ummanu.po import runner as po_runner
-from ummanu.po import service as po_service
-from ummanu.po import store as po_store
-from ummanu.po import token as po_token
+from ummanu.po import (
+    client as po_client,
+    runner as po_runner,
+    service as po_service,
+    store as po_store,
+    token as po_token,
+)
 from ummanu.po.client import PoServiceClient, ServiceUnavailable
 from ummanu.po.queue import PoQueue, QueueError, queue_dir
 from ummanu.po.runner import (
@@ -56,7 +62,16 @@ from ummanu.po.runner import (
     still_running,
 )
 from ummanu.po.service import PoService, ServiceStartError, listening
-from ummanu.po.sprints import BoardSprintSessions, SprintRecord, WhyDocument, find_why_documents, why_document_label
+from ummanu.po.sprints import (
+    BoardSprintSessions,
+    SprintRecord,
+    WhyDocument,
+    find_why_documents,
+    why_document_label,
+)
+from ummanu.runtime.head.local_pty.client import LocalPtySpawnError
+from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.memory import MemoryScopeError
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import (
     NOTHING_WRITTEN,
@@ -70,13 +85,6 @@ from ummanu.webproto.errors import (
 )
 from ummanu.webproto.po_auth import PoTokenLayer
 from ummanu.webproto.po_ops import PoLayer
-from tests.fakes.upgrade import FakeUnitInstaller
-from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
-from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints, sprint_client
-from tests.web_fakes import Recording
-from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-from ummanu.runtime.head.local_pty.client import LocalPtySpawnError
-from ummanu.runtime.head.memory import MemoryScopeError
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = {"claude": ("opus",), "codex": ("gpt-5.6-sol",)}
@@ -242,8 +250,8 @@ class CommentDeliveryTests(ServiceFixture):
                 raise RuntimeError("comments temporarily unreadable")
             return native_call(method, **params)
 
-        first_request = dict(op="submit", session_id=session, text="Which cut ships?",
-                             request_id="native-first-50", source="dispatcher", card=facts)
+        first_request = {"op": "submit", "session_id": session, "text": "Which cut ships?",
+                             "request_id": "native-first-50", "source": "dispatcher", "card": facts}
         with mock.patch.object(client, "call", side_effect=unread):
             refused = service.handle(first_request)
         self.assertEqual(refused["error"]["code"], "unavailable")
@@ -307,6 +315,7 @@ class CommentDeliveryTests(ServiceFixture):
 
     def facts(self, count: int, *, sprint: str = "sprint:50") -> dict:
         from dataclasses import replace
+
         from ummanu.board.production_rights import card_facts
 
         row = self.sprints.records.get(sprint, SprintRecord(sprint, "open", None))
@@ -339,8 +348,8 @@ class CommentDeliveryTests(ServiceFixture):
             raise QueueError("lost acknowledgement after durable queue write")
 
         with mock.patch.object(service, "pump"), mock.patch.object(service.queue, "put", side_effect=lost_ack):
-            answer = service.handle(dict(op="submit", session_id=session, text="Which cut ships?",
-                                         request_id="first-50", source="dispatcher", card=facts))
+            answer = service.handle({"op": "submit", "session_id": session, "text": "Which cut ships?",
+                                         "request_id": "first-50", "source": "dispatcher", "card": facts})
         self.assertEqual(answer["error"]["code"], "outcome_unknown")
         queued = service.queue.find("first-50")
         self.assertEqual(queued.metadata["comment_position"], 50)
@@ -380,8 +389,8 @@ class CommentDeliveryTests(ServiceFixture):
 
     def test_refusal_and_rendering_do_not_consume_comments_and_pending_acceptance_does(self) -> None:
         from tests.po_card_fakes import card
-        from ummanu.web import pages
         from ummanu.dispatch.po_cards import _po_record, render_po_card_input
+        from ummanu.web import pages
 
         self.sprints = FakeSprints({"sprint:50": None})
         service = self.service(run=False, sprints=self.sprints)
@@ -390,8 +399,8 @@ class CommentDeliveryTests(ServiceFixture):
         self.facts(50)
         render_po_card_input(task, {"comments": list(self.sprints.records["sprint:50"].comments)},
                              _po_record(task, "render-only").po_submission)
-        refused = service.handle(dict(op="submit", session_id=session, text="Refused", request_id="refused",
-                                      source="dispatcher", card={**self.facts(50), "kind": "operation"}))
+        refused = service.handle({"op": "submit", "session_id": session, "text": "Refused", "request_id": "refused",
+                                      "source": "dispatcher", "card": {**self.facts(50), "kind": "operation"}})
         self.assertFalse(refused["ok"])
         self.assertEqual(refused["error"]["code"], "unavailable")
         self.assertIsNone(service.queue.find("refused"))
@@ -1276,7 +1285,8 @@ class RecoveryProgressTests(ServiceFixture):
                 session_id = self.session(service, request_id=f"session-{action}")
                 original = service.runner._turn_launcher
                 processes = []
-                def launch(session, seq, *args):
+                def launch(session, seq, *args, original=original, processes=processes, service=service,
+                           session_id=session_id, action=action):
                     process = original(session, seq, *args)
                     if seq == 1:
                         processes.append(process)
@@ -1287,7 +1297,7 @@ class RecoveryProgressTests(ServiceFixture):
                 service.runner._turn_launcher = launch
                 clean = threading.Event()
                 attempted = threading.Event()
-                def cleanup(_owner, _record):
+                def cleanup(_owner, _record, attempted=attempted, clean=clean, processes=processes):
                     attempted.set()
                     if not clean.is_set():
                         raise MemoryScopeError("temporary cleanup failure")
@@ -1303,13 +1313,14 @@ class RecoveryProgressTests(ServiceFixture):
                         # Stop the launched, scoped process so this case reaches the injected
                         # cleanup failure rather than the legitimate no-running-turn result.
                         self.reached_gate(session_id, 1)
-                        eventually(lambda: ScopedHeadLifecycle.from_run_dir(
+                        eventually(lambda service=service, session_id=session_id: ScopedHeadLifecycle.from_run_dir(
                             service.runner._scope_dir(session_id, 1)) is not None,
                             "the running turn's cleanup scope was not persisted")
                         with self.assertRaises(MemoryScopeError):
                             service.stop_turn(session_id=session_id, seq=1)
                     eventually(attempted.is_set, "cleanup was not attempted")
-                    eventually(lambda: not service._recovered, "cleanup failure did not schedule recovery")
+                    eventually(lambda service=service: not service._recovered,
+                               "cleanup failure did not schedule recovery")
                     service.submit(session_id=session_id, text="next", request_id=f"next-{action}")
                     self.assertEqual(self.turns(session_id)[0].state, po_store.RUNNING)
                     clean.set()
@@ -1908,10 +1919,10 @@ class SprintSessionTests(ServiceFixture):
                         self.assertEqual(seed.metadata["transition"]["measured_bytes"], 32769)
 
     def test_busy_and_pending_input_defer_until_the_next_idle_resolve(self):
-        service, sprints, old = self.budget_resolver()
+        service, _sprints, old = self.budget_resolver()
         self.history(service, old, "x" * 32769)
         turn, _ = service.store.claim_turn(old, "running", lambda seq: "/unused")
-        request = dict(sprint_ref="sprint:1", request_id="resolve")
+        request = {"sprint_ref": "sprint:1", "request_id": "resolve"}
         self.assertEqual(service.sprint_session(**request)["session_id"], old)
         service.queue.put(session_id=old, text="frozen card", request_id="pending", source="dispatcher")
         service.store.complete_turn(old, turn.seq, "done")
@@ -1965,7 +1976,7 @@ class SprintSessionTests(ServiceFixture):
         self.assertEqual(service.queue.pending(new)[0].metadata["transition"]["threshold_bytes"], 262144)
 
     def test_too_small_seed_budget_refuses_and_absent_sources_are_explicit(self):
-        service, sprints, old = self.budget_resolver(threshold=1)
+        service, _sprints, old = self.budget_resolver(threshold=1)
         self.history(service, old, "above")
         answer = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "tiny"})
         self.assertEqual(answer["error"]["code"], "validation")
@@ -2061,9 +2072,9 @@ class SprintSessionTests(ServiceFixture):
                                 "seed": (service.queue, "put"), "comment": (sprints, "comment"),
                                 "record": (sprints, "record_po_session")}[boundary]
                 original = getattr(target, name)
-                def write_then_fail(*args, **kwargs):
-                    original(*args, **kwargs)
-                    raise RuntimeError("lost reply after " + boundary)
+                def write_then_fail(*args, _original=original, _boundary=boundary, **kwargs):
+                    _original(*args, **kwargs)
+                    raise RuntimeError("lost reply after " + _boundary)
                 with mock.patch.object(target, name, side_effect=write_then_fail), mock.patch.object(service, "pump"):
                     failed = service.handle({"op": "sprint_session", "sprint_ref": "sprint:1", "request_id": "first-" + boundary})
                 self.assertEqual(failed["error"]["code"], "outcome_unknown")

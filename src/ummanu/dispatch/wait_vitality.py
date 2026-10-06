@@ -16,48 +16,55 @@ from typing import Any
 
 from ummanu.board import owner_events
 from ummanu.dispatch import attempt_accounting
-from ummanu.dispatch.head_vitality import SnapshotSource as _SnapshotSource
-from ummanu.dispatch.head_vitality import snapshots_from_status as _snapshots_from_status
+from ummanu.dispatch.head_vitality import (
+    SnapshotSource as _SnapshotSource,
+    snapshots_from_status as _snapshots_from_status,
+)
 from ummanu.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS as _DEFAULT_VITALITY_THRESHOLDS,
+    VitalityVerdict,
+    interrupted_command_note as _interrupted_command_note,
+    reduce_vitality as _reduce_vitality,
 )
-from ummanu.dispatch.head_vitality_episode import VitalityVerdict
-from ummanu.dispatch.head_vitality_episode import interrupted_command_note as _interrupted_command_note
-from ummanu.dispatch.head_vitality_episode import reduce_vitality as _reduce_vitality
 from ummanu.dispatch.head_vitality_guard import (
     assert_destructive_allowed as _assert_destructive_allowed,
 )
 from ummanu.dispatch.head_vitality_policy import (
     DEFAULT_RECOVERY_THRESHOLDS as _DEFAULT_RECOVERY_THRESHOLDS,
+    RUNG_ESCALATED as _RUNG_ESCALATED,
+    RecoveryIntent as _RecoveryIntent,
+    RecoveryThresholds as _RecoveryThresholds,
+    apply_rung_state as _apply_rung_state,
+    decide_recovery as _decide_recovery,
 )
-from ummanu.dispatch.head_vitality_policy import RUNG_ESCALATED as _RUNG_ESCALATED
-from ummanu.dispatch.head_vitality_policy import RecoveryIntent as _RecoveryIntent
-from ummanu.dispatch.head_vitality_policy import RecoveryThresholds as _RecoveryThresholds
-from ummanu.dispatch.head_vitality_policy import apply_rung_state as _apply_rung_state
-from ummanu.dispatch.head_vitality_policy import decide_recovery as _decide_recovery
 from ummanu.dispatch.helpers import scrub_host_output
 from ummanu.dispatch.host import DESTRUCTIVE_VERDICTS
-from ummanu.dispatch.launch import STAGE_RESPAWN, WORKER_ROLE
-from ummanu.dispatch.launch import clear_launch_intent as _clear_launch_intent
-from ummanu.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
+from ummanu.dispatch.launch import (
+    STAGE_RESPAWN,
+    WORKER_ROLE,
+    clear_launch_intent as _clear_launch_intent,
+    launch_intent_unwritable as _launch_intent_unwritable,
+)
 from ummanu.dispatch.provider_failure import provider_failure_outcome as _provider_failure_outcome
 from ummanu.dispatch.review import start_review as _start_review
-from ummanu.dispatch.state import DispatcherRecord
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
-from ummanu.dispatch.state import request_token as _request_token
-from ummanu.dispatch.types import STOPPED_BY_WATCHDOG, HostError
-from ummanu.dispatch.watchdog import HeadRunIdentityMismatch as _HeadRunIdentityMismatch
-from ummanu.dispatch.watchdog import guard_head_run_identity as _guard_head_run_identity
-from ummanu.dispatch.watchdog import heartbeat_is_live_match as _heartbeat_is_live_match
-from ummanu.dispatch.watchdog import initial_output_stall_seconds as _initial_output_stall_seconds
-from ummanu.dispatch.watchdog import reset_idle as _reset_idle
-from ummanu.dispatch.watchdog import stall_seconds as _stall_seconds
-from ummanu.dispatch.watchdog import (
-    suspension_response_window_seconds as _suspension_response_window_seconds,
+from ummanu.dispatch.state import (
+    DispatcherRecord,
+    attempt_request_id as _attempt_request_id,
+    request_token as _request_token,
 )
-from ummanu.dispatch.watchdog import wait_cycle_token as _wait_cycle_token
-from ummanu.dispatch.worker_launch import bring_up_worker_head as _bring_up_worker_head
+from ummanu.dispatch.types import STOPPED_BY_WATCHDOG, HostError
+from ummanu.dispatch.watchdog import (
+    HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
+    guard_head_run_identity as _guard_head_run_identity,
+    heartbeat_is_live_match as _heartbeat_is_live_match,
+    initial_output_stall_seconds as _initial_output_stall_seconds,
+    reset_idle as _reset_idle,
+    stall_seconds as _stall_seconds,
+    suspension_response_window_seconds as _suspension_response_window_seconds,
+    wait_cycle_token as _wait_cycle_token,
+)
 from ummanu.dispatch.worker_launch import (
+    bring_up_worker_head as _bring_up_worker_head,
     write_worker_relaunch_intent as _write_worker_relaunch_intent,
 )
 from ummanu.dispatch.worker_report import prompt_worker_report as _prompt_worker_report

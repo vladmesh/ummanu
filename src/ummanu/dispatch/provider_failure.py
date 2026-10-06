@@ -36,11 +36,13 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.dispatch.helpers import safe_one_line
-from ummanu.dispatch.launch import STAGE_RESPAWN, WORKER_ROLE
-from ummanu.dispatch.launch import clear_launch_intent as _clear_launch_intent
-from ummanu.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
-from ummanu.dispatch.state import DispatcherRecord
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
+from ummanu.dispatch.launch import (
+    STAGE_RESPAWN,
+    WORKER_ROLE,
+    clear_launch_intent as _clear_launch_intent,
+    launch_intent_unwritable as _launch_intent_unwritable,
+)
+from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from ummanu.dispatch.types import STOPPED_BY_PROVIDER_FAILURE, HostError
 from ummanu.dispatch.watchdog import reset_idle as _reset_idle
 from ummanu.head_health import HeadChoice, failure_status, failure_until, until_text
