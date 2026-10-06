@@ -89,16 +89,19 @@ failures or preserved work cannot starve newer intents.
 Supported maintenance surfaces:
 
 ```
-ummanu instance-maintenance --instance INSTANCE --residue-inventory
-ummanu instance-maintenance --instance INSTANCE --residue-replay --limit 20
+ummanu instance-maintenance --instance INSTANCE --residue-inventory [--project PROJECT]
+ummanu instance-maintenance --instance INSTANCE --residue-replay --project PROJECT \
+    --target TARGET --manifest DIGEST [--target TARGET --manifest DIGEST ...]
 ```
 
 Inventory reads registered repositories/worktrees and local pipeline refs,
 including archived cards absent from active records. It reports exact tips,
 publication, ancestry and ownership/preservation reasons without adopting by glob
-or touching Git. Replay first captures branch-only archived/Done residue with
-matching project/card and audited dispatcher claim, then settles at most the
-requested bound (1..100). Old workspaces missing exact attempt/head evidence,
+or touching Git. Replay settles only the named targets of one project (1..20),
+each at the manifest digest the inventory reported, and adopts branch-only
+archived/Done residue only with matching project/card and audited dispatcher
+claim; the runbook is in [Operations](OPERATIONS.md#git-residue-read-the-manifest-then-replay-exact-targets).
+Old workspaces missing exact attempt/head evidence,
 foreign/detached worktrees and legacy Orca placements remain preserved and
 reported. All repository types use the same contract, including instance-local
 pipeline branches. A local remote-tracking ref is publication evidence; replay

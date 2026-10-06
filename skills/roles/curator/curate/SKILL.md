@@ -1,6 +1,6 @@
 ---
 name: curate
-description: The memory curator's procedure — pull durable facts out of fresh transcripts, deduplicate them, and write them into the canon through `curator memory-write`. Launched by a session-manager automation in the curator's workspace. The curator is the first plugin of the ummanu runtime.
+description: The memory curator's procedure — pull durable facts out of fresh transcripts, deduplicate them, and write them into the canon through `curator memory-write`. Launched hourly by the `ummanu-curator` systemd timer in the curator's workspace. The curator is the first plugin of the ummanu runtime.
 ---
 
 # Memory curator

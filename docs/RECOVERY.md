@@ -639,7 +639,7 @@ A clean host is recovered with two commands, `bootstrap` then `recover`, whateve
 is `install` with `--recover`).
 
 ```bash
-python3 -m pip install '.[memory]'
+python3 -m pip install -e '.[memory]'
 sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
   --bootstrap-credential-file TOKEN_FILE
 sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \

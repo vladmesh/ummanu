@@ -1,6 +1,6 @@
 ---
 name: retro
-description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the board's first column. It implements nothing itself and moves no card to Ready. The third plugin of the ummanu runtime, launched daily by a session-manager automation in the retro workspace.
+description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the board's first column. It implements nothing itself and moves no card to Ready. The third plugin of the ummanu runtime, launched daily by the `ummanu-retro` systemd timer in the retro workspace.
 ---
 
 # Retro — the feedback loop
