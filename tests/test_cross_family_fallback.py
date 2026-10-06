@@ -158,6 +158,40 @@ class MidTurnTests(unittest.TestCase):
         self.assertEqual(found.kind, KIND_QUOTA)
         self.assertIsNone(claude_turn_failure([*records, {"type": "user", "message": {"content": "again"}}]))
 
+    def test_a_screen_that_only_mentions_a_limit_is_no_refusal(self) -> None:
+        # The review of round 2: the CLIs' own warnings, agent prose and tool output name a limit
+        # too, and none of them is the provider refusing. Strings from Claude Code 2.1.291 and Codex.
+        negatives = {
+            "claude warning": [
+                "\u25cf Done: report filed.",
+                "",
+                "Approaching your 5-hour usage limit \u2014 Claude will wrap up the current task",
+                ">",
+            ],
+            "codex warning": ["Heads up, you have less than 10% of your weekly limit left", "\u203a "],
+            "agent prose": [
+                "\u2022 Reviewed issue:ee68af70: the reviewer hit the Codex usage limit and was read as a stall.",
+                "",
+                "\u203a ...",
+            ],
+            "quoted refusal": ["\u25cf Codex said: " + CODEX_USAGE_LIMIT, ">"],
+            "grep hit": ['src/ummanu/runtime/provider_errors.py:52: "usage limit",'],
+            "api error in prose": ["\u25cf The log shows API Error: 401 from yesterday", ">"],
+        }
+        for name, lines in negatives.items():
+            with self.subTest(name):
+                self.assertIsNone(screen_turn_failure(lines))
+
+    def test_the_clis_own_refusal_lines_are_read(self) -> None:
+        positives = {
+            "claude weekly": ["  \u23bf  You've hit your weekly limit \u00b7 resets 1am (UTC)", "", "\u2502 > \u2502"],
+            "claude 5-hour": ["\u23bf  5-hour limit reached \u2219 resets 3pm", ">"],
+            "claude auth": ["  \u23bf  API Error: 401 invalid token \u00b7 Please run /login", ">"],
+        }
+        for name, lines in positives.items():
+            with self.subTest(name):
+                self.assertIsNotNone(screen_turn_failure(lines))
+
     def test_a_codex_screen_shows_its_usage_limit(self) -> None:
         lines = ["", "■ " + CODEX_USAGE_LIMIT, "", "› Implement {feature}", ""]
         found = screen_turn_failure(lines)

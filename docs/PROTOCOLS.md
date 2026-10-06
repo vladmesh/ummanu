@@ -1149,7 +1149,11 @@ Sources, read from the role's exact HeadRun, never from the workspace at large:
 - Claude: the run's bound session transcript. The failure is an `isApiErrorMessage` record
   (`apiErrorStatus`, typed `error`) that is the transcript's last user/assistant record. When no
   transcript can be bound, the bottom of the head's PTY screen is read instead, only while the
-  supervisor journal says the head is idle.
+  supervisor journal says the head is idle, and only a line in the CLI's own refusal shape counts:
+  anchored at the line start after the CLI's error glyph, an `API Error`, an auth marker, or a spent
+  quota in the refusal wording with its reset ("try again at/in", "resets"). A warning ("Approaching
+  your 5-hour usage limit", "Heads up, you have less than 10% of your weekly limit left"), agent prose or
+  tool output that mentions a limit is never a refusal.
 - PO turns: the CLI's own output (`po.runner.po_provider_error`): Claude's `is_error` result object,
   Codex's `error`/`turn.failed` events, then the stderr tail.
 

@@ -491,22 +491,46 @@ def claude_turn_failure(records: Iterable[Any]) -> ProviderError | None:
 #: How many bottom screen lines may hold the error line the turn ended on (error, blank, prompt box).
 SCREEN_ERROR_WINDOW = 12
 
+# What may stand before a refusal on its own line: whitespace and the glyph the CLI draws an error
+# under (Claude's `⎿`, Codex's `■`), nothing else. Agent prose is drawn under `●`/`•`, tool output and
+# a grep hit start with anything at all; none of them is the CLI refusing.
+_SCREEN_ERROR_LEAD_RE = re.compile(r"^[\s⎿■✗✘×⚠│]*")
+# The refusals themselves, anchored at the start of that line. A spent quota counts only in the
+# CLIs' refusal wording, with the reset they name: Codex's "You've hit your usage limit ... try again
+# at/in ...", Claude's "You've hit your <window> limit · resets ..." / "<window> limit reached ∙
+# resets ..." / "... limit reached|<epoch>". Their warnings ("Approaching your 5-hour usage limit",
+# "Heads up, you have less than 10% of your weekly limit left") never match (ummanu-108 review).
+_SCREEN_REFUSALS = (
+    re.compile(r"^api error\b", re.IGNORECASE),
+    re.compile(r"^(?:error:\s*)?you[’']ve hit your usage limit\b.*\btry again (?:at|in)\b", re.IGNORECASE),
+    re.compile(r"^you[’']ve hit your [a-z0-9 -]{0,24}limit\b.*\bresets?\b", re.IGNORECASE),
+    re.compile(
+        r"^(?:claude ai )?(?:usage|weekly|daily|monthly|session|opus|\d+-hour) limit reached\b"
+        r".*(?:\bresets?\b|\|\d{10})",
+        re.IGNORECASE,
+    ),
+    *(re.compile(rf"^{re.escape(marker)}", re.IGNORECASE) for marker in _CLAUDE_AUTH_MARKERS),
+)
+
+
+def screen_refusal_text(line: str) -> str:
+    """The refusal a screen line shows, with its glyph removed, or "" when it shows none."""
+    text = _SCREEN_ERROR_LEAD_RE.sub("", _ANSI_RE.sub("", line or "")).strip()
+    return text if any(pattern.search(text) for pattern in _SCREEN_REFUSALS) else ""
+
 
 def screen_turn_failure(lines: Iterable[str]) -> ProviderError | None:
-    """The provider error the bottom of a Claude head's screen shows, or None.
+    """The provider error the bottom of an idle head's screen shows, or None.
 
-    Last resort when no session record is readable. Only lines just above the prompt in Claude
-    Code's own error shape count, so earlier output is not mistaken for the turn's end.
+    Last resort when no session record is readable. Only a line in one of the CLIs' own refusal
+    shapes counts (`screen_refusal_text`), so a warning, the agent's prose or tool output that merely
+    mentions a limit is never read as a refusal, and earlier output is not mistaken for the turn's end.
     """
     visible = [line.strip() for line in lines if line.strip()]
     for line in reversed(visible[-SCREEN_ERROR_WINDOW:]):
-        lowered = line.lower()
-        quota = is_quota_text(line)
-        if "api error" not in lowered and not quota and not any(
-            marker in lowered for marker in _CLAUDE_AUTH_MARKERS
-        ):
+        text = screen_refusal_text(line)
+        if not text:
             continue
-        text = line[lowered.find("api error") :] if "api error" in lowered else line.lstrip("⎿ ").strip()
         found = classify_provider_error(text)
         if found is not None:
             return found.stamped(time.time(), "pty-screen")

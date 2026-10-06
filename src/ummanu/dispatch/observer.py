@@ -2552,6 +2552,7 @@ def _launch_observer(
             request_id,
             {
                 "head": head,
+                **({"launched_head": launch_head} if launch_head != head else {}),
                 "launches": attempt,
                 **(
                     {
@@ -2576,7 +2577,9 @@ def _launch_observer(
             head=head,
             reason=f"observer lifecycle event could not be staged: {exc}",
         )
-    intent = _write_launch_intent(runtime, payload, observers, ref, record, head, attempt)
+    intent = _write_launch_intent(
+        runtime, payload, observers, ref, record, head, attempt, launch_head=launch_head
+    )
     if intent is not None:
         # State that cannot be written means no head: a launch nobody can record is exactly how a
         # sprint ends up with two of them.
@@ -2856,8 +2859,15 @@ def _write_launch_intent(
     record: ObserverRecord,
     head: str,
     attempt: int,
+    *,
+    launch_head: str = "",
 ) -> str | None:
     """Fix this launch on disk before the host is called. Returns the failure, or None on success.
+
+    `head` is the declared profile the record keeps; `launch_head` is the profile actually raised
+    when a provider fallback substituted one (ummanu-108). The preflight run, and so the wake
+    liveness episode bound to it, are the launched profile's: an episode bound to a head that is
+    not running would reject every provider observation of the one that is.
 
     The workspace and pid file are asked of the host rather than taken from its answer: they are
     path arithmetic over the sprint reference, and the answer is exactly what a tick that dies
@@ -2879,7 +2889,7 @@ def _write_launch_intent(
     if callable(attest):
         try:
             candidate = attest(
-                head,
+                launch_head or head,
                 role=OBSERVER_ROLE,
                 workspace=workspace,
                 task_ref=head_ops.TaskRef.sprint(ref),
@@ -2890,6 +2900,7 @@ def _write_launch_intent(
             return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
         preflight_run = candidate.to_json()
     record.head = head
+    record.fallback_head = launch_head if launch_head and launch_head != head else ""
     record.workspace = workspace
     record.pid_file = pid_file
     record.head_run = preflight_run or {"run_id": run_id}
@@ -2924,6 +2935,8 @@ def _write_launch_intent(
                 record.wake_liveness = ObserverWakeLiveness.from_json(value)
             else:
                 setattr(record, name, value)
+        # Written only when set, so a previous record without it had none.
+        record.fallback_head = str(previous.get("fallback_head") or "")
         return f"{type(exc).__name__}: {exc}"
     return None
 
