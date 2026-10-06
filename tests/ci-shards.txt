@@ -129,7 +129,7 @@ integration-heads tests/test_live_telemetry.py
 runtime-component tests/test_local_pty_head_runtime.py
 runtime-component tests/test_local_pty_dispatcher_launch.py
 runtime-component tests/test_local_pty_supervisor.py
-unit tests/test_local_pty_progress.py
+runtime-component tests/test_local_pty_progress.py
 unit tests/test_local_pty_screen.py
 runtime-component tests/test_runtime_deadline_contract.py
 integration-memory tests/test_memory_acceptance.py
@@ -166,10 +166,10 @@ unit tests/test_runtime_env.py
 component tests/test_docker_guard.py
 component tests/test_memory_token_launch.py
 unit tests/test_observer_voice.py
-unit tests/test_dispatcher_runtime_isolation.py
+component tests/test_dispatcher_runtime_isolation.py
 unit tests/test_live_root_project.py
 integration-dispatcher tests/test_dispatcher_audit_backend.py
-unit tests/test_runtime_provenance.py
+packaging tests/test_runtime_provenance.py
 unit tests/test_role_skills.py
 unit tests/test_recovery_host_steps.py
 unit tests/test_skill_commands.py
@@ -224,7 +224,7 @@ integration-recovery tests/test_snapshot_recovery_postgres.py
 unit tests/test_instance_maintenance.py
 component tests/test_owned_cleanup.py
 integration-board tests/test_status.py
-unit tests/test_measurement_script.py
+component tests/test_measurement_script.py
 integration-board tests/test_web_command_protocol.py
 integration-board tests/test_web_pause_protocol.py
 integration-board tests/test_web_read_protocol.py

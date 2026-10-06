@@ -28,6 +28,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests import source_trees
 from ummanu.runtime.head import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
@@ -460,7 +461,7 @@ def _terminal_vectors(tree: ast.AST) -> list[tuple[int, str]]:
     and the element before it is not required to be a constant at all.
     """
     found: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
+    for node in source_trees.walk(tree):
         if not isinstance(node, (ast.List, ast.Tuple)):
             continue
         words = [
@@ -488,7 +489,7 @@ def _pane_screen_reads(tree: ast.AST) -> list[int]:
     """
     prose = _docstring_nodes(tree)
     lines = [lineno for lineno, sub in _terminal_vectors(tree) if sub == "read"]
-    for node in ast.walk(tree):
+    for node in source_trees.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
             continue
         if id(node) in prose:
@@ -507,7 +508,7 @@ def _docstring_nodes(tree: ast.AST) -> set[int]:
     an AST at all — what is left is the literals a call is actually built out of.
     """
     out: set[int] = set()
-    for node in ast.walk(tree):
+    for node in source_trees.walk(tree):
         if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         body = getattr(node, "body", [])
@@ -549,7 +550,7 @@ class SeamGrepTests(unittest.TestCase):
         for path in _module_paths():
             if path.relative_to(REPO_ROOT) in _SEAM_EXCEPTIONS:
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             for lineno, sub in _terminal_vectors(tree):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno} (terminal {sub})")
         self.assertEqual(offenders, [], f"orca terminal argument vectors in src/ummanu: {offenders}")
@@ -571,16 +572,16 @@ class SeamGrepTests(unittest.TestCase):
         )
         other_cli = "run(['claude', '-p', 'ping', '--model', 'haiku'])"
 
-        self.assertEqual([sub for _, sub in _terminal_vectors(ast.parse(literal))], ["send"])
-        self.assertEqual([sub for _, sub in _terminal_vectors(ast.parse(from_variable))], ["send"])
-        self.assertEqual(_terminal_vectors(ast.parse(other_cli)), [])
+        self.assertEqual([sub for _, sub in _terminal_vectors(source_trees.parse(literal))], ["send"])
+        self.assertEqual([sub for _, sub in _terminal_vectors(source_trees.parse(from_variable))], ["send"])
+        self.assertEqual(_terminal_vectors(source_trees.parse(other_cli)), [])
 
     def test_no_module_outside_the_seam_reads_a_pane_screen(self) -> None:
         offenders = []
         for path in _module_paths():
             if path.relative_to(REPO_ROOT) in _SEAM_EXCEPTIONS:
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             for lineno in _pane_screen_reads(tree):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
         self.assertEqual(offenders, [], f"pane screen reads in src/ummanu: {offenders}")
@@ -589,13 +590,13 @@ class SeamGrepTests(unittest.TestCase):
         """Named, so a screen read is caught even when the vector around it is assembled
         elsewhere — and prose about `terminal read` still passes, which the modules that own the
         call depend on."""
-        self.assertEqual(_pane_screen_reads(ast.parse("go(['terminal', 'read', '--terminal', t])")), [1])
-        self.assertEqual(_pane_screen_reads(ast.parse("cmd = 'orca terminal read --terminal ' + t")), [1])
-        self.assertEqual(_pane_screen_reads(ast.parse('"""We used to run terminal read."""')), [])
+        self.assertEqual(_pane_screen_reads(source_trees.parse("go(['terminal', 'read', '--terminal', t])")), [1])
+        self.assertEqual(_pane_screen_reads(source_trees.parse("cmd = 'orca terminal read --terminal ' + t")), [1])
+        self.assertEqual(_pane_screen_reads(source_trees.parse('"""We used to run terminal read."""')), [])
         # The subcommand is a whole word: a message about a terminal readiness probe is prose
         # about a different call, and flagging it would push the dispatcher into rewording errors.
         self.assertEqual(
-            _pane_screen_reads(ast.parse("raise HostError('terminal readiness unreadable')")), []
+            _pane_screen_reads(source_trees.parse("raise HostError('terminal readiness unreadable')")), []
         )
 
     def test_no_module_is_excused_from_the_seam_at_all(self) -> None:
@@ -611,15 +612,15 @@ class SeamGrepTests(unittest.TestCase):
         scheduler = REPO_ROOT / "src" / "ummanu" / "automations" / "runtime" / "dispatch.py"
         self.assertIn(scheduler, _module_paths())
         source = scheduler.read_text(encoding="utf-8")
-        self.assertEqual(_terminal_vectors(ast.parse(source)), [])
-        self.assertEqual(_pane_screen_reads(ast.parse(source)), [])
+        self.assertEqual(_terminal_vectors(source_trees.parse(source)), [])
+        self.assertEqual(_pane_screen_reads(source_trees.parse(source)), [])
 
     def test_no_module_outside_the_seam_builds_a_head_command(self) -> None:
         offenders = []
         for path in _module_paths():
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             prose = _docstring_nodes(tree)
-            for node in ast.walk(tree):
+            for node in source_trees.walk(tree):
                 if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                     continue
                 if id(node) in prose:
@@ -628,6 +629,10 @@ class SeamGrepTests(unittest.TestCase):
                     if literal in node.value:
                         offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno} ({literal})")
         self.assertEqual(offenders, [], f"head command assembly outside the head package: {offenders}")
+
+
+def tearDownModule() -> None:
+    source_trees.clear()
 
 
 if __name__ == "__main__":
