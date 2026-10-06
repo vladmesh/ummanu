@@ -25,8 +25,8 @@ raises out of `broad_modules` and the run fails loudly; it never falls back to a
 
 One property is load-bearing and holds by construction rather than by an assertion here: this file
 lives inside the ``tests`` package, so ``python -m tests.broad`` imports ``tests/__init__.py`` — and
-with it every hermetic default the suite depends on (Orca discovery, the throwaway Codex home, the
-throwaway pipeline state dir) — before this module's body runs, and therefore before any
+with it every hermetic default the suite depends on (the throwaway temporary root, the throwaway
+Codex home, the throwaway pipeline state dir) — before this module's body runs, and therefore before any
 ``tests.test_*`` module can be imported. That is exactly the invariant secretary-748 was about, and
 ``tests/test_health_suite_command.py`` proves it for this entry point.
 """
