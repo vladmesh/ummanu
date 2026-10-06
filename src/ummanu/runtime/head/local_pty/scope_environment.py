@@ -4,6 +4,7 @@ The gated launcher is the sole producer. sudo and a synchronous system scope pre
 stdin; the trusted bootstrap leaves it unopened until setpriv has dropped privileges.
 The runtime reader consumes it once and replaces stdin with /dev/null. The kernel
 owns cleanup on exec refusal, cancellation and crashes, including before admission.
+See docs/HEAD_SCOPES.md "Prepared environment across privilege acquisition".
 """
 
 from __future__ import annotations
@@ -84,12 +85,11 @@ def read_environment(fd: int = 0) -> dict[str, str]:
 
 
 def privileged_argv(arguments: list[str]) -> list[str]:
-    """Use the shared argv contract, including the deployed 64c42d7 producer.
+    """Rebuild the privileged argv from the shared argv contract.
 
-    That producer passes sudo -E and an env PYTHONPATH prefix. Neither controls
-    privileged execution here. Interpreter, source, tools and native identity come
-    from this newly executed launcher, while scope properties and head argv retain
-    their existing caller contract. No environment value grants admission authority.
+    Also accepts the older producer form (sudo -E and an `env PYTHONPATH=` prefix); neither
+    controls privileged execution. Interpreter, bootstrap and identity come from this launcher;
+    scope properties and head argv keep the caller's contract. No environment value grants admission.
     """
     args = list(arguments)
     if args[:4] == ["sudo", "-n", "-E", "systemd-run"]:

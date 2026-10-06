@@ -1,14 +1,10 @@
-"""What a prompt delivery into a live interactive head left behind, as values a record can keep.
+"""Shared vocabulary for what a prompt delivery into a live interactive head left behind.
 
 The delivery itself belongs to the head backend (`local_pty_head` and its supervisor). This module
-is the vocabulary every reader of a delivery shares: the stages a delivery can reach, the readiness
-and pre-delivery states a refusal can name, `DeliveryEvidence` as it is persisted beside a head,
-and the one derivation of whether the composer accepted the prompt. Durable records written by the
-Orca pane delivery (removed in secretary-1725) carry the same fields, so they read back unchanged.
-
-It lives in `runtime` because both sides need it and only one may import the other: the
-dispatcher already reads this package, and the triggered-agents tick cannot read `ummanu`
-back. Nothing here knows about boards, roles or sessions, and nothing here reaches a terminal.
+holds the delivery stages, readiness and pre-delivery states, persisted `DeliveryEvidence` and the
+one receipt derivation; pane-era records carry the same fields and read back unchanged. Pure: no
+boards, roles, sessions or terminals. See `docs/PROTOCOLS.md` "A settled head is not a delivered
+prompt" and "A live head is not a delivered pointer".
 """
 
 from __future__ import annotations
@@ -19,8 +15,8 @@ from typing import Any
 
 from .agent_prompt_transport import AGENT_PROMPT_TRANSPORT_VERSION, TRANSPORT_POLICY
 
-# What one delivery attempt achieved. `accepted` means the head took the prompt into a turn while
-# the caller's own proof of delivery is expected to arrive later, outside this call.
+# One delivery attempt's result. `accepted`: the head took the prompt into a turn and the caller's
+# own proof of delivery arrives later.
 DELIVERY_CONFIRMED = "confirmed"
 DELIVERY_ACCEPTED = "accepted"
 
@@ -31,44 +27,37 @@ STAGE_ENTER_ACCEPTED = "enter_accepted"
 STAGE_TURN_OBSERVED = "turn_observed"
 STAGE_ACKNOWLEDGED = "acknowledged"
 
-# What the composer was holding, as an answer that carries no prompt text. `unknown` is a pane
-# whose screen could not be read or has no composer marker on it; the delivery then falls back to
-# readiness alone, which is what this path had before the fingerprint existed.
+# The composer's content, without prompt text. `unknown`: screen unreadable or no composer marker;
+# delivery then relies on readiness alone.
 COMPOSER_UNKNOWN = "unknown"
 COMPOSER_EMPTY = "empty"
 
-# Whether a head could take a prompt. `blocked` is a head held in a dialog: not ready for a prompt,
-# and not working on one either. `unknown` is a probe that failed, which is not a busy head.
+# `blocked`: held in a dialog, neither ready nor working. `unknown`: a failed probe, not a busy head.
 READINESS_READY = "ready"
 READINESS_BUSY = "busy"
 READINESS_BLOCKED = "blocked"
 READINESS_UNKNOWN = "unknown"
-# Evidence states for a refused readiness wait: a stale terminal binding and an unavailable
-# transport, which recovery must not confuse with a head that was found busy.
+# Refused-wait states (stale terminal binding, unavailable transport); recovery must not read them as busy.
 READINESS_UNAVAILABLE = "unavailable"
 READINESS_STALE_HANDLE = "stale_handle"
 
-# What the screen showed *before* the head could take a prompt at all: states in which a TUI is
-# quiescent yet swallows every keystroke, so "ready" and "sendable" disagree.
+# Screen states before a prompt can be taken: the TUI is quiescent yet swallows keystrokes.
 PRE_DELIVERY_NONE = ""
-# Codex's `Update available!` modal (issue:e4d6f307).
+# Codex's `Update available!` modal.
 PRE_DELIVERY_UPDATE_MODAL = "update-modal"
-# `Starting MCP servers` / `tab to queue message`: the composer queues what it is given instead of
-# submitting it (issue:2fdac531). Only ever observed after the write, in `pre_delivery_after`.
+# `Starting MCP servers` / `tab to queue message`: input is queued, not submitted. Only ever observed
+# after the write, in `pre_delivery_after`.
 PRE_DELIVERY_STARTING = "starting"
 # A screen shaped like a dialog that was not recognised. Nothing is typed at it.
 PRE_DELIVERY_UNKNOWN_DIALOG = "unknown-dialog"
 
-# What could be established about sendability before the first byte was written. There is no
-# `established` value: nothing a terminal asserts before a write proves a live, idle composer, so
-# a pre-write answer is either a recognised dialog or this, and the post-write receipt is what a
-# delivery rests on.
+# Pre-write sendability. There is no `established`: nothing before a write proves an idle composer,
+# so a delivery rests on the post-write receipt.
 SENDABILITY_UNESTABLISHED = "unestablished"
 SENDABILITY_DIALOG_REFUSED = "dialog-refused"
 
-# Whether the composer accepted this pointer. `unobserved` is a carrier that never reached the
-# delivery boundary at all — a bring-up that failed before a prompt was sent — and it is neither
-# a receipt nor a refusal.
+# `unobserved`: the carrier never reached the delivery boundary (bring-up failed before a prompt); it
+# is neither a receipt nor a refusal.
 DELIVERY_RECEIPT_ACCEPTED = "accepted"
 DELIVERY_RECEIPT_REFUSED = "refused"
 DELIVERY_RECEIPT_UNOBSERVED = "unobserved"
@@ -77,13 +66,9 @@ DELIVERY_RECEIPT_UNOBSERVED = "unobserved"
 def delivery_receipt_state(carrier: Any) -> str:
     """Whether the composer accepted the pointer this evidence was taken for.
 
-    The one question the rest of the product asks of a delivery record, asked in one place so that
-    a launch, a recovery and an adoption cannot answer it differently. A live pid, a writable pane
-    and Orca's own `accepted`/`bytesWritten` are deliberately not consulted: they are what used to
-    be mistaken for delivery.
-
-    `unobserved` is a carrier the delivery boundary never produced — a bring-up that failed before
-    a prompt existed — and only evidence carrying a `stage` is the boundary's own.
+    The one predicate launch, recovery and adoption share. A live pid, a writable pane and a
+    transport's `accepted`/`bytesWritten` are never consulted. Only evidence carrying a `stage` is the
+    boundary's own; anything else is `unobserved`.
     """
     evidence = getattr(carrier, "evidence", carrier)
     if hasattr(evidence, "to_json"):
@@ -91,7 +76,7 @@ def delivery_receipt_state(carrier: Any) -> str:
     if not isinstance(evidence, dict) or "stage" not in evidence:
         return DELIVERY_RECEIPT_UNOBSERVED
     if bool(evidence.get("payload_left_in_composer")):
-        # Positive, prompt-specific proof that this pointer is still unsent. Determinate.
+        # Prompt-specific proof the pointer is still unsent: determinate, outranks a confirmed turn.
         return DELIVERY_RECEIPT_REFUSED
     if bool(evidence.get("turn_confirmed")):
         return DELIVERY_RECEIPT_ACCEPTED
@@ -100,10 +85,9 @@ def delivery_receipt_state(carrier: Any) -> str:
 
 @dataclass
 class DeliveryEvidence:
-    """What one delivery attempt saw, in a form that can be persisted beside the head.
+    """What one delivery attempt saw, persistable beside the head.
 
-    Everything here is an identifier, a bounded classification or a digest. The prompt is represented
-    by its size and its hash and never by its text: these records outlive the head they were taken on.
+    Only identifiers, bounded classifications and digests: the prompt is kept as size and hash, never text.
     """
 
     handle: str = ""
@@ -111,16 +95,12 @@ class DeliveryEvidence:
     stage: str = STAGE_NONE
     payload_bytes: int = 0
     payload_sha256: str = ""
-    # How the head was given its task. `nudge-file` is the protocol rule: the pane received a
-    # bounded line naming a document and the content never entered the terminal, so `payload_bytes`
-    # here is the size of that line rather than the size of the task. The path is kept because it
-    # is the run's own pointer to what the head was asked to do; the document's text is not, here
-    # or anywhere else in this record. An empty mode is a delivery that carried its own content.
+    # `nudge-file`: the pane got a bounded line naming a document, so `payload_bytes` is that line's
+    # size; the path is kept, the document text never. Empty: the delivery carried its own content.
     delivery_mode: str = ""
     document_path: str = ""
-    # The public terminal-send adapter that carried the prompt.  The body and its submission are
-    # intentionally recorded independently: neither write acceptance is proof the head began a
-    # turn, which remains the later confirmation stages below.
+    # The terminal-send adapter used. Body and submit writes are recorded separately; neither proves a
+    # turn began, which only the later confirmation stages do.
     transport_version: str = AGENT_PROMPT_TRANSPORT_VERSION
     adapter: str = ""
     framing: str = ""
@@ -132,17 +112,14 @@ class DeliveryEvidence:
     submit_bytes_written: int = 0
     submit_count: int = 0
     turn_confirmed: bool = False
-    # `accepted`/`bytesWritten` as Orca answered the send, kept because they are what used to be
-    # mistaken for delivery and are now one stage of it.
+    # The transport's own `accepted`/`bytesWritten` answer: one stage of delivery, not proof of it.
     send_accepted: bool = False
     bytes_written: int = 0
     # One attempt is one Enter: the first send and every re-entry after it.
     attempts: int = 0
     resends: int = 0
-    # The typed outcome of a readiness wait that failed before any pane probe or write could be
-    # made.  Empty historical evidence is deliberately not busy; `delivery_readiness_state`
-    # reads it as unknown.  The normal before/after fields continue to describe probes made once
-    # a wait succeeded.
+    # Typed outcome of a readiness wait that failed before any probe or write. Empty (older records)
+    # reads as unknown, not busy, via `delivery_readiness_state`.
     readiness_state: str = ""
     readiness_before: str = ""
     readiness_after: str = ""
@@ -151,28 +128,22 @@ class DeliveryEvidence:
     payload_left_in_composer: bool = False
     modal_before: bool = False
     modal_after: bool = False
-    # Which pre-delivery state the pane was found in, if any, and how the known modal was settled.
-    # These three are the modal-resolution half of the telemetry and say nothing about receipt.
+    # Modal-resolution telemetry; says nothing about receipt.
     pre_delivery_before: str = PRE_DELIVERY_NONE
     pre_delivery_after: str = PRE_DELIVERY_NONE
-    # What the boundary could establish about sendability before it wrote the first byte. Never
-    # "established": on this backend nothing asserts a live idle composer pre-write, so this says
-    # either that a dialog refused the write or that sendability was not established and the
-    # receipt is what the delivery rests on. A reader must not mistake the second for a proof.
+    # Never "established": either a dialog refused the write, or sendability was unestablished and the
+    # receipt is what the delivery rests on; the latter is not a proof.
     sendability: str = ""
     modal_resolution: str = ""
     modal_answers: int = 0
-    # The provider-binding half: the caller's own criterion — what the provider wrote down about
-    # the turn — answered yes. `turn_confirmed` beside it is what the pane showed. Neither implies
-    # the other, and "delivered" is not one bit.
+    # Provider binding: the caller's criterion (what the provider recorded) answered yes.
+    # `turn_confirmed` is what the pane showed; neither implies the other.
     provider_bound: bool = False
     provider_source_state: str = ""
     cursor_before: str = ""
     cursor_after: str = ""
     cursor_moved: bool = False
-    # Whether those cursors are Orca's own or the tail digest that stands in when a runtime
-    # answers a read without one: a reader of this evidence must not mistake the second for the
-    # first when it asks why a turn was or was not seen.
+    # True: the cursors are the backend's own; False: a tail digest stood in for them.
     cursor_from_backend: bool = False
     reason: str = ""
 
@@ -215,8 +186,7 @@ class DeliveryEvidence:
             "modal_answers": self.modal_answers,
             "provider_bound": self.provider_bound,
             "provider_source_state": self.provider_source_state,
-            # Derived, and kept in the record so a reader of a persisted receipt does not have to
-            # re-derive it: modal resolution, delivery receipt and provider binding, side by side.
+            # Derived; persisted so readers need not re-derive it.
             "delivery_receipt": self.receipt,
             "cursor_before": self.cursor_before,
             "cursor_after": self.cursor_after,
@@ -227,11 +197,7 @@ class DeliveryEvidence:
 
     @property
     def receipt(self) -> str:
-        """Whether the composer accepted the pointer, as `delivery_receipt_state` answers it.
-
-        The three stored fields are handed over rather than `self`, because `to_json` publishes
-        this derivation and asking it for the whole record here would be a cycle.
-        """
+        """`delivery_receipt_state` over the three stored fields (not `self`, to avoid a `to_json` cycle)."""
         return delivery_receipt_state(
             {
                 "stage": self.stage,
@@ -246,9 +212,7 @@ class DeliveryEvidence:
             return cls()
         fields = cls()
         for name, value in payload.items():
-            # Only the stored fields are restored. `to_json` also publishes derived keys, and a
-            # record that ever carried one under the property's own name must be inert here rather
-            # than an AttributeError raised on a read-only property.
+            # Only stored fields are restored; derived keys such as `delivery_receipt` are ignored.
             if name not in cls.__dataclass_fields__:
                 continue
             current = getattr(fields, name)
@@ -294,11 +258,10 @@ def payload_fingerprint(prompt: str) -> tuple[int, str]:
 
 
 def delivery_readiness_state(carrier: Any) -> str:
-    """Return the typed readiness state carried by a failed delivery, conservatively.
+    """The typed readiness state carried by a failed delivery, conservatively.
 
-    A persisted evidence record predating `readiness_state` did not observe this refusal, so it is
-    unknown rather than busy: only a current failed `tui-idle` wait that parsed one of Orca's working
-    answers earns the no-replacement treatment.
+    Anything not explicitly busy, blocked, unavailable or stale-handle (including records predating
+    `readiness_state`) is unknown, never busy.
     """
     evidence = getattr(carrier, "evidence", carrier)
     if hasattr(evidence, "to_json"):

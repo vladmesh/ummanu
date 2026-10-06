@@ -1,7 +1,8 @@
 """Conservative protection against accidental Docker execution in worker/reviewer heads.
 
 Native Docker resolves endpoints and container metadata. All targets are checked before the
-single destructive call, which uses full IDs. This is not a malicious-head sandbox.
+single destructive call, which uses full IDs. This is not a malicious-head sandbox. See
+docs/HEAD_RUNTIME.md "Worker and reviewer Docker guard".
 """
 
 from __future__ import annotations

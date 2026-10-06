@@ -1,15 +1,9 @@
-"""Watermark + lock, shared by every triggered-agent. Each agent gets its own state dir.
+"""Watermark and run lock shared by every triggered agent, one state dir per agent.
 
-Watermark: an agent remembers how far it has already processed each source (curator:
-lines past a JSONL count). The watermark advances ONLY after the agent's durable output
-is committed (two-phase), so a crash mid-run re-processes rather than silently dropping.
-
-Lock: one lockfile guards a run. Orca already serializes runs of one automation; this is
-a backstop against a manual run overlapping a scheduled one. It is an `flock`, so a killed
-run cannot keep it; the file records the holder's pid and start time for diagnostics.
-
-State root is `TA_STATE` or `~/ummanu-data/automation-state`, then `/<agent>`.
-a watermark file.
+The watermark records how far each source was processed and advances only after the agent's
+durable output is committed, so a crash re-processes rather than drops. The lock is an `flock` (a
+killed run cannot keep it); the file records holder pid and start time for diagnostics. State root
+is `TA_STATE` or `~/ummanu-data/automation-state`, then `/<agent>`.
 """
 
 from __future__ import annotations
@@ -28,7 +22,7 @@ from typing import NoReturn
 
 STATE_ROOT = Path(os.environ.get("TA_STATE", str(Path.home() / "ummanu-data" / "automation-state")))
 
-# Shared precheck protocol: 0 dispatches; explicit skip/defer codes are clean; all others fail.
+# Precheck exit codes: 0 dispatches; the explicit skip/defer codes are clean; all others fail.
 # Skip is not 1, Python's uncaught-exception exit code.
 PRECHECK_SKIP = 100
 
@@ -37,21 +31,20 @@ PRECHECK_BOARD_UNREACHABLE = 101
 
 
 class BoardUnavailable(RuntimeError):
-    """The board store is not reachable yet: nothing was read or written.
+    """The board store is not reachable yet; nothing was read or written.
 
-    A precheck reports it as PRECHECK_BOARD_UNREACHABLE, a deferred tick, rather than as its own
-    failure; any other exception means the precheck itself is broken.
+    A precheck reports it as PRECHECK_BOARD_UNREACHABLE (a deferred tick), not as its own failure.
     """
+
 
 # Durable settlement is in progress; exit cleanly without racing live-head cleanup.
 PRECHECK_DEFERRED = 102
 
 
 def append_line_durable(path: Path, line: str) -> None:
-    """Append one complete line to an append-only journal: `O_APPEND`, one `write()`, then `fsync`.
+    """Append one line to an append-only journal: `O_APPEND`, one `write()`, then `fsync`.
 
-    The file is never read or replaced, so lines that other writers append concurrently survive.
-    A failure raises; a short write is a failure too.
+    Never reads or replaces the file, so concurrent appends survive. A short write raises.
     """
     if "\n" in line:
         raise ValueError("a journal line must not contain a newline")
@@ -72,11 +65,10 @@ def publish_state_atomic(
     *,
     removes: list[Path] | None = None,
 ) -> None:
-    """Publish one triggered-agent state transition or restore every changed path.
+    """Publish one triggered-agent state transition, or restore every changed path on failure.
 
-    Curator baseline settlement updates its watermark and audit as one local transaction.
-    Staging each replacement first lets an audit-write failure leave the prior watermark and
-    pending record intact; a later replace or removal failure restores every affected file.
+    Replacements are staged first, so a failed write leaves the prior files intact, and a failed
+    replace or removal restores every affected file.
     """
     removals = removes or []
     paths = [path for path, _ in writes] + removals
@@ -156,11 +148,10 @@ class AgentState:
         tmp.replace(self.watermark_file)
 
     def load_head_profile(self) -> str | None:
-        """The heads.toml profile id the agent's live terminal was actually launched with, or
-        None if it was never recorded (agent has no `head`, or predates this tracking) — a warm
-        terminal keeps whatever profile it started on and never re-resolves on its own, so
-        idle-reuse needs this to check the resource the terminal is really running against
-        instead of the agent's static preferred head (triggered-agents-275)."""
+        """The heads.toml profile the live terminal was launched with, or None if never recorded.
+
+        A warm terminal keeps its start profile, so idle reuse checks this, not the preferred head.
+        """
         if not self.head_profile_file.is_file():
             return None
         try:
@@ -169,9 +160,7 @@ class AgentState:
             return None
 
     def save_head_profile(self, profile: str | None) -> None:
-        """Record `profile` as the one the just-(re)spawned terminal is running on. Called after
-        every fresh create / watchdog restart / red-fallback relaunch, never after a plain warm
-        reuse (the terminal's profile hasn't changed)."""
+        """Record the profile a freshly (re)spawned terminal runs on; never called on warm reuse."""
         self.ensure_dir()
         tmp = self.head_profile_file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps({"profile": profile}, ensure_ascii=False), encoding="utf-8")
@@ -187,17 +176,12 @@ class AgentState:
             return None
 
     def next_terminal_generation(self) -> int:
-        """Monotonic per-agent counter, bumped once per real terminal create and stamped into that
-        terminal's own self-teardown trailer (triggered-agents-445, PR #95 review B2, round 4).
+        """Bump and return the per-agent terminal generation, stamped into a terminal's teardown trailer.
 
-        Never reset — not even when a terminal is torn down. A finalizer running after its head
-        exits must be able to tell its OWN completed terminal apart from a replacement a concurrent
-        tick created in the meantime: it compares the generation baked into its trailer against the
-        generation recorded for the workspace's current terminal (`load_terminal_generation`). A
-        counter that reset on teardown could hand a replacement the same number a late finalizer is
-        still carrying, which would let that finalizer's blanket `terminal stop` kill the live
-        replacement. Kept in its own file so tearing the handle down (which unlinks
-        terminal_handle.json) never rolls the counter back."""
+        Never reset, and kept apart from terminal_handle.json so teardown cannot roll it back: a late
+        finalizer compares its trailer's generation with `load_terminal_generation` and must never
+        match, and so stop, a replacement terminal.
+        """
         cur = 0
         if self.terminal_generation_file.is_file():
             try:
@@ -214,11 +198,10 @@ class AgentState:
         return nxt
 
     def load_terminal_generation(self) -> int | None:
-        """The generation stamped on the workspace's CURRENT live terminal (the one recorded in
-        terminal_handle.json), or None if none is recorded. `dispatch.finalize` compares the
-        generation baked into its own trailer against this to decide whether the live terminal is
-        still its own (safe to stop) or a replacement a concurrent tick already put in its place
-        (must not be touched) — triggered-agents-445, PR #95 review B2, round 4."""
+        """The generation of the current terminal in terminal_handle.json, or None.
+
+        A finalizer stops the live terminal only when this equals its own trailer's generation.
+        """
         if not self.terminal_handle_file.is_file():
             return None
         try:
@@ -227,12 +210,11 @@ class AgentState:
             return None
 
     def load_terminal_created_at(self) -> float | None:
-        """When `_create_terminal` last actually spawned a process for this agent (epoch
-        seconds), or None if never recorded — the marker `dispatch.run`'s "no terminal" branch
-        checks before creating another one, since a terminal it just created may not be visible
-        in `terminal list` yet (triggered-agents-445, PR #95 review B2): a second dispatch landing
-        in that visibility gap must not read "no terminal" as "nothing was ever spawned" and
-        create a duplicate."""
+        """When this agent's terminal was last actually spawned (epoch seconds), or None.
+
+        Guards the gap before a new terminal shows in `terminal list`, so a second dispatch does not
+        read "no terminal" as "never spawned" and create a duplicate.
+        """
         if not self.terminal_handle_file.is_file():
             return None
         try:
@@ -243,22 +225,13 @@ class AgentState:
     def save_terminal_handle(
         self, handle: str | None, created_at: float | None = None, generation: int | None = None
     ) -> None:
-        """Record the terminal handle from the latest fresh spawn.
+        """Record the terminal handle from the latest spawn (Codex may retitle its tab, so titles
+        alone cannot identify the singleton).
 
-        Codex can rename its tab away from the explicit `triggered-agent:<name>` title after
-        startup, so title matching alone is not stable enough for singleton reuse.
-
-        `created_at` (epoch seconds) is set only by `_create_terminal` at the moment it actually
-        spawns a process — a plain warm-reuse call (the terminal already existed and is just being
-        re-confirmed as the survivor) passes none, which drops any previously recorded timestamp:
-        by the time reuse runs the terminal is already confirmed visible, so there is nothing left
-        for `load_terminal_created_at`'s visibility-gap check to guard.
-
-        `generation` is the monotonic id from `next_terminal_generation`, recorded only for an
-        ephemeral agent's fresh create so `dispatch.finalize` can tell whether the workspace's live
-        terminal is still the one its own trailer belongs to (triggered-agents-445, PR #95 review
-        B2, round 4). A `handle=None` call tears the record down (finalize after a confirmed
-        teardown); the monotonic counter in its own file is deliberately left untouched."""
+        `created_at` is passed only by an actual spawn; warm reuse drops it, since the terminal is
+        then already visible. `generation` comes from `next_terminal_generation` for an ephemeral
+        agent's fresh create. `handle=None` deletes the record but never the generation counter.
+        """
         self.ensure_dir()
         if not handle:
             try:
@@ -276,18 +249,11 @@ class AgentState:
         tmp.replace(self.terminal_handle_file)
 
     def load_head_run(self) -> dict | None:
-        """The `HeadRun` of the head this agent's last tick raised on a backend of this product's
-        own, as that backend's receipt recorded it, or None when no tick has raised one.
+        """The `HeadRun` this agent's last tick raised on a product-owned backend, or None.
 
-        A pane is Orca's to remember and this is not: a `local-pty` head outlives the tick that
-        started it under a supervisor with no session store behind it, so the run id, workspace and
-        spec that reach it again have to be written down here. It is what the next tick hands
-        `LocalPtyHeadRuntime.start`, which is what makes that bring-up a refusal over a head that
-        is still working rather than a second head beside it.
-
-        A record that will not parse is read as no record: a bring-up fenced out by a corrupt file
-        is a role that never goes on duty again, and nothing rewrites this file except the tick
-        that the refusal would be preventing.
+        A `local-pty` head outlives its tick with no session store, so the next tick hands this to
+        `LocalPtyHeadRuntime.start`, which then refuses rather than raising a second head. An
+        unparseable record reads as none, so a corrupt file cannot fence the role off duty forever.
         """
         if not self.head_run_file.is_file():
             return None
@@ -298,11 +264,7 @@ class AgentState:
         return record if isinstance(record, dict) else None
 
     def save_head_run(self, run: dict | None) -> None:
-        """Record the head this tick raised, or forget the one it tore down (`run=None`).
-
-        Two-phase like every neighbour in this directory: a tick that dies mid-write leaves the
-        previous run readable rather than a half-written record the next tick would discard.
-        """
+        """Record the head this tick raised, or forget it (`run=None`); written via temp file and replace."""
         self.ensure_dir()
         if run is None:
             try:
@@ -346,8 +308,7 @@ class AgentState:
             pass
 
     def log_run(self, event: str, **fields: object) -> None:
-        """Append a run-telemetry line to runs.jsonl. Best-effort: a logging failure
-        must never break the run itself, so any error is swallowed."""
+        """Append a run-telemetry line to runs.jsonl; best effort, errors are swallowed."""
         try:
             self.ensure_dir()
             rec = {"ts": datetime.now(UTC).isoformat(), "event": event, **fields}
@@ -358,12 +319,11 @@ class AgentState:
 
     @contextmanager
     def lock(self) -> Iterator[None]:
-        """Exclusive run lock. Raises if another run of this agent holds it.
+        """Exclusive run lock; raises SystemExit if another run of this agent holds it.
 
-        `flock` on the lock file is the mutex: the kernel drops it when the holder dies, so a
-        SIGKILLed run leaves a file but no lock. The pid/start record is diagnostics, and it still
-        refuses a live holder that took the lock without `flock` (the pre-flock bare-pid form).
-        Reclaiming a dead holder's file logs `lock-reclaimed`; a refusal logs `lock-refused`.
+        `flock` is the mutex, dropped by the kernel when the holder dies. The pid/start record is
+        diagnostics, and still refuses a live holder of the legacy bare-pid form without `flock`.
+        Logs `lock-reclaimed` on reclaiming a dead holder's file, `lock-refused` on refusal.
         """
         self.ensure_dir()
         fd = self._acquire_lockfile()
@@ -457,8 +417,8 @@ def _read_lock_record(fd: int) -> dict:
 def _holder_alive(record: dict, written_at: float) -> bool:
     """Whether the recorded holder still runs: the pid exists and is the same process.
 
-    A recorded start time must match. The legacy form has none, so a process that started
-    after the lock file was written is a reused pid rather than the holder.
+    A recorded start time must match; for the legacy form, a process started after the lock file was
+    written is a reused pid.
     """
     pid = record.get("pid")
     if not isinstance(pid, int) or pid <= 0:

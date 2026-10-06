@@ -1,17 +1,10 @@
-"""How anything else addresses a supervised head: start one, then speak to its socket.
+"""Launcher and socket client for supervised heads.
 
-`spawn_head` is the launcher side of the independence property. It starts an intermediate process
-in a new session, that intermediate forks the supervisor and exits, and the launcher reaps the
-intermediate immediately. So the supervisor is never the launcher's child: a dispatcher tick that
-ends — or is killed with its whole process group — leaves the head running and still addressable,
-and there is no descriptor of the launcher's left to turn the supervisor into a zombie.
-
-Readiness is read from the run directory rather than from the pipe of a process that has already
-exited: the socket answers, the journal has `run.started`, and the head has written its own launch
-identity. A refusal on the way up is left behind as `startup.error`, so a launcher can tell "the
-supervisor is still coming up" from "another supervisor already owns this run"; a failure after the
-run was up is `supervisor.error` instead, because a head that ran for an hour and then lost its
-supervisor did not fail to start and must not be described as if it had.
+`spawn_head` starts an intermediate in a new session that forks the supervisor and exits; the
+launcher reaps it at once, so the supervisor is never the launcher's child and survives the
+dispatcher tick (even a killed process group). Readiness is read from the run directory: the
+socket answers, the journal has `run.started`, and the head wrote its launch identity.
+`startup.error` marks a refusal on the way up; `supervisor.error` a failure after the run was up.
 """
 
 from __future__ import annotations
@@ -86,10 +79,9 @@ class HeadHandle:
 
 
 def _supervisor_environment(extra: Mapping[str, str] | None) -> dict[str, str]:
-    """The supervisor imports the product from the checkout this module was loaded from.
+    """Environment for the supervisor, with this checkout's root first on `PYTHONPATH`.
 
-    An ambient `PYTHONPATH` naming another installation is exactly the way a workspace's supervisor
-    would come up running somebody else's code, so this checkout's root goes in front of it.
+    An ambient `PYTHONPATH` naming another installation must not make the supervisor run its code.
     """
     environment = dict(os.environ)
     environment.update(extra or {})
@@ -119,10 +111,10 @@ def spawn_head(
     owner_unit: str = "",
     scope_generation: str = "",
 ) -> HeadHandle:
-    """Bring one head up under a supervisor that outlives this process, and wait until it answers.
+    """Bring one head up under a supervisor that outlives this process; wait until it answers.
 
-    `pid_file` is where the head writes its launch identity when the launcher reads it somewhere
-    other than the run directory's `head.pid`; the supervisor is still the only writer of it.
+    `pid_file` overrides where the head writes its launch identity (default: run dir `head.pid`);
+    the supervisor remains its only writer.
     """
     run_dir = protocol.run_dir_for(root, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -292,12 +284,10 @@ def _after_failed_launch(
 
 
 def _identity_written(pid_file: Path, run_id: str) -> bool:
-    """Whether the head has published its own launch identity yet.
+    """Whether the head has written its launch identity naming this run.
 
-    The heartbeat is written by the head's shell before it `exec`s, so the supervisor's
-    `run.started` can land first. A handle is only honest once the record exists and names this
-    run: until then a reader pointed at the pid file would see a head that is up as one that is
-    not yet written.
+    The heartbeat is written by the head's shell before `exec`, so `run.started` can land first;
+    a handle is only returned once the record exists.
     """
     try:
         record = json.loads(pid_file.read_text(encoding="utf-8"))
@@ -327,10 +317,9 @@ def _answers(socket_path: Path) -> bool:
 
 
 class SupervisorClient:
-    """One connection to one supervisor. Requests are answered in order; attach pushes after that.
+    """One synchronous connection to one supervisor; requests answered in order, attach pushes after.
 
-    Deliberately synchronous and deliberately small: this is the substrate's surface, and the
-    backend that will wear `HeadRuntime` is what turns these answers into receipts.
+    The `HeadRuntime` backend turns these answers into receipts.
     """
 
     def __init__(self, conn: socket.socket) -> None:
@@ -379,18 +368,11 @@ class SupervisorClient:
             self._inbox += chunk
 
     def _refusal_already_sent(self) -> dict[str, Any] | None:
-        """A frame this connection was given before it could be written to, or `None`.
+        """A frame queued before this connection could be written to, or `None`.
 
-        Only ever consulted when a request could not be sent at all. A stream event is not an
-        answer to anything and is skipped, and so is a frame that carries an id: an id names the
-        request it answers, and the request that just failed to be sent is not that one. Only an
-        uncorrelated frame — a connection refused before anything was asked on it, a refusal of
-        bytes too malformed to carry an id — is this caller's news, and it is the whole of it.
-
-        Skipping the correlated ones is the same rule `request` keeps below, kept here as well
-        because this is the one path that reads the queue without having asked anything: without
-        it, an answer to an abandoned earlier request would become this request's answer, which
-        is exactly the desynchronisation the id exists to prevent.
+        Used only when a request could not be sent. Stream events and id-carrying frames (stale
+        answers to abandoned requests) are skipped; only an uncorrelated frame, such as a
+        connection-limit refusal or a malformed-bytes refusal, is returned.
         """
         try:
             while True:
@@ -405,31 +387,20 @@ class SupervisorClient:
             return None
 
     def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Send one request and return *its* answer, discarding anything that answers something else.
+        """Send one request and return its answer, matched by id.
 
-        Three kinds of frame can arrive on this connection, and each is handled by what it is
-        rather than by when it arrived: a pushed stream event, which belongs to `next_event`; the
-        answer to this request, matched by id; and the answer to an earlier request this client
-        stopped waiting for — a timeout, an interrupt — which is discarded and counted here.
-
-        That last case is why the id exists. Without it a stale frame silently becomes the answer
-        to the next question asked, and a connection stays one answer out of step for the rest of
-        its life: a caller asking `status` would be handed the previous `input`'s reply and read a
-        missing `alive` key as a dead head. Nothing in this substrate blocks long enough to make
-        that the normal case any more, but a caller's timeout can fire for reasons of its own, so
-        the recovery is part of the protocol rather than a property of it being fast.
+        Pushed events are skipped (they belong to `next_event`), uncorrelated frames are returned,
+        and answers to earlier abandoned requests are discarded and counted in `stale_frames`, so
+        a caller timeout never leaves the connection one answer out of step.
         """
         self._request_seq += 1
         request_id = self._request_seq
         try:
             self._conn.sendall(protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id}))
         except OSError:
-            # The supervisor may have answered this connection *before* anything was asked on it
-            # and closed it: that is what happens at the connection bound, where the refusal is
-            # written and the socket is let go. A write that then loses the race is `EPIPE`, and
-            # the refusal is still sitting in this end's receive queue. Losing it would turn a
-            # live head at a bound into an exception out of a verb, so the queue is read before
-            # the failure is passed on.
+            # At the connection bound the supervisor writes a refusal and closes before any request,
+            # so this write can fail with `EPIPE` while the refusal waits in the receive queue.
+            # Read it rather than raising out of a verb for a live head.
             refusal = self._refusal_already_sent()
             if refusal is None:
                 raise
@@ -442,23 +413,17 @@ class SupervisorClient:
             if answered == request_id:
                 return frame
             if answered is None:
-                # A frame that answers no particular request: a connection refused before anything
-                # was asked, or a refusal of bytes too malformed to carry an id. It is this
-                # caller's news either way.
+                # Uncorrelated (connection refused, or bytes too malformed to carry an id).
                 return frame
             self.stale_frames += 1
 
     # -- verbs -----------------------------------------------------------------------------
 
     def set_timeout(self, timeout: float) -> None:
-        """Rebound how long one request on this connection may take to be answered.
+        """Set the per-request answer timeout for this connection.
 
-        The connect bound is a bound on reaching a supervisor that has not spoken yet, and it is
-        the right number for that. It is the wrong number for a caller that has since learned how
-        long the thing it is watching may take: a socket left on the connect bound turns a
-        supervisor that is merely slower than that into a supervisor that stopped answering. So the
-        bound is settable, and a caller that knows the substrate's own bound for what it is
-        watching sets it from that rather than from anything of its own.
+        The connect bound suits reaching a silent supervisor, not watching a slow operation; a
+        caller that knows the substrate's bound for what it watches sets it from that.
         """
         self._conn.settimeout(timeout)
 
@@ -468,16 +433,10 @@ class SupervisorClient:
     def send_input(self, data: bytes | str, *, subject: str = "") -> dict[str, Any]:
         """Offer one bounded payload for the head's pty. Oversize is refused, never truncated.
 
-        The answer is about **admission**, and comes back within the supervisor's own tick: `ok`
-        means the payload was taken on and is being written, and it carries the `delivery` — id,
-        size, and the state to ask about later. A refusal names its reason: over the declared limit
-        (with the limit and the actual size), admission closed, the head gone, or another delivery
-        still holding the floor.
-
-        What happened to the bytes afterwards is not in this answer and deliberately so: it is
-        `status()["delivery"]` and the journal's `input.accepted`, both of which count what the
-        head's terminal actually took. `wait_for_delivery` is the convenience for a caller that
-        wants to stand and watch that happen.
+        The answer is about admission, within one supervisor tick: `ok` carries the `delivery`
+        (id, size, state). Refusals: over the limit (with limit and size), admission closed, head
+        gone, or another delivery in flight. What landed is in `status()["delivery"]` and the
+        journal's `input.accepted`; `wait_for_delivery` polls for it.
         """
         payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
         return self.request(
@@ -491,11 +450,10 @@ class SupervisorClient:
         timeout: float = protocol.INPUT_DELIVERY_SECONDS + 5.0,
         poll: float = 0.02,
     ) -> dict[str, Any]:
-        """Ask `status` until the delivery is no longer in flight, and return what became of it.
+        """Poll `status` until the delivery leaves `in_flight`, and return it.
 
-        The waiting is here, in the caller, where it can be given up on: the supervisor is answering
-        every question in the meantime, including this one. A delivery always leaves the in-flight
-        state — it completes, it stalls at its bound, or it fails with the head — so this returns.
+        The wait is caller-side and abandonable; every delivery ends as complete, stalled or
+        failed, so this returns.
         """
         deadline = time.monotonic() + timeout
         while True:
@@ -535,12 +493,7 @@ class SupervisorClient:
         return answer
 
     def next_event(self, timeout: float | None = None) -> dict[str, Any] | None:
-        """The next pushed frame, or `None` when none arrived within `timeout`.
-
-        A reader that cannot tell "nothing was pushed" from "the stream ended" would have to
-        guess, so the two are different values: `None` for the quiet wait, `StopIteration` from
-        `stream` for the end.
-        """
+        """The next pushed frame, or `None` when none arrived within `timeout` or the stream ended."""
         if timeout is not None:
             self._conn.settimeout(timeout)
         while True:
@@ -557,9 +510,9 @@ class SupervisorClient:
             return frame
 
     def stream(self, *, timeout: float | None = None) -> Iterator[dict[str, Any]]:
-        """Yield pushed events for an attached client until the connection ends.
+        """Yield pushed events for an attached client until the connection ends or the head exits.
 
-        Detaching is closing the connection: it is not a message, and it does nothing to the head.
+        Detaching is closing the connection; it does nothing to the head.
         """
         while True:
             frame = self.next_event(timeout)

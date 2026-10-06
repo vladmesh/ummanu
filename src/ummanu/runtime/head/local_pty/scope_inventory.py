@@ -1,8 +1,8 @@
-"""Read-only projection of canonical owners, fenced to a native scope incarnation.
+"""Read-only projection of canonical scope owners, fenced to a native scope incarnation.
 
-This consumes the lifecycle's owner, journal and launch identity. It creates no
-files and acquires only shared locks on existing owner locks. A retained owner
-alone cannot establish that a systemd unit still belongs to that launch.
+Creates no files and takes only shared locks on existing owner locks; a retained owner alone does
+not prove a systemd unit still belongs to that launch. See docs/HEAD_RUNTIME.md "Runtime scopes in
+host reconciliation".
 """
 
 from __future__ import annotations

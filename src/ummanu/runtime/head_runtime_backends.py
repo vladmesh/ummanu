@@ -1,24 +1,11 @@
-"""The one place a head-runtime name becomes a backend object.
+"""The one place a head-runtime name becomes a backend object, and the one reader of that name.
 
-`head_runtimes` holds the closed vocabulary — one name, what an absent one means, and the legacy
-record marker. This module holds the other half: which class that name is, and how to read the name
-off the thing a caller is acting on. They are separate files because the vocabulary is imported by
-`head.command.validate_launch_shape`, which is the check every reader of a registry goes through,
-and that check must stay free of the backends it is validating names against.
-
-Every caller that raises, observes or stops a head reads it: `ummanu.dispatch.host.CommandHostRuntime`
-for the pipeline's heads, the background agents' dispatch for curator, steward and retro,
-`head-status` and the web's product runs. A second copy of either half is a way for one of them to
-raise a head another cannot reach, so there is deliberately one build site and one name reader, and
-both are here.
-
-A durable record written while heads were Orca panes names `orca-legacy`, or nothing. It still
-loads and its name is still read here, but no backend is built for it: `build_head_runtime` refuses
-it with `LegacyHeadRecordError`, by name, and never falls back to `local-pty`.
-
-The dependencies a backend needs are passed in rather than reached for — a run root and the
-product's launch-identity reader — as callables, so naming a backend resolves nothing until it is
-built.
+`head_runtimes` holds the vocabulary; it stays separate so `head.command.validate_launch_shape`
+does not import backends. Every caller that raises, observes or stops a head goes through here, so
+no caller can raise a head another cannot reach. A legacy record (`orca-legacy`, or no name) still
+loads, but `build_head_runtime` refuses it with `LegacyHeadRecordError` and never falls back to
+`local-pty`. Backend dependencies are passed as callables, resolved only on build.
+See docs/HEAD_RUNTIME.md.
 """
 
 from __future__ import annotations
@@ -47,15 +34,10 @@ class LegacyHeadRecordError(UnknownHeadRuntimeError):
 
 
 def head_runtime_name(subject: Any) -> str:
-    """Which backend the thing a lifecycle call was given is held by, as a name.
+    """The backend name of a run, spec, name or None.
 
-    The one reader of `HeadSpec.runtime` outside the spec itself. Every lifecycle site already
-    holds one of three things — the run it is acting on, the spec that run was launched from, or
-    nothing at all — so this takes all three rather than making each caller reach for the same
-    attribute. `None`, and anything that carries no runtime of its own, is read by the record
-    rule: every subject handed here is a head or its record, never a profile — profiles are read
-    through `HeadSpec`, which applies the profile default — and absence in a record has meant
-    `orca-legacy` since before the key existed and goes on meaning it here.
+    The one reader of `HeadSpec.runtime` outside the spec. Subjects are heads or records, never
+    profiles, so absence reads by the record rule (`orca-legacy`).
     """
     if subject is None:
         return RECORD_RUNTIME_WHEN_ABSENT
@@ -66,10 +48,9 @@ def head_runtime_name(subject: Any) -> str:
 
 
 def is_legacy_record(subject: Any) -> bool:
-    """Whether a run, spec or name is a legacy Orca record: it names `orca-legacy`, or nothing.
+    """Whether a run, spec or name is a legacy Orca record (names `orca-legacy`, or nothing).
 
-    The one predicate every reader asks. A legacy record loads and is shown as legacy; it is never
-    launched, delivered to or given a backend.
+    A legacy record loads and is shown, but is never launched, delivered to or given a backend.
     """
     return is_legacy_runtime(head_runtime_name(subject))
 
@@ -82,12 +63,9 @@ def build_head_runtime(
 ) -> Any:
     """Build the backend called `name`.
 
-    An unknown name cannot arrive from a validated registry (`validate_launch_shape` refuses it
-    when the table loads), so reaching this refusal means a record or a caller invented one, and it
-    fails closed by name rather than falling back to a backend the head is not on. A legacy
-    record's name is refused the same way, with its own error: the record is readable, the head it
-    describes was an Orca pane, and nothing here holds one. Callers that keep one instance per name
-    do their own caching around this: a rebuilt runtime would forget the turns it handed out.
+    Unknown and legacy names fail closed by name, never falling back to another backend. Callers
+    that keep one instance per name cache it themselves: a rebuilt runtime forgets its handed-out
+    turns.
     """
     if name == LOCAL_PTY_RUNTIME:
         return LocalPtyHeadRuntime(local_pty_root(), head_process_status=head_process_status)

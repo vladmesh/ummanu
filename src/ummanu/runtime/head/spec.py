@@ -1,15 +1,8 @@
 """`HeadSpec`: one head's launch shape, resolved once and then carried by value.
 
-Every operation in this package has to know the same three things about the head it acts on:
-which adapter drives it, what that adapter is pointed at, and whether its prompt arrives on the
-command line or is delivered into a live session afterwards. The adapter is *required* here and a
-profile without one fails to load: a `HeadSpec` in hand is proof the head is launchable, and
-there is no state in which one exists with the adapter guessed.
-
-The rules the adapter, effort, codex launch mode and backend runtime are checked against live in
-`command.validate_launch_shape`, beside the renderer that has to spell them. What stays with the
-registry is what only a whole registry can answer: that the resource a profile names exists, and
-that its fallback chain points at profiles that do.
+The adapter is required: a `HeadSpec` in hand proves the head is launchable. Per-profile launch
+rules live in `command.validate_launch_shape`; the registry checks only cross-profile facts
+(resource exists, fallbacks resolve).
 """
 
 from __future__ import annotations
@@ -30,10 +23,7 @@ from .memory import DEFAULT_MEMORY_LIMIT_MIB
 if TYPE_CHECKING:  # pragma: no cover - the registry is data this module is handed
     from ..heads import Registry
 
-# The registry is read here and nowhere else in this package, and only when a caller declined to
-# hand one over. The import is deferred to keep that direction one-way at module scope: the
-# registry package imports this one for the launch shapes it validates against, so a head module
-# that imported it back at import time would close the loop.
+# The registry is imported lazily: it imports this package at module scope.
 
 
 def _load_registry() -> Registry:
@@ -42,8 +32,7 @@ def _load_registry() -> Registry:
     return load_registry()
 
 
-# The effort a profile that pins none runs at. Absent effort is legal and means "whatever the
-# adapter's own default is"; an effort the adapter does not know is not.
+# Absent effort means the adapter's own default; an effort the adapter does not know is refused.
 DEFAULT_EFFORT = "default"
 
 
@@ -53,10 +42,9 @@ class HeadSpecError(HeadCommandError):
 
 @dataclass(frozen=True)
 class HeadSpec:
-    """What is needed to launch, address and stop one head, with the adapter never in doubt.
+    """What is needed to launch, address and stop one head.
 
-    Frozen: a spec describes the head a run was started on, and handing the same object to spawn,
-    then nudge, then stop is only safe if none of them can move it under the others.
+    Frozen so spawn, nudge and stop can share one object safely.
     """
 
     profile_id: str
@@ -66,20 +54,13 @@ class HeadSpec:
     resource: str | None = None
     codex_mode: str | None = None
     fallback: tuple[str, ...] = ()
-    #: Which backend this head's life is lived through, carried by value like everything else here.
-    #: It is the profile's answer and not the caller's: the dispatcher builds the backend named
-    #: here, so a head raised under one backend cannot be observed or stopped through another —
-    #: including on a later tick, because the value travels with the durable run record. Orthogonal
-    #: to `adapter`: this says what holds the head, `adapter` says what the head is.
-    #:
-    #: A spec built from a profile always says it (`from_profile`, with the profile default), and a
-    #: profile can only say `local-pty`. One built by hand names no profile: it is a head rebuilt
-    #: from a record that predates the run record or never named a backend, so it carries the
-    #: record rule rather than the profile one — a legacy Orca record, which no backend is built for
-    #: (`head_runtime_backends.is_legacy_record`). A caller that builds a spec by hand for a head it
-    #: holds itself names `local-pty` explicitly.
+    #: The backend holding this head (orthogonal to `adapter`, which says what the head is). Taken
+    #: from the profile (only `local-pty` is valid there) and carried on the durable run record, so a
+    #: head is always observed and stopped through the backend it was raised under. A hand-built spec
+    #: defaults to the record rule, a legacy Orca record no backend serves
+    #: (`head_runtime_backends.is_legacy_record`); callers holding a live head pass `local-pty`.
     runtime: str = RECORD_RUNTIME_WHEN_ABSENT
-    # Hand-built legacy/test specs have no profile to derive this from. Registry specs always do.
+    # Hand-built legacy/test specs have none; registry specs always do.
     memory_limit_mib: int | None = None
 
     @property
@@ -91,9 +72,7 @@ class HeadSpec:
     def from_profile(cls, profile_id: str, profile: Any) -> HeadSpec:
         """The spec for one registry profile, or `HeadSpecError` naming that profile.
 
-        Checked by `validate_launch_shape`. Its cross-profile fields are deliberately not checked — a
-        single profile is not where "this resource exists" can be answered, and a caller holding one
-        profile must not be told its head is unlaunchable over a table it never had.
+        Cross-profile fields (resource existence, fallbacks) are not checked here.
         """
         if not isinstance(profile, Mapping):
             raise HeadSpecError(f"head {profile_id!r} is not a profile table, got {type(profile).__name__}")
@@ -121,9 +100,7 @@ class HeadSpec:
 def load_head_specs(registry: Registry | None = None) -> dict[str, HeadSpec]:
     """Every profile of the selected registry as a `HeadSpec`, keyed by profile id.
 
-    All of them, not the worker/reviewer subset: every role is launched, nudged and stopped by the
-    same operations. A registry whose profiles do not all load is a broken registry, so the first one
-    that does not stops the load by name rather than being dropped from the result.
+    One profile that fails to load fails the whole load by name; none is dropped.
     """
     reg = registry if registry is not None else _load_registry()
     return {pid: HeadSpec.from_profile(pid, prof) for pid, prof in reg.profiles.items()}

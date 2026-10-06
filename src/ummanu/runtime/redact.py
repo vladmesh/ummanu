@@ -1,16 +1,7 @@
-"""Secret redaction — scrub raw secrets before a transcript reaches the model or canon.
+"""Secret redaction before a transcript reaches the model, canon or a board card.
 
-Git is forever; a key that lands in a canon's history is compromised for good. This runs
-before extraction (so the model never sees the raw secret) and is the last line before
-anything is written. Two layers:
-
-  1. Exact-value scrub: load values from known .env files on disk and redact verbatim
-     occurrences. Strongest — catches whatever actually lives in this VPS's secrets.
-  2. Pattern scrub: regexes for well-known key shapes (sk-…, AGE-SECRET, Bearer, …),
-     a backstop for secrets pasted into a transcript that aren't in any .env we know.
-
-`scrub_secrets` adds a third, wider layer on top of those two for text that goes onto a board
-card: secret-looking KEY=value assignments and long token-shaped blobs.
+`redact` layers: (1) exact values from known .env files, (2) regexes for well-known key shapes.
+`scrub_secrets` adds, for board text, secret-named KEY=value assignments and long token-like blobs.
 """
 
 from __future__ import annotations
@@ -22,19 +13,18 @@ from pathlib import Path
 from ummanu.runtime.paths import default_instance_path
 from ummanu.runtime.role_env import is_sensitive_env_name
 
-# .env files whose VALUES are known secrets on this host. Exact matches get scrubbed.
+# .env files whose secret-named values are scrubbed verbatim.
 DEFAULT_ENV_FILES = [
     Path.home() / ".hermes" / ".env",
     default_instance_path() / "runtime.env",
 ]
 
-# Minimum length for an .env value to be treated as a secret worth scrubbing verbatim
-# (short values like "true"/"8077" are config, not secrets, and would over-redact).
+# Shorter values ("true", "8077") are config and would over-redact.
 MIN_ENV_VALUE_LEN = 12
 
 REDACTED = "«REDACTED»"
 
-# Well-known secret shapes. Ordered longest/most-specific first.
+# Most specific first.
 PATTERNS = [
     (re.compile(r"AGE-SECRET-KEY-1[0-9A-Z]{50,}"), "age-secret-key"),
     (re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}"), "anthropic-key"),
@@ -57,17 +47,9 @@ PATTERNS = [
     ),
 ]
 
-# `runtime.env` is an environment *configuration* file, not a list of secret
-# values.  In particular a local board URL is deliberately long enough to have
-# tripped the old length-only rule.  Treating every long value as a secret made
-# mentioning a board URL on a card stop the checkpoint and, worse, made a
-# normal config value look like leaked credential material.
-#
-# Names remain the primary signal for exact-value redaction.  A URL with user
-# info is the exception: it can carry a password even when its variable is
-# named DATABASE_URL, so its value is protected too.  Pattern
-# redaction below remains the backstop for credentials that arrive outside the
-# selected runtime file.
+# `runtime.env` is configuration, not a secret list: exact-value redaction keys on sensitive
+# variable names, so long config values (a board URL) are not masked. Exception: a URL with
+# userinfo may carry a password whatever its name. PATTERNS remain the backstop.
 _URL_WITH_USERINFO_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://[^/\s@]+@")
 
 
@@ -119,14 +101,9 @@ def redact(
     return text
 
 
-# Board comments are a card's public journal, so error texts and captured logs get scrubbed
-# before posting. `redact` above catches known .env values and token shapes; on top of that:
-# KEY=value assignments whose name smells like a secret, and long base64/hex-ish blobs
-# (no `/`, so filesystem paths survive).
-# Keep a marker emitted by an upstream scrubber verbatim.  TaskWriter applies
-# this final board-boundary scrub even when a dispatcher already scrubbed its
-# diagnostic, and replacing one safe marker with another only makes audit
-# evidence noisier.
+# Board-comment layer on top of `redact`: secret-named KEY=value assignments and long
+# base64/hex-like blobs (no `/`, so paths survive). An upstream redaction marker is kept verbatim
+# so a repeated scrub does not rewrite it.
 _ASSIGN_RE = re.compile(
     r"(?i)\b([A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)"
     r"\s*=\s*(?!<redacted>|«REDACTED»)(\S+)"
@@ -136,9 +113,7 @@ _HEX_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 
 def _is_git_sha(blob: str) -> bool:
-    """A git sha — full (40 hex) or abbreviated (7-40 hex) — is plain hex, no `+`/`=`/mixed-case
-    entropy a real token would carry. Masking it turns a commit reference in a CI-failure comment
-    into noise for no security gain."""
+    """A full or abbreviated git sha (plain hex), spared from blob masking."""
     return bool(_HEX_RE.match(blob))
 
 
@@ -147,9 +122,7 @@ def scrub_secrets(
     env_files: Iterable[Path | str] | None = None,
     secret_values: Iterable[object] | None = None,
 ) -> str:
-    """Mask secret-looking material in `text` before it reaches a board comment. `_BLOB_RE` casts
-    a wide net over long alnum runs, so a git sha or any other hex-shaped identifier is spared —
-    only the rest (base64/token-looking blobs) gets masked."""
+    """Mask secret-looking material in `text` before it reaches a board comment (git shas spared)."""
     if not text:
         return text
     text = redact(text, env_files=env_files, secret_values=secret_values)

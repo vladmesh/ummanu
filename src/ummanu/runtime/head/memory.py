@@ -110,11 +110,10 @@ def open_oom_stream() -> int:
 def read_oom_victim(fd: int, head_pid: int) -> dict[str, int] | None:
     """Consume kernel kill records while waitid(WNOWAIT) reserves this child's PID.
 
-    Linux prints this record under the victim's task lock after sending the OOM kill
-    and before exit_mm can finish. Consequently it is already readable at waitid exit,
-    even after delayed supervision. A later child OOM names the child, never this zombie.
-    Counter growth, victim selection summaries and oom_reaper records are not evidence.
-    Overflow or an unreadable stream invalidates the entire observation.
+    The kernel prints the record before the victim can exit, so it is readable at waitid return.
+    Only a kernel-facility "Killed process <head_pid>" record counts; counters, selection summaries
+    and oom_reaper lines do not. Overflow or an unreadable stream invalidates the observation. See
+    docs/HEAD_SCOPES.md "Causal OOM producer and consumer".
     """
     victim = None
     for _ in range(16384):  # bounded even if the kernel is continuously logging
