@@ -160,6 +160,7 @@ integration-recovery tests/test_restore_e2e.py
 unit tests/test_retro_search_log.py
 unit tests/test_retro_pending.py
 unit tests/test_role_env.py
+unit tests/test_runtime_env.py
 component tests/test_docker_guard.py
 component tests/test_memory_token_launch.py
 unit tests/test_observer_voice.py
@@ -267,6 +268,7 @@ unit tests/test_upgrade_state_receipts.py
 integration-board tests/test_retired_identity.py
 unit tests/test_resource_probe.py
 unit tests/test_memory_canon.py
+unit tests/test_memory_formats.py
 unit tests/test_live_root_writers.py
 unit tests/test_default_live_root.py
 unit tests/test_owner_decisions.py

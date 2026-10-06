@@ -54,9 +54,7 @@ def instance_yaml(data_dir: Path) -> str:
 
 
 def git(root: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
-    ).stdout
+    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout
 
 
 class LiveRootPairIgnoredTests(unittest.TestCase):
@@ -202,11 +200,16 @@ class LocatedByDataDirOnlyTests(unittest.TestCase):
                 instance_yaml(root / "data") + "open_sprint_limit: two\n", encoding="utf-8"
             )
             self.assertFalse(validate_instance(instance).ok)
-            write_installed_pair(instance, yaml.safe_dump({
-                "resources": {"acct": {"account": "acct"}},
-                "profiles": {"only-head": {"resource": "acct", "adapter": "codex", "fallback": []}},
-                "role_defaults": {"new_card": "only-head"},
-            }))
+            write_installed_pair(
+                instance,
+                yaml.safe_dump(
+                    {
+                        "resources": {"acct": {"account": "acct"}},
+                        "profiles": {"only-head": {"resource": "acct", "adapter": "codex", "fallback": []}},
+                        "role_defaults": {"new_card": "only-head"},
+                    }
+                ),
+            )
 
             self.assertEqual(installed_pair(instance).snapshot, root / "data" / "heads" / "heads.yaml")
             self.assertEqual(installed_heads(instance)["role_defaults"]["new_card"], "only-head")
@@ -242,7 +245,10 @@ class RecoverRegenerationTests(unittest.TestCase):
             self.assertIn(upgrade.step_head_registry, steps)
             return upgrade.run_steps(context, steps=(upgrade.step_head_registry,))
 
-        with mock.patch.object(installation, "run_steps", side_effect=head_registry_only):
+        with (
+            mock.patch.object(installation, "run_steps", side_effect=head_registry_only),
+            mock.patch.object(installation, "check_product_runtime"),
+        ):
             result = installation.materialize_host(self.instance, upgrade.running_product_root())
         self.assertTrue(result.ok, result.render())
 
@@ -259,8 +265,15 @@ class RecoverRegenerationTests(unittest.TestCase):
         git(self.instance, "init", "--quiet", "--initial-branch", "main")
         git(self.instance, "add", ".")
         git(
-            self.instance, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
-            "commit", "--quiet", "-m", "legacy checkpoint",
+            self.instance,
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "legacy checkpoint",
         )
         head = git(self.instance, "rev-parse", "HEAD")
 

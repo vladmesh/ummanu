@@ -15,16 +15,24 @@ comes from `ummanu status` and `ummanu doctor`, not from this file.
 
 ## Install and check the code
 
+From the product checkout, owned by the installation user, prepare the environment explicitly
+([Recovery](RECOVERY.md#fresh-install-and-recovery) has the full host sequence). Ubuntu 24.04 needs
+`python3-venv` first:
+
 ```bash
-python3 -m pip install -e '.[memory]'
-python3 -m pip install -e '.[dev]'
-python3 -m tests.broad
+sudo apt-get install --yes python3-venv
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[memory,dev]'
+.venv/bin/python -m tests.broad
 ```
 
-The first form installs the CLI with the memory runtime, the second adds the pinned linter. The
+The extras install the memory runtime and pinned linter. The
 install is editable: the runtime reads deployment assets from the checkout, and `upgrade` treats a
 non-editable (snapshot) install as drift and reinstalls. The shipped units run
-`PRODUCT_ROOT/.venv/bin/…`, so the production checkout keeps its virtual environment at `.venv`. `ruff`
+`PRODUCT_ROOT/.venv/bin/…`. Install and recovery refuse a missing or foreign environment before
+materializing the host. Run root commands by the absolute `PRODUCT_ROOT/.venv/bin/ummanu` path and
+name `--product-root PRODUCT_ROOT` for install/recover; shell activation does not preserve a venv's
+PATH through `sudo`. `ruff`
 is pinned in `pyproject.toml` and any other version refuses to run; run it only on changed Python paths
 with the command in [Testing](TESTING.md#changed-python-lint). Host bootstrap supports Ubuntu 24.04,
 installs Docker and Compose from the distribution and provisions the board store; `ummanu install` or
@@ -134,6 +142,18 @@ resource figures.
 The model cache is `DATA_DIR/memory/fastembed-cache`, never `/tmp`. `host.memory_threads` sets the
 ONNX Runtime inference limit (default `1`). `ummanu doctor` prints the cache path and warns when
 `data_dir` puts it under a temporary directory.
+
+`host.memory_model` and `host.memory_dim` select the embedding model and its matching dimension
+(defaults `intfloat/multilingual-e5-large` and `1024`). Install, recover, explicit memory reindex and
+the memory service resolve the same settings. A recovery retry rebuilds an incompatible, legacy or
+unreadable index without reimporting an already-restored board.
+
+The legacy `host.memory_reindex_python` and `host.memory_reindex_script` overrides affect only
+explicit `ummanu memory reindex --instance INSTANCE`. With neither set, it uses the product indexer.
+Setting either requires both: an executable Python file and an existing script; an incomplete pair
+is refused. The script receives `--canon`, `--export`, `--target-db`, `--model` and `--dim`, with
+`MEMORY_THREADS` and `MEMORY_CACHE_DIR` in its environment. Automatic install and recover use the
+product indexer and ignore both overrides.
 
 Heads run on `local-pty`, which ships with the product: no host-owned head runtime is installed,
 ordered after or reported (A20 step 9, [Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)).
@@ -314,6 +334,10 @@ product (changed by a product card), the owner's part in the live root's `person
 by a PO operation and `ummanu config check`, exported with the snapshot). Edits made here are
 overwritten by the next upgrade, which reports `changed` whenever either part changed and
 `unchanged` otherwise. No other head's workspace and nothing under `~/.claude` receives the persona.
+
+The legacy `instance.yaml` fields `persona.name` and `persona.style` still validate but are ignored;
+they do not affect these instructions. `host.orca_repos` also remains accepted and ignored for
+compatibility: it does not create, check or remove Orca registrations.
 
 `ummanu doctor` and `ummanu status` print one line for it, and `status --json` carries it under
 `installation.interactive_workspace`:
@@ -3195,6 +3219,11 @@ A live root's own `heads/heads.yaml` and `heads/source.yaml` are never read. Whe
 An installation owns its registry by keeping `heads/heads.toml`; otherwise it materialises from the
 product's small shipped default (a Claude and an OpenAI subscription, cross-family fallbacks, one default
 per role, no installation policy). A present but unusable `heads/heads.toml` fails the upgrade by name.
+
+The old top-level `heads` array in `instance.yaml` remains accepted but is ignored; it does not select
+models or create systemd services. Existing `systemd:head:*` ownership records and their unit files
+are retained. If a packaged unit needs the same name, reconcile refuses until the operator explicitly
+resolves that legacy ownership, even when the old unit file is missing.
 
 `ummanu status --json` returns `installation.head_registry` (`snapshot`, `canonical`, `canonical_owner`
 `instance`/`product`, `product_root`, `revision`, `error`). `error` is set when the pin was never written on

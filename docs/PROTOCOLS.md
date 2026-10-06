@@ -4740,6 +4740,24 @@ env file (LF-separated, no comments or blank lines, one secret per variable). No
 `list` returns catalog metadata only; `import` and `materialize` print ids and variable names. Reading a
 value is internal API only.
 
+Host `runtime.env` uses a single-line subset of systemd `EnvironmentFile` syntax. The installer
+and role launchers decode the same values as systemd: interior spaces and `#` in unquoted values
+are literal, an unquoted backslash escapes the next character, and a whole value may be single-
+or double-quoted. Double quotes preserve backslashes except before a double quote, backslash,
+backtick or dollar sign. There is no variable expansion. For example, `KEY=a b` and `KEY="a b"`
+both deliver `a b`; `KEY=a#b` delivers `a#b`. A literal backslash in an unquoted value is written
+twice. Multiline values, continuations, quote concatenation and `export KEY=...` are refused.
+Operator-written runtime files may contain blank lines and `#`/`;` comments; repeated variables
+use the last assignment. Runtime diagnostics name the line and error, never its value.
+
+The secret store keeps the **serialized right-hand side**, including its quotes and escapes,
+so import followed by materialize still reproduces the source bytes and line order. The stricter
+import rules above preserve that guarantee: comments, blank lines, CRLF, duplicate variables and
+padding are refused. A stored value targeting an env file must use the supported serialization;
+an unsupported value is refused before replacing that file. Redaction matches both the stored
+serialization and the decoded runtime credential. Materialized files remain private (0600) and
+outside the snapshot export allowlist.
+
 `secret init` is interactive: it refuses when stdin or stderr is not a terminal, checked before the
 recovery phrase is generated. The phrase is printed once to stderr, the operator confirms, screen and
 scrollback are cleared, and `init` asks for a few words back before creating the store.

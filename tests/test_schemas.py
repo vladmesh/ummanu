@@ -6,6 +6,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from ummanu.config import instance_data_dir, validate, validate_instance
@@ -45,7 +46,7 @@ VALID_MANIFEST = {
         "board": {"path": "board"},
         "memory": {
             "path": "memory",
-            "facts": "memory/facts",
+            "facts": "state/memory/facts",
             "export": "memory/export.ndjson",
             "index": "memory/index.sqlite",
         },
@@ -58,6 +59,11 @@ VALID_MANIFEST = {
 
 
 class SchemaValidTests(unittest.TestCase):
+    def test_legacy_data_manifest_remains_readable(self):
+        data = copy.deepcopy(VALID_MANIFEST)
+        data["components"]["memory"]["facts"] = "memory/facts"
+        self.assertEqual(validate(data, "data-manifest", "legacy-data-manifest.json"), [])
+
     def test_valid_configs_pass(self):
         cases = [
             (VALID_INSTANCE, "instance"),
@@ -476,7 +482,7 @@ class SchemaInvalidTests(unittest.TestCase):
 class OnboardingIdentityTests(unittest.TestCase):
     """Binding identity has one source; divergence must be unrepresentable."""
 
-    IDENTITY_FIELDS = {
+    IDENTITY_FIELDS: ClassVar[dict[str, str]] = {
         "id": "other-project",
         "repo": "/srv/projects/other-project",
         "adapter": "other-adapter",

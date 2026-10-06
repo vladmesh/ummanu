@@ -22,9 +22,7 @@ from ummanu.infra.export_allowlist import is_exported
 from ummanu.memory import client_config
 from ummanu.po import workspace as po_workspace
 from ummanu.role_skills import BIN_DIR_ENV, MANIFEST, sync
-from ummanu.runtime import heads as head_registry
-from ummanu.runtime import interactive_workspace as iw
-from ummanu.runtime import role_env
+from ummanu.runtime import heads as head_registry, interactive_workspace as iw, role_env
 
 ROOT = MANIFEST.parent.parent
 SENTINEL = "persona-sentinel-6f1c2a"
@@ -231,7 +229,10 @@ class RecoverTests(Fixture):
             self.assertIn(upgrade.step_interactive_workspace, steps)
             return upgrade.run_steps(context, steps=(upgrade.step_interactive_workspace,))
 
-        with mock.patch.object(installation, "run_steps", side_effect=interactive_only):
+        with (
+            mock.patch.object(installation, "run_steps", side_effect=interactive_only),
+            mock.patch.object(installation, "check_product_runtime"),
+        ):
             result = installation.materialize_host(live_root, self.product)
 
         self.assertTrue(result.ok, result.render())
@@ -358,7 +359,9 @@ class StatusLineTests(Fixture):
 
         self.assertEqual(code, 0, out.getvalue())
         shared = iw.digest(iw.shared_source(ROOT).read_bytes())
-        self.assertIn(f"interactive workspace: {self.workspace} (shared {shared}, personal absent)\n", out.getvalue())
+        self.assertIn(
+            f"interactive workspace: {self.workspace} (shared {shared}, personal absent)\n", out.getvalue()
+        )
 
 
 class ShellTests(Fixture):

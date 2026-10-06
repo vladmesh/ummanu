@@ -6,11 +6,14 @@ import io
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 import unittest.mock
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_account_fixtures import fixture_runtime_account
 from ummanu import cli, host_commands
 from ummanu.cli import main
@@ -25,6 +28,7 @@ from ummanu.host import (
     LiveHostSource,
     PlannedResource,
     SystemdLayout,
+    _CmdResult as CmdResult,
     build_doctor_expectations,
     build_expectations,
     build_plan,
@@ -34,13 +38,13 @@ from ummanu.host import (
     manifest_text,
     plan_changes,
     plan_input_errors,
-)
-from ummanu.host import (
-    _CmdResult as CmdResult,
+    strict_manifest,
 )
 from ummanu.host_apply import (
+    ApplyInputs,
     HostCommandError,
     SystemdUnitInstaller,
+    apply_host,
     resolve_packaged,
     resolve_systemd_layout,
 )
@@ -122,9 +126,7 @@ class ExpectationTests(unittest.TestCase):
         )
 
     def test_doctor_runtime_expectations_distinguish_service_and_timer(self):
-        expected = build_doctor_expectations(
-            {"host": {"unit_prefix": "ummanu-"}}, [], packaged=SHIPPED_UNITS
-        )
+        expected = build_doctor_expectations({"host": {"unit_prefix": "ummanu-"}}, [], packaged=SHIPPED_UNITS)
         self.assertEqual(expected.unit_runtime["ummanu-memory.service"], (True, True))
         self.assertEqual(expected.unit_runtime["ummanu-curator.timer"], (True, True))
         # A oneshot unit fired by its timer has no [Install] section and is only briefly active
@@ -167,9 +169,7 @@ class ExpectationTests(unittest.TestCase):
 
     def test_foreign_unit_is_not_an_unmanaged_conflict(self):
         expected = Expectations(units={"ummanu-memory.service"}, foreign_units={"ummanu-other.service"})
-        result = inventory(
-            expected, HostInventory(units={"ummanu-memory.service", "ummanu-other.service"})
-        )
+        result = inventory(expected, HostInventory(units={"ummanu-memory.service", "ummanu-other.service"}))
         self.assertEqual(result["units"].unmanaged_on_host, [])
 
     def test_foreign_shipped_unit_is_outside_desired_doctor_and_reconcile_parity(self):
@@ -516,7 +516,7 @@ class ReconcilePlanTests(unittest.TestCase):
 
         class FakeLiveHost:
             def collect(self, expected):
-                return CollectResult(HostInventory(units={"ummanu-worker.service"}), {})
+                return CollectResult(HostInventory(units={"ummanu-memory.service"}), {})
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -527,7 +527,7 @@ class ReconcilePlanTests(unittest.TestCase):
                 "version: 1\nname: plan\ndata_dir: "
                 + str(data_dir)
                 + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n"
-                "  unit_prefix: ummanu-\nheads:\n  - role: worker\n    model: test\n",
+                "  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             manifest = data_dir / "host-managed.json"
@@ -559,25 +559,17 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
 
     def test_runtime_payload_changes_require_an_update(self):
-        instance = {"host": {"unit_prefix": "ummanu-"}, "heads": [{"role": "worker", "model": "old"}]}
-        bindings = [
-            {"id": "project-id", "repo": "/srv/old-path", "orca_binding": "project_id", "enabled": True}
-        ]
-        original = build_plan(instance, bindings, packaged=[])
-        actual = HostInventory(
-            units={
-                "ummanu-worker.service",
-                "ummanu-dispatcher-production.service",
-                "ummanu-dispatcher-production.timer",
-            },
-        )
-        instance["heads"][0]["model"] = "new"
-        bindings[0]["repo"] = "/srv/new-path"
-        changed = build_plan(instance, bindings, packaged=[])
+        instance = {"host": {"unit_prefix": "ummanu-"}}
+        unit = next(unit for unit in SHIPPED_UNITS if unit.name == "ummanu-memory.service")
+        original = build_plan(instance, [], packaged=[unit])
+        actual = HostInventory(units={resource.name for resource in original})
+        changed_content = unit.content + b"\n# A changed runtime template\n"
+        updated = replace(unit, content=changed_content, digest=hashlib.sha256(changed_content).hexdigest())
+        changed = build_plan(instance, [], packaged=[updated])
         changes = [
             change for change in plan_changes(changed, actual, original) if change.action != "unchanged"
         ]
-        self.assertEqual({change.action for change in changes}, {"update"})
+        self.assertEqual([(change.action, change.name) for change in changes], [("update", unit.name)])
 
     def test_plan_accepts_an_enabled_binding_without_orca_binding(self):
         errors = plan_input_errors({}, [{"id": "foo-bar", "repo": "/srv/foo_bar", "enabled": True}])
@@ -622,62 +614,63 @@ class ReconcilePlanTests(unittest.TestCase):
 
         self.assertEqual(changes, [])
 
-    def test_plan_rejects_heads_without_unit_prefix(self):
-        errors = plan_input_errors({"heads": [{"role": "worker", "model": "test"}]}, [])
-        self.assertEqual(errors, ["host.unit_prefix is required when heads are configured"])
+    def test_legacy_heads_do_not_plan_units_or_require_a_unit_prefix(self):
+        for host in ({}, {"unit_prefix": "ummanu-"}):
+            instance = {"host": host, "heads": [{"role": "worker", "model": "legacy"}]}
+            with self.subTest(host=host):
+                self.assertEqual(plan_input_errors(instance, [], packaged=SHIPPED_UNITS), [])
+                self.assertEqual(
+                    build_plan(instance, [], packaged=SHIPPED_UNITS),
+                    build_plan({"host": host}, [], packaged=SHIPPED_UNITS),
+                )
 
     def test_plan_rejects_duplicate_logical_id_and_host_name(self):
-        duplicate_heads = {
-            "host": {"unit_prefix": "ummanu-"},
-            "heads": [
-                {"role": "worker", "model": "one"},
-                {"role": "worker", "model": "two"},
-            ],
-        }
-        self.assertIn(
-            "duplicate desired logical_id: systemd:head:worker", plan_input_errors(duplicate_heads, [])
-        )
+        unit = next(unit for unit in SHIPPED_UNITS if unit.name == "ummanu-memory.service")
+        errors = plan_input_errors({"host": {"unit_prefix": "ummanu-"}}, [], packaged=[unit, unit])
+        self.assertIn(f"duplicate desired logical_id: systemd:unit:{unit.name}", errors)
+        self.assertIn(f"duplicate desired resource name: unit {unit.name}", errors)
 
     def test_renamed_managed_resource_is_deleted_alongside_create(self):
-        old_instance = {"host": {"unit_prefix": "old-"}, "heads": [{"role": "worker", "model": "test"}]}
-        new_instance = {"host": {"unit_prefix": "new-"}, "heads": [{"role": "worker", "model": "test"}]}
+        old_instance = {"host": {"unit_prefix": "old-"}}
+        new_instance = {"host": {"unit_prefix": "new-"}}
         managed = [
             resource
-            for resource in build_plan(old_instance, [])
-            if resource.logical_id == "systemd:head:worker"
+            for resource in build_plan(old_instance, [], packaged=[])
+            if resource.logical_id == "systemd:dispatcher:production.service"
         ]
         desired = [
             resource
-            for resource in build_plan(new_instance, [])
-            if resource.logical_id == "systemd:head:worker"
+            for resource in build_plan(new_instance, [], packaged=[])
+            if resource.logical_id == "systemd:dispatcher:production.service"
         ]
-        actual = HostInventory(units={"old-worker.service"})
+        actual = HostInventory(units={"old-dispatcher-production.service"})
         changes = plan_changes(desired, actual, managed, "new-")
         self.assertEqual(
             [(change.action, change.name) for change in changes],
-            [("create", "new-worker.service"), ("delete", "old-worker.service")],
+            [
+                ("create", "new-dispatcher-production.service"),
+                ("delete", "old-dispatcher-production.service"),
+            ],
         )
 
     def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
-        instance = {
-            "host": {"unit_prefix": "ummanu-"},
-            "heads": [{"role": "worker", "model": "test"}],
-        }
+        instance = {"host": {"unit_prefix": "ummanu-"}}
         bindings = [
             {"id": "project-id", "repo": "/srv/project_id", "orca_binding": "project_id", "enabled": True}
         ]
-        desired = build_plan(instance, bindings, packaged=[])
+        unit = next(unit for unit in SHIPPED_UNITS if unit.name == "ummanu-memory.service")
+        desired = build_plan(instance, bindings, packaged=[unit])
         self.assertEqual(
             [resource.name for resource in desired],
             [
                 "ummanu-dispatcher-production.service",
                 "ummanu-dispatcher-production.timer",
-                "ummanu-worker.service",
+                "ummanu-memory.service",
             ],
         )
         actual = HostInventory(
             units={
-                "ummanu-worker.service",
+                "ummanu-memory.service",
                 "ummanu-dispatcher-production.service",
                 "ummanu-dispatcher-production.timer",
             },
@@ -821,14 +814,17 @@ class ReconcilePlanTests(unittest.TestCase):
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
 
-        with tempfile.TemporaryDirectory() as tmp:
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            unittest.mock.patch.dict(os.environ, {"UMMANU_REPO": str(REPO_ROOT)}),
+        ):
             root = Path(tmp)
             instance = root / "instance"
             (instance / "projects").mkdir(parents=True)
             (instance / "instance.yaml").write_text(
                 "version: 1\nname: plan\ndata_dir: "
                 + str(root / "data")
-                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\nheads:\n  - role: worker\n    model: test\n",
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             (instance / "projects" / "project-id.yaml").write_text(
@@ -837,20 +833,19 @@ class ReconcilePlanTests(unittest.TestCase):
             )
             fixture = root / "host"
             fixture.mkdir()
-            (fixture / "units.txt").write_text("ummanu-worker.service\n", encoding="utf-8")
             manifest = root / "managed.json"
             manifest.write_text(
                 json.dumps(
                     {
                         "resources": [
                             {
-                                "logical_id": "systemd:head:worker",
+                                "logical_id": "systemd:unit:ummanu-memory.service",
                                 "kind": "unit",
-                                "name": "ummanu-worker.service",
+                                "name": "ummanu-memory.service",
                                 "fingerprint": "old",
                             },
                             {
-                                "logical_id": "systemd:head:retired",
+                                "logical_id": "systemd:unit:ummanu-retired.service",
                                 "kind": "unit",
                                 "name": "ummanu-retired.service",
                                 "fingerprint": "old",
@@ -861,8 +856,7 @@ class ReconcilePlanTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (fixture / "units.txt").write_text(
-                "ummanu-worker.service\nummanu-retired.service\n"
-                "ummanu-dispatcher-production.timer\n",
+                "ummanu-memory.service\nummanu-retired.service\nummanu-dispatcher-production.timer\n",
                 encoding="utf-8",
             )
             before = manifest.read_bytes()
@@ -880,8 +874,8 @@ class ReconcilePlanTests(unittest.TestCase):
             second = run_cli(argv)
             self.assertEqual(first, second)
             self.assertEqual(first[0], 1)
-            self.assertIn("update systemd:head:worker", first[1])
-            self.assertIn("delete systemd:head:retired", first[1])
+            self.assertIn("update systemd:unit:ummanu-memory.service", first[1])
+            self.assertIn("delete systemd:unit:ummanu-retired.service", first[1])
             self.assertIn("conflict systemd:dispatcher:production.timer", first[1])
             # The binding's legacy orca_binding plans nothing: reconcile has no Orca resources.
             self.assertNotIn("orca", first[1])
@@ -894,7 +888,7 @@ class ReconcilePlanTests(unittest.TestCase):
             root = Path(tmp)
             instance = root / "instance.yaml"
             instance.write_text(
-                "version: 1\nname: plan\ndata_dir: /tmp/data\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\nheads:\n  - role: worker\n    model: test\n",
+                "version: 1\nname: plan\ndata_dir: /tmp/data\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             fixture = root / "host"
@@ -908,7 +902,7 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(code, 1, output)
         self.assertIn("conflict systemd:conflict:ummanu-legacy-sweep.timer", output)
 
-    def test_cli_plan_rejects_heads_without_unit_prefix(self):
+    def test_cli_plan_accepts_legacy_heads_without_unit_prefix(self):
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -923,8 +917,8 @@ class ReconcilePlanTests(unittest.TestCase):
             code, output = run_cli(
                 ["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture)]
             )
-        self.assertEqual(code, 2, output)
-        self.assertIn("host.unit_prefix is required", output)
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("systemd:head:", output)
 
     def test_cli_fixture_decode_error_returns_controlled_exit(self):
         import tempfile
@@ -944,6 +938,118 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn("host inventory unavailable", plan_output)
         self.assertEqual(doctor_code, 2, doctor_output)
         self.assertIn("units:\n  unavailable: fixture host file is not valid UTF-8", doctor_output)
+
+
+class LegacyHeadCompatibilityTests(unittest.TestCase):
+    @staticmethod
+    def legacy_head(role: str) -> PlannedResource:
+        logical_id = f"systemd:head:{role}"
+        name = f"ummanu-{role}.service"
+        spec = json.dumps({"model": "legacy-model", "role": role}, sort_keys=True, separators=(",", ":"))
+        fingerprint = hashlib.sha256(
+            json.dumps([logical_id, "unit", name, spec], separators=(",", ":")).encode()
+        ).hexdigest()
+        return PlannedResource(logical_id, "unit", name, spec, fingerprint)
+
+    def test_example_validates_and_applies_in_dry_run_with_shipped_units(self):
+        report = validate_instance(EXAMPLE_INSTANCE)
+        self.assertTrue(report.ok, report.errors)
+        packaged = resolve_packaged(
+            report.instance,
+            SHIPPED_PACKAGING_ROOT,
+            product_root=REPO_ROOT,
+            instance_path=EXAMPLE_INSTANCE,
+            data_dir=report.data_dir,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "host-managed.json"
+            units = FakeUnitInstaller()
+            result = apply_host(
+                ApplyInputs(
+                    report.instance,
+                    report.bindings,
+                    HostInventory(),
+                    [],
+                    manifest,
+                    packaged,
+                ),
+                units=units,
+                dry_run=True,
+            )
+            self.assertTrue(result.ok, result.render())
+            self.assertTrue(result.changes)
+            self.assertTrue({change.name for change in result.changes} <= {unit.name for unit in packaged})
+            self.assertEqual(units.calls, [])
+            self.assertFalse(manifest.exists())
+
+    def test_legacy_head_service_and_ownership_survive_apply_and_config_removal(self):
+        instance = {
+            "host": {"unit_prefix": "ummanu-", "components": {"dispatcher-production": {"enabled": False}}}
+        }
+        old_config = {**instance, "heads": [{"role": "worker", "model": "legacy-model"}]}
+        legacy = self.legacy_head("worker")
+        memory = next(unit for unit in SHIPPED_UNITS if unit.name == "ummanu-memory.service")
+        original = b"legacy worker service stays with its operator\n"
+        units = FakeUnitInstaller({legacy.name: original}, {legacy.name})
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "host-managed.json"
+            manifest.write_text(manifest_text([legacy]), encoding="utf-8")
+            managed = [legacy]
+            for config in (old_config, instance):
+                with self.subTest(legacy_config="heads" in config):
+                    units.calls.clear()
+                    inventory = HostInventory(units=set(units.files), unit_states=units.unit_states())
+                    result = apply_host(
+                        ApplyInputs(
+                            config,
+                            [],
+                            inventory,
+                            managed,
+                            manifest,
+                            [memory],
+                        ),
+                        units=units,
+                    )
+                    self.assertTrue(result.ok, result.render())
+                    self.assertFalse(any(name == legacy.name for _action, name in units.calls))
+                    self.assertEqual(units.files[legacy.name], original)
+                    self.assertIn(legacy.name, units.active)
+                    managed, error = strict_manifest(manifest)
+                    self.assertEqual(error, "")
+                    self.assertIn(legacy, managed)
+                    self.assertIn(memory.name, {resource.name for resource in managed})
+
+    def test_legacy_head_name_blocks_packaged_takeover_even_when_file_is_missing(self):
+        instance = {
+            "host": {"unit_prefix": "ummanu-", "components": {"dispatcher-production": {"enabled": False}}}
+        }
+        legacy = self.legacy_head("curator")
+        curator = next(unit for unit in SHIPPED_UNITS if unit.name == "ummanu-curator.service")
+        for present in (True, False):
+            for dry_run in (True, False):
+                with self.subTest(present=present, dry_run=dry_run), tempfile.TemporaryDirectory() as tmp:
+                    original = {legacy.name: b"legacy curator unit\n"} if present else {}
+                    units = FakeUnitInstaller(original)
+                    manifest = Path(tmp) / "host-managed.json"
+                    manifest.write_text(manifest_text([legacy]), encoding="utf-8")
+                    before = manifest.read_bytes()
+                    result = apply_host(
+                        ApplyInputs(
+                            instance,
+                            [],
+                            HostInventory(units=set(original)),
+                            [legacy],
+                            manifest,
+                            [curator],
+                        ),
+                        units=units,
+                        dry_run=dry_run,
+                    )
+                    self.assertFalse(result.ok)
+                    self.assertEqual([change.name for change in result.conflicts], [legacy.name])
+                    self.assertEqual(units.calls, [])
+                    self.assertEqual(units.files, original)
+                    self.assertEqual(manifest.read_bytes(), before)
 
 
 class ReconcileAdoptTests(unittest.TestCase):
@@ -1292,9 +1398,7 @@ class LiveSourceErrorTests(unittest.TestCase):
         host = self._host(
             {
                 "systemctl": _cmd(
-                    stdout=(
-                        "ummanu-pipeline.service static  -\nummanu-pipeline.timer   enabled enabled\n"
-                    )
+                    stdout=("ummanu-pipeline.service static  -\nummanu-pipeline.timer   enabled enabled\n")
                 ),
                 "orca": _cmd(stdout=""),
             }
@@ -1460,7 +1564,8 @@ class LiveSourceErrorTests(unittest.TestCase):
                     )
                     enabled = subprocess.CompletedProcess([], 0, stdout="enabled\n", stderr="")
                     patch = unittest.mock.patch(
-                        "ummanu.infra.systemd._proc.run", side_effect=[listed, loaded, enabled, failure, failure]
+                        "ummanu.infra.systemd._proc.run",
+                        side_effect=[listed, loaded, enabled, failure, failure],
                     )
                 with patch:
                     collected = LiveHostSource("operator").collect(expected)

@@ -39,12 +39,17 @@ def run_gate(instance_value: str, project_id: str) -> tuple[int, dict[str, Any]]
     try:
         storage = OnboardingStorage.for_instance(instance)
     except DataDirError as exc:
-        return 1, {"status": "storage_unavailable", "finding": _redact(f"onboarding storage is unavailable: {exc}")}
+        return 1, {
+            "status": "storage_unavailable",
+            "finding": _redact(f"onboarding storage is unavailable: {exc}"),
+        }
     with file_lock(storage.lock(project_id)):
         return _run_gate_locked(instance, storage, project_id)
 
 
-def _run_gate_locked(instance: Path, storage: OnboardingStorage, project_id: str) -> tuple[int, dict[str, Any]]:
+def _run_gate_locked(
+    instance: Path, storage: OnboardingStorage, project_id: str
+) -> tuple[int, dict[str, Any]]:
     binding_path = instance / "projects" / f"{project_id}.yaml"
     draft_path = storage.draft(project_id)
     try:
@@ -78,21 +83,17 @@ def _run_gate_locked(instance: Path, storage: OnboardingStorage, project_id: str
             expected_path = storage.gate_runs(project_id) / expected_run / "result.json"
             if expected_path.exists():
                 try:
-                    previous = load_config(expected_path)
+                    previous = _load_result(expected_path)
                 except ConfigError:
                     return 1, {"status": "conflict", "finding": "current gate result is corrupt"}
-                if (
-                    isinstance(previous, dict)
-                    and previous.get("status") == "passed"
-                    and previous.get("adapter_digest") == current_digest
-                ):
+                if previous.get("status") == "passed" and previous.get("adapter_digest") == current_digest:
                     return 0, previous
             for candidate_path in storage.gate_runs(project_id).glob("*/result.json"):
                 try:
-                    candidate = load_config(candidate_path)
+                    candidate = _load_result(candidate_path)
                 except ConfigError:
                     continue
-                revision = candidate.get("input_revision", {}) if isinstance(candidate, dict) else {}
+                revision = candidate.get("input_revision", {})
                 if (
                     candidate.get("status") == "passed"
                     and revision.get("scanner_head") == expected_head
@@ -127,7 +128,7 @@ def _run_gate_locked(instance: Path, storage: OnboardingStorage, project_id: str
     result_path = storage.gate_runs(project_id) / run_id / "result.json"
     if result_path.exists():
         try:
-            previous = load_config(result_path)
+            previous = _load_result(result_path)
         except ConfigError:
             return 1, _conflict_result(draft, run_id, provision_run, digest, "current gate result is corrupt")
         if previous.get("status") == "passed" and binding.get("enabled") is True:
@@ -152,6 +153,7 @@ def _run_gate_locked(instance: Path, storage: OnboardingStorage, project_id: str
                 capture_output=True,
                 text=True,
                 timeout=_GIT_TIMEOUT,
+                check=False,
             )
         except subprocess.TimeoutExpired as exc:
             add = _timed_out(exc)
@@ -185,6 +187,7 @@ def _run_gate_locked(instance: Path, storage: OnboardingStorage, project_id: str
                     ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
                     capture_output=True,
                     timeout=_GIT_TIMEOUT,
+                    check=False,
                 )
             except subprocess.TimeoutExpired:
                 pass
@@ -259,6 +262,7 @@ def _command(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
             text=True,
             stdin=subprocess.DEVNULL,
             timeout=_COMMAND_TIMEOUT,
+            check=False,
         )
     except subprocess.TimeoutExpired as exc:
         return _timed_out(exc)
@@ -307,6 +311,13 @@ def _timed_out(exc: subprocess.TimeoutExpired) -> subprocess.CompletedProcess[st
 def _gate_run_id(project_id: str, head: str, provision_run: str, digest: str) -> str:
     payload = f"{project_id}\0{head}\0{provision_run}\0{digest}".encode()
     return "gate-" + hashlib.sha256(payload).hexdigest()[:20]
+
+
+def _load_result(path: Path) -> dict[str, Any]:
+    result = load_config(path)
+    if not isinstance(result, dict) or not isinstance(result.get("input_revision", {}), dict):
+        raise ConfigError("gate result and its input revision must be objects")
+    return result
 
 
 def _conflict_result(

@@ -68,6 +68,7 @@ from ummanu.infra.export_allowlist import is_exported
 from ummanu.memory.canon import CanonTransaction, canon_transaction, recover_canon_undo
 from ummanu.runtime import role_env
 from ummanu.runtime.redact import looks_like_credential, redact
+from ummanu.runtime_env import RuntimeEnvError, parse_env_value
 from ummanu.secret_words import RECOVERY_WORDS
 
 CATALOG_NAME = "catalog.yaml"
@@ -87,6 +88,12 @@ PHRASE_KDF_ID = "scrypt"
 PHRASE_KDF_N = 2**16
 PHRASE_KDF_R = 8
 PHRASE_KDF_P = 1
+# Recorded v1 parameters may differ from today's defaults, but recovery never accepts
+# unbounded work from an exported file. These ceilings allow four default derivations.
+_SCRYPT_MAX_MEMORY = 256 * 1024 * 1024
+_SCRYPT_MAX_WORK = 2**21
+_SCRYPT_MAX_R = 32
+_SCRYPT_MAX_P = 16
 KEY_LENGTH = 32
 VERIFIER_PLAINTEXT = b"ummanu installation key v1"
 VERIFIER_AAD = b"ummanu/installation-key/v1"
@@ -250,20 +257,32 @@ def _new_key_params() -> dict[str, Any]:
 def _derive_key(phrase: str, params: dict[str, Any]) -> bytes:
     kdf = params.get("kdf")
     if not isinstance(kdf, dict) or kdf.get("id") != PHRASE_KDF_ID:
-        raise SecretStoreStateError(
-            f"unsupported installation key kdf: {kdf.get('id') if isinstance(kdf, dict) else kdf!r}"
-        )
+        raise SecretStoreStateError("unsupported installation key kdf")
     try:
+        length, n, r, p = (kdf[name] for name in ("length", "n", "r", "p"))
+        if (
+            any(type(value) is not int for value in (length, n, r, p))
+            or length != KEY_LENGTH
+            or n < 2
+            or n & (n - 1)
+            or r < 1
+            or r > _SCRYPT_MAX_R
+            or p < 1
+            or p > _SCRYPT_MAX_P
+        ):
+            raise SecretStoreStateError("installation key parameters are unusable")
+        if 128 * n * r > _SCRYPT_MAX_MEMORY or n * r * p > _SCRYPT_MAX_WORK:
+            raise SecretStoreStateError("installation key kdf exceeds supported resource limits")
         derivation = Scrypt(
-            salt=_unb64(kdf["salt"], "installation key salt"),
-            length=int(kdf["length"]),
-            n=int(kdf["n"]),
-            r=int(kdf["r"]),
-            p=int(kdf["p"]),
+            salt=_unb64(kdf["salt"], "installation key salt", length=SALT_LENGTH),
+            length=length,
+            n=n,
+            r=r,
+            p=p,
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise SecretStoreStateError(f"installation key parameters are unusable: {exc}") from None
-    return derivation.derive(normalize_phrase(phrase).encode("utf-8"))
+        return derivation.derive(normalize_phrase(phrase).encode("utf-8"))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise SecretStoreStateError("installation key parameters are unusable") from None
 
 
 def _seal_verifier(key: bytes) -> dict[str, str]:
@@ -278,14 +297,16 @@ def _check_verifier(key: bytes, params: dict[str, Any]) -> None:
         raise SecretStoreStateError("installation key file carries no usable verifier")
     try:
         opened = ChaCha20Poly1305(key).decrypt(
-            _unb64(verifier["nonce"], "verifier nonce"),
+            _unb64(verifier["nonce"], "verifier nonce", length=NONCE_LENGTH),
             _unb64(verifier["ciphertext"], "verifier ciphertext"),
             VERIFIER_AAD,
         )
-    except (InvalidTag, KeyError, TypeError):
+    except InvalidTag:
         raise RecoveryPhraseError(
             "recovery phrase does not match this installation; nothing was written"
         ) from None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise SecretStoreStateError("installation key verifier is damaged") from None
     if opened != VERIFIER_PLAINTEXT:
         raise RecoveryPhraseError("recovery phrase does not match this installation")
 
@@ -307,8 +328,8 @@ def load_installation_key(instance_dir: Path) -> bytes:
         raise SecretStoreStateError("installation key belongs to another user")
     try:
         material = _unb64(path.read_text(encoding="utf-8").strip(), "installation key")
-    except OSError as exc:
-        raise SecretStoreStateError(f"could not read the installation key: {exc}") from None
+    except (OSError, UnicodeError):
+        raise SecretStoreStateError("could not read the installation key") from None
     if len(material) != KEY_LENGTH:
         raise SecretStoreStateError("installation key has the wrong length")
     _check_verifier(material, _read_key_params(instance_dir))
@@ -335,20 +356,26 @@ def restore_installation_key(instance_dir: Path, phrase: str) -> Path:
 
 def _write_key_file(path: Path, key: bytes) -> None:
     """Write the raw key 0600 without ever leaving it world-readable."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
+    temporary: Path | None = None
     try:
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temporary = Path(name)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
             handle.write(_b64(key) + "\n")
-        os.chmod(temporary, 0o600)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
+        temporary = None
     except OSError as exc:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise SecretStoreError(f"could not write the installation key: {exc}") from None
+        raise SecretStoreError(
+            f"could not write the installation key: {exc.strerror or 'I/O error'}"
+        ) from None
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
 
 
 def _read_key_params(instance_dir: Path) -> dict[str, Any]:
@@ -359,8 +386,8 @@ def _read_key_params(instance_dir: Path) -> dict[str, Any]:
         raise SecretStoreStateError(
             "secret store is not initialized; run `ummanu secret init` first"
         ) from None
-    except (OSError, ValueError) as exc:
-        raise SecretStoreStateError(f"could not read {KEY_PARAMS_NAME}: {exc}") from None
+    except (OSError, ValueError):
+        raise SecretStoreStateError(f"could not read {KEY_PARAMS_NAME}") from None
     if not isinstance(params, dict) or params.get("format") != KEY_PARAMS_FORMAT:
         raise SecretStoreStateError(f"{KEY_PARAMS_NAME} is not an installation key file")
     if params.get("version") != KEY_PARAMS_VERSION:
@@ -399,41 +426,44 @@ def open_value(key: bytes, envelope: dict[str, Any]) -> bytes:
     version = envelope.get("version")
     if version != ENVELOPE_VERSION:
         raise SecretStoreStateError(
-            f"envelope format version {version!r} is newer than this product reads "
-            f"({ENVELOPE_VERSION}); upgrade ummanu"
+            "envelope has an unsupported format version; "
+            f"this product reads version {ENVELOPE_VERSION}; upgrade ummanu"
         )
     aead = envelope.get("aead")
     if not isinstance(aead, dict) or aead.get("id") != AEAD_ID:
-        raise SecretStoreStateError(f"unsupported envelope aead: {envelope.get('aead')!r}")
+        raise SecretStoreStateError("unsupported envelope aead")
     header = {name: field for name, field in envelope.items() if name != "ciphertext"}
     subkey = _derive_value_key(key, header)
     try:
         return ChaCha20Poly1305(subkey).decrypt(
-            _unb64(aead["nonce"], "envelope nonce"),
+            _unb64(aead["nonce"], "envelope nonce", length=NONCE_LENGTH),
             _unb64(envelope["ciphertext"], "envelope ciphertext"),
             _header_bytes(header),
         )
-    except (InvalidTag, KeyError, TypeError):
+    except (InvalidTag, KeyError, TypeError, ValueError, OverflowError):
         raise SecretStoreStateError(
-            f"could not open the value for {envelope.get('id')!r}: "
-            "wrong installation key or a damaged envelope"
+            "could not open the secret value: wrong installation key or a damaged envelope"
         ) from None
 
 
 def _derive_value_key(key: bytes, header: dict[str, Any]) -> bytes:
     kdf = header.get("kdf")
     if not isinstance(kdf, dict) or kdf.get("id") != VALUE_KDF_ID:
-        raise SecretStoreStateError(f"unsupported envelope kdf: {header.get('kdf')!r}")
+        raise SecretStoreStateError("unsupported envelope kdf")
     try:
+        if type(kdf["length"]) is not int or kdf["length"] != KEY_LENGTH:
+            raise SecretStoreStateError("envelope key length is unusable")
+        if not isinstance(kdf["info"], str) or not isinstance(header.get("id"), str):
+            raise SecretStoreStateError("envelope parameters are unusable")
         derivation = HKDF(
             algorithm=SHA256(),
-            length=int(kdf["length"]),
-            salt=_unb64(kdf["salt"], "envelope salt"),
+            length=kdf["length"],
+            salt=_unb64(kdf["salt"], "envelope salt", length=SALT_LENGTH),
             info=f"{kdf['info']}:{header.get('id')}".encode(),
         )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise SecretStoreStateError(f"envelope parameters are unusable: {exc}") from None
-    return derivation.derive(key)
+        return derivation.derive(key)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        raise SecretStoreStateError("envelope parameters are unusable") from None
 
 
 def _header_bytes(header: dict[str, Any]) -> bytes:
@@ -746,8 +776,16 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
                     # missing/bad envelope remains visible through store_findings;
                     # one entry must not make us forget other readable credentials.
                     continue
-                if role_env.is_sensitive_env_name(environment) or looks_like_credential(value):
-                    values.append(value)
+                forms = [value]
+                if environment:
+                    with suppress(RuntimeEnvError):
+                        decoded = parse_env_value(value)
+                        if decoded != value:
+                            forms.append(decoded)
+                if role_env.is_sensitive_env_name(environment) or any(
+                    looks_like_credential(form) for form in forms
+                ):
+                    values.extend(forms)
         except SecretStoreError:
             pass
     return tuple(values)
@@ -1003,6 +1041,10 @@ def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
             raise SecretStoreValidationError(f"{source} line {number} has an invalid variable name")
         if name in values:
             raise SecretStoreValidationError(f"{source} defines {name} twice")
+        try:
+            parse_env_value(value)
+        except RuntimeEnvError as exc:
+            raise SecretStoreValidationError(f"{source} line {number}: {exc}") from None
         values[name] = value
     return values
 
@@ -1058,8 +1100,10 @@ def _read_value(instance_dir: Path, secret_id: str, key: bytes) -> bytes:
         raise SecretStoreStateError(
             f"secret {secret_id!r} is catalogued but its value file is missing"
         ) from None
-    except (OSError, ValueError) as exc:
-        raise SecretStoreStateError(f"could not read the value for {secret_id!r}: {exc}") from None
+    except (OSError, ValueError):
+        raise SecretStoreStateError(f"could not read the value for {secret_id!r}") from None
+    if not isinstance(envelope, dict) or envelope.get("id") != secret_id:
+        raise SecretStoreStateError(f"value file does not belong to secret {secret_id!r}")
     return open_value(key, envelope)
 
 
@@ -1074,8 +1118,8 @@ def _stored_value(instance_dir: Path, secret_id: str, key: bytes) -> bytes | Non
 def _env_value(entry: dict[str, Any], value: bytes) -> str:
     """The right-hand side of one env line, or a refusal.
 
-    An env file has no escaping this format can rely on: `installation` reads the rest of the line
-    literally, so a value with a newline in it would silently become a different variable.
+    Values retain their serialized EnvironmentFile syntax so imported files round-trip
+    byte for byte. Validate it before publishing; runtime consumers decode this syntax.
     """
     try:
         text = value.decode("utf-8")
@@ -1087,6 +1131,12 @@ def _env_value(entry: dict[str, Any], value: bytes) -> str:
         raise SecretStoreValidationError(
             f"secret {entry['id']!r} contains a newline and cannot go into an env file"
         )
+    try:
+        parse_env_value(text)
+    except RuntimeEnvError as exc:
+        raise SecretStoreValidationError(
+            f"secret {entry['id']!r} cannot go into an env file: {exc}"
+        ) from None
     return text
 
 
@@ -1256,7 +1306,9 @@ def _locked_store(instance_dir: Path) -> Iterator[None]:
             try:
                 recover_canon_undo(root)
             except (OSError, RuntimeError) as exc:
-                raise SecretStoreError(f"could not restore an interrupted secret store write: {exc}") from None
+                raise SecretStoreError(
+                    f"could not restore an interrupted secret store write: {exc}"
+                ) from None
         yield
 
 
@@ -1466,8 +1518,13 @@ def _b64(raw: bytes) -> str:
     return base64.b64encode(raw).decode("ascii")
 
 
-def _unb64(text: Any, what: str) -> bytes:
+def _unb64(text: Any, what: str, *, length: int | None = None) -> bytes:
+    if not isinstance(text, str):
+        raise SecretStoreStateError(f"{what} is not valid base64")
     try:
-        return base64.b64decode(str(text), validate=True)
+        value = base64.b64decode(text, validate=True)
     except (ValueError, TypeError):
         raise SecretStoreStateError(f"{what} is not valid base64") from None
+    if length is not None and len(value) != length:
+        raise SecretStoreStateError(f"{what} has the wrong length")
+    return value

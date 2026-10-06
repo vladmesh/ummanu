@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
 
 from ummanu.board.checkpoint_layout import LOGICAL_FILES, publish_split_board
+from ummanu.memory import DEFAULT_MODEL
+from ummanu.memory.config import DEFAULT_DIM
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
 # an install materializes the configured checkout or `~/ummanu`, and neither exists on a machine
@@ -98,3 +101,13 @@ def split_board(board: Path) -> None:
 
 def _git(root: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True)
+
+
+def write_memory_metadata(path: Path, *, model: str = DEFAULT_MODEL, dim: int = DEFAULT_DIM) -> None:
+    """Give a fake rebuild the same model identity as a real index, without the embedding stack."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(path) as conn:
+        conn.execute("CREATE TABLE index_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.executemany(
+            "INSERT INTO index_metadata VALUES (?, ?)", [("model", model), ("dimension", str(dim))]
+        )
