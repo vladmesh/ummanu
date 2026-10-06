@@ -691,10 +691,12 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
         )
         self.assertEqual(self.submitted(), ["$retro"], "the busy head was sent a second skill")
         self.assertEqual(self.actions(), ["supervised-started", "supervised-busy-skip"])
-        self.assertEqual(
+        # The tick looks at the recorded head before the bring-up (is its turn over?), which
+        # adopts the open turn; either refusal is made before anything is spawned.
+        self.assertIn(
             self.events()[-1]["error"],
-            "head_already_up",
-            "the refusal is the launch identity's, made before anything was spawned",
+            ("head_already_up", "turn_in_flight"),
+            "the refusal is made before anything was spawned",
         )
 
     def test_a_dead_head_is_an_ordinary_bring_up(self) -> None:
@@ -742,6 +744,63 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
             message="a record from another boot became a permanent refusal to go on duty",
         )
         self.assertEqual(self.actions(), ["supervised-started", "supervised-started"])
+
+
+class IdleHeadRetirementTests(MechanicalRoleBackendTestCase):
+    """A head whose turn is over and that has sat idle since does not hold its role off duty.
+
+    Codex's TUI does not exit after its turn: the curator's head wrote its memory, advanced, and
+    then sat at its composer, and every later hourly tick was a `supervised-busy-skip
+    head_already_up` over a head with nothing left to do, until someone stopped it by hand.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.prompt_after_start = True
+
+    def finished_head(self) -> Path:
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        (run_dir,) = self.run_dirs()
+        self.assertEqual(self.submitted(), ["$retro"])
+        journal = run_dir / "journal.jsonl"
+
+        def settled() -> bool:
+            kinds = [json.loads(line).get("kind") for line in journal.read_text(encoding="utf-8").splitlines()]
+            turns = [kind for kind in kinds if kind in ("turn.started", "turn.finished")]
+            return bool(turns) and turns[-1] == "turn.finished"
+
+        self.await_(settled, message="the head's turn never finished")
+        return run_dir
+
+    def test_an_idle_head_is_retired_and_the_tick_runs_on_a_fresh_one(self) -> None:
+        run_dir = self.finished_head()
+        first = self.head_pid(run_dir)
+
+        with mock.patch.object(dispatch, "IDLE_HEAD_GRACE_SECONDS", 0.5):
+            time.sleep(0.6)
+            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(
+            self.actions(),
+            ["supervised-started", dispatch.SUPERVISED_IDLE_STOP, "supervised-started"],
+            "the tick was busy-skipped over a head whose turn had long finished",
+        )
+        self.assertEqual(self.submitted(), ["$retro", "$retro"], "the tick never ran its skill")
+        self.assertFalse(_alive(first), "the idle head was left running beside its successor")
+        self.await_(
+            lambda: _alive(self.head_pid(run_dir)) and self.head_pid(run_dir) != first,
+            message="no fresh head was raised",
+        )
+
+    def test_a_head_inside_the_grace_is_still_busy_skipped(self) -> None:
+        run_dir = self.finished_head()
+        head = self.head_pid(run_dir)
+
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(self.actions(), ["supervised-started", "supervised-busy-skip"])
+        self.assertEqual(self.head_pid(run_dir), head)
+        self.assertTrue(_alive(head))
 
 
 class BackendHandoverTests(MechanicalRoleBackendTestCase):

@@ -753,6 +753,14 @@ def _local_pty_runtime() -> Any:
 #: driver makes.
 HANDOVER_INITIATOR = "triggered-agent-dispatch"
 FAILED_BRING_UP_REASON = "this tick's bring-up failed, so the head it raised is nobody's"
+IDLE_HEAD_REASON = "its turn ended and it sat idle, so this tick retires it and raises a fresh head"
+#: The `runs.jsonl` action of a tick that retired the previous tick's finished, idle head.
+SUPERVISED_IDLE_STOP = "supervised-idle-stop"
+#: How long a standing head's turn must have been over before a tick may retire it. A head whose
+#: adapter never exits on its own (Codex's TUI) otherwise holds its role off duty for good: every
+#: later tick is a busy-skip over a head that has nothing left to do. The grace keeps a head that
+#: only paused inside its turn from being taken for finished.
+IDLE_HEAD_GRACE_SECONDS = 600.0
 
 
 @dataclass(frozen=True)
@@ -788,6 +796,59 @@ def _fail_closed(
     return REFUSED_EXIT
 
 
+def _retire_idle_head(
+    agent: str, runtime: Any, prior: dict | None, state: AgentState, event: str, reports: _TickReports
+) -> None:
+    """End the head an earlier tick raised once its turn is over and it has sat idle since.
+
+    A tick is one head raised with its own skill, and the run is meant to end when that head exits.
+    An adapter whose head does not exit after its turn (Codex's TUI keeps its composer open) left
+    the head up with nothing to do, and the bring-up below refused every later tick over it
+    (`supervised-busy-skip head_already_up`) until someone stopped it by hand.
+
+    Only a head the supervisor positively reads as quiet is ended: alive, no turn open, no delivery
+    in flight, and nothing new in its journal for `IDLE_HEAD_GRACE_SECONDS`. The stop is the
+    runtime's own `stop_if_quiescent`, so a turn that starts between this look and the stop refuses
+    it. Anything else — a working head, an unreadable record, a refused stop — changes nothing,
+    and the bring-up decides as before. A steward report the retired head was writing is closed,
+    because no head is writing it any more.
+    """
+    if not prior:
+        return
+    try:
+        run = HeadRun.from_json(prior)
+        seen = runtime.observe(run)
+    except Exception as exc:  # noqa: BLE001 - an unreadable head is the bring-up's to refuse
+        print(f"dispatch[{agent}]: could not observe the recorded head ({type(exc).__name__}: {exc})")
+        return
+    if not seen.ok or seen.busy is not False or not seen.last_output_at:
+        return
+    idle = datetime.now(UTC).timestamp() - float(seen.last_output_at)
+    if idle < IDLE_HEAD_GRACE_SECONDS:
+        return
+    stopped = runtime.stop_if_quiescent(
+        run,
+        StopInitiator(actor=HANDOVER_INITIATOR, reason=IDLE_HEAD_REASON),
+        expected_activity_epoch=seen.epoch,
+        head_process_alive=True,
+    )
+    if not stopped.ok:
+        print(f"dispatch[{agent}]: the idle head {run.run_id} was not stopped ({stopped.reason or stopped.status})")
+        return
+    # The stop left this runtime holding the head's admission closed; the bring-up that follows
+    # reuses the run id, exactly as it does over a head that ended on its own.
+    runtime.forget_head(run.run_id)
+    state.log_run(event, action=SUPERVISED_IDLE_STOP, reference=run.run_id, idle_seconds=int(idle))
+    print(f"dispatch[{agent}]: retired the idle head {run.run_id} after {int(idle)}s")
+    _release_standing_report(
+        state,
+        event,
+        "the head that was writing this report finished its turn and was retired idle, "
+        "so the report was closed by the tick that raised its successor.",
+        report_board=reports.report_board,
+    )
+
+
 def _supervised_bring_up(
     agent: str,
     ws: str,
@@ -815,6 +876,7 @@ def _supervised_bring_up(
         raise
     runtime = _local_pty_runtime()
     prior = state.load_head_run()
+    _retire_idle_head(agent, runtime, prior, state, event, reports)
     spec = HeadSpec.from_profile(str(cmd.profile or agent), dict(cmd.head_profile or {}))
     # A standing duty, not a card. The run id and the task binding have to be the same facts every
     # tick, because they are what the head's own launch-identity record is compared against when a
