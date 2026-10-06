@@ -12,7 +12,6 @@ fixture's own data plane.
 
 from __future__ import annotations
 
-import ast
 import json
 import re
 import unittest
@@ -470,28 +469,6 @@ class SectionSeamTests(CommandProtocolFixture):
         )
         self.assertIsInstance(produced, Section)
         self.assertTrue(produced.trusted)
-
-    def test_a_source_read_enumerates_no_failure_and_is_the_only_broad_catch(self) -> None:
-        """The rule is the span, not a list: nothing here says which failures count.
-
-        The audit alone raises an `OSError` for a journal it cannot open and a `TaskError` for a
-        pending layout this release refuses to guess at, and a tuple naming both is exactly the
-        thing that drifts when the third arrives. So the read-and-convert of one durable document is
-        the whole span, and this module holds no enumeration to keep in step.
-        """
-        source = Path(command_reads.__file__).read_text(encoding="utf-8")
-        module = ast.parse(source)
-        handlers = [node for node in ast.walk(module) if isinstance(node, ast.ExceptHandler)]
-        self.assertEqual([getattr(handler.type, "id", None) for handler in handlers], ["Exception"])
-        span = next(
-            node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_source"
-        )
-        self.assertEqual(
-            [handler for handler in ast.walk(span) if isinstance(handler, ast.ExceptHandler)],
-            handlers,
-            "the one broad catch is the read-and-convert of one source, and nothing wider",
-        )
-        self.assertNotIn("SOURCE_FAILURES", source)
 
     def test_a_defect_outside_a_source_read_still_travels_as_itself(self) -> None:
         self.commit("req-1", event_id="evt_1")

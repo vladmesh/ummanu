@@ -253,6 +253,7 @@ integration-board tests/test_sprint_attention.py
 integration-board tests/test_web_warm_render.py
 unit tests/test_web_markdown.py
 unit tests/test_web_page_parts.py
+unit tests/test_web_boundaries.py
 unit tests/test_web_cursor.py
 unit tests/test_web_card_waits.py
 integration-board tests/test_web_delegation_reads.py

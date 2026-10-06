@@ -672,6 +672,21 @@ class CursorOverHttpTests(TransportFixture):
 
 
 class PageTests(TransportFixture):
+    def test_a_refused_dispatcher_record_keeps_pages_and_system_readable(self) -> None:
+        self._production({"ummanu-9": {"worker_retained_at": 1}})
+        app = self.app()
+        for path in ("/", "/projects", "/projects/ummanu", "/api/system"):
+            with self.subTest(path=path):
+                response = app.handle("GET", path)
+                self.assertEqual(response.status, 200)
+                if path == "/api/system":
+                    snapshot = json.loads(response.body)
+                    self.assertEqual(snapshot["agents"]["source"]["state"], "unavailable")
+                    self.assertEqual(snapshot["projects"]["source"]["state"], "available")
+                    self.assertEqual(snapshot["tasks"]["source"]["state"], "available")
+                else:
+                    self.assertIn("<!doctype html>", response.body.decode())
+
     def test_the_dashboard_omits_card_and_agent_lists(self) -> None:
         page = self.text_of(self.get("/"))
         self.assertNotIn("no agent is running.", page)
