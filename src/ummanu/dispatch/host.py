@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-from ummanu.dispatch.cleanup import CleanupJournal, serialized
-
 import contextlib
 import hashlib
 import json
 import os
 import re
 import shlex
-import shutil
 import signal
 import subprocess
 import time
@@ -40,31 +37,25 @@ from ummanu.codex_provider_events import (
 )
 from ummanu.config import validate_instance
 from ummanu.dispatch import production_checkout
+from ummanu.dispatch.cleanup import CleanupJournal, serialized
 from ummanu.dispatch.e2e import parse_e2e
 from ummanu.dispatch.gate import (
     GateResult,
-)
-from ummanu.dispatch.gate import (
     gate_check as _gate_check,
-)
-from ummanu.dispatch.gate import (
     rerun_failed_ci as _rerun_failed_ci,
-)
-from ummanu.dispatch.gate import (
     validation_ci as _validation_ci,
 )
 from ummanu.dispatch.gate_receipt import (
     accepted_receipt as _accepted_gate_receipt,
-)
-from ummanu.dispatch.gate_receipt import (
     is_exact_sha as _is_exact_sha,
-)
-from ummanu.dispatch.gate_receipt import (
     render_receipt,
 )
-from ummanu.dispatch.git_workspace import WORKSPACES_DIR as GIT_WORKSPACES_DIR
-from ummanu.dispatch.git_workspace import GitWorkspaceManager, orca_workspaces_root
-from ummanu.dispatch.git_workspace import _resolved as _resolved_path
+from ummanu.dispatch.git_workspace import (
+    WORKSPACES_DIR as GIT_WORKSPACES_DIR,
+    GitWorkspaceManager,
+    _resolved as _resolved_path,
+    orca_workspaces_root,
+)
 from ummanu.dispatch.head_vitality_episode import (
     VitalityVerdict as VitalityVerdict,
 )
@@ -76,47 +67,29 @@ from ummanu.dispatch.helpers import (
     _protocol_prerequisites_record_line,
     _round_record_line,
     _tail,
-    scrub_host_output,
-)
-from ummanu.dispatch.helpers import (
     safe_one_line as _safe_one_line,
+    scrub_host_output,
 )
 from ummanu.dispatch.launch import (
     CAUSE_BASE_BRANCH_CONTRACT,
     CAUSE_WORKSPACE_CONTRACT,
     REVIEW_ROLE,
     WORKER_ROLE,
-)
-from ummanu.dispatch.launch import (
     infrastructure_action as _infrastructure_action,
 )
 from ummanu.dispatch.launcher import (
     HeadLaunchError,
-)
-from ummanu.dispatch.launcher import (
     claude_launch_model as _claude_launch_model,
-)
-from ummanu.dispatch.launcher import (
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
-)
-from ummanu.dispatch.launcher import (
     ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
-)
-from ummanu.dispatch.launcher import (
     role_launch_env as _role_launch_env,
 )
 from ummanu.dispatch.observer import (
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
-)
-from ummanu.dispatch.observer import (
     observer_launch_prompt as _observer_launch_prompt,
-)
-from ummanu.dispatch.observer import (
     observer_pid_file as _observer_pid_file,
-)
-from ummanu.dispatch.observer import (
     render_observer_wake_context as _render_observer_wake_context,
 )
 from ummanu.dispatch.post_merge import pr_merge_commit
@@ -133,11 +106,7 @@ from ummanu.dispatch.state import (
     DispatcherRecord,
     GatePrAuthorship,
     GatePublishedRef,
-)
-from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
-)
-from ummanu.dispatch.state import (
     request_token as _request_token,
 )
 from ummanu.dispatch.tui import (
@@ -145,20 +114,10 @@ from ummanu.dispatch.tui import (
     READINESS_BUSY,
     READINESS_READY,
     TuiDeliveryError,
-)
-from ummanu.dispatch.tui import (
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
-)
-from ummanu.dispatch.tui import (
     delivery_readiness_state as _delivery_readiness_state,
-)
-from ummanu.dispatch.tui import (
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
-)
-from ummanu.dispatch.tui import (
     provider_progress_for_run as _provider_progress_for_run,
-)
-from ummanu.dispatch.tui import (
     provider_turn_started as _provider_turn_started,
 )
 from ummanu.dispatch.types import (
@@ -177,32 +136,14 @@ from ummanu.dispatch.types import (
 )
 from ummanu.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
-)
-from ummanu.dispatch.watchdog import (
     bind_head_heartbeat as _bind_head_heartbeat,
-)
-from ummanu.dispatch.watchdog import (
     clear_head_heartbeat as _clear_head_heartbeat,
-)
-from ummanu.dispatch.watchdog import (
     guard_head_run_identity as _guard_head_run_identity,
-)
-from ummanu.dispatch.watchdog import (
     head_process_status as _head_process_status,
-)
-from ummanu.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
-)
-from ummanu.dispatch.watchdog import (
     heartbeat_is_dead as _heartbeat_is_dead,
-)
-from ummanu.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
-)
-from ummanu.dispatch.watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
-)
-from ummanu.dispatch.watchdog import (
     pid_file_path as _pid_file_path,
 )
 from ummanu.dispatch.worker_comments import (
@@ -229,15 +170,13 @@ from ummanu.projects.availability import ProjectAvailability
 from ummanu.projects.contract import (
     UNDECIDABLE_RELATIVE_INTERPRETER,
     ContractVerdict,
+    decide as _decide_broad_check_contract,
 )
-from ummanu.projects.contract import decide as _decide_broad_check_contract
 from ummanu.projects.integration_base import (
     IntegrationBaseError,
+    is_exact_sha as _is_exact_ref_sha,
     resolve_integration_base,
     seed_ref_refusal,
-)
-from ummanu.projects.integration_base import (
-    is_exact_sha as _is_exact_ref_sha,
 )
 from ummanu.routing_journal import (
     HEAD_FROM_CARD,
@@ -255,24 +194,14 @@ from ummanu.runtime.codex_preflight import (
 )
 from ummanu.runtime.head import (
     CODEX_TUI_MODE,
+    OBSERVE_PANE_DISCONNECTED as _OBSERVE_PANE_DISCONNECTED,
+    OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
+    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
     HeadCommand,
     HeadCommandError,
     HeadSpec,
     HeadSpecError,
-)
-from ummanu.runtime.head import (
-    OBSERVE_PANE_DISCONNECTED as _OBSERVE_PANE_DISCONNECTED,
-)
-from ummanu.runtime.head import (
-    OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
-)
-from ummanu.runtime.head import (
-    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
-)
-from ummanu.runtime.head import (
     render_head_command as _render_head_command,
-)
-from ummanu.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
 from ummanu.runtime.head.children import read_head_children
@@ -286,11 +215,7 @@ from ummanu.runtime.head_runtime_backends import (
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.heads import (
     HeadRegistryError,
-)
-from ummanu.runtime.heads import (
     required_role_default as _required_role_default,
-)
-from ummanu.runtime.heads import (
     resolve_head_id as _resolve_head_id,
 )
 from ummanu.runtime.launch_prefix import pythonpath_prefix
@@ -298,11 +223,7 @@ from ummanu.runtime.local_pty_head import head_run_turn_reading
 from ummanu.runtime.paths import configured_product_root
 from ummanu.runtime.prompt_document import (
     PromptDocumentError,
-)
-from ummanu.runtime.prompt_document import (
     nudge_for as _nudge_for,
-)
-from ummanu.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
 from ummanu.runtime.role_env import (
@@ -1780,8 +1701,30 @@ class CommandHostRuntime:
                 lifecycle_run = updated
         return _provider_progress_for_run(lifecycle_run)
 
+    def observer_provider_failure(self, record: Any) -> dict[str, Any]:
+        """Whether this observer's exact HeadRun ended its last turn on a provider error (ummanu-108).
+
+        Bound like `observer_provider_progress`: a persisted run naming another workspace or
+        sprint answers nothing. The reader is `provider_failure.provider_failure_for_run`.
+        """
+        if self.mode == "noop":
+            return {"state": "unavailable", "reason": "noop host"}
+        stored = getattr(record, "head_run", {})
+        try:
+            run = head_ops.HeadRun.from_json(stored)
+        except (head_ops.HeadRunError, TypeError, ValueError):
+            return {"state": "unavailable", "reason": "persisted observer HeadRun is unavailable"}
+        if (
+            run.workspace != str(getattr(record, "workspace", "") or "")
+            or run.task_ref.kind != "sprint"
+            or run.task_ref.ref != str(getattr(record, "sprint", "") or "")
+            or (run.role and run.role != OBSERVER_ROLE)
+        ):
+            return {"state": "identity_mismatch", "reason": "persisted observer HeadRun binding mismatches"}
+        return _provider_failure_for_persisted_run(stored, local_pty_root=self._local_pty_root())
+
     def provider_failure(self, task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, Any]:
-        """Whether this role's exact HeadRun ended its first turn on a provider error (secretary-1799).
+        """Whether this role's exact HeadRun ended its last turn on a provider error (secretary-1799, ummanu-108).
 
         Read-only, and bound like `provider_progress`: a persisted run that names another workspace,
         card or role answers nothing. The reader is `provider_failure.provider_failure_for_run`.

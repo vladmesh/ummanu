@@ -18,6 +18,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.dispatcher_fixtures import SupervisedBackend, supervised_run
+from tests.fakes.dispatcher import (
+    FakeCatalog,
+    FakeHost,
+    TwoOpenSprintAdmission,
+    dispatcher_seed,
+)
+from tests.fakes.observer import (
+    DEAD_PID,
+    install_skill_registry,
+)
+from tests.fanout_fixtures import accepted_transport_run
+from tests.observer_identity import as_observer, bind_observer
+from tests.production_runtime_fixtures import registered_production_runtime
+from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
+from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
+from tests.sql_backend_fixtures import card_store
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import BOARD_ID
 from ummanu.dispatch import observer_fence as dispatcher_observer_fence
@@ -68,6 +85,20 @@ from ummanu.dispatch.worker_lifecycle import head_run_binding
 from ummanu.head_health import HeadReadiness
 from ummanu.head_registry import canonical_heads
 from ummanu.infra import git_worktree
+from ummanu.observer_root import observer_root_repo
+from ummanu.runtime import codex_preflight
+from ummanu.runtime.codex_preflight import ensure_codex_workspace_trusted
+from ummanu.runtime.head import (
+    HEAD_BUSY,
+    HEAD_GONE,
+    DeliverReceipt,
+    HeadCommand,
+    HeadRun,
+    HeadSpec,
+    TaskRef,
+    operations as head_ops,
+)
+from ummanu.runtime.provider_errors import KIND_QUOTA, ProviderError
 from ummanu.runtime.role_env import (
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
@@ -84,28 +115,6 @@ from ummanu.sprints import (
 )
 from ummanu.status import _observers as status_observers
 from ummanu.tasks import TaskError, TaskReader, TaskWriter, _now, task_audit_for
-from tests.fakes.dispatcher import (
-    FakeCatalog,
-    FakeHost,
-    TwoOpenSprintAdmission,
-    dispatcher_seed,
-)
-from tests.fakes.observer import (
-    DEAD_PID,
-    install_skill_registry,
-)
-from tests.dispatcher_fixtures import SupervisedBackend, supervised_run
-from tests.fanout_fixtures import accepted_transport_run
-from tests.observer_identity import as_observer, bind_observer
-from tests.production_runtime_fixtures import registered_production_runtime
-from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
-from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
-from tests.sql_backend_fixtures import card_store
-from ummanu.runtime import codex_preflight
-from ummanu.runtime.codex_preflight import ensure_codex_workspace_trusted
-from ummanu.observer_root import observer_root_repo
-from ummanu.runtime.head import HEAD_BUSY, HEAD_GONE, DeliverReceipt, HeadCommand, HeadRun, HeadSpec, TaskRef
-from ummanu.runtime.head import operations as head_ops
 
 
 @contextlib.contextmanager
@@ -708,6 +717,67 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.calls.count("stop_observer"), 1)
         self.assertNotIn("stop_observer_if_quiescent", self.host.calls)
         self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
+    def test_a_refused_observer_is_replaced_on_its_fallback_with_the_launched_profiles_binding(self) -> None:
+        """ummanu-108: the declared observer's provider refuses it while a batch is pending.
+
+        The replacement walks the declared profile's chain past the red resource. The record keeps the
+        declared profile (the fence compares against it), names the profile that runs in
+        `fallback_head`, and the launch intent's preflight run -- the run the new wake episode is bound
+        to -- is the launched profile's, not the declared one's.
+        """
+        self.catalog.profiles["codex-observer"]["fallback"] = ["claude-opus"]
+        self.open_sprint()
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.runtime.production_tick()
+        first_run = str(self.observers()["sprint:1"].head_run.get("run_id") or "")
+        self.assertTrue(first_run)
+        preflighted: list[str] = []
+
+        def preflight(head, *, role, workspace, task_ref, pid_file, run_id):
+            preflighted.append(head)
+            # The run a profile resolves to (`CommandHostRuntime.preflight_codex_run`), here built
+            # straight from the fake registry entry of the head the launch asked for.
+            spec = HeadSpec.from_profile(head, self.catalog.head_profile(head))
+            return HeadRun(
+                run_id=run_id, spec=spec, workspace=workspace, task_ref=task_ref, role=role, pid_file=pid_file
+            )
+
+        self.host.preflight_codex_run = preflight  # type: ignore[attr-defined]
+        refused = ProviderError(KIND_QUOTA, None, "You've hit your usage limit", reset_at=time.time() + 86400)
+        self.host.observer_provider_failure = lambda record: (  # type: ignore[attr-defined]
+            {
+                "state": "failed",
+                "run_id": first_run,
+                "head": record.head,
+                "resource": "openai-sub",
+                "error": refused.to_json(),
+            }
+            if record.head_run.get("run_id") == first_run
+            else {"state": "none"}
+        )
+        self.writer.comment(
+            role="dispatcher",
+            actor="dispatcher",
+            reference="ummanu-510",
+            body="card changed",
+            request_id="refused-observer-event",
+        )
+
+        replaced = self.runtime.production_tick()
+
+        self.assertEqual(
+            [row["action"] for row in self.actions(replaced)], ["observer-relaunched"], self.actions(replaced)
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual((record.head, record.fallback_head), ("codex-observer", "claude-opus"))
+        self.assertNotEqual(record.head_run.get("run_id"), first_run)
+        self.assertEqual(preflighted, ["claude-opus"])
+        self.assertEqual(self.runtime.head_health.check("codex-observer").status, "exhausted")
+        # The declaration is still the one the fence reads: no mismatch stop on the next tick.
+        after = self.runtime.production_tick()
+        self.assertNotIn("observer-stopped", [row["action"] for row in self.actions(after)])
+        self.assertEqual(self.observers()["sprint:1"].fallback_head, "claude-opus")
 
     def test_the_rotation_carries_the_epoch_of_its_judgement_and_not_one_read_at_the_stop(
         self,

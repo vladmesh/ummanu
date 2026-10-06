@@ -111,6 +111,9 @@ def _resource_rows(report, *, inspect_live: bool, now: float) -> tuple[list[dict
                 "freshness": freshness,
                 "observed_at": _rfc3339(readiness.checked_at),
                 "age_seconds": age_seconds,
+                # When a red verdict a head's own turn recorded expires (ummanu-108): the reset the
+                # provider named, else the end of the backoff. None for a verdict with no expiry.
+                "until": _rfc3339(readiness.until) if readiness.until else None,
             }
         )
     return rows, None
@@ -126,7 +129,11 @@ def _resource_readiness(
 ) -> tuple[HeadReadiness, str, str, str | None]:
     entry = recorded.get(resource)
     cached = _recorded(entry, resource)
-    if cached is not None and now - cached.checked_at < PROBE_TTL_SECONDS:
+    # A verdict held to an expiry answers until then, and no probe is run over it: a cheap probe
+    # is no proof there is quota for real work (ummanu-108).
+    if cached is not None and (
+        now < cached.until if cached.until else now - cached.checked_at < PROBE_TTL_SECONDS
+    ):
         return cached, "dispatcher-cache", "fresh", None
     if inspect_live and probe:
         return run_probe(resource, probe, now), "live-read-only-probe", "fresh", None
@@ -159,6 +166,10 @@ def _recorded(entry: object, resource: str) -> HeadReadiness | None:
         return None
     if checked_at <= 0:
         return None
+    try:
+        until = float(entry.get("until") or 0)
+    except (TypeError, ValueError):
+        until = 0.0
     return HeadReadiness(
         resource,
         str(entry.get("status") or "unknown"),
@@ -167,6 +178,7 @@ def _recorded(entry: object, resource: str) -> HeadReadiness | None:
         else "recorded verdict has no reason",
         checked_at,
         True,
+        until,
     )
 
 

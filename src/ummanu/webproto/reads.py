@@ -28,9 +28,7 @@ from ummanu.dispatch.state import DispatcherRecord
 from ummanu.infra.doctor_findings import accepted as accepted
 from ummanu.status import collect_status
 from ummanu.tasks import TaskError, TaskReader, task_audit_for
-from ummanu.webproto import agents as agent_reads
-from ummanu.webproto import head_view as head_reads
-from ummanu.webproto import sources
+from ummanu.webproto import agents as agent_reads, head_view as head_reads, sources
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.cursor import Cursor, decode
 from ummanu.webproto.errors import (
@@ -736,6 +734,8 @@ PROBLEM_SEVERITY: dict[str, str] = {
     "dispatcher.divergences_open": "yellow",
     "host.inventory_unreadable": "yellow",
     "memory.index_missing": "yellow",
+    # A subscription resource is red (ummanu-108): its roles run on the other family meanwhile.
+    "provider.red": "yellow",
 }
 
 #: The code `ummanu doctor` reports a checkpoint past its RPO under, classified above.
@@ -830,6 +830,15 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
     memory = _object(status.get("memory"))
     if memory and memory.get("index_present") is False:
         found("memory.index_missing", "the memory index is missing")
+    providers = _providers(status)
+    for provider in providers:
+        if provider["state"] not in ("ready", "unknown", "stale"):
+            found(
+                "provider.red",
+                f"provider {provider['resource']} is {provider['state']}"
+                + (f" until {provider['until']}" if provider["until"] else "")
+                + (f": {provider['reason']}" if provider["reason"] else ""),
+            )
     problems = [finding["message"] for finding in findings]
     return {
         "state": "ok" if not problems else "attention",
@@ -854,12 +863,29 @@ def health_summary(status: dict[str, Any]) -> dict[str, Any]:
             "next_due_at": _text(checkpoint.get("checkpoint_next_due_at")) or None,
         },
         "resources": _object(host.get("resources")),
+        # Each subscription resource's state and when a red one comes back (ummanu-108).
+        "providers": providers,
         "cards": _object(installation.get("cards")),
         "memory": {
             "fact_count": memory.get("fact_count"),
             "last_reindex_at": _text(memory.get("last_reindex_at")) or None,
         },
     }
+
+
+def _providers(status: dict[str, Any]) -> list[dict[str, Any]]:
+    """The head resources `collect_status` read from the dispatcher's health cache, with expiry."""
+    rows = _object(status.get("recovery")).get("resources")
+    return [
+        {
+            "resource": _text(row.get("resource")),
+            "state": _text(row.get("state")) or "unknown",
+            "until": _text(row.get("until")) or None,
+            "reason": _text(row.get("reason")),
+        }
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict) and _text(row.get("resource"))
+    ]
 
 
 def _object(value: Any) -> dict[str, Any]:

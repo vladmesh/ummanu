@@ -147,6 +147,8 @@ class TheColourRuleTests(unittest.TestCase):
             "dispatcher.divergences_open",
             "host.inventory_unreadable",
             "memory.index_missing",
+            # ummanu-108: one subscription is red; its roles run on the other family meanwhile.
+            "provider.red",
         }
         self.assertEqual({code for code, s in PROBLEM_SEVERITY.items() if s == "red"}, red)
         self.assertEqual({code for code, s in PROBLEM_SEVERITY.items() if s == "yellow"}, yellow)

@@ -85,6 +85,7 @@ from ummanu.po.context_budget import (
 from ummanu.po.models import (
     EffortRefused,
     efforts_from_instance,
+    first_effort,
     models_from_instance,
     require_explicit_effort,
     successor_choice,
@@ -180,6 +181,8 @@ class PoService:
         self.marker = restart_marker_path(self.data_dir)
         runner.on_settled = self._settled
         runner.on_failed = self._turn_failed
+        if runner.fallback_choice is None:
+            runner.fallback_choice = self.fallback_choice
         self._lock = threading.RLock()
         self._wake = threading.Event()
         self._exit = threading.Event()
@@ -274,12 +277,36 @@ class PoService:
             try:
                 if not self.runner.orphaned_turns():
                     return
-            except Exception:  # noqa: BLE001 - an unreadable store also needs bounded recovery
+            except Exception:  # noqa: BLE001, S110 - an unreadable store also needs bounded recovery
                 pass
             self._recovered = False
             if self._next_recovery <= time.monotonic():
                 self._next_recovery = time.monotonic() + TICK_SECONDS
         self._wake.set()
+
+    def fallback_choice(self, session: Session) -> tuple[str, str, str] | None:
+        """The other CLI a session's refused turn falls over to (ummanu-108): its first offered model.
+
+        The session's effort is kept when the other CLI offers it, else that CLI's first one, so a
+        `high` session continues at `high`. None when the other CLI offers no model.
+        """
+        try:
+            models = self._model_list()
+            efforts = self._effort_list()
+        except Refused:
+            return None
+        for cli in CLIS:
+            if cli == session.cli:
+                continue
+            listed = [str(model) for model in models.get(cli) or () if str(model).strip()]
+            if not listed:
+                continue
+            offered = [str(value) for value in efforts.get(cli) or ()]
+            effort = session.effort if session.effort in offered else (first_effort(cli, efforts) or "")
+            if not effort:
+                continue
+            return cli, listed[0], effort
+        return None
 
     def _turn_failed(self, session_id: str, seq: int, reason: str) -> None:
         """A turn settled `failed`: one `po_turn_failed` notice (a stop by the owner is `interrupted`).

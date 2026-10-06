@@ -20,7 +20,14 @@ from ummanu.checkpoint import (
     rpo_problem,
     snapshot_foreign_commits,
 )
-from ummanu.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
+from ummanu.config import (
+    DataDirError,
+    fallback_errors,
+    instance_data_dir,
+    load_config,
+    validate,
+    validate_instance,
+)
 from ummanu.data import (
     PIPELINE_STATE_DIR,
     export_all,
@@ -632,6 +639,8 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"root filesystem: {finding['message']}")
         elif finding["code"] == "automation_busy_without_advance":
             print(f"{finding['agent']}: {finding['message']}")
+        elif finding["code"] == "head_fallback":
+            print(f"error: head fallback: {finding['message']}")
         elif str(finding["code"]).startswith("live_root."):
             print(f"{finding['code']}: {finding['message']}")
         if accepted(finding):
@@ -909,6 +918,11 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend(checkpoint_rpo)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint_plain)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
+    # A head profile or PO session that cannot fall over to the other subscription family (ummanu-108).
+    findings.extend(
+        {"code": "head_fallback", "message": f"{error.path}: {error.message}"}
+        for error in fallback_errors(report.instance_path.parent, getattr(report, "instance", None))
+    )
     codex_home_status = _codex_home_status(report)
     if codex_home_status["login_missing"] and codex_home_status["codex_required"]:
         # No Codex head of this installation can start: red, with the resolver's own fix text.
@@ -1373,6 +1387,8 @@ def print_recovery_inventory(recovery: dict[str, object]) -> None:
             age = f", age={row['age_seconds']}s" if row.get("age_seconds") is not None else ""
             prior = f", observed_state={row['observed_state']}" if row.get("observed_state") else ""
             recorded = " (recorded)" if row.get("source") == "dispatcher-cache" else ""
+            if row.get("until"):
+                recorded += f" until {row['until']}"
             print(
                 f"  {row['resource']}: {row['state']}{recorded} - {row['reason']} "
                 f"[source={row['source']}, freshness={row['freshness']}, "
@@ -1734,7 +1750,7 @@ def run_memory_propose(args: argparse.Namespace) -> int:
             pinned=args.pinned,
             supersedes=_split_csv(args.supersedes),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("propose", exc)
     _print_json(
         {
@@ -1762,7 +1778,7 @@ def run_memory_commit(args: argparse.Namespace) -> int:
             actor=args.actor,
             propose_id=args.propose_id,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("commit", exc)
     _print_memory_write_result(result)
     return 0
@@ -1785,7 +1801,7 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
             tags=_split_csv(args.tags),
             pinned=args.pinned,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("supersede", exc)
     _print_memory_write_result(result)
     return 0

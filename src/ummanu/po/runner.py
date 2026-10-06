@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ummanu.head_health import HeadHealth, failure_status, failure_until, until_text
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.po.models import DEFAULT_EFFORTS, EffortRefused, require_explicit_effort
@@ -60,14 +61,22 @@ from ummanu.po.store import (
     Turn,
 )
 from ummanu.po.workspace import workspace_dir
-from ummanu.runtime.provider_models import codex_rollout_path, codex_session_models
+from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import HeadHandle, spawn_head
+from ummanu.runtime.head.local_pty.journal import RUN_EXITED, read_events
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError
-from ummanu.runtime.head.local_pty.journal import RUN_EXITED, read_events
-from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.spec import HeadSpec, load_head_specs
 from ummanu.runtime.heads import HeadRegistryError, Registry, load_registry
+from ummanu.runtime.provider_errors import (
+    CODEX_QUOTA_ERROR_INFOS,
+    KIND_QUOTA,
+    ProviderError,
+    classify_provider_error,
+    reset_time,
+    summarize_provider_error,
+)
+from ummanu.runtime.provider_models import codex_rollout_path, codex_session_models
 
 RUNS_DIR_NAME = "po-runs"
 STOPPED_REASON = "stopped by the owner"
@@ -83,6 +92,11 @@ STDERR_TAIL_BYTES = 2000
 STOP_JOIN_SECONDS = 10.0
 # Claude Code's refusal of `--session-id` for a conversation that already exists (checked on 2.1.270).
 CLAUDE_SESSION_IN_USE = "is already in use"
+# The resource each PO CLI draws on when the head registry names none for it.
+DEFAULT_CLI_RESOURCES = {"claude": "claude-sub", "codex": "openai-sub"}
+# How much of a session's feed a turn carried over to the other CLI is given as its context.
+FALLBACK_CONTEXT_ENTRIES = 24
+FALLBACK_CONTEXT_BYTES = 24_000
 
 
 class RunnerError(RuntimeError):
@@ -308,8 +322,12 @@ class PoRunner:
         head_specs: Mapping[str, HeadSpec] | None = None,
         turn_launcher: Callable[..., Any] | None = None,
         scope_owner_unit: str = "ummanu-po.service",
+        fallback_choice: Callable[[Session], tuple[str, str, str] | None] | None = None,
     ) -> None:
         self.store = store
+        # The CLI, model and effort a session falls over to when its own provider refuses a turn
+        # (ummanu-108): the PO service answers from `po.models`; None keeps the turn failed.
+        self.fallback_choice = fallback_choice
         # What a new session's effort is checked against unless its create passes its own list.
         self.efforts: Mapping[str, tuple[str, ...]] = (
             dict(efforts) if efforts is not None else DEFAULT_EFFORTS
@@ -985,7 +1003,17 @@ class PoRunner:
             if relaunched is not None:
                 code = relaunched.wait()
             final_process = relaunched if relaunched is not None else process
-            self._settle(session, seq, code, files, head_loss_reason=getattr(final_process, "head_loss_reason", None))
+            offset = 0
+            fallen = self._fall_over(session, seq, code, files)
+            if fallen is not None:
+                session, final_process, offset = fallen
+                code = final_process.wait()
+                # The replacement's own refusal is recorded too; the turn then settles failed.
+                self._provider_failure(session, code, files, offset=offset, record=True)
+            self._settle(
+                session, seq, code, files,
+                head_loss_reason=getattr(final_process, "head_loss_reason", None), offset=offset,
+            )
         except Exception as exc:  # noqa: BLE001 - a waiter must never leave a turn running without a word
             try:
                 if self._pending_outcome(session.session_id, seq) is None:
@@ -1045,9 +1073,9 @@ class PoRunner:
 
     def _settle(
         self, session: Session, seq: int, code: int, files: TurnFiles,
-        *, head_loss_reason: str | None = None,
+        *, head_loss_reason: str | None = None, offset: int = 0,
     ) -> None:
-        stdout = files.stdout.read_bytes().decode("utf-8", errors="replace")
+        stdout = files.stdout.read_bytes()[offset:].decode("utf-8", errors="replace")
         self._capture_thread_id(session, files.stdout, stdout)
         if session.cli == "claude":
             answer, missing = claude_final_answer(stdout)
@@ -1071,6 +1099,131 @@ class PoRunner:
             self._terminal(session.session_id, seq, {
                 "state": COMPLETED, "answer": answer, "resolved_model": resolved,
             })
+
+    # --- provider fallback (ummanu-108) -------------------------------------------------------
+
+    def cli_resource(self, cli: str) -> str:
+        """The resource a CLI's PO turns draw on: the registry's, else the product's default."""
+        for spec in self.head_specs.values():
+            if spec.adapter == cli and spec.resource:
+                return spec.resource
+        return DEFAULT_CLI_RESOURCES.get(cli, "")
+
+    def _provider_failure(
+        self, session: Session, code: int, files: TurnFiles, *, offset: int = 0, record: bool = False
+    ) -> ProviderError | None:
+        """The provider refusal a failed turn ended on, read from the CLI's own output; else None.
+
+        With `record`, the CLI's resource is recorded red until the reset the provider named (else
+        a bounded backoff), in the same health cache the dispatcher reads.
+        """
+        try:
+            stdout = files.stdout.read_bytes()[offset:].decode("utf-8", errors="replace")
+        except OSError:
+            stdout = ""
+        if session.cli == "claude":
+            answer, _missing = claude_final_answer(stdout)
+        else:
+            answer, _missing = self._codex_final_answer(files)
+        if code == 0 and answer is not None:
+            return None
+        failure = po_provider_error(session.cli, stdout, self._stderr_tail(files))
+        if failure is not None and record:
+            resource = self.cli_resource(session.cli)
+            now = time.time()
+            try:
+                HeadHealth(None, self.data_dir).record(
+                    resource,
+                    failure_status(failure.kind),
+                    f"provider error in a PO turn on {session.cli}/{session.model}: {failure.summary}",
+                    now=now,
+                    until=failure_until(failure.kind, failure.reset_at, now),
+                )
+            except Exception as exc:  # noqa: BLE001 - the fallback below does not depend on it
+                print(f"ummanu po: could not record {resource} red: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return failure
+
+    def _fall_over(self, session: Session, seq: int, code: int, files: TurnFiles) -> tuple[Session, Any, int] | None:
+        """Rerun a turn its provider refused on the session's other CLI, inside the same turn.
+
+        The session moves to the CLI, model and effort `fallback_choice` names (a fresh conversation
+        there), and the turn's own prompt is given again, prefixed with the session's recent feed so
+        the PO resumes from its durable state. Returns the new session, process and the stdout offset
+        the replacement's output starts at; None when there is nothing to fall over to.
+        """
+        if self.fallback_choice is None:
+            return None
+        failure = self._provider_failure(session, code, files, record=True)
+        if failure is None:
+            return None
+        choice = self.fallback_choice(session)
+        if choice is None or choice[0] == session.cli:
+            return None
+        cli, model, effort = choice
+        held = HeadHealth(None, self.data_dir).red_resources().get(self.cli_resource(cli))
+        if held is not None:
+            print(
+                f"ummanu po: turn {session.session_id}/{seq} refused by {session.cli} ({failure.summary}); "
+                f"{cli} is {held.status} until {until_text(held.until)}, so the turn fails",
+                file=sys.stderr,
+            )
+            return None
+        with self._lock:
+            if self.store.turn(session.session_id, seq).state != RUNNING:
+                return None
+            if self._pending_outcome(session.session_id, seq) is not None:
+                return None
+            try:
+                prompt = files.prompt.read_text(encoding="utf-8")
+            except OSError:
+                return None
+            moved = self.store.switch_cli(
+                session.session_id,
+                cli=cli,
+                model=model,
+                effort=effort,
+                cli_session_id=str(uuid.uuid4()) if cli == "claude" else None,
+            )
+            files.prompt.write_text(self._fallback_prompt(session, moved, seq, failure, prompt), encoding="utf-8")
+            try:
+                offset = files.stdout.stat().st_size
+            except OSError:
+                offset = 0
+            process = self._launch(moved, seq, self.argv(moved, files, established=False), files)
+            live = self._live.get((session.session_id, seq))
+            if live is not None:
+                live.process = process
+        print(
+            f"ummanu po: turn {session.session_id}/{seq} refused by {session.cli} ({failure.summary}); "
+            f"the session continues on {cli}/{model}",
+            file=sys.stderr,
+        )
+        return moved, process, offset
+
+    def _fallback_prompt(
+        self, previous: Session, moved: Session, seq: int, failure: ProviderError, prompt: str
+    ) -> str:
+        """The rerun turn's prompt: why the CLI changed, the session's recent feed, then the input."""
+        try:
+            feed = [entry for entry in self.store.feed(previous.session_id) if entry.turn_seq < seq]
+        except Exception:  # noqa: BLE001 - the rerun goes ahead without its history
+            feed = []
+        lines: list[str] = []
+        size = 0
+        for entry in reversed(feed[-FALLBACK_CONTEXT_ENTRIES:]):
+            line = f"[{entry.role} {entry.turn_seq}] {entry.text.strip()}"
+            size += len(line.encode("utf-8"))
+            if size > FALLBACK_CONTEXT_BYTES:
+                break
+            lines.append(line)
+        history = "\n\n".join(reversed(lines)) or "(no earlier messages)"
+        return (
+            f"[ummanu] This PO session ran on {previous.cli}/{previous.model} until its provider refused "
+            f"this turn ({failure.summary}). It continues here on {moved.cli}/{moved.model} in a new "
+            "conversation. The session's recent messages, oldest first, are below; answer the last "
+            "input as the same PO would.\n\n"
+            f"--- session history ---\n{history}\n--- end of history ---\n\n{prompt}"
+        )
 
     def codex_home(self) -> Path:
         """The Codex home a turn runs with: `$CODEX_HOME` of the turn environment, else `~/.codex`."""
@@ -1109,6 +1262,35 @@ class PoRunner:
             self.store.set_cli_session_id(session.session_id, thread_id)
 
 
+def po_provider_error(cli: str, stdout: str, stderr: str) -> ProviderError | None:
+    """The provider refusal a PO turn's own output names (ummanu-108), or None.
+
+    Claude `--output-format json`: a result object with `is_error`. Codex `exec --json`: an `error`
+    or `turn.failed` event. Then the stderr tail, where both CLIs print a refusal they could not
+    turn into an event. Only error records are read, never an answer.
+    """
+    texts: list[str] = []
+    for document in _json_documents(stdout, whole=cli == "claude"):
+        if not isinstance(document, dict):
+            continue
+        if cli == "claude" and document.get("type", "result") == "result" and document.get("is_error"):
+            texts.append(str(document.get("result") or document.get("subtype") or ""))
+        elif cli == "codex" and document.get("type") in ("error", "turn.failed"):
+            error = document.get("error")
+            message = error.get("message") if isinstance(error, dict) else document.get("message")
+            info = error.get("codex_error_info") if isinstance(error, dict) else None
+            if str(info or "") in CODEX_QUOTA_ERROR_INFOS:
+                text = str(message or info)
+                return ProviderError(KIND_QUOTA, None, summarize_provider_error(text), reset_at=reset_time(text))
+            texts.append(str(message or ""))
+    texts.append(stderr or "")
+    for text in texts:
+        found = classify_provider_error(text) if text.strip() else None
+        if found is not None:
+            return found
+    return None
+
+
 __all__ = [
     "PO_REQUEST_ENV",
     "PO_SESSION_ENV",
@@ -1124,6 +1306,7 @@ __all__ = [
     "claude_resolved_model",
     "codex_resolved_model",
     "codex_thread_id",
+    "po_provider_error",
     "process_identity",
     "runs_dir",
     "still_running",

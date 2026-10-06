@@ -92,6 +92,7 @@ unit tests/test_po_scoped_launch.py
 unit tests/test_legacy_head_records.py
 unit tests/test_head_health.py
 unit tests/test_provider_failure.py
+unit tests/test_cross_family_fallback.py
 unit tests/test_head_operations.py
 unit tests/test_head_spec.py
 unit tests/test_head_registry_location.py
