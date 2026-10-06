@@ -1,10 +1,7 @@
-"""The installation's data dir, for the CODEX_HOME resolver that cannot read it itself.
+"""Resolve the selected installation's data dir for `codex_preflight`, which imports nothing else.
 
-`codex_preflight.resolve_codex_home` takes `<data_dir>/codex-home` when it holds a login, but that
-module imports nothing else of `ummanu`, so it knows the data dir only when it is named or in
-`UMMANU_DATA_DIR`. This module is the other half: it reads the data dir of the selected
-installation, and binds it into `UMMANU_DATA_DIR` for the processes that launch Codex heads, so
-the command a head is launched with and the preflight that writes its trust resolve one home.
+`bound_data_dir` puts it in `UMMANU_DATA_DIR` so a head's launch command and its preflight resolve
+one CODEX_HOME (`<data_dir>/codex-home`).
 """
 
 from __future__ import annotations
@@ -27,10 +24,9 @@ INSTANCE_ENV = "UMMANU_INSTANCE"
 
 
 def selected_data_dir() -> Path | None:
-    """`UMMANU_DATA_DIR`, else the `data_dir` of an explicitly selected `UMMANU_INSTANCE`.
+    """`UMMANU_DATA_DIR`, else the `data_dir` of an explicitly selected `UMMANU_INSTANCE`, else None.
 
-    None with neither, or with an instance whose data dir cannot be resolved. The default instance
-    path is never read: a checkout on a host with an installation must not pick up its login.
+    The default instance path is never read: a checkout must not pick up a host installation's login.
     """
     configured = os.environ.get(DATA_DIR_ENV)
     if configured:
@@ -55,11 +51,9 @@ def installation_codex_home(profile: Mapping[str, Any] | None = None) -> CodexHo
 
 
 def installation_codex_dir(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
-    """The CODEX_HOME this installation's heads run with as a path, or None with no login there.
+    """The heads' CODEX_HOME path for `data_dir` (default `selected_data_dir()`), or None without a login.
 
-    `data_dir` is the one the caller serves; unnamed, it is `selected_data_dir()`. A reader of the
-    heads' Codex account (the dashboard's usage bar) takes its login and rollouts from here, not
-    from `~/.codex`, whose login no head refreshes.
+    Readers of the heads' Codex account use this, not `~/.codex`, whose login no head refreshes.
     """
     target = Path(data_dir).expanduser() if data_dir is not None else selected_data_dir()
     try:
@@ -69,38 +63,32 @@ def installation_codex_dir(data_dir: str | os.PathLike[str] | None = None) -> Pa
 
 
 def managed_codex_homes(data_dir: Path | None) -> tuple[Path, ...]:
-    """Every CODEX_HOME an installation manages, whether or not it exists yet or holds a login.
+    """Every CODEX_HOME an installation manages (exists or not): `<data_dir>/codex-home`, if named.
 
-    `<data_dir>/codex-home` when a data dir is named, and nothing otherwise. Seeding and the
-    Memory-client reconcile take their homes from here, so neither can leave one out. The legacy
-    Orca home is not managed since A20 step 7 (secretary-1723).
+    Seeding and the Memory-client reconcile both take homes from here.
     """
-    # Only a named data dir: `data_dir_codex_home(None)` would fall back to this process's own
-    # `UMMANU_DATA_DIR`, which is not necessarily the installation being provisioned.
+    # `data_dir_codex_home(None)` would fall back to this process's `UMMANU_DATA_DIR`, which may not
+    # be the installation being provisioned.
     data_home = data_dir_codex_home(data_dir) if data_dir is not None else None
     return () if data_home is None else (data_home,)
 
 
-# Read-only, and only here: the `sessions/` of the legacy Orca home. The curator
-# (`automations.agents.curator.discover.codex_sessions`) still has sessions there it has not
-# ingested -- on 2026-09-24 its watermark named 2749 of the 3217 rollouts and not the other 468,
-# written up to 08:38Z that day. Remove this once the curator watermark names every file under it.
+# Read-only: the legacy Orca home's `sessions/`, kept until the curator
+# (`automations.agents.curator.discover.codex_sessions`) has ingested every rollout under it.
 _LEGACY_SESSIONS = Path(".config") / "orca" / "codex-runtime-home" / "home" / "sessions"
 
 
 def session_roots() -> list[Path]:
     """Every `sessions/` a reader of this installation's Codex rollouts has to scan.
 
-    The home a launch would resolve to now comes first (when there is one), then the data-dir home
-    and the legacy Orca home whenever their `sessions/` exists, each directory once (symlinks
-    resolved). No head runs on the legacy home any more; it is read, never written or resolved to,
-    for the sessions the curator has not ingested yet (`_LEGACY_SESSIONS`).
+    The resolved launch home first, then the data-dir home and the legacy Orca home when present,
+    each once (symlinks resolved). The legacy home is only read (`_LEGACY_SESSIONS`).
     """
     candidates: list[Path] = []
     try:
         candidates.append(Path(installation_codex_home().path) / "sessions")
     except CodexHomeLoginMissing:
-        # No home a head could run with: a reader still scans whatever sessions exist.
+        # No launchable home: still scan whatever sessions exist.
         pass
     data_home = data_dir_codex_home(selected_data_dir())
     if data_home is not None:
@@ -121,11 +109,9 @@ def session_roots() -> list[Path]:
 
 @contextlib.contextmanager
 def bound_data_dir(data_dir: str | os.PathLike[str] | None = None) -> Iterator[None]:
-    """Name the installation's data dir in `UMMANU_DATA_DIR` for the duration of the block.
+    """Set `UMMANU_DATA_DIR` for the block (default `selected_data_dir()`); restored on exit.
 
-    `data_dir` is the one the caller already serves; unnamed, it is `selected_data_dir()`. A value
-    already in the environment is the operator's and is left as it is. The previous environment is
-    restored on exit, so an in-process caller (a test, a CLI invoked twice) keeps no trace.
+    An operator-set value is left untouched.
     """
     if os.environ.get(DATA_DIR_ENV):
         yield

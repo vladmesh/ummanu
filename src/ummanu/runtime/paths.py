@@ -1,19 +1,9 @@
-"""Where an installation and its product checkout live when nothing names them.
+"""Home-relative fallbacks for an installation and its product checkout when nothing names them.
 
-The product ships no absolute path of its own. An installation is named by ``--instance`` or
-``UMMANU_INSTANCE``, a checkout by ``--product-root`` or ``UMMANU_REPO``; without either,
-both resolve under the running user's home. That is what makes one checkout installable for any
-user instead of only for the host it grew up on, and it keeps a single spelling of each fallback so
-the CLI, the units, the pipeline tick and the curator cannot disagree about which installation or
-which checkout they are talking to.
-
-Only the fallback lives here. Every caller reads its own override first, so an operator who
-configured a path keeps it.
-
-The live root's fallback is a plain directory below the data plane, ``~/ummanu-data/instance``. A
-command that would fall back to it while it does not exist refuses (:func:`resolve_instance_path`)
-instead of creating it or running against nothing: only ``install``, ``recover`` and ``bootstrap``,
-given their target explicitly, bring a live root into being.
+Overrides (``--instance``/``UMMANU_INSTANCE``, ``--product-root``/``UMMANU_REPO``) are read by
+callers first; this module holds the single spelling of each fallback. A missing default live root
+(``~/ummanu-data/instance``) is refused (:func:`resolve_instance_path`), never created: only
+``install``, ``recover`` and ``bootstrap``, given an explicit target, create one.
 """
 
 from __future__ import annotations
@@ -49,12 +39,10 @@ def default_instance_path() -> Path:
 def resolve_instance_path(
     explicit: str | Path | None = None, environ: Mapping[str, str] | None = None
 ) -> Path:
-    """The live root a command was pointed at: ``--instance``, else ``UMMANU_INSTANCE``, else the default.
+    """The live root: ``--instance``, else ``UMMANU_INSTANCE``, else the default if it exists.
 
-    The default is taken only when it exists. Between a release that moves the default and the
-    cutover that moves the live root, a command whose environment lost ``UMMANU_INSTANCE`` (a
-    ``sudo`` that dropped it, a cleared unit) would otherwise run against an empty path, or render
-    units naming it; it raises :class:`MissingDefaultInstance` instead, and creates nothing.
+    A missing default raises :class:`MissingDefaultInstance` and creates nothing, so a command that
+    lost ``UMMANU_INSTANCE`` (e.g. via ``sudo``) never runs against an empty path.
     """
     if explicit:
         return Path(explicit).expanduser()
@@ -75,8 +63,7 @@ INSTANCE_FALLBACK_FLAG = "instance_fallback"
 def add_instance_argument(parser: Any, *, help: str | None = None, type: Any = str) -> None:
     """``--instance`` for a command that may fall back: resolved by :func:`resolve_instance_argument`.
 
-    The default is left ``None`` rather than read from the environment while the parser is built, so
-    the one resolver decides, and refuses, after parsing.
+    The default stays ``None`` so the resolver decides, and refuses, after parsing.
     """
     parser.add_argument(
         "--instance",
@@ -102,12 +89,9 @@ def default_product_root() -> Path:
 
 
 def configured_product_root(environ: Mapping[str, str] | None = None) -> Path:
-    """The product checkout this process was pointed at, or the home default.
+    """The product checkout this process was pointed at (``UMMANU_REPO``), or the home default.
 
-    Deliberately not the checkout containing the running module. An upgrade run out of a candidate
-    checkout materializes the installation the operator configured, and a repair run out of a
-    rescue copy must not silently install that copy; both are named by ``UMMANU_REPO`` or by
-    ``--product-root``, which the callers read first.
+    Never the checkout containing the running module: a candidate or rescue copy must not install itself.
     """
     env = os.environ if environ is None else environ
     configured = env.get(PRODUCT_ENV)
@@ -115,10 +99,7 @@ def configured_product_root(environ: Mapping[str, str] | None = None) -> Path:
 
 
 def instance_dir(path: Path | str) -> Path:
-    """The instance directory for a path that may name either the directory or its config file.
-
-    Callers take ``--instance`` from a human, who reasonably writes either spelling.
-    """
+    """The instance directory for a path naming either the directory or its ``instance.yaml``."""
     resolved = Path(path).expanduser()
     return resolved.parent if resolved.name == INSTANCE_CONFIG_NAME else resolved
 

@@ -1,25 +1,16 @@
-"""The real, cheap provider probes the shipped head registry names as `resources.*.probe`.
+"""Cheap real provider probes named by the shipped head registry as `resources.*.probe`.
 
 `python3 -P -m ummanu.runtime.resource_probe --resource <id>` makes one provider call for
-`claude-sub`, `openai-sub` or `openrouter` and exits 0 when the resource answered, 1 when it did
-not (one scrubbed, capped `resource <id> probe failed; ...` line on stderr) and 2 for a resource id
-with no probe here. This module only answers; it keeps no cache and writes no file.
-`ummanu.head_health` runs the registry's probe command, reads this exit code and output, and is
-the one owner of the verdict, its vocabulary and its TTL cache.
+`claude-sub`, `openai-sub` or `openrouter`: exit 0 answered, 1 failed (one scrubbed, capped
+`resource <id> probe failed; ...` stderr line), 2 unknown id. No cache, no files; `ummanu.head_health`
+owns the verdict and TTL cache. A probe that cannot run is a failure, never an exception.
+`head_health` reads `status=timeout` and `status=provider-unavailable` (provider failed while the
+local login is valid) by name.
 
-A probe that cannot run proves nothing about the resource being up, so a timeout, a missing
-binary, a missing key or any transport error is a failure here, never an exception. Two failure
-statuses are read by name by `head_health`: `status=timeout` (the provider gave no answer inside
-the timeout, which is `timed_out` there) and `status=provider-unavailable` (the provider answered
-with its own failure while the local login is valid, which is `unavailable` there).
-
-Timeouts are per resource (secretary-1799). Codex refuses slowly: on the 2026-09-25 outage it
-reconnected its websocket five times, fell back to HTTPS, reconnected five more and only then
-printed the 401, well past the old flat 20 s. `probe_timeout_s` is 75 s for `openai-sub` and 20 s
-for the others; `TA_PROBE_TIMEOUT_S` moves the default and `TA_PROBE_TIMEOUT_S_<RESOURCE>` (the
-id upper-cased, `-` as `_`, e.g. `TA_PROBE_TIMEOUT_S_OPENAI_SUB`) sets one resource. The outer
-timeout `head_health` puts around the probe command is derived from the same number, so the
-classifier in here always gets to answer before the command is killed.
+Timeouts are per resource: 75 s for `openai-sub` (Codex refuses slowly), 20 s otherwise;
+`TA_PROBE_TIMEOUT_S` moves the default, `TA_PROBE_TIMEOUT_S_<RESOURCE>` sets one resource.
+`head_health` derives its outer timeout from the same number so this classifier answers first.
+See docs/PROTOCOLS.md "Resource probe statuses".
 """
 
 from __future__ import annotations
@@ -41,15 +32,14 @@ from ummanu.runtime.codex_preflight import CodexHomeLoginMissing
 from ummanu.runtime.provider_errors import KIND_AUTH, KIND_RECONNECT, KIND_SERVER, classify_provider_error
 from ummanu.runtime.redact import redact
 
-# A single slow or broken probe is killed rather than hanging the dispatcher's tick. Both
-# env-overridable so a live check can tighten them.
+# Kills a slow or broken probe instead of hanging the dispatcher tick; env-overridable.
 PROBE_TIMEOUT_S = int(os.environ.get("TA_PROBE_TIMEOUT_S", "20"))
 PROBE_REASON_TEXT_LIMIT = int(os.environ.get("TA_PROBE_REASON_TEXT_LIMIT", "400"))
 #: The default inner timeout of a resource with no entry below.
 DEFAULT_PROBE_TIMEOUT_S = 20
 #: Resources whose provider answers more slowly than the default, and how long they get.
 RESOURCE_PROBE_TIMEOUTS_S: dict[str, int] = {"openai-sub": 75}
-#: The inner failure status of a provider that answered with its own failure (see the docstring).
+#: Inner failure status: provider answered with its own failure (see the module docstring).
 STATUS_PROVIDER_UNAVAILABLE = "provider-unavailable"
 
 
@@ -70,11 +60,10 @@ def probe_timeout_env_name(resource_id: str) -> str:
 
 
 def probe_timeout_s(resource_id: str) -> int:
-    """How long this resource's probe waits for its provider, read from the environment per call.
+    """This resource's probe timeout, read from the environment per call.
 
-    Per-resource variable first, then the resource's own default, then `TA_PROBE_TIMEOUT_S`, then
-    20 s. Read per call rather than at import so the dispatcher and the probe it spawns, which
-    share one environment, can never disagree about it.
+    Per-resource variable, then the resource's default, then `TA_PROBE_TIMEOUT_S`, then 20 s. Read
+    per call so the dispatcher and the probe it spawns cannot disagree.
     """
     specific = _env_seconds(probe_timeout_env_name(resource_id))
     if specific is not None:
@@ -194,10 +183,8 @@ def format_probe_failure(resource_id: str, result: ProbeResult) -> str:
 
 
 _OPENROUTER_ENV_FILE = Path(os.environ.get("TA_OPENROUTER_ENV_FILE", str(Path.home() / ".hermes" / ".env")))
-# Which assignment inside _OPENROUTER_ENV_FILE carries the key. The canonical hermes .env writes
-# OPENROUTER_API_KEY; the old decommissioned-repo .env used open_router_key. Accept both so the
-# probe resolves against the live hermes file without a per-host tweak; TA_OPENROUTER_ENV_KEY pins
-# a single explicit name when a host names it something else.
+# Key names accepted in _OPENROUTER_ENV_FILE (hermes `OPENROUTER_API_KEY`, legacy `open_router_key`);
+# TA_OPENROUTER_ENV_KEY pins a single name.
 _OPENROUTER_ENV_KEYS: tuple[str, ...] = (
     (os.environ["TA_OPENROUTER_ENV_KEY"],)
     if os.environ.get("TA_OPENROUTER_ENV_KEY")
@@ -224,9 +211,8 @@ def _read_openrouter_key() -> str | None:
 
 
 def probe_claude_sub() -> ProbeResult:
-    """One haiku token through the shared OAuth-authenticated `claude` CLI (claude-sub is one
-    subscription, no per-profile credential): a failure exactly when the subscription is
-    rate-limited or the CLI cannot reach the API."""
+    """One haiku token through the shared OAuth `claude` CLI: fails when the subscription is
+    rate-limited or the API is unreachable."""
     return _run_subprocess_probe(
         ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"],
         "builtin:claude-sub",
@@ -250,8 +236,8 @@ def _read_http_error_body(err: urllib.error.HTTPError) -> bytes | None:
 
 
 def probe_openrouter() -> ProbeResult:
-    """One 1-token chat completion against OpenRouter's gemini-flash: a failure on a missing key, a
-    non-2xx response, a timeout, or any transport error; never raises."""
+    """One 1-token completion against OpenRouter: fails on a missing key, non-2xx, timeout or any
+    transport error; never raises."""
     command = "POST https://openrouter.ai/api/v1/chat/completions model=google/gemini-2.5-flash max_tokens=1"
     key = _read_openrouter_key()
     if not key:
@@ -313,14 +299,14 @@ def probe_openrouter() -> ProbeResult:
 
 
 def probe_openai_sub() -> ProbeResult:
-    """One `codex exec` turn through the ChatGPT-authed CODEX_HOME (openai-sub is one
-    subscription, no per-profile credential). `-s read-only` and a bare "ping" keep it
-    side-effect-free and tool-free, so no bypass flag is needed. CODEX_HOME is set explicitly
-    because this is a plain subprocess, not a spawned terminal that would inherit it."""
+    """One read-only `codex exec` "ping" through the ChatGPT-authed CODEX_HOME.
+
+    CODEX_HOME is set explicitly because a plain subprocess does not inherit it.
+    """
     try:
         home = installation_codex_home().path
     except CodexHomeLoginMissing as e:
-        # No login to probe with is a failed probe, and its message names the fix.
+        # No login is a failed probe whose message names the fix.
         return ProbeResult(False, "builtin:openai-sub", status="no-login", exception=_exception_text(e))
     env = {**os.environ, "CODEX_HOME": home}
     cmd = ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "ping"]
@@ -345,10 +331,7 @@ def _as_text(value: str | bytes | None) -> str:
 
 
 def codex_chatgpt_login(home: Path) -> bool:
-    """Whether this CODEX_HOME holds a ChatGPT-mode login (`auth.json` with `auth_mode: chatgpt`).
-
-    Read for its mode only; no token leaves this function.
-    """
+    """Whether CODEX_HOME holds a ChatGPT-mode login; only the mode is read, no token leaves."""
     try:
         auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError):
@@ -363,11 +346,9 @@ def codex_chatgpt_login(home: Path) -> bool:
 def codex_provider_side_failure(text: str, home: Path) -> bool:
     """Whether a failed `codex exec` was refused by the provider rather than for the account.
 
-    A 5xx and an exhausted reconnect loop are always the provider's. A 401/403 is the provider's
-    only while the local login is a valid ChatGPT one: on 2026-09-25 the ChatGPT/Codex backend
-    answered every request with `401 Unauthorized: Incorrect API key provided: sk-svcac…` although
-    no API key was in use at all -- a backend fault, and logging in again would not have fixed it.
-    With no such login, a 401 is the account's and stays `unauthenticated`.
+    5xx and exhausted reconnects are always the provider's. A 401/403 "Incorrect API key provided"
+    is the provider's only under a valid ChatGPT login (a backend fault re-login cannot fix);
+    otherwise it is the account's (`unauthenticated`).
     """
     found = classify_provider_error(text)
     if found is None:
