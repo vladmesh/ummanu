@@ -19,8 +19,7 @@ import unittest
 from pathlib import Path
 
 from ummanu.infra import old_name_guard
-from ummanu.infra.old_name_guard import applies as _applies
-from ummanu.infra.old_name_guard import text_of
+from ummanu.infra.old_name_guard import applies as _applies, text_of
 from ummanu.transition.names import INSTANCE_PROJECT
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -40,6 +39,8 @@ ALLOWLIST: tuple[tuple[str, re.Pattern[str] | None, tuple[str, ...]], ...] = (
     ("R", re.compile(r"\bsecretary_1727_[0-9a-f]+\.jsonl\.gz\b"), ANYWHERE),
     # A quoted historical record, replayed against its immutable audit digest byte for byte.
     ("R", None, ("tests/fixtures/gate_attestation_1883.json",)),
+    # The standalone audit quotes historical source and production unit names as evidence.
+    ("R", None, ("opus_review.md",)),
     # The names of the class T files and of the transition's own command, wherever they are referenced.
     (
         "T",
@@ -139,8 +140,21 @@ class OldNameGuardTests(unittest.TestCase):
                 for name in names
                 if any(pattern is None and _applies(globs, name) for _, pattern, globs in ALLOWLIST)
             },
-            "only the whole-file rows (the T files and the one R record) may carry a stray old name",
+            "only the whole-file rows (the T files and declared R records) may carry a stray old name",
         )
+
+    def test_historical_audit_is_allowed_only_at_its_declared_path(self) -> None:
+        history = "secretary -> ummanu\nsecretary-web.service\n"
+        self.assertEqual(violations("opus_review.md", history), [])
+        for path in (
+            "README.md",
+            "docs/OPERATIONS.md",
+            "src/ummanu/cli.py",
+            "docs/another-audit.md",
+            "archive/opus_review.md",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(len(violations(path, history)), 2)
 
     def test_a_failure_names_the_file_line_and_match(self) -> None:
         found = violations("docs/OPERATIONS.md", "# Operations\n\nRun `python3 -m Secretary doctor`.\n")
