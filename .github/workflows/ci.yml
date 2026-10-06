@@ -12,6 +12,12 @@ on:
 env:
   UMMANU_REPO: ${{ github.workspace }}
 
+# A newer push to a pull request supersedes the run for its previous head. Every other run (a push
+# to main, a manual dispatch) is its own group, so it is never cancelled or held behind another.
+concurrency:
+  group: ci-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test_suites:
     name: test / ${{ matrix.suite }}
@@ -30,6 +36,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[memory,ci]'
       - name: Pull the throwaway PostgreSQL image before any suite needs it
@@ -100,6 +108,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[typecheck]'
       - run: python3 -m mypy
@@ -118,6 +128,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python3 -m pip install --upgrade pip
       - run: python3 -m pip install -e '.[ci]'
       - name: Download suite evidence
