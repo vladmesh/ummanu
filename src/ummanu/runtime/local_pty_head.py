@@ -2639,7 +2639,7 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
             raise ValueError("cleanup scope owner binding differs from its recorded head")
         if recorded_only:
             continue
-        if record.get("workspace") == workspace or record.get("task") == task_identity:
+        if record.get("workspace") == workspace or record.get("task") == task_identity:  # noqa: SIM102
             if (owner.run_id, owner.generation) not in known:
                 if record.get("cleanup_complete") and not record.get("launch_allowed"):
                     # A retained terminal flag cannot bless a reused live unit.

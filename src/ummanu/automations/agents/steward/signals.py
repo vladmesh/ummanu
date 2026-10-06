@@ -21,6 +21,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypedDict
+
 from ummanu.runtime.state import AgentState
 
 from ...runtime import production_telemetry
@@ -35,6 +36,7 @@ STATE = AgentState("steward")
 # this signal is the only thing that notices.
 STALE_COLUMNS = ("Ready", "In progress", "Validate", "Assessment", "Blocked")
 STALE_HOURS = float(os.environ.get("TA_STEWARD_STALE_HOURS", "24"))
+
 
 def _workspaces_root() -> Path:
     """Card workspaces owned by the production dispatcher on this installation.

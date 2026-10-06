@@ -28,8 +28,7 @@ from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
 from tests.retired_board import legacy_runtime_lines
 from tests.sql_backend_fixtures import card_store
 from ummanu import host
-from ummanu.automations.agents.steward import cli as steward_cli
-from ummanu.automations.agents.steward import signals as steward_signals
+from ummanu.automations.agents.steward import cli as steward_cli, signals as steward_signals
 from ummanu.automations.runtime import health, production_telemetry
 from ummanu.board.backend import CARD, SPRINT
 from ummanu.cli import build_parser

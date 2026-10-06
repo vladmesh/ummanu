@@ -40,7 +40,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
+from tests.support.head_runtime_contract import HeadRuntimeContract
+from ummanu.codex_provider_events import CodexProviderEventIngress
 from ummanu.dispatch.watchdog import clear_head_heartbeat, head_process_status
+from ummanu.runtime.codex_preflight import codex_provider_source_descriptor
 from ummanu.runtime.head import (
     EXITED,
     HEAD_ALIVE,
@@ -72,12 +75,10 @@ from ummanu.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
-from ummanu.codex_provider_events import CodexProviderEventIngress
-from ummanu.runtime.codex_preflight import codex_provider_source_descriptor
-from tests.support.head_runtime_contract import HeadRuntimeContract
 from ummanu.runtime.local_pty_head import (
     ADOPTED_TURN_SUBJECT,
     DELIVER_DRAINED_BEFORE_THIS_RUNTIME,
+    DELIVER_HEAD_ENDED,
     DELIVER_NOT_SUBMITTED,
     DELIVER_STATE_UNKNOWN,
     DELIVERY_ARRIVED,
@@ -1327,7 +1328,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         return [
             line
             for line in self.output_of(run).splitlines()
-            if line.startswith(b"LINE ") or line.startswith(b"FRAG ")
+            if line.startswith((b"LINE ", b"FRAG "))
         ]
 
     def test_a_delivery_nobody_could_account_for_is_not_reported_as_one_that_never_started(self) -> None:
