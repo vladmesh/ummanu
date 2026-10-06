@@ -56,6 +56,7 @@ from ummanu.host import (
     unit_runtime_expectations,
 )
 from ummanu.infra.systemd import ACTIVE_STATES, SystemdObservation, observation_error
+from ummanu.memory.config import memory_config
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -394,6 +395,7 @@ def resolve_systemd_layout(
     target = instance_path.expanduser().resolve(strict=False)
     user, home = resolve_runtime_owner(target, runtime_user)
     host = instance.get("host", {}) if isinstance(instance.get("host"), dict) else {}
+    memory = memory_config(host)
     configured_data_dir = data_dir if data_dir is not None else instance_data_dir(target)
     return SystemdLayout(
         product_root=(product_root or root.parents[1]).expanduser().resolve(strict=False),
@@ -401,9 +403,9 @@ def resolve_systemd_layout(
         data_dir=configured_data_dir.expanduser().resolve(strict=False),
         runtime_user=user,
         runtime_home=home,
-        memory_model=host.get("memory_model", "intfloat/multilingual-e5-large"),
-        memory_dim=host.get("memory_dim", 1024),
-        memory_threads=host.get("memory_threads", 1),
+        memory_model=memory.model,
+        memory_dim=memory.dim,
+        memory_threads=memory.threads,
     )
 
 
@@ -419,11 +421,17 @@ def apply_host(
 
         fresh = inputs.inventory.runtime_scopes.revalidate()
         if fresh.errors:
-            return ApplyResult(errors=["runtime ownership unavailable: " + "; ".join(fresh.errors.values())],
-                               dry_run=dry_run)
-        inputs = replace(inputs, inventory=replace(
-            inputs.inventory, units=(inputs.inventory.units | set(fresh.observed)) - fresh.disappeared,
-            runtime_scopes=fresh))
+            return ApplyResult(
+                errors=["runtime ownership unavailable: " + "; ".join(fresh.errors.values())], dry_run=dry_run
+            )
+        inputs = replace(
+            inputs,
+            inventory=replace(
+                inputs.inventory,
+                units=(inputs.inventory.units | set(fresh.observed)) - fresh.disappeared,
+                runtime_scopes=fresh,
+            ),
+        )
     host = inputs.instance.get("host", {}) if isinstance(inputs.instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     errors = plan_input_errors(inputs.instance, inputs.bindings, packaged=inputs.packaged)
@@ -458,7 +466,8 @@ def apply_host(
             if dependencies:
                 result.errors.append(
                     f"preserved runtime scope {scope_name} is bound to {', '.join(sorted(dependencies))}; "
-                    "settle its runtime lifecycle before removing the bound service")
+                    "settle its runtime lifecycle before removing the bound service"
+                )
         if result.errors:
             return result
     desired_by_id = {resource.logical_id: resource for resource in desired}

@@ -24,7 +24,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes import snapshot_remote
-from tests.fakes.installation import CARD, SPRINT, _checkpoint, _git
+from tests.fakes.installation import CARD, SPRINT, _checkpoint, _git, write_memory_metadata
 from tests.fakes.snapshot_remote import (
     HEAD,
     REVISION,
@@ -33,14 +33,10 @@ from tests.fakes.snapshot_remote import (
     exporter_remote,
     git,
     recover_snapshot,
-)
-from tests.fakes.snapshot_remote import (
     recovery_args as _args,
 )
-from ummanu import bootstrap as bootstrap_module
-from ummanu import installation, restore, secret_store
-from ummanu.board import provision as provision_module
-from ummanu.board import store
+from ummanu import bootstrap as bootstrap_module, installation, restore, secret_store
+from ummanu.board import provision as provision_module, store
 from ummanu.board.migrate import head_revision
 from ummanu.checkpoint import (
     SNAPSHOT_BASE_REF,
@@ -112,10 +108,11 @@ def _stood_in_bootstrap(
         return bootstrap_module.bootstrap(args)
 
 
-def _service_index(data_dir: Path, instance_dir: Path, **_kwargs) -> int:
+def _service_index(data_dir: Path, instance_dir: Path, *, model: str, dim: int, **_kwargs) -> int:
     """The reindex without the embedding model, in the service's schema, so `memory verify` can read it."""
     index = data_dir / "memory" / "index.sqlite"
-    index.parent.mkdir(parents=True, exist_ok=True)
+    index.unlink(missing_ok=True)
+    write_memory_metadata(index, model=model, dim=dim)
     facts = fact_files(instance_dir / "state" / "memory" / "facts")
     with sqlite3.connect(index) as conn:
         conn.execute(
@@ -1018,7 +1015,9 @@ class CleanHostRecoverTests(unittest.TestCase):
         self.assertEqual(result.status, "ok", result.render())
         self.assert_pair_written_before_the_board(result, fixture.target, fixture.data_dir)
         # The host materializer's own head-registry step then finds the pair current.
-        self.assertEqual(self.steps(result)["host"], ("unchanged", "materializer complete (0 changed step(s))"))
+        self.assertEqual(
+            self.steps(result)["host"], ("unchanged", "materializer complete (0 changed step(s))")
+        )
 
     def test_without_the_pair_the_import_refuses_as_on_the_stand(self):
         """The control: with recover's head-registry step taken out, the drill's failure comes back."""
@@ -1083,9 +1082,7 @@ class CleanHostRecoverTests(unittest.TestCase):
             mock.patch.object(installation, "restore_findings", return_value=[]),
         ):
             return installation.install(
-                _args(
-                    SimpleNamespace(target=target, remote=source), recovery_phrase_file=str(phrase)
-                )
+                _args(SimpleNamespace(target=target, remote=source), recovery_phrase_file=str(phrase))
             )
 
     def test_a_legacy_recover_onto_a_clean_host_completes_past_its_own_secret_file(self):

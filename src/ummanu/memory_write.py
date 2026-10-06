@@ -13,15 +13,11 @@ import yaml
 from ummanu import state_repo
 from ummanu._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
-)
-from ummanu._fsutil import (
     write_json as _write_json,
-)
-from ummanu._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
 from ummanu.memory.access import PO_REVIEW_SCOPE, PO_REVIEW_SCOPE_DIR
-from ummanu.memory.canon import canon_revision, canon_transaction, recover_canon_undo
+from ummanu.memory.canon import canon_revision, canon_transaction, parse_frontmatter, recover_canon_undo
 from ummanu.memory_errors import (
     MemoryExportPublishError,
     MemoryLockError,  # noqa: F401  # Public compatibility re-export.
@@ -362,18 +358,7 @@ def _prepare_fact_text(
 
 
 def _split_fact(text: str) -> tuple[dict[str, Any], str]:
-    if not text.startswith("---\n"):
-        return {}, text
-    end = text.find("\n---\n", 4)
-    if end == -1:
-        raise MemoryValidationError("fact frontmatter is not closed")
-    try:
-        loaded = yaml.safe_load(text[4:end]) or {}
-    except yaml.YAMLError as exc:
-        raise MemoryValidationError(f"fact frontmatter is invalid: {exc}") from None
-    if not isinstance(loaded, dict):
-        raise MemoryValidationError("fact frontmatter must be a mapping")
-    return {str(key): value for key, value in loaded.items()}, text[end + 5 :]
+    return parse_frontmatter(text)
 
 
 def _join_fact(metadata: dict[str, Any], body: str) -> str:

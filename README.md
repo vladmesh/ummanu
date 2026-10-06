@@ -30,35 +30,41 @@ mutable and derived runtime state lives in a local data directory. Install and r
 
 ## Install
 
-The host bootstrap supports Ubuntu 24.04. Install the CLI and memory runtime from a checkout:
+The host bootstrap supports Ubuntu 24.04. Prepare its Python prerequisite, then run the checkout
+setup as the installation user from the product checkout (see [Recovery](docs/RECOVERY.md#fresh-install-and-recovery)
+for account, checkout and private-remote setup):
 
 ```bash
-python3 -m pip install -e '.[memory]'
+sudo apt-get update
+sudo apt-get install --yes python3-venv
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[memory,dev]'
+ummanu_product_root=$(pwd -P)
 ```
 
 The editable install is required because the runtime also uses deployment assets from the checkout.
 The shipped systemd units run `PRODUCT_ROOT/.venv/bin/…`, and `upgrade` installs dependencies only
-into that `.venv`, so the checkout an installation runs from needs its virtual environment at `.venv`.
+into that `.venv`. Install and recovery verify the selected environment before materializing the host.
 
 Bootstrap the host first:
 
 ```bash
-sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE \
+sudo "$ummanu_product_root/.venv/bin/ummanu" bootstrap --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 
 For a new installation, continue with:
 
 ```bash
-sudo ummanu install --instance-remote REMOTE --instance-dir INSTANCE \
-  --installation-user INSTALL_USER
+sudo "$ummanu_product_root/.venv/bin/ummanu" install --instance-remote REMOTE --instance-dir INSTANCE \
+  --installation-user INSTALL_USER --product-root "$ummanu_product_root"
 ```
 
 To rebuild an existing installation from its private checkpoint, use `recover` instead of `install`:
 
 ```bash
-sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE \
-  --installation-user INSTALL_USER
+sudo "$ummanu_product_root/.venv/bin/ummanu" recover --instance-remote REMOTE --instance-dir INSTANCE \
+  --installation-user INSTALL_USER --product-root "$ummanu_product_root"
 ```
 
 Bootstrap installs Docker and Compose from the distribution and provisions the loopback-only `postgres:16`

@@ -55,6 +55,7 @@ from ummanu.config import (
     validate_instance,
 )
 from ummanu.data import init_layout, manifest_for
+from ummanu.dispatch.runtime_provenance import ProductionRuntime
 from ummanu.host import foreign_units
 from ummanu.host_apply import (
     SystemdUnitInstaller,
@@ -74,6 +75,7 @@ from ummanu.memory.client_config import (
     packaged_codex_home,
     seed_codex_home,
 )
+from ummanu.memory.config import index_matches, memory_config
 from ummanu.memory_journal import export_memory_snapshot
 from ummanu.projects.availability import ProjectAvailability, binding_disabled
 from ummanu.restore import (
@@ -111,6 +113,7 @@ from ummanu.upgrade import (
     UpgradeContext,
     UpgradeResult,
     _set_runtime_owner,
+    _snapshot_install,
     default_product_root,
     run_steps,
     step_head_registry,
@@ -658,7 +661,9 @@ def _board_schema_lineage() -> tuple[str, ...]:
 
 def _snapshot_git(repository: Path, args: list[str], label: str, *, input: str | None = None) -> str:
     try:
-        completed = state_repo.run_git(repository, ["--git-dir", str(repository), *args], label=label, input=input)
+        completed = state_repo.run_git(
+            repository, ["--git-dir", str(repository), *args], label=label, input=input
+        )
     except StateRepoError as exc:
         raise InstallError(str(exc)) from None
     if completed.returncode:
@@ -700,7 +705,9 @@ def _adopt_snapshot_repository(staging: Path, repository: Path, installation_use
         _set_installation_owner(first_created, installation_user)
     _set_installation_owner(staging, installation_user)
     if repository.exists() and any(repository.iterdir()):
-        raise InstallError(f"snapshot repository {repository} changed during recovery; no files were overwritten")
+        raise InstallError(
+            f"snapshot repository {repository} changed during recovery; no files were overwritten"
+        )
     os.replace(staging, repository)
 
 
@@ -714,7 +721,9 @@ def _fast_forward_snapshot_repository(
     bootstrap_credential: Path | None,
 ) -> None:
     """Move an existing snapshot repository to the remote tip, fast-forward only."""
-    remote_git = RemoteExecution(remote, "recovery-reuse", instance_dir=target, bootstrap_file=bootstrap_credential)
+    remote_git = RemoteExecution(
+        remote, "recovery-reuse", instance_dir=target, bootstrap_file=bootstrap_credential
+    )
     fetched = remote_git.run_instance(
         repository,
         ["--git-dir", str(repository), "fetch", "--quiet", "--no-tags", remote, SNAPSHOT_REF],
@@ -723,7 +732,9 @@ def _fast_forward_snapshot_repository(
     )
     if fetched.returncode:
         detail = (fetched.stderr or fetched.stdout or "").strip().splitlines()
-        raise InstallError(f"fetch snapshot remote: {detail[-1] if detail else f'exited {fetched.returncode}'}")
+        raise InstallError(
+            f"fetch snapshot remote: {detail[-1] if detail else f'exited {fetched.returncode}'}"
+        )
     if _snapshot_git(repository, ["rev-parse", "FETCH_HEAD"], "inspect fetched snapshot") != tip:
         raise InstallError("the snapshot remote moved during recovery; rerun the same command")
     try:
@@ -752,7 +763,9 @@ def _fast_forward_snapshot_repository(
 def _point_snapshot_remote(repository: Path, remote: str) -> None:
     """Set `origin` to `offsite.instance_remote`, the remote the snapshot pusher publishes to."""
     if remote:
-        _snapshot_git(repository, ["config", "--replace-all", "remote.origin.url", remote], "set snapshot remote")
+        _snapshot_git(
+            repository, ["config", "--replace-all", "remote.origin.url", remote], "set snapshot remote"
+        )
 
 
 def _mark_recovered_tip(repository: Path, tip: str) -> None:
@@ -763,9 +776,13 @@ def _mark_recovered_tip(repository: Path, tip: str) -> None:
         marker = ""
     if marker == tip:
         return
-    blob = _snapshot_git(repository, ["hash-object", "-w", "--stdin"], "write takeover marker", input=f"{tip}\n")
+    blob = _snapshot_git(
+        repository, ["hash-object", "-w", "--stdin"], "write takeover marker", input=f"{tip}\n"
+    )
     _snapshot_git(
-        repository, ["update-ref", "-m", "recover: takeover base", SNAPSHOT_BASE_REF, blob], "write takeover marker"
+        repository,
+        ["update-ref", "-m", "recover: takeover base", SNAPSHOT_BASE_REF, blob],
+        "write takeover marker",
     )
 
 
@@ -1125,9 +1142,7 @@ def materialize_checkpoint(
         # next tick writes both.
         sprint_lines = [
             line
-            for line in ndjson_lines(
-                board.read_text("sprints.ndjson") if board.has("sprints.ndjson") else ""
-            )
+            for line in ndjson_lines(board.read_text("sprints.ndjson") if board.has("sprints.ndjson") else "")
             if line.strip()
         ]
         cards = [json.loads(line) for line in card_lines]
@@ -1234,10 +1249,7 @@ def _restored_run_journals(runs_source: Path) -> dict[Path, list[tuple[int, str]
                 f"private checkpoint has duplicate run journal lines for {relative.as_posix()}"
             )
         try:
-            journals[relative] = [
-                (number, ndjson_line(record))
-                for number, record in ordered
-            ]
+            journals[relative] = [(number, ndjson_line(record)) for number, record in ordered]
         except (TypeError, ValueError):
             raise InstallError(
                 f"private checkpoint contains an unserializable run journal record for {relative.as_posix()}"
@@ -1340,6 +1352,7 @@ def materialize_host(
     report = validate_instance(instance)
     if not report.ok:
         raise InstallError("invalid instance config: " + "; ".join(map(str, report.errors)))
+    check_product_runtime(product_root)
     try:
         installation_user, runtime_home = resolve_runtime_owner(instance, installation_user)
     except ValueError as exc:
@@ -1377,6 +1390,36 @@ def materialize_host(
         failed = result.steps[-1]
         raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
     return result
+
+
+def check_product_runtime(product_root: Path) -> None:
+    """Refuse an unusable checkout runtime before the materializer changes the host."""
+    product_root = product_root.expanduser().resolve()
+    runtime = ProductionRuntime.installed(product_root)
+    executables = ("python3", "ummanu", "ummanu-memory-mcp", "ummanu-memory-po-bridge")
+    missing = [
+        name
+        for name in executables
+        if not (product_root / ".venv" / "bin" / name).is_file()
+        or not os.access(product_root / ".venv" / "bin" / name, os.X_OK)
+    ]
+    remedy = (
+        f"prepare {product_root}/.venv with python3 -m venv and install this checkout editable "
+        "with its .venv/bin/python -m pip install -e '.[memory,dev]'; "
+        "see docs/RECOVERY.md, Fresh install and recovery"
+    )
+    if missing:
+        raise InstallError(f"product runtime unavailable: missing .venv/bin/{missing[0]}; {remedy}")
+    provenance = runtime.probe()
+    if not provenance.valid:
+        raise InstallError(f"{provenance.refusal('install/recover')}; {remedy}")
+    try:
+        snapshot = _snapshot_install(Path(runtime.interpreter))
+    except (AttributeError, TypeError):
+        # A partial pip write or malformed direct_url metadata cannot establish an editable install.
+        snapshot = True
+    if snapshot:
+        raise InstallError(f"product runtime is not an editable install; {remedy}")
 
 
 def materialize_head_registry(
@@ -1874,13 +1917,13 @@ def _restore_without_credentials(
     )
     _write_recovery_progress(progress_path, identity, checkpoint="complete")
     host = report.host if isinstance(report.host, dict) else {}
-    threads = host.get("memory_threads", 1)
-    if progress.get("memory") == "complete" and (data_dir / "memory" / "index.sqlite").is_file():
+    memory = memory_config(host)
+    if progress.get("memory") == "complete" and index_matches(data_dir / "memory" / "index.sqlite", memory):
         result.add("memory", *_unchanged_memory_step(data_dir, target, args.installation_user))
     else:
         _write_recovery_progress(progress_path, identity, memory="started")
         count = rebuild_memory_index(
-            data_dir, target, threads=threads if isinstance(threads, int) else None, isolated=True
+            data_dir, target, model=memory.model, dim=memory.dim, threads=memory.threads, isolated=True
         )
         _publish_recovered_memory_export(data_dir, target, args.installation_user)
         result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
@@ -1988,7 +2031,9 @@ def install(args: argparse.Namespace) -> InstallResult:
             )
             result.add(
                 "instance-checkout",
-                "unchanged" if detail.startswith("reused") else ("would-change" if args.dry_run else "changed"),
+                "unchanged"
+                if detail.startswith("reused")
+                else ("would-change" if args.dry_run else "changed"),
                 detail,
             )
         # Board and runs: the checkout of a legacy checkpoint, or the snapshot's extracted tree.
@@ -2133,15 +2178,14 @@ def install(args: argparse.Namespace) -> InstallResult:
                 result.add("board", "changed", f"{restored} card(s) at parity")
                 _write_recovery_progress(progress_path, identity, board="complete")
             host = report.host if isinstance(report.host, dict) else {}
-            threads = host.get("memory_threads", 1)
+            memory = memory_config(host)
+            compatible_index = index_matches(data_dir / "memory" / "index.sqlite", memory)
             recovered_memory_completion = (
                 progress.get("memory") == "started"
                 and restore_state(data_dir).get("memory_index") == "complete"
-                and (data_dir / "memory" / "index.sqlite").is_file()
+                and compatible_index
             )
-            if (
-                progress.get("memory") == "complete" and (data_dir / "memory" / "index.sqlite").is_file()
-            ) or recovered_memory_completion:
+            if (progress.get("memory") == "complete" and compatible_index) or recovered_memory_completion:
                 result.add("memory", *_unchanged_memory_step(data_dir, target, args.installation_user))
                 if recovered_memory_completion:
                     _write_recovery_progress(progress_path, identity, memory="complete")
@@ -2150,7 +2194,12 @@ def install(args: argparse.Namespace) -> InstallResult:
                 # In a child process: the host step starts `ummanu-memory-mcp`, and this process must
                 # not still hold its own copy of the embedding model beside it (ummanu-53 P14).
                 count = rebuild_memory_index(
-                    data_dir, target, threads=threads if isinstance(threads, int) else None, isolated=True
+                    data_dir,
+                    target,
+                    model=memory.model,
+                    dim=memory.dim,
+                    threads=memory.threads,
+                    isolated=True,
                 )
                 _publish_recovered_memory_export(data_dir, target, args.installation_user)
                 result.add("memory", "changed", f"rebuilt index for {count} fact(s)")

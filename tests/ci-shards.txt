@@ -160,6 +160,7 @@ integration-recovery tests/test_restore_e2e.py
 unit tests/test_retro_search_log.py
 unit tests/test_retro_pending.py
 unit tests/test_role_env.py
+unit tests/test_runtime_env.py
 component tests/test_docker_guard.py
 component tests/test_memory_token_launch.py
 unit tests/test_observer_voice.py

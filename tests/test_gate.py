@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import tempfile
 import unittest
@@ -83,15 +84,57 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertEqual(validate(result, "gate-result", "result"), [])
         self.assertTrue(load_config(self.binding)["enabled"])
-        self.assertEqual(
-            load_config(self.storage.draft("sample-project"))["gate"]["status"], "passed"
-        )
+        self.assertEqual(load_config(self.storage.draft("sample-project"))["gate"]["status"], "passed")
         self.assert_no_derived_artifacts()
         self.assertEqual(run_gate(str(self.instance), "sample-project"), (0, result))
         dry_code, dry_result = project_add(str(self.repo), str(self.instance), dry_run=True)
         self.assertEqual(dry_code, 0, dry_result)
         self.assertEqual(dry_result["gate"]["status"], "passed")
         self.assertTrue(load_config(self.binding)["enabled"])
+
+    def test_malformed_current_result_is_conflict_without_changing_binding_or_draft(self):
+        self.provision()
+        draft_path = self.storage.draft("sample-project")
+        disabled = (self.binding.read_bytes(), draft_path.read_bytes())
+        code, passed = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 0, passed)
+        enabled = (self.binding.read_bytes(), draft_path.read_bytes())
+        result_path = self.storage.gate_runs("sample-project") / passed["run_id"] / "result.json"
+        malformed = ("", "null", "[]", "42", '{"status":"passed","input_revision":null}')
+
+        for state in (disabled, enabled):
+            self.binding.write_bytes(state[0])
+            draft_path.write_bytes(state[1])
+            for text in malformed:
+                with self.subTest(enabled=state == enabled, result=text):
+                    result_path.write_text(text, encoding="utf-8")
+                    with mock.patch("ummanu.gate._command") as command:
+                        code, result = run_gate(str(self.instance), "sample-project")
+                    self.assertEqual((code, result["status"]), (1, "conflict"))
+                    self.assertEqual(self.binding.read_bytes(), state[0])
+                    self.assertEqual(draft_path.read_bytes(), state[1])
+                    self.assertEqual(result_path.read_text(encoding="utf-8"), text)
+                    command.assert_not_called()
+
+    def test_malformed_historical_results_are_skipped_without_changing_enabled_state(self):
+        self.provision()
+        code, passed = run_gate(str(self.instance), "sample-project")
+        self.assertEqual(code, 0, passed)
+        runs = self.storage.gate_runs("sample-project")
+        (runs / passed["run_id"] / "result.json").unlink()
+        historical = runs / "old-result" / "result.json"
+        historical.parent.mkdir()
+        binding_before = self.binding.read_bytes()
+        draft_path = self.storage.draft("sample-project")
+        draft_before = draft_path.read_bytes()
+        malformed = (None, [], 42, {"status": "passed", "input_revision": None})
+        for payload in malformed:
+            with self.subTest(result=payload):
+                historical.write_text(json.dumps(payload), encoding="utf-8")
+                code, result = run_gate(str(self.instance), "sample-project")
+                self.assertEqual((code, result["status"]), (1, "conflict"))
+                self.assertEqual(self.binding.read_bytes(), binding_before)
+                self.assertEqual(draft_path.read_bytes(), draft_before)
 
     def test_binding_with_plane_and_policy_passes_with_identity_only_result(self):
         self.provision()
@@ -271,9 +314,7 @@ class GateTests(unittest.TestCase):
         self.provision()
         code, current = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 0, current)
-        self.assertGreaterEqual(
-            len(list(self.storage.gate_runs("sample-project").glob("*/result.json"))), 2
-        )
+        self.assertGreaterEqual(len(list(self.storage.gate_runs("sample-project").glob("*/result.json"))), 2)
 
         repeat_code, repeated = run_gate(str(self.instance), "sample-project")
 

@@ -31,9 +31,7 @@ from ummanu.secret_store import (
 from ummanu.secret_words import RECOVERY_WORDS
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
-RUNTIME_ENV = (
-    "EXAMPLE_URL=http://127.0.0.1/rpc\nEXAMPLE_API_USER=rpc-user\nEXAMPLE_API_TOKEN=live-token\n"
-)
+RUNTIME_ENV = "EXAMPLE_URL=http://127.0.0.1/rpc\nEXAMPLE_API_USER=rpc-user\nEXAMPLE_API_TOKEN=live-token\n"
 
 
 def fast_key_params() -> dict:
@@ -92,7 +90,14 @@ class RecoveryCase(unittest.TestCase):
         )
         # The store writes files and makes no commit; the legacy tick commits its exported files
         # (`checkpoint.LEGACY_LIVE_PATHS`), which is what a clone of the remote then carries.
-        _git(self.source, "add", "--", "secrets/catalog.yaml", "secrets/installation-key.json", "secrets/values")
+        _git(
+            self.source,
+            "add",
+            "--",
+            "secrets/catalog.yaml",
+            "secrets/installation-key.json",
+            "secrets/values",
+        )
         _git(self.source, "commit", "-m", "checkpoint(state): the secret store")
         self.phrase_file = root / "phrase.txt"
         self.phrase_file.write_text(PHRASE + "\n", encoding="utf-8")
@@ -183,12 +188,26 @@ class LegacyBoardOnlyRecoveryTests(RecoveryCase):
         self.assertEqual(locked.missing, ())
         self.assertTrue(opened.unlocked)
         self.assertEqual([result.path for result in opened.materialized], [runtime_env])
-        self.assertEqual(
-            installation.read_runtime_env(root, None), dict(zip(LEGACY_ENV, LEGACY_VALUES))
-        )
+        self.assertEqual(installation.read_runtime_env(root, None), dict(zip(LEGACY_ENV, LEGACY_VALUES)))
 
 
 class PhraseBranchCase(RecoveryCase):
+    def test_a_damaged_verifier_refuses_before_writing_the_key_or_env_file(self) -> None:
+        path = secret_store.key_params_path(self.source)
+        params = json.loads(path.read_text(encoding="utf-8"))
+        params["verifier"]["nonce"] = secret_store._b64(b"x")
+        path.write_text(json.dumps(params), encoding="utf-8")
+        _git(self.source, "add", "secrets/installation-key.json")
+        _git(self.source, "commit", "-m", "damaged verifier")
+
+        code, output = self.recover("--recovery-phrase-file", str(self.phrase_file))
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("verifier nonce", output)
+        self.assertNotIn(PHRASE, output)
+        self.assertFalse(secret_store.key_path(self.target).exists())
+        self.assertFalse(self.restored.exists())
+
     def test_the_phrase_rebuilds_the_key_and_puts_runtime_env_back(self) -> None:
         code, output = self.recover("--recovery-phrase-file", str(self.phrase_file))
 

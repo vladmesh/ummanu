@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT
+from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, write_memory_metadata
 from ummanu import installation, upgrade
 from ummanu.board.migrate import head_revision
 from ummanu.checkpoint import SNAPSHOT_REF, CheckpointWriter, SnapshotExporter
@@ -226,11 +226,12 @@ def _head_registry_only(context, steps=installation.STEPS):
     )
 
 
-def _rebuilt_index(data_dir: Path, instance_dir: Path, **_kwargs) -> int:
+def _rebuilt_index(data_dir: Path, instance_dir: Path, *, model: str, dim: int, **_kwargs) -> int:
     """The reindex without the embedding model: one index file for the facts the live root holds."""
     facts = sorted((instance_dir / "state" / "memory" / "facts").rglob("*.md"))
-    (data_dir / "memory").mkdir(parents=True, exist_ok=True)
-    (data_dir / "memory" / "index.sqlite").write_text("\n".join(map(str, facts)), encoding="utf-8")
+    index = data_dir / "memory" / "index.sqlite"
+    index.unlink(missing_ok=True)
+    write_memory_metadata(index, model=model, dim=dim)
     return len(facts)
 
 
@@ -246,6 +247,7 @@ def recover_snapshot(
     makes the named installation callable raise instead."""
     patches = {
         "check_prerequisites": mock.Mock(),
+        "check_product_runtime": mock.Mock(),
         "import_normalized_board": board,
         "rebuild_memory_index": mock.Mock(side_effect=_rebuilt_index),
         "provision_project_checkouts": mock.Mock(return_value=[]),

@@ -11,14 +11,17 @@ host ownership or the security boundary, state the intended contract in the issu
 
 ## Development setup
 
+On Ubuntu 24.04, install `python3-venv` first (`sudo apt-get install --yes python3-venv`).
+Run the following from your checkout:
+
 ```bash
-python3 -m pip install -e '.[memory]'
-python3 -m pip install -e '.[dev]'
-python3 -m tests.broad
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[memory,dev]'
+.venv/bin/python -m tests.broad
 ```
 
 Keep the package installed in editable mode: tests and runtime commands resolve deployment assets
-from the checkout.
+from the checkout. Use `.venv/bin/python` for the commands below, or activate `.venv` first.
 
 The `dev` extra is the pinned `ruff`; `required-version` in `pyproject.toml` makes any other version
 refuse to run. Lint only changed and untracked Python paths with the command in

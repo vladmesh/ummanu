@@ -19,6 +19,7 @@ from ummanu.host import (
 )
 from ummanu.host_apply import resolve_installed_packaged
 from ummanu.installation import add_bootstrap_credential_arguments
+from ummanu.memory.config import memory_config
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.restore import (
     RestoreError,
@@ -211,17 +212,15 @@ def run_memory_reindex(args: argparse.Namespace) -> int:
     host = report.host if isinstance(report.host, dict) else {}
     python = host.get("memory_reindex_python")
     script = host.get("memory_reindex_script")
-    model = host.get("memory_model", "intfloat/multilingual-e5-large")
-    dim = host.get("memory_dim", 1024)
-    threads = host.get("memory_threads", 1)
+    memory = memory_config(host)
     count = rebuild_memory_index(
         data_dir,
         instance_path.parent,
         python=Path(python) if isinstance(python, str) else None,
         script=Path(script) if isinstance(script, str) else None,
-        model=model if isinstance(model, str) else None,
-        dim=dim if isinstance(dim, int) else None,
-        threads=threads if isinstance(threads, int) else None,
+        model=memory.model,
+        dim=memory.dim,
+        threads=memory.threads,
     )
     return {"ok": True, "action": "memory-reindex", "facts": count}
 

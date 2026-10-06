@@ -5,23 +5,20 @@ description: Example installation used by doctor --dry-run and schema tests.
 data_dir: /var/lib/ummanu-data
 offsite:
   instance_remote: git@example.invalid:example/secretary-instance.git
-persona:
-  name: example-operator
-  style: terse
-heads:
-  - role: worker
-    model: example-worker-model
-  - role: reviewer
-    model: example-reviewer-model
+# Put personal instructions in persona/AGENTS.md in the instance live root.
+# Override model profiles through heads/heads.toml in the instance, when needed.
 host:
   projects_root: /srv/projects
   unit_prefix: ummanu-
   units:
-    - ummanu-pipeline.service
+    - ummanu-dispatcher-production.service
     - ummanu-curator.timer
   # Components this installation deliberately does not run. Anything the product
   # ships and this block does not name is enabled.
   components:
+    web-front:
+      enabled: false
+      reason: example installation has no public web sites
     retro:
       enabled: false
       reason: example installation has nothing to reflect on

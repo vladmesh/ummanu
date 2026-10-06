@@ -26,12 +26,11 @@ from typing import Any
 from ummanu.infra.systemd import (
     ACTIVE_STATES,
     ENABLED_STATES,
+    CommandResult as _CmdResult,
     SystemdObservation,
     observation_error,
 )
-from ummanu.infra.systemd import (
-    CommandResult as _CmdResult,
-)
+from ummanu.memory.config import DEFAULT_DIM, DEFAULT_MODEL, DEFAULT_THREADS
 from ummanu.projects.availability import ProjectAvailability, binding_disabled
 from ummanu.runtime.local_pty_head import runtime_scope_inventory
 from ummanu.runtime.paths import component_enabled, configured_product_root, default_instance_path
@@ -105,9 +104,9 @@ class SystemdLayout:
     data_dir: Path
     runtime_user: str
     runtime_home: Path
-    memory_model: str = "intfloat/multilingual-e5-large"
-    memory_dim: int = 1024
-    memory_threads: int = 1
+    memory_model: str = DEFAULT_MODEL
+    memory_dim: int = DEFAULT_DIM
+    memory_threads: int = DEFAULT_THREADS
 
 
 def default_systemd_layout() -> SystemdLayout:
@@ -194,7 +193,7 @@ def build_plan(
 ) -> list[PlannedResource]:
     """Render the supported host surface without consulting the live host.
 
-    Heads produce systemd services and every enabled component of the shipped unit catalogue
+    Legacy heads are ignored; profiles come from heads/heads.toml. Every enabled packaged component
     produces its unit. Project bindings produce nothing here: a legacy ``orca_binding`` names an
     Orca registration that reconcile neither creates, checks nor removes.
     """
@@ -204,18 +203,6 @@ def build_plan(
         packaged = load_packaged_units(default_packaging_root(), prefix)
     digests = {unit.name: unit.digest for unit in packaged}
     result: list[PlannedResource] = []
-    heads = instance.get("heads", []) if isinstance(instance, dict) else []
-    if isinstance(heads, list) and prefix:
-        for head in heads:
-            if not isinstance(head, dict) or not isinstance(head.get("role"), str):
-                continue
-            role = head["role"]
-            logical_id = f"systemd:head:{role}"
-            name = f"{prefix}{role}.service"
-            model = head.get("model")
-            if not isinstance(model, str):
-                continue
-            result.append(_resource(logical_id, "unit", name, {"model": model, "role": role}))
     if prefix:
         if component_enabled(host, "dispatcher-production"):
             result.extend(_production_dispatcher_units(prefix, digests))
@@ -291,11 +278,6 @@ def plan_input_errors(
     """Reject incomplete desired-state inputs before a plan can fail open."""
     bindings = list(bindings)
     packaged = list(packaged) if packaged is not None else None
-    host = instance.get("host", {}) if isinstance(instance, dict) else {}
-    prefix = host.get("unit_prefix") if isinstance(host, dict) else None
-    heads = instance.get("heads", []) if isinstance(instance, dict) else []
-    if isinstance(heads, list) and heads and not isinstance(prefix, str):
-        return ["host.unit_prefix is required when heads are configured"]
     errors: list[str] = []
     desired = build_plan(instance, bindings, packaged=packaged)
     logical_ids: set[str] = set()
@@ -430,16 +412,23 @@ def plan_changes(
     """
     declared_foreign = set(declared_foreign)
     desired, managed = list(desired), list(managed)
-    scope_resources = [resource for resource in [*desired, *managed]
-                       if resource.kind == "unit" and resource.name.endswith(".scope")
-                       and (resource.name not in declared_foreign
-                            or actual.runtime_scopes is not None
-                            and resource.name in actual.runtime_scopes.scopes)]
+    scope_resources = [
+        resource
+        for resource in [*desired, *managed]
+        if resource.kind == "unit"
+        and resource.name.endswith(".scope")
+        and (
+            resource.name not in declared_foreign
+            or actual.runtime_scopes is not None
+            and resource.name in actual.runtime_scopes.scopes
+        )
+    ]
     if scope_resources:
         # A scope is never a packaged resource, even if an old manifest or
         # explicit host configuration attempts to put it in that lifecycle.
-        return [PlanChange(resource.logical_id, "unit", resource.name, "conflict")
-                for resource in scope_resources]
+        return [
+            PlanChange(resource.logical_id, "unit", resource.name, "conflict") for resource in scope_resources
+        ]
     actual_names = {"unit": actual.units}
     # Do not let an older manifest record pull a now-declared foreign unit back
     # under management through the deletion pass below.
@@ -453,11 +442,20 @@ def plan_changes(
         for resource in desired
         if resource.kind != "unit" or resource.name not in declared_foreign
     }
+    legacy_head_names = {
+        resource.name: resource.logical_id
+        for resource in managed_by_id.values()
+        if resource.kind == "unit" and resource.logical_id.startswith("systemd:head:")
+    }
     changes: list[PlanChange] = []
     for resource in desired_by_id.values():
         present = resource.name in actual_names[resource.kind]
         owned = managed_by_id.get(resource.logical_id)
-        if not present:
+        if resource.name in legacy_head_names and legacy_head_names[resource.name] != resource.logical_id:
+            # Ownership survives a missing file too. Creating a packaged unit here would take
+            # over a legacy name and leave two records for it in the next managed manifest.
+            action = "conflict"
+        elif not present:
             action = "create"
         elif owned and owned.kind == resource.kind and owned.name == resource.name:
             action = "update" if owned.fingerprint != resource.fingerprint else "unchanged"
@@ -465,6 +463,12 @@ def plan_changes(
             action = "conflict"
         changes.append(PlanChange(resource.logical_id, resource.kind, resource.name, action))
     for logical_id, resource in managed_by_id.items():
+        if resource.kind == "unit" and logical_id.startswith("systemd:head:"):
+            # Older plans treated head profiles as units. Retain their ownership
+            # records and files; removing that obsolete input is not authority to
+            # stop a service. A collision with a current packaged resource is still
+            # a conflict in the desired-resource pass above.
+            continue
         desired_resource = desired_by_id.get(logical_id)
         renamed = desired_resource and (
             resource.kind != desired_resource.kind or resource.name != desired_resource.name
@@ -707,14 +711,20 @@ def _project_diff(expected: Expectations, actual: HostInventory) -> KindDiff:
     """A disabled binding's checkout matches when present and is not missing when absent."""
     diff = _diff(expected.projects, actual.projects - expected.dormant_projects)
     present = expected.dormant_projects & actual.projects
-    return replace(diff, matched=sorted({*diff.matched, *present}),
-                   unmanaged_on_host=sorted(set(diff.unmanaged_on_host) - expected.foreign_projects))
+    return replace(
+        diff,
+        matched=sorted({*diff.matched, *present}),
+        unmanaged_on_host=sorted(set(diff.unmanaged_on_host) - expected.foreign_projects),
+    )
 
 
 def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDiff]:
     """Compare expectations against a host inventory, one KindDiff per kind."""
-    transient = (set(actual.runtime_scopes.scopes) | set(actual.runtime_scopes.disappeared)
-                 if actual.runtime_scopes is not None and not actual.runtime_scopes.errors else set())
+    transient = (
+        set(actual.runtime_scopes.scopes) | set(actual.runtime_scopes.disappeared)
+        if actual.runtime_scopes is not None and not actual.runtime_scopes.errors
+        else set()
+    )
     return {
         "projects": _project_diff(expected, actual),
         "units": _diff(expected.units, actual.units - expected.foreign_units - transient),
@@ -823,8 +833,9 @@ class FixtureHostSource(HostSource):
             )
             if reason
         }
-        return _with_runtime_scopes(expected, CollectResult(
-            HostInventory(projects, units, states, timer_triggers=triggers), errors))
+        return _with_runtime_scopes(
+            expected, CollectResult(HostInventory(projects, units, states, timer_triggers=triggers), errors)
+        )
 
     def _timer_triggers(self) -> tuple[dict[str, str], str]:
         """Optional fixture last triggers: ``timer LastTriggerUSec`` per line (the value has spaces)."""

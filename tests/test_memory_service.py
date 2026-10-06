@@ -1,8 +1,12 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+from ummanu.memory_errors import MemoryValidationError
 
 try:
     import numpy as np
@@ -117,6 +121,58 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "forced embedding failure"):
             self.update()
         self.assertEqual(self.rows(), before)
+
+    def test_malformed_frontmatter_preserves_index_and_reports_a_controlled_failure(self):
+        self.write_export([("global/a", "alpha")])
+        self.update()
+        before = self.db.read_bytes()
+        self.calls.clear()
+        for source in ("export", "canon"):
+            with self.subTest(source=source):
+                good = "---\nsource: test\n---\nchanged alpha\n"
+                bad = "---\n- not a mapping\n---\nBody\n"
+                if source == "export":
+                    self.export.write_text(
+                        "".join(
+                            json.dumps({"id": fact_id, "path": f"{fact_id}.md", "text": raw}) + "\n"
+                            for fact_id, raw in (("global/a", good), ("global/b", bad))
+                        ),
+                        encoding="utf-8",
+                    )
+                else:
+                    self.export.unlink()
+                    (self.canon / "global").mkdir()
+                    (self.canon / "global" / "a.md").write_text(good, encoding="utf-8")
+                    (self.canon / "global" / "b.md").write_text(bad, encoding="utf-8")
+                with self.assertRaisesRegex(MemoryValidationError, "frontmatter must be a mapping"):
+                    self.update()
+                with self.assertRaisesRegex(MemoryValidationError, "frontmatter must be a mapping"):
+                    memory_reindex.rebuild(
+                        self.canon, self.export, self.db, "test-model", 4, document_embed=self.embed
+                    )
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    code = memory_reindex.main(
+                        [
+                            "--canon",
+                            str(self.canon),
+                            "--export",
+                            str(self.export),
+                            "--target-db",
+                            str(self.db),
+                            "--model",
+                            "test-model",
+                            "--dim",
+                            "4",
+                        ]
+                    )
+                self.assertEqual(code, 1)
+                self.assertEqual(
+                    json.loads(output.getvalue()),
+                    {"ok": False, "error": "fact frontmatter must be a mapping"},
+                )
+                self.assertEqual(self.db.read_bytes(), before)
+                self.assertEqual(self.calls, [])
 
     def test_without_an_export_the_canon_files_of_a_non_git_root_are_read(self):
         (self.canon / "global").mkdir()
@@ -268,7 +324,9 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
         with mock.patch.object(memory_service, "read_guard", return_value=self.identity({"project:alpha"})):
             self.assertEqual(memory_service.memory_get(1)["text"], "allowed project fact")
             self.assertEqual(memory_service.memory_get(2), {"error": "not found", "id": 2})
-            self.assertEqual([entry["text"] for entry in memory_service.memory_list()], ["allowed project fact"])
+            self.assertEqual(
+                [entry["text"] for entry in memory_service.memory_list()], ["allowed project fact"]
+            )
 
     def test_po_can_narrow_to_review_bucket_while_worker_cannot_receive_it(self):
         po = memory_service.memory_access.MemoryReadIdentity(
@@ -335,12 +393,15 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
         denial = memory_service.memory_access.MemoryAccessDenial("runtime_identity_missing")
         with mock.patch.object(memory_service, "read_guard", return_value=denial):
             self.assertEqual(memory_service.memory_list(), [denial.response()])
-        self.assertEqual([entry["text"] for entry in memory_service.list_memory_entries()], [
-            "pending PO review",
-            "Ummanu development fact",
-            "foreign project fact",
-            "allowed project fact",
-        ])
+        self.assertEqual(
+            [entry["text"] for entry in memory_service.list_memory_entries()],
+            [
+                "pending PO review",
+                "Ummanu development fact",
+                "foreign project fact",
+                "allowed project fact",
+            ],
+        )
         self.assertEqual(memory_service.get_memory_entry(1)["text"], "allowed project fact")
 
 

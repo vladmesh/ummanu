@@ -690,6 +690,7 @@ class WebFrontSitesTests(unittest.TestCase):
         with (
             mock.patch.object(installation, "STEPS", (upgrade.step_web_front_config, host)),
             mock.patch.object(installation, "step_host", host),
+            mock.patch.object(installation, "check_product_runtime"),
         ):
             result = installation.materialize_host(
                 instance,

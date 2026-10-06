@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu.runtime.redact import REDACTED, redact, scrub_secrets
+from ummanu.runtime.role_env import load_env_file
 
 
 class ScrubSecretsTests(unittest.TestCase):
@@ -68,6 +69,47 @@ class ScrubSecretsTests(unittest.TestCase):
                 redact("token opaque-token-value", env_files=[runtime]),
                 f"token {REDACTED}:env-value",
             )
+
+    def test_escaped_runtime_secrets_are_redacted_in_both_serialized_and_decoded_forms(self):
+        cases = (
+            (r"opaque\-credential\-sentinel", "opaque-credential-sentinel"),
+            (r'"opaque\$credential\"sentinel"', 'opaque$credential"sentinel'),
+            (r"opaque\ credential\ sentinel", "opaque credential sentinel"),
+            (r"'opaque\credential\sentinel'", r"opaque\credential\sentinel"),
+            ("opaque\\-credential\\-sentinel\\ ", "opaque-credential-sentinel "),
+            ("opaque\\-credential\\-sentinel\\\t", "opaque-credential-sentinel\t"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = Path(tmpdir) / "runtime.env"
+            for serialized, expected in cases:
+                with self.subTest(value=serialized):
+                    runtime.write_text(f"API_TOKEN={serialized}\n", encoding="utf-8")
+                    actual = load_env_file(runtime)["API_TOKEN"]
+                    self.assertEqual(actual, expected)
+                    output = redact(f"runtime: {actual}\nfile: {serialized}", env_files=[runtime])
+                    self.assertNotIn(expected, output)
+                    self.assertNotIn(serialized, output)
+                    self.assertEqual(output.count(REDACTED), 2)
+
+    def test_crlf_and_non_lf_unicode_separators_preserve_the_whole_credential(self):
+        serialized = "opaque\\-credential\u2028sentinel"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = Path(tmpdir) / "runtime.env"
+            runtime.write_bytes(f"API_TOKEN={serialized}\r\n".encode())
+            actual = load_env_file(runtime)["API_TOKEN"]
+            self.assertEqual(actual, "opaque-credential\u2028sentinel")
+            output = redact(f"runtime: {actual}\nfile: {serialized}", env_files=[runtime])
+        self.assertEqual(output, f"runtime: {REDACTED}:env-value\nfile: {REDACTED}:env-value")
+
+    def test_malformed_env_line_does_not_discard_other_secret_matches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = Path(tmpdir) / "runtime.env"
+            runtime.write_text(
+                'BAD_TOKEN="unfinished-credential-value\nGOOD_TOKEN=second\\-credential\\-value\n',
+                encoding="utf-8",
+            )
+            output = redact("unfinished-credential-value second-credential-value", env_files=[runtime])
+        self.assertEqual(output, f"{REDACTED}:env-value {REDACTED}:env-value")
 
     def test_pat_and_identity_runtime_names_are_exact_value_secrets(self):
         with tempfile.TemporaryDirectory() as tmpdir:

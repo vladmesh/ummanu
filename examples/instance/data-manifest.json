@@ -5,7 +5,7 @@
     "board": {"path": "board"},
     "memory": {
       "path": "memory",
-      "facts": "memory/facts",
+      "facts": "state/memory/facts",
       "export": "memory/export.ndjson",
       "index": "memory/index.sqlite"
     },
