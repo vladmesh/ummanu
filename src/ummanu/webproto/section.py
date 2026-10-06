@@ -1,66 +1,22 @@
-"""The one place a section of a snapshot is assembled, and the one invariant it holds:
+"""The one place a section of a snapshot is assembled, and the invariant it holds.
 
-    A source that refused, or that was never read, may not delete, shadow or fabricate an answer
-    another source already gave. Every section says which source answered it, and an answer is
-    attributed to the source that actually produced it.
+    A source that refused, or was never read, may not delete, shadow or fabricate an answer another
+    source gave. Every section names the source that actually produced it.
 
-`sources.py` gave that rule its shape -- every section carries a `Source`, and "there are no running
-agents" is never spelled the same way as "the file that would say so could not be read". What it did
-not give it was a *place*. Each section assembled itself, so the rule was kept a branch at a time,
-and four sites of one document broke it in four different ways across two review rounds: a refusal
-ordered above a board answer already in hand; an answer decided by one source and returned under
-another's availability; one try block covering two sources, so the failure of the second erased the
-first; and an affirmative claim -- "this sprint declared no observer, and none was started" --
-manufactured out of a file that only proves it holds no row. Each was repaired locally and the next
-one appeared somewhere else, which is what a rule with no enforcement point looks like.
+* A source is a `Reading`, made once per document; :meth:`SourceSet.value` refuses the payload of a
+  source that did not answer.
+* :meth:`SourceSet.decide` takes ordered :class:`Rule` s. A rule runs only when every source it
+  `needs` answered; the first rule that produces wins and the section carries its `answers` source.
+* When no rule can produce, the section is its declared `blank`, attributed to the first consulted
+  source (in precedence order) that refused. Only `narrates` fields may differ from the blank.
+* If every consulted source answered and no rule produced, the rules are not total: `decide` raises.
+* Provenance: only `decide` and `mark` mint a trusted section (`minted is _MINTED`). :func:`render`
+  and :class:`SectionSet` (which wraps every public method, like `ProtocolBoundary`) refuse a
+  section built by calling the constructor, and `render` refuses a plain mapping with a `source`.
 
-So the rule is enforced here, structurally, and a section is covered by the act of being a section.
-
-**A source is a `Reading`**, made once for the whole document: its key, its `Source`, and the value
-it produced. :meth:`SourceSet.value` refuses to hand back the payload of a source that did not
-answer, so a section cannot read one by accident.
-
-**A section is decided by :meth:`SourceSet.decide`**, from an ordered list of :class:`Rule`. A rule
-names the source it `answers` from and every source it `needs`, receives exactly those sources'
-values as its arguments -- and is *not run at all* unless every one of them answered. So the value
-of a refused source can never reach a claim: not because a branch remembered to check, but because
-the code that would have used it never executes. The first rule that produces wins, and the section
-carries the `Source` of the rule's `answers` key -- the source that actually produced the answer,
-never the availability of whatever else happened to be read.
-
-**What a refusal may say is declared, not written per branch.** Every section declares its `blank`:
-the field values that claim nothing. When no rule can produce, the section is that blank, attributed
-to the highest-precedence source among those consulted that refused -- the first missing input in
-the chain -- and carrying its reason. A section may narrate that refusal (`reason`, and the
-identifiers it is about), but the claim fields are checked against the blank, so a branch that tries
-to answer under a source that refused raises :class:`SectionContractError` rather than shipping.
-
-**A section that cannot answer when everything answered is a hole**, and `decide` raises rather than
-inventing an attribution for it: with every consulted source available and no rule producing, the
-section's rules are not total, which is a defect of this layer and not a fact about the
-installation.
-
-**And the document seam.** A section is consumed in exactly two places, and both ask where it came
-from. :func:`render` turns the assembled tree into JSON: it refuses a plain mapping carrying a
-`source` of this shape, *and* it refuses a `Section` this module did not decide. :class:`SectionSet`
-closes the same loop on the other side -- every public method of a subclass is wrapped at class
-creation and must answer with a section that `decide` or `mark` produced, exactly as
-`ProtocolBoundary` wraps every public operation. A section added next month is guarded by being a
-public method of the set, and there is no list to keep in step.
-
-The provenance is what makes that true rather than merely stated. Being a `Section` is not the
-credential: a builder that returned `Section(read.source("liveness"), {"state": "working"},
-"liveness")` under an unavailable liveness source was accepted by both places, for being the right
-type, and published the exact claim this module exists to prevent. So a section carries `minted`,
-which only :func:`_minted` sets, which only `decide` and `mark` call. **The promise, stated exactly:**
-a section built by calling the constructor cannot be returned from a builder and cannot reach a
-document. An author who reaches into this module for the private sentinel can still mint one -- that
-is forging rather than forgetting, and no seam in this language prevents it; what is prevented is
-the section written the ordinary way that claims more than its source gave.
-
-`SectionContractError` is a `RuntimeError` on purpose, and deliberately outside
-`boundary.IMPLEMENTATION_FAILURES`: it is a defect of this layer, not a source that refused, and
-dressing it as `backend_unavailable` would hide it from the reader best placed to fix it.
+`SectionContractError` is a `RuntimeError` kept outside `boundary.IMPLEMENTATION_FAILURES`: it is a
+defect of this layer, and reporting it as `backend_unavailable` would hide it.
+See docs/PROTOCOLS.md, "Sources fail apart".
 """
 
 from __future__ import annotations
@@ -69,16 +25,16 @@ import functools
 import inspect
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ummanu.webproto import sources
 
-#: The four fields `sources.Source.to_json` always writes. `render` uses them to tell a section
-#: somebody hand-built from a data mapping that merely happens to have a `source` field of its own.
+#: The four fields `sources.Source.to_json` always writes; `render` uses them to recognise a
+#: hand-built section.
 SOURCE_FIELDS = frozenset({"state", "reason", "observed_at", "data_age_seconds"})
 
-#: What a refusal may still put into words without making a claim: why nothing was established, and
-#: which subject the section would have been about. Everything else is checked against the blank.
+#: What a refusal may still say without making a claim. Everything else is checked against the blank.
 NARRATION = ("reason",)
 
 
@@ -101,6 +57,23 @@ class Reading:
     @property
     def answered(self) -> bool:
         return self.source.state == sources.AVAILABLE
+
+
+def read_source(
+    key: str,
+    produce: Callable[[], Any],
+    *,
+    refusal: Callable[[Exception], str],
+    now: float,
+    evidence: Path | None,
+) -> Reading:
+    """Read and convert one source; assembly and refusal formatting stay outside the catch."""
+    try:
+        value = produce()
+    except Exception as exc:  # noqa: BLE001 -- only this source's read and conversion are guarded
+        source = sources.unavailable(refusal(exc), now=now, evidence=evidence)
+        return Reading(key, source, None)
+    return Reading(key, sources.available(now), value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,36 +103,18 @@ def rule(
     return Rule(answers, tuple(needs) if needs else (answers,), produce)
 
 
-#: Proof that a section was assembled by this module, carried by the section itself.
-#:
-#: A private object and deliberately not a boolean or a string: a flag is set by anybody who
-#: constructs the dataclass, and this is never exported, never written to a document and never
-#: reachable from a value a caller passes in. So `minted is _MINTED` answers exactly one question --
-#: did :meth:`SourceSet.decide` or :meth:`SourceSet.mark` make this? -- and answers it for an
-#: instance somebody built by calling the constructor with three arguments, which is what a section
-#: written by hand looks like.
-#:
-#: What it does *not* claim: an author who deliberately reaches into this module for the sentinel
-#: can still mint one. That is forging, not forgetting, and the rule this seam exists to enforce is
-#: that a section written the ordinary way cannot claim more than its source gave.
+#: Proof that `SourceSet.decide` or `SourceSet.mark` made a section. A private object, not a flag, so
+#: a section built by calling the constructor can never carry it. Deliberately importing it is forging,
+#: which this seam does not try to prevent.
 _MINTED = object()
 
 
 @dataclass(frozen=True, slots=True)
 class Section:
-    """One section: the source that answered it, named, and the fields it answered with.
+    """One section: the named source that answered it, and its fields.
 
-    The name is in the document and not only in this object. Two sources that both answered are the
-    same four fields -- `available`, no reason, the moment of the read -- so without it a reader
-    cannot tell an answer the board established from one the dispatcher established, and "every
-    section names the source that answered it" would hold only for the sources that failed.
-
-    `minted` is where this object says where it came from. An instance built by calling this
-    constructor carries nothing, is not :attr:`trusted`, and is refused by `guard` and by `render` --
-    the two places a section is consumed. Without that, a section written by hand was accepted by
-    both merely for being a `Section`, and a builder that returned
-    `Section(read.source("liveness"), {"state": "working"}, "liveness")` under an unavailable
-    liveness source published exactly the claim this module exists to prevent.
+    The name is written to the document: two available sources look identical otherwise. A section
+    not built by `decide` or `mark` is not :attr:`trusted` and is refused by `guard` and `render`.
     """
 
     source: sources.Source
@@ -226,12 +181,7 @@ class SourceSet:
         return _minted(self.source(key), {}, key)
 
     def replacing(self, key: str, value: Any) -> SourceSet:
-        """This set with one source's value narrowed -- the same reading, for one subject of it.
-
-        A listing reads each source once for the whole document and then answers per sprint. The
-        narrowing keeps the source's own availability: what changes is which part of what it gave is
-        in front of the sections, never whether it answered.
-        """
+        """This set with one source's value narrowed to one subject; its availability is unchanged."""
         self.reading(key)
         return SourceSet(
             Reading(entry.key, entry.source, value if entry.key == key else entry.value)
@@ -292,12 +242,7 @@ class SourceSet:
 
 
 def render(node: Any) -> Any:
-    """The assembled document as JSON, and the seam that keeps a section from being hand-built.
-
-    A `Section` becomes its source plus its fields. A plain mapping carrying a `source` of the shape
-    `sources.Source` writes is refused: that is a section assembled outside `decide`, which is the
-    one thing this module exists to prevent.
-    """
+    """The assembled document as JSON; refuses an untrusted `Section` or a hand-built section mapping."""
     if isinstance(node, Section):
         if not node.trusted:
             raise SectionContractError(
@@ -321,8 +266,7 @@ def render(node: Any) -> Any:
     return node
 
 
-#: Set on a wrapped builder, so a test can tell a guarded section from an unguarded one without
-#: calling it, and so wrapping twice is a no-op.
+#: Set on a wrapped builder, so tests can detect guarding and wrapping twice is a no-op.
 GUARDED = "__webproto_section__"
 
 
@@ -362,10 +306,8 @@ def sections(cls: type) -> tuple[str, ...]:
 class SectionSet:
     """A class whose public methods each assemble one section of a document.
 
-    Subclassing is the whole mechanism, exactly as with `boundary.ProtocolBoundary`: every public
-    method defined in the body is wrapped at class creation and must answer with a section that
-    `SourceSet.decide` or `SourceSet.mark` decided -- not merely with something of that type -- so a
-    section added tomorrow is covered by being one. Helpers stay private and are untouched.
+    Every public method is wrapped at class creation (see :func:`guard`) and must return a trusted
+    section, so a new section is covered by being one. Private helpers are untouched.
     """
 
     def __init_subclass__(cls, **kwargs: Any) -> None:

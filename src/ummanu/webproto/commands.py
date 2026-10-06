@@ -1,24 +1,14 @@
-"""`ummanu web-read` and `ummanu web-run`: the layer, callable before any web transport exists.
+"""`ummanu web-read` and `ummanu web-run`: the layer as CLI command groups.
 
-Two command groups side by side, one per half of the layer, with one subcommand per operation --
-so both halves can be exercised, diffed and scripted from a shell, and so the card that adds a real
-transport starts from a surface an operator has already read with their own eyes and driven a real
-Codex worker and a real Claude reviewer through, rather than from an untried API.
-
-This module is the only file under `webproto` that knows a caller exists, and it stays the only one
-now that there are two groups: it parses arguments, prints JSON and maps a typed error onto an exit
-status, and the layer itself does none of those things, which is what keeps a second transport from
-having to re-implement any of it.
-
-The operator loop `web-run` makes is the loop a web page will make:
+The only module under `webproto` that knows a caller exists: it parses arguments, prints JSON and
+maps typed errors to exit statuses; the layer does none of that. The `web-run` loop:
 
     ummanu web-run start  --instance I --ref R --request-id X --profile P
     ummanu web-run state  --instance I --run-id  <run>          # until state.ended
     ummanu web-run review --instance I --worker-run <run> --request-id Y --profile Q
     ummanu web-run state  --instance I --run-id  <review>
 
-`start` and `review` are idempotent on `--request-id`: running either twice with the same one
-returns the same run and raises no second head.
+`start` and `review` are idempotent on `--request-id`.
 """
 
 from __future__ import annotations
@@ -29,6 +19,7 @@ import os
 import sys
 from typing import Any
 
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.command_reads import CommandReadLayer
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.journal import DEFAULT_LIMIT
@@ -111,11 +102,10 @@ def _common(parser: argparse.ArgumentParser) -> None:
 def _installation(parser: argparse.ArgumentParser) -> None:
     """The arguments every read of this group takes: which installation, and how to print it.
 
-    `--offline` is deliberately not among them. It is the host-inspection switch of the
-    installation health collector, and the two command-history reads consult no host: offering it
-    there would offer a mode that changes nothing.
+    No `--offline`: it only switches host inspection in the health collector, which the
+    command-history reads do not use.
     """
-    parser.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(parser, help="path to an instance dir or instance.yaml")
     parser.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),
@@ -247,14 +237,10 @@ def _event_lines(snapshot: dict[str, Any]):
 
 # -- `ummanu web-run`: the operation half ----------------------------------------------------
 
-#: The same statuses the read group uses for the same situations, plus one. An owner conflict is a
-#: refusal about the state of the world rather than a malformed request, so it gets its own status:
-#: a script can then tell "somebody else has this card" from "I asked wrongly".
+#: Owner conflict: refused on the state of the world, not a malformed request.
 EXIT_CONFLICT = 3
-#: The status an operation that is durably part-done and repairable answers with. It is the status
-#: `SprintWriter.close` has always given `audit_pending`, kept here so the command that maps it and
-#: the table beside it cannot drift: the typed failure is an `OperationPending` carrying the request
-#: id to repeat, and this is the number a shell script branches on.
+#: A durably part-done, repairable operation (`OperationPending`, repeat the same request id); the
+#: status `SprintWriter.close` gives `audit_pending`.
 EXIT_PENDING = 4
 _RUN_EXIT_BY_CODE = {
     "not_found": 2,
@@ -310,7 +296,7 @@ def add_web_run_subcommands(subparsers) -> None:
 
 
 def _run_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(parser, help="path to an instance dir or instance.yaml")
     parser.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),

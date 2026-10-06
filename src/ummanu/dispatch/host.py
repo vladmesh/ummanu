@@ -14,7 +14,7 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -1367,19 +1367,20 @@ class CommandHostRuntime:
             )
         except memory_access.MemoryAccessError as exc:
             raise HostError(f"memory access binding could not be issued: {exc}") from None
-        launch_identity = {**(identity or {}), **grant.launch_identity}
         launch = self.catalog.head_launch(
             head,
             OBSERVER_PROMPT_FILE,
             workspace=str(workspace),
             role=OBSERVER_ROLE,
             launch_prompt=_observer_launch_prompt(),
-            identity=launch_identity,
+            identity=dict(identity or {}),
         )
+        # The bearer goes in the head's environment, not its command: the command is logged by sudo.
         lifecycle_run = self._open_head_pane(
             lifecycle_run,
             f"{reference} observer",
             _launch_command(heartbeat_owner, launch.command, pid_file, heartbeat),
+            env=dict(grant.launch_identity),
         )
         ingress = self._codex_provider_ingress(lifecycle_run)
         if ingress is not None:
@@ -3185,8 +3186,10 @@ class CommandHostRuntime:
             except memory_access.MemoryAccessError as exc:
                 raise HostError(f"memory access binding could not be issued: {exc}") from None
             memory_identity = grant.launch_identity
-        # A worker or reviewer head writes the board as the profile it runs (`BOARD_ACTOR`).
-        launch_identity = dict(memory_identity or {})
+        # A worker or reviewer head writes the board as the profile it runs (`BOARD_ACTOR`). The
+        # memory bearer is not part of the command: sudo logs the command line of a scoped launch to
+        # the system journal. It reaches the head through the environment the backend is handed.
+        launch_identity: dict[str, str] = {}
         if role in {"worker", "reviewer"}:
             launch_identity[BOARD_ACTOR_ENV] = head
         # The backend is the profile's, whatever adapter the command turns out to run.
@@ -3239,6 +3242,7 @@ class CommandHostRuntime:
             command=command,
             title=title,
             pointer=pointer,
+            env=dict(memory_identity or {}),
             pid_file=pid_file,
             transport=self._head_transport(
                 workspace,
@@ -3509,7 +3513,14 @@ class CommandHostRuntime:
         """
         return self.data_dir / "heads"
 
-    def _open_head_pane(self, run: head_ops.HeadRun, title: str, command: str) -> head_ops.HeadRun:
+    def _open_head_pane(
+        self,
+        run: head_ops.HeadRun,
+        title: str,
+        command: str,
+        *,
+        env: Mapping[str, str] | None = None,
+    ) -> head_ops.HeadRun:
         """Bring a head up in a pane of its own, with no prompt delivered by the bring-up.
 
         The observer is the one head whose delivery contour is its own: it opens the pane, then puts
@@ -3522,6 +3533,7 @@ class CommandHostRuntime:
             run.task_ref,
             command=command,
             title=title,
+            env=dict(env or {}),
             pid_file=run.pid_file,
             run_id=run.run_id,
             role=run.role,

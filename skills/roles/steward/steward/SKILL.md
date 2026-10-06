@@ -1,6 +1,6 @@
 ---
 name: steward
-description: The steward agent's procedure — hourly watch over the pipeline plus one unconditional daily sweep of the whole system (no precheck gate, so it also catches blindness in the signals themselves). The main purpose is live post-merge control of self-modification: end-to-end testing of the meta projects (the board, the pipeline, the curator) is impossible anywhere but on the live system, so the steward wakes on an anomaly signal or on the daily schedule, works it out from system data, fixes by hand whatever is blocking the pipeline right now, and files cards for the rest. Plus routine: triaging Blocked, stalls, orphaned workspaces, log anomalies. Launched by a session-manager automation in the steward's workspace.
+description: The steward agent's procedure — a watch over the pipeline every three hours plus one unconditional daily sweep of the whole system (no precheck gate, so it also catches blindness in the signals themselves). The main purpose is live post-merge control of self-modification: end-to-end testing of the meta projects (the board, the pipeline, the curator) is impossible anywhere but on the live system, so the steward wakes on an anomaly signal or on the daily schedule, works it out from system data, fixes by hand whatever is blocking the pipeline right now, and files cards for the rest. Plus routine: triaging Blocked, stalls, orphaned workspaces, log anomalies. Launched by the `ummanu-steward` and `ummanu-steward-deep-sweep` systemd timers in the steward's workspace.
 ---
 
 # Steward — watching the pipeline
@@ -132,7 +132,7 @@ JSON with five kinds of signal, each of them a reason you were woken at all:
   teardown that did not finish.
 
 Each signal arrives only once (deduplicated by the watermark, which `steward advance` moves at the end),
-so a card that has been sitting in Blocked for a week does not wake you every hour. If it changes state
+so a card that has been sitting in Blocked for a week does not wake you on every tick. If it changes state
 (stuck again after being returned to Ready), the signal comes back.
 
 `scan` without `--json` prints the same thing as human-readable markdown, which is convenient for a quick
@@ -169,17 +169,15 @@ Do not limit yourself to the five detector signals. Over the window since the pr
 - **The whole board**, not only Blocked: cards with no movement, disagreements between the local card
   cache and the board, duplicates, columns nobody has looked into.
 - **Workspaces on disk** across all projects — the same thing `new_orphan_workspaces` gives, but without
-  the watermark deduplication: look at everything there now, not only at what is new since the last hour.
+  the watermark deduplication: look at everything there now, not only at what is new since the last signal run.
 - **systemd and the journal** for both steward timers and the timers of the other agents: are they
   ticking, is a precheck gate silently refusing somewhere, is anything flapping.
-- **Drift of systemd units and session-manager automations from the current specs**:
+- **Drift of systemd units from the current specs**:
   ```
   ummanu upgrade --instance <instance dir> --dry-run --no-pull
   ```
   It shows what diverged from the canon without changing anything. The `host` step prints unit
-  creations and updates and any conflicting names absent from the managed manifest; the `automations`
-  step prints which automation fields (workspace, repo, prompt, precheck, enabled) drifted from
-  `automation.toml`.
+  creations and updates and any conflicting names absent from the managed manifest.
 - **Drift of role skills between heads** (ummanu, curator, retro and steward must get their skills
   from the product's `skills/roles`, not from scattered shell directories):
   ```

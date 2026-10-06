@@ -707,10 +707,20 @@ class TaskReader:
         self.board_name = board_name
 
     def list(
-        self, *, states: set[str] | None = None, project: str | None = None, sprint: str | None = None
+        self,
+        *,
+        states: set[str] | None = None,
+        project: str | None = None,
+        sprint: str | None = None,
+        include_archived: bool = False,
     ) -> list[dict[str, Any]]:
+        """List active cards, or explicitly opt into archived history before filtering."""
         project_id, columns, swimlanes = self._board()
-        cards = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
+        cards = (
+            all_project_cards(self.client, project_id)
+            if include_archived
+            else self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
+        )
         if not isinstance(cards, list):
             raise TaskError("backend_error", "board store returned an invalid task list", 1)
         rows = [card for card in cards if isinstance(card, dict)]

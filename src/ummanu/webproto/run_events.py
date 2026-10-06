@@ -1,44 +1,17 @@
-"""A product run's two events, written into the history the read layer already reads.
+"""A product run's two events, written into the card history the read layer already reads.
 
-Criterion 6 of secretary-1562 is a prohibition before it is a requirement: the run's launch and its
-outcome must be visible through the `task_events` and `task_snapshot` that already exist, *without*
-a second history. So there is no run journal, no run event store and no per-run ndjson file
-anywhere in this package. What a run publishes it publishes through the audit owner of this
-installation's card client (:func:`ummanu.tasks.task_audit_for`) — the committed board audit,
-under the same lock, in the same generic record shape the control plane's own records
-(`sprint_guard_denied`, `sprint_guard_override`) already use — and
-:class:`ummanu.webproto.journal.EventJournal` reads it back with no change at all, cursor
-included. That store is `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3). Published into
-the file journal beside a board client they went to a file the installation's own readers never
-open.
+No second history: events go through the card client's audit owner
+(:func:`ummanu.tasks.task_audit_for`, `docs/BOARD_STORE.md` §7.3) as generic audit records, and
+:class:`ummanu.webproto.journal.CommittedAudit` reads them back unchanged.
 
-Two events per run, and there are two because a run has exactly two things worth a place in a
-card's history:
+``product_run.started``   a head was raised: run, role, profile, pid, workspace, run dir, log
+``product_run.finished``  the run reached a terminal state: state, exit, result and verdict
 
-``product_run.started``   a head was raised for this card: which run, which role, which profile,
-                          the pid, the workspace, the run directory and the log
-``product_run.finished``  that run reached a terminal state: which state, the exit status, whether
-                          a result was published and the verdict on it when there is one
-
-Both are idempotent, and by the audit's own mechanism rather than by a check here: the request id
-is derived from the run id, and the audit refuses to append a second record under a request id it
-already owns. Every field of the record is derived from the run — including `occurred_at`, which is
-the run's own start or settle time and not the clock at the moment of the call — so a replay builds
-a byte-identical event and the journal recognises it as the one it already holds instead of
-refusing it as a different payload under a taken id.
-
-That determinism is a requirement and not a nicety, because publication is *retried*: the operation
-layer republishes both events on every path that hands back a run it did not just create, so an
-event lost to one journal failure becomes visible again. It is also why `state` here must be the
-settled document — which :mod:`ummanu.webproto.run_state` derives from the run record alone,
-exit status and result included — rather than one re-read from a run directory. An event whose
-payload changed when the run directory was swept would be refused as a different payload under a
-taken request id, precisely when the retry is what is needed.
-
-The records are deliberately *generic* audit records rather than typed board protocol events. A
-typed event is a Card lifecycle transition, and a product run is not one: it moves no card, and
-`is_significant_card_event` must go on reading it as machinery telemetry rather than waking a
-sprint observer for it.
+Idempotent through the audit itself: the request id derives from the run id, and every field
+(including `occurred_at`) derives from the run record, so a republish (done on every path that
+returns an existing run) builds a byte-identical event. Hence `state` must come from
+:mod:`ummanu.webproto.run_state`, not from a run directory that may be swept. Generic, not typed
+Card events: a run moves no card and must not wake a sprint observer.
 """
 
 from __future__ import annotations
@@ -54,8 +27,7 @@ from ummanu.webproto.runs import ProductRun
 STARTED = "product_run.started"
 FINISHED = "product_run.finished"
 
-#: Who writes these. Deliberately not one of the pipeline's roles: a product run is not a worker, a
-#: reviewer or the dispatcher, and a history that said it was would be read as an attempt.
+#: Deliberately not a pipeline role, so the history is never read as an attempt.
 ACTOR = {"role": "product-runtime", "id": "ummanu.webproto"}
 
 
@@ -90,12 +62,8 @@ def publish_started(audit: Any, run: ProductRun) -> dict[str, Any]:
 def publish_finished(audit: Any, run: ProductRun, state: dict[str, Any]) -> dict[str, Any]:
     """Record how this run ended, once, on the same history its start is on.
 
-    `outcome` is the journal's own two-valued field and is not a third name for the run's state: it
-    says whether the run reached its ending having done its work, and `payload.state` carries the
-    exact value out of the read layer's vocabulary that this ending is. A run that is over while
-    nothing could establish how it ended is `failure` there and `source_unavailable` here, and the
-    two say different things on purpose: the audit's field is about the work, and the state is
-    about the process -- which is exactly the claim this event must not overstate.
+    `outcome` is the audit's two-valued field about the work (`success` only for `finished`);
+    `payload.state` is the exact run state, e.g. `source_unavailable` with outcome `failure`.
     """
     result = state.get("result") if isinstance(state.get("result"), dict) else {}
     return _publish(

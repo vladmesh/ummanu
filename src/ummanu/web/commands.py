@@ -20,6 +20,7 @@ from ummanu.web.provider_usage import ProviderUsageLayer
 from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from ummanu.webproto.card_ops import CardOperationLayer
 from ummanu.webproto.command_reads import CommandReadLayer
+from ummanu.webproto.commands import add_instance_argument
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -42,7 +43,7 @@ def add_web_serve_subcommands(subparsers) -> None:
         "web-serve",
         help="serve the local dashboard and card pages over the web-read and web-run operations",
     )
-    group.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(group, help="path to an instance dir or instance.yaml")
     group.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),

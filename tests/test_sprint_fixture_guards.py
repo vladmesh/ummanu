@@ -22,7 +22,7 @@ SUITES = (
     test_sprint_listing_budget,
 )
 EXPECTED_METHODS = {
-    "tests.test_sprints": 112,
+    "tests.test_sprints": 113,
     "tests.test_sprint_executors": 21,
     "tests.test_sprint_restore": 25,
     "tests.test_sprint_listing_budget": 4,
@@ -52,7 +52,7 @@ EXPECTED_CLASSES = {
     "tests.test_sprints.SprintAuditTraversalTests": 7,
     "tests.test_sprints.SprintSingleWriterGuardTests": 13,
     "tests.test_sprints.SprintReservedProjectGuardTests": 6,
-    "tests.test_sprints.SprintCloseDecisionTests": 11,
+    "tests.test_sprints.SprintCloseDecisionTests": 12,
     "tests.test_sprints.CloseDecisionFileTests": 3,
     "tests.test_sprint_executors.ExecutorValueTests": 2,
     "tests.test_sprint_executors.SprintExecutorPinTests": 5,
@@ -223,11 +223,13 @@ class SprintFixtureGuards(unittest.TestCase):
         secretary-1842 added two local-run declaration cases and two snapshot/restore cases: 161.
 
         ummanu-69 added the quoted owner-decision and paid-budget roundtrip case: 162.
+
+        ummanu-92 added close/retry preservation of previously archived cards and cleanup: 163.
         """
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 162)
+        self.assertEqual(len(methods), 163)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]

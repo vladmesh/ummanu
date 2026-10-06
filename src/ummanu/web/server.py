@@ -1,17 +1,10 @@
-"""The socket half: `http.server` from the standard library, bound to loopback and nothing else.
+"""The socket half: standard-library `ThreadingHTTPServer`, bound to loopback and nothing else.
 
-There is no web framework in this project's dependencies and this card adds none — `pyproject.toml`
-holds PyYAML, jsonschema and cryptography, and a dashboard that reads three documents and posts two
-does not need more. `ThreadingHTTPServer` is enough: requests are short, each one is a handful of
-file reads, and a browser that opens two connections must not deadlock behind one.
-
-**Where this may listen is not a preference, and DoD 5 did not change that.** The service has no
-password, no TLS and no authorisation of any kind, and its POST routes start real heads on this
-installation. Anybody who can reach the port therefore owns the pipeline. So a non-loopback address
-is refused here, in code, and the slice that published this installation kept the refusal exactly
-as it was rather than relaxing it: the front (:mod:`ummanu.webfront`) terminates TLS and checks
-a password and then proxies to `127.0.0.1`, so this refusal is what makes the front the only way in
-from off this host. Weakening it would not add a feature; it would add a second, unguarded door.
+No web framework is a dependency. Security: the service has no password, TLS or authorisation and
+its POST routes start real heads, so a non-loopback bind is refused in code. The guarded front
+(:mod:`ummanu.webfront`) terminates TLS, checks a password and proxies to loopback; this refusal is
+what makes it the only way in from off-host. Never relax it. See docs/PROTOCOLS.md, "Serving the
+pipeline locally" and "Publishing the pipeline: the guarded front".
 """
 
 from __future__ import annotations
@@ -39,28 +32,20 @@ LOOPBACK_ONLY = (
 )
 
 
-#: The one line every answered request leaves on stderr, which systemd puts in the service journal
-#: (`journalctl -u ummanu-web.service`). It replaces the request line `BaseHTTPRequestHandler`
-#: used to print from `send_response`, which named the method, the target and the status and said
-#: nothing about how long any of it took — so the cost of a page was measurable only from outside,
-#: by a stopwatch on a client. The duration is the whole of the application's part of the answer:
-#: the body read, `WebApp.handle`, and the headers and body written back.
+#: The one line every answered request writes to stderr (the service journal): client, method,
+#: target, status and duration. The duration covers the body read, `WebApp.handle` and the write.
 REQUEST_LINE = "{client} {method} {target} {status} {duration:.1f}ms"
 
 
-#: How many of the innermost frames an unhandled failure is logged with. Enough to name the call
-#: site and the layer it was reached through; not a full traceback, which is unbounded.
+#: How many innermost frames an unhandled failure is logged with: enough to locate it, bounded.
 LOGGED_FRAMES = 5
 
 
 def _frames(exc: BaseException) -> str:
-    """The innermost call sites of a failure, and the classes it was wrapped in — no messages.
+    """The innermost call sites of a failure and the classes it was wrapped in, without messages.
 
-    A class name alone did not locate the failure this was written for: `_WrappedReferencingError`
-    says jsonschema refused to resolve something, and the frame that matters is the validator call
-    in `ummanu.config`. Frames are file, line and function, all of them product-side facts; the
-    exception messages are left out, because an unexpected failure is the one case where nothing has
-    audited whether its text quotes config, a request or a credential.
+    Messages are left out: an unexpected failure's text is unaudited and may quote config, a request
+    or a credential. Frames (file, line, function) are product-side facts.
     """
     parts = [
         f"{frame.filename}:{frame.lineno} in {frame.name}"
@@ -80,17 +65,20 @@ class LoopbackOnly(Exception):
     """A bind this transport refuses. Raised before a socket exists, never after."""
 
 
-def resolve_bind(host: str) -> tuple[int, str]:
-    """The socket family and the literal address to bind, or a refusal — before any socket exists.
+class _BodyRefused(ValueError):
+    """A body whose framing or size prevents safe reuse of the connection."""
 
-    A name is not an address, and a name is what an operator types. `localhost` is loopback on
-    every host anyone has ever met, but that is a convention of `/etc/hosts` and NSS rather than a
-    property of the spelling: a host may map it, or `localhost.localdomain`, to a routable address,
-    and a check that compared spellings would then hand exactly that address to `socket.bind` and
-    publish a service with no password and no TLS. So the name is resolved here and every address
-    it resolves to must be loopback; one that is not refuses the bind. What is bound afterwards is
-    the literal address this resolution produced, not the name — nothing gets to resolve it a
-    second time, to something else, between the check and the socket.
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def resolve_bind(host: str) -> tuple[int, str]:
+    """The socket family and the literal address to bind, or a refusal, before any socket exists.
+
+    Security: the name is resolved here (a host may map `localhost` to a routable address) and every
+    resolved address must be loopback. The literal address is what gets bound, so nothing re-resolves
+    the name between the check and the socket.
     """
     candidate = (host or "").strip() or DEFAULT_HOST
     literal = candidate.strip("[]")
@@ -123,24 +111,18 @@ def check_bind(host: str) -> str:
 
 
 class _Handler(BaseHTTPRequestHandler):
-    """The thinnest adapter there is: request line in, `WebApp.handle` out.
+    """The thinnest adapter: request line in, `WebApp.handle` out.
 
-    It decides nothing the application could have decided. Every status it writes was decided there,
-    from the one code-to-status table, and every body it writes was produced there too. The request
-    headers are handed over unread for the same reason: whether a POST may be answered at all is
-    the application's single cross-origin check, not a rule this adapter gets its own copy of.
-
-    It decides exactly one thing, and only because the application did not: an exception nobody
-    expected has no status, and the default answer to that is a closed socket with no response at
-    all. :meth:`_contain` answers it as a bounded 500 instead.
+    Statuses, bodies and the cross-origin check (headers are handed over unread) all belong to the
+    application. The one thing decided here is an unexpected exception, answered by :meth:`_contain`
+    as a bounded 500 instead of a closed socket.
     """
 
     protocol_version = "HTTP/1.1"
     server_version = "ummanu-web"
     sys_version = ""
 
-    #: The status this request was answered with, as `_write` decided it. 0 until it does, which is
-    #: what a request whose answer never reached the socket is logged as.
+    #: The status `_write` answered with; 0 means the answer never reached the socket.
     _answered_status = 0
     #: When this request started, and whether its one line has been written yet.
     _request_started: float | None = None
@@ -156,14 +138,10 @@ class _Handler(BaseHTTPRequestHandler):
         self._answer("GET", head=True)
 
     def parse_request(self) -> bool:
-        """Start this request's clock, where the request itself starts.
+        """Start this request's clock where the request itself starts.
 
-        Here rather than in :meth:`_answer` for two reasons. The clock must not begin while the
-        socket is idle between two requests of a keep-alive connection, which is what timing from
-        the top of `handle_one_request` would do — a browser holding a connection open would then
-        be recorded as a twenty-second request. And a request `http.server` refuses by itself, an
-        unsupported verb or a malformed request line, never reaches `_answer` and is still a
-        request this service answered; it is logged from :meth:`send_error` against this same clock.
+        Not in `handle_one_request`: idle keep-alive time would be counted. Not in :meth:`_answer`:
+        requests `http.server` refuses by itself never reach it and are logged from :meth:`send_error`.
         """
         self._request_started = time.perf_counter()
         self._request_logged = False
@@ -171,9 +149,7 @@ class _Handler(BaseHTTPRequestHandler):
         return super().parse_request()
 
     def _answer(self, method: str, *, head: bool = False) -> None:
-        # Every exit from here is an answered request, including the two early returns and the
-        # containment boundary, so the line is written in a `finally`: one request, one line,
-        # whichever way the answer was reached.
+        # Every exit (early returns, containment) is an answered request: one request, one line.
         try:
             self._answer_body(method, head=head)
         finally:
@@ -183,8 +159,16 @@ class _Handler(BaseHTTPRequestHandler):
         path, _, query = self.path.partition("?")
         try:
             body = self._read_body()
-        except ValueError as exc:
-            self._write(413, str(exc).encode("utf-8"), "text/plain; charset=utf-8", head=False)
+        except _BodyRefused as exc:
+            # Unread bytes must never be parsed as a second request on this connection.
+            self.close_connection = True
+            self._write(
+                exc.status,
+                str(exc).encode("utf-8"),
+                "text/plain; charset=utf-8",
+                head=head,
+                extra={"Connection": "close"},
+            )
             return
         try:
             response = self.server.app.handle(method, path, query=query, body=body, headers=self.headers)
@@ -194,23 +178,15 @@ class _Handler(BaseHTTPRequestHandler):
         self._write(response.status, response.body, response.content_type, head=head, extra=response.headers)
 
     def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
-        """A status `http.server` decided by itself is still an answered request, so it gets a line.
-
-        An unsupported verb (501) and a malformed or oversized request line (400, 431) never reach
-        the application and never reach :meth:`_answer`. The base class writes its own diagnostic
-        for them through `log_error`; that one says what went wrong and has no duration, so the
-        request line is written here as well, exactly as for any other answer.
-        """
+        """Log a status `http.server` decided by itself (501, 400, 431), which never reaches `_answer`."""
         super().send_error(code, message, explain)
         self._log_answer(int(code))
 
     def _log_answer(self, status: int) -> None:
-        """The per-request line: the verb as it was sent, the target, the status and the duration.
+        """The per-request line: the verb as sent, the target, the status and the duration.
 
-        `self.command` rather than the verb handed to the application, because a HEAD is answered
-        through the GET path and an operator reading the journal is owed the request that was made.
-        The flag makes it one line per request: a refusal written through `send_error` from inside
-        the application path would otherwise be logged there and again in `_answer`'s `finally`.
+        `self.command`, not the verb given to the application, because HEAD is answered via GET. The
+        flag keeps it to one line when `send_error` is reached from inside the application path.
         """
         if self._request_logged:
             return
@@ -228,24 +204,13 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _contain(self, exc: BaseException, *, head: bool) -> None:
-        """Answer an escaped application exception as a complete 5xx instead of a closed socket.
+        """Answer an escaped application exception as a complete 500 instead of a closed socket.
 
-        Every status the application decides still comes from the application — this is not a second
-        code-to-status table and it never sees a deliberate refusal, which returns a `Response` and
-        leaves by the normal path. What it covers is the one case that has no status because nothing
-        decided it: an application, backend-read, config or schema-validation exception nobody
-        expected. `http.server` answers that by closing the connection with no response at all,
-        which is how a live `ummanu-web.service` served empty replies on every route for a day
-        (secretary-1624) — a browser shows nothing, `curl` shows "empty reply from server", and the
-        journal is the only place the reason exists.
-
-        So the response is written here, through `_write`, which means it carries the same security
-        headers and the same `Content-Length` as every other answer and the connection stays usable
-        for the next request. The body is a fixed sentence plus the exception's class name and a
-        reference; the reference is what joins it to the server log, and the log is where the frames
-        are. Neither carries the exception's *message*, the request, the configuration or anything
-        read from the installation: an unexpected failure is exactly the case where nobody has
-        audited what the text contains, so a class name and a call site are what may be published.
+        Not a second code-to-status table: deliberate refusals return a `Response`. Without this,
+        `http.server` closes the connection with no response. Written through `_write`, so security
+        headers and `Content-Length` apply and the connection stays usable. Security: the body carries
+        only a fixed sentence, the exception class and a reference that joins it to the logged frames;
+        never the message, request, config or installation data.
         """
         reference = uuid4().hex[:12]
         print(
@@ -262,12 +227,23 @@ class _Handler(BaseHTTPRequestHandler):
         self._write(500, body, "text/plain; charset=utf-8", head=head)
 
     def _read_body(self) -> bytes:
+        if self.headers.get_all("Transfer-Encoding"):
+            raise _BodyRefused("this service does not accept Transfer-Encoding")
+        lengths = self.headers.get_all("Content-Length") or []
+        if len(lengths) > 1:
+            raise _BodyRefused("this request declares more than one Content-Length")
+        declared = lengths[0].strip() if lengths else "0"
+        if not declared.isascii() or not declared.isdecimal():
+            raise _BodyRefused("this request declares an invalid Content-Length")
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            length = int(declared)
         except ValueError:
-            raise ValueError("this request declares a Content-Length that is not a number") from None
+            raise _BodyRefused("this request declares an invalid Content-Length") from None
         if length > MAX_BODY_BYTES:
-            raise ValueError(f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here")
+            raise _BodyRefused(
+                f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here",
+                413,
+            )
         return self.rfile.read(length) if length > 0 else b""
 
     def _write(
@@ -285,10 +261,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        # No frame, no third party, no script this service did not serve itself: the pages are one
-        # file each and load nothing from anywhere. `form-action 'self'` is what the sprint form
-        # needs and is the whole of what it needs: a form on these pages may submit to this service
-        # and to nowhere else, which is the same promise `'none'` made for pages that had no form.
+        # Pages are one self-contained file each and load nothing external. `form-action 'self'` lets
+        # the sprint form submit to this service and nowhere else.
         self.send_header(
             "Content-Security-Policy",
             "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'",
@@ -300,19 +274,10 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def log_request(self, code: Any = "-", size: Any = "-") -> None:  # the base class names these
-        """Nothing here: :meth:`_log_answer` writes this request's one line, with its duration.
-
-        `send_response` calls this, and the base class prints the request line from it. Leaving
-        that in place would put two lines in the journal for every request, one of them the poorer:
-        it is written before the body is, so it could not carry a duration even if it wanted to.
-        """
+        """Nothing: :meth:`_log_answer` writes the one line, with a duration this hook cannot know."""
 
     def log_message(self, format: str, *args: Any) -> None:  # the base class names this argument
-        """Stderr, for what the base class reports outside an answered request.
-
-        `log_error` reaches here for a malformed request line or a timed-out connection — cases
-        that never enter :meth:`_answer` and so have no duration of their own.
-        """
+        """Stderr, for what the base class reports outside an answered request (bad line, timeout)."""
         print(f"{self.address_string()} {format % args}", file=sys.stderr)
 
 

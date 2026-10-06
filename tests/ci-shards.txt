@@ -160,6 +160,7 @@ unit tests/test_retro_search_log.py
 unit tests/test_retro_pending.py
 unit tests/test_role_env.py
 component tests/test_docker_guard.py
+component tests/test_memory_token_launch.py
 unit tests/test_observer_voice.py
 unit tests/test_dispatcher_runtime_isolation.py
 unit tests/test_live_root_project.py
@@ -229,6 +230,7 @@ integration-board tests/test_web_sprint_transport.py
 integration-board tests/test_sprint_user_path.py
 integration-heads tests/test_automations_composition.py
 unit tests/test_task_commands.py
+unit tests/test_cli_live_defaults.py
 unit tests/test_task_routing.py
 integration-board tests/test_tasks.py
 integration-board tests/test_tasks_sql_backend.py
@@ -251,6 +253,7 @@ integration-board tests/test_sprint_attention.py
 integration-board tests/test_web_warm_render.py
 unit tests/test_web_markdown.py
 unit tests/test_web_page_parts.py
+unit tests/test_web_boundaries.py
 unit tests/test_web_cursor.py
 unit tests/test_web_card_waits.py
 integration-board tests/test_web_delegation_reads.py

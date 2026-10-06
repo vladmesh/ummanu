@@ -1,32 +1,17 @@
-"""What a product run *is*, and the durable place Ummanu keeps one.
+"""What a product run is, and the durable store Ummanu keeps it in.
 
-The read layer of secretary-1561 answers what the installation is doing. This is the record behind
-the half of that answer the product itself produces: a run is one head this product raised for one
-card, and everything about it that outlives the process that raised it — its workspace, its run
-directory, its pid file, its log, its result file and the head record the backend handed back.
+A run is one head this product raised for one card, plus everything that outlives the process:
+workspace, run directory, pid file, log, result file and the backend's head record.
 
-Three decisions are the whole module:
+* Owned here, under `webproto/runs`, never in `dispatcher/production-state.json`: a product run is
+  not a pipeline attempt (no claim, no card move, no attempt id). Dispatcher state is only read, by
+  :mod:`ummanu.webproto.admission`.
+* A request id owns one run of one operation from before the head exists: the record is written
+  under the store lock before anything is spawned, so a repeated start returns the same run. A repeat
+  with another operation or different inputs is a :class:`RequestMismatch`.
+* No stored `state`: the record holds evidence and :mod:`ummanu.webproto.run_state` reads it.
 
-**The run is owned here, not in the dispatcher's production state.** A product run is not a
-pipeline attempt: it takes no claim, moves no card and holds no attempt id, and writing it into
-`dispatcher/production-state.json` would make it look like one to every reader of that file — the
-watchdog, the reconciler, the orphan sweep. So it lives under its own directory of the same data
-plane, and the dispatcher's state is read (by :mod:`ummanu.webproto.admission`) and never
-written.
-
-**A request id owns one run of one operation, and it owns it from before the head exists.** The record is written
-under the store's lock the moment a request id is accepted, with the run id and the workspace path
-already decided, and only then is anything spawned. That ordering is what makes a repeat of the
-same start command return the same run rather than a second process beside the first: the second
-caller finds the record and stops, whether the first caller had finished spawning or not. What the
-record owns is the *request* and not the id alone: it carries the operation it was made under and a
-fingerprint of the inputs, so a repeat that disagrees with either is refused as a
-:class:`RequestMismatch` instead of handing back a document about somebody else's run.
-
-**Nothing here decides what a run's state is.** The record holds evidence — a pid file, a run
-directory, a result path — and :mod:`ummanu.webproto.run_state` reads that evidence when it is
-asked. A stored `state` field would be a second answer to a question the process itself answers,
-and it would be stale the moment the head ended.
+See docs/PROTOCOLS.md, "Running the pipeline".
 """
 
 from __future__ import annotations
@@ -43,8 +28,7 @@ from typing import Any
 from ummanu._fsutil import file_lock
 from ummanu.webproto.store_io import RunStoreError, write_document
 
-#: Which side of the demonstration scenario a run is. Two, and there is no third: this card covers
-#: exactly the scenario it executes.
+#: Which side of the demonstration scenario a run is; there is no third.
 WORKER = "worker"
 REVIEWER = "reviewer"
 RUN_ROLES = (WORKER, REVIEWER)
@@ -54,31 +38,23 @@ RUNS_RELATIVE = Path("webproto") / "runs"
 WORKSPACES_RELATIVE = Path("webproto") / "workspaces"
 HEADS_RELATIVE = Path("webproto") / "heads"
 
-#: The file a head writes its own result into, inside its run directory. The head is told the path
-#: in its environment; nothing infers it from the transcript, and there is no second place a result
-#: may appear.
+#: The file a head writes its result into, inside its run directory. The head is told the path; there
+#: is no other place a result may appear.
 RESULT_NAME = "result.json"
 
-#: How long a run may take before the product ends the head that is holding it. A run is a real
-#: agent turn, so this is generous; it exists so that a head which never finishes is a run that
-#: ends rather than one that is `running` forever.
+#: How long a run may take before the product ends its head, so a head that never finishes ends.
 DEFAULT_DEADLINE_SECONDS = 60.0 * 60.0
 
 
-#: The phases one product run passes through, in order. They exist because a run is two durable
-#: facts and one process, and the order between them is the whole of its safety:
+#: The phases of one product run, in order:
 #:
-#: ``claimed``     a request id owns a run id and every path it will use. Nothing is provisioned and
-#:                 nothing is spawned, so there is no process this record could fail to own;
-#: ``raising``     the **write-ahead** phase: the run directory exists, the pid path is decided, and
-#:                 the record already carries a head description sufficient to *address and stop* a
-#:                 head from disk alone. A run reaches it immediately before a spawn is attempted,
-#:                 so from here on a process may exist whether or not anything came back;
-#: ``raised``      a head came up and the backend's own record of it is bound to this run;
-#: ``unresolved``  the run should be closed and **could not be confirmed closed**: a head may still
-#:                 be alive under it. Not terminal, deliberately -- see
-#:                 :mod:`ummanu.webproto.lifecycle`;
-#: ``settled``     the run reached a terminal state, once and forever.
+#: ``claimed``     a request id owns a run id and its paths; nothing provisioned or spawned;
+#: ``raising``     write-ahead: the run directory exists and the record can address and stop a head
+#:                 from disk alone; set immediately before a spawn, so a process may exist from here;
+#: ``raised``      a head came up and the backend's record of it is bound to this run;
+#: ``unresolved``  the run should be closed but could not be confirmed closed; a head may be alive.
+#:                 Not terminal (see :mod:`ummanu.webproto.lifecycle`);
+#: ``settled``     terminal, once and forever.
 CLAIMED = "claimed"
 RAISING = "raising"
 RAISED = "raised"
@@ -87,37 +63,25 @@ SETTLED = "settled"
 
 PHASES = (CLAIMED, RAISING, RAISED, UNRESOLVED, SETTLED)
 
-#: The two operations a request id may own. A request id is an idempotency key *of one operation*,
-#: never a name for "whatever this caller asked for last": see :class:`RequestMismatch`.
+#: The two operations a request id may own; a request id is the idempotency key of one operation.
 START_OPERATION = "run_start"
 REVIEW_OPERATION = "run_review"
 
 
-# `RunStoreError` is imported above rather than defined here: it now lives at the seam every store
-# of this layer writes through (:mod:`ummanu.webproto.store_io`), because it is that seam's
-# vocabulary and not this store's alone. It stays importable from here, as everything that already
-# imports it from here expects -- `IMPLEMENTATION_FAILURES` included -- and it is still one class.
+# `RunStoreError` lives in :mod:`ummanu.webproto.store_io` and stays importable from here
+# (`IMPLEMENTATION_FAILURES` and others import it from this module).
 
 
 class RequestMismatch(RunStoreError):
-    """This request id already owns a different operation, or the same one over a different request.
+    """This request id already owns a different operation, or the same one with different inputs.
 
-    Idempotency is a promise about a *retry*: the same operation, made again with the same inputs,
-    produces the run the first attempt produced instead of a second one. It is not a promise that
-    any later command carrying that id inherits the first one's run -- that would let a review
-    request return the worker's own document, with `role == "worker"` and no parent run, while no
-    reviewer was ever raised and the caller was told one was. So the record a request id owns
-    carries the operation it was made under and a fingerprint of the request itself, and a repeat
-    that disagrees with either is refused here rather than silently aliased.
+    Idempotency covers a retry of the same request only; another command reusing the id is refused
+    rather than aliased to the first run.
     """
 
 
 def request_fingerprint(operation: str, request: dict[str, Any]) -> str:
-    """The immutable identity of one request: its operation and the inputs it was made with.
-
-    A digest rather than the values themselves, for the same reason the request index is digested:
-    nothing a caller supplies becomes a path or a readable field of this installation.
-    """
+    """The identity of one request (operation plus inputs), digested so no caller input becomes a path."""
     payload = json.dumps(
         {"operation": operation, "request": {key: _text(value) for key, value in request.items()}},
         sort_keys=True,
@@ -127,11 +91,7 @@ def request_fingerprint(operation: str, request: dict[str, Any]) -> str:
 
 @dataclass(frozen=True)
 class ProductRun:
-    """One head this product raised for one card, as everything after the raise has to see it.
-
-    Frozen and JSON, like `HeadRun`: the process that started a run is not the process that reads
-    it back, and every field here is something a later reader needs and cannot recompute.
-    """
+    """One head this product raised for one card. Frozen and JSON: the reader is another process."""
 
     run_id: str
     request_id: str
@@ -141,66 +101,49 @@ class ProductRun:
     profile: str
     adapter: str = ""
     runtime: str = ""
-    #: The worker run a review answers. Empty for a worker run, and the link criterion 1 means by
-    #: "by its result": a review exists only for a worker run that has one.
+    #: The worker run a review answers (a review exists only for a worker run with a result).
+    #: Empty for a worker run.
     parent_run_id: str = ""
     workspace: str = ""
     run_dir: str = ""
     pid_file: str = ""
-    #: The supervisor's versioned journal for this head: `run.started`, every delivery, and the
-    #: `run.exited` that carries the exit status. This is what says how a run ended.
+    #: The supervisor's versioned journal (`run.started`, deliveries, `run.exited` with exit status).
     journal_path: str = ""
     #: The supervisor's own stderr log, for a failure that never reached the journal.
     log_path: str = ""
     result_path: str = ""
-    #: The pid the substrate reported for the head at spawn. Diagnostic only: liveness is decided
-    #: from the launch-identity heartbeat, never from a number remembered here.
+    #: The pid the substrate reported at spawn. Diagnostic only: liveness comes from the heartbeat.
     head_pid: int = 0
     supervisor_pid: int = 0
     started_at: float = 0.0
     deadline_at: float = 0.0
-    #: A head record sufficient to address and stop this run's head from disk alone: run id, spec,
-    #: workspace, task ref, role and pid file. Written **before** the spawn (the write-ahead of the
-    #: `raising` phase) and replaced by the backend's own record once the head is up. Absent only
-    #: while the request id has been claimed and nothing has been prepared yet.
+    #: A head record sufficient to address and stop this run's head from disk alone. Written before
+    #: the spawn (`raising`) and replaced by the backend's record once the head is up.
     head_run: dict[str, Any] = field(default_factory=dict)
-    #: Where this run is in the order above. The one field that says whether a process may exist.
+    #: The one field that says whether a process may exist.
     phase: str = CLAIMED
-    #: Whether a head was ever confirmed up under this record. Unlike `phase` it is never unset, so
-    #: a settled run still knows it owes a `product_run.started` event.
+    #: Whether a head was ever confirmed up. Never unset, so a settled run still knows it owes a
+    #: `product_run.started` event.
     head_raised: bool = False
     #: Why this run's ownership could not be resolved, when it could not. Empty otherwise.
     unresolved_reason: str = ""
-    #: **Fact one: this run is over.** The process it may have held is *provably* gone -- a stop
-    #: this product confirmed, or a launch identity that says there is nothing there -- or no
-    #: process was ever spawned under this record. It is written by :meth:`settled_as` and by
-    #: nothing else, because :mod:`ummanu.webproto.lifecycle` is the one place that can
-    #: establish it, and it is stored rather than derived from the value below so that the two
-    #: facts cannot be read off one another. Nothing about *how* the run ended is in it.
+    #: Fact one: this run is over (its process is provably gone, or none was spawned). Written only
+    #: by :meth:`settled_as`; stored separately from `settled_state` so neither is read off the other.
     ended: bool = False
     #: Set once, by whoever first observed this run reach a terminal process state.
     settled_at: float = 0.0
-    #: **Fact two: how this run ended**, one of the read layer's five values, derived from the
-    #: evidence at the moment fact one became true. `source_unavailable` here is an ending like
-    #: any other: the run is over and what it did could not be established. A reader deciding
-    #: whether the run is over asks `ended`; this answers a different question.
+    #: Fact two: how this run ended, one of the read layer's five values. `source_unavailable` is a
+    #: valid ending. Whether the run is over is `ended`.
     settled_state: str = ""
     settled_reason: str = ""
-    #: The evidence that ending was read off, recorded with it. A settled run is history, and
-    #: history that is re-derived from files a sweep may since have removed is not history: it is a
-    #: run that was `finished` with exit 0 at noon and reads as finished with no exit at midnight.
-    #: Keeping the two here is also what makes this run's `product_run.finished` event
-    #: deterministic, so republishing it after a journal failure rebuilds the identical record.
+    #: The evidence the ending was read from, kept so a settled run does not change after a sweep
+    #: and its `product_run.finished` event is rebuilt identically when republished.
     settled_exit: dict[str, Any] = field(default_factory=dict)
     settled_result: dict[str, Any] = field(default_factory=dict)
 
     @property
     def raised(self) -> bool:
-        """Whether a head was ever confirmed up under this record.
-
-        Deliberately not `bool(self.head_run)` any more: the head record is written *before* the
-        spawn now, so its presence says "a head can be addressed", not "a head came up".
-        """
+        """Whether a head was ever confirmed up; not `bool(self.head_run)`, which is written pre-spawn."""
         return self.head_raised
 
     @property
@@ -279,9 +222,7 @@ class ProductRun:
             phase=_phase(payload, head_run),
             head_raised=_flag(payload.get("head_raised"), bool(head_run)),
             unresolved_reason=_text(payload.get("unresolved_reason")),
-            # A record written before the two facts were told apart carries only the value, and a
-            # value was only ever written by a settle: reading it as "this run is over" is what
-            # that record meant, and it is the one direction that cannot invent a fact.
+            # A pre-split record carries only the value, written only by a settle: read it as over.
             ended=_flag(payload.get("ended"), bool(_text(payload.get("settled_state")))),
             settled_at=_float(payload.get("settled_at")),
             settled_state=_text(payload.get("settled_state")),
@@ -321,12 +262,7 @@ class ProductRun:
         exit_status: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
     ) -> ProductRun:
-        """The same run, marked as having reached a terminal state, once and never again.
-
-        Idempotent by construction: a run that already carries a settlement keeps the first one. The
-        settlement is what makes the run's one terminal event publishable exactly once, and a second
-        writer that could overwrite it would be a second ending for the same run.
-        """
+        """The same run, settled. Idempotent: an already-settled run keeps its first settlement."""
         if self.ended:
             return self
         return replace(
@@ -345,12 +281,9 @@ class ProductRun:
 class RunStore:
     """Every product run of one installation, keyed by run id and by the request that asked for it.
 
-    Two directories and one lock. `runs/<run_id>.json` is the record; `runs/requests/<digest>.json`
-    names the run a request id owns, digested rather than used verbatim so that a caller's request
-    id never becomes a path in this installation (the rule the pre-2026-09-10 file journal kept
-    for its pending records). The lock is one file for the whole store, held across read-decide-write, because the
-    decision this store exists to make — "does this request id already own a run" — is only a
-    decision if nobody can answer it twice at once.
+    `runs/<run_id>.json` is the record; `runs/requests/<digest>.json` maps a request id (digested, so
+    it never becomes a path) to its run. One store-wide lock is held across read-decide-write, so
+    "does this request id already own a run" is answered once.
     """
 
     def __init__(self, data_dir: str | os.PathLike[str]) -> None:
@@ -391,12 +324,10 @@ class RunStore:
     def by_request(
         self, request_id: str, *, operation: str = "", fingerprint: str = ""
     ) -> ProductRun | None:
-        """The run a request id already owns, if it owns one *and this is the same request*.
+        """The run a request id owns, if it owns one and this is the same request.
 
-        `operation` and `fingerprint` are what make the answer a retry rather than an alias: a
-        caller that names them gets the run back only when the record agrees with both, and a
-        :class:`RequestMismatch` otherwise. Naming neither reads the record as it stands, which is
-        what a reader that is not making a request -- a listing, a repair -- wants.
+        With `operation`/`fingerprint`, a disagreeing record raises :class:`RequestMismatch`. With
+        neither, the record is read as it stands (for listings and repairs).
         """
         path = self._request_path(request_id)
         try:
@@ -453,14 +384,9 @@ class RunStore:
     ) -> tuple[ProductRun, bool]:
         """The run this request id owns, creating it under the lock when it owns none yet.
 
-        `build` is called with a fresh run id only when this request id is new, and it returns the
-        record to write. Everything a later reader needs to find the run's debris — its workspace,
-        its run directory, its result path — is therefore durable *before* any process exists, so a
-        caller that dies between this call and the spawn leaves a run that can be found rather than
-        an orphan nobody recorded.
-
-        The boolean says whether this call created the run. `False` is the whole of the idempotency
-        contract: the same request id twice gets the same run, and the second caller spawns nothing.
+        `build` gets a fresh run id and returns the record, so every path is durable before any
+        process exists. The boolean is True only for the call that created the run; a repeat spawns
+        nothing.
         """
         self._prepare()
         with file_lock(self.lock_path):
@@ -502,12 +428,7 @@ class RunStore:
         exit_status: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
     ) -> tuple[ProductRun, bool]:
-        """Record the terminal state of a run, exactly once, and say whether this call did it.
-
-        The one place a run stops being open, and the reason the terminal event can be published
-        without a second history: whoever gets `True` back is the caller that owes that event, and
-        every later observer of the same ending gets `False` and publishes nothing.
-        """
+        """Record a run's terminal state exactly once. True means this caller owes the terminal event."""
         self._prepare()
         with file_lock(self.lock_path):
             current = self.get(run_id)
@@ -543,12 +464,7 @@ def _int(value: Any) -> int:
 
 
 def _phase(payload: dict[str, Any], head_run: dict[str, Any]) -> str:
-    """This record's phase, derived for a record written before phases existed.
-
-    A record from before this field is read by what it already carries: a settlement is `settled`, a
-    head record is `raised`, and anything else is `claimed`. No record is ever read as `raising` or
-    `unresolved`, because neither could have been produced by the code that wrote it.
-    """
+    """This record's phase; a record from before phases reads as `settled`, `raised` or `claimed`."""
     declared = _text(payload.get("phase"))
     if declared in PHASES:
         return declared

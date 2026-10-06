@@ -1299,10 +1299,6 @@ class DispatcherRecord:
         )
 
 
-def _run_snapshot(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
 def _vitality_episode_from_json(payload: Any) -> VitalityEpisode:
     """Load one persisted vitality episode, importing its module lazily.
 

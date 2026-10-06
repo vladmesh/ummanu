@@ -371,53 +371,6 @@ class SourceIsolationTests(PauseProtocolFixture):
         self.assert_available(document, "state")
         self.assertEqual(document["state"]["mode"], DRAIN)
 
-    def test_a_source_read_enumerates_no_failure_and_is_the_only_broad_catch(self) -> None:
-        """The rule is the span, not a list: nothing here says which failures count.
-
-        A tuple of exception types is the thing that drifts -- `DispatcherError` was the step added
-        tomorrow arriving on schedule -- so a source read catches everything raised while reading
-        and converting its one durable document, and the module holds no enumeration to keep in
-        step. This replaces the previous round's test that the two layers shared one tuple: the
-        pause layer no longer has a tuple to share, which is strictly stronger than agreeing on one.
-        """
-        from ummanu.webproto import pause_reads
-
-        source = Path(pause_reads.__file__).read_text(encoding="utf-8")
-        module = ast.parse(source)
-        handlers = [node for node in ast.walk(module) if isinstance(node, ast.ExceptHandler)]
-        # Exactly one, and it names `Exception` rather than any set of vocabularies.
-        self.assertEqual([getattr(handler.type, "id", None) for handler in handlers], ["Exception"])
-        span = next(
-            node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_source"
-        )
-        self.assertEqual(
-            [handler for handler in ast.walk(span) if isinstance(handler, ast.ExceptHandler)],
-            handlers,
-            "the one broad catch is the read-and-convert of one source, and nothing wider",
-        )
-        self.assertNotIn("_SOURCE_FAILURES", source)
-        # Every source of both documents goes through that span, so none of them is the exception.
-        readers = {
-            node.name
-            for node in ast.walk(module)
-            if isinstance(node, ast.FunctionDef)
-            and node.name in {"_installation", "_flag", "_production", "_boards"}
-        }
-        self.assertEqual(readers, {"_installation", "_flag", "_production", "_boards"})
-        for name in sorted(readers):
-            with self.subTest(reader=name):
-                reader = next(
-                    node
-                    for node in ast.walk(module)
-                    if isinstance(node, ast.FunctionDef) and node.name == name
-                )
-                calls = [
-                    node
-                    for node in ast.walk(reader)
-                    if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "_source"
-                ]
-                self.assertTrue(calls, f"{name} reads its source outside the one guarded span")
-
     def test_a_defect_outside_a_source_read_still_travels_as_itself(self) -> None:
         """The other half of the span: assembling a document is this layer's work, not a source.
 
@@ -431,13 +384,6 @@ class SourceIsolationTests(PauseProtocolFixture):
             self.assertRaises(ValueError),
         ):
             self.pause_reads().pause_scope()
-
-    def test_the_sprint_layer_still_reads_its_failures_from_the_one_shared_place(self) -> None:
-        """The sprint reads are not this card's to invert, and they keep one shared list."""
-        from ummanu.webproto import sources as source_module
-        from ummanu.webproto import sprint_reads
-
-        self.assertIs(sprint_reads._SOURCE_FAILURES, source_module.SOURCE_FAILURES)
 
     def test_every_section_names_the_source_that_answered_it(self) -> None:
         self.create()

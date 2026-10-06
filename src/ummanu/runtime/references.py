@@ -1,21 +1,9 @@
-"""How a card and a sprint get the number in their reference.
+"""Reference numbering for Pipeline cards (`<project>-<n>`) and sprints (`sprint:<n>`).
 
-Two board families are numbered rather than hashed: Pipeline cards, `<project>-<n>`, and sprints,
-`sprint:<n>`. Products and issues carry a hash and are not allocated here.
-
-Both families follow one rule: a new reference is the first number above every number the family
-has already used, counted over the board's open **and** archived rows. The archived half is what
-made this a defect twice. A counter that forgets what it handed out re-issues it: on 2026-08-06 a
-sprint created without an explicit reference took `sprint:804`, already the reference of a sprint
-closed on 2026-07-27, and `sprint show` then resolved the new sprint's reference to the old row;
-on 2026-08-18 `create` derived `codegen-orchestrator-1127` from a fresh board row id and
-addressed a card archived long before it.
-
-Allocation alone cannot make a reference unique, because the rule can only count the rows the
-backend actually returned. So it is not the last word: every caller writes an allocated reference
-only after asking the backend whether that exact reference is claimed, and refuses loudly when it
-is. That check, not a guess about how complete an enumeration looked, is what keeps two rows from
-sharing one reference.
+A new reference is the first number above every number the family has used, counted over the
+board's open and archived rows (forgetting archived rows re-issues references). Allocation is not
+the uniqueness guarantee: callers ask the backend whether the exact reference is claimed before
+writing it, and refuse when it is.
 """
 
 from __future__ import annotations
@@ -28,8 +16,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
-# Where an installation keeps its data plane. The role environment propagates it to every agent
-# process, which is what lets writers in different processes name one lock.
+# Propagated to every agent process by the role environment, so writers in different processes
+# resolve one lock file.
 DATA_DIR_ENV = "UMMANU_DATA_DIR"
 
 
@@ -40,9 +28,8 @@ class BoardRowsUnavailable(RuntimeError):
 def board_rows(call: Callable[..., Any], project_id: int) -> list[dict[str, Any]]:
     """Every row of one board, open and archived alike.
 
-    The card client splits rows into status 1 (open) and status 0 (closed, which is where an
-    archived row lands) and has no complete-set status, so both sets are read and the first copy of each task
-    id is kept in case a backend returns a row in both answers.
+    The client splits rows into status 1 (open) and 0 (closed, incl. archived) with no
+    complete-set status; both are read and the first copy of each task id is kept.
     """
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -74,14 +61,10 @@ def next_reference(rows: Iterable[Mapping[str, Any]], prefix: str) -> str:
 def reference_allocation_lock(data_dir: Path | str | None = None) -> Iterator[None]:
     """Serialize allocate, claim and write across every local writer of one board.
 
-    The card client offers no compare-and-swap on a reference, so the three steps are
-    only atomic if one boundary covers all of them. Every local writer of the same board takes this
-    one file, whichever entry point it came through: two processes that each read the high-water
-    mark, each find the reference unclaimed and each create it would otherwise manufacture exactly
-    the duplicate the claim check exists to prevent.
-
-    The lock lives in the installation's data plane, so callers that know their data directory pass
-    it and the rest resolve the same one from the environment.
+    The card client has no compare-and-swap on a reference, so every local writer of a board takes
+    this one file lock around all three steps; otherwise two processes can both allocate, find the
+    reference unclaimed and create a duplicate. The lock lives in the data directory (`data_dir`, or
+    `UMMANU_DATA_DIR`).
     """
     root = (
         Path(data_dir) if data_dir else Path(os.environ.get(DATA_DIR_ENV) or Path.home() / "ummanu-data")

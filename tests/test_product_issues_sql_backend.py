@@ -7,12 +7,18 @@ two statements of one transaction.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import io
+import json
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 from tests import test_product_issues as shared
 from tests.product_issue_fixtures import ProductIssueFixture
 from ummanu.board import backend
+from ummanu.cli import main
 from ummanu.tasks import TaskError
 
 
@@ -353,3 +359,209 @@ class SqlBackendProductIssueKeyTests(unittest.TestCase):
         self.assertEqual(len({1596, numbered_sprint, custom_sprint, product, issue}), 5)
         self.assertIsNone(backend.record_key_kind(1596))
         self.assertNotEqual(product, issue)
+
+
+class SqlIssueDescriptionEditTests(ProductIssueFixture, unittest.TestCase):
+    ORIGINAL = shared.ProductIssueDescriptionAppendTests.ORIGINAL
+    _open_issue = shared.ProductIssueDescriptionAppendTests._open_issue
+    _append = shared.ProductIssueDescriptionAppendTests._append
+    _claims = SqlProductIssueAppendTransactionTests._claims
+
+    def edit(self, ref, description, *, request_id="edit", **values):
+        return self.store.edit_description(reference=ref, description=description,
+                                           reason="correct", actor="po", request_id=request_id, **values)
+
+    def invoke(self, ref, flags, *, role="po", request_id="cli"):
+        out, err = io.StringIO(), io.StringIO()
+        with (mock.patch("ummanu.product_issue_commands.board_client", return_value=self.client),
+              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err)):
+            code = main(["issue", "edit", "--ref", ref, "--role", role, "--actor", "po",
+                         "--reason", "correct", "--request-id", request_id, "--instance", str(self.root),
+                         "--data-dir", str(self.root / "data"), *flags])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_cli_edit_exact_readback_preserves_other_fields_comments_and_append_history(self):
+        issue = self._open_issue()
+        appended = self._append(issue["ref"], "prior evidence", request_id="append")
+        self.store.update_priority(reference=issue["ref"], priority="P1", reason="urgent", actor="po",
+                                   request_id="priority")
+        before = self.issue(issue["ref"])
+        text = "  Полная замена\n\nlast line  \n"
+        body = self.root / "description.md"
+        body.write_text(text, encoding="utf-8")
+        code, out, _ = self.invoke(issue["ref"], ["--body-file", str(body)])
+        self.assertEqual(code, 0)
+        shown = json.loads(out)
+        self.assertEqual(shown["description"], text)
+        for field in ("title", "product", "kind", "priority", "closed", "close_reason", "history"):
+            if field == "history":
+                self.assertEqual(shown[field]["comments"], before[field]["comments"])
+                self.assertEqual(shown[field]["audit"][:-1], before[field]["audit"])
+            else:
+                self.assertEqual(shown[field], before[field])
+        event = self.store._host().canon.committed("cli")
+        self.assertEqual(event.data["edit"], {
+            "description_sha256_was": hashlib.sha256(appended["description"].encode()).hexdigest(),
+            "description_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        })
+        self.assertNotIn("append", event.data)
+        self.assertEqual(self._claims("cli"), (1, 1))
+        self.assertEqual(self.edit(issue["ref"], "", request_id="clear")["description"], "")
+        self.edit(issue["ref"], text, request_id="restore-text")
+        self.assertEqual(self.invoke(issue["ref"], ["--description", text])[0], 0)
+        self.assertEqual(self._claims("cli"), (1, 1))
+        self.assertEqual(self.invoke(issue["ref"], ["--description", "changed"])[0], 2)
+        self.assertEqual(self.issue(issue["ref"])["description"], text)
+        self.assertEqual(self._claims("cli"), (1, 1))
+        # Append remains a supported operation after a full edit and retains its released evidence.
+        after = self._append(issue["ref"], "later evidence", request_id="later-append")
+        self.assertTrue(after["description"].startswith(text))
+        self.assertIn("append", self.store._host().canon.committed("later-append").data)
+        self.assertEqual(self.edit(issue["ref"], text, request_id="cli")["description"], after["description"])
+
+    def test_refusals_do_not_write_and_do_not_claim_request_ids(self):
+        issue = self._open_issue()
+        before = self.audit_events()
+        invalid = self.root / "invalid.md"
+        invalid.write_bytes(b"\xff")
+        for index, flags in enumerate((["--body-file", str(self.root / "missing")],
+                                       ["--body-file", str(invalid)], [],
+                                       ["--description", "a", "--body-file", str(invalid)])):
+            self.assertEqual(self.invoke(issue["ref"], flags, request_id=f"bad-{index}")[0], 2)
+            self.assertEqual(self._claims(f"bad-{index}"), (0, 0))
+        for role, expected in (("observer", 3), ("dispatcher", 2)):
+            self.assertEqual(self.invoke(issue["ref"], ["--description", "wrong"], role=role,
+                                         request_id=role)[0], expected)
+            self.assertEqual(self._claims(role), (0, 0))
+            with self.assertRaises(TaskError) as refused:
+                self.edit(issue["ref"], "wrong", request_id=role, role=role)
+            self.assertEqual(refused.exception.code, "role_forbidden")
+            self.assertEqual(self._claims(role), (0, 0))
+        with self.assertRaises(TaskError) as caught:
+            self.store.edit_description(reference=issue["ref"], description="wrong", reason="  ", actor="po",
+                                        request_id="empty-reason")
+        self.assertEqual(caught.exception.code, "validation")
+        self.assertEqual(self._claims("empty-reason"), (0, 0))
+        self.assertEqual(self.issue(issue["ref"])["description"], self.ORIGINAL)
+        self.assertEqual(self.audit_events(), before)
+        self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
+        closed = self.issue(issue["ref"])
+        self.assertEqual(self.invoke(issue["ref"], ["--description", "wrong"], request_id="closed-edit")[0], 3)
+        self.assertEqual(self._claims("closed-edit"), (0, 0))
+        self.assertEqual(self.issue(issue["ref"]), closed)
+
+    def test_cross_operation_reuse_and_replay_after_newer_edit_or_close(self):
+        issue = self._open_issue()
+        self._append(issue["ref"], "evidence", request_id="append")
+        self.store.update_priority(reference=issue["ref"], priority="P1", reason="correct", actor="po",
+                                   request_id="priority")
+        for request_id in ("append", "priority"):
+            with self.assertRaises(TaskError) as caught:
+                self.edit(issue["ref"], "one", request_id=request_id)
+            self.assertEqual(caught.exception.code, "validation")
+        first = self.edit(issue["ref"], "one")
+        self.edit(issue["ref"], "two", request_id="newer")
+        self.assertEqual(self.edit(issue["ref"], "one")["description"], "two")
+        self.assertEqual(self.store.retry_transaction("edit")["description"], "two")
+        for callback in (lambda: self._append(issue["ref"], "one", request_id="edit", reason="correct"),
+                         lambda: self.store.update_priority(reference=issue["ref"], priority=first["priority"],
+                                                            reason="correct", actor="po", request_id="edit")):
+            with self.assertRaises(TaskError) as caught:
+                callback()
+            self.assertEqual(caught.exception.code, "validation")
+        self.assertEqual(self._claims("edit"), (1, 1))
+        self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
+        replay = self.edit(issue["ref"], "one")
+        self.assertTrue(replay["closed"])
+        self.assertEqual(replay["description"], "two")
+
+    def test_native_replace_refuses_other_fields_and_stale_description_evidence(self):
+        from ummanu.board import Actor, DescriptionEdit, EntityKind, EventKind, RelatedRefs, Replace
+
+        issue = self._open_issue()
+        host = self.store._host()
+        current = host.read(EntityKind.ISSUE, issue["ref"])
+        digest = lambda text: hashlib.sha256(text.encode()).hexdigest()
+        evidence = DescriptionEdit(digest(current.description), digest("edit"))
+        for successor in (replace(current, description="edit", title="changed"),
+                          replace(current, description="edit", priority="P0")):
+            with self.assertRaises(TaskError):
+                self.store._host_mutation(lambda successor=successor: host.replace(Replace(successor, Actor("po", "po"), "correct",
+                                                                      request_id="refused", description_edit=evidence)))
+            self.assertEqual(self._claims("refused"), (0, 0))
+        # A staged occurrence's before hash cannot overwrite a newer description during recovery.
+        successor = replace(current, description="edit")
+        event = host._entity_event(EventKind.ENTITY_UPDATED,
+                                   successor, Actor("po", "po"), "correct", host._related(successor, RelatedRefs()),
+                                   "staged", edit=evidence)
+        self.edit(issue["ref"], "newer", request_id="newer")
+        with self.client.transaction():
+            host.canon.stage("staged", event)
+        with self.assertRaises(TaskError):
+            self.store.retry_transaction("staged")
+        self.assertEqual(self.issue(issue["ref"])["description"], "newer")
+        self.assertEqual(self._claims("staged"), (1, 0))
+
+    def test_backend_failure_rolls_back_description_claim_and_event_then_retries_once(self):
+        issue = self._open_issue()
+        for stage in ("description", "event"):
+            owner = self.client.records if stage == "description" else self.store.audit
+            method = "update" if stage == "description" else "_write_board_event"
+            original = getattr(owner, method)
+
+            def fail(*args, original=original, **kwargs):
+                original(*args, **kwargs)
+                raise TaskError("backend_error", "injected after write", 1)
+
+            before = self.issue(issue["ref"])
+            with mock.patch.object(owner, method, side_effect=fail), self.assertRaises(TaskError) as caught:
+                self.edit(issue["ref"], stage, request_id=stage)
+            self.assertNotEqual(caught.exception.code, "audit_pending")
+            self.assertEqual(self.issue(issue["ref"]), before)
+            self.assertEqual(self._claims(stage), (0, 0))
+            self.assertEqual(self.edit(issue["ref"], stage, request_id=stage)["description"], stage)
+            self.assertEqual(self.edit(issue["ref"], stage, request_id=stage)["description"], stage)
+            self.assertEqual(self._claims(stage), (1, 1))
+
+    def test_pending_edit_recovery_confirms_the_exact_description_without_rewriting_it(self):
+        from ummanu.board import Actor, DescriptionEdit, EntityKind, EventKind, RelatedRefs
+
+        issue = self._open_issue()
+        host = self.store._host()
+        current = host.read(EntityKind.ISSUE, issue["ref"])
+        desired = replace(current, description="pending text")
+        evidence = DescriptionEdit(hashlib.sha256(current.description.encode()).hexdigest(),
+                                   hashlib.sha256(desired.description.encode()).hexdigest())
+        event = host._entity_event(EventKind.ENTITY_UPDATED, desired, Actor("po", "po"), "correct",
+                                   host._related(desired, RelatedRefs()), "pending-edit", edit=evidence)
+        with self.client.transaction():
+            host.canon.stage("pending-edit", event)
+            row = self.client.call("getTaskByReference", project_id=1, reference=issue["ref"])
+            self.client.call("updateTask", id=row["id"], description=desired.description)
+        self.assertEqual(self._claims("pending-edit"), (1, 0))
+        with mock.patch.object(self.client.records, "update", side_effect=AssertionError("recovery rewrote text")):
+            recovered = self.edit(issue["ref"], desired.description, request_id="pending-edit")
+        self.assertEqual(recovered["description"], desired.description)
+        self.assertEqual(self._claims("pending-edit"), (1, 1))
+        self.assertEqual(host.canon.committed("pending-edit"), event)
+
+    def test_cli_closed_and_all_filter_products_without_changing_inclusive_store_api(self):
+        issue = self._open_issue()
+        self.store.create_product(product_id="other", projects=["ummanu"], title="Other", description="",
+                                  actor="po", request_id="other-product")
+        other = self.store.create_issue(product="other", issue_kind="bug", priority="P2", title="Other issue",
+                                        description="", actor="po", request_id="other-issue")
+        closed = self.store.create_issue(product="ummanu", issue_kind="bug", priority="P1", title="Closed",
+                                         description="", actor="po", request_id="closed-issue")
+        self.store.close_issue(reference=closed["ref"], reason="resolved", actor="po", request_id="close")
+        self.assertEqual({i["ref"] for i in self.store.list_issues(include_closed=True)},
+                         {issue["ref"], other["ref"], closed["ref"]})
+        for flags, expected in (([], {issue["ref"]}), (["--closed"], {closed["ref"]}),
+                                 (["--all"], {issue["ref"], closed["ref"]})):
+            output = io.StringIO()
+            with (mock.patch("ummanu.product_issue_commands.board_client", return_value=self.client),
+                  contextlib.redirect_stdout(output)):
+                code = main(["issue", "list", "--product", "ummanu", "--instance", str(self.root),
+                             "--data-dir", str(self.root / "data"), *flags])
+            self.assertEqual(code, 0)
+            self.assertEqual({i["ref"] for i in json.loads(output.getvalue())}, expected)

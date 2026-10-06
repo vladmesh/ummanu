@@ -1,21 +1,10 @@
 """The routes, and what each of them calls. One layer operation per route, and no route without one.
 
-This module is the transport in the literal sense: it turns a request line into arguments, calls
-one operation of :mod:`ummanu.webproto`, and turns what comes back into JSON or into a page. It
-holds no session, no cache and no state between requests — the cursor a client watches a card with
-is the client's, which is why a reload and a reconnect resume rather than restart, and why two
-browsers watching the same card cannot disturb each other. The same rule covers the sprint form:
-the request id that makes a submission idempotent lives in the form the browser holds, and this
-process remembers nothing between the two requests that would let it invent a second one.
-
-The one thing this module decides for itself is who may make a mutation, and it decides it in one
-place on the POST path rather than per route (:func:`cross_origin_reason`). Everything else it is
-handed.
-
-The route table is the surface, all of it, and it is a table so that it can be read and asserted
-against. Every entry names an operation that already exists. There is no entry that takes a
-command, a shell, a script, a path or a module to run, and there is no catch-all: an unrouted path
-is 404 and an unrouted method on a routed path is 405, neither of which reaches any handler.
+Stateless transport over :mod:`ummanu.webproto`: no session, cache or state between requests (watch
+cursors and form request ids live in the client). The only decision made here is who may make a
+mutation (:func:`cross_origin_reason`, plus the PO token under /po), once on the POST path. `ROUTES`
+is the whole surface: no route runs a command, script or path, and there is no catch-all (unrouted
+path 404, unrouted method 405). See docs/PROTOCOLS.md, "Serving the pipeline locally".
 """
 
 from __future__ import annotations
@@ -40,18 +29,15 @@ from ummanu.webproto.po_auth import COOKIE_PATH as PO_COOKIE_PATH
 from ummanu.webproto.reads import TASK_SNAPSHOT_EVENTS
 from ummanu.webproto.sprint_reads import NONE_SPELLING
 
-#: The largest request body this transport reads. Every body it accepts is a handful of short
-#: fields, so anything above this is a mistake or an attempt, and reading it would be neither.
+#: The largest request body read; every accepted body is a handful of short fields.
 MAX_BODY_BYTES = 64 * 1024
 
 JSON_TYPE = "application/json; charset=utf-8"
 HTML_TYPE = "text/html; charset=utf-8"
 FORM_TYPE = "application/x-www-form-urlencoded"
 
-#: The two body encodings a route may declare. A JSON object is what a program sends; a submitted
-#: form is what a browser sends, and it is the encoding the sprint form uses so that the page works
-#: as a page -- the request id it carries is in the markup the browser holds, which is exactly what
-#: makes a double click, a retry and a reconnection one sprint rather than three.
+#: Route body encodings: a JSON object (programs) or a submitted form (browsers; the sprint form's
+#: request id lives in the markup, so a double click or retry is one sprint).
 JSON_BODY = "json"
 FORM_BODY = "form"
 
@@ -75,11 +61,9 @@ class Route:
     handler: str
     #: The layer call this route is a transport for, named so the table reads as the contract it is.
     operation: str
-    #: How a body arrives here: a JSON object, or a submitted HTML form. Both are read into the
-    #: same shape and both are held to the same closed field list; what differs is the decoding.
+    #: JSON object or HTML form; both decode to the same shape under the same closed field list.
     body: str = JSON_BODY
-    #: Whether this route answers a person or a program. A refusal on a page route is rendered as
-    #: a page carrying the same status, so a browser shows the reason instead of a blank body.
+    #: Page routes render a refusal as a page with the same status.
     page: bool = False
 
     @property
@@ -91,8 +75,7 @@ class Route:
 ROUTES: tuple[Route, ...] = (
     Route("GET", "/", "dashboard", "reads.system_snapshot", page=True),
     Route("GET", "/tasks/{ref}", "task_page", "reads.task_snapshot", page=True),
-    # One of the card's local-pty heads, read-only: its terminal's tail and its journal
-    # (secretary-1703). The run id has to be one the card recorded, or the answer is 404.
+    # One of the card's local-pty heads, read-only; an unrecorded run id is 404.
     Route("GET", "/tasks/{ref}/heads/{run_id}", "head_page", "reads.head_view", page=True),
     Route("GET", "/sprints", "sprints_page", "sprint_reads.sprint_list", page=True),
     Route("GET", "/projects", "projects_page", "reads.system_snapshot", page=True),
@@ -108,12 +91,9 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/api/runs/{run_id}", "run", "ops.run_state"),
     Route("POST", "/api/runs/start", "start", "ops.run_start"),
     Route("POST", "/api/runs/review", "review", "ops.run_review"),
-    # The operator's half, added outside a sprint on 2026-09-13: the pause, the open sprints and
-    # what the owner says to them, the command feed, and the owner's two writes on a card. Each is
-    # one operation of a layer that already existed and had no route; none is a new rule.
+    # The operator's routes: each is one existing layer operation.
     Route("GET", "/history", "commands_page", "command_reads.command_history", page=True),
-    # The page behind the lamp on the bottom bar (secretary-1647): the problems the installation
-    # has recorded, by code, and which of them make the lamp red.
+    # The page behind the bottom bar's lamp: recorded problems by code, and which make it red.
     Route("GET", "/doctor", "doctor_page", "doctor.doctor_snapshot", page=True),
     Route("GET", "/api/pause", "pause", "pause_reads.pause_state"),
     Route("GET", "/api/pause/scope", "pause_scope", "pause_reads.pause_scope"),
@@ -126,11 +106,9 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/api/history/{request_id}", "command_request", "command_reads.command_request"),
     Route("POST", "/api/tasks/{ref}/comment", "task_comment", "card_ops.task_comment"),
     Route("POST", "/api/tasks/{ref}/move", "task_move", "card_ops.task_move"),
-    # The owner spends one Codex rate-limit reset credit (secretary-1776): the button beside the
-    # credits on the bar. Idempotent on `request_id`, which is also the provider's redeem id.
+    # Spends one Codex rate-limit reset credit; idempotent on `request_id` (also the provider's redeem id).
     Route("POST", "/api/providers/codex/reset-limit", "codex_reset_limit", "provider_ops.codex_reset_limit"),
-    # The PO head (secretary-1631). Every route under /po is behind the PO token
-    # (:func:`requires_po_token`); the login form is the one that cannot be.
+    # The PO head: every /po route requires the PO token (:func:`requires_po_token`) except login.
     Route("POST", "/po/login", "po_login", "po_auth.po_login", body=FORM_BODY, page=True),
     Route("GET", "/po", "po_page", "po.po_overview", page=True),
     Route("POST", "/po/sessions", "po_create", "po.po_create_session", body=FORM_BODY, page=True),
@@ -140,9 +118,7 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", "/po/sessions/{session}/close", "po_close", "po.po_close", body=FORM_BODY, page=True),
     Route("POST", "/po/sessions/{session}/title", "po_rename", "po.po_rename", body=FORM_BODY, page=True),
     Route("GET", "/po/api/sessions/{session}", "po_session_json", "po.po_session"),
-    # The owner's bell (secretary-1770): the list behind the header's count, a click that marks one
-    # event read, and "mark all read", which takes notices only. Each is one call of the owner events
-    # layer, which reads and writes the board's `owner_events` and nothing else.
+    # The owner's bell: list, mark one read, mark all read (notices only); board `owner_events` only.
     Route("GET", "/owner-events", "owner_events_page", "owner_events.owner_event_list", page=True),
     Route(
         "POST", "/owner-events/read-all", "owner_events_read_all", "owner_events.mark_all_read",
@@ -164,9 +140,8 @@ PO_SEND_FIELDS = frozenset({"request_id", "text"})
 PO_STOP_FIELDS = frozenset({"seq"})
 PO_CLOSE_FIELDS: frozenset[str] = frozenset()
 PO_RENAME_FIELDS = frozenset({"title"})
-#: The form fields of every /po POST, by handler. A field set with `request_id` marks a route whose
-#: operation takes the id into `PoStore`'s request transaction; `tests.test_web_po_transport` holds
-#: the route table to this.
+#: Form fields of every /po POST, by handler. A set with `request_id` marks a route whose operation
+#: takes the id into `PoStore`'s request transaction (held by `tests.test_web_po_transport`).
 PO_FORM_FIELDS = {
     "po_login": PO_LOGIN_FIELDS,
     "po_create": PO_CREATE_FIELDS,
@@ -188,10 +163,7 @@ def requires_po_token(route: Route) -> bool:
     return under and (route.method, route.pattern) not in PO_OPEN_ROUTES
 
 
-#: The fields each POST accepts, and the only ones. A body carrying anything else is refused rather
-#: than silently ignored: an unknown field is a client that believes this endpoint does something it
-#: does not, and answering it as though the request had been understood is how a transport grows a
-#: second, undocumented surface.
+#: The fields each POST accepts, and the only ones; unknown fields are refused, never ignored.
 START_FIELDS = frozenset({"ref", "request_id", "profile", "instruction"})
 SPRINT_COMMENT_FIELDS = frozenset({"request_id", "body"})
 SPRINT_CLOSE_FIELDS = frozenset({"request_id", "reason", "closeout", "decisions"})
@@ -201,15 +173,13 @@ TASK_COMMENT_FIELDS = frozenset({"request_id", "body"})
 TASK_MOVE_FIELDS = frozenset({"request_id", "target", "reason", "sprint_override", "sprint_override_reason"})
 CODEX_RESET_FIELDS = frozenset({"request_id"})
 PROVIDER_OPS_NOT_BUILT = "this web process was built without the provider operation layer"
-#: The two owner event forms carry only where to go back to: `view=all` when pressed from the all
-#: view; anything else, or nothing, returns to the unread default.
+#: Owner event forms carry only the return view: `view=all`, else the unread default.
 OWNER_EVENT_FIELDS = frozenset({"view"})
 OWNER_EVENTS_NOT_BUILT = "this web process was built without the owner events layer"
 
 #: How many commands the dashboard's feed and the commands page show per read.
 FEED_LIMIT = 25
-#: How many of a card's events the card page reads by default: enough for the whole transition
-#: timeline of a card that went round several times, where the API's default is a short tail.
+#: Card-page event read size: enough for a full transition timeline (the API default is a short tail).
 TASK_PAGE_EVENTS = 200
 REVIEW_FIELDS = frozenset({"ref", "request_id", "profile", "worker_run_id"})
 SPRINT_FIELDS = frozenset(
@@ -227,27 +197,20 @@ SPRINT_FIELDS = frozenset(
     }
 )
 
-#: The role and the actor a sprint opened from here is opened under. The web has no identity of its
-#: own -- the front checks one password belonging to the owner -- so it says which of the roles
-#: `SprintWriter.create` admits it is acting as, and names itself as the actor so the sprint's audit
-#: says where the create came from rather than pretending to be a CLI.
+#: Role and actor for writes from here. The web has no identity of its own (the front checks the
+#: owner's password), so it acts as `po` and names itself `web` in the audit.
 SPRINT_ROLE = "po"
 SPRINT_ACTOR = "web"
 
-#: The value the two executor selects carry when the owner leaves the role to the observer. It is
-#: the empty option of an HTML select and never a profile name: the handler turns it into `None`,
-#: which is the layer's spelling for "nothing was said about this role". See criterion 4.
+#: The executor selects' "observer chooses" option; :func:`_pin` turns it into `None` (unpinned).
 EXECUTOR_UNPINNED = ""
 
 
 class WebApp:
     """The routing half, built over the read, operation and sprint layers.
 
-    All four are handed in rather than constructed here, which is what lets a test drive every
-    route against fakes with no socket, no Orca and no live installation. None of them is
-    optional: a layer a route needs is a fact about how this application was built, so an
-    application missing one fails where it was built rather than on the first request that
-    reaches that route.
+    Layers are injected (so tests drive every route against fakes). Required layers are positional,
+    so a missing one fails at construction; the keyword-only ones are optional features.
     """
 
     def __init__(
@@ -277,19 +240,15 @@ class WebApp:
         self.command_reads = command_reads
         self.card_ops = card_ops
         self.provider_usage = provider_usage
-        #: The cached recorded-health reading behind the doctor lamp and the doctor page. Optional
-        #: in the same way and for the same reason the provider layer is: a process built without
-        #: it still serves every page, and the lamp says health is unknown -- which is red.
+        #: Cached recorded health behind the doctor lamp and page. Optional: without it every page
+        #: is served and the lamp reads unknown (red).
         self.doctor = doctor
-        #: The PO token check and the PO sessions. Optional: a process built without them does not
-        #: serve /po at all, and the dashboard omits the indicator.
+        #: PO token check and sessions. Optional: without them /po is not served.
         self.po_auth = po_auth
         self.po = po
-        #: The owner's bell. Optional like the PO layers: a process built without it draws no bell
-        #: and answers its routes with the reason.
+        #: The owner's bell. Optional: without it no bell is drawn and its routes answer the reason.
         self.owner_events = owner_events
-        #: The owner's provider writes: the Codex reset. Optional like the bell: a process built
-        #: without it answers the reset route with the reason (503) and spends nothing.
+        #: The Codex reset. Optional: without it the reset route answers 503 and spends nothing.
         self.provider_ops = provider_ops
 
     # -- the entry point -------------------------------------------------------------------
@@ -305,23 +264,11 @@ class WebApp:
     ) -> Response:
         """One request, answered. The only place a protocol code becomes a status.
 
-        The cross-origin check is here and only here. It is asked once, of every POST, before a
-        handler is chosen and therefore before any operation of the layer can run -- which is the
-        whole of it: a rule written per route is a rule the next route forgets, and the two routes
-        that already start heads would have been exactly the ones nobody went back to.
-
-        The bottom bar's source is fed here for the same reason and in the same one place: every
-        page rendered under this call, refusals included, draws the providers' limits from it, and
-        it is a callable rather than a document, so a JSON route -- which renders no page -- costs
-        no provider read. It is unset again when the request ends, so nothing is held between two.
-
-        The doctor lamp's reading is fed here too, by the same mechanism and under the same rules:
-        one context variable holding a callable, set for the span of this request, so a JSON route
-        costs no health collection and two requests never see each other's reading.
-
-        Whether this request is a POST is marked here for the same span and the same reason: a page
-        rendered as the answer to a submission -- a refusal, normally -- must not reload itself,
-        because a reload of a POST result is the browser offering to send the submission again.
+        The cross-origin check runs here, once for every POST, before any handler. Per-request
+        context (set for this call only, never shared between requests): the bottom bar's limits
+        source, the doctor lamp source and the bell source as callables (so JSON routes pay no
+        read), one pinned health and owner-events reading, and whether this is a POST (a page
+        answering a submission must not auto-reload, which would re-send it).
         """
         with (
             pages.limits_source(self._limits_section),
@@ -355,8 +302,7 @@ class WebApp:
             reason = cross_origin_reason(headers)
             if reason is not None:
                 return self._deny(route, status=403, code="cross_origin", message=reason)
-        # The PO token, asked here and only here, for the same reason as the origin: a route under
-        # /po added tomorrow is guarded by its path, and nothing below runs before this answers.
+        # The PO token, checked by path here so any future /po route is guarded too.
         if route.pattern == PO_PREFIX or route.pattern.startswith(PO_PREFIX + "/"):
             refusal = self._po_gate(route, headers)
             if refusal is not None:
@@ -372,10 +318,8 @@ class WebApp:
     def match(self, method: str, path: str) -> tuple[Route | None, dict[str, Any]]:
         """The route for this request, or why there is none: 404 for a path, 405 for a method.
 
-        A path a literal route matches belongs to that route, and a route with a placeholder is
-        never considered beside it: `/api/runs/start` is the start operation and not a read of a
-        run named "start". Without that rule the two would be decided by the order of the table,
-        which is not a contract anybody should have to know.
+        A literal route wins over a placeholder route (`/api/runs/start` is not a run named
+        "start"), independent of table order.
         """
         wanted = [unquote(part) for part in path.split("/") if part]
         candidates = [
@@ -554,16 +498,14 @@ class WebApp:
     def _dashboard(self, _params, _query, _body) -> Response:
         """The operator's one screen, assembled from four reads that fail apart.
 
-        The snapshot is the route's operation and the only one whose refusal is the page's: the
-        pause, the open sprints and the command feed are read beside it, and one of them refusing
-        marks its own section with the reason rather than taking the dashboard down. The same rule
-        :meth:`_task_page` applies to a card's runs, applied to the three sections this page grew.
+        Only the snapshot's refusal fails the page; pause, open sprints and the command feed each
+        show their own reason instead.
         """
         snapshot = self.reads.system_snapshot()
         pause = self._or_reason(self.pause_reads.pause_state)
         sprints = self._or_reason(lambda: self.sprint_reads.sprint_list(statuses=["open"]))
         limits = self._limits_section()
-        # Only a number, so it needs no token; a PO store that does not answer hides it, nothing more.
+        # A count only, so no token; an unavailable PO store just hides it.
         po = self._or_reason(self.po.po_running_count) if self.po is not None else None
         return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, limits=limits, po=po))
 
@@ -578,11 +520,9 @@ class WebApp:
         )
 
     def _session_titles(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:
-        """The titles of the PO sessions a card page links to, or the reason there are none (secretary-1811).
+        """Titles of the PO sessions a card page links to, or the reason they are unavailable.
 
-        None when the page names no session or this process was built without the PO layer: the page
-        then draws short ids. A PO store that does not answer marks the titles unavailable and takes
-        nothing else down.
+        None when no session is named or there is no PO layer (the page shows short ids).
         """
         named = pages.po_sessions_named(snapshot)
         if not named or self.po is None:
@@ -631,8 +571,7 @@ class WebApp:
         )
 
     def _owner_events_page(self, _params, query, _body) -> Response:
-        # Unread is the default (secretary-1778): only `?all=1` widens it, and `?unread=1` from an
-        # older link or any other value lands on the default rather than failing.
+        # Unread is the default; only `?all=1` widens it, any other value falls back.
         unread_only = _one(query, "all") not in {"1", "true", "yes", "on"}
         document = self._owner_event_layer().owner_event_list(unread_only=unread_only)
         marked = _one(query, "marked")
@@ -668,9 +607,7 @@ class WebApp:
     def _limits_section(self) -> dict[str, Any] | None:
         """The provider limits for a page, or `None` when this process was built without them.
 
-        The one read behind both the dashboard's panel and the bottom bar of every page. It is the
-        cached layer's own call and nothing else: the cache decides when a provider is actually
-        asked, so rendering a hundred pages inside one cache window asks each provider once.
+        The cached layer's call, behind both the dashboard panel and every page's bottom bar.
         """
         if self.provider_usage is None:
             return None
@@ -679,10 +616,8 @@ class WebApp:
     def _one_health_reading(self) -> AbstractContextManager[None]:
         """One health reading for this whole request: the dashboard's panel and the lamp alike.
 
-        The panel reads health through the read layer and the lamp through the doctor layer, and
-        both land on the doctor layer's cache. Pinned here, around the request, the second lookup
-        answers with the first one's reading even when the cache window expires between them. A
-        doctor that is not the cached layer -- none, or a test's fake -- has nothing to pin.
+        Pins the doctor cache for the request so both lookups agree across a cache expiry. Only a
+        real `DoctorLayer` is pinned.
         """
         if isinstance(self.doctor, DoctorLayer):
             return self.doctor.one_reading()
@@ -691,10 +626,7 @@ class WebApp:
     def _doctor_section(self) -> dict[str, Any] | None:
         """The recorded health for a page, or `None` when this process was built without it.
 
-        The one read behind both the lamp on the bar and the doctor page, and it is the cached
-        layer's own call: the cache decides when health is actually collected, so a walk over
-        every page inside one window collects once. A JSON route renders no page and so makes no
-        call at all.
+        The cached layer's call, behind both the lamp and the doctor page.
         """
         if self.doctor is None:
             return None
@@ -710,10 +642,7 @@ class WebApp:
     def _runs_or_reason(self, ref: str) -> dict[str, Any]:
         """The card's product runs for the page, or the reason there are none to show.
 
-        A run listing that refused must not take the card page down with it: the state, the events
-        and the result are read from other sources and are still worth showing. This is the same
-        rule the layer applies inside a snapshot, applied by the transport to the one call it makes
-        beside the snapshot.
+        A refused run listing does not take the card page down.
         """
         try:
             return {"available": True, "reason": None, "items": self.ops.run_list(ref)["items"]}
@@ -725,10 +654,8 @@ class WebApp:
     def _sprint_form(self, _params, _query, _body) -> Response:
         """The empty form, on this installation's own catalogue.
 
-        The request id is minted here rather than by the browser, and it is minted once per form:
-        it is what the submission carries back, so it is a property of *this* form and not of each
-        POST somebody makes from it. A reload of this page is a new intention and gets a new id; a
-        second submission of the page already open is the same intention and gets the same one.
+        The request id is minted here, once per rendered form: a reload is a new intention (new id),
+        a resubmission of the open form is the same one (same id).
         """
         return _html(
             200,
@@ -742,26 +669,11 @@ class WebApp:
     def _sprint_create(self, _params, _query, body) -> Response:
         """One submission: refuse what is incomplete, hand the rest down, and go to the sprint.
 
-        Two kinds of refusal, and they are not the same kind of thing. A field the form itself
-        requires -- no goal, no definition of done, no observer, no issue, no project -- is answered
-        here, named field by field, because the person is looking at the form and can fix it. What a
-        sprint *may be* is never decided here: an unknown profile, a closed issue, an unregistered
-        project and a project another sprint holds are the writer's judgements, reached through the
-        layer, and what this does with them is show what it was told beside the values the person
-        typed.
-
-        Success is a redirect and not a rendered page, so the address bar ends up on the sprint and
-        a refresh re-reads it rather than re-posting the form.
-
-        **A refusal decides what happens to the request id, and the two answers are opposite.**
-        `sprint_create` claims the id, with a digest of the inputs, *before* the writer judges them
-        (see its docstring): so a refusal that leaves nothing behind has still spent that id, and a
-        corrected resubmission under it would be answered `validation: different inputs` -- a dead
-        end with no sprint and no way forward. A refusal that is not an
-        :class:`~ummanu.webproto.errors.OperationPending` therefore comes back on a form carrying
-        a *new* id, because a corrected submission really is a new request and nothing durable was
-        created. An `OperationPending` is the exact opposite and must keep the same id and the same
-        values: a sprint exists, and only that id reaches it.
+        Missing form fields are refused here per field; admissibility (profiles, issues, projects,
+        reservations) is the writer's judgement, shown beside the typed values. Success is a 303 to
+        the sprint. `sprint_create` claims the id with an input digest before judging, so a refusal
+        other than `OperationPending` re-renders with a fresh id (the old one is spent and nothing was
+        created); `OperationPending` keeps the id and values, because only that id reaches the sprint.
         """
         _fields(body, SPRINT_FIELDS, "sprint create")
         submitted = _submission(body)
@@ -773,7 +685,7 @@ class WebApp:
         except ValueError:
             errors["local_run_exceptions"] = "Enter a JSON list of project, argv and rationale entries."
         if errors:
-            # Nothing reached the layer, so this id was never claimed and is still the right one.
+            # Nothing reached the layer, so this id was never claimed.
             return self._form_again(submitted, errors=errors, status=400)
         try:
             created = self.sprint_ops.sprint_create(
@@ -813,18 +725,9 @@ class WebApp:
     ) -> Response:
         """The form the person just submitted, with what was refused and everything they typed.
 
-        `fresh` mints a new request id for the form, and it is the only thing that ever replaces a
-        value the person's submission carried. It is set exactly when the layer refused without
-        leaving a sprint behind, for the reason :meth:`_sprint_create` gives: that id is spent, and
-        a form that handed it back would let the owner correct a field and be told the correction
-        is a different request. Every other value comes back untouched -- including one the
-        catalogue no longer offers, which the page marks rather than drops, because a form that
-        quietly changed a submitted choice would be asking for a repeat of something else.
-
-        The catalogue is read again because the form is rendered again, and a catalogue that cannot
-        be read must not replace the refusal on the screen with its own: the reason the submission
-        was refused is the thing being answered, so an unreadable catalogue is shown beside it as a
-        section that could not be read rather than raised over the top of it.
+        `fresh` mints a new request id (only when the layer refused without creating a sprint); every
+        other value comes back untouched, including a choice the catalogue no longer offers. An
+        unreadable catalogue is shown as its own section rather than replacing the refusal.
         """
         shown = dict(submitted)
         if fresh:
@@ -850,8 +753,7 @@ class WebApp:
     def _po_gate(self, route: Route, headers: Any) -> Response | None:
         """Why this /po request is refused before its handler, or `None` when it may go on.
 
-        Only the token layer is asked, and it reads only the token file: a request without a valid
-        cookie never reaches the PO service or the board store.
+        Only the token file is read; without a valid cookie nothing reaches the PO service or board.
         """
         if self.po_auth is None or self.po is None:
             return self._deny(route, status=503, code="po_unavailable", message=PO_NOT_SERVED)
@@ -914,14 +816,14 @@ class WebApp:
         return _html(200, pages.po_session(document, request_id=_po_request_id()))
 
     def _po_session_json(self, params, query, _body) -> Response:
-        # The page's poller only watches turns, so it asks with `cards=0` and pays no board listing.
+        # The page's poller watches turns only, so `cards=0` skips the board listing.
         return _json(200, self._po_session_document(params["session"], cards=_one(query, "cards") != "0"))
 
     def _po_session_document(self, session_id: str, *, cards: bool = True) -> dict[str, Any]:
-        """The session from the PO layer, and beside it the cards it delegated from one board listing.
+        """The session from the PO layer, plus the cards it delegated from one board listing.
 
-        `delegated` is the read layer's answer (secretary-1811); a board that refused marks only that
-        block, the session is still served. Without `cards` it is null and the board is not read.
+        A refused board marks only `delegated`. Without `cards`, `delegated` is null and the board is
+        not read.
         """
         document = self.po.po_session(session_id)
         if not cards:
@@ -940,9 +842,8 @@ class WebApp:
     def _po_send(self, params, _query, body) -> Response:
         """One message into the PO service's queue. A refusal renders the session again with the text kept.
 
-        A message for a session whose turn is running is queued, not refused. The re-rendered form
-        keeps its request id — so a resend is a replay of whatever the first submission did — unless
-        the refusal is marked as having written nothing (`_keeps_request_id`).
+        A message for a running turn is queued, not refused. The re-rendered form keeps its request id
+        (a resend replays) unless the refusal wrote nothing (`_keeps_request_id`).
         """
         _fields(body, PO_SEND_FIELDS, "PO message")
         session_id = params["session"]
@@ -1088,11 +989,8 @@ def _payload(route: Route, raw: bytes) -> dict[str, Any]:
 def _form(raw: bytes) -> dict[str, Any]:
     """A submitted HTML form, as the fields it carries.
 
-    A field a form submits more than once -- the issues and the projects a sprint serves -- is a
-    list, and one submitted once is the string it carries. `keep_blank_values` is on because an
-    empty field is an answer: the executor selects are submitted empty when the owner leaves the
-    role to the observer, and dropping them here would make "nothing was said" indistinguishable
-    from "this browser sent no such field at all".
+    Repeated fields are lists. Blank values are kept: an empty executor select means "observer
+    chooses", which must differ from an absent field.
     """
     if len(raw) > MAX_BODY_BYTES:
         raise ValidationRefused(f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here")
@@ -1157,8 +1055,7 @@ def _flag(value: Any) -> bool:
 def _decisions(value: Any) -> Any:
     """The close decisions as sent: absent, the CLI's decisions file as text, or its parsed object.
 
-    Nothing is parsed here. The layer owns the shape through the one parser the CLI uses, so the
-    web refuses exactly what `ummanu sprint close --decisions-file` refuses and nothing else.
+    Not parsed here; the layer uses the CLI's parser, so the web refuses exactly what it refuses.
     """
     if value is None or value == "" or value == {}:
         return None
@@ -1173,9 +1070,8 @@ def _decisions(value: Any) -> Any:
 def _submission(form: dict[str, Any]) -> dict[str, Any]:
     """One form as the sprint create's own vocabulary, and as what to put back in the boxes.
 
-    This is deliberately the only shape the handler and the page both know: the person's answers,
-    whatever became of them. So a refused submission is re-rendered from the same object that was
-    sent down, and no field can be lost on the way back by being read out of two different places.
+    The single shape both the handler and the page use, so a refused submission re-renders from
+    exactly what was sent.
     """
     return {
         "request_id": _first(form, "request_id"),
@@ -1211,9 +1107,8 @@ def _all(form: dict[str, Any], name: str) -> list[str]:
     return [value.strip() for value in values if str(value).strip()]
 
 
-#: What the form itself requires, and the words each one is refused with. These are the four
-#: emptinesses a person can see on their own screen; everything about whether a filled-in value is
-#: *admissible* belongs to the writer and is never re-decided here.
+#: Fields the form itself requires, with their refusal text. Admissibility of filled values is the
+#: writer's, never decided here.
 _REQUIRED: tuple[tuple[str, str], ...] = (
     (
         "request_id",
@@ -1228,12 +1123,9 @@ _REQUIRED: tuple[tuple[str, str], ...] = (
 )
 
 
-#: Why the one answer that is not a profile is not an answer *here*. `none` opens a sprint the
-#: production tick deliberately raises no observer for, so on this route it would be a button
-#: labelled "start" that starts nothing. It stays a legal answer for `ummanu sprint create` and
-#: for the rows that already carry it -- the sprint page renders those unchanged -- and what is
-#: narrowed is this client, not the contract. The spelling is the layer's own rather than a word
-#: repeated here, so a layer that ever spelled it differently would be refused under its own name.
+#: `none` is refused on this route only: it raises no observer, so the "start" button would start
+#: nothing. It stays legal for `ummanu sprint create` and existing rows. Compared against the layer's
+#: own `NONE_SPELLING`.
 OBSERVER_MUST_BE_A_PROFILE = (
     "a sprint opened from here names the head that will run it: opening one with no observer means "
     "nothing is raised for it, which is not what this page's button says. Choose a profile, or open "
@@ -1249,12 +1141,9 @@ def _incomplete(submitted: dict[str, Any]) -> dict[str, str]:
 
 
 def _pin(value: str) -> str | None:
-    """One executor select, as the layer spells it: a profile, or nothing said about the role.
+    """One executor select, as the layer spells it: a profile, or `None` (nothing said, unpinned).
 
-    The empty option means the observer chooses, and `None` is how the layer is told so -- the row
-    is then written with no field for that role at all. An empty string must never travel down as
-    if it were a profile name, which is the whole reason this is a function and not an inline
-    `or`.
+    An empty string must never travel down as if it were a profile name.
     """
     text = str(value or "").strip()
     return None if text == EXECUTOR_UNPINNED else text
@@ -1272,8 +1161,7 @@ def _request_id() -> str:
 
 # -- who may make a mutation ----------------------------------------------------------------------
 
-#: Said to a browser whose page came from somewhere else. Quoted into the refusal so the reason is
-#: on the screen rather than only in a status number.
+#: The cross-origin refusal text, shown on the page.
 CROSS_ORIGIN_REFUSAL = (
     "this request was made from a page this service did not serve, so it is refused before any "
     "operation runs; open the page from this service's own address and submit it there"
@@ -1283,23 +1171,10 @@ CROSS_ORIGIN_REFUSAL = (
 def cross_origin_reason(headers: Any) -> str | None:
     """Why this POST is refused as cross-origin, or `None` if it may proceed.
 
-    The rule is the one a browser makes checkable: a browser sends `Origin` on every request whose
-    method is not GET or HEAD, on its own requests as much as on somebody else's, so a POST that
-    carries an origin naming a host other than the one it was addressed to came from a page this
-    service did not serve. That is refused here, before a handler exists.
-
-    Two properties of the shape are load-bearing:
-
-    **A request with no `Origin` at all is not a browser**, and it keeps working. `ummanu
-    web-run`, `curl` and the diagnostics in OPERATIONS.md send none, and refusing them would break
-    the loopback client this service is operated with while defending nothing: cross-origin is a
-    browser's problem precisely because a browser is the thing that attaches somebody else's
-    credentials to a request the person did not make.
-
-    **The comparison is host and port, never scheme.** The front terminates TLS and proxies to
-    `127.0.0.1` over plain HTTP, so a genuine `https://host` origin arrives at a process that would
-    call itself `http`. Comparing schemes would refuse every real request through the published
-    front; comparing the authority is what the check is actually about.
+    Browsers send `Origin` on every non-GET/HEAD request, so an `Origin` whose host differs from
+    `Host` (or `null`, or no `Host`) is refused. No `Origin` means not a browser (`ummanu web-run`,
+    `curl`) and is allowed. Compare host and port, never scheme: the TLS front proxies to
+    `127.0.0.1` over plain HTTP.
     """
     origin = _header(headers, "Origin")
     if not origin:
@@ -1358,11 +1233,8 @@ def _as_refusal(exc: Exception) -> ReadError:
 def _keeps_request_id(exc: ReadError) -> bool:
     """Whether a refused create or send form keeps its request id: always, unless it wrote nothing.
 
-    Only a refusal marked `nothing_written` where it was raised (`ummanu.webproto.errors.NOTHING_WRITTEN`:
-    the service not reached, validation before the request id was reserved, the id taken by another
-    request, an unknown or closed session) gets a fresh id. Anything else — a lost answer, a service
-    error after the message was queued, an exception nobody marked — may follow an accepted request,
-    and only the same id makes the resend a replay rather than a second request.
+    Only a refusal marked `nothing_written` (`ummanu.webproto.errors.NOTHING_WRITTEN`) gets a fresh
+    id. Anything else may follow an accepted request, and only the same id makes a resend a replay.
     """
     return exc.data.get("nothing_written") is not True
 
@@ -1384,9 +1256,8 @@ def _presented_cookie(headers: Any) -> str:
 def via_tls(headers: Any) -> bool:
     """Whether the browser reached this service through the TLS front.
 
-    The front (Caddy `reverse_proxy`) sets `X-Forwarded-Proto` from its own connection and replaces a
-    value a client sent; a direct loopback request carries none. A local client forging it only makes
-    its own cookie `Secure`, which is stricter, never looser.
+    The front sets `X-Forwarded-Proto` and replaces a client's value; a loopback client forging it
+    only makes its own cookie stricter.
     """
     return _header(headers, "X-Forwarded-Proto").split(",")[0].strip().lower() == "https"
 
@@ -1402,11 +1273,7 @@ def _secure_cookie(response: Response, headers: Any) -> Response:
 def _redirect(location: str, *, what: str = "this sprint is open") -> Response:
     """See the thing that was made, at its own address.
 
-    303 and not 302: the browser is told to *get* what the POST produced, so the address bar ends
-    on the sprint and a refresh re-reads it. A form that answered a submission with a rendered page
-    would leave the browser holding a POST it can be asked to repeat, which is the one thing the
-    request id exists to make harmless and the one thing a person should not have to rely on it
-    for.
+    303 so the browser GETs the result and a refresh re-reads it instead of re-posting the form.
     """
     return Response(
         303, pages.redirect(location, what=what).encode("utf-8"), HTML_TYPE, {"Location": location}

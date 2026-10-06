@@ -1,9 +1,10 @@
 # systemd assets
 
 Templates for the ummanu runtime units: production dispatcher ticks, the memory service, the PO
-service, the web transport and its front, curator, steward (including the deep sweep) and retro. There is no
-scheduled backup unit: the git checkpoint is the recovery contract ([Recovery](../../docs/RECOVERY.md)),
-and `backup create` is a manual, optional cold archive.
+service, the web transport and its front, curator, steward (including the deep sweep), retro, the
+periodic `doctor` record and the daily instance maintenance. There is no scheduled backup unit: the
+git checkpoint is the recovery contract ([Recovery](../../docs/RECOVERY.md)), and `backup create` is
+a manual, optional cold archive.
 
 These files are templates, not host-ready files or a starting point to copy by hand. `ummanu
 reconcile apply` compiles them with the installation user, home, product checkout, instance and

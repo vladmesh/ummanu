@@ -1,23 +1,10 @@
-"""The product's one reader of a head's launch identity, beside the one writer of it.
+"""Reader of a head's launch identity; `command.with_pid_heartbeat` is the writer.
 
-`command.with_pid_heartbeat` is what puts the record on disk: the head's own shell writes `pid`,
-`boot_id`, `proc_starttime_ticks` beside the run, role and task it was launched for, and then
-`exec`s, so the pid stays the head's own for its whole life. This module is the other half of that
-one scheme — the classification of such a record into "this launch is running", "it ended" and
-"this pid is somebody else's now".
-
-It lives here rather than in the control plane that grew it because both of the things that need
-it live under this package: `local_pty_head.LocalPtyHeadRuntime` is handed this reader by whoever
-builds it, and the mechanical-role driver in `runtime/dispatch.py` builds
-one too. `ummanu.dispatch.watchdog` re-exports every name below, so the control plane keeps
-the spelling it has always used and there is still exactly one implementation.
-
-A record survives a reboot and a pid can be handed out again, which is why a bare "does this
-integer name a process?" is not the question any of these answer: `boot_id` and
-`proc_starttime_ticks` are what make a stale record read as the dead head it describes, and
-`expected` is what makes a live process that is not this launch read as a mismatch rather than as
-a match. Missing, half-written, malformed and legacy pid-only files keep their own inconclusive
-states: a reader that cannot tell must never be read as one that said no.
+The head shell writes `pid`, `boot_id`, `proc_starttime_ticks`, run, role and task, then `exec`s.
+This module classifies such a record as running, ended, or a reused pid. `boot_id` and start ticks
+make a stale record read dead; `expected` makes a foreign live process a mismatch. Missing,
+partial, malformed and pid-only files stay inconclusive: "cannot tell" never reads as "no".
+`ummanu.dispatch.watchdog` re-exports these names. See docs/PROTOCOLS.md "Head heartbeat identity".
 """
 
 from __future__ import annotations
@@ -29,8 +16,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-#: The record layout `with_pid_heartbeat` writes and this module reads. A record of any other
-#: version is inconclusive rather than dead: it was written by a scheme this reader does not know.
+#: Any other record version is inconclusive, not dead.
 HEARTBEAT_VERSION = 1
 
 HEARTBEAT_LIVE_MATCH = "live-match"
@@ -43,9 +29,8 @@ HEARTBEAT_UNREADABLE = "unreadable"
 def _proc_starttime_ticks(pid: int) -> str:
     """Linux's process-creation discriminator for a live PID.
 
-    ``comm`` may contain spaces and parentheses, so splitting the complete ``stat`` line on
-    whitespace is not safe. The final closing parenthesis ends it; field 22 is then token 19 of the
-    remaining fields (which begin at field 3).
+    ``comm`` may contain spaces and parentheses: split after the last ``)``; field 22 is then
+    token 19.
     """
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     close = stat.rfind(")")
@@ -59,9 +44,8 @@ def _boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 
-#: What `/proc/<pid>/status` says about a pid that answered `kill(pid, 0)`: a process that is there
-#: to run, one the kernel has not reaped yet, one that has gone since the signal, and one whose
-#: status could not be read at all. The last is inconclusive; the two middle ones are ended.
+#: `/proc/<pid>/status` verdict for a pid that answered `kill(pid, 0)`. Zombie and gone mean ended;
+#: unreadable is inconclusive.
 _PROCESS_RUNNING = "running"
 _PROCESS_ZOMBIE = "zombie"
 _PROCESS_GONE = "gone"
@@ -69,18 +53,11 @@ _PROCESS_UNREADABLE = "unreadable"
 
 
 def _process_state(pid: int) -> str:
-    """What the process itself says it is, read from its own `/proc` status.
+    """The process state from its own `/proc` status.
 
-    `kill(pid, 0)` answers for a zombie exactly as it does for a running process, so a check made
-    right at exit reads one tick stale as still alive; this read is what closes that gap. It closes
-    a second one too: a pid reaped between that signal and this read has no `/proc` entry left, and
-    that absence is `gone` and never "not a zombie". Classified as running it made a head that had
-    already exited read as `live-match` -- the one answer a watchdog may not give about a dead head,
-    since it is what the control plane treats as "this launch is still running". CI caught it as an
-    intermittent `'live-match' != 'dead'` a moment after a head was stopped (2026-09-12).
-
-    A status that exists but cannot be read is neither: that is `unreadable`, and the caller keeps
-    it inconclusive rather than deciding anything on it.
+    `kill(pid, 0)` succeeds for a zombie, and a pid reaped after that signal has no `/proc` entry:
+    both must read as ended (`zombie`/`gone`), never as running, or a dead head reads `live-match`.
+    A status that exists but cannot be read is `unreadable` (inconclusive).
     """
     try:
         status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
@@ -113,9 +90,8 @@ def _unreadable(reason: str) -> dict[str, Any]:
 def task_binding(kind: str, ref: str) -> str:
     """The `task` a launch identity names: `kind:ref`, with the kind written exactly once.
 
-    A sprint's reference already reads `sprint:<ID>`, so prefixing it again produced
-    `sprint:sprint:<ID>` (secretary-1698); a reference that already carries its kind is kept as it is.
-    Every writer and every reader of the record spells the task through this one function.
+    A ref already carrying its kind (`sprint:<ID>`) is kept. Every writer and reader spells the task
+    through this function.
     """
     kind = str(kind or "")
     ref = str(ref or "")
@@ -125,12 +101,10 @@ def task_binding(kind: str, ref: str) -> str:
 
 
 def _task_matches(recorded: str, expected: str) -> bool:
-    """Whether a record's `task` is the binding expected, in its spelling or a pre-1698 one.
+    """Whether a record's `task` is the expected binding, in its spelling or a legacy one.
 
-    Heads launched before secretary-1698 wrote two other spellings and may still be running: an
-    Orca-launched observer says `sprint:sprint:<ID>`, and a local-pty head says its bare reference
-    (`steward`, `secretary-1463`). Reading those as foreign would declare a running head someone
-    else's and replace it. The alias is safe because the run id beside it is still compared exactly.
+    Older heads may still run with `sprint:sprint:<ID>` (Orca observer) or a bare ref (local-pty);
+    reading those as foreign would replace a running head. Safe because the run id is compared exactly.
     """
     if recorded == expected:
         return True
@@ -141,8 +115,7 @@ def _task_matches(recorded: str, expected: str) -> bool:
 def _record_matches_expected(record: Mapping[str, Any], expected: Mapping[str, Any] | None) -> bool:
     if expected is None:
         return True
-    # An empty expected run is deliberately not a wildcard.  A caller that has no durable HeadRun
-    # cannot prove a process belongs to it, even when its pid file happens to be well formed.
+    # An empty expected field is not a wildcard: without a durable HeadRun nothing can be proven.
     for name in ("run_id", "role", "task"):
         value = str(expected.get(name) or "")
         if not value:
@@ -182,11 +155,10 @@ def _read_record(pid_file: str) -> tuple[dict[str, Any] | None, dict[str, Any] |
 
 
 def publish_heartbeat(pid_file: str, identity: Mapping[str, str], *, pid: int | None = None) -> None:
-    """Publish the versioned launch identity for the current process atomically.
+    """Atomically publish the versioned launch identity for the current process.
 
-    Head shells use an equivalent tiny stdlib writer before ``exec``.  Short-lived
-    launch-bound helpers use this function so the reader sees the exact same
-    heartbeat contract, rather than a probe-only liveness convention.
+    Head shells use an equivalent stdlib writer before ``exec``; short-lived launch-bound helpers use
+    this so the reader sees the same contract.
     """
     current_pid = os.getpid() if pid is None else pid
     record = {
@@ -227,14 +199,9 @@ def publish_heartbeat(pid_file: str, identity: Mapping[str, str], *, pid: int | 
 def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Classify a launch-identity heartbeat without trusting PID reuse.
 
-    A readable record has one of ``live-match``, ``dead`` or ``identity-mismatch``. Missing,
-    partially written, malformed and legacy PID-only files retain their distinct inconclusive states.
-
-    A pid that answered ``kill(pid, 0)`` is then asked what it is (:func:`_process_state`): a zombie
-    and a pid reaped between the two are both ``dead``, because neither is a launch that is running.
-    So is a pid reaped before its start time is read: its `/proc/<pid>/stat` is gone, which is the
-    same absence `_process_state` calls `gone`, not an unreadable one (CI, 2026-10-04: a stopped
-    head read `dead`, was reaped, and the next read said `unreadable`).
+    A readable record is ``live-match``, ``dead`` or ``identity-mismatch``; unreadable files keep
+    distinct inconclusive states. A zombie, or a pid reaped before its status or start time is read
+    (`/proc` entry gone), is ``dead``.
     """
     record, failure = _read_record(pid_file)
     if failure is not None:
@@ -254,8 +221,7 @@ def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = N
     except ProcessLookupError:
         return dead
     except PermissionError:
-        # A normal dispatcher head is owned by us.  Treat an uninspectable process as inconclusive:
-        # a weak permission answer cannot authorize a signal or a replacement.
+        # Uninspectable is inconclusive: it cannot authorize a signal or a replacement.
         return _unreadable("process-not-inspectable")
     except OSError as exc:
         return _unreadable(type(exc).__name__)

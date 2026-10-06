@@ -636,9 +636,6 @@ class SqlSprintRecords:
         )
         return {"charged": already, **current}
 
-    def comments(self, task_id: int) -> list[dict[str, Any]]:
-        return self.comments_of([int(task_id)])[int(task_id)]
-
     def comments_of(self, task_ids: list[int]) -> dict[int, list[dict[str, Any]]]:
         """Sprint comments for every key, in one read after the key resolution."""
         keys = [int(task_id) for task_id in task_ids]

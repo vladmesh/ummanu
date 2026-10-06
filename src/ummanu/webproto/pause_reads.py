@@ -1,57 +1,16 @@
-"""What the pipeline-wide pause is right now, and what a command would reach before it is issued.
+"""The pause reads: `pause_state` (the pause as `ummanu pause-status` reports it) and `pause_scope`
+(what a pause command would reach, answered before it is issued). Both write nothing.
 
-Two reads, and one thing they both refuse to let a caller believe.
+Every document states the pause's properties as fields: it is pipeline-wide (:data:`PIPELINE_WIDE`),
+a drain stops no running head (:data:`DRAIN_CONTRACT`), and a freeze is a separate command never
+reached implicitly (:data:`FREEZE_CONTRACT`). Rules stay in :mod:`ummanu.dispatch.pause`,
+`dispatcher_pause_ops.head_lines` and `observer_snapshot`; nothing is re-decided here.
 
-**`pause_state`** is the pause as `ummanu pause-status` has always reported it: the mode, who set
-it and when, the flag it lives in, the heads of every tracked card, the sprint observers, and
-whether an automation-owned freeze will lift itself.
-
-**`pause_scope`** is the read this layer did not have. An operator could always ask what the pause
-*is*; nothing answered "if I drain right now, what exactly does that reach". So the scope read says
-it before the command: that the pause is one pipeline-wide flag and not a per-sprint control, which
-dispatcher and which files it acts on, which sprints are open and which of their cards are inside
-that scope, and which heads are running right now -- together with the two statements that keep the
-answer from being read as something it is not. It is derived from exactly the durable state
-`pause_status` already reads, and it writes nothing: no flag, no lock, no head, no wake.
-
-**The four properties of the pause, stated on every document rather than left to be inferred.**
-
-1. :data:`PIPELINE_WIDE` -- there is one flag and one pipeline. A read reached from a sprint is
-   still a read of the whole installation, and every open sprint of it is inside the scope.
-2. :data:`DRAIN_CONTRACT` -- a drain stops no running head. It stops claiming new cards and
-   dispatching background roles; a card already in flight rides its cycle to the end. No field of
-   these documents may be read as saying otherwise, which is why the heads a drain leaves alone are
-   reported under `heads` and never under anything named "stopped".
-3. :data:`FREEZE_CONTRACT` -- a freeze is a different command that stops those heads, and it is
-   never an implicit upgrade of a drain. It is named here so an operator can see what the other
-   command would do; it is deliberately not offered as a variant of the soft path, and
-   `ummanu.dispatch.pause_ops.pause` refuses to change mode while paused.
-4. The `state` section carries the `stopped_worker`, `stopped_reviewer` and `stopped_observer`
-   lists and the `on_resume` sentence that :mod:`ummanu.dispatch.pause` already writes, so what
-   a resume would put back is said by the thing that stopped it.
-
-**Every rule stays where it already is.** `normalize_pause_mode`, `on_resume_text` and
-`auto_resume_status` are :mod:`ummanu.dispatch.pause`'s; the per-card head line -- what it means
-that a head is missing -- is `dispatcher_pause_ops.head_lines`, the same call `pause_status` makes;
-the observer rows are `observer_snapshot`'s. Nothing here re-decides any of them and nothing here
-opens a second flag, store or lock.
-
-**What is not reused, and why.** `pause_status` reads the flag and the dispatcher's production state
-into one flat answer, so either of them failing would take the other's fields with it. These
-documents are assembled through :mod:`ummanu.webproto.section`, where a source that refused
-reaches no claim, so the two are read as two sources and every section names the one that answered
-it. The pause flag being unreadable therefore leaves the heads, the sprints and the cards standing,
-and vice versa -- and the flag's refusal says in words that the production tick reads an unreadable
-flag as a freeze, which is the rule `ProductionPause.load` already holds and this read does not
-restate as a claim of its own.
-
-**And "could not answer" is a span here, never a list.** Each source read (:func:`_source`) catches
-everything raised while reading and converting its one durable document and answers with a refused
-`Reading` carrying the cause. It enumerates no exception types: the list this module used to share
-had already drifted -- `DispatcherError`, which `DispatcherRecord.from_json` raises for a record
-shape this release does not store, was in none of them -- and a span cannot be forgotten the way an
-entry can. Everything outside that span, this module's sections and the assembly of its documents
-included, is this layer's own work: a failure there is a defect and travels as itself.
+The flag, production state, sprint board and Pipeline listing are separate sources (via
+:mod:`ummanu.webproto.section`), so one refusing does not take the others' fields. Each source read
+(:func:`_source`) catches everything raised while reading and converting its one document; anything
+outside that span is a defect and propagates. See docs/PROTOCOLS.md, "The pause as protocol
+operations".
 """
 
 from __future__ import annotations
@@ -80,28 +39,21 @@ from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import ValidationRefused
 from ummanu.webproto.section import Reading, Section, SectionSet, SourceSet, render, rule
+from ummanu.webproto.section import read_source as _source
 
 SCHEMA_VERSION = 1
 
-#: The name of the soft pause, spelled once. Every operation and every document that says "drain"
-#: says it from here, so there is no second spelling for a mode to be reached under.
+#: The name of the soft pause, spelled once.
 DRAIN = "drain"
 
-#: The sources of a pause document, in the precedence they are consulted in -- which is the order a
-#: refusal is attributed in, because it is the order the chain needs them. The installation locates
-#: the data plane and therefore the files a pause acts on; the flag says whether the pipeline is
-#: paused; the dispatcher's production state says what is behind the cards; the sprint board says
-#: which sprints are open; and the Pipeline listing says which cards those sprints hold.
+#: The sources of a pause document, in precedence order (the order a refusal is attributed in).
 SOURCE_INSTALLATION = "installation"
 SOURCE_PAUSE = "pause"
 SOURCE_LIVENESS = "liveness"
 SOURCE_SPRINTS = "sprints"
 SOURCE_CARDS = "cards"
 
-#: Property 1, on every document this module returns. It is not read from a source, because it is
-#: not a fact about this installation: it is what the pause *is* in this product, and a sprint-shaped
-#: view of a global switch that does not say it is global is the failure this field exists to
-#: prevent.
+#: Property 1, on every document; not read from any source, since it is what the pause is.
 PIPELINE_WIDE = (
     "The pause is one pipeline-wide flag on the production dispatcher. There is no per-sprint "
     "pause and no way to pause one sprint: a pause reached from a sprint stops the dispatcher "
@@ -109,7 +61,7 @@ PIPELINE_WIDE = (
     "whether or not one does -- and stops claiming for every open sprint at once."
 )
 
-#: Property 2. Named `stops`/`does_not_stop` rather than left to a reader of the head list.
+#: Property 2.
 DRAIN_CONTRACT = {
     "mode": DRAIN,
     "operation": "pause_drain",
@@ -130,9 +82,7 @@ DRAIN_CONTRACT = {
     ),
 }
 
-#: Property 3. A freeze is described here so an operator can see the difference before choosing, and
-#: is deliberately not reachable from the soft path: this layer has no freeze operation, and
-#: `pause_drain` takes no mode.
+#: Property 3. Described so an operator can compare; not reachable from this layer.
 FREEZE_CONTRACT = {
     "mode": "freeze",
     "operation": None,
@@ -151,63 +101,24 @@ FREEZE_CONTRACT = {
     ),
 }
 
-#: What is on the Pipeline board but is not a card a pause reaches. The board's own distinction,
-#: taken from where it is already made: a Product or an Issue is a record that never takes a claim
-#: or a task transition, whatever column it currently sits in.
+#: Board records a pause never reaches: a Product or Issue takes no claim or task transition.
 NOT_A_CARD = frozenset(_TYPED_RECORD_TYPES)
 
 
 class _Unreadable(Exception):
     """Inside one source read: the document could not be read or parsed at all.
 
-    Not a second kind of refusal -- both answers are the same unavailable source -- but the one
-    distinction that changes what the refusal may say. A pause flag whose bytes are unreadable is a
-    file the production tick has already decided its own behaviour for; a flag that parses and holds
-    the wrong shapes is not, and must not borrow that sentence.
+    Lets the refusal say what the tick does with an unreadable file (e.g. a flag read as a freeze),
+    a sentence a parseable-but-malformed document must not borrow.
     """
-
-
-def _source(
-    key: str,
-    produce: Callable[[], Any],
-    *,
-    refusal: Callable[[Exception], str],
-    now: float,
-    evidence: Path | None,
-) -> Reading:
-    """Read and convert one source's durable document, or say that it could not answer.
-
-    **This is the whole span of the broad catch, and the span is the contract.** A source read is
-    the one place whose entire job is to answer "did this source answer", so *anything* raised while
-    reading and converting that one document becomes an unavailable `Reading` -- not a list of
-    exception types, because a list is what has to be kept in step and the next durable document
-    read through here would be the next hole. `DispatcherError` out of `DispatcherRecord.from_json`
-    is exactly that hole arriving: it was the step nobody added to the tuple.
-
-    **What is deliberately outside it.** Section building, the assembly of a document, and every
-    other line of this layer are not in any span: a failure there is a defect of this layer and
-    travels as itself, to the reader best placed to fix it. That boundary is why the conversions
-    live inside `produce` rather than inside a section -- the conversion of a durable document is
-    part of reading it, and everything after it is this layer's own work.
-
-    The cause is not swallowed: `refusal` composes the reason from it, so the type and message of
-    whatever failed are on the document, in the section's own `source.reason`.
-    """
-    try:
-        return Reading(key, sources.available(now), produce())
-    except Exception as exc:  # noqa: BLE001 -- the span above is the reason this is broad
-        return Reading(key, sources.unavailable(refusal(exc), now=now, evidence=evidence), None)
 
 
 @dataclass(frozen=True, slots=True)
 class _Dispatcher:
-    """The dispatcher's production state, read once and converted once for the whole document.
+    """The dispatcher's production state, read and converted once per document.
 
-    Converted *in the source read* and not in a section, and that is the point of the class: a
-    production state can be perfectly readable JSON and still not be convertible into the records
-    this reports -- an `attempt_round` of `"not-an-integer"` is the case that made this a defect --
-    and a conversion left inside a section would raise past `SourceSet.decide` instead of marking
-    the source unavailable. Everything that can fail happens where the failure becomes a refusal.
+    Converted inside the source read so an unconvertible record (e.g. a non-integer
+    `attempt_round`) marks the source unavailable instead of raising past `SourceSet.decide`.
     """
 
     phase: str
@@ -217,20 +128,17 @@ class _Dispatcher:
 
 
 class PauseSections(SectionSet):
-    """Every section of every pause document, and the only place a source is attributed to one.
+    """Every section of every pause document; the only place a source is attributed to one.
 
-    One method per section, and a section is covered by being one. Nothing here reads a file: every
-    value comes from a source read once for the document, and a rule receives exactly the sources it
-    declares.
+    Nothing here reads a file: each rule receives exactly the sources it declares.
     """
 
     # -- what the pause acts on ---------------------------------------------------------------
 
     def target(self, read: SourceSet) -> Section:
-        """Which dispatcher's flag a pause command would write, and where it lives.
+        """Which dispatcher's flag a pause would write, and where it lives.
 
-        Sourced `installation`, because these are locations of the data plane and not readings of
-        the flag: they are the answer to "which flag" even when that flag cannot be read.
+        Sourced `installation`: these are data-plane locations, known even when the flag is not.
         """
         return read.decide(
             rule(
@@ -270,14 +178,9 @@ class PauseSections(SectionSet):
     # -- the pause itself ---------------------------------------------------------------------
 
     def state(self, read: SourceSet) -> Section:
-        """Whether the pipeline is paused, and everything the flag itself says about it.
+        """Whether the pipeline is paused, and what the flag says, as converted by :func:`_flag_state`.
 
-        Every field is the flag's, decided by the rules that already own them and applied in the
-        source read (:func:`_flag_state`): `normalize_pause_mode` for the mode, `on_resume_text` for
-        what a resume would put back, and `auto_resume_status` for whether the pause will lift
-        itself. The conversion is there rather than here so a flag that is readable JSON but holds
-        the wrong shapes -- `stopped_worker: 1` -- refuses as a source instead of raising past the
-        seam. This publishes what it produced.
+        The conversion happens in the source read so a malformed flag refuses as a source.
         """
         return read.decide(
             rule(SOURCE_PAUSE, dict),
@@ -301,11 +204,9 @@ class PauseSections(SectionSet):
     # -- what is inside the scope --------------------------------------------------------------
 
     def heads(self, read: SourceSet) -> Section:
-        """The heads the dispatcher holds right now, per card and per sprint observer.
+        """The heads the dispatcher holds now, per card (`head_lines`) and per sprint observer.
 
-        The per-card lines are `dispatcher_pause_ops.head_lines` -- the same call `pause_status`
-        makes, so "this head is missing because a freeze stopped it" is decided once. A drain stops
-        none of these; that is said in :data:`DRAIN_CONTRACT` and not in a field name here.
+        A drain stops none of these; :data:`DRAIN_CONTRACT` says so.
         """
         return read.decide(
             rule(SOURCE_LIVENESS, lambda live: {"cards": live.heads, "observers": live.observers}),
@@ -314,11 +215,9 @@ class PauseSections(SectionSet):
         )
 
     def sprints(self, read: SourceSet) -> Section:
-        """The open sprints inside the scope, and the ones that are not open, counted.
+        """The open sprints in scope, and a count of the others.
 
-        `items` is `null` and never `[]` when the sprint board did not answer: an empty list is the
-        affirmative claim that this installation has no open sprint, which is the opposite of a
-        board nobody could read -- and the claim that would make a pipeline-wide pause look narrow.
+        `items` is `null`, never `[]`, when the sprint board did not answer.
         """
         return read.decide(
             rule(
@@ -341,25 +240,11 @@ class PauseSections(SectionSet):
         )
 
     def cards(self, read: SourceSet) -> Section:
-        """Every card on the Pipeline board, with the sprint that holds it where one does.
+        """Every card on the Pipeline board, with its sprint or `null`.
 
-        The whole board and not the open sprints' cards, because the whole board is the scope: a
-        drain stops the dispatcher claiming a Ready card whether or not a sprint holds it, so a card
-        no open sprint holds is inside the pause exactly as much as one that is. Saying "there are
-        others" while listing only the linked ones is not the scope; it is the admission that the
-        scope was not shown.
-
-        It costs no extra board call. The Pipeline listing is read once for the document and this
-        publishes what it holds, rather than filtering it down to the sprints named beside it.
-
-        Product and Issue records are not cards here, and that is the board's own rule rather than
-        a judgement of this read: they live on the same board and in a column, but a Product or an
-        Issue never takes a claim or a task transition
-        (`ummanu.tasks._TYPED_RECORD_TYPES`), so a pause reaches no such record and listing one
-        as inside its scope would be the same misdescription in the other direction.
-
-        The sprint is the relationship the listing itself carries, and it is `null` for a card no
-        sprint holds -- never the empty string, and never omitted.
+        The whole board is the scope: a drain stops claiming a Ready card whether or not a sprint
+        holds it. Product and Issue records (`ummanu.tasks._TYPED_RECORD_TYPES`) are excluded, since
+        no pause reaches them.
         """
 
         def from_listing(linked: dict[str, list[dict[str, Any]]]):
@@ -383,11 +268,7 @@ class PauseSections(SectionSet):
 
 
 def _flag_state(state: dict[str, Any]) -> dict[str, Any]:
-    """The pause flag as the `state` section publishes it, from the rules that already own it.
-
-    Called inside the source read, so every conversion that can fail on a semantically corrupt flag
-    fails where the failure becomes an unavailable source rather than an exception past the seam.
-    """
+    """The pause flag as the `state` section publishes it; called inside the source read."""
     mode = normalize_pause_mode(state.get("mode"))
     stopped_worker = _refs(state.get("stopped_worker"))
     stopped_reviewer = _refs(state.get("stopped_reviewer"))
@@ -409,7 +290,7 @@ def _flag_state(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _refs(value: Any) -> list[str]:
-    """One of the flag's head lists. A value that is not a list of references is not one."""
+    """One of the flag's head lists; raises unless it is a list of references."""
     if value is None:
         return []
     if not isinstance(value, list) or any(not isinstance(entry, str) for entry in value):
@@ -421,19 +302,14 @@ def _open(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if str(row.get("status") or "") == "open"]
 
 
-#: One instance is enough: no section holds state, and the set exists to be enumerated as much as
-#: to be called.
+#: Stateless; one instance serves every document.
 SECTIONS = PauseSections()
 
 
 class PauseReadLayer(ProtocolBoundary):
     """One installation's pause, read with no knowledge of who is asking.
 
-    Construction does no I/O, as the other layers' does not. Every read resolves the installation,
-    the flag, the dispatcher's state and the boards when it is called.
-
-    `board_client` and `clock` are the seams a test -- or a transport with its own connection policy
-    -- supplies directly. Neither is a mode: the same code path runs against the live installation.
+    Construction does no I/O. `board_client` and `clock` are seams for tests or transports, not modes.
     """
 
     def __init__(
@@ -454,9 +330,7 @@ class PauseReadLayer(ProtocolBoundary):
     def pause_state(self) -> dict[str, Any]:
         """Whether the pipeline is paused, in what mode, since when, and what is behind its cards.
 
-        The read `ummanu pause-status` answers with. It writes nothing, takes no lock, and starts,
-        stops and wakes nothing: it reads the flag, the dispatcher's durable state and the pid
-        heartbeats those records name, and reports them.
+        Writes nothing, takes no lock, and starts, stops or wakes nothing.
         """
         now = self._clock()
         report, installation = self._installation(now=now)
@@ -478,15 +352,9 @@ class PauseReadLayer(ProtocolBoundary):
         )
 
     def pause_scope(self) -> dict[str, Any]:
-        """What a pause command would reach, answered before the command is issued.
+        """What a pause command would reach: `pause_state` plus open sprints, Pipeline cards and heads.
 
-        Everything `pause_state` says, plus what is inside the scope: the open sprints, their cards,
-        how many Pipeline cards belong to no open sprint, and the heads that are running now. The
-        two statements beside it are the point of the read as much as the lists are -- a drain
-        stops none of those heads, and what a freeze would stop instead is a different command.
-
-        It is a read in the full sense of this layer: no flag is written, the production tick lock is
-        not taken, no head is stopped, started or woken, and nothing is scheduled.
+        A pure read: no flag write, no tick lock, no head started, stopped or woken.
         """
         now = self._clock()
         report, installation = self._installation(now=now)
@@ -545,16 +413,9 @@ class PauseReadLayer(ProtocolBoundary):
     def _installation(self, *, now: float) -> tuple[InstanceReport | None, Reading]:
         """The installation config as a source, and the refusal only it can force.
 
-        The same shape the sprint reads use, for the same reason: with an explicit data directory a
-        config that does not validate takes away only what it owns, and the flag and the
-        dispatcher's state are still read. Without one there is nothing left to locate them with.
-
-        The refusal is `validation` and not `backend_unavailable`, and that is a compatibility
-        promise rather than a taste: `ummanu pause-status` reached this installation through
-        `runtime_from_args`, whose `invalid_instance` is a `DispatcherError` with exit status 2, and
-        an operator or a script that reads that status must keep reading it now that the command is
-        a client of this layer. A config that does not validate is the caller naming an installation
-        that is not one; nothing of this installation refused.
+        With an explicit data directory, an invalid config removes only what it owns. Without one,
+        the refusal is `validation` (not `backend_unavailable`), keeping the exit status 2 that
+        `runtime_from_args`' `invalid_instance` gave `ummanu pause-status`.
         """
 
         def produce() -> tuple[InstanceReport, dict[str, Path]]:
@@ -582,9 +443,7 @@ class PauseReadLayer(ProtocolBoundary):
         if reading.answered:
             report, paths = reading.value
             return report, Reading(SOURCE_INSTALLATION, reading.source, paths)
-        # The refusal is raised outside the span on purpose: it is this layer answering the caller,
-        # not a source failing, and a broad catch that swallowed it would answer a document about an
-        # installation nobody could locate.
+        # Raised outside the span: this is the layer answering the caller, not a source failing.
         if self._data_dir is None:
             raise ValidationRefused(str(reading.source.reason))
         return None, reading
@@ -601,14 +460,10 @@ class PauseReadLayer(ProtocolBoundary):
     # -- the sources --------------------------------------------------------------------------
 
     def _flag(self, data_dir: Path, *, now: float) -> Reading:
-        """The pause flag, read once through the class the production tick reads it with.
+        """The pause flag, read through `ProductionPause` as the production tick reads it.
 
-        `ProductionPause.load` answers `{}` for a flag that is not there -- which is the pipeline
-        running, an answer and not a refusal -- and marks a flag it could not read or parse as
-        corrupt. That corrupt marking is this source refusing: what the flag says is not
-        established, so no section may claim it. The reason states the consequence the product has
-        already decided for that case, which is a rule of `ProductionPause` and not a claim of this
-        read: an unreadable flag is treated as a freeze by every tick until it is repaired.
+        A missing flag (`{}`) means running. A corrupt one is this source refusing; the reason says
+        that every tick treats an unreadable flag as a freeze until it is repaired.
         """
         flag = ProductionPause(data_dir)
 
@@ -625,9 +480,7 @@ class PauseReadLayer(ProtocolBoundary):
                     f"the pause flag could not be read: {flag.path}. Until it is repaired every "
                     "production tick reads an unreadable flag as a freeze and advances nothing"
                 )
-            # Any other fault, and it must not borrow the sentence above: the file parses, so the
-            # tick keeps reading the same flag and behaving by it. What is unestablished is what the
-            # flag says here, not what the pipeline does.
+            # The file parses, so the tick still behaves by it: only what it says is unestablished.
             return (
                 f"the pause flag parses but does not hold a pause state: {flag.path} "
                 f"({_reason(exc)}). The production tick reads the same file, so what could not be "
@@ -637,11 +490,9 @@ class PauseReadLayer(ProtocolBoundary):
         return _source(SOURCE_PAUSE, produce, refusal=refusal, now=now, evidence=flag.path)
 
     def _production(self, data_dir: Path, *, now: float) -> Reading:
-        """The dispatcher's durable production state, read once for the document.
+        """The dispatcher's production state; the `unavailable` phase is this source refusing.
 
-        `ProductionState.load` reports a state it could not read as the `unavailable` phase -- the
-        same predicate `pause` and `resume` branch on -- and that is this source refusing. A refusal
-        is "nobody could say which heads are up", never "no head is up".
+        A refusal means nobody could say which heads are up, never that none is.
         """
         state = ProductionState(data_dir)
 
@@ -652,9 +503,8 @@ class PauseReadLayer(ProtocolBoundary):
             return _Dispatcher(
                 phase=str(payload.get("phase") or "new"),
                 owner=str(payload.get("owner") or ""),
-                # Every conversion of the durable document is inside this span, records included:
-                # `DispatcherRecord.from_json` refuses record shapes this release does not store,
-                # and that refusal is this source failing to answer, not an exception for a caller.
+                # Record conversion is inside the span: a shape `DispatcherRecord.from_json`
+                # refuses is this source not answering.
                 heads=head_lines(state.records(payload)),
                 observers=observer_snapshot(payload),
             )
@@ -676,9 +526,7 @@ class PauseReadLayer(ProtocolBoundary):
     ) -> tuple[Reading, Reading]:
         """The sprint board and the Pipeline listing, as two sources that fail apart.
 
-        `SprintReader.list(create=False)` and `linked_cards`, exactly as the sprint reads take them:
-        a read of this layer creates no board, and the two calls are two board passes that can fail
-        independently -- an installation without a Pipeline must not lose its open sprints.
+        Read with `create=False`, so no board is created.
         """
         evidence = data_dir / "board" / "cards.ndjson"
         sprints = _source(
@@ -699,12 +547,7 @@ class PauseReadLayer(ProtocolBoundary):
 
     @staticmethod
     def _marks(read: SourceSet, keys: tuple[str, ...]) -> dict[str, Any]:
-        """The availability of every source of the document, said once for the document.
-
-        Under `sources` rather than beside the sections, because two of these sources are named the
-        same as the sections they feed -- `sprints` and `cards` -- and a mark that overwrote its own
-        section would answer "which sprints are in the scope" with an availability record.
-        """
+        """Every source's availability, under `sources` so a mark never overwrites a same-named section."""
         return {key: read.mark(key) for key in keys}
 
     def _client(self) -> Any:
@@ -720,13 +563,7 @@ class PauseReadLayer(ProtocolBoundary):
 
 
 def extent() -> dict[str, Any]:
-    """Property 1 as a field, on every document, read from no source at all.
-
-    Not a section, for the reason the sprint delivery document's `acceptance` is not one: it is not
-    established by anything on this installation. It is what the pause is, and it is stated whatever
-    every source did -- including on a document where every source refused, which is exactly when a
-    reader most needs to know that what they are looking at is global.
-    """
+    """Property 1 as a field, read from no source, so it is present even when every source refused."""
     return {"scope": "pipeline", "per_sprint": False, "statement": PIPELINE_WIDE}
 
 

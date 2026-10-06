@@ -1,21 +1,9 @@
 """One shape for "did this source answer, and if not, why, and how old is what we have".
 
-Every snapshot this layer returns is assembled from several independent sources -- the
-installation health collector, the project registry, the board, the dispatcher's own durable
-state, the event journal -- and they fail apart. A dashboard that gets one object with a missing
-key cannot tell "there are no running agents" from "the file that would say so could not be read",
-and that difference is the whole reason an operator opens a dashboard.
-
-So every section of every snapshot carries one of these, always, with the same four fields:
-
-``state``            ``available`` or ``unavailable``; never absent, never inferred from emptiness
-``reason``           why an unavailable source could not answer, in plain words; null when it did
-``observed_at``      when the value in the snapshot was true
-``data_age_seconds`` how old that value is, in seconds, or null when nothing dated it
-
-For an available source, ``observed_at`` is the moment of the read and the age is 0. For one that
-refused, both describe the newest evidence still on disk behind it, so "unavailable" comes with
-"and what I am showing you instead is 40 minutes old" rather than with silence.
+Snapshot sources fail apart, so every section carries a `Source`: ``state`` (``available`` or
+``unavailable``, never inferred from emptiness), ``reason``, ``observed_at`` and
+``data_age_seconds``. An available source is dated at the read with age 0; an unavailable one is
+dated by the newest evidence still on disk. See docs/PROTOCOLS.md "Sources fail apart".
 """
 
 from __future__ import annotations
@@ -25,43 +13,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ummanu.head_registry import HeadRegistryConfigError
-from ummanu.sprint_observer import ObserverMetadataError
-from ummanu.tasks import TaskError
-
 AVAILABLE = "available"
 UNAVAILABLE = "unavailable"
-
-#: What a source read may answer with instead of a value, in one place every layer reads it from.
-#:
-#: The list is deliberately wider than "the file was not there" or "the bytes were not JSON". A
-#: durable document of this installation can be perfectly readable and still not be convertible into
-#: the state a read reports -- a production record whose `attempt_round` is the string
-#: `"not-an-integer"`, a pause flag whose `stopped_worker` is the number `1` -- and the conversion
-#: raises `ValueError`, `TypeError` or `KeyError` where a missing file raises `OSError`. Reaching a
-#: caller, every one of them means the same thing: *this source could not answer*. So each becomes an
-#: unavailable `Reading` rather than an exception, and the section built from it claims nothing.
-#:
-#: It lives here rather than in each layer because it is one rule about sources, and two hand-kept
-#: lists of "what a refused source can raise" drift the first time a new durable document is read
-#: through one of them. `ummanu.webproto.sprint_reads` catches exactly this tuple.
-#:
-#: A list is still a list, and this one drifted: `DispatcherError`, which
-#: `DispatcherRecord.from_json` raises for a record shape a release does not store, was never in it.
-#: So `ummanu.webproto.pause_reads` no longer enumerates at all -- its source reads catch
-#: everything raised while reading and converting one durable document, because the *span* is what
-#: says "this source could not answer" and a span cannot be forgotten the way an entry can. This
-#: tuple is kept for the layer that still reads by it rather than being widened again.
-SOURCE_FAILURES: tuple[type[BaseException], ...] = (
-    TaskError,
-    HeadRegistryConfigError,
-    ObserverMetadataError,
-    OSError,
-    ValueError,
-    KeyError,
-    TypeError,
-)
-
 
 def isoformat(moment: float) -> str:
     """The journal's own UTC spelling, so timestamps compare as strings across snapshots."""
@@ -91,11 +44,9 @@ def available(now: float) -> Source:
 
 
 def unavailable(reason: str, *, now: float, evidence: Path | None = None) -> Source:
-    """A refusal, dated by the newest evidence still readable behind it.
+    """A refusal, dated by the mtime of ``evidence`` (the file the section would come from).
 
-    ``evidence`` is the file the section would have been built from. Its modification time is the
-    only honest answer to "how old is what you are showing me" when the reader itself failed, and a
-    file that is not there at all dates nothing, so both fields stay null.
+    A missing evidence file dates nothing, so both fields stay null.
     """
     stamped: float | None = None
     if evidence is not None:

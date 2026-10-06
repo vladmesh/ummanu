@@ -1,13 +1,10 @@
 """The PO head's sessions for the dashboard: list, read, create, send, stop, close, rename.
 
-A thin client. Reads are direct board-store reads (`ummanu.po.store`) plus the PO service's queue
-directory for messages not yet taken; every write — create, send, stop, close, rename — goes to the PO service
-over its local socket (`ummanu.po.client`). The web holds no runner and starts no turn process, so
-restarting it touches no turn. Every rule about turns — one running per session, the queue, how a stop
-settles, what reaches the feed — and about request ids stays in the service, the runner and the store;
-this layer checks the model and effort lists and translates their vocabulary into this package's typed
-codes. When the service does not answer, a write is refused as "the PO service is not running" and
-nothing is written.
+A thin client: reads go to the board store (`ummanu.po.store`) and the PO service's queue
+directory; every write goes to the PO service over its socket (`ummanu.po.client`). The web runs no
+turn; turn, queue and request-id rules stay in the service and store. This layer only checks the
+model and effort lists and maps failures to typed codes. An unreachable service refuses a write
+with nothing written.
 """
 
 from __future__ import annotations
@@ -58,10 +55,10 @@ from ummanu.webproto.errors import (
 
 
 class PoLayer(ProtocolBoundary):
-    """One installation's PO sessions. Construction does no I/O; `store`, `client`, `models` and `efforts` are test seams.
+    """One installation's PO sessions; construction does no I/O.
 
-    A layer given `models` and no `efforts` offers the product's default efforts rather than reading
-    `instance.yaml` for them.
+    `store`, `client`, `models` and `efforts` are test seams; with `models` and no `efforts`, the
+    product's default efforts are offered.
     """
 
     def __init__(
@@ -123,8 +120,7 @@ class PoLayer(ProtocolBoundary):
     def po_session(self, session_id: str) -> dict[str, Any]:
         """The session, its turns and feed from the store, and its messages still in the service's queue.
 
-        `efforts` is what the installation offers per CLI, so "new session" from a session stored with
-        `default` can name the effort the new one opens at; an unreadable config offers none.
+        `efforts` is what the installation offers per CLI (none on an unreadable config).
         """
         store = self._store_or_refuse()
         session = self._store(lambda: store.session(session_id))
@@ -150,10 +146,9 @@ class PoLayer(ProtocolBoundary):
         }
 
     def po_session_titles(self, session_ids: Iterable[str]) -> dict[str, Any]:
-        """The title and state of each named session a card page links to (secretary-1811).
+        """The title and state of each named session a card page links to.
 
-        A session the store no longer holds is left out, so a page draws its short id; a store that
-        does not answer refuses the whole call, and the page says the titles are unavailable.
+        A session the store no longer holds is left out; a store that does not answer refuses the call.
         """
         store = self._store_or_refuse()
         sessions: dict[str, dict[str, Any]] = {}
@@ -174,8 +169,7 @@ class PoLayer(ProtocolBoundary):
     def _queued(self, session_id: str) -> list[dict[str, Any]]:
         """Messages the PO service holds for this session and has not started, oldest first.
 
-        The queue directory is read directly, as the store is; an unreadable one reads as empty rather
-        than hiding the feed.
+        An unreadable queue directory reads as empty rather than hiding the feed.
         """
         try:
             waiting = PoQueue(self._resolved_data_dir()).pending(session_id)
@@ -199,8 +193,8 @@ class PoLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """One session per request id (`PoStore.claim_session`); a repeat answers the same session.
 
-        `effort` is one the installation offers for `cli` (`require_explicit_effort`: none, or `default`,
-        is refused); it is bound to the request id with the CLI and the model.
+        `effort` must be one offered for `cli` (`require_explicit_effort`); it is bound to the request
+        id with the CLI and the model.
         """
         request_id = _required(request_id, "request_id")
         models = self._model_list()
@@ -232,10 +226,8 @@ class PoLayer(ProtocolBoundary):
     def po_send(self, *, request_id: str, session_id: str, text: str) -> dict[str, Any]:
         """One message into the PO service's queue per request id, bound to this session and this exact text.
 
-        The service answers once the message is on disk: `queued` while it waits for the session's
-        running turn, else the turn it became (`seq`, `state`). A repeat of the same form answers with
-        what the first submission made — still queued, or the turn running, completed, or failed with
-        its reason — and queues and starts nothing. The id reused for anything else is refused.
+        Answers `queued`, or the turn it became (`seq`, `state`). A repeat answers what the first
+        submission made and starts nothing; the id reused for anything else is refused.
         """
         request_id = _required(request_id, "request_id")
         if not str(text or "").strip():
@@ -277,8 +269,7 @@ class PoLayer(ProtocolBoundary):
     def po_close(self, *, session_id: str) -> dict[str, Any]:
         """Close a session as the owner (`PoStore.close_session`); already closed answers it unchanged.
 
-        A running turn, or a message still queued for the session, is `owner_conflict` and nothing is
-        written. No request id: a close repeated is the same close.
+        A running turn or queued message is `owner_conflict`, nothing written. Idempotent, no request id.
         """
         client = self._client_or_refuse()
         self._store(
@@ -292,8 +283,7 @@ class PoLayer(ProtocolBoundary):
     def po_rename(self, *, session_id: str, title: str) -> dict[str, Any]:
         """Set the session's title (`PoStore.set_title`), open or closed; an empty title clears it.
 
-        No request id: a rename repeated sets the same value. A title the store refuses is a
-        validation refusal carrying its reason.
+        Idempotent, no request id; a title the store refuses is a validation refusal.
         """
         client = self._client_or_refuse()
         renamed = self._store(

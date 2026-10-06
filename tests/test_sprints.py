@@ -20,10 +20,12 @@ from tests.sprint_close_fixtures import (
     init_state_repo,
 )
 from ummanu import sprints
+from ummanu.board.models import EntityKind
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.steward_reports import StewardReportBoard
 from ummanu.cli import main
 from ummanu.config import load_config
+from ummanu.dispatch.cleanup import CleanupJournal
 from ummanu.knowledge_write import list_knowledge_documents
 from ummanu.product_issues import ProductIssueStore
 from ummanu.sprint_close import parse_close_decisions
@@ -3527,6 +3529,114 @@ class SprintCloseDecisionTests(SprintFixture):
             f"archived when sprint {ref} closed: merged in the last hour of the sprint",
             "\n".join(self.record_comments(landed)),
         )
+
+    def test_close_and_retry_leave_previously_archived_cards_and_cleanup_unchanged(self) -> None:
+        ref = self._open(issues=["issue:open"])
+        cards = {}
+        for name in ("drop", "retained", "active"):
+            cards[name] = self.tasks.create(
+                role="observer", actor="observer", project="ummanu", task_type="code",
+                title=name, description=f"exact {name} description\nКириллица", target="ready",
+                sprint=ref, request_id=f"history-close-create-{name}",
+            )["task"]["ref"]
+        self.tasks.move(
+            role="po", actor="operator", reference=cards["retained"], target="done",
+            reason="completed before close", sprint_override=True,
+            sprint_override_reason="PO records the completed work",
+            request_id="history-close-done",
+        )
+        archived = {cards["drop"], cards["retained"]}
+        for reference in sorted(archived):
+            self.tasks.archive(
+                role="po", actor="operator", reference=reference, reason="archived before close",
+                request_id=f"history-close-archive-{reference}",
+            )
+        reader = TaskReader(self.client)
+        cleanup = CleanupJournal(Path(self.tmp.name))
+
+        def archived_state():
+            intents = cleanup.read()["intents"]
+            return {
+                reference: {
+                    "task": reader.show(reference),
+                    "comments": self.record_comments(reference),
+                    "events": self.tasks.audit.events(reference=reference),
+                    "cleanup": {key: intent for key, intent in intents.items()
+                                if intent["task"]["ref"] == reference},
+                }
+                for reference in archived
+            }
+
+        def cli_history(*flags):
+            output = io.StringIO()
+            with (mock.patch("ummanu.task_commands.card_client", return_value=self.client),
+                  contextlib.redirect_stdout(output)):
+                code = main(["task", "list", "--instance", str(self.instance),
+                             "--sprint", ref, *flags])
+            self.assertEqual(code, 0, output.getvalue())
+            return json.loads(output.getvalue())
+
+        before = archived_state()
+        for name, state in (("drop", "ready"), ("retained", "done")):
+            saved = before[cards[name]]
+            self.assertEqual(saved["task"]["description"], f"exact {name} description\nКириллица")
+            self.assertEqual((saved["task"]["state"], saved["task"]["closed"]), (state, True))
+            self.assertEqual(sum(event["kind"] == "archived" for event in saved["events"]), 1)
+            self.assertEqual(len(saved["cleanup"]), 1)
+        self.assertEqual(self.sprint(ref)["status"], "open")
+        self.assertEqual({card["ref"] for card in cli_history()}, set(cards.values()))
+        self.assertEqual([card["ref"] for card in cli_history("--state", "done", "--project", "ummanu")],
+                         [cards["retained"]])
+        self.assertEqual(cli_history("--project", "other"), [])
+        self.assertEqual([card["ref"] for card in reader.list(sprint=ref)], [cards["active"]])
+        self.assertEqual([card["ref"] for card in self.sprint(ref, include_cards=True)["cards"]],
+                         [cards["active"]])
+        self.assertEqual(self.writer._host().read(EntityKind.SPRINT, ref).card_refs, (cards["active"],))
+        self.assertEqual(archived_state(), before)
+
+        decisions = {
+            "issues": list(KEEP_THE_ISSUE_OPEN["issues"]),
+            "cards": [{"ref": cards["active"], "verdict": "done", "reason": "last active target landed"}],
+        }
+        first = self.writer.close(
+            role="po", actor="operator", reference=ref, decisions=decisions,
+            request_id="history-close",
+        )
+        self.assertEqual(first["sprint"]["status"], "closed")
+        self.assertEqual(first["sprint"]["cards"], [])
+        self.assertEqual(first["disposed_tasks"], [cards["active"]])
+        self.assertEqual(first["archived_tasks"], [])
+        event = self.writer.audit.committed_event("history-close")
+        self.assertEqual(event["payload"]["targets"], {
+            "archive": [], "remaining": [cards["active"]],
+            "remaining_states": {cards["active"]: "ready"},
+        })
+        typed = self.writer.audit.committed_event("history-close:typed-close")
+        self.assertEqual(typed["related_refs"], ["product:ummanu", "issue:open"])
+        self.assertEqual(archived_state(), before)
+        self.assertEqual((reader.show(cards["active"])["state"], reader.show(cards["active"])["closed"]),
+                         ("done", True))
+        self.assertIn("[po]\ndone when sprint " + ref + " closed: last active target landed",
+                      self.record_comments(cards["active"]))
+        self.assertEqual({card["ref"] for card in cli_history()}, set(cards.values()))
+        self.assertEqual({item["ref"] for item in cleanup.summary(sprint=ref)}, set(cards.values()))
+        self.assertEqual(len(cleanup.summary(sprint=ref)), 3)
+        events_after_close = self._events()
+        cleanup_after_close = cleanup.read()
+        active_after_close = reader.show(cards["active"])
+        active_comments_after_close = self.record_comments(cards["active"])
+        with mock.patch.object(self.writer, "_close_targets", side_effect=AssertionError("reconstructed targets")):
+            replay = self.writer.close(
+                role="po", actor="operator", reference=ref, decisions=decisions,
+                request_id="history-close",
+            )
+        self.assertEqual(replay, first)
+        self.assertEqual(archived_state(), before)
+        self.assertEqual(self._events(), events_after_close)
+        self.assertEqual(cleanup.read(), cleanup_after_close)
+        self.assertEqual(reader.show(cards["active"]), active_after_close)
+        self.assertEqual(self.record_comments(cards["active"]), active_comments_after_close)
+        self.assertEqual(self.transaction_state(), {"ok": True, "pending": 0})
 
     def test_the_observer_closes_its_own_sprint_end_to_end_in_its_own_name(self) -> None:
         """secretary-1765: the observer bound to its sprint closes it on a decisions file, on SQL.

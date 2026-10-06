@@ -21,9 +21,10 @@ from pathlib import Path
 
 from ummanu.dispatch.bootstrap import runtime_from_args
 from ummanu.dispatch.head_status import head_status
+from ummanu.dispatch.pause import PAUSE_MODES, normalize_pause_mode
 from ummanu.dispatch.types import DispatcherError, HostError
 from ummanu.runtime.codex_home import bound_data_dir
-from ummanu.dispatch.pause import PAUSE_MODES, normalize_pause_mode
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.tasks import TaskError
 from ummanu.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND
 from ummanu.webproto.errors import ReadError
@@ -71,8 +72,9 @@ def add_pause_commands(subparsers) -> None:
     )
     add_common(pause)
     pause.add_argument("mode", choices=(*PAUSE_MODES, "soft", "hard"))
-    pause.add_argument("--reason", help="why the pipeline is paused; required")
-    pause.add_argument("--reason-file")
+    reason = pause.add_mutually_exclusive_group()
+    reason.add_argument("--reason", help="why the pipeline is paused; required")
+    reason.add_argument("--reason-file")
     pause.add_argument(
         "--exclude-workspace",
         action="append",
@@ -122,7 +124,7 @@ def add_head_status_command(subparsers) -> None:
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--instance", required=True)
+    add_instance_argument(parser)
     # Same pair, same order, as `ummanu task` (task_commands._add_data_dir_args) and as the
     # background agents' production-telemetry reader: an installation that
     # points its data plane elsewhere through the environment must move the dispatcher's writes

@@ -1,12 +1,8 @@
-"""The interactive head's permanent workspace in the installation's data directory.
+"""The interactive head's permanent workspace (`<data_dir>/interactive`), the cwd of `ummanu shell`.
 
-`ummanu shell` starts the owner's interactive head with this directory as its working directory.
-Upgrade and recover materialize it the way they materialize the PO workspace (`ummanu.po.workspace`):
-an `AGENTS.md` composed of the shared part shipped with the product and the personal part kept in the
-live root, and a one-line `CLAUDE.md` pointing at it. Codex reads `AGENTS.md` from its cwd as it is.
-
-The persona reaches only this directory. No other workspace and nothing under the owner's home is
-written here; that boundary is the reason the persona lives in a workspace of its own.
+Upgrade and recover materialize it like the PO workspace (`ummanu.po.workspace`): an `AGENTS.md`
+composed of the shipped shared part plus the live root's personal part, and a one-line `CLAUDE.md`
+pointing at it. The persona is written only here, never to other workspaces or the owner's home.
 """
 
 from __future__ import annotations

@@ -443,6 +443,49 @@ class TaskReaderTests(BoardFixture, CardStoreCase):
     def board_read(self) -> TaskReader:
         return self.reader
 
+    def test_cli_closed_sprint_list_includes_archived_done_and_keeps_filters(self) -> None:
+        with self.client.transaction():
+            ensure_sprint_row(self.client, "sprint:closed-list", status="closed")
+            ensure_sprint_row(self.client, "sprint:open-list")
+        for ref, sprint, archived in (("ummanu-9901", "sprint:closed-list", True),
+                                       ("ummanu-9902", "sprint:closed-list", False),
+                                       ("ummanu-9903", "sprint:open-list", False)):
+            self.add_card(reference=ref, title="Sprint list card", state="done" if archived else "ready",
+                          archived=archived, metadata={"project": "ummanu", "type": "code", "sprint_ref": sprint})
+        self.rpc.clear()
+        self.rpc_batches.clear()
+        output = io.StringIO()
+        with (mock.patch("ummanu.task_commands.card_client", return_value=self.client),
+              contextlib.redirect_stdout(output)):
+            code = main(["task", "list", "--instance", "/fixture", "--sprint", "sprint:closed-list"])
+        self.assertEqual(code, 0)
+        cards = json.loads(output.getvalue())
+        self.assertEqual({c["ref"] for c in cards}, {"ummanu-9901", "ummanu-9902"})
+        done = next(c for c in cards if c["ref"] == "ummanu-9901")
+        self.assertTrue(done["closed"])
+        self.assertEqual(done["state"], "done")
+        self.assertEqual(done["project"], "ummanu")
+        self.assertEqual(len(self.rpc_batches), 1)
+        self.assertFalse(self.board_calls("getAllComments"))
+        self.assertFalse(self.board_writes())
+        for flags, expected in (
+            (["--state", "done", "--project", "ummanu"], {"ummanu-9901"}),
+            (["--project", "other"], set()),
+        ):
+            output = io.StringIO()
+            with (mock.patch("ummanu.task_commands.card_client", return_value=self.client),
+                  contextlib.redirect_stdout(output)):
+                code = main(["task", "list", "--instance", "/fixture",
+                             "--sprint", "sprint:closed-list", *flags])
+            self.assertEqual(code, 0)
+            self.assertEqual({c["ref"] for c in json.loads(output.getvalue())}, expected)
+        self.assertEqual([c["ref"] for c in self.reader.list(sprint="sprint:closed-list")], ["ummanu-9902"])
+        self.assertEqual(self.reader.list(sprint="sprint:closed-list", states={"done"}), [])
+        self.assertEqual(self.reader.list(sprint="sprint:closed-list", project="other"), [])
+        self.assertEqual([c["ref"] for c in self.reader.list(sprint="sprint:open-list")], ["ummanu-9903"])
+        self.assertNotIn("ummanu-9901", [c["ref"] for c in self.reader.list()])
+        self.assertEqual(self.client._query("SELECT status FROM sprints WHERE ref = %s", ("sprint:closed-list",)), [("closed",)])
+
     def test_list_normalizes_and_filters_deterministically(self) -> None:
         result = self.reader.list(states={"ready"}, project="ummanu")
 

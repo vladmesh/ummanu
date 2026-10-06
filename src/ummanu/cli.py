@@ -42,10 +42,7 @@ from ummanu.gate import run_gate
 from ummanu.head_health import (
     PROBE_BROKEN,
     PROBE_TIMED_OUT,
-    PROBE_TTL_SECONDS,
-    HeadHealth,
     HeadReadiness,
-    run_probe,
 )
 from ummanu.head_registry import HeadRegistryConfigError, installed_heads, read_source
 from ummanu.host import (
@@ -145,6 +142,10 @@ class DoctorInspection:
 
 class StructuredArgumentParser(argparse.ArgumentParser):
     """Keep public command validation in the same JSON envelope as handlers."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs["allow_abbrev"] = False
+        super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> None:
         self.exit(2, json.dumps({"error": {"code": "usage", "message": message}}) + "\n")
@@ -549,7 +550,7 @@ def _add_instance(
     help: str | None = None,
     data_dir_help: str | None = None,
 ) -> None:
-    parser.add_argument("--instance", required=True, help=help)
+    add_instance_argument(parser, help=help)
     if data_dir:
         parser.add_argument("--data-dir", help=data_dir_help)
 
@@ -1345,61 +1346,6 @@ def _divergence_findings(production: dict[str, object]) -> list[str]:
     return findings
 
 
-def resource_probe_readiness(report, *, inspect_live: bool) -> list[HeadReadiness]:
-    """One verdict per resource this installation's head registry describes a probe for.
-
-    `ummanu doctor` asks a different question from the tick. The tick asks whether a claim may
-    be launched; doctor asks whether the gate that answers that is working at all — because a probe
-    that cannot be launched used to be indistinguishable from a resource nobody had an opinion
-    about, and the claims then went through ungated and silently (`issue:6cfbbb9b`, P0).
-
-    Read-only in both directions: a fresh verdict the dispatcher already wrote is reused rather than
-    re-probed (probes cost real provider tokens), a stale or absent one is probed here without ever
-    writing the dispatcher's TTL cache, and `--offline` reports only what is recorded, since a probe
-    cannot be run without reaching the provider. An installation with no head snapshot yet has no
-    resources to report on, and a broken snapshot is already named by `ummanu status`.
-    """
-    if report.data_dir is None:
-        return []
-    instance_dir = report.instance_path.parent
-    try:
-        resources = installed_heads(instance_dir).get("resources", {})
-    except HeadRegistryConfigError:
-        return []
-    if not isinstance(resources, dict):
-        return []
-    recorded = HeadHealth(None, report.data_dir).snapshot()
-    now = time.time()
-    verdicts: list[HeadReadiness] = []
-    for name in sorted(resources):
-        entry = resources[name] if isinstance(resources[name], dict) else {}
-        probe = str(entry.get("probe") or "")
-        if not probe:
-            continue
-        cached = _recorded_readiness(str(name), recorded, now)
-        if cached is not None:
-            verdicts.append(cached)
-        elif inspect_live:
-            verdicts.append(run_probe(str(name), probe, now))
-    return verdicts
-
-
-def _recorded_readiness(resource: str, recorded: dict[str, object], now: float) -> HeadReadiness | None:
-    """The dispatcher's own verdict for this resource while it is still inside the probe TTL."""
-    entry = recorded.get(resource)
-    if not isinstance(entry, dict):
-        return None
-    try:
-        checked_at = float(entry.get("checked_at") or 0)
-    except (TypeError, ValueError):
-        return None
-    if now - checked_at >= PROBE_TTL_SECONDS:
-        return None
-    return HeadReadiness(
-        resource, str(entry.get("status") or "unknown"), str(entry.get("reason") or ""), checked_at, True
-    )
-
-
 def _probe_finding(readiness: HeadReadiness) -> str:
     """Name a broken probe as the gating failure it is, not as a red resource.
 
@@ -1411,23 +1357,6 @@ def _probe_finding(readiness: HeadReadiness) -> str:
         f"resource {readiness.resource} probe cannot run ({readiness.reason}); "
         "claims on this resource are not gated by health until it is repaired"
     )
-
-
-def print_resource_probes(readiness: list[HeadReadiness]) -> list[HeadReadiness]:
-    """The probe of every resource, and separately the ones that could not be run at all."""
-    if not readiness:
-        return readiness
-    print()
-    print("resource probes: read-only")
-    for verdict in readiness:
-        age = " (recorded)" if verdict.cached else ""
-        print(f"  {verdict.resource}: {verdict.status}{age} - {verdict.reason}")
-    broken = [verdict for verdict in readiness if verdict.status == PROBE_BROKEN]
-    if broken:
-        print("resource probe findings:")
-        for verdict in broken:
-            print(f"  {_probe_finding(verdict)}")
-    return readiness
 
 
 def print_recovery_inventory(recovery: dict[str, object]) -> None:

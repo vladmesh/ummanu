@@ -1,55 +1,12 @@
-"""The one place a product run is allowed to exist for a card, and the order it decides in.
+"""The one gate a product run passes before it may exist for a card.
 
-Criterion 4 of secretary-1562 asks for a single owner of a card and names the failure it is
-guarding against: a product run must not become a second owner beside the production dispatcher,
-and it must not step into work an open sprint's observer is running. Two owners of one card is not
-a race to be locked out — it is two agents editing one workspace and two writers reporting on one
-attempt, and no lock repairs that after the fact.
-
-So there is one gate, it is this function, and **every** path that starts a head goes through it:
-`run_start` for the worker and `run_review` for the reviewer both call :func:`admit` before they
-build a workspace or spawn anything, and neither has a branch that skips it. It answers with a
-value the caller then uses (the card and its binding), so a caller cannot proceed without having
-asked — there is no "check" it could forget beside a "read" it could not.
-
-It decides in this order, and the order matters because each question is only meaningful once the
-one before it has been answered:
-
-1. **the card exists.** Everything below is about a card, so a reference the board does not hold is
-   `not_found` before anything else is asked;
-2. **its project is registered and enabled here.** A run provisions a workspace out of the
-   project's repository, and an unregistered project has no repository this installation owns;
-3. **no open sprint reserves that project.** This is the existing rule, read from the existing
-   index (`ummanu.sprints.active_sprint_projects`) that `TaskWriter._guard_sprint_write`
-   already authorises board writes against. A reserved project is a sprint's, and its observer
-   decides what runs in it — so the product run refuses rather than negotiating;
-4. **the card is not in the production dispatcher's lane.** The dispatcher claims `ready` cards and
-   holds `in_progress`, `validate`, `assessment` and `blocked` ones; a card in any of those is an
-   attempt somebody is running. What is left — the backlog — is where a product run may take a
-   card, and that is a fact about the card's state rather than a new register of ownership;
-5. **the dispatcher holds no durable record for it.** The state file is the dispatcher's own answer
-   to "am I running this card", read (never written) exactly as the read layer reads it. A card
-   whose column moved while an attempt is still recorded is still that attempt's;
-6. **this layer holds no run for it that is not over.** One product run per card at a time. A run
-   that is over is history and does not block the next one, which is what lets a review follow its
-   worker.
-
-   The fact this reads is `ProductRun.ended`, and it is the **only** fact about a run any branch of
-   this gate consults: whether the run is over, never how it ended. The two were one value until
-   secretary-1563 -- a card was freed by the run carrying a value in `(finished, process_failed)`,
-   so a run that was genuinely over but whose ending could only be named `source_unavailable` had
-   to be given a false one before its card could be freed. Told apart, this condition asks the
-   question it actually means, and no ending has to be invented to answer it.
-
-   This is also the whole of how an *unresolved* run fences a card, and deliberately so. A run
-   whose head could not be confirmed stopped is not over (:mod:`ummanu.webproto.lifecycle`),
-   so this condition already refuses the next run over it -- with no second register of ownership
-   and no new rule here. The failure that made this necessary got past this gate only because the
-   code that could not confirm a cleanup settled the run anyway; the repair is that it no longer
-   may, not that this gate learned a new question.
-
-Nothing here is a scheduler, a store or an audit of its own. Every fact it consults already has an
-owner elsewhere, and it consults them in a fixed order rather than re-deriving any of them.
+Both start paths (`run_start`, `run_review`) call :func:`admit` before building or spawning
+anything, and use the `Admission` it returns. Checks, in order: card exists, project registered and
+enabled, no open sprint reserves the project, card not in the dispatcher's lane, no dispatcher
+record for it, no run of this layer for it that is not over. The last check consults only
+`ProductRun.ended`, never how a run ended; a run whose head could not be confirmed stopped is not
+over, which is all that fences an unresolved run. Every fact read here is owned elsewhere.
+See docs/PROTOCOLS.md "One owner of a card".
 """
 
 from __future__ import annotations
@@ -63,10 +20,8 @@ from ummanu.tasks import ACTIVE_STATES, TaskError, TaskReader
 from ummanu.webproto.errors import OwnerConflict, TaskNotFound, ValidationRefused
 from ummanu.webproto.runs import ProductRun, RunStore
 
-#: The states in which a card belongs to the production pipeline. `ready` is what the dispatcher's
-#: claim pass takes; `ACTIVE_STATES` are the ones in which a card holds a workspace, a suspended
-#: worker or a running head; `blocked` is an attempt waiting on an observer decision. A product run
-#: takes a card from none of them.
+#: The states in which a card belongs to the production pipeline: `ready` (claimed), `ACTIVE_STATES`
+#: (workspace, suspended worker or running head) and `blocked` (waiting on an observer decision).
 DISPATCHER_LANE = frozenset({"ready", "blocked"}) | ACTIVE_STATES
 
 #: The states a product run may take a card from: the backlog, and only it.
@@ -81,8 +36,7 @@ class Admission:
     project: str
     card: dict[str, Any]
     binding: dict[str, Any]
-    #: The runs this card already has, oldest first, all of them over. `run_review` finds its
-    #: worker here.
+    #: The runs this card already has, oldest first, all over. `run_review` finds its worker here.
     runs: tuple[ProductRun, ...] = ()
 
     @property
@@ -173,9 +127,7 @@ def _refuse_dispatcher_lane(ref: str, state: str) -> None:
 def _refuse_dispatcher_record(ref: str, production_state: Path) -> None:
     """The dispatcher's own durable answer to "am I running this card", read and never written.
 
-    An unreadable state file is not "the dispatcher is running nothing": it is a source that could
-    not say, and starting a second owner on a maybe is exactly what this gate exists to prevent. So
-    it refuses, and names the file.
+    An unreadable state file refuses: it is a source that could not say, not "running nothing".
     """
     import json
 
@@ -202,14 +154,7 @@ def _refuse_dispatcher_record(ref: str, production_state: Path) -> None:
 
 
 def _refuse_open_run(ref: str, runs: tuple[ProductRun, ...]) -> None:
-    """The fence, decided by one fact: is each run of this card over.
-
-    `run.ended` and nothing else. Not the run's outcome value, not whether that value is one this
-    reader would call a success or a failure, and not the phase spelled out again here: a run is
-    over when the process it may have held is provably gone or was never spawned, and that is the
-    only property of a run that can free a card. Whatever a run ended *as* is a matter for whoever
-    reads it, and it has no vote here.
-    """
+    """Refuse while any run of this card is not over; decided by `run.ended` alone, never the outcome."""
     open_runs = [run for run in runs if not run.ended]
     if open_runs:
         names = ", ".join(f"{run.run_id} ({run.role})" for run in open_runs)

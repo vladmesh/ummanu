@@ -1,21 +1,11 @@
-"""`HeadRun`: one head's life, from the pane it was opened in to the initiator that ended it.
+"""`HeadRun`: one running head, from spawn to the initiator that ended it.
 
-`HeadSpec` says what a head *is*; this says that one of them is running, and it is the value the
-three operations hand each other. Four things about it are decisions rather than fields:
-
-  * **identity is its own value, not the pane handle.** Orca aliases the handle it returned at
-    create time while the pty stays exactly where it was, so the run has a `run_id` that nothing
-    about the pane can move, and `rebound` puts the new handle on the same run;
-  * **the lifecycle is four states and moves one way.** `spawned` has a pane, `working` has been
-    given its task, `finishing` is one somebody has asked to stop, and `exited` is one whose stop
-    was confirmed. A record in `finishing` is a stop begun and not confirmed. All four are history:
-    none of them says what the head is doing right now, and `working` in particular is not a busy
-    flag -- `HeadRuntime` owns the turn lease and the activity epoch that answer that;
-  * **who stopped it is recorded, and before the stop happens.** `finishing` cannot be entered
-    without an initiator. The first initiator is also the one that stays, because a refused stop
-    is retried by later ticks through other paths, so `finishing` is idempotent;
-  * **it is JSON, so it survives the dispatcher.** The process that spawned a head is not
-    necessarily the process that stops it.
+- Identity is `run_id`, never the pane handle; `rebound` moves a renamed handle onto the same run.
+- Lifecycle moves one way: `spawned` -> `working` (task given) -> `finishing` (stop asked) ->
+  `exited` (stop confirmed). It is history, not a busy flag; `HeadRuntime` owns the turn lease and
+  activity epoch.
+- `finishing` requires an initiator, recorded before the stop; the first one is kept on retries.
+- JSON round-trips, because the process that stops a head may not be the one that spawned it.
 """
 
 from __future__ import annotations
@@ -61,11 +51,7 @@ class HeadRunError(RuntimeError):
 
 @dataclass(frozen=True)
 class StopInitiator:
-    """Who ended a head, and why they said they were ending it.
-
-    A separate type rather than a string because it is the one fact a stop cannot be performed
-    without: `stop(run, initiator)` takes it positionally, so no call ends a head anonymously.
-    """
+    """Who ended a head, and why; `stop(run, initiator)` takes it positionally, so no stop is anonymous."""
 
     actor: str
     reason: str = ""
@@ -89,11 +75,10 @@ class StopInitiator:
 
 @dataclass(frozen=True)
 class HeadRun:
-    """One head that was started, as everything after the start has to see it.
+    """One started head, as everything after the start sees it.
 
-    Frozen, and every transition returns a new value: a run is written down between ticks. Equality
-    is deliberately structural, so two reads of the same written record compare equal; `same_run` is
-    what asks whether two values are the same *head*.
+    Frozen; transitions return new values. Equality is structural (two reads of one record are
+    equal); `same_run` asks whether two values are the same head.
     """
 
     run_id: str
@@ -140,11 +125,8 @@ class HeadRun:
 
     @property
     def settled(self) -> bool:
-        """Whether this head's end was confirmed, so nothing is owed to it any more.
-
-        Deliberately not `not running`: `finishing` is neither, and a caller that reads it as "finished
-        with" throws away the identity and the initiator of a stop that is still owed.
-        """
+        """Whether this head's end was confirmed. Not `not running`: `finishing` is neither, and still
+        owes a stop with its identity and initiator."""
         return self.lifecycle == EXITED
 
     def same_run(self, other: HeadRun) -> bool:
@@ -173,31 +155,22 @@ class HeadRun:
         return replace(self, fanout_policy=_fanout_policy_json(policy))
 
     def rebound(self, handle: str, *, leaf: str = "") -> HeadRun:
-        """The same run, addressed at the pane handle it has now.
-
-        Deliberately does not touch `run_id` or the lifecycle: a session manager that renamed a pane has
-        said nothing about the head in it.
-        """
+        """The same run at its current pane handle; `run_id` and lifecycle are unchanged."""
         return replace(self, handle=handle, leaf=leaf or self.leaf)
 
     def working(self) -> HeadRun:
-        """This head has been given its task, which is a fact about the past and stays true.
+        """Mark that this head was given its task: a fact about the past, not a busy flag.
 
-        Not a statement that a turn is running. A caller asking whether this head is busy asks its
-        runtime, which holds the lease that was granted for the turn and the epoch that moves when
-        the head is seen doing something; this value is still `working` long after that turn ended.
+        Whether a turn is running is the runtime's lease and activity epoch.
         """
         if self.lifecycle in (FINISHING, EXITED):
             raise HeadRunError(f"a head in {self.lifecycle} is not given more work")
         return replace(self, lifecycle=WORKING)
 
     def finishing(self, initiator: StopInitiator) -> HeadRun:
-        """Somebody has asked this head to stop, and this is who.
+        """Record who asked this head to stop, before the stop is attempted.
 
-        Recorded before the stop is attempted, so a stop that is refused or that outlives the dispatcher
-        leaves the initiator behind. Idempotent by initiator: the first actor to enter this state is the
-        one the record keeps, because overwriting would make the record name the last retry rather than
-        the decision that ended the head.
+        Idempotent: the first initiator is kept, so the record names the decision, not the last retry.
         """
         if not isinstance(initiator, StopInitiator):
             raise HeadRunError("a stop initiator is a StopInitiator")
@@ -255,13 +228,10 @@ def new_run_id() -> str:
 
 
 def _spec_json(spec: HeadSpec) -> dict[str, Any]:
-    """The launch shape the head started with, written out with the run.
+    """The launch shape the head started with, written with the run (the registry may change).
 
-    Written rather than re-resolved: the registry can be edited while a head is running.
-
-    Codex v1 provider identity uses the fixed projection in `runtime.head_run_binding`; it must not
-    grow when this persisted launch shape gains lifecycle fields such as memory_limit_mib.
-    `HeadRun.to_json` records runtime beside this block for legacy record compatibility.
+    Codex provider identity uses the fixed projection in `runtime.head_run_binding`, which must not
+    grow with this shape. `HeadRun.to_json` writes runtime beside this block for legacy compatibility.
     """
     result: dict[str, Any] = {
         "profile_id": spec.profile_id,
@@ -278,14 +248,10 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
 
 
 def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
-    """The recorded launch shape, with the backend that held it handed in beside it.
+    """The recorded launch shape, with the backend recorded beside it handed in.
 
-    `runtime` arrives separately because it is written beside the spec block rather than inside it;
-    see `to_json`. An absent one is a record written before heads had a choice of backend, and
-    every such head was an Orca-legacy one. Unlike the adapter it is not repaired by guessing —
-    absence *is* the answer. It is `RECORD_RUNTIME_WHEN_ABSENT` and not the profile default: a
-    record keeps what it meant when it was written, and a profile that names no runtime today is
-    a `local-pty` head that no record written before the key existed could describe.
+    An absent `runtime` predates the choice of backend and means `RECORD_RUNTIME_WHEN_ABSENT`, not
+    today's profile default: a record keeps what it meant when written.
     """
     if not isinstance(payload, dict):
         raise HeadRunError("a head run carries the spec it was launched from")
@@ -319,8 +285,7 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
 def _fanout_policy_json(payload: Any) -> dict[str, Any]:
     """Return one safe policy shape, never upgrading unknown history into an allow.
 
-    The evidence belongs to the run that was launched, and a recovery process has no authority to
-    manufacture it from today's registry or a screen transcript.
+    Evidence belongs to the launched run; recovery cannot manufacture it from the registry or a screen.
     """
     if not isinstance(payload, dict):
         return _unknown_fanout_policy("fan-out policy attestation is missing")

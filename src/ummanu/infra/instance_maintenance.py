@@ -64,9 +64,9 @@ def gc_command() -> list[str]:
     return [*overrides, "gc", "--auto", "--quiet"]
 
 
-def count_objects(instance_dir: Path) -> dict[str, int]:
+def count_objects(instance_dir: Path, prefix: list[str] | tuple[str, ...] = ()) -> dict[str, int]:
     """``git count-objects -v`` as integers: ``count`` is the loose objects, ``packs`` the packs."""
-    output = state_repo.git(instance_dir, ["count-objects", "-v"], label="count instance objects")
+    output = state_repo.git(instance_dir, [*prefix, "count-objects", "-v"], label="count instance objects")
     counts: dict[str, int] = {}
     for line in output.splitlines():
         key, _, value = line.partition(":")
@@ -249,22 +249,55 @@ def cleanup_docker() -> dict[str, Any]:
     return inventory.as_dict()
 
 
+def maintenance_target(instance_dir: Path) -> tuple[Path, Path, list[str]]:
+    """``(lock_root, repository, git_prefix)`` of the repository the run packs.
+
+    A live root that is still a Git work tree is packed itself, as before. A plain live root (the
+    exporter layout, docs/RECOVERY.md "Writers") has no repository of its own: its checkpoints land
+    in the exporter's bare snapshot repository (``offsite.snapshot_repo``), so that is the one that
+    accumulates loose objects and the one packed. The state-repo lock stays the live root's, which is
+    the lock the exporter takes around a cut. Raises :class:`ummanu.state_repo.StateRepoError` when
+    the live root is neither.
+    """
+    from ummanu.checkpoint import live_root_is_work_tree
+    from ummanu.config import DataDirError, instance_data_dir, instance_snapshot_repo
+
+    live = Path(instance_dir).expanduser().resolve()
+    if live_root_is_work_tree(live):
+        return live, state_repo.require_repo(live), []
+    try:
+        snapshot = instance_snapshot_repo(live, instance_data_dir(live))
+    except DataDirError:
+        raise state_repo.StateRepoError(
+            f"instance repo is not a git repository and names no snapshot repository: {live}"
+        ) from None
+    # The bare snapshot repository carries none of the live root's local packing controls
+    # (docs/RECOVERY.md), so the same memory bounds ride on the command line instead.
+    bounds = [argument for key, value in state_repo.PACKING_CONTROLS if key.startswith("pack.")
+              for argument in ("-c", f"{key}={value}")]
+    return live, snapshot, [*bounds, "--git-dir", str(snapshot)]
+
+
 def run(instance_dir: Path) -> dict[str, Any]:
     """One maintenance run. Raises :class:`ummanu.state_repo.StateRepoError` on a Git failure."""
-    instance = state_repo.require_repo(instance_dir)
+    lock_root, repo, prefix = maintenance_target(instance_dir)
+    if prefix and not repo.is_dir():
+        # The exporter creates its repository on the first cut; until then there is nothing to pack.
+        return {"instance": str(lock_root), "repository": str(repo), "skipped": "snapshot repository absent"}
     started = time.monotonic()
-    before = count_objects(instance)
-    state_repo.git(instance, gc_command(), label="instance gc", timeout=GC_TIMEOUT_SECONDS)
-    with state_repo.state_repo_lock(instance):
+    before = count_objects(repo, prefix)
+    state_repo.git(repo, [*prefix, *gc_command()], label="instance gc", timeout=GC_TIMEOUT_SECONDS)
+    with state_repo.state_repo_lock(lock_root):
         state_repo.git(
-            instance,
-            ["reflog", "expire", "--all"],
+            repo,
+            [*prefix, "reflog", "expire", "--all"],
             label="instance reflog expire",
             timeout=REFLOG_TIMEOUT_SECONDS,
         )
-    after = count_objects(instance)
+    after = count_objects(repo, prefix)
     return {
-        "instance": str(instance),
+        "instance": str(lock_root),
+        "repository": str(repo),
         "loose_objects": {"before": before.get("count"), "after": after.get("count")},
         "packs": {"before": before.get("packs"), "after": after.get("packs")},
         "duration_s": round(time.monotonic() - started, 3),

@@ -1,18 +1,10 @@
-"""What a provider said when it refused a head's turn or a resource probe, classified without secrets.
+"""Classify provider refusals of a head turn or resource probe, without secrets.
 
-One vocabulary for two readers (secretary-1799). The resource probe (`ummanu.head_health`, and the
-`openai-sub` probe in `resource_probe`) asks whether a refusal is the provider's or the account's.
-The dispatcher's wait tick asks whether a head's first turn ended on a provider error rather than on
-work, which is a provider verdict and not a stall (`dispatch.provider_failure`).
-
-In scope are the errors that say the provider, not the task, stopped the turn: an HTTP 401/403, a
-429, any 5xx (529 included), and a connection the client gave up on after its own retries
-("Reconnecting... 5/5", "exceeded retry limit", "stream disconnected before completion"). Anything
-else a turn can end with -- a context window, a tool failure, a model refusal -- is not classified
-here and keeps its old path.
-
-Every reader here is pure and takes already-parsed records or screen lines: nothing opens a file,
-and nothing returns provider text that was not first reduced to a bounded, secret-free summary.
+Shared by the resource probe (`ummanu.head_health`, `resource_probe`) and the dispatcher's
+first-turn check (`dispatch.provider_failure`). In scope: HTTP 401/403, 429, 5xx, and a connection
+the client gave up on after its own retries; anything else is not classified here. Readers are
+pure and return only bounded, secret-free summaries. See docs/PROTOCOLS.md "Provider failure on a
+head's first turn".
 """
 
 from __future__ import annotations
@@ -25,8 +17,7 @@ from typing import Any
 
 from ummanu.runtime.redact import scrub_secrets
 
-#: The kinds of provider error this module names. `auth` is a 401/403, `rate_limit` a 429, `server`
-#: a 5xx, `reconnect` a connection the client gave up on.
+#: `auth` = 401/403, `rate_limit` = 429, `server` = 5xx, `reconnect` = client gave up reconnecting.
 KIND_AUTH = "auth"
 KIND_RATE_LIMIT = "rate_limit"
 KIND_SERVER = "server"
@@ -34,8 +25,7 @@ KIND_RECONNECT = "reconnect"
 
 SUMMARY_LIMIT = 200
 
-# A status code is read only where the text says it is one, never from a bare number: a request id,
-# a port or a line count must not become a 503.
+# A status is read only where the text labels it one: a request id or port must not become a 503.
 _STATUS_PATTERNS = (
     re.compile(r"unexpected status\s+(\d{3})\b", re.IGNORECASE),
     re.compile(r"\bapi error:?\s*(\d{3})\b", re.IGNORECASE),
@@ -48,8 +38,7 @@ _STATUS_PATTERNS = (
     ),
 )
 _RECONNECT_RE = re.compile(r"reconnecting\.{2,3}\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
-# What a client prints once its own retries are spent. Only a message that ended a turn or a probe
-# is read with these, so they name a connection that gave up, not one that is still retrying.
+# Printed once a client's retries are spent; only read on a message that ended a turn or probe.
 _GAVE_UP_MARKERS = (
     "exceeded retry limit",
     "stream disconnected before completion",
@@ -73,8 +62,7 @@ _CLAUDE_ERROR_KINDS = {
     "overloaded_error": KIND_SERVER,
     "api_error": KIND_SERVER,
 }
-# Identifiers a provider echoes back that are either a secret or a handle on one: a masked or
-# partial key, and everything after the url/ray/request-id tail Codex appends.
+# Masked/partial keys, and the url/ray/request-id tail Codex appends.
 _KEY_RE = re.compile(r"\b(?:sk|rk|pk|sess)-[A-Za-z0-9*._\-]{3,}|\S*\*{4,}\S*")
 _TAIL_RE = re.compile(r"[,;]?\s*(?:url|cf-ray|request[ _-]?id|x-request-id)\s*[:=].*$", re.IGNORECASE)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -126,11 +114,10 @@ def kind_of_status(status: int | None) -> str:
 
 
 def classify_provider_error(text: str, *, status: int | None = None) -> ProviderError | None:
-    """Classify one provider message, or None when it is not a provider error this module names.
+    """Classify one provider message, or None when out of scope.
 
-    `status` is a status the caller already holds as data (Claude's `apiErrorStatus`); otherwise it
-    is read from the text. A status wins over the reconnect wording because it says more: a Codex
-    probe that reconnected five times and then got a 401 is a 401.
+    `status` is a caller-held status (Claude's `apiErrorStatus`), else read from the text. A status
+    wins over reconnect wording (reconnected five times, then 401, is a 401).
     """
     code = status if status is not None else status_code(text)
     kind = kind_of_status(code)
@@ -146,11 +133,9 @@ def classify_provider_error(text: str, *, status: int | None = None) -> Provider
 
 
 def summarize_provider_error(text: str, *, limit: int = SUMMARY_LIMIT) -> str:
-    """The first meaningful line of a provider message, bounded and with every secret taken out.
+    """The first meaningful line of a provider message, bounded and secret-free.
 
-    Codex quotes the rejected key back ("Incorrect API key provided: sk-svcac***…fvMA") and appends
-    the request's url, Cloudflare ray and request id. None of that is needed to name the error, and
-    the first is a secret, so the key goes and the tail goes before the usual scrub runs.
+    The echoed key and the url/ray/request-id tail are removed before the usual scrub.
     """
     lines = [_ANSI_RE.sub("", line).strip() for line in str(text or "").splitlines()]
     line = next((line for line in lines if line), "")
@@ -196,17 +181,10 @@ def _codex_error_text(value: Any) -> str:
 def codex_first_turn_failure(events: Iterable[Any]) -> ProviderError | None:
     """The provider error a Codex session's first turn ended on, or None.
 
-    Read from the rollout journal: a turn runs from `task_started` to `task_complete`, and a turn the
-    provider refused ends with a `task_complete` whose `error.message` names it (the 2026-09-25 case:
-    "unexpected status 401 Unauthorized: Incorrect API key provided", 35 s after launch). An older
-    journal writes the refusal as a separate `error` event inside the turn and closes the turn with
-    no agent message; that shape is read too.
-
-    Only the first turn is in scope: once any turn of this session completed without an error the
-    head has worked, and whatever it hits later is not this verdict. So the answer is the last
-    completed turn's provider error, and only while no completed turn before it was clean -- a head
-    whose first turn failed and which was then nudged into a second failing turn is still the same
-    case. A turn still open (no `task_complete` yet) answers nothing.
+    Read from the rollout journal: a refused turn ends with a `task_complete` carrying
+    `error.message`; older journals emit a separate `error` event and close the turn with no agent
+    message. Answers the last completed turn's error only while no earlier completed turn was clean;
+    an open turn answers nothing.
     """
     turns: list[tuple[ProviderError | None, bool]] = []
     pending: ProviderError | None = None
@@ -267,9 +245,8 @@ def _claude_text(record: Mapping[str, Any]) -> str:
 def claude_api_error(record: Mapping[str, Any]) -> ProviderError | None:
     """The provider error one Claude Code session record carries, or None.
 
-    Claude Code writes a refused request as a synthetic assistant record with `isApiErrorMessage`,
-    the status in `apiErrorStatus` and a typed `error` ("authentication_failed", "rate_limit",
-    "server_error"), after its own retries are spent.
+    Such a record is an assistant record with `isApiErrorMessage`, `apiErrorStatus` and a typed
+    `error`, written after Claude Code's own retries are spent.
     """
     if record.get("type") != "assistant" or record.get("isApiErrorMessage") is not True:
         return None
@@ -300,10 +277,8 @@ def _claude_clean_turn_end(record: Mapping[str, Any]) -> bool:
 def claude_first_turn_failure(records: Iterable[Any]) -> ProviderError | None:
     """The provider error a Claude Code session's first turn ended on, or None.
 
-    The turn ended on the error when the session's last conversational record (user or assistant)
-    is an API error record: a later user record is a new prompt the head is now working on. The
-    first-turn rule is the Codex one: no assistant record before it ended a turn cleanly
-    (`stop_reason: end_turn`).
+    The last user/assistant record must be an API error record, and no earlier assistant record may
+    have ended a turn cleanly (`stop_reason: end_turn`).
     """
     last: Mapping[str, Any] | None = None
     clean_before = False
@@ -318,18 +293,15 @@ def claude_first_turn_failure(records: Iterable[Any]) -> ProviderError | None:
     return claude_api_error(last)
 
 
-#: How far up from the bottom of a head's screen an error line may sit and still be the line the
-#: turn ended on: the error, the blank line and the prompt box under it.
+#: How many bottom screen lines may hold the error line the turn ended on (error, blank, prompt box).
 SCREEN_ERROR_WINDOW = 12
 
 
 def screen_turn_failure(lines: Iterable[str]) -> ProviderError | None:
     """The provider error the bottom of a Claude head's screen shows, or None.
 
-    The last resort when no session record can be read: the PTY's own text, rendered to a screen.
-    Only the lines just above the prompt are read, and only a line that is Claude Code's own error
-    shape ("API Error: 401 …", "Invalid API key · Please run /login"), so output a head merely
-    printed earlier in its turn is not taken for the turn's end.
+    Last resort when no session record is readable. Only lines just above the prompt in Claude
+    Code's own error shape count, so earlier output is not mistaken for the turn's end.
     """
     visible = [line.strip() for line in lines if line.strip()]
     for line in reversed(visible[-SCREEN_ERROR_WINDOW:]):

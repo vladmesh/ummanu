@@ -1,11 +1,7 @@
-"""Pre-answer Claude Code's interactive first-run prompts before a headless driver spawns a head.
+"""Pre-answer Claude Code's first-run prompts before a headless driver spawns a head.
 
-Two separate dialogs can block a fresh `claude` process on stdin nobody will ever type into:
-folder trust ("do you trust this folder") and the onboarding theme picker ("choose the text
-style"). Both live as flags in `~/.claude.json`. A head stuck on either never reaches its skill
-and never renames its terminal tab away from the shell default, so title-based agent detection
-(`_agent_terminals` in runtime/dispatch.py) never recognizes it — it becomes a silent orphan,
-un-reused and un-reaped forever. Used by runtime/dispatch.py, the singleton terminal driver.
+Folder trust and the onboarding theme picker both block a fresh `claude` on stdin, so the head
+never starts its work and is never detected. Both are flags in `~/.claude.json`.
 """
 
 from __future__ import annotations

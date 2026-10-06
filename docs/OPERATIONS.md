@@ -16,13 +16,15 @@ comes from `ummanu status` and `ummanu doctor`, not from this file.
 ## Install and check the code
 
 ```bash
-python3 -m pip install .
-python3 -m pip install '.[memory]'
-python3 -m pip install '.[dev]'
+python3 -m pip install -e '.[memory]'
+python3 -m pip install -e '.[dev]'
 python3 -m tests.broad
 ```
 
-The first form installs the CLI, the second adds the memory runtime, the third the pinned linter. `ruff`
+The first form installs the CLI with the memory runtime, the second adds the pinned linter. The
+install is editable: the runtime reads deployment assets from the checkout, and `upgrade` treats a
+non-editable (snapshot) install as drift and reinstalls. The shipped units run
+`PRODUCT_ROOT/.venv/bin/…`, so the production checkout keeps its virtual environment at `.venv`. `ruff`
 is pinned in `pyproject.toml` and any other version refuses to run; run it only on changed Python paths
 with the command in [Testing](TESTING.md#changed-python-lint). Host bootstrap supports Ubuntu 24.04,
 installs Docker and Compose from the distribution and provisions the board store; `ummanu install` or
@@ -2416,9 +2418,10 @@ Every HTML page the transport serves — the dashboard, sprints, projects, cards
 form, `/po` and its sessions, and refusal pages too — ends in one bar fixed to the bottom of the viewport.
 It shows what each provider subscription has left: for Claude and for Codex, every usage window the
 provider reported, its remaining percentage and **how long is left until it resets** — `2d 12h left`,
-`6h 45m left`, `42m left`, `less than a minute left`, or, for a reading whose moment has gone by,
-`reset already passed`; a window whose reading carries no moment says `no reset time recorded` rather
-than showing a dash. One provider is one group and reads as one: its name is the group's heading, a
+`6h 45m left`, `42m left` or `less than a minute left`. A reset moment that has already gone by is
+rolled forward by whole window lengths to the next one ahead, and the percentage is then drawn as
+`stale`, because the reading predates that reset; a past moment with no usable window length, or a
+reading with no moment, says `no reset time recorded` rather than showing a dash. One provider is one group and reads as one: its name is the group's heading, a
 rule separates it from the next provider, each window is a chip of its own (`5-hour 73% · 1h 6m left`),
 and the percentage follows the window's name at the chip's own gap. A percentage is drawn as the layer
 rounded it, with a trailing `.0` dropped: `73%`, and `95.4%` when the reading really is fractional.
@@ -3089,6 +3092,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `pull` | `git fetch` plus `merge --ff-only`; a dirty checkout is refused |
 | `registries` | read the skill manifest, instance overlay, head canon and memory pack; an unreadable or undeliverable registry stops the run before any write |
 | `memory-pack` | materialize the shipped memory pack into the memory canon |
+| `runtime-owner` | after a root-run upgrade, give `runtime.env`, `.gitignore` and `.git` back to the runtime user; a malformed `runtime.env` fails here |
 | `dependencies` | compare the venv with the checkout through the dependency receipt (tracked-manifest digest, extras, venv path); on a mismatch, a snapshot install or a wrong Ruff pin, `pip install -e <root>[dev,…]` with every extra this installation uses, then write the receipt |
 | `dependency-provenance` | import `ummanu`, psycopg, SQLAlchemy and Alembic with `-P` from the selected root and venv |
 | `board-store-provision` | no-op before provisioning; otherwise verify/start the pinned `postgres:16` service and volume without rotating credentials |
@@ -3096,13 +3100,19 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries (Claude, `~/.codex`, the legacy Codex home and an existing `DATA_DIR/codex-home`, seeding what it lacks) without touching provider login state |
 | `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
+| `po-workspace` | materialize the PO head's working directory; its notes file is never rewritten |
 | `interactive-workspace` | compose `DATA_DIR/interactive/AGENTS.md` from the product's shared part and the live root's `persona/AGENTS.md`, write `CLAUDE.md`, hand the tree to the runtime user ([The interactive head](#the-interactive-head-and-its-workspace)) |
 | `head-registry` | generate `<data>/heads/heads.yaml` and `<data>/heads/source.yaml` from the canon; no Git call |
 | `instance-packing` | on a live root that is still a Git work tree, keep its local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); `skipped` on a plain live root ([Recovery](RECOVERY.md#local-git-packing-controls)) |
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
+| `pipeline-state` | restore the dispatcher's untracked run journals (`state/pipeline/`) from the instance checkpoint; a live journal that does not extend the checkpoint fails the step and is never overwritten |
 | `role-skills` | `role_skills sync` into shell skill directories |
+| `po-workspace-owner` | hand the whole PO workspace, delivered skills included, to the runtime user |
+| `po-token` | create `DATA_DIR/po-web-token` (0600, runtime user) if absent; an existing token is never rewritten |
+| `web-front-config` | render `DATA_DIR/webfront/Caddyfile` from `host.web_front.sites` before `host` starts the front; with no sites in instance config the existing file is kept byte for byte |
 | `host` | `reconcile apply`: units from `packaging/systemd` |
 | `memory` | start a stopped memory service; restart an active one whose process receipt is missing, belongs to another process or binds another revision, source, dependency digest, `MEMORY_MODEL` or pack digest (or whose code, unit or pack this run changed); then a bounded `memory_list` read and a new receipt |
+| `po` | start a stopped `ummanu-po.service`; restart an active one whose process receipt is missing, of another process or bound to another revision or digest, without killing a running PO turn (idle, it restarts now; busy, the restart is reported deferred); skipped when the component is opted out |
 | `web` | for an active transport, verify its process receipt or restart, probe loopback, write the receipt after 200 |
 | `verify` | repeat dry run; the second rollout must be a no-op |
 

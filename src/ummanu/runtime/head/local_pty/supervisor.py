@@ -71,9 +71,7 @@ from .journal import (
 from .screen import ScreenModel
 
 #: A turn is over when the head has said nothing for this long. The substrate cannot see a
-#: provider's own end-of-turn marker — that is an adapter's knowledge, and inventing one here would
-#: be a lie in the journal — so what it records is the fact it can actually observe: the head went
-#: quiet.
+#: provider's end-of-turn marker, so it records the observable fact: the head went quiet.
 TURN_QUIET_SECONDS = 2.0
 #: Output is considered for progress at this interval; repeated screen content is folded.
 PROGRESS_COALESCE_SECONDS = 0.5
@@ -81,13 +79,12 @@ PROGRESS_COALESCE_SECONDS = 0.5
 PROGRESS_SEEN_LINES_MAX = 4096
 #: How long a stopping head is given before the signal is escalated.
 STOP_GRACE_SECONDS = 5.0
-#: The loop's own resolution: what bounds how late a quiet turn or a stop deadline is noticed.
+#: Loop resolution: bounds how late a quiet turn or a stop deadline is noticed.
 LOOP_TICK_SECONDS = 0.1
-#: How long the supervisor keeps trying to flush the last frames to attached clients before it
-#: closes the socket for good.
+#: How long to keep flushing last frames to attached clients before closing the socket.
 FAREWELL_SECONDS = 0.5
 _READ_CHUNK = 65536
-#: Indices into the list `termios.tcgetattr` returns, named rather than counted at the call site.
+#: Indices into the list `termios.tcgetattr` returns.
 _IFLAG = 0
 _LFLAG = 3
 _CC = 6
@@ -95,7 +92,7 @@ _CC = 6
 EXIT_OK = 0
 EXIT_STARTUP_FAILED = 2
 EXIT_ALREADY_RUNNING = 3
-#: A run that was up and then lost its supervisor. Distinct from a startup failure on purpose.
+#: A run that was up and then lost its supervisor; distinct from a startup failure.
 EXIT_RUN_FAILED = 4
 
 START_ALREADY_RUNNING = "already_running"
@@ -137,12 +134,10 @@ class _Client:
 
 
 class _Delivery:
-    """One admitted payload on its way to the head's terminal, and everything said about it.
+    """One admitted payload on its way to the head's terminal.
 
-    A delivery outlives the request that admitted it. That is the whole point: the socket answers
-    "accepted" within its tick, the loop writes the bytes as the head takes them, and how far it
-    got is state — reported by `status`, written down in the journal when it ends — rather than a
-    caller held on the wire.
+    Outlives the admitting request: the loop writes bytes as the head takes them, and progress is
+    state reported by `status` and journaled at the end, never a caller held on the wire.
     """
 
     __slots__ = ("id", "payload", "subject", "written", "deadline", "state", "why", "seconds")
@@ -166,7 +161,7 @@ class _Delivery:
         return self.state == protocol.DELIVERY_IN_FLIGHT
 
     def view(self) -> dict[str, Any]:
-        """What a reader is told about this delivery, whether it is running, done or abandoned."""
+        """What a reader is told about this delivery in any state."""
         return {
             "id": self.id,
             "state": self.state,
@@ -180,7 +175,7 @@ class _Delivery:
 
 
 class Supervisor:
-    """One run's owner. Constructed in the process that will *be* the supervisor, never elsewhere."""
+    """One run's owner. Constructed only in the process that will be the supervisor."""
 
     def __init__(
         self,
@@ -260,10 +255,9 @@ class Supervisor:
     def claim(self) -> None:
         """Take exclusive ownership of the run directory, or refuse without touching anything.
 
-        The lock is what makes a restart over an orphaned socket safe. A live supervisor holds it,
-        so a second start is refused loudly rather than binding a second socket beside the first
-        and bringing a second head up under the same run id. Only once the lock is *held* is a
-        socket file left over from a dead supervisor treated as debris and removed.
+        A live supervisor holds the lock, so a second start is refused rather than binding a second
+        socket and head under the same run id. Only with the lock held is a leftover socket file
+        treated as debris and removed.
         """
         self.run_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self.run_dir, 0o700)
@@ -285,14 +279,11 @@ class Supervisor:
         self._bind()
 
     def _refuse_a_second_head(self) -> None:
-        """Refuse to start beside a head of this run that is still alive.
+        """Refuse to start beside a still-live head of this run.
 
-        Holding the lock proves no other *supervisor* owns the run; it does not prove the run has
-        no head. A supervisor killed with `SIGKILL` leaves its head running and orphaned, and the
-        one thing a restart must never do is bring a second head up under the same run id in
-        silence. The check reads the head's own launch identity — the same record
-        `ummanu.dispatch.watchdog` reads — and refuses only on the full triple, so a recycled
-        pid cannot fence a run out.
+        The lock proves no other supervisor owns the run, not that no head is alive: a `SIGKILL`ed
+        supervisor leaves an orphaned head. Reads the head's launch identity (as the watchdog does)
+        and refuses only on the full identity triple, so a recycled pid cannot fence a run out.
         """
         alive = _live_head(self.pid_file, self.run_id)
         if alive:
@@ -343,17 +334,11 @@ class Supervisor:
         return ["/bin/sh", "-c", wrapped]
 
     def start_head(self) -> int:
-        """Fork the head onto a pty of its own: new session, controlling terminal, launch identity.
+        """Fork the head onto its own pty: new session, controlling terminal, launch identity.
 
-        This is `pty.fork` written out rather than called, for one reason: the terminal has to be
-        **configured before the head exists**, not after. Its size and its line discipline are
-        properties of the pty, so setting them on the slave before the fork means the head cannot
-        observe anything else — no window where the first `TIOCGWINSZ` sees 0x0, and no window
-        where a payload arrives while the discipline is still the kernel's default.
-
-        Everything this process holds is already close-on-exec, so the head's `exec` drops the
-        socket, the lock and the journal rather than carrying a copy of them into a process that
-        would keep them open after the supervisor died.
+        `pty.fork` written out so the terminal's size and line discipline are set on the slave
+        before the fork: the head never sees a 0x0 size or the default discipline. Everything this
+        process holds is close-on-exec, so the head's `exec` drops the socket, lock and journal.
         """
         argv = self._head_argv()
         environment = dict(os.environ)
@@ -370,14 +355,14 @@ class Supervisor:
                     environment.pop(OOM_STREAM_ENV, None)
                     os.close(ready_read)
                     os.close(go_write)
-                    # Reserve the new PID while still OOM-protected. The parent drops
-                    # earlier kernel records before allowing this incarnation to execute.
+                    # Reserve the new PID while still OOM-protected; the parent drops earlier kernel
+                    # records before allowing this incarnation to execute.
                     os.write(ready_write, b"R")
                     if os.read(go_read, 1) != b"1":
                         os._exit(127)
                     os.close(go_read)
-                    # The scope bootstrap protected only the supervisor. Every head descendant
-                    # inherits this ordinary score and is included in a group OOM kill.
+                    # Only the supervisor is OOM-protected; head descendants get the ordinary score
+                    # and are included in a group OOM kill.
                     Path("/proc/self/oom_score_adj").write_text("0\n", encoding="ascii")
                     os.write(ready_write, b"1")
                     os.close(ready_write)
@@ -421,36 +406,16 @@ class Supervisor:
     def _prepare_terminal(self, slave: int) -> None:
         """Size the pty and set the line discipline the head inherits, before the head runs.
 
-        The canonical discipline the kernel sets by default is the whole reason this exists. In it
-        `N_TTY` buffers a *line*, caps that line at 4095 bytes and **silently discards** everything
-        past the cap: the writer is not blocked, is given no `EAGAIN`, and is told nothing. A
-        supervisor that declares a 64 KiB input limit on top of that discipline is declaring a
-        limit it does not have, and losing the tail of a delivery in silence is precisely the
-        legacy wound (`issue:d9d049eaad39d02bbb1e`) this backend exists not to repeat.
+        Canonical mode caps a line at 4095 bytes and silently discards the rest, which would make
+        the declared 64 KiB input limit false. Non-canonical mode gives `EAGAIN` back-pressure, so
+        any payload up to the limit arrives whole. Settings:
 
-        Non-canonical is therefore the substrate's default, and it is what makes the declared limit
-        real: the kernel gives back-pressure through `EAGAIN` instead of dropping bytes, so a
-        payload of any size up to the limit arrives whole.
+          * off: `ICANON`, all echo flags, `IEXTEN` (they buffer, cap and re-emit input);
+          * off: `IXON` (it would eat `0x11`/`0x13`, and a stray `0x13` freezes the head's output);
+          * on: `ICRNL`, the only input translation left (CR reaches the head as newline);
+          * on: `ISIG` (`^C` still interrupts) and `OPOST` (output line endings).
 
-        What is turned off, precisely, and what is left on:
-
-          * **off: `ICANON` and every echo flag**, plus `IEXTEN`. These are what buffer, cap and
-            re-emit a delivery, and they are what the 4095-byte silent truncation lives in;
-          * **off: `IXON`**. Software flow control is not a byte-preserving discipline either: it
-            eats `0x11` and `0x13` out of a delivery, and `0x13` additionally stops the head's
-            output until a `0x11` arrives. A payload with one stray byte in it would then produce
-            a head that answers nothing and looks dead — the exact class of wrong diagnosis this
-            sprint exists to remove — so a payload's bytes are never allowed to mean this;
-          * **on, deliberately: `ICRNL`**, so a carriage return in a delivery reaches the head as a
-            newline. This one *does* rewrite a byte, and it stays because it is what a terminal
-            does and what an interactive adapter reading lines expects; a caller that needs a
-            literal `0x0D` on the head's terminal cannot have it through this mode. It is the only
-            input translation left on;
-          * **on: `ISIG`**, so a `^C` in a delivery still interrupts the head, and **`OPOST`**, so
-            the head's output keeps the line endings a terminal gives it.
-
-        An interactive adapter that wants a mode of its own sets one for itself; this is the mode
-        it inherits until it does, not one imposed on it.
+        An adapter may set its own mode afterwards; this is only the inherited default.
         """
         packed = struct.pack("HHHH", self.rows, self.cols, 0, 0)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, packed)
@@ -477,12 +442,10 @@ class Supervisor:
     # -- the loop --------------------------------------------------------------------------
 
     def run(self) -> int:
-        """Own the head until it ends, and say how it ended.
+        """Own the head until it ends, and return the exit code.
 
-        Everything after `claim` is inside the one `finally`: a failure on the way up — a pty that
-        cannot be opened, a journal that cannot be written — must let go of the socket and the lock
-        it already took, so that what a launcher finds is a named refusal rather than debris that
-        answers nothing.
+        Everything after `claim` is under one `finally`, so a failed bring-up releases the socket
+        and lock and leaves a named refusal rather than unanswering debris.
         """
         try:
             try:
@@ -500,7 +463,7 @@ class Supervisor:
             self._shutdown()
 
     def _begin(self) -> None:
-        """Bring the head up and say so, in the order a reader of the run directory needs."""
+        """Bring the head up and record it, in the order a run-directory reader needs."""
         self._journal = JournalWriter(self.journal_path, self.run_id).open()
         self._install_signals()
         self._prepare_memory_scope()
@@ -558,12 +521,9 @@ class Supervisor:
             raise SupervisorStartupError("memory_scope_unavailable", str(exc)) from exc
 
     def _abandon_head(self) -> None:
-        """End a head this supervisor forked and then failed to take ownership of.
+        """End a head forked by a failed `_begin`: SIGTERM the group, grace, SIGKILL, then reap.
 
-        Reached only from a failed `_begin`, where there is no loop to escalate a stop through and
-        nobody else who knows the pid: the process group is signalled, given the grace a stop gets,
-        and killed. Reaping it here is what keeps a failed bring-up from leaving a zombie behind
-        for init to collect after this process has already written its refusal.
+        No loop exists to escalate through; reaping here avoids leaving a zombie after the refusal.
         """
         if self._head_pid <= 0 or self._head_status is not None:
             return
@@ -590,9 +550,8 @@ class Supervisor:
             if mask & selectors.EVENT_READ:
                 self._read_head()
             if mask & selectors.EVENT_WRITE:
-                # The head's terminal has room: put more of the admitted payload into it. Reading
-                # first is deliberate — a head blocked writing its own output cannot deadlock
-                # against a supervisor with a payload to place.
+                # The terminal has room for more of the admitted payload. Reading first means a head
+                # blocked writing its own output cannot deadlock against a pending payload.
                 self._pump_delivery()
         elif data == "wakeup":
             try:
@@ -627,8 +586,7 @@ class Supervisor:
             and now - self._progress_at >= PROGRESS_COALESCE_SECONDS
         ):
             self._flush_progress()
-        # A terminal that never becomes writable raises no event, so the delivery bound is a thing
-        # the tick notices rather than a thing the selector reports.
+        # A terminal that never becomes writable raises no event, so the tick enforces the bound.
         self._expire_delivery()
         if self._stopping and self._stop_deadline and now >= self._stop_deadline:
             self._stop_deadline = 0.0
@@ -661,8 +619,7 @@ class Supervisor:
             except BlockingIOError:
                 return
             except OSError as exc:
-                # A pty master reads EIO once the last slave end is gone: that is the head's exit
-                # arriving as a read error rather than as an event of its own.
+                # A pty master reads EIO once the last slave end is gone (usually the head's exit).
                 if exc.errno in (errno.EIO, errno.EBADF):
                     self._master_closed()
                     return
@@ -680,9 +637,8 @@ class Supervisor:
         self._finish_delivery(
             protocol.DELIVERY_FAILED, "the head's terminal was closed before the delivery finished"
         )
-        # EIO means every slave end of the pty is closed, which is usually the head's exit
-        # arriving early. It is not proof of one: a head may close its terminal and keep running,
-        # so the exit itself is still taken from `waitpid`, in the tick, when it really happens.
+        # EIO means every slave end is closed, usually but not provably the head's exit (a head may
+        # close its terminal and keep running), so the exit itself comes from `waitpid`.
         self._reap()
 
     def _record_output(self, chunk: bytes) -> None:
@@ -711,7 +667,7 @@ class Supervisor:
         self._progress_window_bytes = 0
         self._progress_at = 0.0
         visible = {hashlib.blake2b(line.encode("utf-8"), digest_size=16).digest() for line in lines}
-        # A screen may show more lines than the history cap. An evicted line that stays visible
+        # A screen may show more lines than the history cap; an evicted but still-visible line
         # must not be rediscovered on every spinner redraw.
         new = any(
             digest not in self._progress_seen and digest not in self._progress_visible for digest in visible
@@ -739,7 +695,7 @@ class Supervisor:
     # -- delivery: admitted by the socket, written by the loop -----------------------------
 
     def _admit(self, payload: bytes, subject: str) -> _Delivery:
-        """Take one payload on, and hand it to the loop rather than to the caller's patience."""
+        """Admit one payload and hand it to the loop."""
         self._delivery_seq += 1
         delivery = _Delivery(self._delivery_seq, payload, subject, self.delivery_seconds)
         self._delivery = delivery
@@ -747,12 +703,7 @@ class Supervisor:
         return delivery
 
     def _arm_delivery(self) -> None:
-        """Ask the loop to wake when the head's terminal has room, not on a timer.
-
-        A pty master is writable exactly while its buffer has space, so the delivery advances as
-        fast as the head reads and costs nothing at all while the head does not. Watching for it
-        this way is what lets the loop keep answering everybody else in between.
-        """
+        """Wake the loop when the head's terminal has room (pty master writable), not on a timer."""
         if self._master < 0:
             return
         try:
@@ -769,13 +720,9 @@ class Supervisor:
             pass
 
     def _pump_delivery(self) -> None:
-        """Write as much of the admitted payload as the terminal will take right now, and no more.
+        """Write as much of the admitted payload as the terminal takes now, stopping at `EAGAIN`.
 
-        Every call is bounded by the kernel's own back-pressure: writes continue while they succeed
-        and stop at the first `EAGAIN`. Nothing here waits for the head — the loop returns to the
-        selector and comes back when the pty says there is room — so a head that reads slowly, or
-        not at all, costs the supervisor one non-blocking write attempt per wake-up and costs every
-        other caller nothing.
+        Never waits for the head: a slow or stopped reader costs one non-blocking write per wake-up.
         """
         delivery = self._delivery
         if delivery is None or not delivery.in_flight:
@@ -801,40 +748,23 @@ class Supervisor:
         self._expire_delivery()
 
     def _expire_delivery(self) -> None:
-        """Give up on a payload the head has not taken within the delivery bound, and say so.
-
-        The bound belongs to the supervisor's own memory, not to anybody's patience: it decides how
-        long a payload for a head that stopped reading is carried before the fact is written down.
-        """
+        """Abandon a payload the head has not taken within the delivery bound, recording a stall."""
         delivery = self._delivery
         if delivery is None or not delivery.in_flight:
             return
         if self._head_status is not None:
-            # A pty master stays writable after the head is gone, so the end of a delivery to a
-            # dead head is a thing the tick notices rather than one the kernel reports.
+            # A pty master stays writable after the head is gone, so the tick notices this.
             self._finish_delivery(protocol.DELIVERY_FAILED, "the head exited")
             return
         if time.monotonic() >= delivery.deadline:
             self._finish_delivery(protocol.DELIVERY_STALLED, "the head stopped reading its terminal")
 
     def _finish_delivery(self, state: str, why: str) -> None:
-        """Close a delivery out, and write down what actually reached the head's terminal.
+        """Close a delivery out and journal what actually reached the head's terminal.
 
-        `input.accepted` is written here and only here: its `bytes` is what the kernel took from
-        this process, never what a client handed over. That is the honest accounting the previous
-        round owed — and it is bought by writing the record when the bytes land, rather than by
-        making a caller wait for them to.
-
-        A delivery of which **no** byte landed gets a record too, with `bytes` of zero. It is a
-        real thing that happened to a payload this supervisor admitted, and leaving it only in
-        `status` — which the next delivery overwrites — meant a run whose journal could not say
-        that a delivery had been made at all. What it does not do is open a turn: a head that
-        received nothing has not been given anything to work on, and a `turn.started` there would
-        be the journal inventing work.
-
-        Retry is not this substrate's business: a delivery that stalled leaves a prefix on the
-        terminal that cannot be taken back, and what a caller should do about that belongs to
-        `deliver` on the backend built above this, not here.
+        The only writer of `input.accepted`; `bytes` is what the kernel took. A delivery with zero
+        bytes landed is still recorded but opens no turn. Retry after a stall (which leaves an
+        irrevocable prefix) is the backend's `deliver` concern, not the substrate's.
         """
         delivery = self._delivery
         if delivery is None or not delivery.in_flight:
@@ -872,7 +802,7 @@ class Supervisor:
         if self._head_pid <= 0:
             return
         try:
-            # The head is its own session and process group leader, so its pid names its group.
+            # The head leads its own session and process group, so its pid names its group.
             os.killpg(self._head_pid, number)
         except (ProcessLookupError, PermissionError):
             try:
@@ -900,7 +830,7 @@ class Supervisor:
             self._selector.register(conn, selectors.EVENT_READ, client)
 
     def _refuse_connection(self, conn: socket.socket) -> None:
-        """Say no to a caller the supervisor will not hold, rather than holding it silently."""
+        """Refuse a caller over the connection limit with a frame, then close."""
         try:
             conn.settimeout(0.2)
             conn.sendall(protocol.encode_frame(protocol.connection_refusal(len(self._clients))))
@@ -951,18 +881,14 @@ class Supervisor:
                 return
 
     def _handle(self, client: _Client, line: bytes) -> None:
-        """Answer one request, entirely from state this process already holds.
+        """Answer one request from state this process already holds.
 
-        Every handler below returns within this call: `status`, `output` and `attach` read state,
-        `resize` is one ioctl on a descriptor this process owns, `drain` and `stop` set a flag and
-        signal, and `input` admits or refuses. None of them asks the head for anything, so the
-        longest a caller waits is one pass of the loop.
+        No handler asks the head anything, so a caller waits at most one loop pass.
         """
         try:
             request = protocol.decode_frame(line)
         except protocol.ProtocolError as exc:
-            # Bytes this malformed have no id to answer with, so the frame carries none: a client
-            # reading it can see it is uncorrelated rather than mistake it for its own answer.
+            # Malformed bytes have no id, so the refusal carries none (uncorrelated).
             self._send(client, {"ok": False, "error": protocol.ERROR_MALFORMED, "detail": str(exc)})
             return
         request_id = request.get(protocol.REQUEST_ID)
@@ -997,12 +923,7 @@ class Supervisor:
             )
 
     def _answer(self, client: _Client, request_id: Any, payload: dict[str, Any]) -> None:
-        """Send one answer, carrying back the id of the question it answers.
-
-        Without this a response is identified only by its position in the stream, and a caller that
-        stopped waiting for one leaves it to be mistaken for the answer to its next question. The
-        id makes that mistake impossible to make silently.
-        """
+        """Send one answer carrying the request's id, so a stale answer cannot pass as a fresh one."""
         if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
             payload = {**payload, protocol.REQUEST_ID: request_id}
         self._send(client, payload)
@@ -1036,15 +957,11 @@ class Supervisor:
         }
 
     def _op_input(self, client: _Client, request: dict[str, Any]) -> dict[str, Any]:
-        """Admit one payload, or refuse it by name. Either way, within this tick.
+        """Admit one payload or refuse it by name, within this tick.
 
-        Admission is the whole of what this handler decides, and it decides it from state the
-        supervisor already holds: whether the head is gone, whether admission is closed, whether a
-        payload is already in flight, and whether this one is inside the declared limit. None of
-        those questions is about how fast the head reads its terminal, which is why none of them
-        can make a caller wait on it. `ok` here means *accepted*, and the answer says so; what
-        happened to the bytes afterwards is `status`'s `delivery` and the journal's
-        `input.accepted`, both of which count what the terminal actually took.
+        Decided from held state only: head gone, admission closed, a delivery in flight, or over
+        the limit. `ok` means accepted; what landed is in `status`'s `delivery` and the journal's
+        `input.accepted`.
         """
         del client
         payload = protocol.decode_payload(request.get("data"))
@@ -1165,11 +1082,9 @@ class Supervisor:
         self._flush(client)
 
     def _push_output(self, client: _Client, chunk: bytes) -> None:
-        """Hand an attached client its bytes, or count what a slow client could not take.
+        """Push a chunk to an attached client, or drop and count it when the client is backed up.
 
-        A client that stops reading must not be able to grow the supervisor without bound, and it
-        must not be told a partial stream is a whole one: the chunk is dropped, counted, and the
-        count is sent as its own event once the client drains.
+        Keeps a slow reader from growing the supervisor; the drop count is sent as its own event.
         """
         if len(client.pending) + len(chunk) > protocol.OUTPUT_BUFFER_BYTES:
             client.dropped += len(chunk)
@@ -1182,11 +1097,9 @@ class Supervisor:
         self._flush(client)
 
     def _announce_dropped(self, client: _Client) -> None:
-        """Tell an attached client what it missed, before anything else it is told.
+        """Send a pending drop count before anything else.
 
-        A count that is only ever sent alongside the next chunk that fits is a count that is lost
-        when the overflow happens on the last one, so the same notice is emitted here from the
-        stream's end as well as from the middle of it.
+        Also called at stream end, so an overflow on the last chunk is not lost.
         """
         if not client.overflowed:
             return
@@ -1213,7 +1126,7 @@ class Supervisor:
             pass
 
     def _close_client(self, client: _Client) -> None:
-        """A caller going away is not an event in the head's life: it detaches, nothing else."""
+        """Detach a caller; this is not an event in the head's life."""
         try:
             self._selector.unregister(client.conn)
         except (KeyError, ValueError):
@@ -1268,7 +1181,7 @@ class Supervisor:
         return EXIT_OK
 
     def _shutdown(self) -> None:
-        """Let go of everything, in the order that leaves nothing addressable behind."""
+        """Release everything, leaving nothing addressable behind."""
         if self._oom_stream >= 0:
             os.close(self._oom_stream)
             self._oom_stream = -1
@@ -1318,10 +1231,9 @@ class Supervisor:
 
 
 def _live_head(pid_file: Path, run_id: str) -> int:
-    """The pid of this run's head when it is still running, and 0 otherwise.
+    """The pid of this run's head when still running, else 0.
 
-    Deliberately the same three-part test the watchdog applies: a live pid alone means nothing
-    after a reboot or a pid recycle, so the boot id and the process start ticks have to agree too.
+    The watchdog's test: pid, boot id and process start ticks must all agree (reboot, pid reuse).
     """
     try:
         record = json.loads(pid_file.read_text(encoding="utf-8"))
@@ -1355,12 +1267,8 @@ def _live_head(pid_file: Path, run_id: str) -> int:
 
 
 def failure_of(started: bool) -> tuple[str, str, int]:
-    """Which file a failure is left in, what it is called, and what the supervisor exits with.
-
-    A failure before the run was up and a failure after it are different facts about a run
-    directory, and the only honest way to say so is to name them differently: a head that ran for
-    an hour and then lost its supervisor did not fail to *start*, and a reader who finds
-    `startup.error` beside its journal is being told something untrue.
+    """The failure file, reason and exit code: `startup.error` before the run was up, else
+    `supervisor.error`.
     """
     if started:
         return protocol.SUPERVISOR_ERROR_NAME, RUN_FAILED, EXIT_RUN_FAILED
@@ -1415,8 +1323,8 @@ def main(argv: list[str] | None = None) -> int:
         (run_dir / protocol.STARTUP_ERROR_NAME).unlink(missing_ok=True)
         (run_dir / protocol.SUPERVISOR_ERROR_NAME).unlink(missing_ok=True)
     if args.daemonize and os.fork() != 0:
-        # The intermediate exits at once. Its parent reaps it, and the supervisor below is
-        # reparented to init: addressable through its socket and its pid file, owned by nobody.
+        # The intermediate exits at once and its parent reaps it; the supervisor is reparented to
+        # init, addressable through its socket and pid file.
         os._exit(EXIT_OK)
     if args.cwd:
         os.chdir(args.cwd)

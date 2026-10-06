@@ -1,17 +1,9 @@
-"""The product's one way to make a workspace fit for an interactive Codex head to start in.
+"""Pre-pane preparation of a workspace for an interactive Codex head.
 
-Every Codex head is a TUI, and a TUI asks about directory trust before it will take a prompt.
-Nobody is sitting in front of the pane, so a head whose root codex has never seen sits on the
-dialog, never answers Orca's readiness probe and never receives its prompt. The answer is written
-before the pane exists rather than waited for afterwards.
-
-That makes one ordering the contract for every interactive Codex head, whichever launcher brings
-it up: **ensure trust, create the pane, wait for readiness, deliver the prompt, confirm the
-turn.** The first step is here, the last three are `tui_delivery`. A preflight that fails must
-fail here, with no pane created and nothing for a caller to mistake for a head that ran.
-
-It lives in `ummanu.runtime` with the head package that renders and launches every head, and
-the dispatcher reaches it from there. Nothing here knows about boards, roles or sessions.
+A Codex TUI blocks on the trust dialog with nobody at the pane, so the answer is written before the
+pane exists. Order for every launcher: ensure trust, create the pane, wait for readiness, deliver the
+prompt, confirm the turn (the last three are `tui_delivery`). A failure raises here, before any pane.
+Fan-out telemetry: `docs/PROTOCOLS.md` "Codex provider-internal fan-out policy".
 """
 
 from __future__ import annotations
@@ -45,12 +37,10 @@ CODEX_AUTH_FILE = "auth.json"
 CODEX_HOME_PROFILE = "profile"
 CODEX_HOME_ENV = "env"
 CODEX_HOME_DATA_DIR = "data-dir"
-# The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
+# The file codex reads trust from, inside the CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
-# The file codex keeps its update check in, inside the same CODEX_HOME: a `VersionInfo` of
-# `latest_version`, `last_checked_at` and `dismissed_version`. Picking "Skip until next version"
-# on the update modal is exactly a write of `dismissed_version = latest_version` here, which is
-# why the modal can be answered before the pane exists rather than typed at afterwards.
+# Codex's update-check state in the same CODEX_HOME. "Skip until next version" on the update modal
+# writes `dismissed_version = latest_version` here, so the modal can be answered before the pane.
 CODEX_VERSION_FILE = "version.json"
 
 # What `ensure_codex_update_modal_dismissed` did, as an answer a caller can record.
@@ -96,17 +86,13 @@ KNOWN_COLLABORATION_TOOLS = frozenset(
 
 
 class CodexPreflightError(RuntimeError):
-    """A workspace could not be made fit for an interactive Codex head to start in.
-
-    Raised only before a pane exists, so a caller that sees it knows nothing was launched.
-    """
+    """A workspace could not be prepared; raised only before a pane exists, so nothing launched."""
 
 
 class CodexHomeLoginMissing(CodexPreflightError):
     """No CODEX_HOME a head may run with: no profile `codex_home`, no `TA_CODEX_HOME`, no data-dir login.
 
-    The message names the fix. `home` is the data-dir home the login belongs in, or None when this
-    process names no data dir at all.
+    `home` is the data-dir home the login belongs in, or None when no data dir is named.
     """
 
     def __init__(self, home: Path | None) -> None:
@@ -163,13 +149,10 @@ class CodexHome:
 def resolve_codex_home(
     profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] | None = None
 ) -> CodexHome:
-    """Which CODEX_HOME a head with this profile runs with, resolved now rather than at import.
+    """Which CODEX_HOME a head with this profile runs with, resolved at call time.
 
-    In order: the profile's `codex_home`, `TA_CODEX_HOME`, and `<data_dir>/codex-home` when it holds
-    a login (a non-empty `auth.json`). With none of them it fails closed with
-    `CodexHomeLoginMissing`, whose message names the fix: there is no other home to fall back to.
-    The legacy Orca home (`~/.config/orca/...`) was the last rung until A20 step 7 removed it
-    (secretary-1723), once every live Codex head was proven to run on the data-dir login.
+    In order: the profile's `codex_home`, `TA_CODEX_HOME`, then `<data_dir>/codex-home` when it holds
+    a non-empty `auth.json`. Otherwise raises `CodexHomeLoginMissing`; there is no other fallback.
     """
     configured = profile.get("codex_home")
     if configured:
@@ -184,20 +167,15 @@ def resolve_codex_home(
 
 
 def codex_home(profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] | None = None) -> str:
-    """The CODEX_HOME a head with this profile runs with — and therefore the config it reads trust
-    from. The launch command names the same one, so the file written here is the file that head
-    will actually consult."""
+    """The CODEX_HOME path for this profile; the launch command names the same home."""
     return resolve_codex_home(profile, data_dir=data_dir).path
 
 
 def data_dir_codex_home(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
-    """`<data_dir>/codex-home` of the installation this process serves, or None with none named.
+    """`<data_dir>/codex-home` of this installation, or None when no data dir is named.
 
-    A named data dir wins, then `UMMANU_DATA_DIR`. This module reads no instance file: it imports
-    nothing else of `ummanu`, so the processes that launch heads bind `UMMANU_DATA_DIR` for
-    it from their installation (`ummanu.runtime.codex_home.bound_data_dir`). A process that did
-    not has no data-dir rung, and `resolve_codex_home` refuses it unless a profile or
-    `TA_CODEX_HOME` names a home.
+    A named data dir wins, then `UMMANU_DATA_DIR`. This module imports nothing else of `ummanu`, so
+    head launchers bind `UMMANU_DATA_DIR` (`ummanu.runtime.codex_home.bound_data_dir`).
     """
     if data_dir is not None:
         return Path(data_dir).expanduser() / CODEX_HOME_DATA_DIRNAME
@@ -219,10 +197,8 @@ def codex_home_logged_in(home: Path) -> bool:
 def codex_trust_paths(workspace: str) -> list[str]:
     """The paths codex asks about for a head started in `workspace`.
 
-    Both the workspace and its repository root, because codex checks the repository root of the
-    directory it starts in when that directory is inside a git repo — a worktree inherits the answer
-    given to the repo it was cut from — and the directory itself when it is not. Trust overrides and
-    the config write are rendered from this one list.
+    The workspace plus, inside a git repo, the repository root codex keys trust on (a worktree
+    inherits its repo's answer). Trust overrides and the config write both render from this list.
     """
     workspace_path = Path(workspace).resolve(strict=False)
     paths = [workspace_path]
@@ -245,16 +221,11 @@ def ensure_codex_workspace_trusted(
     workspace: str,
     config: Path | None = None,
 ) -> None:
-    """Answer the codex trust question for one workspace before a head starts in it.
+    """Record codex trust for one workspace before a head starts in it.
 
-    The `-c projects...trust_level` overrides the launch command carries do not reach that check
-    (codex 0.145 still shows the dialog with them in place), so the answer has to live in
-    `config.toml` of the CODEX_HOME the head runs with, which is where codex writes it when a human
-    picks "Yes, continue".
-
-    Both the workspace and its repository root are recorded. Trust already on file is left alone, and
-    a path the file keeps at another trust level is somebody's decision, so it fails the bring-up
-    with a readable reason instead of being overwritten.
+    Launch `-c projects...trust_level` overrides do not reach the dialog (codex 0.145), so trust is
+    written to the head's `config.toml`, as codex does for "Yes, continue". Existing trust is kept; a
+    path held at another trust level is refused, never overwritten.
     """
     config_path = config or Path(codex_home(profile)) / CODEX_CONFIG_FILE
     text = _read_codex_config(config_path)
@@ -292,22 +263,11 @@ def ensure_codex_update_modal_dismissed(
     profile: Mapping[str, Any],
     version_file: Path | None = None,
 ) -> str:
-    """Answer codex's update prompt for this runtime before a head starts under it.
+    """Answer codex's update modal before a head starts, as "Skip until next version" would.
 
-    Same shape and the same reason as `ensure_codex_workspace_trusted`: nobody is sitting in front
-    of the pane, so a dialog that waits for a person is a head that never receives its prompt. On
-    `issue:e4d6f307` this exact modal held a high-effort Codex reviewer for 51 minutes with the review
-    pointer swallowed, `tui-idle` satisfied throughout and the codex process at zero CPU.
-
-    The answer written here is the file codex itself writes when a human picks "Skip until next
-    version": `dismissed_version` set to the version the check found. Nothing is upgraded, nothing
-    is downloaded, and no version is pinned — an upgrade is a separate, explicit action.
-
-    Prevention is best effort by construction: the file belongs to codex, it may not exist yet on a
-    fresh runtime home, and a check that runs after this write can raise the modal again. So this
-    returns what it did rather than raising for a state it could not reach, and the delivery
-    boundary's on-screen answer stays the guarantee. A path that is not a regular file is the one
-    exception and is refused, because a bring-up must never follow a symlink somebody left there.
+    Sets `dismissed_version` to the found `latest_version`; nothing is upgraded or pinned. Best
+    effort: returns what it did instead of raising, and the delivery boundary answers the modal on
+    screen. A version file that is not a regular file is refused (never follow a symlink).
     """
     path = version_file or codex_version_file(profile)
     reject_symlinked_config(path, "codex version file")
@@ -349,9 +309,8 @@ def preflight_codex_launch(
 ) -> HeadRun:
     """Prepare one exact Codex ``HeadRun`` and attach advisory fan-out telemetry.
 
-    Provider-schema evidence stays attached when available but is not a launch requirement; workspace
-    trust is the sole hard pre-pane requirement. The source descriptor is written whenever its
-    baseline can be enumerated, because it fences later provider progress to this exact HeadRun.
+    Workspace trust is the only hard pre-pane requirement. The provider source baseline is written
+    whenever it can be enumerated, because it fences later provider progress to this HeadRun.
     """
     attested = attest_codex_fanout(
         profile,
@@ -370,9 +329,7 @@ def preflight_codex_launch(
     except CodexPreflightError as exc:
         refused = _unknown_run(attested, f"workspace trust preflight failed: {exc}")
         raise CodexFanoutPolicyError(str(exc), run=refused) from None
-    # The update modal is prevented here for the same reason trust is, and it is not a launch
-    # requirement for the same reason telemetry is not: a runtime home this could not settle still
-    # produces a head, and the delivery boundary answers the modal on screen if one appears.
+    # Not a launch requirement: the delivery boundary answers the modal on screen if it appears.
     try:
         ensure_codex_update_modal_dismissed(profile)
     except CodexPreflightError:
@@ -389,10 +346,8 @@ def attest_codex_fanout(
 ) -> HeadRun:
     """Build a conservative, run-bound provider-schema attestation without opening a pane.
 
-    ``schema_attestation`` is expected to be a provider-schema capture, not a configuration knob: a
-    canonical ``tools`` list and its digest, the observed binary digest and CLI version, model and
-    role. A mapping that merely says a model did not spawn is not this shape and is recorded as
-    schema-unknown.
+    ``schema_attestation`` must be a provider-schema capture (canonical ``tools`` and digest, binary
+    digest, CLI version, model, role); any other mapping is recorded as schema-unknown.
     """
     # Launch configuration cannot promote itself to provider-schema evidence.
     raw = schema_attestation
@@ -476,9 +431,8 @@ def attest_codex_fanout(
 class CodexProviderEventRecorder:
     """Durably append advisory provider-edge evidence to one exact HeadRun.
 
-    The recorder owns no pane and has no screen or transcript fallback. Its classifications are
-    diagnostics only: an observed edge or a telemetry-write failure never controls a head's
-    lifecycle, delivery, replacement or continuation liveness.
+    Owns no pane and has no screen or transcript fallback. Classifications are diagnostics only and
+    never control a head's lifecycle, delivery, replacement or continuation liveness.
     """
 
     def __init__(
@@ -543,10 +497,7 @@ def enforce_provider_event(
     block: Callable[[dict[str, Any]], None],
     captured_at: str | None = None,
 ) -> ProviderEventOutcome:
-    """Record provider-edge telemetry without changing the run or board lifecycle.
-
-    ``stop`` and ``block`` remain part of the installed callback shape, but fan-out is advisory.
-    """
+    """Record provider-edge telemetry; ``stop`` and ``block`` are kept for the callback shape only."""
     del stop, block
     prior_run = recorder.run
     try:
@@ -563,11 +514,9 @@ def enforce_provider_event(
 
 
 def reject_symlinked_config(config: Path, kind: str) -> None:
-    """Refuse to treat anything but a regular file as a head runtime's own config.
+    """Refuse anything but a regular file as a head runtime's config (no symlinks or devices).
 
-    A bring-up rewrites installation state shared by every head on the host, so it must never follow
-    a symlink or a device somebody put in that path. Public because the Claude side of the same
-    bring-up writes its config under the same rule.
+    Public because the Claude side of the bring-up writes its config under the same rule.
     """
     try:
         mode = config.lstat().st_mode
@@ -608,12 +557,10 @@ def _save_codex_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _save_codex_config(config: Path, text: str) -> None:
-    """Replace the codex config with `text`, but only once it parses as the TOML codex will read.
+    """Replace the codex config with `text` once it parses as TOML.
 
-    The new trust tables are appended to the file as it stands rather than re-rendered from a parse,
-    because this file is the installation's own. Appending can produce invalid TOML if the file
-    already declared `projects` in a form a table header cannot extend, so the result is parsed back
-    before it replaces anything.
+    Trust tables are appended to the installation's file rather than re-rendered, which can yield
+    invalid TOML, so the result is parsed back before it replaces anything.
     """
     _codex_config_projects(text, config)
     _atomic_write(config, text, kind="codex config")
@@ -726,11 +673,10 @@ def _policy_run(
 
 
 def _with_unbound_provider_source(profile: Mapping[str, Any], run: HeadRun) -> HeadRun:
-    """Attach the pre-pane source baseline used to bind the new Codex event journal.
+    """Attach the pre-pane session-journal baseline used to bind the new Codex event journal.
 
-    Session JSONL has a provider session id and parent thread id but no Ummanu run id, so the
-    baseline is part of the attestation: a later lifecycle can select exactly one *new* provider
-    journal and never re-label an older same-workspace session as this run.
+    A session JSONL carries no Ummanu run id, so the baseline lets a later lifecycle select exactly one
+    new journal and never relabel an older same-workspace session as this run.
     """
     root = Path(codex_home(profile)) / "sessions"
     if root.exists() and not root.is_dir():
@@ -758,11 +704,10 @@ def _with_unbound_provider_source(profile: Mapping[str, Any], run: HeadRun) -> H
 
 
 def codex_provider_source_descriptor(run: HeadRun) -> dict[str, Any]:
-    """The immutable launch facts every Codex provider journal keeps for its entire lifetime.
+    """The immutable launch facts every Codex provider journal binding keeps for its lifetime.
 
-    A provider journal identifies its own session but cannot name the Ummanu head that opened it.
-    Source binding may append verified journal facts, but it must carry these values byte-for-value
-    into every persisted bound source so later readers can reject a foreign same-workspace journal.
+    Source binding may append verified journal facts but must carry these values unchanged into every
+    bound source, so readers can reject a foreign same-workspace journal.
     """
     return {
         "run_id": run.run_id,
@@ -783,10 +728,9 @@ def _unknown_run(run: HeadRun, reason: str) -> HeadRun:
 
 
 def _codex_cli_identity(binary_path: str | None = None) -> tuple[str, str, str]:
-    """Hash and query the binary that an ordinary ``codex`` launch resolves to.
+    """Hash and query the binary an ordinary ``codex`` launch resolves to.
 
-    The command renderer invokes ``codex`` by name, so accepting a different configured path here
-    would bind an attestation to a binary the pane does not execute.
+    The renderer invokes ``codex`` by name, so the attestation binds to that binary.
     """
     candidate = binary_path or shutil.which("codex")
     if not candidate:
@@ -860,8 +804,8 @@ def _typed_provider_event(
 ) -> dict[str, Any]:
     """Reduce untrusted provider input to the four durable event kinds.
 
-    All original bytes are represented only by a canonical digest. A malformed object is still an
-    event: accepting it as an empty result would be a transcript reconstruction path in disguise.
+    Raw bytes are kept only as a canonical digest. A malformed object is still an event, never an
+    empty result.
     """
     captured = captured_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     supplied_digest = (

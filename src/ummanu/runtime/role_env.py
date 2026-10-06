@@ -25,19 +25,14 @@ ENTRY_POINT = "ummanu.runtime.role_env"
 
 RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
 UMMANU_RUNTIME_ENV_FILE_ENV = "UMMANU_RUNTIME_ENV_FILE"
-# Packaged automation units predate the dispatcher heads and use the first spelling, while
-# dispatcher-launched heads use the second. The explicit ummanu-side pin wins when both are
-# present, so recovery cannot materialize secrets into an ambient unit's runtime.env.
+# Packaged automation units use the TA_ spelling, dispatcher-launched heads the UMMANU_ one. The
+# UMMANU_ pin wins, so recovery cannot materialize secrets into an ambient unit's runtime.env.
 RUNTIME_ENV_FILE_ENVS = (UMMANU_RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_FILE_ENV)
 RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 
 
 def runtime_env_path() -> Path:
-    """Where the runtime env file lives, resolved per call rather than frozen at import.
-
-    The file is read on every `runtime_env()`, so the name that points at it is read the same way:
-    a process moved onto another installation's file gets it without a module reload.
-    """
+    """The runtime env file, resolved per call so a process moved onto another installation follows."""
     return Path(
         next(
             (os.environ[name] for name in RUNTIME_ENV_FILE_ENVS if os.environ.get(name)), RUNTIME_ENV_DEFAULT
@@ -45,7 +40,7 @@ def runtime_env_path() -> Path:
     )
 
 
-# Kept for ummanu.session, whose launch error reports the file selected when this module loaded.
+# For ummanu.session's launch error: the file selected at import.
 RUNTIME_ENV = runtime_env_path()
 
 
@@ -56,15 +51,9 @@ RUNTIME_PYTHONPATH_ENV = "TA_RUNTIME_PYTHONPATH"
 def runtime_product_root() -> Path:
     """The checkout a launched role imports the product from, resolved per call.
 
-    The launcher's explicit ``TA_RUNTIME_PYTHONPATH`` first, then the product checkout this
-    installation is configured with. An installation materialized from an alternate checkout binds
-    ``UMMANU_REPO`` in the units it renders and in the launch command it writes; falling
-    straight to the checkout that imported this module would start the role out of whatever code
-    happened to be running the dispatcher instead of the version the host was upgraded onto.
-
-    The last resort is this checkout rather than ``~/ummanu``: a module that is already imported
-    knows its own tree is importable, and a role started on a host that configured nothing at all
-    should not be sent to a path that may not exist.
+    ``TA_RUNTIME_PYTHONPATH``, then the configured ``UMMANU_REPO`` (an alternate checkout binds it in
+    the units and launch command it renders), else this module's own checkout, which is importable.
+    Never the dispatcher's running checkout by default, nor an assumed ``~/ummanu``.
     """
     configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
     return Path(configured).expanduser() if configured else REPO_ROOT
@@ -75,17 +64,16 @@ def runtime_pythonpath() -> str:
     return str(runtime_product_root() / "src")
 
 
-# The product's own interpreter, provisioned by `ummanu upgrade` and verified by
-# `scripts/ummanu-agent-gate.sh` before it starts a role: `<product root>/.venv/bin/python3`.
+# The product's own interpreter (`<product root>/.venv/bin/python3`), provisioned by `ummanu upgrade`
+# and verified by `scripts/ummanu-agent-gate.sh`.
 MANAGED_VENV_DIR = ".venv"
 
 
 def managed_venv_bin(product_root: Path | str | None = None) -> Path:
     """`<product root>/.venv/bin`, the one place a role's product interpreter is resolved.
 
-    The product root defaults to `runtime_product_root()`, the checkout the role imports the product
-    from, so the interpreter and the source tree come from one checkout. Resolving is pure, like the
-    rest of a rendered command; `require_managed_interpreter` is what refuses a missing one.
+    Defaults to `runtime_product_root()` so interpreter and source come from one checkout. Pure;
+    `require_managed_interpreter` refuses a missing one.
     """
     root = Path(product_root).expanduser() if product_root is not None else runtime_product_root()
     return root / MANAGED_VENV_DIR / "bin"
@@ -94,9 +82,8 @@ def managed_venv_bin(product_root: Path | str | None = None) -> Path:
 def require_managed_interpreter(product_root: Path | str | None = None) -> Path:
     """`managed_venv_bin()`, refused when its `python3` is missing or not executable.
 
-    A head started without it would find the system `python3`, which lacks the product's
-    dependencies, and every role skill's `python3 -P -m ummanu ...` would fail inside a head that
-    looked healthy. The message is the one `scripts/ummanu-agent-gate.sh` gives for the same fault.
+    Without it a head would run the system `python3` and every `python3 -P -m ummanu ...` would fail.
+    The message matches `scripts/ummanu-agent-gate.sh`.
     """
     root = Path(product_root).expanduser() if product_root is not None else runtime_product_root()
     venv_bin = managed_venv_bin(root)
@@ -110,24 +97,18 @@ def require_managed_interpreter(product_root: Path | str | None = None) -> Path:
     return venv_bin
 
 
-# UMMANU_DATA_DIR names the installation's data plane, not a secret. It has to survive the
-# allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its
-# data dir through that file moves the WRITER. A role stripped of the same name would fall back to
-# instance.yaml and read a production-state.json nobody writes, calling that silence healthy
-# (secretary-833 review, round 3).
+# Installation identity, not secrets. UMMANU_DATA_DIR must survive the allowlist: the dispatcher unit
+# imports runtime.env wholesale, so a role stripped of it would read a state file nobody writes.
 NONSECRET_ENV = (
     "UMMANU_INSTANCE",
     "UMMANU_DATA_DIR",
     "UMMANU_REPO",
 )
-# Bound by whoever launched the role (the rendered unit), and not retractable by the runtime env
-# file, which is itself a file inside one installation.
+# Bound by the launcher (the rendered unit); runtime.env cannot override them.
 OBSERVER_SPRINT_ENV = "UMMANU_OBSERVER_SPRINT"
 OBSERVER_GENERATION_ENV = "UMMANU_OBSERVER_GENERATION"
 MEMORY_ACCESS_TOKEN_ENV = "UMMANU_MEMORY_ACCESS_TOKEN"
-# Who a role head writes the board as: the `--actor` every board command defaults to. The dispatcher
-# names a worker or reviewer head by its profile in the launch command; every other role head is its
-# role (`observer`, `steward`, `retro`).
+# The `--actor` board commands default to: a worker/reviewer head's profile, else the role name.
 BOARD_ACTOR_ENV = "BOARD_ACTOR"
 UNIT_BOUND_ENV = (
     "UMMANU_INSTANCE",
@@ -137,8 +118,7 @@ UNIT_BOUND_ENV = (
     MEMORY_ACCESS_TOKEN_ENV,
     BOARD_ACTOR_ENV,
 )
-# An observer's identity is supplied only by its launcher. A runtime.env entry must never let a
-# head claim another sprint, or write under another head's name.
+# Launcher-supplied identity only: runtime.env must never let a head claim another sprint or name.
 LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV)
 # What a launched process has to be told about the installation it belongs to.
 LAUNCH_BOUND_ENV = (*RUNTIME_ENV_FILE_ENVS, "UMMANU_INSTANCE", "UMMANU_REPO")
@@ -153,32 +133,25 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "curator": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
 }
 RUFF_ROLES = frozenset(("worker", "reviewer"))
-# Roles whose heads run the product's own CLI rather than a candidate's: their `python3` is the
-# product's managed venv. `pipeline` launches no head and keeps whatever interpreter it was given.
+# Roles whose heads run the product's CLI on its managed venv. `pipeline` launches no head.
 PRODUCT_VENV_ROLES = frozenset(("observer", "steward", "retro", "curator"))
-# Reserved to the dispatcher. A project's conventional ``.venv`` remains adapter-owned, so uv,
-# make and setup commands never share an environment with the head-launch boundary.
+# Reserved to the dispatcher, separate from a project's adapter-owned ``.venv``.
 WORKSPACE_ENV_DIR = ".ummanu-task-env/venv"
-# The dispatcher-owned namespace that holds that environment. Owned cleanup removes it as a whole,
-# so everything the pipeline itself generates in a workspace belongs inside it.
+# The dispatcher-owned namespace holding that environment; cleanup removes it whole, so everything
+# the pipeline generates in a workspace belongs inside it.
 WORKSPACE_NAMESPACE = Path(WORKSPACE_ENV_DIR).parts[0]
-# Standard tool settings that keep a worker's or reviewer's test and lint caches inside that
-# namespace instead of the candidate source tree, where cleanup would rightly read them as work.
+# Keeps worker/reviewer test and lint caches inside the namespace, out of the candidate tree.
 WORKSPACE_TOOL_CACHES = {
     "PYTHONPYCACHEPREFIX": "pycache",
     "RUFF_CACHE_DIR": "ruff-cache",
     "MYPY_CACHE_DIR": "mypy-cache",
 }
-# A startup file in the workspace venv's site-packages that sets the same bytecode prefix for every
-# interpreter of that venv, including a child a test starts with an environment built from scratch,
-# which drops PYTHONPYCACHEPREFIX. An explicit prefix still wins. The name sorts before the other
-# startup files, so the modules their import lines load are redirected too.
+# A venv startup file setting the same bytecode prefix for every interpreter of that venv, including
+# a child started with a scratch environment. An explicit prefix wins; the name sorts first so other
+# startup files' imports are redirected too.
 WORKSPACE_PYCACHE_PTH = "00-ummanu-task-pycache.pth"
-# Everything the pipeline itself writes into a candidate checkout, excluded through the repository's
-# local ``info/exclude`` on every bring-up so a project's committed ``.gitignore`` needs no pipeline
-# entries: the reserved namespace, the dispatcher's task document and the ``ummanu check broad``
-# receipt directory, and a research card's report directory, which the dispatcher moves into knowledge.
-# The last three are root-anchored: the same names deeper in a project are its own.
+# What the pipeline writes into a candidate checkout, excluded via the repo's local ``info/exclude``
+# on every bring-up. All but the namespace are root-anchored: deeper same-named paths are the project's.
 WORKSPACE_EXCLUDES = (
     f"{Path(WORKSPACE_ENV_DIR).parts[0]}/",
     "/TASK.md",
@@ -200,10 +173,10 @@ def workspace_pycache_pth(workspace: Path | str) -> str:
 
 
 def dispatcher_workspace_namespace(root: Path | str) -> Path | None:
-    """`root`'s reserved namespace when the dispatcher's ownership claim there is intact, else None.
+    """`root`'s reserved namespace when the dispatcher's ownership claim is intact, else None.
 
-    The claim is the one `_claim_workspace_environment` writes: an `owner.json` naming the
-    dispatcher and this exact workspace, inside a namespace that resolves within it.
+    The claim (written by `_claim_workspace_environment`) is an `owner.json` naming the dispatcher and
+    this exact workspace, inside a namespace that resolves within it.
     """
     try:
         resolved = Path(root).resolve(strict=True)
@@ -216,8 +189,7 @@ def dispatcher_workspace_namespace(root: Path | str) -> Path | None:
     return namespace if observed == expected and inside and not namespace.is_symlink() else None
 
 
-# This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
-# are rejected before reaching this gate; they remain here as the board's declared roles.
+# Gates the synthetic BOARD_ROLE. po and dispatcher have no allowlist entry and are rejected earlier.
 BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_ENV_NAME_RE = re.compile(
@@ -227,12 +199,10 @@ SENSITIVE_ENV_NAME_RE = re.compile(
 
 
 def is_sensitive_env_name(name: str) -> bool:
-    """Whether an env variable's *name* declares credential material.
+    """Whether an env variable's name declares credential material.
 
-    This is the canonical classification shared by role environment filtering
-    and every exact-value redaction gate.  Values alone are not enough: normal
-    endpoint URLs are long configuration, while a custom secret-store variable
-    need not resemble a provider token.
+    The one classification for role env filtering and every exact-value redaction gate; values alone
+    cannot tell a secret from long configuration.
     """
     return bool(SENSITIVE_ENV_NAME_RE.search(str(name)))
 
@@ -356,12 +326,12 @@ def runtime_env(
         elif key in base:
             env[key] = base[key]
 
-    # These are derived by the trusted launcher, never inherited or supplied by runtime.env.
+    # Derived by the trusted launcher, never inherited or taken from runtime.env.
     for key in docker_guard.BINDINGS:
         env.pop(key, None)
     if role in RUFF_ROLES:
         env.update(_docker_bindings(env))
-        # This comes only from the explicit trusted command argument, never the ambient env.
+        # Only from the explicit trusted command argument, never the ambient env.
         if local_run_policy is not None:
             try:
                 policy = json.loads(local_run_policy)
@@ -379,9 +349,7 @@ def runtime_env(
             env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
             env["VIRTUAL_ENV"] = str(environment)
             env.update(workspace_tool_cache_env(workspace))
-        # The wrapper itself is imported through an explicit production source prefix. That is a
-        # trusted command boundary, not ambient authority for every command the head subsequently
-        # runs. Candidate imports come from its environment or the broad-check bootstrap.
+        # PYTHONPATH served only the wrapper's own import; it is not authority for the head's commands.
         env.pop("PYTHONPATH", None)
         env["PATH"] = str(docker_guard_dir()) + os.pathsep + env.get("PATH", "")
     elif role in PRODUCT_VENV_ROLES:
@@ -401,11 +369,9 @@ def runtime_env(
 def board_actor(role: str, env: dict[str, str]) -> str:
     """The actor a role head writes the board as.
 
-    A role whose allowlist carries `BOARD_ACTOR` (worker, reviewer) takes the value in the exec
-    process's own environment, which the dispatcher's launch command binds to the head profile;
-    runtime.env cannot supply it, but a value the process already carried passes through.
-    Every other role, the observer included, is its role: nothing a launch or a runtime.env carries
-    can make an observer write as anyone else.
+    Worker and reviewer (allowlist carries `BOARD_ACTOR`) use the value in the exec process's env,
+    bound to the head profile by the launch command; runtime.env cannot supply it. Every other role,
+    the observer included, is its role name.
     """
     if BOARD_ACTOR_ENV in ROLE_ALLOWLIST.get(role, ()):
         named = str(env.get(BOARD_ACTOR_ENV) or "").strip()
@@ -423,10 +389,8 @@ def role_shell_command(
 ) -> str:
     """Make product-provisioned tools available inside a role's login shell.
 
-    The role wrapper starts ``/bin/sh -lc`` so a head gets its normal login environment. Some
-    shell profiles replace ``PATH`` there, after ``runtime_env()`` has already supplied it. Keep
-    the venv prefix in the command itself: the workspace venv for worker and reviewer tooling, the
-    product's managed venv for the roles that run the product's own CLI.
+    Login profiles may reset ``PATH`` after ``runtime_env()``, so the venv prefix goes in the command:
+    the workspace venv for worker/reviewer, the product's managed venv for product-CLI roles.
     """
     guard_prefix = ""
     if role in RUFF_ROLES:
@@ -467,11 +431,9 @@ def declared_observer_sprint(env: dict[str, str] | None = None) -> str:
 def launch_binding() -> list[str]:
     """Leading assignments that tie a launched process to this installation.
 
-    The launched process is a terminal Orca creates, not a child of the launcher, so it inherits
-    none of the launcher's unit environment. Naming the runtime env file and the instance in the
-    command itself is what keeps a role started by a non-default installation from reading
-    the home default live root (``paths.default_instance_path``). Only names the launcher was actually given are rendered:
-    writing out the fallback would state a choice nobody made.
+    The head's terminal is not the launcher's child, so the runtime env file and instance are named in
+    the command; otherwise a non-default installation's role reads ``paths.default_instance_path``.
+    Only names the launcher was given are rendered.
     """
     return [f"{name}={shlex.quote(value)}" for name in LAUNCH_BOUND_ENV if (value := os.environ.get(name))]
 
