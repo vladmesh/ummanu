@@ -6,6 +6,12 @@ installs the defaults below before any `test_*` module is imported: `python -m u
 discovery imports `tests/__init__.py` first, so they are live before any test can reach a
 production call path:
 
+- `HOME` is disposable. `BASH_ENV` and `ENV` are removed; a test-owned `bash` on `PATH` runs the real
+  interpreter with `--noprofile --norc`, so command stdout and exit status do not depend on a host's
+  login/rc files. This is a test-tool fixture; production command rendering is unchanged. Tests of
+  shell startup itself must opt in to an explicit interpreter and their own files;
+- `UMMANU_DISPATCHER_BODY_DIR` is a run-owned default installed before test imports; focused
+  fixtures may patch it and restore it at cleanup;
 - `TMPDIR` (and `tempfile.tempdir`) point at one throwaway root the run owns and removes at exit; an
   `ummanu-*` or `orca-*` entry still in it then fails the run, naming the leak
   (`tests/test_suite_tmp_guard.py`);
@@ -87,7 +93,7 @@ A CLI test that needs a board injects it where the client is built — the
 
 A test with sprint content of its own injects it explicitly rather than patching a global:
 `collect_status(report, offline=True, sprint_client=sprint_store(self, status_seed()))` is the seam, and
-`tests/test_hermetic_board.py:test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape`
+`tests/test_hermetic_board_integration.py:test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape`
 is the worked example. Do not build a client against a real endpoint in a `test_*` module the
 default `python -m unittest` run discovers; a live canary belongs in an operator runbook or an
 explicit, separately opted-in integration test against a disposable endpoint instead.

@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest.mock import patch
 from xml.etree import ElementTree
 
+import yaml
+
 from scripts.ci_test_shards import (
     CHANGED_LINES_JSON_NAME,
     COVERAGE_JSON_NAME,
@@ -45,19 +47,18 @@ from scripts.ci_test_shards import (
     run_suite_with_evidence,
     validate_fast_profile,
 )
+from tests.support.git import git
 
 CANDIDATE_SHA = "a" * 40
 
 
 class CiTestSuiteManifestTests(unittest.TestCase):
     def _commit_checkout(self, root: Path) -> None:
-        subprocess.run(["git", "init", "--quiet", str(root)], check=True)
-        subprocess.run(["git", "-C", str(root), "config", "user.name", "CI test"], check=True)
-        subprocess.run(
-            ["git", "-C", str(root), "config", "user.email", "ci-test@example.invalid"], check=True
-        )
-        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
-        subprocess.run(["git", "-C", str(root), "commit", "--quiet", "-m", "fixture"], check=True)
+        git(root, "init", "--quiet")
+        git(root, "config", "user.name", "CI test")
+        git(root, "config", "user.email", "ci-test@example.invalid")
+        git(root, "add", ".")
+        git(root, "commit", "--quiet", "-m", "fixture")
 
     def _run_temporary_suite(self, root: Path, report_dir: Path) -> int:
         grouped = {suite: ["tests/test_passing.py"] for suite in SUITES}
@@ -238,6 +239,25 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             set(FAST_MODULES) & set(modules(sorted(runtime_component_modules))),
             "the fast profile must never run real local-PTY or runtime-deadline proofs",
         )
+
+    def test_real_fast_profile_completes_under_its_own_process_and_network_guard(self) -> None:
+        self.assertEqual(run_fast(Path(__file__).resolve().parents[1]), 0)
+
+    def test_aggregate_rejects_each_non_success_typecheck_or_lint_result(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
+        aggregate = workflow["jobs"]["test"]
+        self.assertEqual(set(aggregate["needs"]), {"test_suites", "typecheck", "lint"})
+        command = aggregate["steps"][-1]["run"]
+        for typecheck in ("success", "failure", "cancelled", "skipped"):
+            for lint in ("success", "failure", "cancelled", "skipped"):
+                with self.subTest(typecheck=typecheck, lint=lint):
+                    rendered = command.replace("${{ steps.coverage_aggregate.outcome }}", "success")
+                    rendered = rendered.replace("${{ steps.suite_aggregate.outcome }}", "success")
+                    rendered = rendered.replace("${{ needs.typecheck.result }}", typecheck)
+                    rendered = rendered.replace("${{ needs.lint.result }}", lint)
+                    result = subprocess.run(["bash", "-c", rendered], check=False)
+                    self.assertEqual(result.returncode == 0, typecheck == lint == "success")
 
     def test_fast_profile_rejects_a_missing_declared_module_before_launch(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -422,7 +442,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             """  test:
     name: test
     if: ${{ always() }}
-    needs: test_suites""",
+    needs: [test_suites, typecheck, lint]""",
             workflow,
         )
         self.assertIn(

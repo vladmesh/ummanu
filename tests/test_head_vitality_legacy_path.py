@@ -1,13 +1,4 @@
-"""Legacy decision-path characterisation for the incident regression table (card S1-3).
-
-Where ``test_head_vitality_regression.py`` pins what the reducer *should* conclude, these
-tests pin what the watchdog's existing wait-tick / gate machinery *does* today for three of
-the incidents. They exist so S1-4's switch can be reviewed as a diff against recorded
-behaviour instead of memory:
-
-* where it still contradicts the plan, the test is marked ``expectedFailure`` with the
-  sprint that flips it named in the docstring -- none is silently skipped.
-"""
+"""Regression scenarios for the dispatcher vitality path and its recovery decisions."""
 
 from __future__ import annotations
 
@@ -17,8 +8,6 @@ import time
 import unittest
 from pathlib import Path
 from unittest import mock
-
-os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (

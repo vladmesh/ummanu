@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 from tests.fakes.sprints import sprint_store, status_seed
@@ -645,6 +646,7 @@ class StatusCliTests(unittest.TestCase):
                 )
         payload = json.loads(json_output.getvalue())
         self.assertEqual(json_code, 0, payload)
+        self.assertEqual(text_code, 1, text_output.getvalue())
         self.assertNotIn("external_runtime", payload["host"])
         self.assertFalse([row for row in payload["host"]["units"] if row.get("active") != "active"])
         # examples/instance's fixture host is otherwise incomplete (missing project checkout),
@@ -663,7 +665,6 @@ class StatusCliTests(unittest.TestCase):
         )
 
     def test_doctor_json_reports_an_unresolved_divergence_even_offline(self):
-        root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"
             (data_dir / "dispatcher").mkdir(parents=True)
@@ -1136,7 +1137,7 @@ class HeadlessWorkStatusTests(unittest.TestCase):
     operator has: the per-card attempt row, and the sprint summary that counts it.
     """
 
-    EPISODE = {
+    EPISODE: ClassVar[dict] = {
         "since": 1_700_000_000.0,
         "record_state": "adopted",
         "handle_known": False,

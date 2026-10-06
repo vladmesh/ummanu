@@ -23,8 +23,6 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
-
 from ummanu.dispatch.head_vitality import (
     CHILD_CPU_ADVANCE_MS,
     ProcessState,

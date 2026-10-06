@@ -64,6 +64,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from tests.support.shell import shell_tools
+
 # The suite's own temporary directory, and the guard that keeps it from leaking (secretary-1663).
 # Every `tempfile` call in this process and every child that inherits TMPDIR lands under one root
 # the run claims here, before any other default below and before any test module is imported, so
@@ -151,3 +153,16 @@ os.environ.update(
     GIT_CONFIG_KEY_1="maintenance.auto",
     GIT_CONFIG_VALUE_1="false",
 )
+
+# Claim the dispatcher body default before importing test modules. Per-test patches may override it.
+_SUITE_BODY_DIR = _SUITE_TMP / "dispatcher-bodies"
+_SUITE_BODY_DIR.mkdir()
+os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(_SUITE_BODY_DIR)
+
+# A shell fixture keeps real command execution while removing ambient login/rc side effects.
+_SUITE_HOME = _SUITE_TMP / "home"
+_SUITE_HOME.mkdir()
+os.environ["HOME"] = str(_SUITE_HOME)
+os.environ.pop("BASH_ENV", None)
+os.environ.pop("ENV", None)
+os.environ["PATH"] = str(shell_tools(_SUITE_TMP / "shell-tools")) + os.pathsep + os.environ.get("PATH", os.defpath)

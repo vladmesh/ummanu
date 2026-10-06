@@ -18,6 +18,9 @@ concurrency:
   group: ci-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
 jobs:
   test_suites:
     name: test / ${{ matrix.suite }}
@@ -33,13 +36,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           # The migration compatibility proof runs the actual pre-migration source tree.
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: ./.github/actions/python-setup
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - run: python3 -m pip install --upgrade pip
-      - run: python3 -m pip install -e '.[memory,ci]'
+          extras: ${{ matrix.suite == 'unit' && 'ci,dev' || 'memory,ci' }}
+      - name: Run the hermetic fast profile
+        if: ${{ matrix.suite == 'unit' }}
+        run: python3 scripts/ci_test_shards.py --fast
       - name: Pull the throwaway PostgreSQL image before any suite needs it
         # The card-store fixtures pull `postgres:16` from inside a test; a Docker Hub hiccup there
         # reads as a red product test. Pull it up front, with retries, so the pull either succeeds
@@ -105,19 +107,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@v5
+      - uses: ./.github/actions/python-setup
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - run: python3 -m pip install --upgrade pip
-      - run: python3 -m pip install -e '.[typecheck]'
+          extras: typecheck
       - run: python3 -m mypy
 
-  test:
-    name: test
-    if: ${{ always() }}
-    needs: test_suites
+  lint:
+    name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -125,13 +121,30 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: ./.github/actions/python-setup
         with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
-      - run: python3 -m pip install --upgrade pip
-      - run: python3 -m pip install -e '.[ci]'
+          extras: dev
+      - name: Check changed Python files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: >-
+          python3 scripts/ci_lint.py --base-sha "$BASE_SHA" --candidate-sha "$CANDIDATE_SHA"
+
+  test:
+    name: test
+    if: ${{ always() }}
+    needs: [test_suites, typecheck, lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - uses: ./.github/actions/python-setup
+        with:
+          extras: ci
       - name: Download suite evidence
         if: ${{ always() }}
         continue-on-error: true
@@ -185,7 +198,8 @@ jobs:
       - name: Publish main coverage baseline
         if: >-
           ${{ github.ref == 'refs/heads/main' && steps.coverage_aggregate.outcome == 'success' &&
-          steps.suite_aggregate.outcome == 'success' }}
+          steps.suite_aggregate.outcome == 'success' && needs.typecheck.result == 'success' &&
+          needs.lint.result == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: ci-coverage-baseline-${{ github.sha }}
@@ -195,7 +209,8 @@ jobs:
       - name: Write main coverage baseline summary
         if: >-
           ${{ github.ref == 'refs/heads/main' && steps.coverage_aggregate.outcome == 'success' &&
-          steps.suite_aggregate.outcome == 'success' }}
+          steps.suite_aggregate.outcome == 'success' && needs.typecheck.result == 'success' &&
+          needs.lint.result == 'success' }}
         env:
           BASELINE_SHA: ${{ github.sha }}
           BASELINE_ARTIFACT: ci-coverage-baseline-${{ github.sha }}
@@ -207,3 +222,5 @@ jobs:
         run: >-
           test "${{ steps.coverage_aggregate.outcome }}" = success
           && test "${{ steps.suite_aggregate.outcome }}" = success
+          && test "${{ needs.typecheck.result }}" = success
+          && test "${{ needs.lint.result }}" = success
