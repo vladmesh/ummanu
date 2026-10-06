@@ -1780,8 +1780,30 @@ class CommandHostRuntime:
                 lifecycle_run = updated
         return _provider_progress_for_run(lifecycle_run)
 
+    def observer_provider_failure(self, record: Any) -> dict[str, Any]:
+        """Whether this observer's exact HeadRun ended its last turn on a provider error (ummanu-108).
+
+        Bound like `observer_provider_progress`: a persisted run naming another workspace or
+        sprint answers nothing. The reader is `provider_failure.provider_failure_for_run`.
+        """
+        if self.mode == "noop":
+            return {"state": "unavailable", "reason": "noop host"}
+        stored = getattr(record, "head_run", {})
+        try:
+            run = head_ops.HeadRun.from_json(stored)
+        except (head_ops.HeadRunError, TypeError, ValueError):
+            return {"state": "unavailable", "reason": "persisted observer HeadRun is unavailable"}
+        if (
+            run.workspace != str(getattr(record, "workspace", "") or "")
+            or run.task_ref.kind != "sprint"
+            or run.task_ref.ref != str(getattr(record, "sprint", "") or "")
+            or (run.role and run.role != OBSERVER_ROLE)
+        ):
+            return {"state": "identity_mismatch", "reason": "persisted observer HeadRun binding mismatches"}
+        return _provider_failure_for_persisted_run(stored, local_pty_root=self._local_pty_root())
+
     def provider_failure(self, task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, Any]:
-        """Whether this role's exact HeadRun ended its first turn on a provider error (secretary-1799).
+        """Whether this role's exact HeadRun ended its last turn on a provider error (secretary-1799, ummanu-108).
 
         Read-only, and bound like `provider_progress`: a persisted run that names another workspace,
         card or role answers nothing. The reader is `provider_failure.provider_failure_for_run`.

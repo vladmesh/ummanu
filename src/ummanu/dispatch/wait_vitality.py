@@ -104,7 +104,7 @@ def wait_watchdog(
             "action": f"{kind}-heartbeat-identity-mismatch",
             "reason": "the heartbeat names a live process with a mismatching launch identity",
         }
-    # A first turn that ended on a provider error is a provider verdict, and it outranks every
+    # A turn that ended on a provider error is a provider verdict, and it outranks every
     # stall reading below (secretary-1799): a head idle at its prompt after a 401 is not late, it
     # was refused, and the answer is the next head of its chain, not a nudge, a respawn into the
     # same provider or Blocked. Decided on the tick that first sees the turn's end.

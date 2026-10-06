@@ -109,8 +109,23 @@ class ProviderFakeTests(unittest.TestCase):
         with mock.patch.object(resource_probe.subprocess, "run", return_value=failed) as run:
             result = resource_probe.probe_openai_sub()
         self.assertFalse(result.ok)
-        self.assertEqual(result.status, "non-zero-exit")
+        # ummanu-108: a spent usage limit is named as such, not left as a bare non-zero exit.
+        self.assertEqual(result.status, "exhausted")
         self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], codex_preflight.codex_home({}))
+
+    def test_a_spent_quota_is_read_past_the_banner_with_its_reset(self) -> None:
+        banner = "Reading additional input from stdin...\nOpenAI Codex v0.159.2\n" + "-" * 600 + "\n"
+        failed = subprocess.CompletedProcess(
+            [], 1, "",
+            banner + "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to "
+            "purchase more credits or try again at Oct 9th, 2026 9:11 PM.",
+        )
+        with mock.patch.object(resource_probe.subprocess, "run", return_value=failed):
+            result = resource_probe.probe_openai_sub()
+        line = resource_probe.format_probe_failure("openai-sub", result)
+        self.assertIn("status=exhausted", line)
+        self.assertIn("provider_error=ERROR: You've hit your usage limit", line)
+        self.assertIn("try again at Oct 9th, 2026 9:11 PM", line)
 
     def test_a_missing_binary_and_a_timeout_are_failures_not_exceptions(self) -> None:
         with mock.patch.object(resource_probe.subprocess, "run", side_effect=FileNotFoundError("claude")):

@@ -5,7 +5,8 @@ Each fake logs its argv, cwd, stdin, `$UMMANU_PO_SESSION` and `$UMMANU_PO_REQUES
 changes behaviour on words in the owner's message:
 `SLEEP` keeps the turn running with a child in its process group, `GATE` keeps it running until the
 file `$FAKE_LOG.gate` exists, `FAIL` exits non-zero, `SILENT` exits zero without a final answer,
-`NOPERSIST` makes Claude save no conversation.
+`NOPERSIST` makes Claude save no conversation. While the file `$FAKE_LOG.quota-<cli>` exists, that
+CLI refuses every turn with its provider's own spent-usage-limit message, as the real one does.
 
 Each also says which model it ran the way the real CLI does: Claude's result object keys `modelUsage`
 by the full id (`FAKE_CLAUDE_RESOLVED` of the alias it was given, the session's own model first and a
@@ -53,6 +54,10 @@ if flag == "--resume" and session not in saved:
 if flag == "--session-id" and session in saved:
     print(f"Error: Session ID {session} is already in use.", file=sys.stderr)
     sys.exit(1)
+if os.path.exists(log + ".quota-claude"):
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "session_id": session,
+                      "result": "You've hit your weekly limit \u00b7 resets 1am (UTC)"}))
+    sys.exit(1)
 if "NOPERSIST" not in prompt:
     with open(saved_path, "a") as handle:
         handle.write(session + "\n")
@@ -94,6 +99,12 @@ resume = argv[:2] == ["exec", "resume"]
 thread = argv[-2] if resume else "019a-fake-thread"
 out = argv[argv.index("-o") + 1]
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
+if os.path.exists(log + ".quota-codex"):
+    message = ("You\u2019ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase "
+               "more credits or try again at Oct 9th, 2026 9:11 PM.")
+    print(json.dumps({"type": "error", "message": message}), flush=True)
+    print(json.dumps({"type": "turn.failed", "error": {"message": message}}), flush=True)
+    sys.exit(1)
 home = os.environ.get("FAKE_CODEX_HOME")
 if home:
     effort = next((value.split("=", 1)[1] for value in argv if value.startswith("model_reasoning_effort=")), "medium")

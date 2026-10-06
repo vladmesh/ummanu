@@ -68,7 +68,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from ummanu.head_health import HeadHealth, resolve_head_chain
+from ummanu.head_health import HeadHealth, failure_status, failure_until, resolve_head_chain, until_text
 from ummanu.runtime import claude_env
 from ummanu.runtime.codex_preflight import (
     CodexPreflightError,
@@ -757,8 +757,14 @@ def _local_pty_runtime() -> Any:
 HANDOVER_INITIATOR = "triggered-agent-dispatch"
 FAILED_BRING_UP_REASON = "this tick's bring-up failed, so the head it raised is nobody's"
 IDLE_HEAD_REASON = "its turn ended and it sat idle, so this tick retires it and raises a fresh head"
+PROVIDER_FAILURE_REASON = (
+    "its provider refused its turn, so this tick records the resource red and raises the role on the "
+    "next head of its chain"
+)
 #: The `runs.jsonl` action of a tick that retired the previous tick's finished, idle head.
 SUPERVISED_IDLE_STOP = "supervised-idle-stop"
+#: The `runs.jsonl` action of a tick that retired a head its provider refused (ummanu-108).
+SUPERVISED_PROVIDER_FAILURE = "supervised-provider-failure"
 #: How long a standing head's turn must have been over before a tick may retire it. A head whose
 #: adapter never exits on its own (Codex's TUI) otherwise holds its role off duty for good: every
 #: later tick is a busy-skip over a head that has nothing left to do. The grace keeps a head that
@@ -845,6 +851,20 @@ def _retire_idle_head(
             f"dispatch[{agent}]: the idle head {run.run_id} was not stopped ({stopped.reason or stopped.status})"
         )
         return
+    _forget_stopped_head(runtime, run)
+    state.log_run(event, action=SUPERVISED_IDLE_STOP, reference=run.run_id, idle_seconds=int(idle))
+    print(f"dispatch[{agent}]: retired the idle head {run.run_id} after {int(idle)}s")
+    _release_standing_report(
+        state,
+        event,
+        "the head that was writing this report finished its turn and was retired idle, "
+        "so the report was closed by the tick that raised its successor.",
+        report_board=reports.report_board,
+    )
+
+
+def _forget_stopped_head(runtime: Any, run: HeadRun) -> None:
+    """Clear what a confirmed-stopped head leaves, so the bring-up can reuse its run id."""
     # The stop left this runtime holding the head's admission closed; the bring-up that follows
     # reuses the run id, exactly as it does over a head that ended on its own.
     runtime.forget_head(run.run_id)
@@ -864,13 +884,70 @@ def _retire_idle_head(
         if record is not None:
             for path in (record, Path(f"{record}.leaf")):
                 path.unlink(missing_ok=True)
-    state.log_run(event, action=SUPERVISED_IDLE_STOP, reference=run.run_id, idle_seconds=int(idle))
-    print(f"dispatch[{agent}]: retired the idle head {run.run_id} after {int(idle)}s")
+
+
+def _retire_refused_head(
+    agent: str, registry: Any, state: AgentState, event: str, reports: _TickReports
+) -> None:
+    """A previous head whose provider refused its turn: resource red, head retired (ummanu-108).
+
+    Read before the tick resolves its head, so the resolution walks past the refusing resource to
+    the other family. The resource stays red until the reset the provider named (else a bounded
+    backoff); the head is stopped rather than left to sit out the idle grace, because it can do
+    nothing more. The role's durable state (its watermark, its report card) is what the next head
+    resumes from. Anything unreadable changes nothing.
+    """
+    from ummanu.dispatch.provider_failure import provider_failure_for_persisted_run
+
+    try:
+        prior = state.load_head_run()
+        if not prior:
+            return
+        reading = provider_failure_for_persisted_run(prior, local_pty_root=_installation_data_dir() / "heads")
+    except Exception:  # noqa: BLE001 - an unreadable prior head is no verdict
+        return
+    if reading.get("state") != "failed":
+        return
+    error = reading.get("error") if isinstance(reading.get("error"), dict) else {}
+    kind = str(error.get("kind") or "")
+    summary = " ".join(str(error.get("summary") or kind or "provider error").split())[:200]
+    resource = str(reading.get("resource") or "")
+    now = time.time()
+    until = failure_until(kind, float(error.get("reset_at") or 0.0), now)
+    if resource:
+        try:
+            _head_health(registry).record(
+                resource,
+                failure_status(kind),
+                f"provider error in a turn of {agent} head {reading.get('head') or ''}: {summary}",
+                now=now,
+                until=until,
+            )
+        except Exception as exc:  # noqa: BLE001 - the stop below does not depend on it
+            print(f"dispatch[{agent}]: could not record {resource} red ({type(exc).__name__}: {exc})")
+    runtime = _local_pty_runtime()
+    try:
+        run = HeadRun.from_json(prior)
+        stopped = runtime.stop(run, StopInitiator(actor=HANDOVER_INITIATOR, reason=PROVIDER_FAILURE_REASON))
+    except Exception as exc:  # noqa: BLE001 - an unstoppable head is the bring-up's to refuse
+        print(f"dispatch[{agent}]: could not stop the refused head ({type(exc).__name__}: {exc})")
+        return
+    if not stopped.ok:
+        print(f"dispatch[{agent}]: the refused head {run.run_id} was not stopped ({stopped.reason or stopped.status})")
+        return
+    _forget_stopped_head(runtime, run)
+    state.log_run(
+        event,
+        action=SUPERVISED_PROVIDER_FAILURE,
+        reference=run.run_id,
+        error=f"{resource or '(unnamed resource)'} refused the turn: {summary}; red until {until_text(until)}",
+    )
+    print(f"dispatch[{agent}]: {resource} refused head {run.run_id} ({summary}); red until {until_text(until)}")
     _release_standing_report(
         state,
         event,
-        "the head that was writing this report finished its turn and was retired idle, "
-        "so the report was closed by the tick that raised its successor.",
+        f"the head writing this report was refused by its provider ({resource}: {summary}), so it was "
+        "retired and the role was raised on the next head of its chain.",
         report_board=reports.report_board,
     )
 
@@ -1031,6 +1108,8 @@ def _tick(
         print(f"dispatch[{agent}]: pipeline paused — no dispatch")
         return 0
     registry = _registry_snapshot()
+    if registry.registry is not None:
+        _retire_refused_head(agent, registry.registry, state, event, reports)
     try:
         resolution = _resolve_launch(agent, variant, registry)
     except NoSupervisedHead as refusal:

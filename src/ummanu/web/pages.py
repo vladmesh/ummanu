@@ -1274,6 +1274,15 @@ def _health_panel(installation: dict[str, Any]) -> str:
         ["active attempts", _or_dash(dispatcher.get("active_attempts"))],
         ["last tick", _or_dash(dispatcher.get("last_tick_finished_at"))],
     ]
+    for provider in status.get("providers") or []:
+        if not isinstance(provider, dict):
+            continue
+        until = provider.get("until")
+        rows.append([
+            f"provider {escape(str(provider.get('resource')))}",
+            escape(str(provider.get("state")))
+            + (f' <span class="muted">until {escape(str(until))}</span>' if until else ""),
+        ])
     parts.append(_rows(["", ""], rows))
     units = [
         unit

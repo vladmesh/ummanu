@@ -15,10 +15,21 @@ from typing import Any
 from ummanu import _proc
 from ummanu._fsutil import write_json
 from ummanu.dispatch.types import HostError
-from ummanu.runtime.provider_errors import KIND_RECONNECT, KIND_SERVER, classify_provider_error
+from ummanu.runtime.provider_errors import (
+    KIND_QUOTA,
+    KIND_RECONNECT,
+    KIND_SERVER,
+    classify_provider_error,
+    reset_time,
+)
 from ummanu.runtime.resource_probe import probe_timeout_s
 
 PROBE_TTL_SECONDS = 300
+# How long a resource a head's own turn found spent or refused stays red when the provider named no
+# reset time (ummanu-108). Bounded, and followed by a fresh probe; a reset the provider names is
+# held to exactly, however far off it is.
+QUOTA_BACKOFF_SECONDS = 3600
+PROVIDER_FAILURE_BACKOFF_SECONDS = 900
 # The outer timeout of the default probe. A resource's own outer timeout is its inner probe timeout
 # plus `PROBE_TIMEOUT_MARGIN_SECONDS` (`probe_timeout_seconds`), never less than this.
 PROBE_TIMEOUT_SECONDS = 20
@@ -51,6 +62,7 @@ LAUNCH_ALLOWED_STATUSES = frozenset({"ready", "unknown"})
 # report spells them. Read by name, before any wording: the inner probe already knows which it was.
 INNER_TIMEOUT_MARKER = "status=timeout"
 INNER_PROVIDER_UNAVAILABLE_MARKER = "status=provider-unavailable"
+INNER_EXHAUSTED_MARKER = "status=exhausted"
 # What a failed *launch* of the probe looks like in the output the shell hands back. None of these
 # is something a reachable provider says about an account, so they are read only after the
 # provider-failure markers below have had their say.
@@ -89,24 +101,53 @@ def probe_env() -> dict[str, str]:
 
 @dataclass(frozen=True)
 class HeadReadiness:
+    """One verdict on a resource. `until` (epoch, 0.0 = none) is when a red verdict expires.
+
+    A verdict with an `until` in the future is held to it: no probe runs before then, because a
+    cheap probe answering `pong` is no proof there is quota for real work (ummanu-108).
+    """
+
     resource: str
     status: str
     reason: str
     checked_at: float
     cached: bool = False
+    until: float = 0.0
 
     @property
     def launch_allowed(self) -> bool:
         return self.status in LAUNCH_ALLOWED_STATUSES
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        value = {
             "resource": self.resource,
             "status": self.status,
             "reason": self.reason,
             "checked_at": self.checked_at,
             "cached": self.cached,
         }
+        if self.until:
+            value["until"] = self.until
+        return value
+
+
+def failure_status(kind: str) -> str:
+    """The resource status a head's provider error records: a spent quota is `exhausted`."""
+    return "exhausted" if kind == KIND_QUOTA else "unavailable"
+
+
+def failure_until(kind: str, reset_at: float, now: float) -> float:
+    """When a resource a head's turn found red comes back: the provider's reset, else a backoff."""
+    if reset_at > now:
+        return reset_at
+    return now + (QUOTA_BACKOFF_SECONDS if kind == KIND_QUOTA else PROVIDER_FAILURE_BACKOFF_SECONDS)
+
+
+def until_text(until: float) -> str:
+    """An expiry as an operator reads it: an ISO UTC minute."""
+    if not until:
+        return ""
+    return time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(until))
 
 
 def probe_timeout_seconds(resource: str) -> int:
@@ -145,6 +186,8 @@ def run_probe(resource: str, probe: str, now: float, *, timeout: float | None = 
     text = raw.lower()
     if INNER_TIMEOUT_MARKER in text:
         return HeadReadiness(resource, PROBE_TIMED_OUT, "provider gave the probe no answer in time", now)
+    if INNER_EXHAUSTED_MARKER in text:
+        return _exhausted(resource, raw, now)
     # The provider's own failure, named before the account's: a 5xx, a reconnect loop that ran out,
     # or the inner probe saying the provider refused a valid login (the 2026-09-25 401). An operator
     # reading `unauthenticated` would log in again, which fixes none of these.
@@ -167,7 +210,7 @@ def run_probe(resource: str, probe: str, now: float, *, timeout: float | None = 
     # 2026-08-06 that cost sprint:1200 two launches and a round into a dead resource before the
     # watchdog ceiling stopped it.
     if any(marker in text for marker in ("usage limit", "quota", "credits", "insufficient_quota", "billing")):
-        return HeadReadiness(resource, "exhausted", "resource quota is spent", now)
+        return _exhausted(resource, raw, now)
     if any(
         marker in text
         for marker in ("503", "circuit_open", "unavailable", "rate limit", " 429", "connection", "network")
@@ -182,6 +225,19 @@ def run_probe(resource: str, probe: str, now: float, *, timeout: float | None = 
             resource, PROBE_BROKEN, f"probe could not be launched: {_probe_detail(completed)}", now
         )
     return HeadReadiness(resource, "unknown", "probe returned an unclassified failure", now)
+
+
+def _exhausted(resource: str, raw: str, now: float) -> HeadReadiness:
+    """A spent quota, held to the reset the provider names when it names one (ummanu-108)."""
+    reset_at = reset_time(raw, now=now)
+    until = reset_at if reset_at > now else 0.0
+    return HeadReadiness(
+        resource,
+        "exhausted",
+        "resource quota is spent" + (f" until {until_text(until)}" if until else ""),
+        now,
+        until=until,
+    )
 
 
 def _probe_detail(completed: subprocess.CompletedProcess[str]) -> str:
@@ -355,15 +411,20 @@ class HeadHealth:
         now = time.time()
         # A fresh recorded verdict answers before the probe command is even looked at: it may have
         # come from a head's own provider error rather than from a probe (`record`), and it holds
-        # for its TTL on a resource with no probe as much as on one with a probe.
-        if isinstance(entry, dict) and now - float(entry.get("checked_at") or 0) < PROBE_TTL_SECONDS:
-            return HeadReadiness(
-                resource,
-                str(entry.get("status") or "unknown"),
-                str(entry.get("reason") or ""),
-                float(entry["checked_at"]),
-                True,
-            )
+        # for its TTL on a resource with no probe as much as on one with a probe. A verdict with an
+        # expiry holds until that expiry instead, however long, and is probed afresh once it passes.
+        if isinstance(entry, dict):
+            until = _float(entry.get("until"))
+            fresh = now < until if until else now - _float(entry.get("checked_at")) < PROBE_TTL_SECONDS
+            if fresh:
+                return HeadReadiness(
+                    resource,
+                    str(entry.get("status") or "unknown"),
+                    str(entry.get("reason") or ""),
+                    _float(entry.get("checked_at")),
+                    True,
+                    until,
+                )
         try:
             probe = str(self.catalog.resource(resource).get("probe") or "")
         except (AttributeError, HostError, KeyError, TypeError, ValueError) as exc:
@@ -383,15 +444,18 @@ class HeadHealth:
             pass
         return verdict
 
-    def record(self, resource: str, status: str, reason: str, *, now: float | None = None) -> HeadReadiness:
+    def record(
+        self, resource: str, status: str, reason: str, *, now: float | None = None, until: float = 0.0
+    ) -> HeadReadiness:
         """Record a verdict on `resource` observed outside a probe, replacing its cached entry.
 
-        Replacing the entry is the cache invalidation: the next `check` within the TTL answers with
-        this verdict instead of a probe result from before it, and the probe runs again once the TTL
-        has passed. A cache that cannot be written raises, because the caller's next step (walking
-        the fallback chain past this resource) depends on the verdict having landed.
+        Replacing the entry is the cache invalidation: the next `check` within the TTL (or before
+        `until`, when given) answers with this verdict instead of a probe result from before it,
+        and the probe runs again once that has passed. A cache that cannot be written raises,
+        because the caller's next step (walking the fallback chain past this resource) depends on
+        the verdict having landed.
         """
-        verdict = HeadReadiness(resource, status, reason, time.time() if now is None else now)
+        verdict = HeadReadiness(resource, status, reason, time.time() if now is None else now, until=until)
         cache = self._load()
         cache[resource] = verdict.to_json()
         self._save(cache)
@@ -403,6 +467,22 @@ class HeadHealth:
     def _run(self, resource: str, probe: str, now: float) -> HeadReadiness:
         return run_probe(resource, probe, now)
 
+    def red_resources(self, *, now: float | None = None) -> dict[str, HeadReadiness]:
+        """Every resource held red by an unexpired verdict, read from the cache without probing."""
+        moment = time.time() if now is None else now
+        held: dict[str, HeadReadiness] = {}
+        for resource, entry in self._load().items():
+            if not isinstance(entry, dict):
+                continue
+            until = _float(entry.get("until"))
+            status = str(entry.get("status") or "unknown")
+            if until > moment and status not in LAUNCH_ALLOWED_STATUSES:
+                held[str(resource)] = HeadReadiness(
+                    str(resource), status, str(entry.get("reason") or ""),
+                    _float(entry.get("checked_at")), True, until,
+                )
+        return held
+
     def _load(self) -> dict[str, Any]:
         try:
             value = json.loads(self.path.read_text(encoding="utf-8"))
@@ -412,3 +492,12 @@ class HeadHealth:
 
     def _save(self, cache: dict[str, Any]) -> None:
         write_json(self.path, cache)
+
+
+def _float(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0

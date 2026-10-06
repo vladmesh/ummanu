@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from typing import Any
 
 from ummanu.dispatch import attempt_accounting
@@ -846,6 +847,47 @@ def _walk_review_provider_hold(
     return None
 
 
+def _review_chain_switch(
+    runtime: Any, task: dict[str, Any], record: DispatcherRecord, attempt_id: str, readiness: Any
+) -> Any:
+    """Move the reviewer onto the head its role's chain resolves to now; the readiness to launch on.
+
+    The walk starts from the role's preferred head (the card's override or the role default), so a
+    fallback reviewer returns to the primary when that is launchable again. A walk with nothing
+    launchable leaves the record alone and answers with the reason naming every refused resource.
+    """
+    from ummanu.dispatch.provider_failure import resolve_role_chain, same_family_review_note
+
+    ref = task["ref"]
+    try:
+        choice = resolve_role_chain(runtime, task, kind="review")
+    except HostError:
+        return readiness
+    if not choice.resolved:
+        return replace(readiness, reason=choice.reason) if len(choice.rejected) > 1 else readiness
+    if choice.head == record.review_head:
+        return choice.readiness
+    previous = record.review_head
+    record.review_head = choice.head
+    record.preferred_review_head = choice.preferred if choice.substituted else ""
+    runtime.writer.comment(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        body=(
+            f"Reviewer head: {choice.head} instead of {previous} ({choice.reason})."
+            + (same_family_review_note(runtime, record, choice.head) if choice.substituted else "")
+        ),
+        request_id=_attempt_request_id(
+            record.attempt_id or attempt_id,
+            "review-head-chain",
+            ref,
+            f"{choice.head}-{record.review_baseline}",
+        ),
+    )
+    return choice.readiness
+
+
 def start_review(
     runtime: Any,
     task: dict[str, Any],
@@ -878,6 +920,11 @@ def start_review(
             outcome_reason="review resource check failed",
             exc=exc,
         )
+    if not readiness.launch_allowed or record.preferred_review_head:
+        # The claimed reviewer is only the first one to try (ummanu-108): a red resource walks the
+        # role's chain to the other family, and a reviewer that was substituted goes back to the
+        # primary once its resource is green again. Decided per launch, never mid-run.
+        readiness = _review_chain_switch(runtime, task, record, attempt_id, readiness)
     if not readiness.launch_allowed:
         record.state = "review_starting"
         if record.gate_state == "green":

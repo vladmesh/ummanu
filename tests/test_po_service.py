@@ -2635,5 +2635,88 @@ class ThinWebTests(unittest.TestCase):
         self.assertFalse((ROOT / "src" / "ummanu" / "webproto" / "po_recovery.py").exists())
 
 
+class ProviderFallbackTests(ServiceFixture):
+    """ummanu-108: a PO session whose subscription is spent continues on the other CLI."""
+
+    def health(self) -> dict:
+        path = self.data / "dispatcher" / "resource_health.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+    def test_a_codex_session_out_of_quota_falls_over_to_claude_within_the_same_turn(self) -> None:
+        service = self.service(models=MODELS)
+        session_id = self.session(service, "codex", "gpt-5.6-sol")
+        service.submit(session_id=session_id, text="Earlier question", request_id="m-1")
+        self.assertEqual(self.settled(session_id, 1).state, po_store.COMPLETED)
+        Path(str(self.log) + ".quota-codex").touch()
+
+        service.submit(session_id=session_id, text="What next?", request_id="m-2")
+        turn = self.settled(session_id, 2)
+
+        self.assertEqual(turn.state, po_store.COMPLETED, turn.reason)
+        session = self.store().session(session_id)
+        self.assertEqual((session.cli, session.model, session.effort), ("claude", "opus", "high"))
+        answer = self.feed(session_id)[-1]
+        self.assertEqual(answer[:2], (2, "agent"))
+        # The new conversation is given the session's durable history and the same input.
+        self.assertIn("Earlier question", answer[2])
+        self.assertIn("What next?", answer[2])
+        self.assertIn("refused this turn", answer[2])
+        health = self.health()["openai-sub"]
+        self.assertEqual(health["status"], "exhausted")
+        self.assertGreater(health["until"], health["checked_at"] + 86400)
+        self.assertEqual([call["cli"] for call in self.calls()], ["codex", "codex", "claude"])
+
+    def test_a_claude_session_out_of_quota_falls_over_to_codex(self) -> None:
+        service = self.service(models=MODELS)
+        session_id = self.session(service, "claude", "opus")
+        Path(str(self.log) + ".quota-claude").touch()
+
+        service.submit(session_id=session_id, text="Hello", request_id="m-1")
+        turn = self.settled(session_id, 1)
+
+        self.assertEqual(turn.state, po_store.COMPLETED, turn.reason)
+        self.assertEqual(self.store().session(session_id).cli, "codex")
+        self.assertEqual(self.health()["claude-sub"]["status"], "exhausted")
+        self.assertTrue(self.health()["claude-sub"]["until"])
+
+    def test_both_subscriptions_spent_fails_the_turn_once_with_both_red(self) -> None:
+        service = self.service(models=MODELS)
+        session_id = self.session(service, "claude", "opus")
+        Path(str(self.log) + ".quota-claude").touch()
+        Path(str(self.log) + ".quota-codex").touch()
+
+        service.submit(session_id=session_id, text="Hello", request_id="m-1")
+        turn = self.settled(session_id, 1)
+
+        self.assertEqual(turn.state, po_store.FAILED)
+        self.assertEqual({key: value["status"] for key, value in self.health().items()},
+                         {"claude-sub": "exhausted", "openai-sub": "exhausted"})
+        self.assertEqual([call["cli"] for call in self.calls()], ["claude", "codex"])
+
+    def test_a_red_fallback_resource_is_not_tried(self) -> None:
+        service = self.service(models=MODELS)
+        session_id = self.session(service, "claude", "opus")
+        from ummanu.head_health import HeadHealth
+
+        HeadHealth(None, self.data).record("openai-sub", "exhausted", "spent", until=4102444800.0)
+        Path(str(self.log) + ".quota-claude").touch()
+
+        service.submit(session_id=session_id, text="Hello", request_id="m-1")
+
+        self.assertEqual(self.settled(session_id, 1).state, po_store.FAILED)
+        self.assertEqual([call["cli"] for call in self.calls()], ["claude"])
+        self.assertEqual(self.store().session(session_id).cli, "claude")
+
+    def test_an_ordinary_failure_is_not_a_provider_failure(self) -> None:
+        service = self.service(models=MODELS)
+        session_id = self.session(service, "claude", "opus")
+
+        service.submit(session_id=session_id, text="FAIL", request_id="m-1")
+
+        self.assertEqual(self.settled(session_id, 1).state, po_store.FAILED)
+        self.assertEqual(self.store().session(session_id).cli, "claude")
+        self.assertEqual(self.health(), {})
+
+
 if __name__ == "__main__":
     unittest.main()

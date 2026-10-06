@@ -354,8 +354,17 @@ class ObserverRecord:
     # The terminal episode of the immediately retired HeadRun.  This is audit-only: all decisions
     # use ``wake_liveness``, which is always bound to the current HeadRun after a replacement.
     retired_wake_liveness: dict[str, Any] = field(default_factory=dict)
+    # The profile actually running when a provider fallback put the observer on another head of the
+    # declared profile's chain (ummanu-108); empty when it runs on the declared `head` itself.
+    fallback_head: str = ""
 
     def to_json(self) -> dict[str, Any]:
+        value = self._json()
+        if self.fallback_head:
+            value["fallback_head"] = self.fallback_head
+        return value
+
+    def _json(self) -> dict[str, Any]:
         return {
             "sprint": self.sprint,
             "generation": self.generation,
@@ -434,6 +443,7 @@ class ObserverRecord:
                 if isinstance(payload.get("retired_wake_liveness"), dict)
                 else {}
             ),
+            fallback_head=str(payload.get("fallback_head") or ""),
         )
 
 
@@ -1711,6 +1721,80 @@ def _replace_observer_for_no_progress(
     return replaced
 
 
+def _observer_provider_failure(runtime: Any, record: ObserverRecord) -> dict[str, Any] | None:
+    """The host's reading of this observer's own provider refusal, or None when it shows none."""
+    probe = getattr(runtime.host, "observer_provider_failure", None)
+    if not callable(probe) or not record.head_run.get("run_id"):
+        return None
+    try:
+        reading = probe(record)
+    except Exception:  # noqa: BLE001 - an unreadable source is no verdict; the wake decides
+        return None
+    if not isinstance(reading, dict) or reading.get("state") != "failed":
+        return None
+    if str(reading.get("run_id") or record.head_run.get("run_id")) != str(record.head_run.get("run_id")):
+        return None
+    return reading
+
+
+def _replace_observer_for_provider_failure(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+    reading: dict[str, Any],
+) -> dict[str, Any]:
+    """Record the refusing resource red, then replace the observer through the emergency path.
+
+    The replacement walks the declared profile's chain (`_launch_observer`), so it lands on the
+    other family while this resource is red, and it carries the same pending batch.
+    """
+    from ummanu.head_health import failure_status, failure_until, until_text
+
+    error = reading.get("error") if isinstance(reading.get("error"), dict) else {}
+    kind = str(error.get("kind") or "")
+    summary = " ".join(str(error.get("summary") or kind or "provider error").split())[:200]
+    resource = str(reading.get("resource") or "")
+    now = time.time()
+    until = failure_until(kind, float(error.get("reset_at") or 0.0), now)
+    if resource:
+        try:
+            runtime.head_health.record(
+                resource,
+                failure_status(kind),
+                f"provider error in a turn of observer head {reading.get('head') or record.head}: {summary}",
+                now=now,
+                until=until,
+            )
+        except Exception as exc:  # noqa: BLE001 - the cache writer has no narrower contract
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-provider-failure-unrecorded",
+                "head": record.head,
+                "reason": f"resource health could not be written ({type(exc).__name__}); retried next tick",
+            }
+    replaced = _replace_observer_for_no_progress(
+        runtime,
+        payload,
+        observers,
+        ref,
+        record,
+        event,
+        reason=(
+            f"provider failure: observer head {reading.get('head') or record.head} was refused by "
+            f"{resource or '(unnamed resource)'} ({summary}); the resource is red until {until_text(until)}"
+        ),
+    )
+    replaced["provider_failure"] = {"resource": resource, "error": summary, "until": until}
+    if record.fallback_head:
+        replaced["switched_to"] = record.fallback_head
+    return replaced
+
+
 def _adopt_precontract_unbound_observer(
     runtime: Any,
     payload: dict[str, Any],
@@ -1843,6 +1927,12 @@ def _wake_for_event(
         # source — carries on to the pane read.  An observation which cannot prove progress is
         # not a verdict about the head: it decides which of the two bounded no-progress ladders
         # below ends the wait, never whether the wait ends at all.
+    # A last turn that ended on a provider refusal is not a busy or quiet head (ummanu-108): the
+    # resource goes red until its reset and the observer is replaced on the next head of its chain,
+    # with the same pending batch, before any nudge or ceiling reads the silence.
+    refused = _observer_provider_failure(runtime, record)
+    if refused is not None:
+        return _replace_observer_for_provider_failure(runtime, payload, observers, ref, record, event, refused)
     if delivery.stage == DeliveryStage.RETRY_DEFERRED and now < delivery.next_at:
         return {
             "status": "degraded",
@@ -2346,8 +2436,12 @@ def _launch_observer(
             return _defer(runtime, payload, observers, ref, record, head="", reason=exc.message)
         except HostError as exc:
             return _defer(runtime, payload, observers, ref, record, head="", reason=str(exc))
-    readiness = runtime.head_readiness(head)
-    if not readiness.launch_allowed:
+    # The declared profile is only the first one to try (ummanu-108): a red resource walks the
+    # profile's fallback chain to the other family. `head` stays the declared profile on the record
+    # (the fence and the declaration compare against it); `launch_head` is what actually runs.
+    choice = runtime.resolve_head(head)
+    readiness = choice.readiness
+    if not choice.resolved:
         return _defer(
             runtime,
             payload,
@@ -2355,13 +2449,18 @@ def _launch_observer(
             ref,
             record,
             head=head,
-            reason=f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}",
+            reason=(
+                f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}"
+                if len(choice.rejected) < 2
+                else choice.reason
+            ),
             readiness=readiness.to_json(),
         )
+    launch_head = choice.head
     # A head whose shell has no observer skill would come up with a prompt pointing at a file it
     # cannot open, and would improvise a sprint from the entity alone. The launch waits instead,
     # and the record says exactly which file is missing.
-    delivery = observer_skill_delivery(runtime, head)
+    delivery = observer_skill_delivery(runtime, launch_head)
     if not delivery["delivered"]:
         return _defer(
             runtime,
@@ -2497,7 +2596,7 @@ def _launch_observer(
     try:
         launched = runtime.host.prepare_observer(
             sprint,
-            head,
+            launch_head,
             prompt=render_observer_prompt(
                 sprint,
                 skill_path=_first_path(delivery),
@@ -2576,6 +2675,7 @@ def _launch_observer(
         )
     now = time.time()
     record.head = head
+    record.fallback_head = launch_head if launch_head != head else ""
     record.workspace = str(launched.get("workspace") or "")
     record.handle = str(launched.get("handle") or "")
     record.leaf = str(launched.get("leaf") or "")

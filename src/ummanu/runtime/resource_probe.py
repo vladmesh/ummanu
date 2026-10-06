@@ -4,8 +4,9 @@
 `claude-sub`, `openai-sub` or `openrouter`: exit 0 answered, 1 failed (one scrubbed, capped
 `resource <id> probe failed; ...` stderr line), 2 unknown id. No cache, no files; `ummanu.head_health`
 owns the verdict and TTL cache. A probe that cannot run is a failure, never an exception.
-`head_health` reads `status=timeout` and `status=provider-unavailable` (provider failed while the
-local login is valid) by name.
+`head_health` reads `status=timeout`, `status=provider-unavailable` (provider failed while the
+local login is valid) and `status=exhausted` (the subscription's usage limit is spent; the line
+then carries `provider_error=` with the provider's own words and reset time) by name.
 
 Timeouts are per resource: 75 s for `openai-sub` (Codex refuses slowly), 20 s otherwise;
 `TA_PROBE_TIMEOUT_S` moves the default, `TA_PROBE_TIMEOUT_S_<RESOURCE>` sets one resource.
@@ -29,7 +30,13 @@ from pathlib import Path
 
 from ummanu.runtime.codex_home import installation_codex_home
 from ummanu.runtime.codex_preflight import CodexHomeLoginMissing
-from ummanu.runtime.provider_errors import KIND_AUTH, KIND_RECONNECT, KIND_SERVER, classify_provider_error
+from ummanu.runtime.provider_errors import (
+    KIND_AUTH,
+    KIND_QUOTA,
+    KIND_RECONNECT,
+    KIND_SERVER,
+    classify_provider_error,
+)
 from ummanu.runtime.redact import redact
 
 # Kills a slow or broken probe instead of hanging the dispatcher tick; env-overridable.
@@ -41,6 +48,9 @@ DEFAULT_PROBE_TIMEOUT_S = 20
 RESOURCE_PROBE_TIMEOUTS_S: dict[str, int] = {"openai-sub": 75}
 #: Inner failure status: provider answered with its own failure (see the module docstring).
 STATUS_PROVIDER_UNAVAILABLE = "provider-unavailable"
+# The subscription's usage limit is spent (ummanu-108). Read off the whole output before it is
+# capped: Codex prints its banner first, so the usage-limit line sits past the reason's limit.
+STATUS_EXHAUSTED = "exhausted"
 
 
 def _env_seconds(name: str) -> int | None:
@@ -162,6 +172,10 @@ def probe_failure_reason(resource_id: str, result: ProbeResult) -> dict[str, obj
         reason["timeout_s"] = result.timeout_s
     if result.http_status is not None:
         reason["http_status"] = result.http_status
+    if result.status == STATUS_EXHAUSTED:
+        found = classify_provider_error(_as_text(result.stdout) + "\n" + _as_text(result.stderr))
+        if found is not None:
+            reason["provider_error"] = found.summary
     for key in ("stderr", "stdout", "exception"):
         summary = _clean_summary(getattr(result, key))
         if summary:
@@ -176,7 +190,9 @@ def format_probe_failure(resource_id: str, result: ProbeResult) -> str:
         f"class={reason['probe_class']}",
         f"status={reason['status']}",
     ]
-    for key in ("command", "exit_code", "timeout_s", "http_status", "stderr", "stdout", "exception"):
+    for key in (
+        "provider_error", "command", "exit_code", "timeout_s", "http_status", "stderr", "stdout", "exception"
+    ):
         if key in reason:
             parts.append(f"{key}={reason[key]}")
     return "; ".join(parts)
@@ -213,11 +229,14 @@ def _read_openrouter_key() -> str | None:
 def probe_claude_sub() -> ProbeResult:
     """One haiku token through the shared OAuth `claude` CLI: fails when the subscription is
     rate-limited or the API is unreachable."""
-    return _run_subprocess_probe(
+    result = _run_subprocess_probe(
         ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"],
         "builtin:claude-sub",
         timeout_s=probe_timeout_s("claude-sub"),
     )
+    if result.status == "non-zero-exit" and _quota_spent(_as_text(result.stdout) + "\n" + _as_text(result.stderr)):
+        return replace(result, status=STATUS_EXHAUSTED)
+    return result
 
 
 def _http_failure_status(status: int | None) -> str:
@@ -317,11 +336,17 @@ def probe_openai_sub() -> ProbeResult:
         display_command=f"CODEX_HOME={home} {_display_command(cmd)}",
         timeout_s=probe_timeout_s("openai-sub"),
     )
-    if result.status == "non-zero-exit" and codex_provider_side_failure(
-        _as_text(result.stdout) + "\n" + _as_text(result.stderr), Path(home)
-    ):
+    text = _as_text(result.stdout) + "\n" + _as_text(result.stderr)
+    if result.status == "non-zero-exit" and _quota_spent(text):
+        return replace(result, status=STATUS_EXHAUSTED)
+    if result.status == "non-zero-exit" and codex_provider_side_failure(text, Path(home)):
         return replace(result, status=STATUS_PROVIDER_UNAVAILABLE)
     return result
+
+
+def _quota_spent(text: str) -> bool:
+    found = classify_provider_error(text)
+    return found is not None and found.kind == KIND_QUOTA
 
 
 def _as_text(value: str | bytes | None) -> str:

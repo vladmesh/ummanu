@@ -461,6 +461,27 @@ class PoStore:
             )
             return cursor.rowcount == 1
 
+    def switch_cli(
+        self, session_id: str, *, cli: str, model: str, effort: str, cli_session_id: str | None
+    ) -> Session:
+        """Move an open session onto another CLI after its own provider refused it (ummanu-108).
+
+        The CLI's conversation id is replaced (a new conversation: Claude's id is chosen up front,
+        Codex's is recorded by its first turn), and the session keeps its feed, its turns and its
+        requests: the PO's durable state is what the new conversation is resumed from.
+        """
+        if cli not in CLIS:
+            raise PoStoreError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
+        with self._transaction() as connection:
+            row = connection.execute(
+                "UPDATE po_sessions SET cli = %s, model = %s, effort = %s, cli_session_id = %s "
+                f"WHERE session_id = %s RETURNING {_SESSION_COLUMNS}",
+                (cli, model, effort, cli_session_id, session_id),
+            ).fetchone()
+        if row is None:
+            raise SessionNotFound(f"there is no PO session {session_id}")
+        return Session(*row)
+
     # --- turns ------------------------------------------------------------------------------
 
     def begin_turn(self, session_id: str, text: str, stdout_path: Callable[[int], Path]) -> Turn:
