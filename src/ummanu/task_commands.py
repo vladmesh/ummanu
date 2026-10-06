@@ -114,7 +114,9 @@ def add_task_subcommands(subparsers) -> None:
     repair_apply.add_argument("--plan-id", required=True)
     repair_apply.add_argument("--task-id", action="append", required=True, type=int)
     repair_apply.add_argument("--request-id", required=True)
-    repair_apply.add_argument("--reason-file", required=True)
+    repair_reason = repair_apply.add_mutually_exclusive_group(required=True)
+    repair_reason.add_argument("--reason")
+    repair_reason.add_argument("--reason-file")
     repair_apply.set_defaults(handler=run_task_repair_references_apply)
     task_create = task_subcommands.add_parser("create")
     task_create.add_argument(
@@ -205,7 +207,13 @@ def add_task_subcommands(subparsers) -> None:
         command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
         _add_data_dir_args(command)
         command.add_argument("--request-id")
-        command.add_argument("--body-file")
+        if name in {"decide", "move", "archive"}:
+            content = command.add_mutually_exclusive_group()
+            content.add_argument("--body-file", help="UTF-8 reason file")
+            content.add_argument("--reason", help="literal reason, never a filename")
+            content.add_argument("--reason-file", help="UTF-8 reason file")
+        else:
+            command.add_argument("--body-file")
         if name == "report":
             command.add_argument("--kind", required=True, choices=("done", "blocked"))
             # Required with `--kind blocked`, refused with `--kind done`; the writer holds both
@@ -215,7 +223,6 @@ def add_task_subcommands(subparsers) -> None:
             command.add_argument("--kind", required=True, choices=("green", "red"))
         if name == "decide":
             command.add_argument("--kind", required=True, choices=tuple(value.value for value in TaskDecision))
-            command.add_argument("--reason-file")
             command.add_argument(
                 "--protocol-prerequisite",
                 action="append",
@@ -232,13 +239,10 @@ def add_task_subcommands(subparsers) -> None:
                 required=True,
                 choices=tuple(state.value for state in CardState),
             )
-            command.add_argument("--reason-file")
             # A card leaves Assessment on a decision somebody recorded with `task decide`, and
             # the move has to name it: the writer checks it against the card's audit.
             command.add_argument("--decision", default="", choices=("", *(value.value for value in TaskDecision)))
             _add_sprint_override_args(command)
-        if name == "archive":
-            command.add_argument("--reason-file")
         command.set_defaults(handler=handler)
     task_complete = task_subcommands.add_parser(
         "complete", help="PO only: complete an In progress decision or operation card it answered"
@@ -446,7 +450,7 @@ def run_task_repair_references_apply(args: argparse.Namespace) -> int:
             TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args)),
             plan_id=args.plan_id,
             task_ids=args.task_id,
-            reason=_read_body(args.reason_file),
+            reason=_reason_body(args),
             request_id=args.request_id,
             actor=args.actor or args.role,
             role=args.role,
@@ -479,9 +483,17 @@ def _read_body(path: str | None) -> str:
         raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
 
 
+def _reason_body(args: argparse.Namespace) -> str:
+    literal = getattr(args, "reason", None)
+    paths = [getattr(args, name, None) for name in ("body_file", "reason_file")]
+    if sum(value is not None for value in [literal, *paths]) > 1:
+        raise TaskError("usage", "choose one body/reason source", 2)
+    return literal if literal is not None else _read_body(next((path for path in paths if path is not None), None))
+
+
 def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
     def command() -> object:
-        body = _read_body(getattr(args, "body_file", None) or getattr(args, "reason_file", None))
+        body = _reason_body(args)
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return operation(writer, body, args.actor or args.role)
 

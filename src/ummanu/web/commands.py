@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import Callable
 
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 from ummanu.web.provider_usage import ProviderUsageLayer
@@ -42,7 +43,7 @@ def add_web_serve_subcommands(subparsers) -> None:
         "web-serve",
         help="serve the local dashboard and card pages over the web-read and web-run operations",
     )
-    group.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(group, help="path to an instance dir or instance.yaml")
     group.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),

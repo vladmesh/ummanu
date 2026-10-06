@@ -2,7 +2,21 @@
 
 `--instance` accepts either an instance directory or a direct path to `instance.yaml`. The instance
 holds installation configuration and the portable checkpoint in `state/`; the data directory holds
-local mutable and derived runtime state.
+local mutable and derived runtime state. Live-root commands resolve an omitted `--instance` from
+`UMMANU_INSTANCE`, otherwise existing `~/ummanu-data/instance`; an absent default is refused without
+creating it. An explicit flag wins. Installation/recovery host provisioning still requires its
+explicit `--instance-dir` destination. Host bootstrap without `--empty` does not consume a live root.
+
+Task commands `decide`, `move` and `archive` accept a single source: literal `--reason TEXT`, UTF-8
+`--reason-file PATH`, or the supported `--body-file PATH` reason input. A literal that names a file
+stays literal. Conflicting sources and abbreviated flags are refused before writes. Existing lifecycle
+rules decide when a non-empty reason is required. `task repair-references-apply`, `task handover` and
+`task cancel` require either `--reason` or `--reason-file`; `pause` accepts those same exclusive sources.
+Ordinary body-file commands and `--sprint-override-reason-file` retain their separate meanings.
+
+`task list --sprint sprint:ID` includes archived cards of that sprint, even after it closes, with normal
+normalized fields and optional state/project filters. It reads all rows and batched metadata without
+reopening the sprint. An unscoped task/dispatcher/steward listing remains active-only.
 
 ## Checks and host ownership
 
@@ -1829,9 +1843,12 @@ python3 -P -m ummanu product create --role po --id ummanu --project ummanu --tit
 python3 -P -m ummanu issue create --role po --product ummanu --kind feature --priority P2 --title TITLE
 python3 -P -m ummanu issue create --role observer --kind improvement --priority P3 --title TITLE
 python3 -P -m ummanu issue list --product ummanu
+python3 -P -m ummanu issue list --product ummanu --closed
+python3 -P -m ummanu issue list --product ummanu --all
 python3 -P -m ummanu issue show --ref issue:123
 python3 -P -m ummanu issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
 python3 -P -m ummanu issue append --role po --ref issue:123 --reason REASON --body-file BLOCK.md
+python3 -P -m ummanu issue edit --role po --actor ACTOR --ref issue:123 --reason REASON --body-file DESCRIPTION.md
 python3 -P -m ummanu issue close --role po --ref issue:123 --reason resolved
 ```
 
@@ -1841,7 +1858,7 @@ Who writes what:
 | --- | --- | --- |
 | `product create` | yes | not offered |
 | `issue create` | yes, any product (`--product` required) | yes, under the [identity guard](#the-sprint-guard), for its sprint's product |
-| `issue update-priority`, `issue append` | yes | `role_forbidden` |
+| `issue update-priority`, `issue append`, `issue edit` | yes | `role_forbidden` |
 | `issue close` | yes | `role_forbidden` (an observer's `sprint close` closes its sprint's declared issues on its verdicts, in its name) |
 | `task move`/`task edit` of a Product or Issue | `transition_forbidden` | `role_forbidden` |
 
@@ -1865,16 +1882,30 @@ issue with `issue close`, with exactly one of `resolved`, `invalid`, `duplicate`
 archives the backend record and keeps comments and audit available through `issue show --ref` and
 checkpoint recovery. `sprint close` closes an issue through this same lifecycle when its decisions file gives
 one of those verdicts; it never closes an issue merely because a sprint that declared it ended, and
-never records somebody else's close as its own verdict. `issue list --closed` includes open and
-closed issues; without it only open issues are listed.
+never records somebody else's close as its own verdict. `issue list` lists open issues,
+`issue list --closed` lists only closed issues, and `issue list --all` lists both. `--closed` and
+`--all` are mutually exclusive; `--product` filters every mode. The internal store
+`list_issues(include_closed=True)` remains inclusive.
 
-`issue append` is the only change to an issue description after create, and it only adds: the
+`issue append` adds to an issue description: the
 `--body-file` block goes after the unchanged current text, under a `---` rule and an
 `[issue:appended <UTC time> by <actor>]` line. PO-only, non-empty reason and block; a closed issue
 refuses it. It writes one `entity.updated` event carrying `data.append` with `body_sha256` (the block
 as given), `description_sha256_was` and `description_sha256`. A repeat of the same `--request-id` with
 the same ref, reason and block (matched by `body_sha256`) is answered without a second block or event;
 the same id with anything else is `validation`.
+
+`issue edit --ref issue:123 --role po --actor ACTOR --reason "correct the description"
+(--description "full text" | --body-file DESCRIPTION.md)` replaces exactly the description of an
+open issue, including an explicitly empty description. It accepts the ordinary instance, data-dir
+and request-id options. One content source and a non-empty literal reason are required. Only the
+PO may edit; title, product, kind, priority, closure, comments and prior audit stay intact. The native
+Replace mutation writes one `entity.updated` event with `data.edit` containing the exact before/after
+SHA-256 description digests. Same request/payload replays once and returns current readback, without
+overwriting later edits; changed payload or an append/priority request id is refused. Missing files,
+invalid input, closed issues and role refusals write no effect/event. The description and canonical
+event commit or roll back in the existing native SQL transaction. Append's `data.append` evidence
+and replay/recovery contract remain supported.
 
 Products and Issues never enter the execution columns: `move` and `claim` reject one before any write.
 Work on an issue is a separate card the PO creates in Ready.

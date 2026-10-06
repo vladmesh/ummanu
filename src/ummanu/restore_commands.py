@@ -32,6 +32,7 @@ from ummanu.restore import (
     restore_postgres_backup,
     restore_state,
 )
+from ummanu.runtime.paths import add_instance_argument
 
 
 def add_restore_subcommands(subparsers) -> None:
@@ -39,7 +40,7 @@ def add_restore_subcommands(subparsers) -> None:
         "bootstrap", help="bootstrap a host or create an empty ummanu-data target"
     )
     bootstrap.add_argument("--empty", action="store_true", help="create an empty ummanu-data target")
-    bootstrap.add_argument("--instance", help="instance for --empty")
+    add_instance_argument(bootstrap, help="live instance for --empty; unused for host bootstrap")
     bootstrap.add_argument("--instance-remote", help="private instance remote for host bootstrap")
     bootstrap.add_argument("--instance-dir", help="local instance checkout for host bootstrap")
     bootstrap.add_argument("--installation-user", help="dedicated OS account for host bootstrap")
@@ -49,7 +50,7 @@ def add_restore_subcommands(subparsers) -> None:
 
     restore = subparsers.add_parser("restore", help="restore ummanu-data from an archive")
     restore.add_argument("archive")
-    restore.add_argument("--instance", required=True)
+    add_instance_argument(restore)
     restore.add_argument("--dry-run", action="store_true")
     restore.set_defaults(handler=run_restore)
 
@@ -57,16 +58,16 @@ def add_restore_subcommands(subparsers) -> None:
         "restore-postgres", help="restore a PostgreSQL full archive into an empty local board store"
     )
     postgres_restore.add_argument("archive")
-    postgres_restore.add_argument("--instance", required=True)
+    add_instance_argument(postgres_restore)
     postgres_restore.add_argument("--dry-run", action="store_true")
     postgres_restore.set_defaults(handler=run_restore_postgres)
 
     board = subparsers.add_parser("restore-board", help="import the normalized board into an empty backend")
-    board.add_argument("--instance", required=True)
+    add_instance_argument(board)
     board.set_defaults(handler=run_restore_board)
 
     reconcile = subparsers.add_parser("restore-reconcile", help="verify live managed reconcile after restore")
-    reconcile.add_argument("--instance", required=True)
+    add_instance_argument(reconcile)
     reconcile.set_defaults(handler=run_restore_reconcile)
 
 

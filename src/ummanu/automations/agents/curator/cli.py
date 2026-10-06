@@ -32,6 +32,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ummanu.runtime.paths import MissingDefaultInstance, add_instance_argument, resolve_instance_argument
 from ummanu.runtime.redact import looks_like_credential, scrub_secrets
 from ummanu.runtime.state import (
     PRECHECK_DEFERRED,
@@ -45,7 +46,6 @@ from . import discover, harvest, rebind
 from .memory_protocol import (
     MemoryProtocolError,
     MemoryWriteRequest,
-    default_ummanu_instance,
     write_fact,
 )
 
@@ -447,7 +447,7 @@ def cmd_memory_write(argv: list[str]) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(prog="python3 -P -m ummanu automations curator memory-write")
-    parser.add_argument("--instance", default=str(default_ummanu_instance()))
+    add_instance_argument(parser)
     parser.add_argument("--data-dir")
     parser.add_argument("--actor", required=True)
     parser.add_argument("--scope", required=True)
@@ -459,6 +459,10 @@ def cmd_memory_write(argv: list[str]) -> int:
     parser.add_argument("--supersedes", default="")
     parser.add_argument("--ummanu-repo")
     ns = parser.parse_args(argv)
+    try:
+        resolve_instance_argument(ns)
+    except MissingDefaultInstance as exc:
+        parser.error(str(exc))
 
     request = MemoryWriteRequest(
         instance=Path(ns.instance),

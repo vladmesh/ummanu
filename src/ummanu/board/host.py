@@ -35,7 +35,7 @@ _DESCRIPTION_APPEND_KEYS = ("body_sha256", "description_sha256_was", "descriptio
 
 @dataclass(frozen=True, slots=True)
 class DescriptionAppend:
-    """The evidence of the one description change an Issue takes after create: an added block.
+    """The evidence of an Issue description append: an added block.
 
     The old text stays byte for byte and the block goes after it.  The replaced Issue already carries
     the new description; these digests are the identity of the request, because once the block is on
@@ -65,15 +65,39 @@ class DescriptionAppend:
 
 
 @dataclass(frozen=True, slots=True)
+class DescriptionEdit:
+    """Exact before/after evidence for a full Issue description replacement."""
+
+    description_sha256_was: str
+    description_sha256: str
+
+    def __post_init__(self) -> None:
+        for value in (self.description_sha256_was, self.description_sha256):
+            if not isinstance(value, str) or not _SHA256.fullmatch(value):
+                raise ValueError("description edit evidence must be SHA-256 hex digests")
+
+    def event_data(self) -> dict[str, str]:
+        return {"description_sha256_was": self.description_sha256_was,
+                "description_sha256": self.description_sha256}
+
+    @classmethod
+    def from_event_data(cls, data: object) -> DescriptionEdit:
+        if not isinstance(data, dict) or set(data) != {"description_sha256_was", "description_sha256"}:
+            raise ValueError("description edit evidence must carry exactly its two digests")
+        return cls(data["description_sha256_was"], data["description_sha256"])
+
+
+@dataclass(frozen=True, slots=True)
 class Replace:
     entity: BoardEntity
     actor: Actor
     reason: str
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
     request_id: str | None = None
-    # Only an Issue replace that appends to the description carries it; without it an Issue
+    # Explicit description operations carry their own evidence; without either, an Issue
     # replace is the released priority change.
     description_append: DescriptionAppend | None = None
+    description_edit: DescriptionEdit | None = None
 
 
 @dataclass(frozen=True, slots=True)

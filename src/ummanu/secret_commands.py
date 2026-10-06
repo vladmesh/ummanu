@@ -25,6 +25,7 @@ from ummanu.infra.github_credential import (
     CredentialError,
     validate_checkpoint_credential,
 )
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.secret_store import (
     CONFIRM_WORDS,
     MATERIALIZE_FILE,
@@ -59,7 +60,7 @@ def add_secret_subcommands(subparsers) -> None:
         "init",
         help="generate the recovery phrase and create the store; refuses to overwrite one",
     )
-    init.add_argument("--instance", required=True)
+    add_instance_argument(init)
     init.add_argument("--actor", default=DEFAULT_ACTOR)
     init.add_argument(
         "--words",
@@ -72,7 +73,7 @@ def add_secret_subcommands(subparsers) -> None:
     set_command = secret_subcommands.add_parser(
         "set", help="store one value read from stdin or a file; never from the command line"
     )
-    set_command.add_argument("--instance", required=True)
+    add_instance_argument(set_command)
     set_command.add_argument("--actor", default=DEFAULT_ACTOR)
     set_command.add_argument("--id", required=True, dest="secret_id")
     set_command.add_argument("--scope", required=True, help="'installation' or 'project:<id>'")
@@ -87,13 +88,13 @@ def add_secret_subcommands(subparsers) -> None:
     list_command = secret_subcommands.add_parser(
         "list", help="print catalog metadata; values are never printed"
     )
-    list_command.add_argument("--instance", required=True)
+    add_instance_argument(list_command)
     list_command.set_defaults(handler=run_secret_list)
 
     import_command = secret_subcommands.add_parser(
         "import", help="take an existing env file into the store, one secret per variable"
     )
-    import_command.add_argument("--instance", required=True)
+    add_instance_argument(import_command)
     import_command.add_argument("--actor", default=DEFAULT_ACTOR)
     import_command.add_argument(
         "--file",
@@ -112,7 +113,7 @@ def add_secret_subcommands(subparsers) -> None:
     remove_command = secret_subcommands.add_parser(
         "remove", help="drop one secret from the catalog and delete its envelope"
     )
-    remove_command.add_argument("--instance", required=True)
+    add_instance_argument(remove_command)
     remove_command.add_argument("--actor", default=DEFAULT_ACTOR)
     remove_command.add_argument("--id", required=True, dest="secret_id")
     remove_command.set_defaults(handler=run_secret_remove)
@@ -120,7 +121,7 @@ def add_secret_subcommands(subparsers) -> None:
     materialize_command = secret_subcommands.add_parser(
         "materialize", help="write the materializing secrets into their env files"
     )
-    materialize_command.add_argument("--instance", required=True)
+    add_instance_argument(materialize_command)
     materialize_command.add_argument(
         "--target",
         choices=MATERIALIZE_TARGETS,
@@ -136,7 +137,7 @@ def add_secret_subcommands(subparsers) -> None:
         command = github_commands.add_parser(
             verb, help="read a GitHub token from stdin or a mode-0600 file; never from argv"
         )
-        command.add_argument("--instance", required=True)
+        add_instance_argument(command)
         command.add_argument("--actor", default=DEFAULT_ACTOR)
         source = command.add_mutually_exclusive_group(required=True)
         source.add_argument("--file", help="regular mode-0600 token file")
