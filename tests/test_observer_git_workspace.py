@@ -86,7 +86,7 @@ class _RecordingHost(CommandHostRuntime):
         self._record(args)
         return super().run_capture(args, label, cwd=cwd)
 
-    def _open_head_pane(self, run, title, command):  # type: ignore[override]
+    def _open_head_pane(self, run, title, command, **_kwargs):  # type: ignore[override]
         self.events.append("head-start")
         return dataclasses.replace(run, handle="run:observer", leaf="leaf:observer")
 

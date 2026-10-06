@@ -160,6 +160,7 @@ unit tests/test_retro_search_log.py
 unit tests/test_retro_pending.py
 unit tests/test_role_env.py
 component tests/test_docker_guard.py
+component tests/test_memory_token_launch.py
 unit tests/test_observer_voice.py
 unit tests/test_dispatcher_runtime_isolation.py
 unit tests/test_live_root_project.py
