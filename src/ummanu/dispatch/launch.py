@@ -624,7 +624,6 @@ def pane_state_label(readiness: str) -> str:
 # Classify shared worker/reviewer bring-up failures as infrastructure unless the card contract failed.
 FAILURE_CLASS_INFRASTRUCTURE = "infrastructure"
 FAILURE_CLASS_TASK = "task"
-GATE_NAME_FOR_TASK_CLASS = "substantive"
 
 CAUSE_LAUNCH_ABORTED = "launch_aborted"
 CAUSE_HOST_UNAVAILABLE = "host_unavailable"

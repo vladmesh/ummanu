@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
-import hashlib
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, TypeVar
 
 from ummanu.board.attempt_outcome import AttemptOutcomePayload
@@ -45,24 +41,6 @@ class AttemptOutcomeOccurrence:
     def payload(self) -> AttemptOutcomePayload:
         """The closed outcome data normalized once by the canon, or on compatibility construction."""
         return self._payload or AttemptOutcomePayload.from_data(self.event.data)
-
-
-@contextlib.contextmanager
-def marker_comment_lock(data_dir: str | Path, ref: str) -> Iterator[None]:
-    """Serialize one Card marker occurrence from its witness through commit.
-
-    Marker prose intentionally has no request id, so the per-Card lock makes the staged matching-row
-    ordinal a real occurrence witness even when two writers choose identical marker text at once.
-    """
-    directory = Path(data_dir) / "board" / "marker-comments"
-    directory.mkdir(parents=True, exist_ok=True)
-    name = hashlib.sha256(ref.encode("utf-8")).hexdigest() + ".lock"
-    with (directory / name).open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def render_marker_comment(event: Event) -> str:

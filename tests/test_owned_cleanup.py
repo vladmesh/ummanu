@@ -897,7 +897,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_old_archived_worktree_without_runtime_proof_is_preserved(self):
         self.task["closed"] = True
-        result = self.owner.inventory(catch_up=True)
+        result = self.owner.inventory()
         self.assertIn("historical worktree", result["residue"][0]["reason"])
         self.assertTrue(self.workspace.exists())
         self.assertEqual(self.owner.replay(), [])
