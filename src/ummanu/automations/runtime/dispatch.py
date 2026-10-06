@@ -162,7 +162,7 @@ def _pipeline_paused() -> bool:
         from ..agents.pipeline import pause as pipeline_pause
 
         return pipeline_pause.is_paused()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - an unreadable pause state refuses the dispatch
         print(
             f"dispatch: pipeline pause state is unreadable; refusing dispatch ({type(exc).__name__}: {exc})",
             file=sys.stderr,
@@ -198,7 +198,7 @@ def _registry_snapshot() -> RegistrySnapshot:
         from ummanu.runtime import heads as pipeline_heads
 
         return RegistrySnapshot(pipeline_heads.load_registry())
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - an unreadable registry is reported, not raised
         return RegistrySnapshot(None, f"{type(exc).__name__}: {exc}")
 
 
@@ -294,7 +294,7 @@ def _resolve_launch(
         raise NoSupervisedHead(f"the head registry would not load ({snapshot.error or 'unreadable'})")
     try:
         head = _preferred_head(agent, spec, snapshot)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any routing failure is no supervised head
         raise NoSupervisedHead(f"no head profile is routed to {agent} ({exc})") from None
     if not head:
         raise NoSupervisedHead(f"no head profile is routed to {agent}")
@@ -303,12 +303,12 @@ def _resolve_launch(
         choice = resolve_head_chain(head, health.check, lambda pid: _head_fallback(registry, pid))
         resolved = choice.head or head
         profile = dict(registry.profile(resolved))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any profile failure is no supervised head
         raise NoSupervisedHead(f"head {head!r} could not be resolved to a profile ({exc})") from None
     try:
         # `from_profile` refuses every runtime but `local-pty`, so a spec is a supervised head.
         HeadSpec.from_profile(resolved, profile)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any spec failure is no supervised head
         raise NoSupervisedHead(f"head profile {resolved!r} will not make a head spec ({exc})") from None
     resolution = LaunchResolution(skill, resolved, profile)
     # Rendered once here, without a card, so a profile whose command will not render is refused
@@ -338,7 +338,7 @@ def _render_launch(
             workspace=_workspace(agent),
             binding=STANDING_BINDING,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any render failure is no supervised head
         raise NoSupervisedHead(
             f"the command for head profile {resolution.profile!r} will not render ({exc})"
         ) from None
@@ -478,7 +478,7 @@ def _recover_steward_dispatch_failure(
             raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=cmd.card_ref, target="done", reason=body)
         state.log_run(event, action="dispatch-recovery", result="done", reference=cmd.card_ref)
-    except Exception as recovery_error:
+    except Exception as recovery_error:  # noqa: BLE001 - a failed recovery is logged, not raised
         state.log_run(
             event,
             action="dispatch-recovery",
@@ -510,7 +510,7 @@ def _release_steward_report(
             raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=cmd.card_ref, target="done", reason=note)
         state.log_run(event, action="dispatch-release", result="done", reference=cmd.card_ref)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - a failed release is logged, not raised
         state.log_run(
             event, action="dispatch-release", result="failed", reference=cmd.card_ref, error=str(error)
         )
@@ -547,7 +547,7 @@ def _escalate_steward_preflight_failure(
         state.log_run(
             event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref, error=str(failure)
         )
-    except Exception as escalation_error:
+    except Exception as escalation_error:  # noqa: BLE001 - a failed escalation is logged, not raised
         state.log_run(
             event,
             action="dispatch-preflight",
@@ -581,7 +581,7 @@ def _release_standing_report(
             raise RuntimeError("steward report board must be supplied by the composition root")
         report_board.move_report(reference=reference, target="done", reason=note)
         state.log_run(event, action="owner-report-release", result="done", reference=reference)
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001 - a failed release is logged, not raised
         state.log_run(
             event, action="owner-report-release", result="failed", reference=reference, error=str(error)
         )
@@ -626,7 +626,7 @@ class _TickReports:
         #: Set by a refused tick: it leaves every standing record and report as it found them.
         self.hold_still = False
 
-    def __enter__(self) -> _TickReports:
+    def __enter__(self) -> _TickReports:  # noqa: PYI034 - a final class; Self buys nothing here
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -707,7 +707,7 @@ class _TickReports:
                 return
             if self.state.load_head_run() is not None:
                 return
-        except Exception:
+        except Exception:  # noqa: BLE001 - an unreadable head record leaves the report alone
             return
         _release_standing_report(
             self.state,
@@ -833,7 +833,9 @@ def _retire_idle_head(
         head_process_alive=True,
     )
     if not stopped.ok:
-        print(f"dispatch[{agent}]: the idle head {run.run_id} was not stopped ({stopped.reason or stopped.status})")
+        print(
+            f"dispatch[{agent}]: the idle head {run.run_id} was not stopped ({stopped.reason or stopped.status})"
+        )
         return
     # The stop left this runtime holding the head's admission closed; the bring-up that follows
     # reuses the run id, exactly as it does over a head that ended on its own.

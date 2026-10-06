@@ -36,9 +36,7 @@ from unittest import mock
 from ummanu.automations.runtime import dispatch
 from ummanu.dispatch.watchdog import head_process_status
 from ummanu.head_health import HeadChoice, HeadReadiness
-from ummanu.runtime import heads as pipeline_heads
-from ummanu.runtime import local_pty_head, role_env
-from ummanu.runtime import state as runtime_state
+from ummanu.runtime import heads as pipeline_heads, local_pty_head, role_env, state as runtime_state
 from ummanu.runtime.head import HeadCommand, render_head_command
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import SupervisorClient
