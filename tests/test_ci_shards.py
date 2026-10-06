@@ -329,6 +329,38 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertNotEqual(command.returncode, 0)
         self.assertIn("fast test profile forbids external command execution", command.stderr)
 
+    def test_fast_guard_allows_the_checkpoint_remote_read_but_refuses_config_writes(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture_root = Path(tmp)
+            repo = fixture_root / "instance"
+            repo.mkdir()
+            git(repo, "init", "--quiet")
+            git(repo, "config", "remote.origin.url", "git@example.invalid:x/y.git")
+            environment = fast_environment(root, fixture_root)
+            for arguments, allowed in (
+                (["--get", "remote.origin.url"], True),
+                (["user.name", "changed"], False),
+            ):
+                with self.subTest(arguments=arguments):
+                    script = (
+                        "import subprocess; subprocess.run("
+                        + repr(["git", "-C", str(repo), "config", *arguments])
+                        + ", check=True)"
+                    )
+                    result = subprocess.run(
+                        [sys.executable, "-c", script],
+                        env=environment,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, allowed, result.stderr)
+                    if allowed:
+                        self.assertEqual(result.stdout.strip(), "git@example.invalid:x/y.git")
+                    else:
+                        self.assertIn("fast test profile forbids external command execution", result.stderr)
+
     def test_bounded_runner_stops_and_reaps_a_timed_out_child(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "child.pid"
