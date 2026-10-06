@@ -16,7 +16,7 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 - `src/ummanu` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
   packages: `automations`, `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`,
-  `schemas`, `web`, `webfront`, `webproto`.
+  `schemas`, `transition`, `web`, `webfront`, `webproto`.
 - `src/ummanu/automations` is the three background agents (curator, steward, retro), built on top
   of the rest of `ummanu`. `python3 -P -m ummanu automations <agent> <cmd>` is their one entry:
   `ummanu.cli` hands the argv untouched to the composition root
@@ -34,7 +34,7 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
   `exhausted`, `unavailable`) and caches it in `<data_dir>/dispatcher/resource_health.json` for
   300 s. The card dispatcher and the background agents' head resolution read that one cache; a
   head is launchable when its status is `ready` or `unknown`. The shipped registry's probes are `python3 -P -m ummanu.runtime.resource_probe --resource <id>` (`claude-sub`,
-  `openai-sub`, `openrouter`): one cheap provider call, exit 0 healthy, 1 failed with one scrubbed
+  `openai-sub`; the module also probes `openrouter` for a registry that declares it): one cheap provider call, exit 0 healthy, 1 failed with one scrubbed
   reason line on stderr, 2 for an id it has no probe for. It writes nothing.
 - `src/ummanu/runtime` holds the head-runtime utilities both the pipeline and the background
   agents use (`paths`, `references`, `prompt_document`, `launch_prefix`, `shared_state`,
@@ -342,7 +342,8 @@ Operations, idempotency, ownership and outcomes: [Protocols](PROTOCOLS.md#runnin
 
 ## The web transport
 
-`ummanu.web` serves the dashboard, card, sprint, project and history pages and a JSON API over
+`ummanu.web` serves the dashboard, card, sprint, project, history, `/po`, `/doctor` and
+`/owner-events` pages and a JSON API over
 HTTP, using the standard-library `http.server`. It is a transport like `web-read`/`web-run`: each
 entry of `ummanu.web.app.ROUTES` is one `ummanu.webproto` operation, and one table
 (`ummanu.web.statuses`) maps protocol codes to HTTP status. It holds no snapshot, state derivation,
@@ -372,7 +373,9 @@ Routes, status table, cursors: [Protocols](PROTOCOLS.md#serving-the-pipeline-loc
 
 External access is TLS plus one password, and the product contains no authentication code.
 `ummanu.webfront` renders a Caddy configuration (Caddy from the Ubuntu archive) that terminates
-TLS, checks the owner's password with `basicauth *` against a bcrypt hash, and proxies to loopback.
+TLS, checks the owner's password with `basicauth` against a bcrypt hash, and proxies to loopback. A
+browser that passed the password check carries a 30-day owner-session cookie and is proxied without
+a second challenge.
 
 - The front is the only public listener; the application cannot bind anywhere else, and pages call
   the read layer in-process, so there is no internal HTTP surface.

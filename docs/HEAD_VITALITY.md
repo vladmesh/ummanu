@@ -55,8 +55,8 @@ A `VitalitySnapshot` is one channel's reading of one head run at one instant.
 
 | Source | Producer wrapped | Axes answered |
 |---|---|---|
-| `pid_heartbeat` | `dispatcher_watchdog.head_process_status` | Process |
-| `provider_cursor` | `dispatcher_tui.provider_progress_for_run` | Progress |
+| `pid_heartbeat` | `dispatch.watchdog.head_process_status` | Process |
+| `provider_cursor` | `dispatch.tui.provider_progress_for_run` | Progress |
 | `pane_advisory` | pane-era: pane readiness (`{"idle": bool}`) before A20; no dispatcher status carries it since secretary-1723 | Turn |
 | `execution_child` | `runtime.head.children.read_head_children` (the head's `/proc` descendants) | Progress |
 | `supervisor_journal` | `runtime.local_pty_head.head_run_turn_reading` (the run's own `journal.jsonl`) | Turn, Progress |
@@ -319,7 +319,7 @@ silence after it was asked; `last_progress_at` is kept. Records without the fiel
 so the worker stops editing while CI and the reviewer own the checkout and a red verdict can resume the
 same conversation.
 
-`_reduce_and_store_vitality_episode` passes `record.worker_continuation.retained` for the worker head
+`dispatch.wait_vitality.reduce_and_store_vitality_episode` passes `record.worker_continuation.retained` for the worker head
 (the review head always passes `False`). `Retained` earns no rung: no SIGCONT, no nudge, no operator
 escalation, and the guard refuses every destructive step (`retained`). A head stopped without an
 active retention follows the `Suspended` ladder.
@@ -423,11 +423,13 @@ A refusal produces a degraded `{kind}-guard-refused` outcome and one idempotent 
 on the wait cycle and refusal class. The body says only what that key names; live measurements (quiet,
 dark sources, next deadline) stay on the episode and are read with `ummanu head-status`.
 
-Guarded entry point: `DispatcherRuntime._trigger_wait_watchdog`, which fences both arms
+Guarded entry point: `dispatch.wait_vitality._trigger_wait_watchdog`, which fences both arms
 (`dispatch.wait_vitality._respawn_wait`, `dispatch.wait_vitality._escalate_wait`) through `dispatch.wait_vitality._guard_or_wait`. The no-episode fallback's evidence
 branches (`no output since launch`, `no terminal progress`) keep their triggers but act only under
-`dispatch.wait_vitality._trigger_wait_watchdog`; its pure clock branch escalates without destroying. `_stop_worker_confirmed`
-and `_end_review_pane_confirmed` run only beneath a guarded entry.
+`dispatch.wait_vitality._trigger_wait_watchdog`; its pure clock branch escalates without destroying.
+`DispatcherRuntime._stop_worker_confirmed` and `_end_review_pane_confirmed` carry no guard of their
+own: a vitality stop reaches them through the guarded arms above, and their other callers are the
+stops below that do not act on vitality.
 
 Not guarded, because they do not act on vitality:
 
@@ -474,7 +476,7 @@ once, then escalate.
 
 ### SIGCONT execution
 
-`DispatcherRuntime._sigcont_head` is the only signal this path sends. At send time it re-verifies
+`dispatch.wait_vitality._sigcont_head` is the only signal this path sends. At send time it re-verifies
 identity through `guard_head_run_identity` (pid, boot id, proc start time, expected HeadRun); a
 mismatched, unreadable or vanished heartbeat sends nothing. Delivery follows `_signal_head`: the head's
 own process group when it has one, else the pid. SIGTERM/SIGKILL stay behind their guarded entries.
@@ -520,10 +522,10 @@ live round, so a verdict that can stop a head needs strong admitted evidence.
 | Invariant | Tests |
 |---|---|
 | Provider `Advancing` ⇒ `HealthyActive`; advisory pane-idle (pane-era) alone never leaves `Unverifiable`; no destructive verdict while the transcript moves; such a head is never prompted or respawned. | `IssueB5195041CodexTranscriptBlindnessTests`, `IssueB5195041LegacyIdlePathTests` |
-| Busy pane (pane-era advisory) + `Running` + `Advancing` ⇒ `HealthyActive`; readiness unavailable is Turn-only and never stall evidence; unknown provider ⇒ `HealthyQuiet`, never `Dead`/`ConfirmedStall`. | `Issue3e7abdf9BusyReadAsUnavailableTests`, `Issue3e7abdf9LegacyBusyReadinessTests` |
+| Busy pane (pane-era advisory) + `Running` + `Advancing` ⇒ `HealthyActive`; readiness unavailable is Turn-only and never stall evidence; unknown provider ⇒ `HealthyQuiet`, never `Dead`/`ConfirmedStall`. | `Issue3e7abdf9BusyReadAsUnavailableTests` |
 | `Running` + admitted `Quiet` ⇒ `SuspectedStall` at +300 s and `ConfirmedStall` at +900 s from last progress; a busy pane (pane-era advisory) only corroborates. | `Issue8f86ed63BusyMasksStallTests` |
 | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen; never `ConfirmedStall` or `Dead`; the gate-pending tick SIGCONTs a non-retained suspended worker within one tick. | `IssueFe04011bStoppedWorkerSixHourCeilingTests`, `IssueFe04011bLegacyGatePendingTests` |
-| A repeated deterministic reason with a live terminal keeps `Unverifiable` and escalates after 3 identical sightings; a repeated heuristic reason earns only observation. | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` |
+| A repeated deterministic reason with a live terminal keeps `Unverifiable` and escalates after 3 identical sightings; a repeated heuristic reason earns only observation. | `CodegenOrchestrator1194DeterministicSplitFailureTests` |
 | A confirmed retention ⇒ `Retained`: no SIGCONT or other rung, so a red gate reuses the suspended session; `Dead` still outranks it. | `Issue02fe04d7RetainedWorkerTests` |
 | A dark progress source freezes only for `dark_ceiling`, then `SuspectedStall` (spending the nudge) and `ConfirmedStall`; the reason names the dark source; nothing is stopped before the outer ceiling. | `Ummanu1517Tests`, `Ummanu1517WaitTickTests` |
 | A status with no provider channel (`reason: "pid"`, `"disconnected"`) after the provider answered once is stamped `absent@provider_cursor`, takes the `dark_ceiling` window, and a confirmation is held behind the outer ceiling. | `ProviderLessStatusShapesTests` |
