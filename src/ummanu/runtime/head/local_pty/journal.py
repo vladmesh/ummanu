@@ -1,19 +1,10 @@
-"""One head's event journal: versioned, append-only, and readable while it is being written.
+"""One head's event journal: versioned, append-only, readable while being written.
 
-Three properties are what make this a journal rather than a log file, and each of them is a field:
-
-  * **`schema_version`** is on every record, not on the file, because a reader may open a journal
-    written by an older supervisor that is still running. There is no header to miss and no
-    per-file negotiation;
-  * **`seq`** is a strictly increasing sequence within the run, so a reader can tell "nothing new
-    happened" from "I missed something". It is recovered from the file on open, so a supervisor
-    that takes an orphaned run dir over does not restart the sequence;
-  * **`run_id`** is on every record, so a record is never ambiguous about which head it describes
-    once it has been copied out of its file.
-
-Records are single-line JSON appended to a file opened `O_APPEND`, one `write()` per record, then
-`fsync`. A `SIGKILL` can therefore leave at most one partial trailing line, and `read_events`
-reports that as a truncated tail instead of failing: everything before it is complete and ordered.
+Every record carries `schema_version` (a running older supervisor may have written it), `seq`
+(strictly increasing per run, recovered from the file on open so a takeover continues it) and
+`run_id`. Records are single-line JSON, one `O_APPEND` `write()` plus `fsync` each, so `SIGKILL`
+leaves at most one partial trailing line, which readers report as a truncated tail.
+See docs/HEAD_RUNTIME.md "Supervisor progress journal".
 """
 
 from __future__ import annotations
@@ -28,24 +19,18 @@ from typing import Any, Self
 
 JOURNAL_SCHEMA_VERSION = 1
 
-#: How much of a journal's end a reader that only wants the head's current shape reads, in bytes.
-#: The bound is a number rather than a policy because the cost of reading a journal has to be
-#: statable: a supervised role's run directory is reused across incarnations and its journal is
-#: append-only across all of them, so "read the file" grows without limit while the question a
-#: reader asks — what state is this head in *now* — is answered by its last few records. Every
-#: record this substrate writes is a single line well under 256 bytes, so 64 KiB is several
-#: hundred of them: far more than one incarnation's shape needs, and a fixed cost per read.
+#: Bytes a current-state reader reads off a journal's end. Run directories are reused across
+#: incarnations, so the file grows without bound; records are under 256 bytes, so 64 KiB holds
+#: several hundred, at a fixed cost per read.
 JOURNAL_TAIL_BYTES = 64 * 1024
 
 #: The head's process is up and the supervisor owns it.
 RUN_STARTED = "run.started"
 #: Sealed admitted identity bound to native scope, fsynced before any head exists.
 SCOPE_BOUND = "scope.bound"
-#: A delivery ended, and this is what of it reached the head's pty: `bytes` counts what the kernel
-#: took from the supervisor, `offered_bytes` what the caller handed over, and `complete` says
-#: whether those are the same number. Written when the bytes land, never when they are admitted, so
-#: the record is about arrival rather than intent. A payload refused at admission — oversized,
-#: admission closed, a delivery already in flight — is not an event: nothing about the head changed.
+#: A delivery ended: `bytes` is what the pty took, `offered_bytes` what the caller handed over,
+#: `complete` whether they match. Written on arrival, not admission; a payload refused at admission
+#: is not an event.
 INPUT_ACCEPTED = "input.accepted"
 #: A turn opened — the first accepted input since the head last went quiet.
 TURN_STARTED = "turn.started"
@@ -83,17 +68,11 @@ class JournalError(RuntimeError):
 
 @dataclass(frozen=True)
 class JournalReadResult:
-    """Everything a reader can honestly say about a journal file it just read.
+    """What a reader can honestly say about a journal it just read.
 
-    `truncated_tail` is the `SIGKILL` case: the last line has no newline, so the supervisor died
-    mid-write. It is reported rather than raised, because the records before it are intact.
-    `malformed` counts complete lines that were not usable records at all — a different failure
-    from a torn tail, and one a reader should not be able to confuse with it.
-
-    `partial_head` says the read began inside the file rather than at its start, which is what a
-    bounded read of the end does. It is a separate field from the two failures above because it is
-    not one: the records are intact and ordered, and the only thing a reader may not conclude from
-    them is that what they do not contain never happened.
+    `truncated_tail`: the last line has no newline (writer died mid-write); earlier records are
+    intact. `malformed`: complete lines that were not usable records, a distinct failure.
+    `partial_head`: a bounded read began mid-file, so absence of a record proves nothing.
     """
 
     events: tuple[dict[str, Any], ...] = ()
@@ -128,8 +107,7 @@ class JournalWriter:
         """Open for append, continuing the sequence already in the file."""
         self._seq = _last_seq(self.path)
         self._fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        # Close-on-exec: a head that inherited this descriptor could keep the journal open after
-        # the supervisor that owns it is gone.
+        # Close-on-exec: a head inheriting it could hold the journal open after the supervisor dies.
         os.set_inheritable(self._fd, False)
         return self
 
@@ -150,9 +128,7 @@ class JournalWriter:
     def append(self, kind: str, **fields: Any) -> dict[str, Any]:
         """Append one record and return exactly what was written.
 
-        An unknown kind raises here rather than reaching the file: the set of things this substrate
-        can say about a head is closed, and a journal with an invented kind in it is a journal no
-        reader can route on.
+        Unknown kinds raise: the event vocabulary is closed so readers can route on it.
         """
         if kind not in EVENT_KINDS:
             known = ", ".join(EVENT_KINDS)
@@ -205,8 +181,7 @@ def _usable(record: Any) -> dict[str, Any] | None:
     try:
         seq = int(record["seq"])
     except (KeyError, TypeError, ValueError, OverflowError):
-        # `OverflowError` is `int(inf)`: `json.loads` reads a bare `Infinity`, and a damaged line
-        # is a malformed record, not an exception out of every reader of the file.
+        # `OverflowError` is `int(inf)` from a bare `Infinity`: a malformed record, not an exception.
         return None
     if seq <= 0:
         return None
@@ -215,13 +190,9 @@ def _usable(record: Any) -> dict[str, Any] | None:
 
 
 def read_events(path: str | os.PathLike[str]) -> JournalReadResult:
-    """Read a journal a live or dead supervisor wrote, without trusting its last line.
+    """Read a whole journal (live or dead writer) without trusting its last line.
 
-    The whole file, for a reader that needs the run's whole history. A reader that only needs the
-    head's current shape asks `read_tail` instead, which is bounded.
-
-    A missing file reads as an empty journal, because "the supervisor has not written yet" and "the
-    supervisor wrote nothing" are the same fact to a reader that has just been pointed at a run.
+    For current state use the bounded `read_tail`. A missing file reads as an empty journal.
     """
     try:
         raw = Path(path).read_bytes()
@@ -231,23 +202,12 @@ def read_events(path: str | os.PathLike[str]) -> JournalReadResult:
 
 
 def read_tail(path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYTES) -> JournalReadResult:
-    """Read at most `max_bytes` bytes off the end of a journal, and say that the read was bounded.
+    """Read at most `max_bytes` off a journal's end, reporting `partial_head` when bounded.
 
-    The read a caller that asks "what is this head doing now" makes. The first line of the window
-    is dropped whenever the window did not start at the beginning of the file — it is a record cut
-    in half by the bound, not by a dead writer, and admitting it would put a malformed record into
-    a result whose `malformed` count means something else. `partial_head` then says what was done,
-    so a reader can tell "this journal contains no drain" from "the window I read contains none".
-
-    **The bound is on the bytes this reads, not on the records it keeps** (secretary-1479). A
-    journal is read while its supervisor is appending to it, so the size this seeks against is
-    already old by the time the read runs: asking for everything to the end would read through
-    whatever landed in between, and a writer that keeps going can make that arbitrarily larger
-    than the number this function is named for. The window is therefore closed at both ends — it
-    is the last `min(max_bytes, size)` bytes of the file *as it was measured* — and a record
-    appended after the measurement belongs to the next read rather than to this one.
-
-    A missing file reads as an empty journal, exactly as it does for `read_events`.
+    The first line of a window not starting at the file's beginning is a cut record and is dropped
+    (it must not count as `malformed`). The bound is on bytes read: the window is the last
+    `min(max_bytes, size)` bytes of the size as measured, so records appended concurrently belong
+    to the next read. A missing file reads as an empty journal.
     """
     window = tail_window(path, max_bytes=max_bytes)
     if window is None:
@@ -261,9 +221,8 @@ def tail_window(
 ) -> tuple[bytes, bool] | None:
     """The raw bytes `read_tail` parses, and whether the window began mid-history.
 
-    `None` for a missing file. A window that did not start at the file's beginning has its first
-    (cut) line already dropped. Exposed for a reader that must judge the records' own values rather
-    than the coerced ones `read_tail` hands back (the vitality reading, secretary-1739).
+    `None` for a missing file; a mid-history window has its cut first line dropped. Exposed for
+    readers that must judge raw record values rather than `read_tail`'s coerced ones (vitality).
     """
     if max_bytes <= 0:
         raise JournalError("a bounded journal read is bounded by a positive number of bytes")
