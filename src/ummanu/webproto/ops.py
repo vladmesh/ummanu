@@ -1,53 +1,17 @@
-"""The mutation half of the transport-independent layer: three operations over one product run.
+"""The mutation half of the transport-independent layer: product runs without Orca or a transport.
 
-secretary-1561 gave this package the reads — what the installation is doing, what a card is doing,
-what has happened to it. This is what produces the thing those reads show, without Orca and without
-a transport:
+:meth:`OperationLayer.run_start` raises a worker head for one card in a product-cut workspace;
+:meth:`OperationLayer.run_review` raises a reviewer over an ended worker run's workspace and result;
+:meth:`OperationLayer.run_state` reads one run and is the one place its ending is settled. Documents
+follow the `web-run` schema; refusals are typed :class:`ummanu.webproto.errors.ReadError`.
 
-* :meth:`OperationLayer.run_start` raises a real worker head for one card, in a workspace this
-  product cut, under a supervisor this product owns;
-* :meth:`OperationLayer.run_review` raises a real reviewer head *by the worker's result*: it
-  establishes what the worker run ended as, refuses while that is still open, and hands the
-  reviewer the worker's workspace and the worker's own result document;
-* :meth:`OperationLayer.run_state` reads one run, and is the one place a run's ending is settled.
-
-Every one of them returns a JSON-serialisable document against the published `web-run` schema, and
-every refusal is a typed :class:`ummanu.webproto.errors.ReadError` with a protocol code. There
-is no status number anywhere in this package, and no web import in it — the same two properties the
-read layer holds, checked the same way.
-
-**What is owned here, and what is borrowed.** The workspace (`workspaces`), the run record
-(`runs`), the run directory, the pid file, the journal and the result file are the product's. The
-head's process is held by `LocalPtyHeadRuntime` — the backend that already exists — reached through
-the product's one name-to-backend mapping, `head_runtime_backends.build_head_runtime`, which builds
-no other backend and holds no session manager. No pane is created, listed, probed or reaped on
-any path below, because a supervisor leaves none; no Orca CLI is spawned, no Orca RPC is spoken,
-and no repository inventory of Orca's is read. `ummanu run_start` and `run_state` are the two
-paths criterion 2 names, and `tests/test_web_run_protocol.py` fails if either of them grows one.
-
-**Which head runs is configuration, not code.** A profile id is an argument, it is resolved through
-the head registry (`ummanu.runtime.heads`), and it must name the `local-pty`
-runtime — a profile that names Orca's backend is refused here rather than quietly run under a
-backend it does not declare. Nothing in this module knows the name of a model, an adapter or an
-effort.
-
-**One owner of a card.** Both start paths go through :func:`ummanu.webproto.admission.admit`
-before they build or spawn anything, and neither has a branch around it.
-
-**The order between a process and the record of it is not decided here.** It is decided in
-:mod:`ummanu.webproto.lifecycle`, in one function, and this module calls it for every start,
-every review and every close. What stays here is *policy* -- which card may run (`admission`),
-which profile, when a run should be closed -- and what leaves is the order in which a run may be
-raised, bound and ended without ever leaving a live head with no owner.
-
-**A request id owns an operation, and the events of a run are never assumed published.** Two
-properties that read as bookkeeping and are not. A request id is the idempotency key of one
-operation made with one set of inputs, checked against the record it owns, so a review made under a
-worker's id is a typed refusal rather than a review document about the worker's own run. And
-raising a head and publishing its start are two durable writes, as are settling an ending and
-publishing it: every path that hands back an existing or already-settled run republishes what that
-run owes first (:meth:`OperationLayer._republish`), because criterion 6 is that a launch and an
-outcome are visible through `task_events` and `task_snapshot`, not that they were once written.
+Heads run only under `LocalPtyHeadRuntime` via `head_runtime_backends.build_head_runtime`; no Orca
+pane, CLI or RPC is touched (`tests/test_web_run_protocol.py` enforces this). The profile comes from
+the head registry and must name `local-pty`. Both start paths pass
+:func:`ummanu.webproto.admission.admit` first; the process/record ordering lives in
+:mod:`ummanu.webproto.lifecycle`. A request id keys one operation with one input fingerprint, and
+every path returning an existing run republishes its events (:meth:`OperationLayer._republish`).
+See docs/PROTOCOLS.md, "Running the pipeline".
 """
 
 from __future__ import annotations
@@ -113,8 +77,7 @@ from ummanu.webproto.store_io import write_document
 from ummanu.webproto.workspaces import provision, workspace_path
 from ummanu.runtime.head_runtime_backends import build_head_runtime
 
-#: Re-exported so that the names an operator and a test already know keep resolving here, while the
-#: transitions that use them live in one place. See :mod:`ummanu.webproto.lifecycle`.
+#: Re-exported names; the transitions using them live in :mod:`ummanu.webproto.lifecycle`.
 __all__ = [
     "CLAUDE_JSON",
     "INITIATOR",
@@ -128,9 +91,8 @@ __all__ = [
 
 SCHEMA_VERSION = 1
 
-#: What the head is told about its own run, in its environment. A head reads the path it must write
-#: its result to rather than being asked to invent one, so there is exactly one place a result can
-#: appear and exactly one reader of it.
+#: The head's environment: where it must write its result (the one place a result can appear) and
+#: which run it is.
 RESULT_ENV = "UMMANU_RUN_RESULT"
 RUN_ENV = "UMMANU_RUN_ID"
 ROLE_ENV = "UMMANU_RUN_ROLE"
@@ -141,13 +103,8 @@ WORKSPACE_ENV = "UMMANU_RUN_WORKSPACE"
 class OperationLayer(ProtocolBoundary):
     """One installation's product runtime, with no knowledge of who is asking.
 
-    Construction does no I/O, exactly as `ReadLayer`'s does not: every operation resolves the
-    instance, the store and the backend when it is called, so a long-lived transport holding one of
-    these never acts on a configuration it read at start-up.
-
-    `board_client`, `registry`, `spawn` and `clock` exist so a test — or a transport with its own
-    connection policy — can supply those directly. None of them is a mode: the same code path runs
-    with the live ones as with the fakes.
+    Construction does no I/O; every operation resolves instance, store and backend when called, so
+    a long-lived transport never acts on stale configuration. The injectable seams are not modes.
     """
 
     def __init__(
@@ -213,12 +170,7 @@ class OperationLayer(ProtocolBoundary):
             raise ValidationRefused(f"the head registry could not be read: {exc}") from None
 
     def _profile(self, profile_id: str) -> tuple[HeadSpec, dict[str, Any]]:
-        """One registry profile as a launchable spec, refused by name when it is not one.
-
-        A profile naming any runtime but `local-pty` — Orca's included — never becomes a spec
-        (`validate_launch_shape`), so it is a configuration refusal here rather than a silent
-        substitution.
-        """
+        """One registry profile as a launchable spec; a non-`local-pty` profile is refused."""
         if not profile_id:
             raise ValidationRefused("a product run names the head profile it runs on")
         registry = self._registry_table()
@@ -231,10 +183,8 @@ class OperationLayer(ProtocolBoundary):
         return spec, profile
 
     def _runtime(self, data_dir: Path) -> Any:
-        """This layer's backend, built through the product's one name-to-backend mapping.
-
-        `runtime_factory` is the seam a test supplies its own backend through, and it is the only
-        one: with none given this builds the supervised backend by name, the only one there is.
+        """This layer's backend via the product's name-to-backend mapping; `runtime_factory` is the
+        test seam.
         """
         if self._runtime_factory is not None:
             return self._runtime_factory(data_dir)
@@ -247,14 +197,10 @@ class OperationLayer(ProtocolBoundary):
         )
 
     def _audit(self, data_dir: Path) -> Any:
-        """The audit owner of this installation's card backend, for the run events published below.
+        """The audit owner of the card backend (`task_audit_for`), where run events are published.
 
-        `run_events.publish_*` appends a generic audit record, so it has to be appended where the
-        installation's readers look for one: the `requests` rows of the PostgreSQL board store,
-        whose generic records live in that one table (`docs/BOARD_STORE.md` §7.3). Built from the data dir alone this published a product run
-        into a file that backend never reads, which is the same invisible-record defect
-        `task_audit_for` exists to close. The run protocol itself is unchanged: the same events, in
-        the same order, in the store the client names.
+        Generic records must land in the PostgreSQL `requests` table (`docs/BOARD_STORE.md` §7.3),
+        never in a data-dir file that backend's readers do not read.
         """
         return task_audit_for(self._client(), data_dir)
 
@@ -270,17 +216,9 @@ class OperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Raise a worker head for one card, or hand back the run this request id already owns.
 
-        The order is the contract, and it is the order idempotency needs: the request id is claimed
-        first, with the run id and every path already decided; the admission gate is passed before
-        anything is built; and only then is a workspace cut and a head raised. A repeat of the same
-        request id — a retried command, a client that reconnected — finds the record at the first
-        step and returns it, so no second process and no second workspace can exist for it.
-
-        "The same request id" means the same request: the id is claimed under this operation and a
-        fingerprint of these inputs, so a repeat naming a different card, profile or instruction —
-        or a different operation entirely — is refused rather than answered with somebody else's
-        run. And the repeat republishes the run's `product_run.started` before returning it, so a
-        launch whose publication failed once is not invisible forever.
+        Order: claim the request id (with run id and paths decided), pass admission, then cut the
+        workspace and raise the head. A repeat with the same id and inputs returns the existing run
+        and republishes `product_run.started`; different inputs or operation are refused.
         """
         now = self._clock()
         report = self.report()
@@ -350,16 +288,9 @@ class OperationLayer(ProtocolBoundary):
     ) -> dict[str, Any]:
         """Raise a reviewer head for a worker run that has ended, by that run's own result.
 
-        "By its result" is enforced rather than described: the worker run is settled through
-        :meth:`run_state` first, and a worker that is still running is refused. Whatever it ended as
-        — a published result, a non-zero exit, a process that died — is what the reviewer is handed,
-        in the same workspace the worker worked in, so the review is of the work rather than of a
-        report about it.
-
-        The request id is claimed under *this* operation and this review's own inputs, which is what
-        keeps that promise against a caller that repeats the worker's start id here: the repeat is a
-        typed validation conflict rather than a `product_review` document carrying the worker's run,
-        with no reviewer raised and nobody told.
+        The worker is settled via :meth:`run_state` first and refused while still running; the
+        reviewer gets the worker's workspace and outcome. The request id is fingerprinted under this
+        operation, so reusing the worker's start id is a validation refusal.
         """
         now = self._clock()
         report = self.report()
@@ -377,9 +308,8 @@ class OperationLayer(ProtocolBoundary):
 
         worker = self._worker_run(store, ref=ref, worker_run_id=worker_run_id)
         worker_state = self.run_state(worker.run_id)
-        # `ended` and not the outcome value: what a review waits for is the worker being *over*,
-        # and a worker that ended in a way nothing could establish is over too. Reading the value
-        # here would leave such a run unreviewable forever.
+        # `ended`, not the outcome value: a worker whose ending could not be established is still
+        # over, and must stay reviewable.
         if not worker_state["state"]["ended"]:
             raise OwnerConflict(
                 f"the worker run {worker.run_id} is {worker_state['state']['value']}: a review is "
@@ -435,23 +365,12 @@ class OperationLayer(ProtocolBoundary):
         return self._review_document(run, store, now=now)
 
     def run_state(self, run_id: str) -> dict[str, Any]:
-        """One run's state — and the one place a run's ending becomes durable.
+        """One run's state, and the one place a run's ending becomes durable.
 
-        Reading is most of it, and the write is exactly one thing: the first observation of a run
-        that is over settles the run, recording the state, the reason, the exit status and the
-        result together, and its single `product_run.finished` event goes onto the card's own
-        journal. That is not a second history, and not a second answer either:
-        :meth:`ummanu.webproto.runs.RunStore.settle` records an ending once, and the event is a
-        pure function of that record, so every later observer that republishes it rebuilds the
-        record the journal already holds. Republishing rather than publishing once is deliberate —
-        the settle is durable before its publication is, and an ending lost to one journal failure
-        would otherwise never become visible again.
-
-        Two things this operation does besides observing, and both are what "the product owns the
-        process" means. A run whose head has published its result is a run whose work is done, so
-        the head holding it is ended here rather than left to sit in a terminal forever. A run past
-        its deadline is ended for the opposite reason: nothing came, and a head nobody will ever
-        read is not left running.
+        The first observation of an ended run settles it (`RunStore.settle`, once) and publishes
+        `product_run.finished`; every later terminal read republishes, since the event is a pure
+        function of the record and publication can fail after the settle. A run whose result is in,
+        or that is past its deadline, has its head ended here.
         """
         now = self._clock()
         data_dir = self.data_dir()
@@ -465,27 +384,15 @@ class OperationLayer(ProtocolBoundary):
             run = self._lifecycle(data_dir, store).advance(run, SETTLED, now=now, reason=closing)
             state = run_state_reads.observe(run, now=now)
         if run.ended:
-            # Not `if first`: an ending is settled once, and *publishing* it is a separate durable
-            # write that may have failed after the settle. So every terminal read republishes,
-            # which is free when the event is already on the journal and is the only way an ending
-            # lost to one journal failure ever becomes visible again. See :meth:`_republish`.
+            # Republish on every terminal read: publication may have failed after the settle.
             state = self._republish(data_dir, run, now=now, state=state) or state
         return self._document(run, now=now, state=state)
 
     def run_list(self, ref: str) -> dict[str, Any]:
-        """Every product run of one card, each read exactly as :meth:`run_state` reads it.
+        """Every product run of one card, each as the full :meth:`run_state` document.
 
-        A listing rather than a fourth operation: it introduces no fact of its own and settles
-        nothing a single read would not settle, and it is here rather than in a caller so that the
-        CLI group and the web transport cannot come to list a card's runs differently. A card that
-        has never been run has an empty list, which is not a refusal.
-
-        Each item is the whole `product_run` document :meth:`run_state` returns, state included,
-        and that is the point: a listing that kept only the record would leave every reader to
-        guess a state from `settled_state` and `ended`, and an open run that reads `unknown` or
-        `source_unavailable` would be indistinguishable from one that is running. Those are
-        different things, so the listing carries the state that tells them apart rather than
-        dropping it and inviting each caller to invent one.
+        Settles nothing a single read would not. Full state is kept so an open run reading `unknown`
+        or `source_unavailable` is distinguishable from one running. No runs is an empty list.
         """
         layer_now = self._clock()
         store = self.store()
@@ -513,18 +420,9 @@ class OperationLayer(ProtocolBoundary):
     def _closing_before_any_spawn(self, lifecycle: RunLifecycle, run: ProductRun, *, now: float):
         """Close a run whose preparation failed, while it provably still holds no process.
 
-        The request id is claimed before the workspace is cut, which is what makes a retry
-        idempotent, and the cost of that ordering is a run record that exists while preparation is
-        still going. An unraised record that nothing ever settles would hold the card against every
-        later run -- a fence only a human could lift -- so a preparation that fails closes its own
-        run before the refusal reaches the caller.
-
-        The close goes through :meth:`RunLifecycle.advance` like every other close, and what it is
-        handed is the newest record preparation produced: the block reports each phase it reaches
-        through `prepared`, so a failure inside the write-ahead closes the record the write-ahead
-        wrote rather than the stale one this block began with. Whether that close may settle is
-        still the lifecycle's decision and not this block's -- a write-ahead that failed after its
-        spawn window opened lands in `unresolved` from here exactly as it would from anywhere.
+        The request id is claimed before the workspace is cut, so an unsettled record would fence the
+        card forever. The block reports each phase via `prepared`, and the close (through
+        :meth:`RunLifecycle.advance`, which decides whether it may settle) uses the newest record.
         """
         latest = [run]
 
@@ -550,12 +448,8 @@ class OperationLayer(ProtocolBoundary):
     ) -> ProductRun | None:
         """The run this exact request already owns, or nothing, or a typed refusal.
 
-        The refusal is the point. A request id is the idempotency key of *one* operation made with
-        *one* set of inputs, so the store is asked for the run under both, and a repeat that names
-        a different operation or different inputs is a validation conflict rather than a document
-        about a run that answers a different question. Without that, a review command that reused
-        the worker's request id would be handed the worker's own run back, reported as a review,
-        with no reviewer ever raised.
+        A request id keys one operation with one input fingerprint; a mismatch is a validation
+        refusal, never another operation's run.
         """
         if not request_id:
             raise ValidationRefused("a product run operation names the request it is made under")
@@ -574,20 +468,11 @@ class OperationLayer(ProtocolBoundary):
         now: float,
         state: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        """Make sure this run's events are on the card's history, however often that is asked.
+        """Ensure this run's `started`/`finished` events are on the card's history; idempotent.
 
-        Criterion 6 says the launch and the outcome are visible through the existing `task_events`
-        and `task_snapshot`. Publishing them once, on the path that created them, only holds that
-        while the audit never fails: an audit owner that is briefly unavailable *after* the head
-        is up loses `product_run.started` forever, because the retry the idempotency contract
-        invites finds the record and returns it without ever trying again. The same hole sits under
-        `run_state`, whose settle is durable before its publication is.
-
-        So publication is not a step of the creating path but a property every path restores: a
-        recovered run republishes what it owes before it is returned. It costs nothing when the
-        events are already there, because both are derived entirely from the run -- `occurred_at`
-        included -- so a replay builds the byte-identical record the audit already holds and
-        recognises, and neither a second event nor a second history can come of it.
+        Every path returning a recovered run calls this, since an audit failure after the head is up
+        or after the settle would otherwise lose the event forever. Events are derived entirely from
+        the run (`occurred_at` included), so a replay is byte-identical and never duplicates.
         """
         if not run.raised and not run.ended:
             return state
@@ -655,27 +540,15 @@ class OperationLayer(ProtocolBoundary):
         }
 
     def _reason_to_close(self, run: ProductRun, state: dict[str, Any], *, now: float) -> str:
-        """Why this read should close the run, or nothing. The policy half of a close.
+        """Why this read should close the run, or `""`. The policy half of a close.
 
-        Four answers, and the middle two are why this is a method rather than a condition:
+        * settled: never closed again;
+        * unresolved: closed on every read (the stop is retried until the ending is confirmed);
+        * running: closed when its result is in or its deadline passes;
+        * otherwise: closed only when `state["ended"]`, never by the outcome value, which can read
+          `source_unavailable` both for a gone head and for an unreadable launch identity.
 
-        * a settled run is history and is never closed again;
-        * an **unresolved** run is closed on every read, because that is what resolving it means:
-          the stop is retried from the same durable record, and the run settles the moment the
-          ending is confirmed. A card is therefore not fenced by an unresolved run for any longer
-          than the head under it actually survives;
-        * a running run is closed when its work is done or its time is up;
-        * a run whose process evidence says it is **over** is closed so that ending becomes
-          durable, and one whose evidence does not is left alone. That fact is `state["ended"]`
-          and never the outcome value beside it: a head that is gone while its journal cannot be
-          read is over and settles `source_unavailable`, and a run whose launch identity itself
-          could not be read carries that same value while nothing about its process is established
-          -- so it is not closed. One value, two answers, which is why the closing question reads
-          the fact and not the word.
-
-        The deadline is the earlier of the one the run was started with and the one this caller is
-        configured with, so `--deadline-seconds` on a read shortens a run that is going nowhere and
-        can never silently extend one past what its own start promised.
+        The deadline is the earlier of the run's own and this caller's, so it can only shorten.
         """
         if run.ended:
             return ""
@@ -708,11 +581,7 @@ class OperationLayer(ProtocolBoundary):
     # -- the documents a head is pointed at ---------------------------------------------------
 
     def _worker_document(self, run: ProductRun, admission: Admission, *, instruction: str, base: str) -> Path:
-        """The task document this run's worker is pointed at, written outside its workspace.
-
-        Outside deliberately: a workspace's identity is its tracked diff, and a document written
-        into it would be part of what the reviewer then reads as the worker's work.
-        """
+        """The worker's task document, written outside the workspace so it is not part of the diff."""
         card = admission.card
         body = "\n".join(
             [
@@ -782,13 +651,8 @@ class OperationLayer(ProtocolBoundary):
         return self._write_document(run, "REVIEW.md", body)
 
     def _write_document(self, run: ProductRun, name: str, body: str) -> Path:
-        """One document a head is pointed at, written through this layer's one file seam.
-
-        Through the seam rather than with its own `write_text` for the reason
-        :mod:`ummanu.webproto.store_io` exists: there is one place this package writes a file
-        and one vocabulary it fails in, and a path that wrote its own would be the next one to
-        raise something nothing translates. The local refusal stays, because *which* write failed
-        is worth saying and the seam cannot know it.
+        """One head document, written through :mod:`ummanu.webproto.store_io`, with a local refusal
+        naming which write failed.
         """
         path = Path(run.run_dir) / name
         try:
@@ -832,11 +696,7 @@ def _run_json(run: ProductRun) -> dict[str, Any]:
 
 
 def _reads(run: ProductRun) -> dict[str, str]:
-    """How this run is read back through the layer that already exists, spelled out for a client.
-
-    Criterion 6 in one field: there is no run history and no run outcome store to point a reader at,
-    so what a document points at is the card's own `task_events` and `task_snapshot`.
-    """
+    """How this run is read back: the card's own `task_events` and `task_snapshot` (no run store)."""
     return {
         "task_events": f"ummanu web-read events --ref {run.ref}",
         "task_snapshot": f"ummanu web-read task --ref {run.ref}",

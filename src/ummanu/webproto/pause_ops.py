@@ -1,58 +1,14 @@
-"""The two pause operations of this layer: put the pipeline into a soft pause, and lift it.
+"""The two pause operations: `pause_drain` sets the pipeline-wide soft pause, `pause_resume` lifts it.
 
-`pause_drain` sets the pipeline-wide soft pause. `pause_resume` clears whatever pause is set and
-puts back what a freeze stopped. That is the whole surface, and what is *not* on it is as much of
-the contract as what is:
+There is no freeze operation and no mode parameter: `pause_drain` passes the literal
+:data:`~ummanu.webproto.pause_reads.DRAIN`, and a freeze is only `ummanu pause freeze`. Every rule
+(tick lock, same-mode no-op, `pause_conflict`, head stop/relaunch, TTL) stays in
+`ummanu.dispatch.pause_ops`; this layer adds no flag, lock, store or request index.
 
-**There is no freeze operation and no mode parameter.** `pause_drain` cannot be asked for anything
-but a drain: it takes no mode, has no default mode, no fallback, no retry in another mode and no
-convenience flag, and it passes the literal :data:`~ummanu.webproto.pause_reads.DRAIN` down. A
-freeze stops live heads -- including the head that would be calling this -- so the one path to one
-is the deliberate `ummanu pause freeze`, and the existing refusal to change mode while paused
-(`dispatcher_pause_ops.pause`'s `pause_conflict`) keeps a drain from being turned into one behind
-the caller's back. That refusal is preserved here rather than smoothed over: it reaches the caller
-as `owner_conflict`, which is what a well-formed request refused on the state of the world is in
-this layer.
-
-**Every rule stays in `ummanu.dispatch.pause_ops`.** The tick lock, the idempotent-in-the-same-
-mode no-op, the conflict, the legacy mirror, the head stop and relaunch, the watchdog windows and
-the auto-resume TTL are all its, and these operations call it and re-decide none of them. There is
-no second flag, no second lock, no second store and no request index of this layer's own: the pause
-is idempotent in its own mode by its own rule, so a repeat needs no key to be safe.
-
-**The result of a command is readable, and its three outcomes are told apart.** `action` is the
-answer `dispatcher_pause_ops` itself gave -- `paused` for a command that set the flag, `noop` for a
-repeat in the same mode that changed nothing, `resumed` for a resume that lifted one -- and
-`changed` is that as a boolean. A refusal is not an action at all: `pause_conflict` raises
-`OwnerConflict` and writes nothing. Beside them the document carries the state read
-(:meth:`~ummanu.webproto.pause_reads.PauseReadLayer.pause_state`), so a caller reads what the
-pipeline is now from the same sections it would have read before the call.
-
-**And a command that did something says so even when the pipeline cannot be described afterwards.**
-`dispatcher_pause_ops.pause` and `resume` set the flag and then render the status through
-`pause_status`, which converts every dispatcher record -- so a production state that is semantically
-corrupt (an obsolete record shape, an `attempt_round` that is not an integer, a truncated write)
-makes that last step refuse over a pause that has already taken. What this layer reports then is the
-action the command itself decided under the production tick lock:
-`dispatcher_pause_ops.PauseCommandCompleted` carries that decision out of the lock with the failure
-of the render, and :meth:`PauseOperationLayer._perform` reports it with the refusal as a warning and
-an unavailable section on the embedded state read.
-
-**The action is never inferred here, and cannot be.** This layer reads no flag of its own, before or
-after a command. A flag read taken outside the lock is not evidence of which command set what it
-holds: with the pipeline already drained, a second `pause_drain` that observes `drain` on both sides
-of its call may have found the mode already held, or may have written its own drain after another
-command's `resume` cleared the flag between those two reads -- the same two observations for two
-different actions (secretary-1577, reproduced on secretary-1576's round 4). So the decision comes
-from where the command was serialised against every other one, and nothing else is consulted.
-`_perform` re-decides nothing and repairs nothing: a failure that is not a completed command travels
-unchanged, and a refusal of the pause's own rules -- `validation`, `pause_conflict` -- never reaches
-that path at all, because those are decisions made before anything is written.
-
-**And a resume says what it put back**, from the lists the stop itself wrote: `relaunched`, `parked`
-and `skipped` as `resume` produced them, with the mode that was lifted. A drain relaunches nothing
-because a drain stopped nothing, and the document says that in words rather than leaving an empty
-list to be read as a failure.
+`action` is the dispatcher's own answer (`paused`, `noop`, `resumed`), never inferred from a flag
+read outside the tick lock. When the command completed but rendering the status afterwards failed
+(`PauseCommandCompleted`), the decision is still reported, with a warning. See docs/PROTOCOLS.md,
+"The pause as protocol operations".
 """
 
 from __future__ import annotations
@@ -79,22 +35,13 @@ from ummanu.webproto.pause_reads import (
     extent,
 )
 
-#: The operations of this module, named so a client can offer them without spelling either twice.
+#: The operation names.
 PAUSE_DRAIN_OPERATION = "pause_drain"
 PAUSE_RESUME_OPERATION = "pause_resume"
 
-#: The error contract of the pause half, in one place, for the four operations of both its modules.
-#:
-#: It is here because a published contract that only a document states goes stale on the next change
-#: -- twice on this card a behaviour change left a public sentence behind. So the codes each
-#: operation can refuse with are a value: `tests/test_web_pause_protocol.py` drives every code listed
-#: here out of the real operation, *and* checks the operations table in `docs/PROTOCOLS.md` against
-#: it, so the prose fails with the code rather than after it.
-#:
-#: What is deliberately not listed: `backend_unavailable` reaching a caller from
-#: :mod:`ummanu.webproto.boundary` for an implementation failure anywhere in this layer. That is
-#: the layer-wide contract every operation of this package carries and not something a pause
-#: operation decides, and listing it per operation would be listing it everywhere.
+#: The codes each pause operation can refuse with; `tests/test_web_pause_protocol.py` drives each
+#: one and checks the operations table in `docs/PROTOCOLS.md` against it. The layer-wide
+#: `backend_unavailable` from :mod:`ummanu.webproto.boundary` is not listed per operation.
 PAUSE_ERRORS: dict[str, tuple[str, ...]] = {
     PAUSE_DRAIN_OPERATION: ("validation", "owner_conflict", "backend_unavailable"),
     PAUSE_RESUME_OPERATION: ("validation", "backend_unavailable"),
@@ -102,21 +49,10 @@ PAUSE_ERRORS: dict[str, tuple[str, ...]] = {
     "pause_scope": ("validation",),
 }
 
-#: How a `DispatcherError` from the pause becomes a code of this layer. Every entry is a mapping and
-#: never a re-decision: what was refused and why is `dispatcher_pause_ops`' answer, and this only
-#: says which of this layer's codes carries it.
-#:
-#: `pause_conflict` is `owner_conflict` for the reason that code exists. The request is well formed
-#: -- a drain, an actor, a reason -- and it is refused on the state of the world: the pipeline is
-#: already paused in the other mode. The same request made after a resume is admitted, exactly as a
-#: comment on a closed sprint is.
-#: `invalid_instance` and `invalid_heads` are `validation` for a compatibility reason, and it is the
-#: one this card had to be told twice: these three commands reached the dispatcher through
-#: `runtime_from_args`, whose refusal of a config that does not validate is a `DispatcherError` with
-#: exit status 2, and an operator or script reading that status must keep reading it now that the
-#: command is a client of this layer. It is also the honest code: the caller named an installation
-#: that is not one, which is a malformed request and not a durable source of this installation
-#: refusing.
+#: How a `DispatcherError` code maps to this layer's codes (a mapping, never a re-decision).
+#: `pause_conflict` is `owner_conflict`: a well-formed request refused on the state of the world.
+#: `invalid_instance`/`invalid_heads` are `validation` so callers keep the exit status 2 that
+#: `runtime_from_args` gave for a config that does not validate.
 _CODES: dict[str, Any] = {
     "validation": ValidationRefused,
     "usage": ValidationRefused,
@@ -127,11 +63,9 @@ _CODES: dict[str, Any] = {
 
 
 class PauseOperationLayer(ProtocolBoundary):
-    """One installation's pause operations, with no knowledge of who is asking.
+    """One installation's pause operations; construction does no I/O.
 
-    Construction does no I/O: the dispatcher runtime the operations act through is built when one is
-    called. `runtime` is the seam a test -- or a caller that already holds one -- supplies its own
-    through; it is not a mode, and the same code path runs against the live installation.
+    `runtime` lets a test or caller supply its own dispatcher runtime; it is not a mode.
     """
 
     def __init__(
@@ -156,17 +90,10 @@ class PauseOperationLayer(ProtocolBoundary):
     # -- operations ---------------------------------------------------------------------------
 
     def pause_drain(self, *, actor: str, reason: str) -> dict[str, Any]:
-        """Put the pipeline into the soft pause, or say that it already was in it.
+        """Put the pipeline into the soft pause, or report that it already was.
 
-        There is no `mode` argument, and that is the contract rather than an omission: this
-        operation can produce a drain and nothing else. The literal is handed to
-        `dispatcher_pause_ops.pause`, which owns every rule about what a pause is -- the tick lock,
-        the same-mode no-op, and the refusal to change mode while paused.
-
-        A drain stops no running head. The card whose worker is writing right now keeps writing;
-        what stops is claiming new cards and dispatching background roles. The document says so on
-        its `modes.drain` object, and the heads that keep running are listed on the state read
-        beside it.
+        No `mode` argument by contract: only a drain. A drain stops no running head; it stops
+        Ready claims and background role dispatch.
         """
         now = self._clock()
         runtime = self._runtime()
@@ -174,17 +101,10 @@ class PauseOperationLayer(ProtocolBoundary):
         return self._document(PAUSE_DRAIN_OPERATION, result, actor=actor, now=now, restored=None)
 
     def pause_resume(self, *, actor: str) -> dict[str, Any]:
-        """Clear the pause, and report what was actually put back.
+        """Clear the pause and report what `resume` put back (`restored`).
 
-        `resume` is the one that owns this: a drain stopped nothing and so puts nothing back, a
-        freeze relaunches the worker and reviewer heads it stopped in their existing workspaces, and
-        a card whose head reported while the pause was on is left to the next tick rather than given
-        a fresh head. What this adds is the reporting: the mode that was lifted and the three lists
-        the resume produced, told apart from the no-op of resuming a pipeline that was not paused.
-
-        A resume whose own answer never arrived (:meth:`_perform`) still reports the pause it lifted,
-        with those lists `null` for a freeze: what it put back was in the answer nobody could read,
-        which is not the empty list's claim that it put nothing back.
+        If the command completed but its answer was lost (:meth:`_perform`), a freeze's lists are
+        `null`, not empty: what was put back is unknown, not nothing.
         """
         now = self._clock()
         runtime = self._runtime()
@@ -198,13 +118,7 @@ class PauseOperationLayer(ProtocolBoundary):
         )
 
     def _runtime(self) -> Any:
-        """The dispatcher runtime these operations act through, built once per call.
-
-        The same one `ummanu dispatcher` builds, through the same factory, so the operation and
-        the CLI cannot act on two different dispatchers. A config this factory refuses is an
-        installation that cannot be paused at all, and it reaches the caller as
-        `backend_unavailable` rather than as the dispatcher's own vocabulary.
-        """
+        """The dispatcher runtime, built per call by the same factory as `ummanu dispatcher`."""
         if self._given_runtime is not None:
             return self._given_runtime
         return self._call(
@@ -220,18 +134,14 @@ class PauseOperationLayer(ProtocolBoundary):
 
     @staticmethod
     def _call(operation: Callable[[], Any]) -> Any:
-        """Run one call into the dispatcher, and translate its vocabulary once.
+        """Run one dispatcher call, mapping `DispatcherError` via :data:`_CODES`.
 
-        `DispatcherError` is mapped by :data:`_CODES` and never re-decided; a `HostError` is the
-        product runtime failing to reach a head, which is `backend_unavailable` here as it is
-        everywhere else in this layer.
+        `HostError` becomes `backend_unavailable`.
         """
         try:
             return operation()
         except PauseCommandCompleted:
-            # Not a failure of the command: the command happened, and this carries what it did. The
-            # caller of `_call` that knows what to do with it is `_perform`; translating it here
-            # would turn a completed pause into `backend_unavailable` again.
+            # A completed command, not a failure: `_perform` reports it.
             raise
         except DispatcherError as exc:
             raise _CODES.get(exc.code, RuntimeUnavailable)(exc.message) from None
@@ -239,34 +149,19 @@ class PauseOperationLayer(ProtocolBoundary):
             raise RuntimeUnavailable(f"the host could not answer this pause command: {exc}") from None
 
     def _perform(self, operation: Callable[[], Any]) -> dict[str, Any]:
-        """One pause command, and its own answer to "what did I do" when the state cannot be read.
+        """Run one pause command; if it completed but the status render failed, report its decision.
 
-        `dispatcher_pause_ops.pause` and `resume` write the flag and *then* render the status
-        through `pause_status`, which converts every dispatcher record. So a production state that
-        no longer converts -- a record shape this release does not store, an `attempt_round` that is
-        not an integer, a file a partial write truncated -- raises after the pause has already
-        taken. That ordering is the dispatcher's and this does not change it; what this changes is
-        what the caller hears, because a completed drain reported as `backend_unavailable` tells an
-        operator the safety control did not take while it silently did, in exactly the situation the
-        command exists for.
-
-        So the dispatcher hands the failure over with the decision it made under the tick lock
-        attached (:class:`~ummanu.dispatch.pause_ops.PauseCommandCompleted`), and this reports
-        that decision. There is nothing to establish here and nothing is read to establish it: the
-        action is `paused`, `noop` or `resumed` as the code that performed it decided, and what a
-        flag holds now is somebody else's command as much as it is this one's.
-
-        Everything else travels unchanged. A `validation` refusal and a `pause_conflict` are made
-        before anything is written and are re-raised as themselves; any other failure is a command
-        that did not complete, and it reaches the caller as the refusal it is.
+        The dispatcher writes the flag, then renders status; a corrupt production record makes the
+        render raise after the pause took. `PauseCommandCompleted` carries the decision made under
+        the tick lock, reported here with a warning; nothing is read to establish it. Any other
+        failure (including `validation` and `pause_conflict`, raised before any write) propagates.
         """
         try:
             return self._call(operation)
         except PauseCommandCompleted as completed:
             return {
                 **completed.decision,
-                # The lists a freeze's resume produced were in the answer that never arrived. Said
-                # as unknown rather than as empty, which would be the claim that it put nothing back.
+                # Lists a freeze's resume produced are unknown, not empty.
                 "reported": False,
                 "warnings": [
                     *completed.warnings,
@@ -288,14 +183,7 @@ class PauseOperationLayer(ProtocolBoundary):
         now: float,
         restored: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """What a pause command answers with: what it did, and the pipeline as the read reads it.
-
-        The pause is not described a second time here. A caller that has just drained and a caller
-        looking an hour later read the same sections, which is why the state read is embedded at
-        all: right after this call it says the flag is down, in which mode, by whom, and which heads
-        are still running -- and the last of those is the one a soft pause must never be read as
-        having stopped.
-        """
+        """The `pause_command` document: what the command did, plus the embedded `pause_state` read."""
         action = str(result.get("action") or "")
         return {
             "schema_version": SCHEMA_VERSION,
@@ -303,14 +191,11 @@ class PauseOperationLayer(ProtocolBoundary):
             "observed_at": sources.isoformat(now),
             "operation": operation,
             "actor": actor,
-            # The three outcomes, told apart. `noop` is a repeat that changed nothing, and it is
-            # deliberately not the same answer as a command that did something; a refusal is
-            # neither, and never reaches here at all.
+            # `noop` (a repeat that changed nothing) is distinct from a change; refusals never get here.
             "action": action,
             "changed": action not in {"noop", ""},
             "restored": restored,
-            # Whatever the pause itself wanted the operator to hear -- an observer head the host
-            # would not stop, a production state it could not read -- carried through unchanged.
+            # Warnings from the pause itself, carried through unchanged.
             "warnings": list(result.get("warnings") or []),
             "extent": extent(),
             "modes": {"drain": DRAIN_CONTRACT, "freeze": FREEZE_CONTRACT},
@@ -328,11 +213,7 @@ class PauseOperationLayer(ProtocolBoundary):
 
 
 def _did(decision: dict[str, Any]) -> str:
-    """What the command did, in the words the operator's warning needs it in.
-
-    Read off the decision the dispatcher made under the lock, and never off a state of the world:
-    this only spells an action that was already established.
-    """
+    """Phrase the decision made under the lock for the operator's warning."""
     action = str(decision.get("action") or "")
     if action == "paused":
         return "the pipeline-wide pause was set"
@@ -345,18 +226,10 @@ def _did(decision: dict[str, Any]) -> str:
 
 
 def _restored(result: dict[str, Any]) -> dict[str, Any]:
-    """What a resume put back, from the lists the resume itself produced.
+    """What a resume put back, copied from `resume`'s own lists with a statement of the case.
 
-    Narration over `resume`'s own answer and no decision of its own: the lists are copied, and the
-    sentence only says which of the three cases they belong to. The drain case is the one worth
-    spelling out -- an empty `relaunched` there is not a resume that failed to bring anything back,
-    it is a drain that never stopped anything.
-
-    And when the resume completed but its own answer never arrived (:meth:`PauseOperationLayer.
-    _perform`), the lists are `null` rather than empty for a freeze: nobody read what it put back,
-    and an empty list there would be the claim that it put nothing back. For a drain and for a
-    pipeline that was not paused they are still `[]`, because what was put back is established by
-    what a drain is and not by a list somebody had to read.
+    When the answer was lost (`reported` false), a freeze's lists are `null` (unknown); for a
+    drain or an unpaused pipeline they stay `[]`, since a drain stops nothing.
     """
     mode = str(result.get("resumed_mode") or "") or None
     unread = not result.get("reported", True) and mode == "freeze"

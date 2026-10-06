@@ -1,72 +1,18 @@
 """What was commanded on this installation, and what became of one request id.
 
-Two reads, and one written contract between them.
+`command_history` pages the committed audit across every entity, newest first (the journal's append
+order reversed, never a sort by `occurred_at`); each row carries `actor`, `action`, `entity` and
+`result`. `command_request` answers `not_found`, `pending` (with the safe continuation), `committed`
+or `unknown` for one request id, from the audit's own lookups, without re-sending anything.
 
-**`command_history`** is the operator's "what happened here lately": a page of the last commands
-*across every entity* -- cards, sprints, products, issues -- each one carrying the four fields a
-history is made of. Who initiated it (`actor`), what the action was (`action`), which entity it was
-aimed at (`entity`), and how it ended (`result`). Until it existed, the only cross-entity answer was
-to open the journal file, and the only protocol answer was
-:meth:`~ummanu.webproto.reads.ReadLayer.task_events`, which is one card's slice and cannot be
-asked about the installation.
+The audit is the card audit via :func:`ummanu.tasks.task_audit_for` (`requests`/`board_events`,
+`docs/BOARD_STORE.md` §7.3); the file journal is never consulted. No second store or index: history
+is `SqlTaskAudit.events_page`, lookups are `committed_event`/`pending_event` (the pair the writers
+use), paging is the frozen-offset cursor of :mod:`ummanu.webproto.cursor`.
 
-**`command_request`** is the answer to "what became of the request id I sent". Before it, a caller
-learned that by *re-sending the operation* and reading the repeat's answer. That is safe -- every
-operation below is idempotent on its request id -- but it is not a read: it is available only to
-whoever still holds the original arguments, and it makes an operator perform a mutation to satisfy
-a question. So this answers the same thing from the audit's own two lookups, and never by doing
-anything: not found, pending with what is already done and how to continue safely, or committed
-with its result and the entity it produced.
-
-**The audit is the card audit.** The two reads go through :func:`ummanu.tasks.task_audit_for`,
-so the canon is `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3). The file journal under
-`<data>/board` is *not* consulted: it holds nothing the PostgreSQL backend wrote, and answering from
-it published an empty history and a `not_found` for records the installation was holding all along.
-
-**Neither opens a second store, index, scheduler or registry of operations.** Everything below is
-already durable and already read by the writers themselves:
-
-* the history is :meth:`ummanu.board.sql_audit.SqlTaskAudit.events`, the released cross-entity traversal,
-  which defaults to every entity and returns committed records in append order;
-* the request lookup is :meth:`ummanu.board.sql_audit.SqlTaskAudit.committed_event` and
-  :meth:`ummanu.board.sql_audit.SqlTaskAudit.pending_event` -- the pair `SprintWriter._write` itself consults
-  to decide that a repeat is a no-op. This read re-decides none of it and calls no writer;
-* the paging is this layer's own frozen-offset cursor (:mod:`ummanu.webproto.cursor`) and its
-  :data:`~ummanu.webproto.journal.DEFAULT_LIMIT` and
-  :data:`~ummanu.webproto.journal.MAX_LIMIT`.
-
-**Newest first means the journal's order reversed, and nothing else.** `occurred_at` is stamped by
-the writer, so two events can share a second and a clock can go backwards; the append order is the
-only order that is a fact. A page is therefore the tail of the traversal, handed back in reverse,
-and the document says which order it is in rather than letting a reader assume a sort by time.
-
-**A position is an ordinal.** This read pages the traversal's own sequence, so its cursor carries
-how many committed records stand before the oldest row of the next page -- the same count
-`task_events` keeps for one card's slice. Both are frozen for the same reason -- nothing before them
-can ever change -- and the two cannot be confused for each other: a history cursor is bound to
-:data:`HISTORY_SCOPE`, the empty reference, and every card cursor is bound to a card.
-
-**What the history is honest about.** An audit nobody could read is an unavailable source and never
-an empty history -- including the case the released traversal answers `[]` for, a journal file that
-is not there at all, which this read refuses rather than publishes. A page that reached the
-beginning of the history is told from one the limit cut short by `has_more`. And an entity kind the
-record does not carry stays `null`: the generic audit records beside the typed ones say which
-reference they are about but not what kind of entity it is, and inventing "card" for them would be
-the fabrication this layer's section seam exists to prevent.
-
-**And `unknown` is a state of its own, in both reads.** A request id the audit could not be read for
-is `unknown`, never `not_found`: "this installation never saw that request" and "nobody could say"
-are opposite answers, and folding them is how a caller is told an operation did not happen when it
-may well have. That is the blank of the section, so it is what a refusal *must* say -- the seam
-raises rather than letting a rule claim otherwise. `unknown` covers the audit as a whole and not one
-lookup of it: a staged record found beside a journal nobody could read still answers `unknown`,
-because a committed record for the same request cannot be ruled out and "pending" would be a claim
-that it was ruled out.
-
-**Neither read performs, retries or repairs anything.** A read that repairs is not a read: nothing
-here calls a writer, stages, commits, discards or reconciles a pending record, and nothing takes the
-audit lock. What a pending request needs is described (:data:`OPERATION_IDENTITY`) and left to the
-caller who owns the operation.
+An unreadable audit is an unavailable source, never an empty history and never `not_found`: it is
+`unknown`. An entity kind the record does not carry stays `null`. Neither read writes, locks, retries
+or repairs. See docs/PROTOCOLS.md, "What has been commanded, and what became of a request".
 """
 
 from __future__ import annotations
@@ -89,27 +35,22 @@ from ummanu.webproto.section import Reading, Section, SectionSet, SourceSet, ren
 
 SCHEMA_VERSION = 1
 
-#: The sources of these documents, in the precedence a refusal is attributed in. The installation
-#: locates the data plane and therefore the journal; the audit is the journal itself.
+#: The sources of these documents, in the precedence a refusal is attributed in.
 SOURCE_INSTALLATION = "installation"
 SOURCE_AUDIT = "audit"
 
-#: What a cross-entity page's cursor is bound to: no entity, because the page is about all of them.
-#:
-#: The cursor codec binds a position to a reference so that a cursor from another card is an error
-#: rather than a plausible-looking wrong answer. That property is what makes this safe: every card
-#: cursor names a card, this one names none, and neither reader will honour the other's.
+#: The reference a history cursor is bound to: none, so card cursors and history cursors are never
+#: interchangeable.
 HISTORY_SCOPE = ""
 
-#: The four states :meth:`CommandReadLayer.command_request` may answer with. `unknown` is one of
-#: them and is never spelled as one of the others.
+#: The four states :meth:`CommandReadLayer.command_request` answers with; `unknown` is never folded
+#: into another.
 STATE_COMMITTED = "committed"
 STATE_PENDING = "pending"
 STATE_NOT_FOUND = "not_found"
 STATE_UNKNOWN = "unknown"
 
-#: What the history covers, stated on the document rather than left to be inferred from its rows.
-#: Read from no source: it is what this read *is*, so it is said even when every source refused.
+#: What the history covers, stated on the document; read from no source.
 HISTORY_EXTENT = {
     "entities": "all",
     "records": "committed",
@@ -124,18 +65,9 @@ HISTORY_EXTENT = {
     ),
 }
 
-#: The one place the operation-identity contract is written down, and the value the prose is held to.
-#:
-#: Which operations take a `request_id`, what repeating one means for each, which take none and why,
-#: and what the part-done failures promise about what is already done. All of it was true before this
-#: card and none of it was in one place, so a caller learned it from five docstrings and a test.
-#:
-#: It is a value rather than prose for the reason `PAUSE_ERRORS` is: a published sentence that only a
-#: document states goes stale on the next change. `tests/test_web_command_protocol.py` derives both
-#: sets from the operation layers' own signatures -- the operations that name a `request_id`
-#: parameter, and the pause operations that do not -- and holds `docs/PROTOCOLS.md` to this table, so
-#: an operation that gains or loses its identity fails here rather than leaving a public promise
-#: behind.
+#: The operation-identity contract: which operations take a `request_id`, what a repeat means, and
+#: what part-done failures promise. `tests/test_web_command_protocol.py` derives both sets from the
+#: operation layers' signatures and holds `docs/PROTOCOLS.md` to this table.
 OPERATION_IDENTITY: dict[str, Any] = {
     "with_request_id": {
         "run_start": {
@@ -230,10 +162,8 @@ OPERATION_IDENTITY: dict[str, Any] = {
     },
 }
 
-#: The codes each read of this module can refuse with, checked against `docs/PROTOCOLS.md` by a test.
-#: `backend_unavailable` reaching a caller from :mod:`ummanu.webproto.boundary` for an
-#: implementation failure is the layer-wide contract of every operation here and is deliberately not
-#: listed per read.
+#: The codes each read can refuse with, checked against `docs/PROTOCOLS.md` by a test. The layer-wide
+#: `backend_unavailable` from :mod:`ummanu.webproto.boundary` is not listed per read.
 COMMAND_ERRORS: dict[str, tuple[str, ...]] = {
     "command_history": ("validation",),
     "command_request": ("validation",),
@@ -252,18 +182,11 @@ def _source(
     now: float,
     evidence: Path | None,
 ) -> Reading:
-    """Read one source's durable document, or say that it could not answer.
+    """Read one source's durable document, or answer with an unavailable `Reading`.
 
-    The whole span of the broad catch, and the span is the contract -- the rule
-    :mod:`ummanu.webproto.pause_reads` states and holds. A source read is the one place whose
-    entire job is to answer "did this source answer", so anything raised while reading and
-    converting that one document becomes an unavailable `Reading`. It enumerates no exception types,
-    because a list is what has to be kept in step: the audit alone can raise `OSError` for a journal
-    it cannot open and `TaskError` for a pending directory in a layout this release will not guess
-    at, and the next durable read added here would be the next hole.
-
-    Everything outside the span -- the sections, the paging, the assembly of a document -- is this
-    layer's own work, and a failure there is a defect that travels as itself.
+    The broad catch is deliberate and this span is its whole extent (the rule of
+    :mod:`ummanu.webproto.pause_reads`): no exception types are enumerated. Failures outside it
+    (sections, paging, document assembly) are defects and propagate.
     """
     try:
         return Reading(key, sources.available(now), produce())
@@ -273,10 +196,8 @@ def _source(
 
 @dataclass(frozen=True, slots=True)
 class _History:
-    """One page of the committed audit, read and converted once for the whole document.
-
-    `total` is how many records are committed; `records` are the ordinals `[end - limit, end)` of
-    the traversal, which is all the page reads (secretary-1658).
+    """One page of the committed audit: `total` committed records, and `records` at ordinals
+    `[end - limit, end)`.
     """
 
     total: int
@@ -285,11 +206,7 @@ class _History:
 
 @dataclass(frozen=True, slots=True)
 class _Lookup:
-    """What the audit's own two lookups say about one request id, read once for the document.
-
-    Both are read inside the source span, so a pending directory this release refuses to guess at is
-    a source that did not answer rather than an exception past the seam -- and never a `not_found`.
-    """
+    """The audit's two lookups for one request id, both read inside the source span."""
 
     request_id: str
     committed: dict[str, Any] | None = None
@@ -299,10 +216,8 @@ class _Lookup:
 def _page(history: _History, cursor: Cursor | None, limit: int) -> dict[str, Any]:
     """The newest `limit` records at or before `cursor`, newest first, and where reading continues.
 
-    The position is an ordinal in the traversal's append-ordered sequence: `offset` is how many
-    committed records stand before the oldest row handed out, so the next page is what is older than
-    this one. It is frozen for the same reason a byte offset is -- the journal only grows, so no
-    record can ever appear before one already counted.
+    `offset` counts committed records before the oldest row handed out; it is frozen because the
+    journal only grows.
     """
     end = history.total if cursor is None else cursor.offset
     if end > history.total:
@@ -314,26 +229,20 @@ def _page(history: _History, cursor: Cursor | None, limit: int) -> dict[str, Any
     return {
         "items": [_row(record) for record in reversed(history.records)],
         "next_cursor": Cursor(ref=HISTORY_SCOPE, offset=start).encode(),
-        # True only when the limit cut the page short, so a page that reached the beginning of the
-        # history is told from one that stopped because it was full.
+        # True only when the limit cut the page short.
         "has_more": start > 0,
     }
 
 
 def _row(record: dict[str, Any]) -> dict[str, Any]:
-    """One committed audit record as a command: initiator, action, target entity, result.
+    """One committed audit record as a command row: initiator, action, target entity, result.
 
-    Deliberately not :func:`ummanu.webproto.journal._item`, and deliberately holding the same
-    rule. That one is a card's own history: it carries a cursor per event, the transition and the
-    related refs, because a client watching one card needs them. This is a line of a command
-    history, which is the four fields and nothing else. What is shared is the rule that matters: a
-    typed protocol event carries the `reason` its writer gave and a released generic audit record
-    carries the `outcome` of its backend effect, and neither is renamed into the other's field.
+    Unlike :func:`ummanu.webproto.journal._item` it carries only these fields, but shares its rule:
+    a typed event's `reason` and a generic record's `outcome` are never renamed into each other.
     """
     actor = record.get("actor")
-    # The journal's own discriminator, and the one `EventJournal` and `BoardEventCanon` read: a
-    # typed protocol event declares its record type, and everything else on this journal is a
-    # released generic audit record.
+    # The journal's discriminator (as in `EventJournal` and `BoardEventCanon`): only typed protocol
+    # events declare this record type.
     typed = record.get("record_type") == Event.RECORD_TYPE
     return {
         "occurred_at": _text(record.get("occurred_at")) or None,
@@ -356,13 +265,7 @@ def _row(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _entity(record: dict[str, Any], typed: bool) -> dict[str, Any]:
-    """The target entity of one record, with the kind left `null` when the record does not say it.
-
-    A typed protocol event writes `subject: {kind, ref}` on purpose, so a reader never has to infer
-    the entity from an event-kind prefix. The released generic records beside it carry the reference
-    only. Answering "card" for those would be a claim nothing on the record supports, so the kind is
-    `null` and the reader can see which rows say it and which do not.
-    """
+    """The target entity of one record; `kind` is `null` unless a typed event's `subject` states it."""
     reference = _text(record.get("ref"))
     subject = record.get("subject") if typed else None
     kind: str | None = None
@@ -382,9 +285,7 @@ class CommandSections(SectionSet):
     def commands(self, read: SourceSet) -> Section:
         """One page of the committed history, newest first.
 
-        `items` is `null` and never `[]` when the audit did not answer: an empty list is the
-        affirmative claim that this installation has commanded nothing, which is the opposite of a
-        journal nobody could read.
+        `items` is `null`, never `[]`, when the audit did not answer.
         """
         return read.decide(
             rule(SOURCE_AUDIT, lambda page: dict(page), needs=(SOURCE_AUDIT,)),
@@ -393,16 +294,11 @@ class CommandSections(SectionSet):
         )
 
     def operation(self, read: SourceSet) -> Section:
-        """What became of one request id, decided from the audit's own two lookups and nothing else.
+        """What became of one request id, from the audit's two lookups.
 
-        Committed wins over staged, exactly as :meth:`ummanu.board.sql_audit.SqlTaskAudit.event` decides it:
-        a committed record is proof the operation finished, whatever else is still on disk. When a
-        stale pending record stands beside it, `staged` says so -- an owed cleanup is a fact about
-        this installation and not a reason to answer differently.
-
-        The blank is `unknown`, so an audit that refused cannot be published as `not_found`. That is
-        held by the seam rather than by a branch here: a rule needing a source that did not answer
-        is not run at all, and the fields of a refusal are checked against this blank.
+        Committed wins over staged (as `SqlTaskAudit.event` decides); a stale staged record beside it
+        is reported as `staged`. The blank is `unknown`, so a refused audit can never read as
+        `not_found`; the seam enforces this.
         """
         return read.decide(
             rule(SOURCE_AUDIT, _outcome, needs=(SOURCE_AUDIT,)),
@@ -423,7 +319,7 @@ class CommandSections(SectionSet):
 
 
 def _outcome(lookup: _Lookup) -> dict[str, Any]:
-    """The three answers a request id can have when the audit answered, and no fourth."""
+    """The three answers when the audit answered: committed, pending or not found."""
     record = lookup.committed
     if record is not None:
         found = _row(record)
@@ -451,9 +347,7 @@ def _outcome(lookup: _Lookup) -> dict[str, Any]:
             "actor": found["actor"],
             "occurred_at": found["occurred_at"],
             "event_id": found["event_id"],
-            # A staged record describes an effect whose backend write may still fail, so its result
-            # is not established. Publishing the staged reason as a result would be reporting an
-            # intention as an outcome.
+            # A staged effect may still fail, so its result is not established.
             "result": None,
             "staged": True,
             "continuation": _continuation(lookup.request_id, found["action"]),
@@ -473,11 +367,10 @@ def _outcome(lookup: _Lookup) -> dict[str, Any]:
 
 
 def _continuation(request_id: str, action: str) -> dict[str, Any]:
-    """How a part-done operation is continued safely: by repeating exactly this request.
+    """How a part-done operation is continued: repeat exactly this request id.
 
-    The same shape `OperationPending` carries on the failure itself
-    (`data.action.repeat_request`), so a caller that already handles one refusal handles this read
-    with no second table. It is a description and never an act: this read repeats nothing.
+    Same shape as `OperationPending`'s `data.action.repeat_request`. Description only; nothing is
+    repeated here.
     """
     return {
         "repeat_request": True,
@@ -492,16 +385,14 @@ def _continuation(request_id: str, action: str) -> dict[str, Any]:
     }
 
 
-#: One instance is enough: no section holds state, and the set exists to be enumerated as much as to
-#: be called.
+#: Stateless; one instance serves every document.
 SECTIONS = CommandSections()
 
 
 class CommandReadLayer(ProtocolBoundary):
     """One installation's committed commands, read with no knowledge of who is asking.
 
-    Construction does no I/O, as every other layer's does not: the installation and the audit are
-    resolved when a read is called. `clock` is the seam a test supplies directly; it is not a mode.
+    Construction does no I/O. `clock` and `board_client` are seams for tests or transports, not modes.
     """
 
     def __init__(
@@ -514,10 +405,7 @@ class CommandReadLayer(ProtocolBoundary):
     ) -> None:
         self.instance = Path(instance)
         self._data_dir = Path(data_dir) if data_dir is not None else None
-        # `board_client` is the seam a test -- or a transport with its own connection policy --
-        # supplies its own board through, exactly as `SprintReadLayer` takes one. It is not a mode:
-        # the same code path runs with the live client, and the audit both reads consult is the one
-        # that client names.
+        # The audit both reads consult is the one this client names.
         self._board_client = board_client
         self._clock = clock
 
@@ -526,12 +414,8 @@ class CommandReadLayer(ProtocolBoundary):
     def command_history(self, cursor: str | None = None, *, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """A page of the last commands across every entity, newest first.
 
-        Each row is the four fields a history is made of: the initiator, the action, the target
-        entity and the result. `next_cursor` continues into older commands and `has_more` says
-        whether the limit cut this page short.
-
-        A read in the full sense of this layer: it opens the committed journal for reading through
-        the traversal that already exists, writes nothing, takes no lock, and starts nothing.
+        `next_cursor` continues into older commands; `has_more` says the limit cut this page short.
+        Writes nothing and takes no lock.
         """
         now = self._clock()
         bounded = max(1, min(int(limit), MAX_LIMIT))
@@ -541,10 +425,8 @@ class CommandReadLayer(ProtocolBoundary):
             self.data_dir(report), end=None if position is None else position.offset, limit=bounded, now=now
         )
         if audit.answered:
-            # Paged outside the source span on purpose: a cursor this reader did not issue is the
-            # caller being refused, not the audit failing to answer, and a defect in the paging is
-            # this layer's own. The span is the read and the conversion of the document, and stops
-            # where the audit has answered.
+            # Paged outside the source span: a foreign cursor is the caller being refused, and a
+            # paging defect is this layer's own, not the audit failing to answer.
             audit = Reading(SOURCE_AUDIT, audit.source, _page(audit.value, position, bounded))
         read = SourceSet([installation, audit])
         return render(
@@ -562,14 +444,8 @@ class CommandReadLayer(ProtocolBoundary):
     def command_request(self, request_id: str) -> dict[str, Any]:
         """What became of one request id: not found, pending, committed -- or unknown.
 
-        The read that replaces re-sending an operation to find out what it did. It consults the two
-        lookups the writer itself consults and re-decides nothing with them; it never performs,
-        retries or repairs the operation, and a pending answer describes the safe continuation
-        rather than taking it.
-
-        The operation-identity contract travels on the document (:data:`OPERATION_IDENTITY`), so a
-        caller holding a pending answer can see what repeating that particular operation means
-        without leaving the answer.
+        Re-decides nothing and never performs, retries or repairs; a pending answer describes the
+        safe continuation. :data:`OPERATION_IDENTITY` travels on the document.
         """
         now = self._clock()
         identifier = str(request_id or "")
@@ -586,8 +462,7 @@ class CommandReadLayer(ProtocolBoundary):
                 "observed_at": sources.isoformat(now),
                 "request_id": identifier,
                 "operation": SECTIONS.operation(read),
-                # Not a section, because it is read from nothing on this installation: it is what a
-                # request id *is* in this product, and it is stated whatever every source did.
+                # Not a section: read from no source, so stated whatever every source did.
                 "identity": _identity(),
                 "sources": self._marks(read),
             }
@@ -611,10 +486,8 @@ class CommandReadLayer(ProtocolBoundary):
     def _installation(self, *, now: float) -> tuple[InstanceReport | None, Reading]:
         """The installation config as a source, and the refusal only it can force.
 
-        The same shape the sprint and pause reads use: with an explicit data directory a config that
-        does not validate takes away only what it owns and the audit is still read; without one
-        there is nothing left to locate the journal with, and the caller named an installation that
-        is not one -- which is `validation`, as it is on every other read of this layer.
+        With an explicit data directory, an invalid config removes only what it owns. Without one,
+        the read is refused as `validation`.
         """
 
         def produce() -> InstanceReport:
@@ -648,19 +521,11 @@ class CommandReadLayer(ProtocolBoundary):
     # -- the source ---------------------------------------------------------------------------
 
     def _history(self, data_dir: Path, *, end: int | None, limit: int, now: float) -> Reading:
-        """One page of the committed audit, read once for the document through the released traversal.
+        """One page of the committed audit via `events_page`, read once for the document.
 
-        Everything the read can raise -- a store that will not answer, a record shape the conversion
-        will not take -- refuses the source through the span rather than through a list of types.
-
-        What is deliberately *not* second-guessed: a record the traversal cannot parse is skipped by
-        the traversal, as it is for every other reader of the audit. This read publishes what the
-        traversal parsed and :data:`HISTORY_EXTENT` says so.
-
-        The audit owner reads the page itself (`events_page`): on PostgreSQL a count and the page
-        from the committed claim-order index, so the cost is the page and the pages above it rather
-        than the history (secretary-1658). A cursor
-        past the end reads no rows and is refused by `_page`, outside the span.
+        Any failure refuses the source. Records the traversal cannot parse are skipped by it, as
+        :data:`HISTORY_EXTENT` states. On PostgreSQL the cost is the page and the pages above it, not
+        the whole history. A cursor past the end reads no rows and is refused by `_page`.
         """
 
         def produce(audit: Any) -> _History:
@@ -670,15 +535,10 @@ class CommandReadLayer(ProtocolBoundary):
         return self._audit(data_dir, produce, now=now)
 
     def _request(self, data_dir: Path, request_id: str, *, now: float) -> Reading:
-        """The audit's own two lookups for one request id, inside one source span.
+        """`committed_event` then `pending_event` for one request id, inside one source span.
 
-        `committed_event` and `pending_event` are the pair `SprintWriter._write` consults to decide
-        that a repeat is a no-op, and they are called here exactly as they are there: committed
-        first, then staged. Nothing is written, cleared, resolved or repaired by either.
-
-        Both are read for every answer rather than the second only when the first is empty, because
-        a stale staged record beside a committed one is a fact this read reports (`staged`) instead
-        of a difference a caller has to go and find.
+        Both are always read, so a stale staged record beside a committed one is reported. Nothing
+        is written or repaired.
         """
 
         def produce(audit: Any) -> _Lookup:
@@ -687,15 +547,10 @@ class CommandReadLayer(ProtocolBoundary):
         return self._audit(data_dir, produce, now=now)
 
     def _audit(self, data_dir: Path, produce: Callable[[Any], Any], *, now: float) -> Reading:
-        """One read of the one durable source of both documents, and the whole of the broad span.
+        """One read of the card audit (`requests`/`board_events`), the sole source of both documents.
 
-        The source is the card audit: `requests`/`board_events` (`docs/BOARD_STORE.md` §7.3). Read
-        off the file journal beside a PostgreSQL client, both lookups answered from a file that
-        backend never writes -- an empty history for an installation that has commanded plenty, and
-        `not_found` for a request id it holds -- which are exactly the two answers this layer may
-        not publish. An empty `requests` table is a read that happened; a store that cannot be
-        reached raises inside the span and refuses the source, as does a client the switch cannot
-        build at all.
+        Never the file journal, which a PostgreSQL backend never writes. An empty `requests` table is
+        a real answer; an unreachable store or an unbuildable client refuses the source.
         """
 
         def read() -> Any:
@@ -719,7 +574,7 @@ class CommandReadLayer(ProtocolBoundary):
 
     @staticmethod
     def _marks(read: SourceSet) -> dict[str, Any]:
-        """The availability of every source, said once for the document and claiming nothing."""
+        """The availability of every source, stated once for the document."""
         return {key: read.mark(key) for key in (SOURCE_AUDIT, SOURCE_INSTALLATION)}
 
     def _instance_file(self) -> Path:
