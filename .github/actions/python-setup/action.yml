@@ -1,0 +1,20 @@
+name: Candidate Python setup
+description: Install the checked-out candidate with the extras required by this job
+inputs:
+  extras:
+    description: Comma-separated editable-install extras
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+        cache-dependency-path: pyproject.toml
+    - shell: bash
+      run: python3 -m pip install --upgrade pip
+    - shell: bash
+      env:
+        CANDIDATE_EXTRAS: ${{ inputs.extras }}
+      run: python3 -m pip install -e ".[${CANDIDATE_EXTRAS}]"

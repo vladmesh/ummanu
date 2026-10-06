@@ -11,14 +11,10 @@ never a signal, never a destructive host call, and no renewal of the outer wait 
 
 from __future__ import annotations
 
-import os
-import tempfile
 import time
 import unittest
 from typing import ClassVar
 from unittest import mock
-
-os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
 from ummanu.dispatch import wait_vitality as wait_vitality_module

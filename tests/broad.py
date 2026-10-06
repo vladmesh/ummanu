@@ -1,34 +1,7 @@
-"""The Ummanu project's local broad suite: the `unit` and `component` CI suites, and nothing else.
+"""Run the manifest's unit and component suites with package-owned hermetic defaults.
 
-`python3 -m tests.broad` is the answer to the question the broad-check contract could not ask before
-issue:8b39e60e4df361c6138e — which suite IS this project's broad suite. Until it existed, the worker
-task packet printed the placeholder ``<this project's broad suite module>`` and every document
-answered it with bare ``python3 -m unittest``: repository-wide discovery, all CI suites in one
-process, 3782 tests and about 402 seconds. That is not a check a worker runs between edits, so in
-practice it was either skipped or paid for once and reused past the point where it meant anything.
-
-The composition here is the owner's decision, measured: `unit` (~58s) plus `component` (~19s), about
-1440 tests in ~77s. The other seven suites — `runtime-component`, `integration-board`, `integration-dispatcher`,
-`integration-heads`, `packaging`, `integration-recovery` and `integration-memory` — stay in dispatcher-owned exact-SHA GitHub CI,
-which remains the complete gate and is not weakened by anything here. A green local broad receipt
-has never been, and still is not, a substitute for it.
-
-The module list is derived from ``tests/ci-shards.txt`` at run time rather than written out here.
-The manifest owns the taxonomy: it is validated before any CI suite starts, and every top-level
-``tests/test_*.py`` must occur in it exactly once. A second hand-maintained list of the same modules
-would drift the first time somebody added a test file, and it would drift silently — a broad suite
-that quietly stopped running a module is worse than one that fails. For the same reason the parsing
-is not copied either: ``scripts/ci_test_shards.py`` already validates and groups the manifest, and
-this module loads that one implementation by path (``scripts/`` is not an importable package) so
-the two can never disagree about what a suite contains. A manifest that is invalid or unreadable
-raises out of `broad_modules` and the run fails loudly; it never falls back to a smaller set.
-
-One property is load-bearing and holds by construction rather than by an assertion here: this file
-lives inside the ``tests`` package, so ``python -m tests.broad`` imports ``tests/__init__.py`` — and
-with it every hermetic default the suite depends on (the throwaway temporary root, the throwaway
-Codex home, the throwaway pipeline state dir) — before this module's body runs, and therefore before any
-``tests.test_*`` module can be imported. That is exactly the invariant secretary-748 was about, and
-``tests/test_health_suite_command.py`` proves it for this entry point.
+The manifest parser is shared with CI; invalid or incomplete membership fails loudly.
+The other seven suites stay in exact-SHA CI. See docs/TESTING.md for the profile contract.
 """
 
 from __future__ import annotations

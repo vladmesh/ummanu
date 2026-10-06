@@ -112,7 +112,8 @@ unit tests/test_health_suite_command.py
 component tests/test_hermetic_codex.py
 unit tests/test_codex_home.py
 unit tests/test_workspace_roots.py
-integration-board tests/test_hermetic_board.py
+unit tests/test_hermetic_board.py
+integration-board tests/test_hermetic_board_integration.py
 component tests/test_hermetic_pipeline_state.py
 unit tests/test_hermetic_source_tree.py
 component tests/test_github_credential.py
@@ -269,3 +270,6 @@ unit tests/test_memory_canon.py
 unit tests/test_live_root_writers.py
 unit tests/test_default_live_root.py
 unit tests/test_owner_decisions.py
+
+unit tests/test_ci_lint.py
+unit tests/test_hermetic_shell.py

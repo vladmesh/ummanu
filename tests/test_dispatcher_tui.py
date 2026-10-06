@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.dispatcher_fixtures import SupervisedBackend
+from tests.fanout_fixtures import accepted_transport_run
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.tui import (
     DELIVERY_RECEIPT_ACCEPTED,
@@ -23,8 +25,6 @@ from ummanu.dispatch.tui import (
     provider_turn_started,
 )
 from ummanu.dispatch.worker_lifecycle import ContinuationProviderCondition
-from tests.dispatcher_fixtures import SupervisedBackend
-from tests.fanout_fixtures import accepted_transport_run
 from ummanu.runtime.codex_preflight import codex_provider_source_descriptor
 from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from ummanu.runtime.tui_delivery import (
@@ -451,51 +451,25 @@ class CodexUserTurnRecordTests(unittest.TestCase):
 
 
 class ClaudeTranscriptPathTests(unittest.TestCase):
-    """Where Claude Code keeps a workspace's transcripts, checked against where it keeps them.
+    """Fixed Claude-style folder names are independent of the implementation under test."""
 
-    Both halves of the 2026-08-11 blind bring-up were the same mistake: a claim about another
-    product's format, asserted only against a mock of itself. `path.replace('/', '-')` had never
-    been true — Claude Code replaces every non-alphanumeric character — and the unit tests could
-    not notice, because they built the fixture directory with the same wrong rule they were
-    testing. So one test here reads the real catalogue, and the hermetic one takes its directory
-    name from production code rather than restating it.
-    """
-
-    def test_the_project_folder_name_matches_the_real_claude_catalogue(self) -> None:
-        """The rule against the directories Claude Code actually wrote on this host.
-
-        Every session log records the `cwd` it was opened in, so each project directory carries the
-        workspace path it was named after and the pair can be checked without guessing. Skipped
-        where there is no catalogue to read — a machine without one cannot answer the question, and
-        a mock of the answer would be the defect this test exists for.
-        """
-        root = Path.home() / ".claude" / "projects"
-        if not root.is_dir():
-            self.skipTest("no ~/.claude/projects on this host")
+    def test_the_project_folder_name_matches_fixed_claude_catalogue_pairs(self) -> None:
         pairs = [
-            (project.name, cwd)
-            for project in sorted(root.iterdir())
-            if project.is_dir()
-            for cwd in [_recorded_cwd(project)]
-            if cwd
+            ("-home-dev-workspaces-codegen-orchestrator", "/home/dev/workspaces/codegen_orchestrator"),
+            ("-srv-Sample-Project", "/srv/Sample_Project"),
+            ("-srv-sample-project", "/srv/sample.project"),
         ]
-        if not pairs:
-            self.skipTest("no Claude session log on this host records its workspace")
-        underscored = [pair for pair in pairs if "_" in pair[1]]
-        if not underscored:
-            self.skipTest("no workspace with an underscore in the catalogue on this host")
-
-        self.assertEqual([(name, cwd) for name, cwd in pairs if claude_project_dir_name(cwd) != name], [])
-        # And the rule that was there before really does miss those workspaces, which is why six
-        # healthy heads were closed on a product whose workspaces carry one.
-        self.assertEqual(
-            [
-                (name, cwd)
-                for name, cwd in underscored
-                if str(Path(cwd).resolve(strict=False)).replace("/", "-") == name
-            ],
-            [],
-        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name, cwd in pairs:
+                folder = root / name
+                folder.mkdir()
+                (folder / "session.jsonl").write_text(
+                    json.dumps({"type": "user", "cwd": cwd}) + "\n", encoding="utf-8",
+                )
+                self.assertEqual(_recorded_cwd(folder), cwd)
+                self.assertEqual(claude_project_dir_name(cwd), name)
+                self.assertNotEqual(str(Path(cwd).resolve()).replace("/", "-"), name)
 
     def test_an_underscore_workspace_is_confirmed_by_its_transcript_alone(self) -> None:
         """The delivery criterion, on the shape of workspace the incident was reported against.
