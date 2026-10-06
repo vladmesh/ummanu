@@ -646,12 +646,11 @@ class StatusCliTests(unittest.TestCase):
                 )
         payload = json.loads(json_output.getvalue())
         self.assertEqual(json_code, 0, payload)
-        self.assertEqual(text_code, 1, text_output.getvalue())
+        self.assertEqual(text_code, 0, text_output.getvalue())
         self.assertNotIn("external_runtime", payload["host"])
         self.assertFalse([row for row in payload["host"]["units"] if row.get("active") != "active"])
-        # examples/instance's fixture host is otherwise incomplete (missing project checkout),
-        # same as test_doctor_json_reports_the_same_missing_host_resource_as_doctor; the unit
-        # section is what this scenario pins: matched, no drift, no runtime findings.
+        # The example project is disabled, so its absent checkout is not a doctor finding.
+        # With all required units present, the complete fixture stays healthy.
         text = text_output.getvalue()
         for foreign in ("orca-server", "xvfb", "Orca runtime"):
             self.assertNotIn(foreign, json_output.getvalue())
