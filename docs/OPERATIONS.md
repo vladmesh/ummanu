@@ -3308,6 +3308,10 @@ project directories, such as the sprint:1475 rename, and before the next tick, w
 `ummanu doctor` reports `automation_busy_without_advance` for the curator when its supervised head has been answered
 `supervised-busy-skip` for longer than `BUSY_WITHOUT_ADVANCE_HOURS` (6 h) with no `advance` or successful
 `memory_write` in `runs.jsonl` and no head started since. The head is stuck: inspect and stop it rather than wait.
+A head that only finished its turn and sat idle (a Codex TUI keeps its composer open after the turn) is
+not this finding any more: the next tick ends it with `stop_if_quiescent` once its supervisor shows no turn
+open, no delivery in flight and no output for `IDLE_HEAD_GRACE_SECONDS` (10 min), logs
+`supervised-idle-stop` with the retired run id, and raises a fresh head in the same tick.
 
 A later intentional baseline is a separate manual operation. It requires one registered canonical project
 or the reserved `review:po` selector,

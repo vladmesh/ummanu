@@ -268,7 +268,6 @@ unit tests/test_upgrade_state_receipts.py
 integration-board tests/test_retired_identity.py
 unit tests/test_resource_probe.py
 unit tests/test_memory_canon.py
-unit tests/test_memory_formats.py
 unit tests/test_live_root_writers.py
 unit tests/test_default_live_root.py
 unit tests/test_owner_decisions.py

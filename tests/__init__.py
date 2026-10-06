@@ -66,6 +66,11 @@ from pathlib import Path
 
 from tests.support.shell import shell_tools
 
+# ONNX Runtime can initialize its telemetry uploader while importing fastembed. Disable it
+# before any test module imports the memory runtime; children inherit the same opt-out.
+# https://github.com/microsoft/onnxruntime/blob/v1.30.0/docs/Privacy.md
+os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+
 # The suite's own temporary directory, and the guard that keeps it from leaking (secretary-1663).
 # Every `tempfile` call in this process and every child that inherits TMPDIR lands under one root
 # the run claims here, before any other default below and before any test module is imported, so
@@ -165,4 +170,6 @@ _SUITE_HOME.mkdir()
 os.environ["HOME"] = str(_SUITE_HOME)
 os.environ.pop("BASH_ENV", None)
 os.environ.pop("ENV", None)
-os.environ["PATH"] = str(shell_tools(_SUITE_TMP / "shell-tools")) + os.pathsep + os.environ.get("PATH", os.defpath)
+os.environ["PATH"] = (
+    str(shell_tools(_SUITE_TMP / "shell-tools")) + os.pathsep + os.environ.get("PATH", os.defpath)
+)

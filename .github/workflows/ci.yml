@@ -11,6 +11,8 @@ on:
 # interpreter/root invariant without falling back to the runner user's nonexistent ~/ummanu.
 env:
   UMMANU_REPO: ${{ github.workspace }}
+  # Suppress ONNX Runtime telemetry before Python imports can initialize its uploader.
+  ORT_DISABLE_TELEMETRY: "1"
 
 # A newer push to a pull request supersedes the run for its previous head. Every other run (a push
 # to main, a manual dispatch) is its own group, so it is never cancelled or held behind another.
