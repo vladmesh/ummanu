@@ -736,7 +736,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def preflight(head, *, role, workspace, task_ref, pid_file, run_id):
             preflighted.append(head)
-            spec = self.catalog.observer_run(head).spec
+            # The run a profile resolves to (`CommandHostRuntime.preflight_codex_run`), here built
+            # straight from the fake registry entry of the head the launch asked for.
+            spec = HeadSpec.from_profile(head, self.catalog.head_profile(head))
             return HeadRun(
                 run_id=run_id, spec=spec, workspace=workspace, task_ref=task_ref, role=role, pid_file=pid_file
             )
@@ -764,7 +766,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         replaced = self.runtime.production_tick()
 
-        self.assertEqual([row["action"] for row in self.actions(replaced)], ["observer-relaunched"])
+        self.assertEqual(
+            [row["action"] for row in self.actions(replaced)], ["observer-relaunched"], self.actions(replaced)
+        )
         record = self.observers()["sprint:1"]
         self.assertEqual((record.head, record.fallback_head), ("codex-observer", "claude-opus"))
         self.assertNotEqual(record.head_run.get("run_id"), first_run)
