@@ -24,6 +24,7 @@ from typing import Any
 
 from ummanu.cli_output import print_json
 from ummanu.config import instance_data_dir
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.secret_store import (
     MATERIALIZE_FILE,
     SecretStoreError,
@@ -76,7 +77,7 @@ def add_web_front_subcommands(subparsers) -> None:
         "set-password",
         help="store the owner's password and its bcrypt hash; a value never travels through argv",
     )
-    password.add_argument("--instance", required=True)
+    add_instance_argument(password)
     password.add_argument("--actor", default=DEFAULT_ACTOR)
     source = password.add_mutually_exclusive_group(required=True)
     source.add_argument("--stdin", action="store_true", help="read the password from standard input")
@@ -91,7 +92,7 @@ def add_web_front_subcommands(subparsers) -> None:
     config = commands.add_parser(
         "render", help="write the front's configuration, taking auth material from the secret store"
     )
-    config.add_argument("--instance", required=True)
+    add_instance_argument(config)
     config.add_argument("--data-dir", default=os.environ.get("UMMANU_DATA_DIR"))
     config.add_argument(
         "--site",
@@ -114,7 +115,7 @@ def add_web_front_subcommands(subparsers) -> None:
     audit = commands.add_parser(
         "check", help="report every published route a rendered configuration answers unguarded"
     )
-    audit.add_argument("--instance", required=True)
+    add_instance_argument(audit)
     audit.add_argument("--data-dir", default=os.environ.get("UMMANU_DATA_DIR"))
     audit.add_argument("--config", help="the file to read; the data directory's own path by default")
     audit.set_defaults(handler=run_check)

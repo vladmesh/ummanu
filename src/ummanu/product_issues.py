@@ -1324,6 +1324,7 @@ class ProductIssueStore:
                         or known.reason != reason
                         or known.data.get("priority") != priority
                         or "append" in known.data
+                        or "edit" in known.data
                     ):
                         raise TaskError("validation", "request id belongs to another operation or payload", 2)
                     try:
@@ -1427,6 +1428,81 @@ class ProductIssueStore:
                         description_append=DescriptionAppend(
                             body_sha256, _digest(current.description), _digest(description)
                         ),
+                    )
+                    self._host_mutation(lambda: host.replace(operation))
+                except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                    raise self._host_error(exc) from None
+                return self.show_issue(reference)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def edit_description(
+        self,
+        *,
+        reference: str,
+        description: str,
+        reason: str,
+        actor: str,
+        request_id: str | None = None,
+        role: str = "po",
+    ) -> dict[str, Any]:
+        """Replace only the description of an open Issue through the native audited mutation."""
+        admit_role(role, actor, {"po"})
+        if not isinstance(description, str) or not isinstance(reason, str) or not reason.strip():
+            raise TaskError("validation", "description edit requires explicit text and a non-empty reason", 2)
+        request_id = request_id or str(uuid.uuid4())
+        description_sha256 = _digest(description)
+        with self.transactions.reference_lock(reference) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                self._reject_other_pending_reference_operation(reference, request_id)
+                self._reject_other_pending_typed_operation(reference, request_id)
+                from ummanu.board import Actor, DescriptionEdit, EntityKind, Issue, Replace
+
+                host = self._host()
+                try:
+                    known = host.canon.event(request_id) if host.canon is not None else None
+                except ValueError as exc:
+                    raise TaskError("validation", str(exc), 2) from None
+                if known is not None:
+                    evidence = known.data.get("edit")
+                    if (
+                        known.kind.value != "entity.updated"
+                        or known.entity_kind is not EntityKind.ISSUE
+                        or known.ref != reference
+                        or known.actor != Actor(role, actor)
+                        or known.reason != reason
+                        or not isinstance(evidence, dict)
+                        or evidence.get("description_sha256") != description_sha256
+                    ):
+                        raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                    try:
+                        self._host_mutation(lambda: host.recover_product_issue(request_id))
+                    except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                        raise self._host_error(exc) from None
+                    return self.show_issue(reference)
+                current = host.read(EntityKind.ISSUE, reference)
+                if not isinstance(current, Issue):
+                    raise TaskError("validation", "reference is not an Issue", 2)
+                if current.state.value == "closed":
+                    raise TaskError("closed", "cannot edit a closed issue", 3)
+                desired = Issue(
+                    current.ref,
+                    current.title,
+                    current.product_ref,
+                    current.state,
+                    current.priority,
+                    current.issue_kind,
+                    description,
+                    current.close_reason,
+                )
+                try:
+                    operation = Replace(
+                        desired,
+                        Actor(role, actor),
+                        reason,
+                        request_id=request_id,
+                        description_edit=DescriptionEdit(_digest(current.description), description_sha256),
                     )
                     self._host_mutation(lambda: host.replace(operation))
                 except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.

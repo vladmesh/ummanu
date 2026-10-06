@@ -91,7 +91,9 @@ def add_product_issue_subcommands(subparsers) -> None:
     listing = issue_sub.add_parser("list")
     _common(listing)
     listing.add_argument("--product")
-    listing.add_argument("--closed", action="store_true")
+    states = listing.add_mutually_exclusive_group()
+    states.add_argument("--closed", action="store_true", help="list only closed issues (default: open only)")
+    states.add_argument("--all", action="store_true", help="list both open and closed issues")
     listing.set_defaults(handler=run_issue_list)
     show = issue_sub.add_parser("show")
     _common(show)
@@ -109,6 +111,14 @@ def add_product_issue_subcommands(subparsers) -> None:
     append.add_argument("--reason", required=True)
     append.add_argument("--body-file", required=True, help="the block to append, read as UTF-8")
     append.set_defaults(handler=run_issue_append)
+    edit = issue_sub.add_parser("edit", help="PO only: replace exactly an open issue's description, with native audit")
+    _common(edit, write=True)
+    edit.add_argument("--ref", required=True)
+    edit.add_argument("--reason", required=True, help="non-empty literal reason")
+    content = edit.add_mutually_exclusive_group(required=True)
+    content.add_argument("--description", help="full replacement description, verbatim")
+    content.add_argument("--body-file", help="full replacement description, read as UTF-8")
+    edit.set_defaults(handler=run_issue_edit)
     close = issue_sub.add_parser("close")
     _common(close, write=True)
     close.add_argument("--ref", required=True)
@@ -197,7 +207,11 @@ def run_issue_create(args):
 
 
 def run_issue_list(args):
-    return _run(args, lambda store: store.list_issues(product=args.product, include_closed=args.closed))
+    def listing(store):
+        issues = store.list_issues(product=args.product, include_closed=args.closed or args.all)
+        return [issue for issue in issues if issue["closed"]] if args.closed else issues
+
+    return _run(args, listing)
 
 
 def run_issue_show(args):
@@ -239,6 +253,22 @@ def run_issue_close(args):
             reference=args.ref, reason=args.reason, actor=actor, request_id=args.request_id, role=args.role
         ),
     )
+
+
+def run_issue_edit(args):
+    def command():
+        actor = _actor(args)
+        description = _read_body(args.body_file) if args.body_file is not None else args.description
+        return _store(args).edit_description(
+            reference=args.ref,
+            description=description,
+            reason=args.reason,
+            actor=actor,
+            request_id=args.request_id,
+            role=args.role,
+        )
+
+    return run_task_command(command)
 
 
 def run_transaction_list(args):

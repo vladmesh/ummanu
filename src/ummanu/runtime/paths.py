@@ -72,7 +72,7 @@ def resolve_instance_path(
 INSTANCE_FALLBACK_FLAG = "instance_fallback"
 
 
-def add_instance_argument(parser: Any, *, help: str | None = None) -> None:
+def add_instance_argument(parser: Any, *, help: str | None = None, type: Any = str) -> None:
     """``--instance`` for a command that may fall back: resolved by :func:`resolve_instance_argument`.
 
     The default is left ``None`` rather than read from the environment while the parser is built, so
@@ -81,16 +81,19 @@ def add_instance_argument(parser: Any, *, help: str | None = None) -> None:
     parser.add_argument(
         "--instance",
         default=None,
-        help=help
-        or f"live root: an instance dir or instance.yaml (default: {INSTANCE_ENV}, else {default_instance_path()})",
+        type=type,
+        help=(help or "live root: an instance dir or instance.yaml")
+        + f" (default: {INSTANCE_ENV}, else {default_instance_path()})",
     )
-    parser.set_defaults(**{INSTANCE_FALLBACK_FLAG: True})
+    parser.set_defaults(**{INSTANCE_FALLBACK_FLAG: True, "instance_value_type": type})
 
 
 def resolve_instance_argument(args: Any, environ: Mapping[str, str] | None = None) -> None:
     """Fill a parsed ``--instance`` that fell back; raises :class:`MissingDefaultInstance`."""
+    if getattr(args, "command", None) == "bootstrap" and not getattr(args, "empty", False):
+        return
     if getattr(args, INSTANCE_FALLBACK_FLAG, False) and not getattr(args, "instance", None):
-        args.instance = str(resolve_instance_path(None, environ))
+        args.instance = getattr(args, "instance_value_type", str)(resolve_instance_path(None, environ))
 
 
 def default_product_root() -> Path:

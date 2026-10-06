@@ -15,6 +15,7 @@ import os
 import sys
 
 from ummanu.po import PO_SESSION_ENV
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND, EXIT_VALIDATION
 from ummanu.webproto.errors import ReadError
 
@@ -25,7 +26,7 @@ def add_po_subcommands(subparsers) -> None:
     rename = verbs.add_parser(
         "rename", help="set a PO session's title; an empty title clears it, a repeat changes nothing"
     )
-    rename.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(rename, help="path to an instance dir or instance.yaml")
     rename.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from ummanu.board.owner_events import OwnerEventError, OwnerEventStore
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.runtime.paths import instance_dir as normalize_instance_dir
 
 EXIT_UNAVAILABLE = 1
@@ -21,7 +22,7 @@ def add_owner_event_subcommands(subparsers) -> None:
     command = subparsers.add_parser("owner-events", help="read the owner events behind the web's bell")
     verbs = command.add_subparsers(dest="owner_events_command", required=True)
     listing = verbs.add_parser("list", help="list owner events: what needs the owner first, then newest first")
-    listing.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(listing, help="path to an instance dir or instance.yaml")
     listing.add_argument("--unread", action="store_true", help="only the events nobody has read")
     listing.add_argument("--limit", type=int, default=100, help="the most events to print (default 100)")
     listing.add_argument("--json", action="store_true", help="one JSON document instead of lines")

@@ -11,6 +11,7 @@ import json
 import sys
 from pathlib import Path
 
+from ..runtime import paths
 from .names import OLD
 
 
@@ -23,7 +24,7 @@ def add_transition_subcommands(subparsers: argparse._SubParsersAction) -> None: 
         f"from-{OLD.package}",
         help=f"move this installation from {OLD.package} to its new name; --plan first",
     )
-    command.add_argument("--instance", required=True, help="the instance repository (it keeps its name)")
+    paths.add_instance_argument(command, help="the instance repository (it keeps its name)")
     mode = command.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true", help="print every step and precondition; write nothing")
     mode.add_argument("--apply", action="store_true", help="run, resuming at the first unfinished step")

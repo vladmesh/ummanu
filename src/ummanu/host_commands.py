@@ -27,6 +27,7 @@ from ummanu.host import (
     strict_manifest as _strict_manifest,
 )
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
+from ummanu.runtime.paths import add_instance_argument
 
 
 def run_reconcile_plan(args) -> int:
@@ -264,7 +265,7 @@ def run_reconcile_apply(args) -> int:
 def add_reconcile_subcommands(subcommands) -> None:
     """Register the Phase 7 host commands outside the already busy CLI module."""
     plan = subcommands.add_parser("plan", help="show the read-only desired host plan")
-    plan.add_argument("--instance", required=True)
+    add_instance_argument(plan)
     plan.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     source = plan.add_mutually_exclusive_group()
     source.add_argument(
@@ -283,7 +284,7 @@ def add_reconcile_subcommands(subcommands) -> None:
     apply_command = subcommands.add_parser(
         "apply", help="bring the host to the instance config (the write half of plan)"
     )
-    apply_command.add_argument("--instance", required=True)
+    add_instance_argument(apply_command)
     apply_command.add_argument(
         "--dry-run", action="store_true", help="show the changes without touching the host"
     )
@@ -296,7 +297,7 @@ def add_reconcile_subcommands(subcommands) -> None:
     apply_command.set_defaults(handler=run_reconcile_apply)
 
     adopt = subcommands.add_parser("adopt", help="record one verified existing desired resource as managed")
-    adopt.add_argument("--instance", required=True)
+    add_instance_argument(adopt)
     adopt.add_argument("--logical-id", required=True)
     adopt.add_argument("--managed-manifest", metavar="FILE")
     adopt.add_argument("--unit-dir", default="/etc/systemd/system", metavar="DIR")

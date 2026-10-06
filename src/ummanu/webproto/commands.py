@@ -29,6 +29,7 @@ import os
 import sys
 from typing import Any
 
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.command_reads import CommandReadLayer
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.journal import DEFAULT_LIMIT
@@ -115,7 +116,7 @@ def _installation(parser: argparse.ArgumentParser) -> None:
     installation health collector, and the two command-history reads consult no host: offering it
     there would offer a mode that changes nothing.
     """
-    parser.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(parser, help="path to an instance dir or instance.yaml")
     parser.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),
@@ -310,7 +311,7 @@ def add_web_run_subcommands(subparsers) -> None:
 
 
 def _run_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(parser, help="path to an instance dir or instance.yaml")
     parser.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),

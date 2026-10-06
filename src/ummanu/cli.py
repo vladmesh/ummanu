@@ -146,6 +146,10 @@ class DoctorInspection:
 class StructuredArgumentParser(argparse.ArgumentParser):
     """Keep public command validation in the same JSON envelope as handlers."""
 
+    def __init__(self, *args, **kwargs):
+        kwargs["allow_abbrev"] = False
+        super().__init__(*args, **kwargs)
+
     def error(self, message: str) -> None:
         self.exit(2, json.dumps({"error": {"code": "usage", "message": message}}) + "\n")
 
@@ -549,7 +553,7 @@ def _add_instance(
     help: str | None = None,
     data_dir_help: str | None = None,
 ) -> None:
-    parser.add_argument("--instance", required=True, help=help)
+    add_instance_argument(parser, help=help)
     if data_dir:
         parser.add_argument("--data-dir", help=data_dir_help)
 

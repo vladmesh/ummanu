@@ -76,6 +76,12 @@ from ummanu.po.client import (
     service_dir,
     socket_path,
 )
+from ummanu.po.context_budget import (
+    CONTEXT_METRIC,
+    context_budget_bytes,
+    conversation_bytes,
+    rollover_request_id,
+)
 from ummanu.po.models import (
     EffortRefused,
     efforts_from_instance,
@@ -92,9 +98,6 @@ from ummanu.po.queue import (
     QueueError,
 )
 from ummanu.po.runner import PoRunner, RunnerError
-from ummanu.po.context_budget import (
-    CONTEXT_METRIC, context_budget_bytes, conversation_bytes, rollover_request_id,
-)
 from ummanu.po.sprints import (
     BoardSprintSessions,
     SprintRecord,
@@ -121,6 +124,7 @@ from ummanu.po.store import (
     session_fingerprint,
     sprint_session_fingerprint,
 )
+from ummanu.runtime.paths import add_instance_argument
 
 # How often the service looks at its queue, its restart marker and a recovery that did not run yet,
 # besides being woken by a submit or a settled turn.
@@ -1155,7 +1159,7 @@ def add_po_serve_subcommands(subparsers) -> None:
         "po-serve",
         help="run the PO head service: the one owner of PO turns, fed by a durable queue over a local socket",
     )
-    command.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(command, help="path to an instance dir or instance.yaml")
     command.add_argument(
         "--data-dir",
         default=os.environ.get("UMMANU_DATA_DIR"),

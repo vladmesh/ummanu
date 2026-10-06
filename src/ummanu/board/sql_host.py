@@ -20,6 +20,7 @@ from ummanu.board.events import (
 from ummanu.board.host import (
     Create,
     DescriptionAppend,
+    DescriptionEdit,
     MarkerComment,
     MutationResult,
     Replace,
@@ -197,16 +198,23 @@ class SqlBoardHost:
         self._require_product_issue_configuration()
         entity = operation.entity
         append = operation.description_append
+        edit = operation.description_edit
+        if append is not None and edit is not None:
+            raise BoardProtocolError("Issue replace requires one description operation")
+        if edit is not None and (operation.actor.role != "po" or not operation.reason.strip()):
+            raise BoardProtocolError("Issue description edit requires the PO and a non-empty reason")
         request_id = self._request_id(operation.request_id, "issue-replace")
         related = self._related(entity, operation.related_refs)
-        existing = self._existing(request_id, entity, operation.actor, operation.reason, append=append)
+        existing = self._existing(request_id, entity, operation.actor, operation.reason, append=append, edit=edit)
         if existing is not None and self.canon.committed(request_id) is not None:
             return MutationResult(self.read(EntityKind.ISSUE, entity.ref), existing)
         if existing is None:
             current = self.read(EntityKind.ISSUE, entity.ref)
             if not isinstance(current, Issue) or current.state is not IssueState.OPEN:
                 raise BoardProtocolError("cannot replace a closed Issue")
-            if append is not None:
+            if edit is not None:
+                _require_description_edit(current, entity, edit)
+            elif append is not None:
                 _require_description_append(current, entity, append)
             elif (entity.title, entity.product_ref, entity.state, entity.issue_kind, entity.description) != (
                 current.title,
@@ -224,7 +232,10 @@ class SqlBoardHost:
             related,
             request_id,
             append=append,
+            edit=edit,
         )
+        if edit is not None:
+            return self._edit_description(entity, edit, event, request_id)
         if append is not None:
             return self._append_description(entity, append, event, request_id)
         content = f"[issue:priority]\n{operation.reason}\n[request-id:{request_id}]"
@@ -293,6 +304,33 @@ class SqlBoardHost:
             row = self._raw_by_ref(entity.ref)
             if row is None or str(row.get("description") or "") != entity.description:
                 raise BoardProtocolError("Issue description append is not proven")
+            return self._normalized_row(row)
+
+        MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
+            effect, confirm=confirm
+        )
+        return MutationResult(self.read(EntityKind.ISSUE, entity.ref), event)
+
+    def _edit_description(
+        self, entity: Issue, edit: DescriptionEdit, event: Event, request_id: str
+    ) -> MutationResult:
+        """Replace the description over exactly the text named in the edit evidence."""
+
+        def effect() -> None:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("Issue was not found")
+            if _digest(str(row.get("description") or "")) != edit.description_sha256_was:
+                # Refuse to overwrite a description that changed since this edit was prepared.
+                raise BoardProtocolError("Issue description changed before the edit")
+            saved = self.client.call("updateTask", id=self._row_id(row), description=entity.description)
+            if not saved:
+                raise BoardProtocolError("board store rejected the issue description")
+
+        def confirm() -> BoardEntity:
+            row = self._raw_by_ref(entity.ref)
+            if row is None or str(row.get("description") or "") != entity.description:
+                raise BoardProtocolError("Issue description edit is not proven")
             return self._normalized_row(row)
 
         MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
@@ -638,12 +676,13 @@ class SqlBoardHost:
                     if "append" in event.data
                     else None
                 )
+                edit = DescriptionEdit.from_event_data(event.data["edit"]) if "edit" in event.data else None
             except ValueError as exc:
                 raise BoardProtocolError(
-                    "pending Issue event has invalid description append evidence"
+                    "pending Issue event has invalid description evidence"
                 ) from exc
             return self.replace(
-                Replace(entity, event.actor, event.reason, event.related_refs, request_id, append)
+                Replace(entity, event.actor, event.reason, event.related_refs, request_id, append, edit)
             )
         if event.kind is EventKind.ISSUE_CLOSED and isinstance(entity, Issue):
             return self.transition(
@@ -891,6 +930,7 @@ class SqlBoardHost:
         *,
         target: str | None = None,
         append: DescriptionAppend | None = None,
+        edit: DescriptionEdit | None = None,
     ) -> Event | None:
         assert self.canon is not None
         event = self.canon.event(request_id)
@@ -902,7 +942,7 @@ class SqlBoardHost:
             or event.actor != actor
             or event.reason != reason
             or event.target_state != target
-            or event.data != _event_data(entity, append)
+            or event.data != _event_data(entity, append, edit)
         ):
             raise ValueError("request id belongs to another operation or payload")
         return event
@@ -951,6 +991,7 @@ class SqlBoardHost:
         source: str | None = None,
         target: str | None = None,
         append: DescriptionAppend | None = None,
+        edit: DescriptionEdit | None = None,
     ) -> Event:
         identity: dict[str, Any] = {
             "request_id": request_id,
@@ -964,6 +1005,8 @@ class SqlBoardHost:
         }
         if append is not None:
             identity["append"] = append.event_data()
+        if edit is not None:
+            identity["edit"] = edit.event_data()
         payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         return Event(
             "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32],
@@ -976,7 +1019,7 @@ class SqlBoardHost:
             related,
             source,
             target,
-            _event_data(entity, append),
+            _event_data(entity, append, edit),
         )
 
     def _issues_board(self) -> tuple[int, int]:
@@ -1384,11 +1427,13 @@ def _entity_payload(entity: Product | Issue) -> dict[str, Any]:
     }
 
 
-def _event_data(entity: Product | Issue, append: DescriptionAppend | None) -> dict[str, Any]:
-    """The normalized entity every Product/Issue event carries, plus an append's digests."""
+def _event_data(entity: Product | Issue, append: DescriptionAppend | None, edit: DescriptionEdit | None = None) -> dict[str, Any]:
+    """The normalized entity plus explicit description-operation evidence, when present."""
     data = _entity_payload(entity)
     if append is not None:
         data["append"] = append.event_data()
+    if edit is not None:
+        data["edit"] = edit.event_data()
     return data
 
 
@@ -1417,6 +1462,15 @@ def _require_description_append(current: Issue, successor: Issue, append: Descri
         or _digest(successor.description) != append.description_sha256
     ):
         raise BoardProtocolError("Issue replace appends only a non-empty block after the current description")
+
+
+def _require_description_edit(current: Issue, successor: Issue, edit: DescriptionEdit) -> None:
+    from dataclasses import replace
+
+    if (replace(successor, description=current.description) != current
+            or _digest(current.description) != edit.description_sha256_was
+            or _digest(successor.description) != edit.description_sha256):
+        raise BoardProtocolError("Issue description edit changes only the exact current description")
 
 
 def _issue_from_payload(data: dict[str, Any]) -> Issue:
