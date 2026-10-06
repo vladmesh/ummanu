@@ -63,6 +63,20 @@ class CanonicalRegistryTests(unittest.TestCase):
     def test_the_observer_role_owns_its_own_skill(self) -> None:
         self.assertEqual(self.manifest["roles"]["observer"]["skills"], [OBSERVER_SKILL])
 
+    def test_a_codex_standing_head_finds_its_skill_in_its_own_workspace(self) -> None:
+        # A Codex head runs on CODEX_HOME=<data_dir>/codex-home and reads project skills from
+        # `.agents/skills` in its cwd, `~/orca/workspaces/ummanu/<role>` for a standing role. A copy
+        # only in the legacy Orca home left a Codex curator with "no skill `curate`".
+        home = Path("/fixture-home")
+        expected = iter_expected(self.registry, home)
+        for role in ("curator", "retro", "steward"):
+            workspace_root = home / "orca" / "workspaces" / "ummanu" / role / ".agents" / "skills"
+            delivered = {
+                item.skill for item in expected
+                if item.shell == "codex" and item.role == role and item.dest.parent == workspace_root
+            }
+            self.assertEqual(delivered, set(self.manifest["roles"][role]["skills"]), role)
+
     def test_the_canonical_observer_skill_is_in_this_repository(self) -> None:
         source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
 
