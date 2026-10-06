@@ -3515,8 +3515,13 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertEqual(result["disposed_tasks"], sorted([landed, dropped]))
         self.assertEqual({item["ref"] for item in result["cleanup"]}, {landed, dropped})
         self.assertTrue(all(item["status"] == "pending" for item in result["cleanup"]))
-        # No card of the sprint is left in a working state on the closed contract.
-        self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
+        # Scoped history retains the recorded dispositions; active work retains neither card.
+        reader = TaskReader(self.client)  # type: ignore[arg-type]
+        self.assertEqual(
+            {card["ref"]: (card["state"], card["closed"]) for card in reader.list(sprint=ref)},
+            {landed: ("done", True), dropped: ("ready", True)},
+        )
+        self.assertEqual([card for card in reader.list() if card["sprint"] == ref], [])
         for reference in (landed, dropped):
             self.assertFalse(self.record_is_active(reference))
         self.assertIn(

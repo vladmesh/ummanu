@@ -14,13 +14,13 @@ import sys
 import time
 from collections.abc import Callable
 
-from ummanu.runtime.paths import add_instance_argument
 from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 from ummanu.web.provider_usage import ProviderUsageLayer
 from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from ummanu.webproto.card_ops import CardOperationLayer
 from ummanu.webproto.command_reads import CommandReadLayer
+from ummanu.webproto.commands import add_instance_argument
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
