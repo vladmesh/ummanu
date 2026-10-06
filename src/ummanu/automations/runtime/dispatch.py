@@ -88,7 +88,6 @@ from ummanu.runtime.head import (
     with_pid_heartbeat,
 )
 from ummanu.runtime.head.identity import head_process_status
-from ummanu.runtime.head.local_pty.protocol import PID_FILE_NAME as HEAD_PID_FILE_NAME
 from ummanu.runtime.head_runtime_backends import build_head_runtime
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.state import AgentState
@@ -767,6 +766,9 @@ SUPERVISED_IDLE_STOP = "supervised-idle-stop"
 IDLE_HEAD_GRACE_SECONDS = 600.0
 #: How long the tick waits for a retired head's supervisor to release its socket.
 IDLE_STOP_SUPERVISOR_EXIT_SECONDS = 10.0
+#: The launch identity a supervised head writes beside its socket in its run directory (the
+#: substrate's `PID_FILE_NAME`, which this driver may not import).
+HEAD_PID_FILE_NAME = "head.pid"
 
 
 @dataclass(frozen=True)
