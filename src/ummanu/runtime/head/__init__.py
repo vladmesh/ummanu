@@ -1,29 +1,12 @@
-"""The head: the thing a pipeline run is actually carried out by, as a type rather than a dict.
+"""Head types: one agent session (Codex TUI, Claude terminal) the product brings up and stops.
 
-A head is one agent session — a Codex TUI, a Claude terminal — that the product brings up, points
-at a task document, and eventually stops. Three operations describe its whole life — spawn, nudge
-and stop — and the types they all take live here. `HeadSpec` is the head they act on, `HeadRun` is
-the one that is running, and `TaskRef` is what it was pointed at — a card, a sprint entity or a
-role's standing instruction, because not every head serves a Pipeline card.
-
-`command` is the fourth thing they all need and the one that used to live everywhere else: the
-shell command a head runs, rendered once here from a registry profile the caller hands over
-as data.
-
-`runtime` is where those three operations became a boundary rather than a namespace: `HeadRuntime`
-is one head backend as everything above it may see one -- six verbs (`start`, `deliver`, `observe`,
-`request_drain`, `stop`, `attach`), each answering with a typed receipt. The one backend is
-`runtime.local_pty_head`, over the process supervisor in `local_pty`.
-`runtime` also owns the values that used to be squeezed into a lifecycle state, all of them per
-head: the `TurnLease` a head runs one turn under, the activity epoch that moves when the backend
-sees *that* head do something, and whether the head still admits work at all. A backend serialises
-its own verbs around them, so nothing above the boundary has to hold a lock to get one head's
-delivery, drain and stop in order.
-
-`operations` keeps what the verbs share: their typed refusals, `NudgePointer` and
-`post_delivery_run`. The neighbour is `prompt_document`, which owns what a head is given. This
-package owns which head that is, what it runs, and what happens to it. The Orca backend and its
-pane host were removed in secretary-1725.
+`HeadSpec` is the head, `HeadRun` the running instance, `TaskRef` what it was pointed at (card,
+sprint or standing instruction). `command` renders a head's shell command from a registry profile.
+`runtime` defines the backend boundary `HeadRuntime` with six verbs (`start`, `deliver`, `observe`,
+`request_drain`, `stop`, `attach`) returning typed receipts, plus the per-head `TurnLease`,
+activity epoch and admission state; a backend serialises its own verbs, so callers need no lock.
+The one backend is `runtime.local_pty_head`. `operations` holds shared refusals, `NudgePointer` and
+`post_delivery_run`. What a head is told belongs to `prompt_document`.
 """
 
 from __future__ import annotations
