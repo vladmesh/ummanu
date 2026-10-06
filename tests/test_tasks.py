@@ -468,7 +468,19 @@ class TaskReaderTests(BoardFixture, CardStoreCase):
         self.assertEqual(len(self.rpc_batches), 1)
         self.assertFalse(self.board_calls("getAllComments"))
         self.assertFalse(self.board_writes())
-        self.assertEqual([c["ref"] for c in self.reader.list(sprint="sprint:closed-list", states={"done"}, project="ummanu")], ["ummanu-9901"])
+        for flags, expected in (
+            (["--state", "done", "--project", "ummanu"], {"ummanu-9901"}),
+            (["--project", "other"], set()),
+        ):
+            output = io.StringIO()
+            with (mock.patch("ummanu.task_commands.card_client", return_value=self.client),
+                  contextlib.redirect_stdout(output)):
+                code = main(["task", "list", "--instance", "/fixture",
+                             "--sprint", "sprint:closed-list", *flags])
+            self.assertEqual(code, 0)
+            self.assertEqual({c["ref"] for c in json.loads(output.getvalue())}, expected)
+        self.assertEqual([c["ref"] for c in self.reader.list(sprint="sprint:closed-list")], ["ummanu-9902"])
+        self.assertEqual(self.reader.list(sprint="sprint:closed-list", states={"done"}), [])
         self.assertEqual(self.reader.list(sprint="sprint:closed-list", project="other"), [])
         self.assertEqual([c["ref"] for c in self.reader.list(sprint="sprint:open-list")], ["ummanu-9903"])
         self.assertNotIn("ummanu-9901", [c["ref"] for c in self.reader.list()])

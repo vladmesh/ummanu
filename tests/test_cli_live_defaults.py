@@ -330,8 +330,18 @@ class SprintListUnitTests(unittest.TestCase):
         self.assertEqual([p["status_id"] for m, p in calls if m == "getAllTasks"], [1, 0])
         reader = TaskReader(client)
         self.assertEqual([c["ref"] for c in reader.list()], ["ummanu-1"])
+        self.assertEqual([c["ref"] for c in reader.list(sprint="sprint:closed")], ["ummanu-1"])
+        self.assertEqual(reader.list(sprint="sprint:closed", states={"done"}), [])
         self.assertEqual(
-            [c["ref"] for c in reader.list(sprint="sprint:closed", states={"done"}, project="ummanu")],
+            [
+                c["ref"]
+                for c in reader.list(
+                    sprint="sprint:closed",
+                    states={"done"},
+                    project="ummanu",
+                    include_archived=True,
+                )
+            ],
             ["ummanu-2"],
         )
-        self.assertEqual(reader.list(sprint="sprint:closed", project="another"), [])
+        self.assertEqual(reader.list(sprint="sprint:closed", project="another", include_archived=True), [])

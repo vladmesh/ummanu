@@ -16,7 +16,9 @@ Ordinary body-file commands and `--sprint-override-reason-file` retain their sep
 
 `task list --sprint sprint:ID` includes archived cards of that sprint, even after it closes, with normal
 normalized fields and optional state/project filters. It reads all rows and batched metadata without
-reopening the sprint. An unscoped task/dispatcher/steward listing remains active-only.
+reopening the sprint. The CLI opts into `TaskReader.list(include_archived=True)` for `--sprint`.
+Ordinary reader calls, including internal sprint-scoped reads, sprint event links and close targets,
+remain active-only; closure and recovery keep their existing frozen target set.
 
 ## Checks and host ownership
 
@@ -2148,11 +2150,14 @@ cards:
 ```
 
 Both sections are optional in the file; neither is optional in the close. Every declared issue needs a
-verdict and every card not in Done needs a disposition; a close short of one is refused with
+verdict and every active card not in Done needs a disposition; a close short of one is refused with
 `validation` before the transaction opens, naming the undecided issues and the cards with their states,
 and writes nothing. Also refused that way: an unknown ref, a ref decided twice, an unknown verdict, an
 empty reason, an unknown field or section, a non-string key (`1: x`), an unparsable file. `actual` is
 required by the two confirmations and refused on every other decision.
+
+Already archived cards are outside the close's frozen active target set. They remain visible through
+`task list --sprint`, while close and its retries preserve their rows, audit and cleanup obligations.
 
 A closing verdict closes the issue through the `issue close` lifecycle with that reason. `open` writes
 nothing to the issue; the close event carries the basis.

@@ -424,7 +424,12 @@ def not_implemented_task(args: argparse.Namespace) -> int:
 def run_task_list(args: argparse.Namespace) -> int:
     return _run_task_read(
         args,
-        lambda reader: reader.list(states=set(args.state or ()), project=args.project, sprint=args.sprint),
+        lambda reader: reader.list(
+            states=set(args.state or ()),
+            project=args.project,
+            sprint=args.sprint,
+            include_archived=args.sprint is not None,
+        ),
     )
 
 

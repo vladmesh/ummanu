@@ -4770,16 +4770,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.observers(), {})
         self.assertEqual(self.runtime.sprints.show(self.SECOND)["status"], "open")
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
-        # The close archived its cards out of active dispatch, while scoped history keeps them.
+        # Nothing is skipped for the closed sprint any more: its cards left the board with it,
+        # taken off the contract by the dispositions the close carried.
         self.assertEqual(self.skipped(result), [])
-        self.assertEqual(
-            {
-                card["ref"]: (card["state"], card["closed"])
-                for card in self.runtime.sprints.show(self.FIRST)["cards"]
-            },
-            {"ummanu-510": ("ready", True), "fourth-1": ("ready", True)},
-        )
-        self.assertEqual([card for card in self.reader.list() if card["sprint"] == self.FIRST], [])
+        self.assertEqual([card["ref"] for card in self.runtime.sprints.show(self.FIRST)["cards"]], [])
         # The open sprint's card in flight keeps riding its cycle.
         self.assertIn("ummanu-511", self.advanced(result))
 
@@ -4853,16 +4847,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "open")
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "fourth-1")
         self.assertIn("ummanu-510", self.advanced(result))
-        # Archived dispositions remain readable without reaching another active dispatch pass.
+        # The closed sprint's own Ready card is not left alone on the board any more: its
+        # disposition archived it with the close, so no later pass reaches it at all.
         self.assertEqual(self.skipped(self.runtime.production_tick()), [])
-        self.assertEqual(
-            {
-                card["ref"]: (card["state"], card["closed"])
-                for card in self.runtime.sprints.show(self.SECOND)["cards"]
-            },
-            {"ummanu-511": ("ready", True), "third-1": ("ready", True)},
-        )
-        self.assertEqual([card for card in self.reader.list() if card["sprint"] == self.SECOND], [])
+        self.assertEqual([card["ref"] for card in self.runtime.sprints.show(self.SECOND)["cards"]], [])
 
     # two open sprints, one head each ----------------------------------------
 
