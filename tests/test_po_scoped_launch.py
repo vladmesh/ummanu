@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-import tempfile
+import functools
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from ummanu.po.runner import PoRunner
+from ummanu.runtime.head.local_pty import client as client_module
 from ummanu.runtime.head.local_pty.client import HeadHandle, LocalPtySpawnError
 from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
@@ -131,13 +133,17 @@ class PoScopedLaunchTests(unittest.TestCase):
             with (
                 mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", side_effect=start),
                 mock.patch("ummanu.runtime.head.local_pty.client._identity_written", return_value=False),
-                mock.patch("ummanu.runtime.head.local_pty.client.SPAWN_TIMEOUT_SECONDS", 0.02),
+                # `spawn_head` binds SPAWN_TIMEOUT_SECONDS as its default when it is defined, so
+                # patching the constant left the real 20 s wait in place. Shorten the call instead.
+                mock.patch(
+                    "ummanu.po.runner.spawn_head", functools.partial(client_module.spawn_head, timeout=0.02)
+                ),
                 mock.patch("ummanu.runtime.head.local_pty.client.SupervisorClient.connect", return_value=client),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop_scope),
+                self.assertRaisesRegex(RuntimeError, "did not answer"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "did not answer"):
-                    runner._launch(session, 1, ["/bin/true"], files)
+                runner._launch(session, 1, ["/bin/true"], files)
             self.assertEqual(settled, [True])
 
     def test_failed_scope_cleanup_does_not_settle_a_live_po_turn(self) -> None:
@@ -151,14 +157,16 @@ class PoScopedLaunchTests(unittest.TestCase):
                 session_id="session", cli="codex", model=None, effort="default", cwd=temp,
             )
             files = runner.files("session", 1)
-            with mock.patch(
-                "ummanu.po.runner.spawn_head",
-                side_effect=LocalPtySpawnError(
-                    "cleanup_failed", "scope is still alive", cleanup_complete=False,
+            with (
+                mock.patch(
+                    "ummanu.po.runner.spawn_head",
+                    side_effect=LocalPtySpawnError(
+                        "cleanup_failed", "scope is still alive", cleanup_complete=False,
+                    ),
                 ),
+                self.assertRaisesRegex(RuntimeError, "scope is still alive"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "scope is still alive"):
-                    runner._launch(session, 1, ["/bin/true"], files)
+                runner._launch(session, 1, ["/bin/true"], files)
             store.finish_turn.assert_not_called()
 
     def test_po_failure_stops_detached_descendants_before_settling(self) -> None:
@@ -221,9 +229,9 @@ class PoScopedLaunchTests(unittest.TestCase):
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                            return_value=SimpleNamespace(returncode=1, stderr=b"failed")),
+                self.assertRaisesRegex(RuntimeError, "could not stop head scope"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "could not stop head scope"):
-                    runner._abandon("session", 1, None, "launch failed")
+                runner._abandon("session", 1, None, "launch failed")
             store.finish_turn.assert_not_called()
             self.assertEqual(ScopedHeadLifecycle.from_run_dir(scope_dir).run_id, owner.run_id)
 
@@ -238,7 +246,7 @@ class PoScopedLaunchTests(unittest.TestCase):
                 )
                 store = SimpleNamespace(
                     session=lambda *_: SimpleNamespace(cli="claude"),
-                    running_turns=lambda *_: [turn], turn=lambda *_: turn,
+                    running_turns=lambda *_, turn=turn: [turn], turn=lambda *_, turn=turn: turn,
                     finish_turn=mock.Mock(return_value=True),
                 )
                 runner = PoRunner(store, root)
@@ -250,11 +258,11 @@ class PoScopedLaunchTests(unittest.TestCase):
                 cgroup.mkdir(parents=True)
                 (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
 
-                def stop(*_args, **_kwargs):
+                def stop(*_args, cgroup=cgroup, **_kwargs):
                     (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
                     return SimpleNamespace(returncode=0, stderr=b"")
 
-                def finish(*_args, **_kwargs):
+                def finish(*_args, cgroup=cgroup, **_kwargs):
                     self.assertEqual((cgroup / "cgroup.events").read_text(), "populated 0\n")
                     return True
 

@@ -24,6 +24,11 @@ manifest invalid before any suite starts. When changing the runner or manifest, 
     python3 -m unittest -v tests.test_ci_shards
     python3 scripts/ci_test_shards.py --check
 
+`unit` is the in-process suite and should finish in about three minutes in CI. A module that builds a
+virtualenv or runs pip, serves real HTTP on loopback, waits out a real wall-clock cadence or replays
+minutes of recorded PTY output belongs in `component`, `runtime-component` or `packaging`. A
+repository-wide AST check parses through `tests/source_trees.py`, so each file is parsed once per module.
+
 ## Required setup
 
 A missing required dependency is an infrastructure failure, never a green skip. The one exception:
