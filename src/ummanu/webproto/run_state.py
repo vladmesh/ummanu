@@ -1,48 +1,17 @@
-"""What became of one product run, told apart into the values the read layer already introduced.
+"""What became of one product run, in the read layer's existing vocabulary. Writes nothing.
 
-Criterion 5 of secretary-1562 asks for distinguishable outcomes rather than one "it did not work",
-and names five: a normal ending, a non-zero exit, a process that died, a source that could not say,
-and not knowing. It also says the values are the ones the read layer already introduced and that no
-second dictionary is invented. Both hold here, and they hold together because the two are not one
-field:
+* `value` is one of :data:`ummanu.webproto.agents.AGENT_STATES`; `exit` is the process's own
+  `{"code", "signal"}` from the supervisor journal (normal end: `finished`, code 0; failure:
+  `process_failed` with a code or a signal), so no new vocabulary is added.
+* `ended` (the run is over: its process is provably gone or never spawned) is a separate fact from
+  `value` (how it ended); `source_unavailable` can be an ending.
+* Evidence is only files this product owns: the head's launch identity (via
+  `ummanu.dispatch.watchdog.head_process_status`), the supervisor journal (`run.exited`) and the
+  run's result file. Never a pane, window or session manager.
+* Decision order: a published result plus an ended process is `finished`, however the process ended
+  (including a stop this product requested); only then do exit status and absence speak.
 
-* **`state` is** :data:`ummanu.webproto.agents.AGENT_STATES` **, unchanged** — `running`,
-  `finished`, `process_failed`, `source_unavailable`, `unknown`. A dashboard that renders an agent
-  row renders a run row with the same five words and the same meanings;
-* **`exit` is the process's own exit status**, `{"code": ..., "signal": ...}`, taken from the
-  supervisor's journal. It is not a vocabulary, so it adds none: a normal ending is `finished` with
-  code `0`, an ending the head chose and failed at is `process_failed` with a code, and a process
-  that was killed is `process_failed` with a signal. Those are the two the card names separately,
-  and they are separate here without a sixth word.
-
-The evidence is three files this product owns, and nothing else — no pane, no window, no session
-manager, and no inventory of any kind:
-
-  1. the head's **launch identity**, read through the product's one reader for it
-     (`ummanu.dispatch.watchdog.head_process_status`, the same door
-     :mod:`ummanu.webproto.agents` reads liveness through). The expectation is the shape the
-     local-pty backend itself writes and compares — run id, role and the task string the supervisor
-     was given — so this asks the head the same question its own backend asks;
-  2. the supervisor's **journal** in the run directory, for `run.exited` and the exit status on it;
-  3. this run's **result file**, which the head is told the path of and writes itself.
-
-**Two facts, and they are not one field.** `ended` says the run is **over** -- the process it may
-have held is provably gone, or none was ever spawned -- and `value` says **how** it ended. They
-were one value until secretary-1563, because "terminal" was computed as `value in (finished,
-process_failed)`: an ending that could only be named `source_unavailable` was therefore not an
-ending at all, and every path that had to produce a terminal answer had to name a failure it had
-no evidence for. Told apart, `source_unavailable` is an ending like any other -- the run is over,
-what it did could not be established -- and nothing has to lie to close a run.
-
-The order of the decision is the point of the module. A result that was published and a process
-that has since ended is a run that finished — however that process ended, including a stop this
-product asked for once the result was in, because the product owns the process and ending a head
-whose work is done is what owning it means. Only after that do the exit status and the bare absence
-of a process get to speak, and each of them says something different from the others.
-
-Nothing here writes. Settling a run — recording that ending once, so its one terminal event can be
-published without a second history — is :meth:`ummanu.webproto.runs.RunStore.settle`, and the
-operation layer is what calls it with what this module observed.
+Settling a run is :meth:`ummanu.webproto.runs.RunStore.settle`, called by the operation layer.
 """
 
 from __future__ import annotations
@@ -74,58 +43,38 @@ from ummanu.webproto.runs import CLAIMED, UNRESOLVED, ProductRun
 # Re-exported for the operation layer, which records the journal's path on every run it starts.
 from ummanu.runtime.local_pty_head import JOURNAL_NAME as JOURNAL_NAME
 
-# The substrate's own names for the record that carries a head's exit status and for the file it is
-# written to, reached through the one backend that owns that package rather than around it, so this
-# reader and that writer cannot disagree about either.
+# The substrate's own names for the exit record and its file, so this reader and that writer agree.
 from ummanu.runtime.local_pty_head import RUN_EXITED, head_run_journal
 
-#: The three values that *name an ending*. `running` is not one, and `unknown` is the absence of
-#: one, so a run that is over while the evidence says either of those is recorded
-#: `source_unavailable` by :meth:`ummanu.webproto.lifecycle.RunLifecycle._ending` -- over, and
-#: how not established. This is a partition of the same five values and not a sixth: whether a run
-#: is over is the separate `ended` fact, and no reader decides it from this tuple.
+#: The three values that name an ending. A run that is over while the evidence says `running` or
+#: `unknown` is recorded `source_unavailable` by :meth:`ummanu.webproto.lifecycle.RunLifecycle._ending`.
+#: Whether a run is over is the separate `ended` fact, never decided from this tuple.
 ENDING_VALUES = (FINISHED, PROCESS_FAILED, SOURCE_UNAVAILABLE)
 
-#: Read this module against :mod:`ummanu.webproto.lifecycle`: a run's *phase* says where its
-#: lifecycle is and a run's *state* says what its process is doing, and they are not the same
-#: question. Only two phases answer the state question by themselves -- a settled run says its
-#: recorded ending forever, and an unresolved run says `unknown` because at the moment that was
-#: written nothing had established anything -- and every other phase is decided from the process
-#: evidence. :func:`from_evidence` is that decision without either shortcut, for the one caller
-#: that has just changed the world and must not read its own stale record back.
+#: A run's phase (:mod:`ummanu.webproto.lifecycle`) is not its state. Only settled (recorded ending)
+#: and unresolved (`unknown`) phases answer the state by themselves; every other phase is decided
+#: from process evidence by :func:`from_evidence`.
 
 
 def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
     """This run's state, its exit status and its result, from process evidence alone."""
     if run.ended:
-        # A settled run is history and says the same thing forever. Re-deriving it would let a run
-        # that was `finished` at noon read as `source_unavailable` at midnight because its run
-        # directory had been swept -- and the exit status and result are part of "the same thing",
-        # so they come from the record the settle wrote and not from files that may be gone. That
-        # is also what makes this run's terminal event deterministic: the document below is a pure
-        # function of the record, so republishing the event after a journal failure rebuilds the
-        # identical record rather than a second, differing one.
+        # A settled run says the same thing forever, from its record (files may have been swept);
+        # this also keeps its terminal event deterministic when republished.
         return _document(
             run.settled_state,
             run.settled_reason,
             exit_status=settled_exit(run),
             result=settled_result(run),
             heartbeat={"state": "settled"},
-            # Fact one, off the record and not off the value: a settled run is over whatever it
-            # ended as, `source_unavailable` included. Deriving this from the value again is
-            # exactly the seam this module was split on.
+            # Off the record, not the value: a settled run is over whatever it ended as.
             ended=True,
             now=now,
             settled_at=run.settled_at,
         )
     if run.phase == UNRESOLVED:
-        # A run whose cleanup was not confirmed. It is not `process_failed`: nothing established
-        # that the process failed, and naming a failure here would be the same lie under a
-        # different name. `unknown` is the read layer's own word for "no evidence establishes
-        # this", and the fact that decides the card is the `ended: False` below -- the run stays
-        # unsettled, which is what `admission.admit` already refuses a second run over. The
-        # heartbeat and the journal still travel on `evidence` and `exit`, so an operator sees
-        # what *is* known.
+        # Cleanup not confirmed: `unknown`, not `process_failed` (no evidence of failure). `ended` stays
+        # False so `admission.admit` refuses a second run; heartbeat and journal still travel.
         return _document(
             UNKNOWN,
             run.unresolved_reason
@@ -133,8 +82,7 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
             exit_status=_exit_status(_journal(run)[0]),
             result=_result(run),
             heartbeat=head_process_status(run.pid_file, expected=expected_identity(run)),
-            # Fact one is false here, and that is the whole of the fence: a head may still be
-            # alive under this run, so it is not over and no gate may treat it as over.
+            # A head may still be alive under this run, so no gate may treat it as over.
             ended=False,
             now=now,
         )
@@ -145,9 +93,7 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
             exit_status=_empty_exit(),
             result=_result(run),
             heartbeat={"state": HEARTBEAT_NOT_YET_WRITTEN},
-            # A claim is the phase before anything can exist: this run has not ended, it has not
-            # begun. The lifecycle knows the other half -- that no process was ever spawned under
-            # it -- and that is where a close of such a run establishes fact one.
+            # Not begun; the lifecycle knows no process was spawned and establishes `ended` on close.
             ended=False,
             now=now,
         )
@@ -155,20 +101,10 @@ def observe(run: ProductRun, *, now: float) -> dict[str, Any]:
 
 
 def from_evidence(run: ProductRun, *, now: float) -> dict[str, Any]:
-    """This run's state from the process evidence alone, with no phase shortcut applied.
+    """This run's state from heartbeat, journal and result file right now, with no phase shortcut.
 
-    :func:`observe` is the reader's answer and answers *two* phases out of the record instead --
-    a settled run says its recorded ending forever, and an unresolved run says `unknown` because
-    at the moment it was written nothing had established anything. This is the other question, and
-    it is the one a caller asks once it has just changed the world: **what do the heartbeat, the
-    journal and the result file say right now**.
-
-    Keeping the two apart is not tidiness. A run whose cleanup could not be confirmed may have gone
-    on to publish a result and end normally, and the read that finally confirms its stop then holds
-    positive evidence of a *finished* run. Classifying that through `observe` would apply the
-    stored `unresolved` shortcut and settle the run as `unknown` beside its own published result --
-    a normal ending lost, permanently, and only ever on the recovery path. So a close classifies
-    from here.
+    A close classifies from here, not :func:`observe`: an unresolved run may since have published a
+    result and ended normally, and the stored `unresolved` shortcut would lose that ending.
     """
     heartbeat = head_process_status(run.pid_file, expected=expected_identity(run))
     journal, journal_failure = _journal(run)
@@ -192,11 +128,7 @@ def from_evidence(run: ProductRun, *, now: float) -> dict[str, Any]:
 
 
 def terminal_evidence(run: ProductRun) -> tuple[dict[str, Any], dict[str, Any]]:
-    """The exit status and result behind an ending, in the shape a settle records them.
-
-    Read once, at the moment the ending is settled, because that is the last moment they are
-    guaranteed to be there: after it they are the record's, not the filesystem's.
-    """
+    """The exit status and result behind an ending, read once at settle time, in the recorded shape."""
     return _exit_status(_journal(run)[0]), _result(run)
 
 
@@ -215,12 +147,9 @@ def settled_result(run: ProductRun) -> dict[str, Any]:
 
 
 def expected_identity(run: ProductRun) -> dict[str, str]:
-    """The identity this run's head wrote, in the shape its own backend writes and compares.
+    """The identity this run's head wrote, in the shape `LocalPtyHeadRuntime._process_alive` compares.
 
-    `LocalPtyHeadRuntime._process_alive` builds exactly this — run id, role and the card's task
-    binding (`card:<ref>`) the supervisor was handed — and the supervisor's `with_pid_heartbeat`
-    wrapper writes exactly these three. A head raised before secretary-1698 wrote the bare
-    reference instead, and the reader still accepts that spelling for the same run id.
+    Run id, role and the card task binding (`card:<ref>`); the reader also accepts the older bare ref.
     """
     return {"run_id": run.run_id, "role": run.role, "task": task_binding(TASK_CARD, run.ref)}
 
@@ -232,18 +161,11 @@ def _classify(
     result: dict[str, Any],
     journal_failure: str,
 ) -> tuple[str, str, bool]:
-    """The two facts this evidence establishes: how the run ended, why, and whether it is over.
+    """How the run ended, why, and whether it is over (`ended`, from evidence, not from the value).
 
-    The third value is fact one as the *evidence* can see it -- the launch identity says there is
-    no such process, or the supervisor recorded that it exited -- and it is deliberately not a
-    function of the first: a run whose head is gone and whose journal cannot be read is over
-    (`True`) while the only honest value for it is `source_unavailable`, and a run whose launch
-    identity itself cannot be read is *not* over (`False`) under that same value. One value, two
-    endedness answers, is precisely why these cannot be one field.
-
-    A pid that belongs to another process stays `unknown` and not over, as it was: pid reuse
-    proves nothing about this run's head either way, and a gate that freed the card on it would
-    free it on a guess.
+    A gone head with an unreadable journal is over yet `source_unavailable`; an unreadable launch
+    identity is not over under the same value. A pid owned by another process is `unknown` and not
+    over: pid reuse proves nothing about this run.
     """
     state = str(heartbeat.get("state") or "")
     if state == HEARTBEAT_LIVE_MATCH:
@@ -339,9 +261,7 @@ def _empty_exit() -> dict[str, Any]:
 def _result(run: ProductRun) -> dict[str, Any]:
     """The head's own result document, when it wrote one.
 
-    A result that is there but is not JSON is reported as present with a null value and the reason:
-    the head did publish something, and telling that from "it published nothing" is the difference
-    between a run that finished badly and one that never got there.
+    A result that is not JSON is present with a null value and a reason, unlike no result at all.
     """
     if not run.result_path:
         return {"present": False, "value": None, "reason": "this run declares no result path"}
@@ -379,12 +299,7 @@ def _document(
     now: float,
     settled_at: float = 0.0,
 ) -> dict[str, Any]:
-    """One run's state as its readers see it, carrying both facts and conflating neither.
-
-    `ended` is passed in rather than derived here, and that is the contract: whether a run is over
-    is established by the caller that holds the evidence for it -- the record, the launch identity,
-    or the lifecycle that confirmed a stop -- and never re-derived from the value beside it.
-    """
+    """One run's state document. `ended` is passed in by the caller holding the evidence, never derived."""
     available = state != SOURCE_UNAVAILABLE
     source = sources.available(now) if available else sources.unavailable(reason, now=now)
     return {
