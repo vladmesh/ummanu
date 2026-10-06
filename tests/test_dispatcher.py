@@ -10701,7 +10701,7 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
         )
         self.host = CommandHostRuntime(catalog, self.root / "data", mode="real")  # type: ignore[arg-type]
         self.host._create_git_observer_workspace = lambda _placed: self.workspace  # type: ignore[method-assign]
-        self.host._open_head_pane = lambda run, _title, _command: dataclasses.replace(  # type: ignore[method-assign]
+        self.host._open_head_pane = lambda run, _title, _command, **_kwargs: dataclasses.replace(  # type: ignore[method-assign]
             run, handle="run:observer", leaf=""
         )
         self.stopped: list[str] = []
