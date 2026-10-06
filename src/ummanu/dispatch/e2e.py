@@ -221,7 +221,6 @@ class DispatchedRun:
     """The run GitHub's dispatch answer names; `run_id` 0 when the answer named none."""
 
     run_id: int = 0
-    html_url: str = ""
 
 
 def dispatch_workflow(
@@ -257,11 +256,9 @@ def dispatch_workflow(
             answer = {}
         run_id = answer.get("workflow_run_id") if isinstance(answer, dict) else None
         if isinstance(run_id, int) and not isinstance(run_id, bool) and run_id > 0:
-            return DispatchedRun(run_id, str(answer.get("html_url") or ""))
+            return DispatchedRun(run_id)
         return DispatchedRun()
-    text = _tail((completed.stderr or completed.stdout or "").strip()) or "(no output)"
-    status = _HTTP_STATUS_RE.search(text)
-    code = (status.group(1) or status.group(2)) if status else ""
+    code, text = _gh_status(completed)
     if code == "429" or "rate limit" in text.lower():
         raise GateTransportError(f"e2e workflow dispatch was rate limited: {text}")
     raise DispatchRefused(f"GitHub refused the dispatch of {declaration.workflow} on {branch}: {text}")

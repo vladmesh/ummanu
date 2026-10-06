@@ -49,7 +49,6 @@ from ummanu.board.sprint_read import (
     SprintBudget,
     SprintReadMetadata,
     SprintResume,
-    SprintSourceAudit,
     sprint_string_list,
 )
 from ummanu.board.sprint_read import (
@@ -3666,12 +3665,6 @@ def _close_archive_request_id(request_id: str, reference: str) -> str:
     return f"{request_id}:sprint-close-archive:{digest}"
 
 
-def _closeout_result(plan: Any) -> dict[str, Any] | None:
-    """Released compatibility helper backed by the typed closeout boundary."""
-    typed = SprintCloseoutPlan.from_document(plan)
-    return typed.to_result() if typed is not None else None
-
-
 def _close_step_request_id(request_id: str, step: str, reference: str) -> str:
     """One derived id per step of a close, so a retry replays it instead of repeating it."""
     digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
@@ -3804,21 +3797,3 @@ def _budget_json(budget: dict[str, Any]) -> str:
     return json.dumps(
         {key: value for key, value in budget.items() if key != "uncharged"}, separators=(",", ":")
     )
-
-
-def _source_audit(value: Any) -> dict[str, str] | None:
-    """Released private compatibility projection of :class:`SprintSourceAudit`."""
-    source = SprintSourceAudit.from_legacy(value)
-    return source.to_document() if source is not None else None
-
-
-def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:
-    try:
-        resume = SprintResume.from_legacy(value, required=required, now=_now)
-    except ValueError as exc:
-        raise TaskError("validation", str(exc), 2) from None
-    if resume is None:
-        return None
-    if required and _timestamp(resume.recorded_at) is None:
-        raise TaskError("validation", "resume recorded_at must include a timezone", 2)
-    return resume.to_document()

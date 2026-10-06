@@ -223,20 +223,14 @@ from ummanu.runtime.codex_preflight import (
     CodexFanoutRecordingError,
 )
 from ummanu.runtime.head import (
-    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
-)
-from ummanu.runtime.head import (
     HeadSpec,
 )
-from ummanu.runtime.launch_prefix import pythonpath_prefix
 from ummanu.sprints import SprintReader, budget_thresholds
 from ummanu.tasks import (
     TaskReader,
     TaskWriter,
 )
 
-_PYTHONPATH_PREFIX = pythonpath_prefix()
-_CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m ummanu task"
 
 class DispatcherRuntime:
     def __init__(
