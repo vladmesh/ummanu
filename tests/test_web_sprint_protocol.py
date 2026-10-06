@@ -766,8 +766,8 @@ class LayerPropertyTests(SprintProtocolFixture):
                 with self.subTest(layer=layer.__name__, operation=name):
                     self.assertTrue(getattr(getattr(layer, name), GUARDED, False))
 
-    def test_an_unreadable_source_becomes_a_protocol_code_and_never_escapes(self) -> None:
-        """The boundary is what holds this, and it holds it for an operation added today."""
+    def test_an_unreadable_source_refuses_a_write_but_only_its_read_sections(self) -> None:
+        """Writes refuse the operation; reads keep the independent board answers."""
         reference = self.reference_of(self.create())
         with mock.patch.object(
             SprintRequestStore, "by_request", side_effect=RunStoreError("unreadable")
@@ -776,9 +776,14 @@ class LayerPropertyTests(SprintProtocolFixture):
         self.assertEqual(refused.exception.code, "backend_unavailable")
         with mock.patch(
             "ummanu.webproto.sprint_reads.observer_snapshot", side_effect=RunStoreError("x")
-        ), self.assertRaises(ReadError) as read_refused:
-            self.reads().sprint_state(reference)
-        self.assertEqual(read_refused.exception.code, "backend_unavailable")
+        ):
+            document = self.reads().sprint_state(reference)
+        self.assertEqual(document["liveness"]["source"]["state"], "unavailable")
+        self.assertIn("x", document["liveness"]["source"]["reason"])
+        self.assertEqual(document["observer"]["launch"]["state"], OBSERVER_UNAVAILABLE)
+        self.assertEqual(document["sprint"]["source"]["state"], "available")
+        self.assertEqual(document["sprint"]["value"]["goal"], "Give webproto a sprint create")
+        self.assertEqual(document["cards"]["source"]["state"], "available")
 
     def test_a_refusal_with_nothing_to_add_carries_no_data(self) -> None:
         self.assertEqual(
