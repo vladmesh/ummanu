@@ -921,7 +921,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     # A head profile or PO session that cannot fall over to the other subscription family (ummanu-108).
     findings.extend(
         {"code": "head_fallback", "message": f"{error.path}: {error.message}"}
-        for error in fallback_errors(report.instance_path.parent, report.instance)
+        for error in fallback_errors(report.instance_path.parent, getattr(report, "instance", None))
     )
     codex_home_status = _codex_home_status(report)
     if codex_home_status["login_missing"] and codex_home_status["codex_required"]:
