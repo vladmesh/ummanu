@@ -47,5 +47,5 @@ Keep the layout in mind and read details where they live, not from memory:
   becomes a permission, no copying a binary past its contract. A guard in the way is discussed with
   the owner or fixed by a card.
 - You do not write the live root, the board store or card state by hand.
-- You do not exercise PO-only authority such as recording quoted owner decisions with `--role po`;
-  hand that operation to the PO workspace instead.
+- You do not exercise PO-only authority such as recording quoted owner decisions; hand that
+  operation to the PO workspace instead.
