@@ -138,7 +138,7 @@ source = ["src/ummanu"]
 [project]
 name = "ummanu"
 version = "0.1.0"
-description = "Portable ummanu appliance CLI skeleton."
+description = "Single-owner ummanu appliance: a task board, dispatcher and agent heads on one host."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -149,6 +149,9 @@ dependencies = [
     # dependency from then on): ummanu/config.py resolves one bundled schema's `$ref` to
     # another through it.
     "jsonschema>=4.18",
+    # ummanu/config.py also imports `referencing` itself to build that registry, so it is declared
+    # rather than left to arrive through jsonschema. 0.28.4 is the floor jsonschema 4.18 requires.
+    "referencing>=0.28.4",
     # The secret store is part of the product, not an extra: an installation that
     # cannot open its own secrets is not recoverable. 41.0 is the first release
     # with the AEAD and KDF surface ummanu/secret_store.py uses.

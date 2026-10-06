@@ -1,4 +1,4 @@
-"""The process substrate a second head backend will stand on, and nothing above it.
+"""The process substrate the local-pty head backend stands on, and nothing above it.
 
 This package owns one thing: a head process the product *itself* owns — started in its own
 session and process group on its own pty, held by a supervisor that outlives the dispatcher tick
@@ -7,8 +7,8 @@ versioned append-only journal.
 
 It is a substrate, not a backend. There is no `HeadRuntime` here, no wiring into the dispatcher
 and no profile that selects it. `LocalPtyHeadRuntime` — the six verbs of
-`..runtime.HeadRuntime` expressed on top of this — is a separate piece of work, and the only
-thing this package owes it is that each verb has something to stand on:
+`..runtime.HeadRuntime` expressed on top of this — lives in `ummanu.runtime.local_pty_head`, and
+the only thing this package owes it is that each verb has something to stand on:
 
   * `deliver` is the socket's bounded input, `observe` is its bounded output plus `status`,
     `attach` is its bounded attach, `request_drain` is `drain`, `stop` is `stop`, and `start` is

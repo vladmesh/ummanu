@@ -37,7 +37,7 @@ from typing import Any
 
 from ummanu.dispatch.state import DispatcherRecord
 
-# The control plane's own seam onto the heartbeat reader and its vocabulary: `dispatcher_watchdog`
+# The control plane's own seam onto the heartbeat reader and its vocabulary: `dispatch.watchdog`
 # re-exports every one of these names, so this layer reads process state through the same door the
 # dispatcher does rather than opening a second one onto the runtime package.
 from ummanu.dispatch.watchdog import (
