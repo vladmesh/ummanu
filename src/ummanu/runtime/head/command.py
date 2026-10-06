@@ -1,21 +1,12 @@
-"""The one place a head's shell command is built: profile plus prompt input, out comes a command.
+"""The one place a head's shell command is built from a profile and prompt input.
 
-What this module owns and what it deliberately does not:
+Owns the adapter shapes (`claude`, `codex`, `hermes`: efforts, prompt on the command line or not)
+and the role-env wrapper. Does not own the registry (`ummanu.runtime.heads` imports this package,
+never the reverse; a profile arrives as a mapping) and opens no pane (`spawn` runs the string).
 
-  * **it owns the adapter shapes.** What a `claude`, a `codex` or a `hermes` invocation looks
-    like, which efforts each accepts, and which of them carry their prompt on the command line;
-  * **it owns the role-env wrapper**, because a head's command is not the adapter's argv — it is
-    that argv under the role environment its launcher binds;
-  * **it does not own the registry.** `[profiles.*]`, `heads.yaml`, `load_registry` and the
-    fallback chains stay in `ummanu.runtime.heads`; a profile arrives here as a mapping. This
-    package is imported by the registry, never the reverse, which is what keeps a head operation
-    runnable without the registry;
-  * **it does not open a pane.** A rendered command is a string; `spawn` is what runs it.
-
-`prompt` is the whole of the launch-shape decision. A prompt given is a prompt on the command
-line for the adapters that can carry one; `prompt=None` renders the interactive shape, where the
-caller delivers the prompt into the live pane afterwards and `prompt_after_start` says so. A
-Codex head has only the interactive shape, so it ignores a prompt either way.
+A given `prompt` goes on the command line for adapters that can carry one; `prompt=None` renders the
+interactive shape and `prompt_after_start` tells the caller to deliver into the live pane. Codex has
+only the interactive shape.
 """
 
 from __future__ import annotations
@@ -58,11 +49,9 @@ CODEX_LAUNCH_MODES = {CODEX_TUI_MODE}
 
 PYTHON_SAFE_PATH_FLAG = "-P"
 
-# Every head runs the one role-env entry point, `role_env.ENTRY_POINT`. The launcher only chooses
-# where that command's PYTHONPATH comes from. A dispatcher head gets the configured checkout
-# (`UMMANU_REPO`, else `$HOME/ummanu`) with the launcher's own PYTHONPATH appended, and
-# may carry an identity. A standing agent gets `role_env.runtime_pythonpath()`
-# (`TA_RUNTIME_PYTHONPATH`, else `UMMANU_REPO`, else the importing checkout) and none.
+# Every head runs `role_env.ENTRY_POINT`; the binding only chooses its PYTHONPATH. Head binding: the
+# configured checkout (`UMMANU_REPO`, else `$HOME/ummanu`) plus the launcher's PYTHONPATH, with an
+# optional identity. Standing binding: `role_env.runtime_pythonpath()`, no identity.
 HEAD_BINDING = "head"
 STANDING_BINDING = "standing"
 ROLE_ENV_BINDINGS = (HEAD_BINDING, STANDING_BINDING)
@@ -82,19 +71,12 @@ class HeadCommand:
 
 
 def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
-    """Whether one profile describes a launch shape this module can actually render.
+    """Refuse a profile whose launch shape this module cannot render.
 
-    Both readers of a registry run through this one — `validate_registry` for the whole table and
-    `HeadSpec.from_profile` for a single profile — so a head refused at load time and a head refused
-    at bring-up are refused by the same rule. Only the launch shape: whether the resource a profile
-    names exists, and whether its fallback chain points anywhere, stay with the registry.
-
-    `runtime` is part of the launch shape and is checked here for the same reason: the name a
-    profile gives its backend has to be refused when the table is read, not when the head is
-    raised. It is checked independently of the adapter, because the two are orthogonal — any of
-    `HEAD_RUNTIMES` may hold any of the adapters — and an absent one is `DEFAULT_HEAD_RUNTIME`.
-    A profile still naming `orca-legacy` is the upgrade boundary of A20 step 2: it is refused by
-    name with the fix, never rewritten silently.
+    Shared by `validate_registry` and `HeadSpec.from_profile`, so load time and bring-up apply one
+    rule. Covers adapter, effort, codex mode, `runtime` (independent of adapter; absent means
+    `DEFAULT_HEAD_RUNTIME`; `orca-legacy` is refused by name with the fix) and memory limit. Resource
+    existence and fallback chains stay with the registry.
     """
     adapter = _named(profile.get("adapter"), f"profile {profile_id!r} adapter")
     if adapter not in _ADAPTERS:
@@ -138,11 +120,8 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
 
 
 def _named(value: object, what: str) -> str:
-    """A profile field that has to be a plain name before anything can be looked up by it.
-
-    Checked before the membership tests above rather than left to them: a list where a name belongs
-    is unhashable, so `value not in table` would raise TypeError past every caller.
-    """
+    """A profile field that must be a plain string; checked first since an unhashable value would
+    make `value not in table` raise TypeError."""
     if not isinstance(value, str):
         raise HeadCommandError(f"{what} must be a name, got {type(value).__name__}")
     return value
@@ -160,10 +139,8 @@ def render_head_command(
 ) -> HeadCommand:
     """The shell command that brings one head up, and how its prompt reaches it.
 
-    `role` is what the command is wrapped for. An empty role renders the adapter command bare, for
-    the one caller that is not launching a head into a pane at all: `ummanu shell`. `workspace` is
-    what a Codex head's directory-trust override names and is required for one. `identity` is a
-    head's own binding and only the head binding renders it.
+    An empty `role` renders the bare adapter command (`ummanu shell`). `workspace` is required for
+    Codex trust overrides. `identity` is rendered only by the head binding.
     """
     adapter = str(profile.get("adapter") or "")
     render = _ADAPTERS.get(adapter)
@@ -200,15 +177,10 @@ def wrap_role_command(
 ) -> str:
     """Render one head's command under the role environment its launcher binds.
 
-    The installation binding is written into the command itself because a head does not start as a
-    child of its launcher: Orca creates the terminal, so nothing the launcher's unit exported is
-    guaranteed to be in the environment `role_env exec` then runs in. Without it, a dispatcher
-    rendered for a non-default instance launches heads that read the home default's `runtime.env`.
-
-    `identity` is rendered beside that binding rather than left to `runtime.env`. Only names the
-    role's allowlist knows are rendered; anything else is refused here instead of silently ignored.
-    `local_run_policy` is a dispatcher snapshot rendered as an explicit role-env argument so no
-    inherited binding or runtime.env declaration can accidentally grant a heavy-command exception.
+    The installation binding is written into the command because the head's terminal is not the
+    launcher's child; without it a non-default instance's heads read the home default `runtime.env`.
+    `identity` names must be in the role's allowlist, else refused. `local_run_policy` is passed as an
+    explicit role-env argument so no inherited or runtime.env value can grant the exception.
     """
     if binding not in ROLE_ENV_BINDINGS:
         known = ", ".join(ROLE_ENV_BINDINGS)
@@ -242,19 +214,12 @@ def with_pid_heartbeat(
 ) -> str:
     """Prefix a head command with an atomic versioned launch-identity heartbeat.
 
-    `$$` inside a shell names that shell's own pid. The final `exec` replaces that process
-    with the head, so the record keeps the same pid for its whole life. Scoped heads use
-    `in_process` to publish the record in that process too; a separate writer would
-    temporarily add a task to the cgroup and defeat sole-victim OOM attribution.
-
-    A wrapped head command starts with a leading `NAME=value` assignment, and POSIX `exec` treats the
-    word right after it as the program to run, so `exec PYTHONPATH=... python3` fails. Routing the
-    whole command through `env` keeps `exec` a single-word invocation while `env` applies the leading
-    assignments before it execs the real program in place, so the captured pid still belongs to the
-    head.
+    `$$` is the shell's pid and the final `exec` replaces it with the head, so the pid holds for the
+    head's life. `in_process` writes the record in that same process: a separate writer would join the
+    cgroup and break sole-victim OOM attribution. `exec env <command>` is required because `exec
+    NAME=value prog` treats the assignment as the program.
     """
-    # Keep the terminal process group for TTY semantics and safe group signalling.
-    # Write the PID identity before exec and replace its record atomically.
+    # Keeps the terminal process group for TTY semantics and safe group signalling.
     writer_args = "path, pid, identity, command = sys.argv[1:]" if in_process else "path, pid, identity = sys.argv[1:]"
     writer = """import json
 import os
@@ -301,7 +266,7 @@ if record.get('leaf') != before:
     publish(record)""".replace("__WRITER_ARGS__", writer_args)
     encoded_identity = json.dumps(dict(identity or {}), sort_keys=True, separators=(",", ":"))
     if in_process:
-        # Publish identity in the head process so the recorded PID survives exec.
+        # Written in the head process itself, so the recorded pid survives exec.
         writer += "\nos.execvpe('/bin/sh', ['/bin/sh', '-c', 'exec env ' + command], os.environ)"
         return (
             f'exec python3 -P -c {shlex.quote(writer)} {shlex.quote(pid_file)} "$$" '
@@ -348,12 +313,11 @@ def _render_claude(profile: Mapping[str, Any], *, prompt: str | None, workspace:
 
 
 def _render_hermes(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:
-    """Hermes' one-shot-seeded-session equivalent of `claude --dangerously-skip-permissions
-    <prompt>`: `-z` seeds an autonomous session with the initial message (not `-q`/`chat`'s
-    single-turn query mode), `--yolo` is Hermes' skip-permissions, `--cli` forces the plain REPL
-    (no TUI) so it behaves in an Orca terminal the same way the classic `claude` invocation does.
-    Without a prompt there is no session to seed, so the seed is simply absent and the REPL comes
-    up empty — the shape `ummanu shell` opens for an operator."""
+    """Hermes' equivalent of `claude --dangerously-skip-permissions <prompt>`.
+
+    `-z` seeds an autonomous session (not `-q` single-turn), `--yolo` skips permissions, `--cli` forces
+    the plain REPL. Without a prompt the REPL comes up empty, as `ummanu shell` wants.
+    """
     del workspace
     parts = ["hermes"]
     if prompt is not None:
@@ -367,19 +331,12 @@ def _render_hermes(profile: Mapping[str, Any], *, prompt: str | None, workspace:
 
 
 def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:
-    """The command that brings one Codex head up. There is one shape and it is interactive.
+    """The command that brings one Codex head up; the only shape is the interactive TUI.
 
-    Nothing selects it: no profile field, no card, no caller argument. `prompt` is accepted and never
-    used — the caller delivers it into the live pane once Orca reports the TUI idle.
-
-    `--skip-git-repo-check` is an `exec`-only flag in Codex 0.143; the top-level TUI rejects it, and
-    pipeline workspaces are git worktrees already.
-
-    The trust overrides state the intent on the command line, for the provisioned worktree and, for a
-    linked worktree, the same repository root Codex derives from the common git dir. They do not on
-    their own answer the dialog: Codex 0.145 still shows it with them in place, which is why the only
-    thing that gets a pane past it is the `codex_preflight` write into the CODEX_HOME this command
-    names, before the pane is created. The paths come from that same preflight.
+    `prompt` is ignored: the caller delivers it into the live pane once the TUI is idle. No
+    `--skip-git-repo-check` (exec-only; the TUI rejects it). The trust overrides state intent only;
+    Codex 0.145 still shows the dialog, so the `codex_preflight` write into this CODEX_HOME is what
+    passes it, and the paths come from that preflight.
     """
     del prompt
     if not workspace:
@@ -415,7 +372,7 @@ def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspa
     try:
         home = codex_home(profile)
     except CodexHomeLoginMissing as exc:
-        # No home to launch in (A20 step 7): refused in the renderer's own failure type, with the fix.
+        # Refused in the renderer's own failure type, with the fix.
         raise HeadCommandError(str(exc)) from None
     return f"CODEX_HOME={shlex.quote(home)} {shlex.join(args)}"
 

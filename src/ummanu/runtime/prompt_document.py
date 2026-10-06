@@ -1,21 +1,13 @@
-"""The document a head is given, and the one short line that points it there.
+"""The document a head is given, and the one short line (nudge) that points it there.
 
-An interactive head's input channel is a keyboard, and everything the product has lost on it was
-large: a ~12 KiB reviewer prompt pasted into a Codex composer that kept the text and consumed the
-Enter. Short lines never failed. So the input channel carries no content at all: the task lives in
-a file, and the pane receives a bounded line naming that file's absolute path.
+Large pastes into an interactive head's input are unreliable, so the task lives in a file and the
+pane gets a bounded line naming its absolute path. Invariants owned here:
 
-Two properties make that reliable by construction, and both are owned here:
+  * the nudge is bounded and single-line whatever the document says (only its path is derived);
+  * the document lives outside the worktree it describes, since receipts hash tracked diff plus
+    untracked files.
 
-  * **the nudge is bounded and single-line whatever the document says.** Prompt text cannot reach
-    the terminal through it, because the only thing derived from the document is its path;
-  * **the document lives outside every git worktree.** A workspace's identity is its tracked diff
-    plus its untracked files, and receipts hash exactly that. A prompt written into the checkout
-    would move that identity, so a caller names the worktree the document describes and a document
-    inside it is refused rather than quietly written.
-
-The document is durable on purpose: it outlives the head as the run's own record of what that head
-was asked to do, which is why it is written where run artifacts are kept.
+The document is durable: it is the run's record of what the head was asked to do.
 """
 
 from __future__ import annotations
@@ -25,14 +17,10 @@ import stat
 import tempfile
 from pathlib import Path
 
-# A ceiling in bytes, because bytes are what the terminal receives. The legacy pane transport's
-# reliability evidence is for short lines, so the pointer stays below 256 rather than inheriting
-# the local-pty substrate's much larger input bound. Real workspace paths are allowed the room:
-# the instruction around the absolute path is deliberately terse and the discriminating note owns
-# the remaining bytes.
+# Bytes, because the terminal receives bytes. Kept below 256 because only short lines are proven
+# reliable on the legacy pane transport.
 NUDGE_MAX_BYTES = 256
-# What the delivery evidence calls this mode. Telemetry records the mode, the nudge's size and the
-# document's path; the document's text is not delivery telemetry and is never in it.
+# Telemetry records mode, nudge size and document path, never the document text.
 NUDGE_FILE_MODE = "nudge-file"
 _NUDGE_TEMPLATE = "Read {path} and do its task."
 _DOCUMENT_MODE = 0o600
@@ -40,21 +28,15 @@ _DOCUMENT_DIR_MODE = 0o700
 
 
 class PromptDocumentError(RuntimeError):
-    """A document or a nudge that would not hold the guarantees above; the message says which."""
+    """A document or nudge that would break the module's guarantees."""
 
 
 def nudge_for(path: str | Path, note: str = "") -> str:
     """The one line a pane receives for a head that has a document waiting.
 
-    Absolute, because the head's own working directory is not something the sender knows. ASCII,
-    because the encoding a terminal will apply to the line is not something delivery can prove.
-    Control bytes are refused outright: a single newline in a path would turn one nudge into two
-    lines and a stray Enter.
-
-    `note` is for the caller whose pointer has to discriminate as well as point. It travels through
-    here so there is still exactly one place where the four guarantees are made, and so the ceiling
-    is checked over the line as it will actually be delivered. A line that does not fit is refused
-    whole: a truncated note would be a discriminator silently cut to length.
+    The path must be absolute (the head's cwd is unknown), ASCII (terminal encoding is unprovable)
+    and free of control bytes (a newline would split the nudge). `note` is appended and the ceiling
+    applies to the whole line; a line that does not fit is refused, never truncated.
     """
     location = str(path)
     if not os.path.isabs(location):
@@ -81,14 +63,10 @@ def nudge_for(path: str | Path, note: str = "") -> str:
 
 
 def write_prompt_document(path: str | Path, text: str, *, outside: str | Path | None = None) -> Path:
-    """Put one head's task where it can read it, and where nothing else has to account for it.
+    """Write one head's task document atomically, private (0600, directory 0700).
 
-    `outside` is the worktree this document describes; a path inside it is a programming error caught
-    here rather than a receipt digest that moved for no reason.
-
-    The write is atomic and the file is private (0600), as is its directory. A retry that asks for a
-    document it already wrote keeps the file's content and mtime, so a reader can still take the
-    timestamp as "when this head was last given a task". Its mode is still made to hold.
+    `outside` is the worktree the document describes; a path inside it is refused. A retry with
+    identical content keeps content and mtime (mtime means "last given a task") and only fixes mode.
     """
     document = Path(path)
     if not document.is_absolute():
@@ -108,11 +86,7 @@ def write_prompt_document(path: str | Path, text: str, *, outside: str | Path | 
 
 
 def _make_private(document: Path) -> None:
-    """Hold the 0600 promise for a document this call did not write.
-
-    A document that is already correct is never rewritten, and its mode is then whatever left it.
-    Fixing the mode rather than rewriting the file keeps the content and the mtime as they were.
-    """
+    """Enforce 0600 on an existing correct document without rewriting it (keeps mtime)."""
     try:
         if stat.S_IMODE(document.stat().st_mode) != _DOCUMENT_MODE:
             os.chmod(document, _DOCUMENT_MODE)
@@ -121,9 +95,7 @@ def _make_private(document: Path) -> None:
 
 
 def _encoded(text: str) -> bytes:
-    """The document's bytes, or a refusal. Same policy as the transport's own body check: text
-    that cannot be encoded is a caller's bug, not something to write in a lossy form and hand to a
-    head as its task."""
+    """The document's UTF-8 bytes; unencodable text is a caller bug, refused rather than written lossily."""
     try:
         return str(text).encode("utf-8", "strict")
     except UnicodeEncodeError as exc:
@@ -131,11 +103,7 @@ def _encoded(text: str) -> bytes:
 
 
 def _refuse_inside(document: Path, worktree: Path) -> None:
-    """Refuse a document that would land inside the checkout it is about.
-
-    Both sides are resolved through their symlinks first: a workspaces root reached by one name and a
-    document written under another would otherwise compare as unrelated paths.
-    """
+    """Refuse a document inside the checkout it is about; both sides resolved through symlinks."""
     resolved = Path(os.path.realpath(document))
     tree = Path(os.path.realpath(worktree))
     if resolved == tree or tree in resolved.parents:
@@ -152,11 +120,9 @@ def _already_holds(document: Path, text: str) -> bool:
 
 
 def _replace_atomically(document: Path, text: str) -> None:
-    """Write the document's bytes, unmodified, and swap it into place in one step.
+    """Write the document's bytes unmodified and swap it into place atomically.
 
-    Binary mode, so what the head opens is what the caller rendered: a prompt that arrived from the
-    board's web form carries CRLF, and text mode would rewrite those line endings on the way in and
-    translate them back out again.
+    Binary mode preserves CRLF from web-form prompts.
     """
     temp_path: Path | None = None
     try:

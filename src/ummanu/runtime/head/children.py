@@ -1,24 +1,14 @@
 """What a head's own child processes are doing, read from ``/proc`` (Linux, stdlib only).
 
-A head that runs one long foreground command is silent in its pane and its provider journal until
-the command returns, yet it is working: its child is alive and consuming CPU or moving bytes. The
-vitality reducer used to see only the silence (secretary-1665, 2026-09-21: two integration shards
-under one Bash call, respawned at 968 s of "strong quiet" with the test child alive). This module
-is the observation half of the fix: it names the descendants of the head's recorded pid with the
-counters that prove they moved. Deciding what movement means belongs to
-``head_vitality.VitalitySnapshot.from_child_activity`` and the episode reducer.
+A head running one long foreground command is silent yet working. This module reports the
+descendants of the head's recorded pid with movement counters; interpreting them belongs to
+``head_vitality.VitalitySnapshot.from_child_activity``. See docs/HEAD_VITALITY.md "Child processes".
 
-The descendant set is built from one scan of ``/proc/[0-9]*/stat`` (parent pid is field 4), which
-works on every kernel, unlike ``/proc/<pid>/task/*/children`` (``CONFIG_PROC_CHILDREN``). Movement
-is aggregated over EVERY descendant: cumulative CPU -- ``utime + stime + cutime + cstime``, so the CPU
-of short-lived grandchildren already reaped still counts, plus the head's own ``cutime + cstime`` --
-and, best effort, ``rchar + wchar`` from ``/proc/<pid>/io``, which also covers a test process that
-mostly waits on sockets. Only the per-process description (start time, the pid-reuse
-discriminator; counters; command line; output file) is bounded to ``DESCENDANT_LIMIT``.
-
-Every failure is an answer, never an exception: an unreadable ``/proc`` is ``unavailable``, and a
-process that exits mid-scan is simply not listed. Command lines leave this module already
-redacted and bounded, because the reading is persisted on the dispatcher's episode and may be
+Descendants come from one scan of ``/proc/[0-9]*/stat`` (parent is field 4; works without
+``CONFIG_PROC_CHILDREN``). Movement covers every descendant: ``utime+stime+cutime+cstime`` plus the
+head's own ``cutime+cstime`` (reaped grandchildren still count), and best-effort ``rchar+wchar``.
+Only per-process descriptions are bounded by ``DESCENDANT_LIMIT``. Failures are answers, never
+exceptions. Command lines leave already redacted and bounded: readings are persisted and may be
 quoted into a successor's TASK.md.
 """
 
@@ -30,11 +20,8 @@ from typing import Any
 
 from ummanu.runtime.redact import scrub_secrets
 
-#: How many descendants one reading DESCRIBES (command line, output file, per-process counters).
-#: It bounds only the metadata a reading carries; movement is counted over the whole tree through
-#: the ``total_cpu_ms``/``total_io`` aggregate (secretary-1692 round 2). Half the slots go to the
-#: newest descendants (the likely foreground command and its workers), half to the ones with the
-#: most cumulative CPU (an older command still grinding under newer idle helpers).
+#: How many descendants one reading describes; totals still cover the whole tree. Half the slots
+#: go to the newest descendants, half to the most cumulative CPU.
 DESCENDANT_LIMIT = 16
 #: Bound on one command line as read (before redaction) and as reported.
 COMMAND_READ_LIMIT = 4096
@@ -122,15 +109,10 @@ def read_head_children(head_pid: Any, *, proc_root: str = "/proc") -> dict[str, 
     """The live descendants of ``head_pid`` with their movement counters.
 
     Answers ``{"state": "observed", "head_pid", "uptime_ticks", "total_cpu_ms", "total_io",
-    "descendant_count", "descendants": [...]}``.
-
-    The totals are the movement measure and cover EVERY live descendant: summed
-    ``utime+stime+cutime+cstime`` plus the head's own ``cutime+cstime`` (so children the head has
-    already reaped still count), and summed ``rchar+wchar`` where readable. ``descendants`` is
-    only the described subset, at most ``DESCENDANT_LIMIT`` of them, each
-    ``{"pid", "start", "cpu_ms", "io", "command", "output"}``, newest first; zombies are neither
-    counted nor listed. ``uptime_ticks`` stamps the reading on the same clock as ``start``.
-    Anything that prevents an answer is ``{"state": "unavailable", "reason": ...}``.
+    "descendant_count", "descendants": [...]}``; totals cover every live descendant (see module
+    docstring). ``descendants`` holds at most ``DESCENDANT_LIMIT`` entries
+    ``{"pid", "start", "cpu_ms", "io", "command", "output"}``, newest first; zombies are excluded.
+    ``uptime_ticks`` shares the clock of ``start``. Otherwise ``{"state": "unavailable", "reason"}``.
     """
     try:
         pid = int(head_pid)

@@ -1,26 +1,10 @@
-"""`TaskRef`: the durable document a head was pointed at, whatever kind of work that document is.
+"""`TaskRef`: the durable document a head run is a run of, with its kind.
 
-A head is always started *at* something, and until now that something was a Pipeline card: the
-dispatcher's whole bring-up path threads a `task` dict with a `ref` and a project through it, and
-the operations that own a head's life would have inherited that assumption by taking the same dict.
-They must not. The observer head of a sprint is pointed at a sprint entity, a steward or a curator
-runs off a standing instruction for its role, and neither has a card — nor should one be invented so
-that a signature can keep asking for one.
-
-So what an operation takes is a pointer with a kind on it. Three kinds exist because three kinds of
-durable document exist in this product today, and a fourth is a value added here rather than a new
-parameter everywhere:
-
-  * `card` — one Pipeline card, named by its reference (`secretary-1412`);
-  * `sprint` — a sprint entity on the board, which outlives every head that ever worked in it;
-  * `standing` — a role's standing instruction, the document a head that is not serving one unit of
-    work at all is nonetheless carrying out.
-
-The pointer is a pointer and not the document: `document` is where the text lives on disk when the
-caller has already written it (that is what `nudge` names in a pane), and it is legitimately empty
-for a head whose task document is the board entity itself. Nothing here reads the document — that
-is `prompt_document`'s job — and nothing here decides what a head is told; this only fixes what a
-run is a run *of*, so that the record of a stopped head still says what it was doing.
+Kinds: `card` (a Pipeline card reference), `sprint` (a board sprint entity, e.g. for an observer
+head) and `standing` (a role's standing instruction, for heads not serving one unit of work).
+`document` is the absolute on-disk path of the task text when the caller wrote one (what `nudge`
+names), and may be empty when the board entity is the document. This module neither reads the
+document nor decides what a head is told.
 """
 
 from __future__ import annotations
@@ -42,12 +26,7 @@ class TaskRefError(ValueError):
 
 @dataclass(frozen=True)
 class TaskRef:
-    """What a head run is a run of: a kind, the identifier of that kind, and where it is written.
-
-    Frozen and carried by value, like `HeadSpec`: the pointer a run was started on is part of that
-    run's identity, and a stop that reports a different task than the spawn is a record nobody can
-    read backwards.
-    """
+    """What a head run is a run of; frozen because it is part of the run's identity."""
 
     kind: str
     ref: str
@@ -59,9 +38,7 @@ class TaskRef:
         if not self.ref:
             raise TaskRefError(f"a {self.kind} task pointer names its task, and this one is empty")
         if self.document and not os.path.isabs(self.document):
-            # Same rule as the nudge that will name it: a head's own working directory is not
-            # something the pointer's writer knows, so a relative path is a different file in
-            # every pane it could be delivered to.
+            # A relative path would resolve differently in every pane it could be delivered to.
             raise TaskRefError(f"a task document is named by absolute path, and {self.document!r} is not one")
 
     @classmethod

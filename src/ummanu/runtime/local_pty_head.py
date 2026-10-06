@@ -1,163 +1,54 @@
-"""`LocalPtyHeadRuntime`: the six verbs over a head this product owns the process of.
+"""`LocalPtyHeadRuntime`: the six `HeadRuntime` verbs over a head this product owns the process of.
 
-The second backend of `HeadRuntime`, standing on the local-pty substrate
-(`head.local_pty`): a supervisor in its own session holding the head's pty, a Unix socket that
-answers without ever waiting for the head, and a versioned journal that says what happened. The
-verbs, the receipts and the order of the critical section are the legacy backend's — nothing here
-means something different by `HEAD_BUSY`, `HEAD_DRAINING`, `HEAD_ALIVE` or `HEAD_GONE`, and the
-contract suite is run against both so that it cannot start to.
+Stands on the local-pty substrate (`head.local_pty`): a supervisor in its own session holding the
+head's pty, a Unix socket that answers without waiting for the head, and a versioned journal.
+`HEAD_BUSY`, `HEAD_DRAINING`, `HEAD_ALIVE` and `HEAD_GONE` mean what they mean on every backend; the
+shared contract suite runs against this one. See docs/HEAD_RUNTIME.md ("`local-pty` parity
+criteria", "Supervisor progress journal") and docs/HEAD_SCOPES.md.
 
-What changes is what the backend can honestly do, and it is exactly the two verbs Orca could not:
+Invariants:
 
-  * **`attach`** is real. The substrate hands out a stream, bounded by its own attach limit, and
-    detaching is closing a socket: it does not touch the head and it does not lose its output,
-    because what the head printed while nobody was attached is still in the supervisor's buffer;
-  * **`request_drain`** is real in the sense this backend can prove. The drain reaches the process
-    that owns the head — its supervisor closes admission for it, writes `drain.requested` into the
-    head's own journal, and refuses every later `input` on the socket by name — and the receipt
-    only says `head_signalled` once `status` has been read back and confirms it. The agent process
-    itself is still told nothing, because no wind-down protocol exists on either side of that pty
-    and inventing one would mean typing into a head that is mid-turn; `DRAIN_HEAD_NOT_SIGNALLED`
-    on the receipt's reason says which of the two happened, so the difference stays legible.
-
-**Delivery is where this backend is not the legacy one, and the difference is load-bearing.** On
-the substrate `ok` from `input` means *admitted*: the payload was taken on and the supervisor's
-loop writes it into the pty as fast as the head reads. A `deliver` that returned `HEAD_OK` on that
-answer would be reporting an intention as an arrival, which is the wound the substrate closed one
-layer down and this one would re-open. So `deliver` follows the payload and then **decides what
-became of it once**, in `_delivery_report`, out of `status`'s own delivery record and the journal's
-`input.accepted` with its two byte counts and its `complete` flag. That decision is a name, it
-travels on the report, and every branch below reads it by that name:
-
-  * `DELIVERY_ARRIVED` — all of it landed: `HEAD_OK`, `delivery_state` `complete`, and a
-    `DeliveryOutcome` carrying the delivered byte count;
-  * `DELIVERY_LEFT_A_PREFIX` — it ended part-way: `HEAD_ALIVE` (or `HEAD_GONE` when the head went
-    with it), `delivery_state` `stalled` or `failed`, with what did land. Fatal, for the reason
-    below;
-  * `DELIVERY_LANDED_NOTHING` — it ended and the kernel took not one byte: the terminal is exactly
-    as it was, no turn was started, and the head is worth delivering to again;
-  * `DELIVERY_UNESTABLISHED` — it was offered, and what became of it **cannot be established**.
-    Three ways, and they differ in which witnesses there were to ask:
-    the supervisor stopped answering after admitting it and the journal has no record of it
-    either; the substrate ran past its own delivery bound without ending it, and the journal has
-    nothing either; or the supervisor stopped answering *as the payload was being offered*, before
-    it named a delivery — and there the journal is not asked at all, because a journal record is
-    matched on the delivery id and no id was ever handed back to match one on. Reported as
-    `delivery_state` `unknown` with the last counts anybody could establish, and fatal.
-
-Four outcomes, and there is no fifth. A delivery's state is never inferred from a boolean predicate
-over the byte counts, and never inferred from *which exception arrived*: an admitted payload
-followed by an unreachable supervisor is not a refusal at admission — a refusal means the terminal
-was never touched, and here it provably may have been.
-
-**The runtime's wait is derived from the substrate's own bound, and that is the cut of this card.**
-secretary-1465 gave this runtime a `delivery_timeout` of its own, independent of the substrate's
-`delivery_seconds`, and every red round of that card grew out of the one thing that permitted:
-a runtime allowed to stop watching a delivery *before* the substrate had finished it. From that
-permission came a fifth outcome for a delivery still in flight, a register of unfinished
-deliveries to carry it on, a second place that asked witnesses what had become of one, and a wrong
-reading of a transient refusal in that second place. None of it exists here, because the
-permission does not: the wait is the bound the substrate declared for **this** delivery — the one
-the head was raised with, read back off the delivery the supervisor admitted — plus a named grace
-(`delivery_grace`, which can only ever extend it). By construction there is no configuration in
-which this runtime stops watching first. A head that needs a longer reception has **one** number
-raised, `delivery_seconds` at `start`, and the runtime's wait follows it.
-
-So a delivery still in flight when that derived wait runs out is not a delivery that is going
-well — it is a substrate that has run past a bound it declared and did not end its own delivery.
-Nobody witnessed an ending, so there is none to report: it is `DELIVERY_UNESTABLISHED`, and fatal
-for the same reason every unestablished fate is. There is exactly one place that asks the
-witnesses what a delivery did, and it is the one that carries the delivery: `_follow`.
-
-**A prefix left behind is fatal to the run, and that is a decision rather than an omission.** A
-payload that reached the head's terminal in part leaves a prefix that nothing can take back: the
-head has already read some of it, so flushing the pty's input queue (`TCIFLUSH` discards only what
-the head has *not* read) repairs nothing, and admission re-opening would let the next payload land
-against that fragment and be read as one line with it. Silently gluing them is the one thing this
-must not do. So `DELIVERY_LEFT_A_PREFIX` closes admission here **and** on the substrate, and every
-later `deliver` for that head is refused `HEAD_DRAINING` naming the reason. `DELIVERY_UNESTABLISHED`
-closes admission for the same reason and a weaker one: a delivery whose fate is unknown *may* have
-left a prefix, and admission left open over a maybe-prefix is exactly the glue this forbids.
-
-**What `HEAD_OK` / `DELIVERY_ARRIVED` means, and it is stronger than the byte count.** It means
-the head received *this payload as its own message* — not that these bytes were written. Because
-the delivery is always watched to its end, "all of it landed" is the whole payload including the
-newline that ends the line, so a receipt that is true about its own bytes cannot be false about the
-message they joined. A partial arrival is never `ok`, and it is never followed by a silent second
-admission over what it left.
-
-**A refusal the substrate stated is never thrown away.** Every reader of a frame — `status`,
-`input`, `drain`, `attach` — tests `ok` before it believes a word of the contents, and a refusal
-the supervisor stated to a question asked *before* a payload was offered classifies as a refusal
-**before** the offer rather than as an unknown fate after one. Both of the substrate's bounds —
-its connection bound and its attach bound — are transient and self-clearing, so they are
-`HEAD_BUSY`: never `_fatal`, never a closed admission, never a drain. Reading such a frame for its
-contents without believing its `ok` was how a live, idle, merely popular head came to be closed for
-the rest of this runtime's life. The one reader that does not test `ok` is `_ask_to_stop`, which
-believes nothing it reads: the outcome of a stop is decided by the launch identity.
-
-**Ordering of the journal against a drain this runtime sends.** The drain that a fatal delivery
-sends can only be written after that delivery's own `input.accepted`, because the state is only
-fatal once the substrate has said the delivery ended — and the supervisor writes the journal record
-before it answers that. The one exception is `DELIVERY_UNESTABLISHED`, where the supervisor is not
-answering at all: if it recovers, its `drain.requested` can precede the `input.accepted` of the
-payload it was still carrying. That ordering is given up knowingly — closing admission over a
-payload whose fate cannot be established outranks the order of two records — and it is the honest
-remainder of observation 2 of the substrate card's review rather than a claim that it cannot happen.
-
-**The turn, the epoch and the admission outlive the process that granted them** (secretary-1479).
-The production dispatcher is a systemd timer: every tick is a new process, so a runtime built at
-the start of one holds an empty `HeadActivity` and used to say, about a head another tick had
-drained, that it admitted work. Three promises died at that boundary — a drain that refuses the
-next turn, a running turn that is not interrupted, and a rotation that happens when the last lease
-closes — and all three are now recovered rather than remembered, from the two witnesses this
-backend already owns and with nothing new stored:
-
-  * **the supervisor**, in one request. `status` already carries `alive`, `draining`, `stopping`,
-    `turn_open`, `turn` and `journal_seq`; it is the head's present tense and it is asked first;
-  * **its journal**, when the supervisor is gone, read as a bounded tail of
-    `local_pty.JOURNAL_TAIL_BYTES` and replayed in sequence order. A supervised role's run
-    directory is reused and the journal is append-only across incarnations, so a full read per tick
-    is a cost that grows with the head's history; `run.started` inside the window is what keeps a
-    previous incarnation's drain or turn from answering for this one.
-
-`_rehydrate` does it inside the same lock and the same critical section as the verb it serves —
-**every critical section, and once within each**, because a snapshot taken by an earlier verb is
-not this decision's snapshot and comparing against one is how a conditional stop came to kill a
-turn another tick had opened in between. The cost obligation 3 bounds is held at one status
-request per critical section by passing that one answer around (`_Probe`) rather than by
-remembering it. Rehydration only ever moves this object in the direction the head has already
-gone: the epoch is raised and never lowered, a turn is adopted and never granted over one that is
-held, admission is closed and never re-opened.
-
-**The activity epoch of a head on this backend is its journal sequence, and it is nothing else** —
-strictly increasing, recovered from the file when the journal is opened, and therefore a number one
-tick can hand out and another can compare. No verb here synthesises one: `start`, `deliver`,
-`observe`, `request_drain` and `stop` all return a sequence some witness actually stated, and a
-witness that could state none leaves the epoch where it was. `ticks` stays what it was — a
-diagnostic, moved by `noted`, and never a quiescence decision.
-
-**And unknown is neither freedom nor a lease.** A head whose run directory holds debris that
-neither witness can read has its admission closed, so no new turn is admitted on an unknown; that
-includes a journal tail that cannot account for its own shape — torn, unreadable, out of order, or
-begun mid-history — because "I did not see a drain" is not "there was none". It is given no lease,
-because a fabricated one would be a fence only the head itself could ever lift.
-
-**A head that has positively ended is closed too, and that is what makes it rotatable.** Closing
-admission is not a fence; a lease is, and the dead are given none. `rotation_ready` means "takes no
-more work and holds no turn", so a head whose supervisor says it exited, or whose launch identity
-says its process is dead, can only answer that truthfully once admission is shut. Nothing stands
-between it and its replacement: a bring-up is decided by the launch identity alone, and `start`
-drops what this runtime concluded about the incarnation that ended before a new one takes its id.
-It is the same asymmetry secretary-1468 and secretary-1478 drew: only positive evidence acts.
-
-**Liveness is the launch identity, and there is no second scheme.** `head.identity.
-head_process_status` — the reader the watchdog already applies, unchanged, and re-exported to the
-control plane under its old name — is passed in by whoever builds this runtime, exactly as
-`stop_if_quiescent` takes `head_process_alive` from its caller on the legacy backend. It is a
-constructor argument rather than an import so that every builder of this runtime is on the same
-reader, and because inventing a second pid-file reader here is the failure this argument exists to
-prevent.
+- `attach` hands out a supervisor stream; detaching is closing the socket and loses no output.
+- `request_drain` makes the supervisor close admission, journal `drain.requested` and refuse later
+  `input`; the receipt says `head_signalled` only once `status` confirms it. The agent process is
+  told nothing; `DRAIN_HEAD_NOT_SIGNALLED` marks a drain the supervisor could not be told of.
+- `ok` from `input` means admitted, not arrived. `deliver` follows the payload to its end and
+  `_delivery_report` decides its outcome once, from `status`'s delivery record and the journal's
+  `input.accepted`; `_follow` is the only place that asks those witnesses. Exactly four outcomes:
+  - `DELIVERY_ARRIVED`: the whole payload, final newline included, landed: `HEAD_OK`, `complete`.
+  - `DELIVERY_LEFT_A_PREFIX`: ended part-way: `HEAD_ALIVE` (or `HEAD_GONE`), `stalled` or `failed`.
+    Fatal.
+  - `DELIVERY_LANDED_NOTHING`: ended with no byte taken; the terminal is unchanged and the head is
+    still worth delivering to.
+  - `DELIVERY_UNESTABLISHED`: the fate cannot be established (the supervisor stopped answering
+    after or while the payload was offered, or the substrate overran its own bound, and the
+    journal has no record): `delivery_state` `unknown`. Fatal.
+  An outcome is never inferred from a byte-count predicate or from which exception arrived.
+- A fatal outcome closes admission here and on the substrate, and every later `deliver` is
+  `HEAD_DRAINING` naming the reason: a prefix cannot be taken back (`TCIFLUSH` drops only unread
+  input) and the next payload would be read as one line with it. An unknown fate may hide one.
+- The delivery wait is derived: the substrate's bound for this delivery (`delivery_seconds` at
+  `start`) plus `delivery_grace`, which only extends it. This runtime never stops watching first.
+- Every frame reader (`status`, `input`, `drain`, `attach`) tests `ok` before contents. A refusal
+  stated before a payload was offered is a refusal, not an unknown fate. The substrate's
+  connection and attach bounds are transient: `HEAD_BUSY`, never fatal, never a drain. Only
+  `_ask_to_stop` ignores `ok`; a stop's outcome is decided by the launch identity.
+- A fatal delivery's drain is journalled after its `input.accepted`, except after
+  `DELIVERY_UNESTABLISHED`, where a recovering supervisor may write `drain.requested` first.
+- Turn, epoch and admission are recovered, never remembered, since every dispatcher tick is a new
+  process. `_rehydrate` runs once per critical section, under the verb's lock: from the
+  supervisor's `status` (one request per section, passed around as `_Probe`), else from a bounded
+  journal tail (`local_pty.JOURNAL_TAIL_BYTES`, replayed in sequence order; a `run.started` in the
+  window cuts off earlier incarnations). It only moves forward: the epoch is raised, a turn is
+  adopted, admission is closed.
+- The activity epoch is the journal sequence, never synthesised; a verb with no witnessed sequence
+  leaves it unchanged. `ticks` is diagnostic only.
+- Unknown state (debris neither witness can read; a torn, unreadable, out-of-order or mid-history
+  journal tail) closes admission and grants no lease. A positively ended head also has admission
+  closed, which makes it `rotation_ready`; `start` is decided by the launch identity alone and drops
+  what was concluded about the previous incarnation.
+- Liveness is the launch-identity reader (`head.identity.head_process_status`) passed in by the
+  builder; there is no second pid-file reader.
 """
 
 from __future__ import annotations
@@ -224,8 +115,7 @@ from ummanu.runtime.tui_delivery import (
 #: Supervisor transport failures become unreachable-head receipts.
 _UNREACHABLE = (local_pty.LocalPtyError, OSError)
 
-#: How the launch-identity reader is called. The shape of `ummanu.dispatch.watchdog`'s
-#: `head_process_status`, which is the one this runtime is meant to be given.
+#: How the launch-identity reader is called: the shape of `head_process_status`.
 IdentityReader = Callable[..., Mapping[str, Any]]
 
 #: Stable observation tokens callers route on.
@@ -248,8 +138,7 @@ DELIVERY_LEFT_A_PREFIX = "left_a_prefix"
 DELIVERY_LANDED_NOTHING = "landed_nothing"
 #: An unestablished fate is fatal because it may have left a terminal prefix.
 DELIVERY_UNESTABLISHED = "unestablished"
-#: The outcomes after which this runtime hands the head no more work, named as a set rather than
-#: recomputed at each site.
+#: The outcomes after which this runtime hands the head no more work.
 FATAL_DELIVERY_OUTCOMES = frozenset({DELIVERY_LEFT_A_PREFIX, DELIVERY_UNESTABLISHED})
 
 #: This state means no delivery fate could be established.
@@ -262,15 +151,12 @@ DELIVER_FAILED = "delivery_failed"
 DELIVER_UNESTABLISHED = "delivery_unestablished"
 DELIVER_PREFIX_IS_FATAL = "partial_delivery_closed_this_head"
 DELIVER_UNKNOWN_IS_FATAL = "unestablished_delivery_closed_this_head"
-#: A head this runtime will hand no more work because a delivery left an irreversible prefix on its
-#: terminal. The reason travels on every later refusal, so the caller learns why rather than only
-#: that it was refused.
+#: Refusal reason after a partial delivery; it travels on every later refusal.
 DRAIN_AFTER_PARTIAL_DELIVERY = (
     "a delivery reached this head's terminal in part and could not be taken back: admission is "
     "closed rather than re-opened over the fragment it left"
 )
-#: The same gate for the same reason, over a delivery whose fate nobody could establish: admission
-#: is not re-opened over a payload that may have left a prefix.
+#: The same gate after a delivery whose fate could not be established.
 DRAIN_AFTER_UNESTABLISHED_DELIVERY = (
     "this head was given a payload and what became of it could not be established: admission is "
     "closed rather than re-opened over bytes that may be sitting on its terminal"
@@ -285,12 +171,8 @@ DRAIN_HEAD_NOT_SIGNALLED = (
     "own socket would still admit a payload from somebody else"
 )
 
-#: The substrate's own names for one head's run directory and for the record that carries its exit
-#: status, re-exported here because this module is the one door onto that package. A reader outside
-#: a lifecycle — an operator command, a product runtime asking how a run it owns ended — needs the
-#: exit status of a head whose supervisor is long gone, and `observe` cannot answer that: it is a
-#: question about a process that no longer exists. Re-exporting rather than letting such a reader
-#: import the substrate keeps the one-door property `test_local_pty_head_runtime` asserts.
+#: Substrate names re-exported so a reader outside a lifecycle (e.g. the exit status of a head whose
+#: supervisor is gone) need not import the substrate; `test_local_pty_head_runtime` asserts this.
 JOURNAL_NAME = protocol.JOURNAL_NAME
 RUN_EXITED = local_pty.RUN_EXITED
 
@@ -300,22 +182,19 @@ DELIVERY_GRACE_SECONDS = 5.0
 #: Missing delivery bounds use the substrate default, not a runtime knob.
 UNDECLARED_DELIVERY_BOUND = protocol.INPUT_DELIVERY_SECONDS
 
-#: The keystroke that sends what an agent's composer holds. It travels alone, as a delivery of its
-#: own: a line and its carriage return in one burst are read by a TUI as a paste, and the line sits
-#: in the composer unsent (issue:70562b15a7dc8764437e).
+#: The submit keystroke, sent as a delivery of its own: a line and its carriage return in one burst
+#: read as a paste to a TUI, and the line stays unsent in the composer.
 SUBMIT_KEY = b"\r"
 #: How long a prompt waits for an agent's TUI to settle before it is typed, how much silence counts
-#: as settled, and how often that is asked. A TUI drawing its banner and starting its MCP servers
-#: is not ready for a line; the same numbers the product runtime settles a raised head on.
+#: as settled, and how often that is asked.
 PROMPT_SETTLE_SECONDS = 90.0
 PROMPT_QUIET_SECONDS = 4.0
 PROMPT_POLL_SECONDS = 0.25
 #: A head that has printed nothing at all is waited on this long before its silence counts as
 #: settled: the process may not have drawn its first frame yet.
 PROMPT_FIRST_OUTPUT_SECONDS = 20.0
-#: What says a submitted prompt started a turn: this much output after the submit, within this long.
-#: An agent that takes a prompt redraws its composer, prints the prompt back and starts a spinner,
-#: which is kilobytes; an Enter that sent nothing redraws at most a cursor.
+#: A submit started a turn when this much output follows it within this long (a taken prompt
+#: redraws kilobytes; an Enter that sent nothing redraws at most a cursor).
 SUBMIT_CONFIRM_BYTES = 256
 SUBMIT_CONFIRM_SECONDS = 20.0
 #: How many submits one prompt is given before it is reported as typed and not taken.
@@ -323,8 +202,7 @@ SUBMIT_ATTEMPTS = 2
 #: Why an agent prompt did not start a turn: it is in the composer, and no submit made it go.
 DELIVER_NOT_SUBMITTED = "prompt_typed_but_no_turn_started"
 
-#: Why a stop-if-quiescent refused. The same two tokens the legacy backend uses, because the
-#: refusals mean the same thing and a caller must not have to tell the backends apart to read them.
+#: Stop-if-quiescent refusal tokens, the same as the legacy backend's.
 STOP_TURN_IN_FLIGHT = "turn_in_flight"
 STOP_ACTIVITY_SINCE = "activity_since_expected_epoch"
 
@@ -332,9 +210,8 @@ STOP_ACTIVITY_SINCE = "activity_since_expected_epoch"
 START_TURN_IN_FLIGHT = "turn_in_flight"
 START_HEAD_ALREADY_UP = "head_already_up"
 
-#: How long `stop` waits for a signalled head to actually be gone before it says it could not be
-#: confirmed. Above the supervisor's own escalation grace, so a head that only dies to `SIGKILL`
-#: is still seen to die rather than reported as a stop that failed.
+#: How long `stop` waits for a signalled head to be gone; above the supervisor's escalation grace,
+#: so a head that only dies to `SIGKILL` is still seen to die.
 STOP_CONFIRM_SECONDS = 10.0
 _CONFIRM_POLL_SECONDS = 0.05
 
@@ -343,13 +220,9 @@ _CONFIRM_POLL_SECONDS = 0.05
 REHYDRATED_FROM_SUPERVISOR = "supervisor"
 #: The supervisor is gone or unreachable and its journal answered instead, from a bounded tail.
 REHYDRATED_FROM_JOURNAL = "journal"
-#: There is no head to say anything about: the run directory holds neither socket nor journal. Not
-#: an unknown — the absence of everything a head leaves behind is a positive answer, exactly as it
-#: is for the launch identity, and a bring-up or a delivery against it is refused by the verb
-#: itself rather than fenced out here.
+#: No socket and no journal: a positive answer that there is no head, not an unknown.
 REHYDRATED_ABSENT = "absent"
-#: A head's debris exists and neither witness could say what state it is in. Fail-closed: this is
-#: the one that closes admission (obligation 2 of secretary-1479).
+#: Debris exists and neither witness could read its state. Fail-closed: closes admission.
 REHYDRATED_UNKNOWN = "unknown"
 #: Self-clearing supervisor bounds are not head state and never close admission.
 REHYDRATED_TRANSIENT = "transient"
@@ -383,11 +256,10 @@ class LocalPtyRuntimeError(RuntimeError):
 
 @dataclass(frozen=True)
 class AttachedStream:
-    """A live head's stream, as a caller is handed one, and the address it was joined at.
+    """A live head's stream and the address it was joined at.
 
-    The client is the caller's to close, and closing it is the whole of detaching: it is not a
-    message to the supervisor, it does not touch the head, and the output that arrives while
-    nobody holds a stream is still in the supervisor's buffer for the next caller.
+    Closing `client` is the whole of detaching; output arriving meanwhile stays in the supervisor's
+    buffer.
     """
 
     client: local_pty.SupervisorClient
@@ -402,25 +274,13 @@ class AttachedStream:
 
 @dataclass(frozen=True)
 class DeliveryReport:
-    """What one delivery did to the head's terminal: the decision, and the numbers behind it.
+    """What one delivery did to the head's terminal: the outcome and the numbers behind it.
 
-    `outcome` is the whole point of this object. It is one of the four names in this module's
-    vocabulary, it is decided once by `_delivery_report`, and nothing downstream re-derives it: a
-    caller — or a branch in this file — asks *which outcome this is*, never "did more than zero
-    bytes land and was it not complete", which is the predicate that made a delivery still in
-    flight look like one that had stalled.
-
-    `state` is what the receipt carries as `delivery_state`: the substrate's own state verbatim,
-    or `unknown` when the fate could not be established. `written` is what the kernel took from the
-    supervisor and `offered` is what the caller handed over — always both, never one. `journalled`
-    says whether the journal's own `input.accepted` was found for this delivery, so a reader can
-    tell a fact corroborated in two places from one that only `status` could give.
-
-    `floor` is the journal sequence this delivery was offered after, and it is what bounds which of
-    the journal's `input.accepted` records may answer for it. Delivery ids restart at 1 in every
-    supervisor incarnation while the journal is append-only across all of them, so without the
-    floor a record from a previous incarnation of a reused run directory could answer for this
-    payload.
+    `outcome` is decided once by `_delivery_report`; callers branch on it, never on byte counts.
+    `state` is the substrate's state verbatim, or `unknown`. `written` is what the kernel took,
+    `offered` what the caller handed over. `journalled` says the journal's `input.accepted` was
+    found. `floor` is the journal sequence the delivery was offered after: delivery ids restart in
+    every supervisor incarnation and the journal does not, so only records above it may answer.
     """
 
     outcome: str
@@ -431,9 +291,7 @@ class DeliveryReport:
     journalled: bool = False
     floor: int = 0
     detail: str = ""
-    #: The highest journal sequence this delivery's watch actually saw, which is what the head's
-    #: activity epoch is raised to afterwards. Never below `floor`: that one was read from the
-    #: supervisor before the payload was offered.
+    #: The highest journal sequence the watch saw; the epoch is raised to it. Never below `floor`.
     seq: int = 0
 
     @property
@@ -454,21 +312,11 @@ def _delivery_report(
     detail: str = "",
     seq: int = 0,
 ) -> DeliveryReport:
-    """Decide what became of one delivery. The only place in this backend that decides it.
+    """Decide once what became of one delivery; the only place in this backend that decides it.
 
-    `established` is whether a witness — the supervisor's `status`, or the head's journal where
-    there was a delivery id to match a record on — actually said what the delivery **ended as**. A
-    delivery that was offered and then went unwitnessed is `DELIVERY_UNESTABLISHED`, and it is
-    deliberately not folded into any of the four states the substrate has words for: "I could not find out" is not "nothing landed", and
-    reporting it as the latter is what let a payload be written straight behind a fragment that had
-    landed.
-
-    A state of `in_flight` is the same fact wearing the substrate's own word. It can only be read
-    here once the wait derived from the substrate's bound has run out, which means the substrate
-    went past a bound it declared without ending its own delivery: nobody witnessed an ending, so
-    there is none to report. Folding it in here rather than giving it an outcome of its own is what
-    keeps "the delivery has not finished" from being a thing this runtime can return — the state
-    that grew a register, a settlement and a second place to ask witnesses.
+    `established` is whether a witness (`status`, or the journal record matched on the delivery id)
+    said what the delivery ended as. Unwitnessed, or still `in_flight` after the derived wait (the
+    substrate overran its own bound), is `DELIVERY_UNESTABLISHED`, never "nothing landed".
     """
     if not established or state == protocol.DELIVERY_IN_FLIGHT:
         return DeliveryReport(
@@ -504,74 +352,21 @@ def _delivery_report(
 class LocalPtyHeadRuntime:
     """The six verbs over a head whose process, terminal and journal this product owns.
 
-    `root` is where run directories live. It is deliberately a short path: a Unix socket address is
-    bounded at about a hundred bytes, and a workspace path with a run id under it does not fit —
-    `protocol.socket_path_for` refuses rather than failing opaquely later.
+    `root` holds run directories and must be short: a Unix socket address is about 100 bytes and
+    `protocol.socket_path_for` refuses a longer one. `head_process_status` is the required
+    launch-identity reader. `connect_timeout` bounds reaching a supervisor and each non-delivery
+    question; once a delivery is admitted, `_put` rebounds the connection to `delivery_wait_for`.
 
-    `head_process_status` is the launch-identity reader, and it is required. There is no reading of
-    a head's process this runtime invents for itself: the product has exactly one scheme for that —
-    `pid`, `boot_id`, `proc_starttime_ticks` written by the head's own shell — and exactly one
-    reader of it, `head.identity.head_process_status`, which `ummanu.dispatch.watchdog`
-    re-exports for the control plane. Passing it in rather than importing it keeps every builder of
-    this runtime — the dispatcher, and the mechanical-role driver in `runtime/dispatch.py` — on
-    that one reader instead of on a scheme of its own.
-
-    `connect_timeout` is what it says and nothing more: how long a supervisor that has not spoken
-    on this connection yet may take to speak. It bounds reaching a head — the connect, and the
-    single question each of `observe`, `attach`, `request_drain` and `stop` asks — and it is
-    deliberately *not* a number that can shorten the watching of a delivery: the moment a delivery
-    is admitted, `_put` rebounds the connection from the bound the substrate declared for that
-    delivery, so every `status` inside `_follow` is bounded by the substrate's number plus the
-    grace rather than by this one. It is named separately from "how long to wait for a delivery"
-    because it answers a different question, and the two were one number only for as long as the
-    second one had no answer of its own.
-
-    There is no `delivery_timeout`. How long this runtime watches a delivery is not something it
-    is told; it is **derived**, per delivery, from the bound the substrate declared on the delivery
-    it admitted — the head's own `delivery_seconds`, the one `start` passed to the supervisor —
-    plus `delivery_grace`, which can only ever extend it. A head that needs a longer reception has
-    one number raised and the other follows it, and there is no configuration in which this runtime
-    stops watching a delivery before the substrate has finished it. That is the whole cut of
-    secretary-1466: the independent second knob is what made "the delivery is still going" a thing
-    a verb could return, and everything that grew to carry such a delivery — a register, a
-    settlement, a second place asking witnesses — is gone with it.
-
-    **One lock for every head of this runtime, and the limitation that buys is named rather than
-    hidden.** `deliver`, `request_drain`, `stop` and `stop_if_quiescent` are the four things that
-    can contradict each other about one head, so they run one at a time under a lock this object
-    owns — the legacy backend's arrangement, and it is per runtime there too. What is different
-    here is how long the lock is held: a verb on the legacy backend is one session-manager call,
-    while `deliver` holds this lock for the whole reception — up to the substrate's own
-    `delivery_seconds` plus `delivery_grace`. So a slow delivery to one head delays `observe`,
-    `attach`, `stop` and `deliver` for every *other* head this runtime holds, for that long.
-
-    It is accepted here, and these are the terms:
-
-      * **nothing is delayed today.** The dispatcher constructs its backends per tick process and
-        drives every verb from that tick's single thread, so there is no second caller in existence
-        to be made to wait. The delay is a property of a concurrency this product does not yet
-        have;
-      * **the hold is bounded, and by a number no profile can raise.** `delivery_seconds` is an
-        argument of `start`, not a registry key: per-profile runtime selection (secretary-1467) did
-        not give a profile one. Every head therefore comes up on the substrate's default of
-        `protocol.INPUT_DELIVERY_SECONDS`, so the worst hold is that plus `DELIVERY_GRACE_SECONDS`
-        — fifteen seconds — which is under one dispatcher tick;
-      * **when it stops being acceptable**, which is the half a limitation is worth naming for. Two
-        thresholds, either one of which is enough: a second caller — a thread, an operator command
-        sharing one runtime object with a tick, a dispatcher that drives two heads at once — or a
-        `delivery_seconds` a profile can raise. The moment a head's reception can be configured
-        past a tick's own period, one head's delivery can starve another head's `stop`, and a stop
-        that cannot run is how a head gets a second one opened beside it.
-
-    The repair, when either threshold is crossed, is the one this docstring is standing in for: a
-    lock per head held across the verb, with this runtime-wide lock reduced to the bookkeeping
-    `HeadActivity` and `_fatal` need — they are shared across heads and `HeadActivity` explicitly
-    locks nothing of its own, so the per-head lock cannot simply replace this one.
+    One lock serialises `deliver`, `request_drain`, `stop` and `stop_if_quiescent` across all heads
+    of this runtime, and `deliver` holds it for the whole reception (at most
+    `protocol.INPUT_DELIVERY_SECONDS` + `DELIVERY_GRACE_SECONDS`, as no profile can raise
+    `delivery_seconds`). That is fine while each tick drives every verb from one thread. Once a
+    runtime has a second concurrent caller or a configurable `delivery_seconds`, use a per-head lock
+    and keep this one only for the shared `HeadActivity` and `_fatal` bookkeeping.
     """
 
-    #: The supervisor wraps the head command in the launch-identity heartbeat, so a caller hands
-    #: `start` a bare command and at most the `pid_file` it will read. A caller that wrapped it too
-    #: would `exec` the inner writer and never run the head (secretary-1698).
+    #: The supervisor wraps the head command in the launch-identity heartbeat, so callers pass a
+    #: bare command; a pre-wrapped one would `exec` the inner writer and never run the head.
     writes_launch_identity = True
 
     def __init__(
@@ -628,11 +423,7 @@ class LocalPtyHeadRuntime:
     def delivery_wait_for(self, substrate_bound: float) -> float:
         """How long this runtime watches a delivery the substrate bounded at `substrate_bound`.
 
-        The one place the wait is computed, and it is a function of the substrate's number rather
-        than of anything this runtime was configured with: the grace is added, never subtracted, so
-        the answer is always strictly longer than the bound it is derived from. A delivery the
-        substrate admitted without declaring a bound on it is waited out at the substrate's own
-        default, which is still the substrate's number and not a second one kept here.
+        Always the substrate's bound (its default when undeclared) plus the non-negative grace.
         """
         bound = float(substrate_bound) if substrate_bound > 0 else UNDECLARED_DELIVERY_BOUND
         return bound + self._delivery_grace
@@ -662,35 +453,19 @@ class LocalPtyHeadRuntime:
         transport: Any = None,
         **ignored: Any,
     ) -> StartReceipt:
-        """Bring one head up under a supervisor of its own, and point it at its task.
+        """Bring one head up under its own supervisor and point it at its task.
 
-        `title` is what Orca puts on a pane and this backend has no pane, so it is accepted and
-        unused rather than refused: the caller above the boundary hands both backends the same
-        arguments, and a verb that rejected one of them would make the boundary a lie.
+        `title` is accepted and unused (there is no pane). A run this runtime holds a turn for, or
+        whose launch identity on disk says it is up (`_already_up`; each tick is a new process), is
+        refused before anything is spawned. `pid_file` is where the caller reads liveness when it is
+        not the run directory's `head.pid`; the supervisor writes the launch identity there.
 
-        A bring-up that names a run this runtime is already holding a turn for is refused before
-        anything is started, exactly as on the legacy backend: the invariant belongs to the
-        boundary, not to a convention its callers keep.
+        `scope_generation` names a caller's durable write-ahead admission: the launch preserves it
+        and cannot replace an existing scope owner. Without it, a fresh generation is acquired after
+        proving the previous owner empty.
 
-        That refusal is made twice, by two witnesses, and both are made before anything is spawned.
-        The turn lease is this runtime's own memory, and it can only ever answer for the heads this
-        object started; the production dispatcher is a systemd timer, so every tick is a *new*
-        process whose activity is empty by construction and for which a head brought up a tick ago
-        never existed. `_already_up` is the second witness, and it is the head's own launch identity
-        on disk — the one fact about a head that outlives the process that started it.
-
-        `pid_file` is where the caller reads this head's liveness, when that is not the run
-        directory's `head.pid`: the dispatcher reads its watchdog heartbeat at a path it knew before
-        the head existed. The head writes its launch identity there, once, through the supervisor;
-        the command it is handed is the bare head command.
-
-        `scope_generation` names a caller's durable write-ahead admission. That launch preserves
-        it and cannot replace an existing scope owner. Ordinary replacement starts omit it and
-        acquire a fresh generation after proving the previous owner empty.
-
-        A `pointer` handed over with a `transport` is an agent's prompt, and it is delivered the
-        way `deliver` delivers one (see there): once the head has settled, typed, then submitted,
-        with a turn seen to start. That wait happens outside this runtime's lock, after the spawn.
+        A `pointer` with a `transport` is an agent's prompt, delivered as `deliver` does, after the
+        spawn and outside the lock.
         """
         del title, ignored
         receipt = self._start_locked(
@@ -758,11 +533,7 @@ class LocalPtyHeadRuntime:
         pid_file: str,
         scope_generation: str,
     ) -> StartReceipt:
-        """`start` under the lock: the refusals, the spawn and a bare pointer's one delivery.
-
-        Given no pointer, its receipt carries the live run, which is what lets `start` put an
-        agent's prompt in front of it without holding this runtime's lock across the settling.
-        """
+        """`start` under the lock: the refusals, the spawn and a bare pointer's one delivery."""
         with self._lock:
             claimed = run.run_id if run is not None else (run_id or "")
             if claimed:
@@ -880,30 +651,13 @@ class LocalPtyHeadRuntime:
         transport: Any = None,
         **ignored: Any,
     ) -> DeliverReceipt:
-        """Put one prompt in front of a running head, and say what became of the bytes.
+        """Put one prompt in front of a running head and say what became of the bytes.
 
-        The refusals before anything is written are the legacy backend's, and they mean the same
-        things: `HEAD_DRAINING` is a head this runtime hands no more work — a drain was requested,
-        or a partial delivery closed it — and `HEAD_BUSY` is a turn this runtime handed out that is
-        still running. Neither is a queue.
-
-        What follows the admission is this backend's own, and it is the reason `ok` can be trusted
-        here: the payload is followed **to its end** — the wait is the substrate's own bound for
-        this delivery plus the named grace, so there is no way for this verb to return while the
-        substrate is still writing — what became of it is decided once as one of the four names in
-        this module's vocabulary, and the receipt carries that decision as its status, its
-        `delivery_state` and its two byte counts. `ok` is only ever `DELIVERY_ARRIVED`, and it
-        means the head received *this payload as its own message* rather than that these bytes were
-        written. See the module docstring for which of the outcomes close this head and why.
-
-        **A `transport` makes the pointer an agent's prompt.** The dispatcher hands every backend
-        the transport it delivers a prompt to an agent's TUI through; this backend owns no pane and
-        reads nothing of it but its `before_send` hook (see `_before_send`), but its presence
-        is what says the line is for a composer, and a composer
-        needs its line *submitted*: a line that ends in a newline is a line break in Claude's
-        composer, and a line with its carriage return in one burst is read as a paste. Without the
-        transport the line is delivered as it always was, which is what a line-reading head needs.
-        See `_deliver_prompt` for what delivering a prompt means here.
+        Before writing: `HEAD_DRAINING` (admission closed) or `HEAD_BUSY` (a turn is running);
+        neither queues. After admission the payload is followed to its end and the receipt carries
+        its outcome; `ok` is only `DELIVERY_ARRIVED`. A `transport` marks the pointer as an agent's
+        composer prompt, typed and then submitted separately (`_deliver_prompt`); only its
+        `before_send` hook is used (`_before_send`).
         """
         del ignored
         if transport is not None:
@@ -918,11 +672,7 @@ class LocalPtyHeadRuntime:
         payload: bytes | None = None,
         wake: Callable[[], Any] | None = None,
     ) -> DeliverReceipt:
-        """`deliver` for one payload: the pointer's line, or `payload` when one is given.
-
-        `wake` is the caller's pre-send hook, and it is performed once the payload has been
-        admitted and before its first byte, whatever the head's stop state (`_before_send`).
-        """
+        """`deliver` for the pointer's line, or `payload`; `wake` runs after admission (`_before_send`)."""
         with self._lock:
             # Rehydrate under the decision lock from the section's single status frame.
             _, probe = self._section_probe(run)
@@ -966,8 +716,7 @@ class LocalPtyHeadRuntime:
                 self.activity.release(run.run_id)
                 raise
             if refusal is not None:
-                # Refused at admission: nothing of this attempt reached the terminal, so the turn
-                # it would have started is handed back.
+                # Refused at admission: nothing reached the terminal, so the turn is handed back.
                 self.activity.release(run.run_id)
                 return DeliverReceipt(
                     status=refusal.status,
@@ -1006,27 +755,19 @@ class LocalPtyHeadRuntime:
     ) -> DeliverReceipt:
         """Put an agent's prompt in front of it the way a keyboard does, and see a turn start.
 
-        Four steps, each through this runtime's own verbs, and none holding its lock across a wait:
+        No step holds the lock across a wait:
 
-        1. **wait until the head has stopped printing** (`_await_settled`). A TUI that is drawing
-           its banner and starting its MCP servers is not ready for a line; a head in a turn is
-           not waited on here, because step 2 refuses it `HEAD_BUSY` by itself;
-        2. **deliver the line.** It lands in the composer and sends nothing. Every refusal and
-           every fatal outcome is this delivery's, exactly as for a bare line. `wake`, the
-           caller's pre-send hook, runs once the line has been admitted and before its first byte:
-           it resumes a retained worker the dispatcher froze with `SIGSTOP` (secretary-1702) and
-           binds a Codex head's provider source (secretary-1719);
-        3. **wait until the substrate's turn over that line has closed** (`_await_idle`). The
-           supervisor opens a turn for every payload and closes it on silence, so a second payload
-           made at once is refused by a turn that is about the echo rather than about the agent;
-        4. **deliver `SUBMIT_KEY` alone, and watch the head answer** (`_await_turn`). A prompt the
-           agent took is kilobytes of redraw and spinner; an Enter that sent nothing is at most a
-           cursor. One more Enter is given, and then the prompt is reported as typed and not taken:
-           `HEAD_ALIVE` with `DELIVER_NOT_SUBMITTED`, never `ok`.
+        1. wait until the head stops printing (`_await_settled`); a head in a turn is refused
+           `HEAD_BUSY` by step 2;
+        2. deliver the line, which lands in the composer; `wake` runs after admission and before
+           the first byte (`SIGCONT` for a retained worker, a Codex provider bind);
+        3. wait until the substrate's turn over that line closes (`_await_idle`), or the submit
+           would be refused by the echo's turn;
+        4. deliver `SUBMIT_KEY` alone and watch for a turn's output (`_await_turn`), up to
+           `SUBMIT_ATTEMPTS` times.
 
-        So `ok` here means what the dispatcher's own TUI transport means by it: a turn was seen to
-        start, and the evidence says `turn_confirmed` only then (the launch evidence of
-        issue:70562b15a7dc8764437e said it over a prompt still sitting in the composer).
+        `ok` and `turn_confirmed` only when a turn was seen to start; otherwise `HEAD_ALIVE` with
+        `DELIVER_NOT_SUBMITTED`.
         """
         self._await_settled(run)
         typed = self._deliver_payload(run, pointer, subject, wake=wake)
@@ -1084,25 +825,12 @@ class LocalPtyHeadRuntime:
         )
 
     def _before_send(self, run: HeadRun, hook: Callable[[], Any]) -> HeadRun:
-        """Perform the caller's pre-send hook, and hand on the run it bound.
+        """Run the caller's pre-send hook after admission and before `_put`, whatever the stop state.
 
-        The Orca transport performs `before_send` once per delivery, after the pane was seen ready
-        and before the first byte, whatever the head's stop state; this backend has no pane
-        transport, so it performs it here, at the same point: after admission, before `_put`. A
-        refused delivery never reaches it. What the dispatcher hands as the hook, and why each is
-        harmless on a head that is running:
-
-          * a retained worker's continuation: `SIGCONT` to the head's group, which a running
-            process ignores. Without it every byte of the continuation and both Enters were written
-            into the pty of a stopped process (secretary-1702);
-          * a Codex head's `CodexProviderEventIngress.bind_before_delivery`: binds and scans the
-            provider's session journal. Advisory telemetry that never controls delivery, and before
-            secretary-1719 a running head never had it performed here.
-
-        A hook that returns a `HeadRun` returns the run its source was bound under, and it is merged
-        the way the transport's handoff merges it (`post_delivery_run`), so the receipt does not
-        hand the caller a copy the binding has already outdated. Any other return is not read. A
-        hook that raises is not caught here: `_deliver_payload` hands back the turn and re-raises.
+        Each hook is harmless on a running head: `SIGCONT` for a retained worker (without it the
+        bytes go to a stopped process) and a Codex `bind_before_delivery` (advisory telemetry). A
+        returned `HeadRun` is merged via `post_delivery_run`; other returns are ignored. Exceptions
+        propagate, and `_deliver_payload` hands back the turn.
         """
         handed = hook()
         if isinstance(handed, HeadRun):
@@ -1112,10 +840,8 @@ class LocalPtyHeadRuntime:
     def _await_settled(self, run: HeadRun) -> None:
         """Wait until the head has printed nothing new for `prompt_quiet`, within `prompt_settle`.
 
-        Read off the supervisor's count of what the head printed, the only thing that moves while
-        a TUI draws itself. A head that has printed nothing at all is given `prompt_first_output`
-        before its silence counts. A head that cannot be observed, or is in a turn, is not waited
-        on: the delivery that follows says what it is.
+        A head that has printed nothing yet gets `prompt_first_output` first. A head that cannot be
+        observed, or is in a turn, is not waited on.
         """
         began = time.monotonic()
         deadline = began + self._prompt_settle
@@ -1167,16 +893,9 @@ class LocalPtyHeadRuntime:
     def observe(self, run: HeadRun) -> ObserveReceipt:
         """What the substrate can say about this head now: its status, its journal, its process.
 
-        Nothing is guessed. `busy` comes from the supervisor's own turn state and from the turn
-        lease this runtime is holding, and stays `None` for every answer that is not one — a socket
-        that did not answer is not a head that is idle. The epoch is the head's own journal
-        sequence, which moves when the substrate wrote a record and not on the fact of having
-        looked: looking twice at a quiet head reads the same number twice, which is exactly the
-        fact a caller watching for progress needs to be able to read.
-
-        The supervisor is asked **once**, and the same answer both rehydrates this runtime and
-        supplies the observation (obligation 3). Asking twice would not only cost two requests; it
-        would report a head as it was at one moment out of an epoch read at another.
+        `busy` comes from the supervisor's turn state and this runtime's lease, and stays `None`
+        without an answer. The epoch is the journal sequence, so a quiet head reads the same number
+        twice. The supervisor is asked once, and that answer both rehydrates and is reported.
         """
         with self._lock:
             address = self._address(run)
@@ -1241,17 +960,11 @@ class LocalPtyHeadRuntime:
             )
 
     def request_drain(self, run: HeadRun, initiator: StopInitiator) -> DrainReceipt:
-        """Take this head out of service, at this runtime *and* at the process that owns it.
+        """Take this head out of service, here and at the supervisor that owns it.
 
-        Two facts, and they are separate because a backend can own one without the other. This one
-        owns both when the socket answers: admission closes here, and the supervisor closes it
-        there — `drain.requested` in the head's own journal, and every later `input` refused by
-        name — which is read back from `status` before `head_signalled` is claimed. When the socket
-        cannot be reached the gate is still real locally and the receipt says exactly that instead.
-
-        What a drain closes is admission, never the turn. A head that is mid-turn keeps running it
-        and keeps its lease; nothing is interrupted, cancelled or written into its terminal. When
-        that last turn closes the head is done, and `rotation_ready` says so.
+        Admission closes locally, and on the supervisor when the socket answers; `head_signalled` is
+        claimed only once `status` reads it back. A drain closes admission, never the turn: a
+        mid-turn head keeps its turn and lease, and is `rotation_ready` once that turn closes.
         """
         if not isinstance(initiator, StopInitiator):
             raise TypeError("a drain names who requested it")
@@ -1259,18 +972,10 @@ class LocalPtyHeadRuntime:
             self.activity.close_admission(run.run_id)
             self._admission_notes.setdefault(run.run_id, DELIVER_DRAINED_BY_THIS_RUNTIME)
             signalled, evidence, seq, probe = self._close_substrate_admission(run, initiator)
-            # Rehydrated out of that same read-back, and therefore *after* the drain rather than
-            # before it. A drain must not lose the turn a previous tick granted — `rotation_ready`
-            # on this receipt is a statement about that turn — and the read-back frame states it:
-            # a drain closes admission and never a turn, so the frame taken after it says
-            # everything the frame taken before it would have, one status request later in time
-            # and none later in cost. This section spends exactly one (obligation 3), and it is
-            # the one `head_signalled` is already claimed from.
+            # Rehydrate from the post-drain read-back, the section's one status request: a drain
+            # never closes a turn, so it still states the turn `rotation_ready` depends on.
             self._rehydrate(run, probe)
-            # The sequence read back *after* the drain, so that the epoch on this receipt counts
-            # the `drain.requested` record this verb just caused rather than the state before it.
-            # It comes off the read-back `head_signalled` is already claimed from: no second
-            # request, and no number of this runtime's own invention.
+            # The epoch counts the `drain.requested` record this verb just caused.
             self.activity.noted(run.run_id)
             return DrainReceipt(
                 status=HEAD_OK if signalled else HEAD_ALIVE,
@@ -1292,16 +997,11 @@ class LocalPtyHeadRuntime:
         signal_name: str = "TERM",
         **ignored: Any,
     ) -> StopReceipt:
-        """End this head, and confirm the ending against the head's own launch identity.
+        """End this head unconditionally, and confirm it against the head's launch identity.
 
-        Unconditional, as on the legacy backend: a freeze, an operator taking a head down and a
-        bring-up cleaning up after itself all mean "end this now" and must not be refused because
-        the head happens to be mid-turn. A stop meant to happen only while the head is quiet asks
-        for that by name, through `stop_if_quiescent`.
-
-        The initiator is recorded on the run before the signal is sent, so a stop that outlives
-        this process still names who began it. A scoped head also requires the durable owner's
-        recursive empty proof; the launch identity going dead only confirms the head's exit.
+        `stop_if_quiescent` is the conditional form. The initiator is recorded on the run before the
+        signal, so a stop that outlives this process names who began it. A scoped head also needs
+        the durable owner's recursive empty proof; the identity going dead only confirms the exit.
         """
         with self._lock:
             preflight = ignored.get("preflight")
@@ -1369,9 +1069,8 @@ class LocalPtyHeadRuntime:
                     lease=self.activity.lease(run.run_id),
                     rotation_ready=self.activity.rotatable(run.run_id),
                 )
-            # The last thing the head's own journal says, read before this runtime forgets the
-            # head: a stop's receipt carries a sequence the next tick could still compare, and a
-            # process-local increment here would be the very number obligation 5 rules out.
+            # Read the journal's sequence before forgetting the head, so the receipt's epoch is one
+            # the next tick can compare.
             self.activity.noted(run.run_id)
             epoch = self._durable_epoch(run)
             self.activity.forget(run.run_id)
@@ -1380,15 +1079,10 @@ class LocalPtyHeadRuntime:
             return StopReceipt(status=HEAD_OK, run=finishing if finishing.settled else finishing.exited(), evidence=asked, epoch=epoch)
 
     def attach(self, run: HeadRun) -> AttachReceipt:
-        """Join a caller to this head's live stream, through the substrate's own bounded attach.
+        """Join a caller to this head's live stream through the substrate's bounded attach.
 
-        The stream travels on `evidence` as an `AttachedStream`: the connected client, the output
-        the head produced before this caller arrived, and how much of it the supervisor had already
-        dropped. `handle` is what the attachment is addressed by — the socket — so a caller that
-        can do something with an address still gets one when it is refused a stream.
-
-        Detaching is closing that client. It is not a message, it does not reach the head, and the
-        head's output goes on being buffered for whoever attaches next.
+        The stream travels on `evidence` as an `AttachedStream`. `handle` is the socket, returned
+        even when the stream is refused. Detaching is closing the client.
         """
         with self._lock:
             self._rehydrate(run)
@@ -1424,10 +1118,7 @@ class LocalPtyHeadRuntime:
             try:
                 answer = client.attach()
             except _UNREACHABLE as exc:
-                # Connected, and then nothing came back. A verb of this boundary answers with a
-                # receipt for that too: an attachment that did not happen against a head that is
-                # still the caller's to account for, classified by the head's process rather than
-                # by the socket that dropped.
+                # Connected, then nothing came back: classify by the head's process, not the socket.
                 client.close()
                 return AttachReceipt(
                     status=HEAD_ALIVE if self._process_alive(address, run) else HEAD_GONE,
@@ -1484,43 +1175,20 @@ class LocalPtyHeadRuntime:
     ) -> StopReceipt:
         """End this head only while it is still quiet, with the check and the stop indivisible.
 
-        The composition the legacy backend owes and this one owes identically, in the order
-        secretary-1462 fixed and for the same reasons:
+        Order, as on the legacy backend:
 
-          1. **the head's epoch against the caller's**, first and before anything is probed. It
-             moved, so the judgement that decided this head was finished has expired;
-          2. **the head's process, by the fact the caller established.** A process established not
-             alive makes any outstanding lease stale by definition — the turn it names ended when
-             the process did — so the lease is closed and the supervisor is **not** asked. Liveness
-             outranks terminal readiness here exactly as it does on Orca: a substrate that is
-             answering about a head that is gone would still report the turn it last saw, and a
-             signal that cannot tell "working" from "not there" cannot hold a veto over "not
-             there";
-          3. **only for a live process, the end of the turn**, read from the supervisor;
-          4. **admission closed, then the stop**, with a refusal putting admission back exactly as
-             it found it — including when an earlier drain had already closed it.
-
-        `head_process_alive` is a required argument rather than something read here, for the same
-        reason it is one on the legacy backend: it is the caller's own launch-identity evidence,
-        the very reading that made it decide this head needed replacing, and re-deriving it here
-        would answer a different question at a different moment.
+          1. the head's epoch against `expected_activity_epoch`, before anything is probed;
+          2. `head_process_alive`, the caller's own launch-identity evidence: a dead process makes
+             any lease stale, so it is released and the supervisor is not asked;
+          3. only for a live process, the end of the turn, read from the supervisor;
+          4. admission closed, then the stop; a refusal restores admission as it found it.
         """
         if not isinstance(initiator, StopInitiator):
             raise TypeError("a stop names who ended the head")
         with self._lock:
-            # Inside the same lock and the same critical section as the comparison it serves, and
-            # unconditionally — a snapshot an earlier verb of this object took is a snapshot of a
-            # different moment, and comparing against one is how this stop came to kill the turn
-            # a concurrent tick had opened after that verb ran. It is not a fifth step of the
-            # order above and it is not a probe of the head's readiness: it is how this object
-            # comes to hold the epoch and the turn that the process which granted them would have
-            # held, so that step 1 compares two numbers on one scale instead of comparing a
-            # caller's number against an empty — or a stale — memory.
-            #
-            # One status frame for this whole section (obligation 3): the answer that rehydrates
-            # the epoch and the lease is the same answer step 3 reads the end of the turn from.
-            # Two requests would also be two moments, and a lease adopted at one moment and tested
-            # at another is the very comparison across time this rehydration exists to remove.
+            # Rehydrate unconditionally inside this section, so step 1 compares against what the
+            # head's witnesses say now, not against an empty or stale memory. One status frame
+            # serves both the rehydration and step 3.
             _, probe = self._section_probe(run)
             self._rehydrate(run, probe)
             epoch = self.activity.epoch(run.run_id)
@@ -1574,13 +1242,9 @@ class LocalPtyHeadRuntime:
             self._admission_notes.pop(run_id, None)
 
     def activity_epoch(self, run: HeadRun) -> int:
-        """This head's activity epoch, asked of the head rather than of this object's memory.
+        """This head's activity epoch, rehydrated under the lock `stop_if_quiescent` takes.
 
-        The reader a caller uses when it is about to hand the epoch back to `stop_if_quiescent`
-        and is not the process that granted it. `self.activity.epoch` answers out of memory, and
-        memory is empty in a tick that has just started; this rehydrates first, under the same
-        lock the conditional stop takes, so the number a tick reads and the number that tick's
-        stop compares it against are on the same scale and describe the same head.
+        For a caller that will hand the epoch back to `stop_if_quiescent` without having granted it.
         """
         with self._lock:
             self._rehydrate(run)
@@ -1589,60 +1253,14 @@ class LocalPtyHeadRuntime:
     # -- what outlived the process that knew it -------------------------------------------------
 
     def _rehydrate(self, run: HeadRun, probe: _Probe | None = None) -> None:
-        """Recover this head's turn, epoch and admission from the substrate that outlived them.
+        """Recover this head's turn, epoch and admission from the supervisor, else its journal.
 
-        The whole of secretary-1479, and it stores nothing new: the durable truth already exists
-        in two places this backend owns, and until now nobody asked them.
-
-          * **the supervisor**, over its socket, in one request — `alive`, `draining`, `stopping`,
-            `turn_open`, `turn` and `journal_seq` are all on the answer `status` already gives;
-          * **its journal**, when the supervisor is gone, read as a bounded tail
-            (`local_pty.JOURNAL_TAIL_BYTES`). A supervised role's run directory is reused and its
-            journal is append-only across incarnations, so reading the whole file every tick is a
-            cost that grows with the head's history; the shape of the head *now* is in its last
-            records, and `run.started` inside the window resets the derivation so that a previous
-            incarnation's drain or turn cannot answer for this one.
-
-        **Once per critical section, and every critical section.** Not once per head per process:
-        that was a cache, and a cache is a snapshot whose freshness is decided by whoever happened
-        to ask first rather than by the decision being made now. A conditional stop that compared
-        an epoch rehydrated by an earlier verb compared a number the head had already moved past,
-        and killed the turn another tick had opened in between. The bound of obligation 3 is kept
-        where it belongs — **one status request per critical section** — by `_Probe`: a verb that
-        needs the supervisor's answer for itself asks once and hands that answer to this.
-
-        **Only in the direction the head already went.** The epoch is raised, never set; the turn
-        is adopted, never granted over one that is held; admission is closed, never re-opened.
-        Rehydration cannot invent activity, cannot evict a running turn and cannot put a head that
-        somebody drained back into service.
-
-        **A bound the substrate clears by itself is neither an answer nor an unknown.** Three
-        classes of evidence and no collapsing between them: the supervisor's status frame or its
-        journal act; a typed self-clearing refusal — `connection_limit`, `attach_limit` — is
-        retried and leaves this head exactly as it was; and only a genuine silence fails closed.
-        The middle one is a refusal of *this caller* by a supervisor that is alive and not
-        draining, so treating it as the unknown below closed a live head's admission over a limit
-        that clears the moment somebody lets go.
-
-        **Unknown is not freedom, and it is not a lease either** (obligation 2). A head whose
-        debris exists but whose state neither witness can state has its admission closed, so no
-        new turn is admitted on an unknown; it is given no turn lease, because a fabricated lease
-        would be a fence nothing could lift — it would make a head that is positively dead
-        un-rotatable forever, and only the head itself ever writes the evidence that would clear
-        it.
-
-        **And a head that has positively ended is closed too, which is what makes it rotatable.**
-        Closing admission over a dead head is not a fence: a fence is a lease, and the dead are
-        given none. `rotatable` is "takes no more work and holds no turn", so a head whose
-        supervisor says it exited — or whose launch identity says its process is dead — answers
-        that truthfully only once the first half of it is closed. Its replacement is not held up
-        by any of this, because a bring-up consults the launch identity and never admission
-        (obligation 1), and `start` clears what this runtime believed about the incarnation that
-        ended before the new one takes the same id.
-
-        **Liveness is not asked here** (obligation 1). Whether a head's process is alive is
-        `head_process_status` and stays `head_process_status`; the launch identity is consulted
-        only for the one negative above, and this adds no second answer to that question.
+        Runs once in every critical section, never cached; `_Probe` keeps that to one status request
+        per section. It only moves the way the head went: the epoch is raised, a turn is adopted
+        (never over a held one), admission is closed (never re-opened). A self-clearing refusal
+        (`connection_limit`, `attach_limit`) leaves the head as it was. An unknown state closes
+        admission and adopts no lease. A positively ended head (the supervisor says it exited, or
+        the launch identity says dead) closes admission and adopts no lease, so it is rotatable.
         """
         run_id = run.run_id
         if not run_id:
@@ -1652,23 +1270,17 @@ class LocalPtyHeadRuntime:
             return
         state = self._durable_state(address, run_id, probe)
         if state.source in (REHYDRATED_ABSENT, REHYDRATED_TRANSIENT):
-            # Nothing to recover from, and — for a bound the substrate clears by itself — nothing
-            # this runtime is entitled to conclude either. The head is left exactly as it was:
-            # admission untouched, no lease adopted, the epoch where it stood. Not even the
-            # sequence moves, because a refusal frame carries none.
+            # Nothing to recover from, or a self-clearing bound: leave the head exactly as it was.
             return
-        # The sequence first and unconditionally: it is the one thing a window that cannot account
-        # for its shape still states truthfully, and the epoch is that number or it is nothing.
+        # The sequence first: even a window that cannot account for its shape states it truthfully.
         self.activity.advance_to(run_id, state.seq)
         if state.source == REHYDRATED_UNKNOWN:
             self.activity.close_admission(run_id)
             self._admission_notes.setdefault(run_id, DELIVER_STATE_UNKNOWN)
             return
         if state.exited or self._identity_says_dead(address):
-            # Positively ended. No lease is adopted — the journal's last word about a supervisor
-            # killed mid-turn is `turn.started`, and believing it against a process that is gone
-            # would hold the one lease nothing could ever release — and admission is closed, so
-            # that the head this runtime can say nothing more about is one it can say is done.
+            # Positively ended: adopt no lease (a supervisor killed mid-turn leaves `turn.started`
+            # last, a lease nothing could release) and close admission.
             self.activity.close_admission(run_id)
             self._admission_notes.setdefault(run_id, DELIVER_HEAD_ENDED)
             return
@@ -1687,14 +1299,10 @@ class LocalPtyHeadRuntime:
             )
 
     def _durable_epoch(self, run: HeadRun, probe: _Probe | None = None) -> int:
-        """This head's epoch, raised to the journal sequence its own witnesses are at.
+        """This head's epoch, raised to the journal sequence its witnesses state.
 
-        The one way an epoch is ever produced on this backend (obligation 5). There is no second,
-        process-local scale beside it: a receipt whose number was invented here is a number the
-        next tick cannot compare to anything, and `stop_if_quiescent` would then be comparing a
-        count of what one object did against a sequence the head wrote. A witness that cannot say
-        a sequence leaves the epoch where it was — `advance_to` never lowers it — so the honest
-        answer to "nobody could tell me" is the last thing somebody could.
+        The only way an epoch is produced on this backend; a witness that states none leaves it
+        unchanged (`advance_to` never lowers it).
         """
         address = self._address(run)
         if address is None:
@@ -1702,13 +1310,10 @@ class LocalPtyHeadRuntime:
         return self.activity.advance_to(run.run_id, self._durable_state(address, run.run_id, probe).seq)
 
     def _section_probe(self, run: HeadRun) -> tuple[_Address | None, _Probe | None]:
-        """The successful-path status request, taken once at the top of a critical section.
+        """The section's one status request, taken at its top; `None` when there is no socket.
 
-        Its answer serves the rehydration, the turn question and the substrate call alike. A
-        failed attempt carries one consumable recovery request into `_put`; `_Probe.spend_retry`
-        makes a third request impossible even if another consumer later tries to recover too.
-        `None` where there is no socket to ask — the journal answers those, and it costs no
-        request.
+        A failed attempt carries one consumable recovery request into `_put` (`_Probe.spend_retry`),
+        so no section makes a third.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -1716,13 +1321,9 @@ class LocalPtyHeadRuntime:
         return address, self._probe(address)
 
     def _probe(self, address: _Address) -> _Probe:
-        """Ask the supervisor once what this head is doing, and keep whatever came of asking.
+        """Ask the supervisor once for `status`: an `ok` frame, another frame, or the transport error.
 
-        On success this is the only status request in the section. Nothing answering gives the
-        section one bounded recovery attempt, consumed by `_Probe.spend_retry` before it is made.
-        It is a method rather than an inline `try` so that the three endings a socket has — an
-        answer, a frame that is not one, and nothing at all — are separated in one place and read
-        by name everywhere else.
+        A transport error grants the section one recovery attempt (`_Probe.spend_retry`).
         """
         try:
             with self._connect(address) as client:
@@ -1736,21 +1337,10 @@ class LocalPtyHeadRuntime:
     def _durable_state(self, address: _Address, run_id: str, probe: _Probe | None = None) -> _DurableHead:
         """What the head itself still says about its turn, its admission and its epoch.
 
-        The supervisor first and the journal second, in that order and never the other way round:
-        a live supervisor is the head's present tense, while the journal is what it wrote down.
-        The journal is not a fallback that can open a door the socket closed — a tail that cannot
-        account for its own shape is an unknown here, and an unknown closes admission.
-
-        `probe` is the answer a caller already has, when this critical section has already spent
-        its one status request. Passing it is what keeps the cost of obligation 3 at one request
-        for every verb that needs the supervisor's answer for itself as well.
-
-        **Three classes of evidence, and none of them may become another.** A durable answer — this
-        supervisor's status frame, or its journal — acts. A typed refusal the substrate clears by
-        itself is retried and changes nothing: the journal is *not* consulted behind it, because a
-        tail that cannot account for its shape would then answer for a supervisor that is alive and
-        talking, and an unknown closes admission. And a genuine silence — no frame, or a frame this
-        runtime cannot read — is the unknown that fails closed.
+        The supervisor first. Its frame acts; a self-clearing refusal is `REHYDRATED_TRANSIENT` and
+        the journal is not consulted behind it. Silence or an unreadable frame falls to the journal,
+        where a tail that cannot account for its shape is `REHYDRATED_UNKNOWN`. `probe` reuses the
+        section's status request.
         """
         if not address.socket_path.exists() and not address.journal_path.exists():
             return _DurableHead(source=REHYDRATED_ABSENT)
@@ -1776,51 +1366,15 @@ class LocalPtyHeadRuntime:
         role: str,
         pid_file: str = "",
     ) -> StartReceipt | None:
-        """The refusal of a bring-up over a head whose own launch identity says it is running.
+        """Refuse a bring-up over a head whose launch identity is a live match; `None` otherwise.
 
-        `None` when there is nothing to refuse, and a receipt when there is: the caller returns it
-        unchanged, so this decision is made in one place and is made *before* `_spawn`. Which is
-        the whole point — a second supervisor started over a live head is not a state this backend
-        recovers from by noticing afterwards.
-
-        The evidence is the head's own launch-identity record and nothing else. Not the run
-        directory, not the socket file, not the journal: all three are debris a dead head leaves
-        behind, and a bring-up fenced out by debris is a card that never runs again. The record
-        answers because it carries `boot_id` and `proc_starttime_ticks` beside the pid, so a
-        record written before this host rebooted — or a pid the kernel has since handed to
-        something else — is read as the dead head it describes rather than as a live one.
-
-        **Only a positive live match refuses.** A record that is missing, half-written, malformed
-        or unreadable is not evidence that a head is up, and this returns `None` for every one of
-        them: the bring-up goes ahead. That direction is chosen deliberately and it is the
-        asymmetry the two failures deserve. Refusing on unreadable evidence turns a corrupt file
-        into a permanent fence around a run that nothing can lift, because nothing ever rewrites
-        that file except the head this refusal is preventing. Proceeding on unreadable evidence
-        risks a second supervisor — and that one is caught again downstream, by the run directory
-        lock the supervisor takes and by its own `_refuse_a_second_head`, which reads the same
-        record from inside the process that would be the second owner.
-
-        The record read first is the **canonical** one, `root/run_id/head.pid`, and never the
-        `pid_file` on the run the caller handed in. A live head writes its launch identity where this backend
-        told it to write it, which is that path and only that path; the `pid_file` on the run a
-        bring-up arrives with is the dispatcher's own watchdog heartbeat, at a workspace path the
-        tick has just *cleared* (`DispatcherHost._launch` drops it before every launch so a
-        previous launch's pid cannot answer for this one). Asking that file whether a head is up
-        gets the answer the clearing put there — nothing — no matter how alive the head is. So the
-        subject is stripped of it before `_address` derives the address, which is exactly what
-        `_address` does with a run that carries no `pid_file`: the derivation is the point, since
-        the head this refuses over was started by a process that is gone. Only the admission reads
-        the canonical path this way; `observe`, `stop`, `stop_if_quiescent` and `deliver` keep
-        honouring the caller's `pid_file`, because for those verbs it is the dispatcher's own
-        identity contract about a head it is already tracking, not a question about whether one
-        exists.
-
-        A bring-up that designates a `pid_file` to `start` is the other place this run's head can
-        have written its identity (secretary-1698): the head of an earlier bring-up with the same
-        designation wrote there and not under the run directory. So that file is read too, and a live
-        match in either refuses. The dispatcher no longer empties that file before a bring-up on this
-        backend, precisely so this read has something to find; a caller that did empty it is
-        answered by the canonical record alone, exactly as before.
+        Decided before `_spawn`. Only a positive live match refuses: a missing, malformed or
+        unreadable record proceeds, since refusing would fence the run forever, and a second
+        supervisor is still caught by the run-directory lock and `_refuse_a_second_head`. The run
+        directory, socket and journal are debris and never refuse. The canonical
+        `root/run_id/head.pid` is read, not the run's `pid_file` (the dispatcher's watchdog
+        heartbeat, cleared before each launch); a `pid_file` designated to `start` is read too, and
+        a live match in either refuses.
         """
         subject = _with_pid_file(
             run
@@ -1860,12 +1414,7 @@ class LocalPtyHeadRuntime:
         )
 
     def _address(self, run: HeadRun) -> _Address | None:
-        """Where this head is addressed, derived from the run id rather than remembered.
-
-        Deriving is what makes this backend answer about a head a *later* dispatcher process asks
-        about: the run directory is `root/run_id` and everything in it has a predictable name, so a
-        runtime constructed a tick ago knows how to reach a head it never started.
-        """
+        """Where this head is addressed, derived from the run id so any later tick can reach it."""
         if not run.run_id:
             return None
         try:
@@ -1884,12 +1433,10 @@ class LocalPtyHeadRuntime:
         return local_pty.SupervisorClient.connect(address.socket_path, timeout=self._connect_timeout)
 
     def _process_alive(self, address: _Address, run: HeadRun) -> bool:
-        """Whether the head's own process is alive, by the launch identity and nothing else.
+        """Whether the head's process is alive, by the launch identity alone.
 
-        The expectation is handed over whole when the run carries one, because the reader treats a
-        partial expectation as unprovable rather than as a wildcard — deliberately, and this must
-        not work around it. A run with no role or task recorded is checked the only way that is
-        left: the record has to be a live match on its own terms and name this run.
+        The full expectation is passed when the run has one (the reader treats a partial one as
+        unprovable); otherwise the record must be a live match naming this run.
         """
         expected = {"run_id": run.run_id, "role": run.role, "task": _task_of(run)}
         if all(expected.values()):
@@ -1904,11 +1451,10 @@ class LocalPtyHeadRuntime:
         )
 
     def _identity_says_dead(self, address: _Address) -> bool:
-        """Whether the launch identity positively says the head's process has ended.
+        """Whether the launch identity positively says the process has ended.
 
-        Positively: a record that cannot be read at all is not evidence of a dead head, and this
-        answers `False` for it. The expectation is deliberately not passed here — the question is
-        about the process the record names, and a mismatch is not a death.
+        An unreadable record is not a death, and no expectation is passed: a mismatch is not one
+        either.
         """
         return bool(self._identity(str(address.pid_file)).get("state") == "dead")
 
@@ -1922,21 +1468,11 @@ class LocalPtyHeadRuntime:
     ) -> tuple[DeliveryReport | None, _Refusal | None]:
         """Offer one payload and follow it until this backend can say what became of it.
 
-        Two answers, and exactly one of them is ever not `None`. The line between them is
-        **whether the payload can still be known not to have been offered**, and it is drawn
-        deliberately rather than by where an exception happens to be caught. Before the request
-        goes onto the socket, a supervisor that cannot be spoken to — or one that answers the
-        question asked there with a refusal of its own — is a `_Refusal`: the head's terminal was
-        provably never touched. From that moment on nothing is a refusal any more —
-        every ending is a `DeliveryReport`, and the worst one of those can say is that what
-        became of the payload could not be established.
-
-        `probe` is what came of the status request the calling section already took. A successful
-        frame is reused and no second request is made. If that attempt failed before producing a
-        frame, the probe permits exactly one recovery request before the offer; its retry bit is
-        consumed first, so no later consumer can make a third. The resulting frame has the same
-        two roles: a stated refusal before anything was offered, or the journal sequence that
-        floors the search for this delivery's own `input.accepted`.
+        Exactly one of the pair is not `None`. Until the request goes onto the socket, an unreachable
+        supervisor or a stated refusal is a `_Refusal` (the terminal was never touched); after that,
+        every ending is a `DeliveryReport`. `probe` is the section's status request: an `ok` frame
+        is reused, a failed one permits one recovery request. That frame supplies either a stated
+        refusal or the journal `floor` for matching this delivery's `input.accepted`.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -1946,11 +1482,8 @@ class LocalPtyHeadRuntime:
                 failure=HeadNudgeFailed("the head's supervisor can no longer be addressed"),
             )
         if probe is not None and probe.status is None and isinstance(probe.answer, Mapping):
-            # A refusal the supervisor stated to this section's one question, and it was stated
-            # before a byte of this payload existed on any socket — so it is a refusal *before*
-            # the offer exactly as it would have been had this method asked it, and it is read by
-            # the same classifier. At the connection bound that is `HEAD_BUSY`, and nothing here
-            # is closed, drained or remembered as fatal.
+            # Refused in this section's status frame, before the offer: a refusal (`HEAD_BUSY` at
+            # the connection bound); nothing is closed or remembered as fatal.
             return None, _stated_refusal(probe.answer)
         if payload is None:
             payload = _payload_of(pointer)
@@ -1959,16 +1492,8 @@ class LocalPtyHeadRuntime:
         except _UNREACHABLE as exc:
             return None, self._unreachable_refusal(address, run, exc)
         with client:
-            # The journal's own sequence, read before this payload is offered, is the second
-            # key that `input.accepted` records are matched on. Delivery ids restart at 1 in
-            # every supervisor incarnation while the journal is append-only across all of
-            # them, so an id alone would let a record from a previous incarnation of a reused
-            # run directory answer for this delivery. Nothing has been offered yet at this
-            # point, so a supervisor that cannot answer here is a refusal.
-            #
-            # The section's own frame is that reading when there is one — it was taken inside this
-            # same lock, before this payload existed, and asking again would be the second status
-            # request obligation 3 does not allow.
+            # The pre-offer journal sequence floors `input.accepted` matching, since delivery ids
+            # restart per incarnation. The section's frame is reused; failing here is a refusal.
             if probe is not None and probe.status is not None:
                 status: Mapping[str, Any] = probe.status
             else:
@@ -1980,32 +1505,16 @@ class LocalPtyHeadRuntime:
                 except _UNREACHABLE as exc:
                     return None, self._unreachable_refusal(address, run, exc)
             if not status.get("ok"):
-                # A refusal the supervisor *stated*, and the frame it stated it in is the whole of
-                # this caller's news. At the connection bound the supervisor accepts the socket,
-                # writes this frame and lets go without registering the connection or reading a
-                # byte of any request — so the payload below was never offered and the head's
-                # terminal was never touched. Believing the frame's contents without believing its
-                # `ok` was how a live head at a self-clearing bound got closed for good: the write
-                # that followed met `EPIPE` and became "admitted, then unanswerable", which is
-                # fatal by design. It also left `floor` at 0, which is the bound this backend
-                # introduced precisely so that a reused run directory's older records cannot
-                # answer for a fresh delivery.
+                # A stated refusal (at the connection bound the supervisor reads no request): the
+                # payload was never offered. `ok` is tested before any contents are believed.
                 return None, _stated_refusal(status)
             floor = int(status.get("journal_seq") or 0)
             try:
                 answer = client.send_input(payload, subject=subject)
             except _UNREACHABLE as exc:
-                # The request is on the socket and no answer came back. Whether the supervisor
-                # read it and admitted the payload cannot be established from here, and "probably
-                # not" is precisely the assumption that writes the next payload behind a fragment.
-                # So this is an unestablished delivery and not a refusal, even though it is one
-                # step earlier than the case below: the line is drawn at what can be established,
-                # never at how far down the call the failure happened to be.
-                #
-                # The journal is not asked here, and that is not an omission: an `input.accepted`
-                # record is matched on the delivery id, and no answer came back to carry one. This
-                # is the one unestablished fate with only one witness, because it is the one that
-                # happens before the second witness has anything to be asked about.
+                # The request is on the socket and no answer came back: whether it was admitted
+                # cannot be established, so this is unestablished, not a refusal. The journal is not
+                # asked, since no delivery id came back to match a record on.
                 return _delivery_report(
                     state=DELIVERY_STATE_UNKNOWN,
                     written=0,
@@ -2017,13 +1526,8 @@ class LocalPtyHeadRuntime:
             if not answer.get("ok"):
                 return None, _admission_refusal(answer)
             admitted = dict(answer.get("delivery") or {})
-            # From here the connection is watching a delivery whose bound the substrate has just
-            # declared, so its own answer bound is derived from that same number rather than left
-            # at the connect bound. `connect_timeout` is how long a supervisor that has not spoken
-            # yet may take to speak; it is not "how long this delivery may take", and leaving it
-            # in force here would let a supervisor slower than it — but well inside the bound it
-            # declared — be read as one that stopped answering, which is a fatal outcome. One
-            # number governs the watching, and it is the substrate's.
+            # From here the answer bound is the derived delivery wait, not `connect_timeout`: a
+            # slow supervisor inside its declared bound must not read as silent, which is fatal.
             client.set_timeout(self.delivery_wait_for(_declared_bound(admitted)))
             return self._follow(address, client, admitted, len(payload), floor), None
 
@@ -2035,54 +1539,31 @@ class LocalPtyHeadRuntime:
         offered: int,
         floor: int,
     ) -> DeliveryReport:
-        """Watch an admitted delivery to its end, and be the only place that asks what it did.
+        """Watch an admitted delivery to its end; the only place that asks what a delivery did.
 
-        **The wait is the substrate's own, not this runtime's.** `admitted` carries the bound the
-        supervisor put on *this* delivery — the head's `delivery_seconds` — so the deadline here is
-        that number plus the named grace, measured from after the admission answer came back and
-        therefore strictly later than the supervisor's own. A delivery always leaves the in-flight
-        state within its bound: it completes, it stalls at that bound, or it fails with the head.
-        So this loop outlasts the substrate by construction, and there is no configuration that
-        makes it return over a delivery still being written.
-
-        The waiting is done here rather than through the client's own `wait_for_delivery` for one
-        reason: that one answers a delivery it could not follow to the end by raising, and a caller
-        then has to read the state of the delivery out of *which exception arrived*. The state
-        travels as a value instead, so the polling is done where every ending can be turned into
-        one — and this is the single point at which the witnesses are asked at all. There is no
-        second one: nothing outside this loop ever asks what became of a delivery, because nothing
-        outside it is ever left holding one.
+        The deadline is `delivery_wait_for` the bound the supervisor declared on this delivery,
+        measured after admission, so it always outlasts the substrate. Polled here rather than via
+        `wait_for_delivery` so that every ending is a value, never a state read off an exception.
         """
         delivery_id = int(admitted.get("id") or 0)
         last: Mapping[str, Any] = admitted
-        # The highest journal sequence this watch has seen, starting at the one read before the
-        # payload was offered. It is carried out on the report so that the epoch this delivery
-        # moves is the head's own sequence rather than a count kept only in this process.
+        # The highest journal sequence seen, from the pre-offer one; the delivery's epoch.
         seq = floor
         deadline = time.monotonic() + self.delivery_wait_for(_declared_bound(admitted))
         while True:
             try:
                 status = client.status()
             except _UNREACHABLE as exc:
-                # Admitted, and then nobody left to ask. The journal is the other witness and it
-                # is on this host's disk, so it is read before anything is concluded; only if it
-                # has nothing about this delivery either is the fate reported as unestablished.
+                # Admitted, then nobody left to ask: the journal decides, else unestablished.
                 return self._report_of(
                     address, last, offered, floor, established=False, detail=str(exc), seq=seq
                 )
             if not status.get("ok"):
                 if _is_transient_bound(status) and time.monotonic() < deadline:
-                    # A bound the substrate clears by itself is not a witness saying anything
-                    # about this delivery, and it is emphatically not an ending: the supervisor is
-                    # alive and busy. There is time left on the substrate's own bound, so the
-                    # question is simply asked again rather than answered out of a frame that
-                    # declined it.
+                    # A self-clearing bound is not an ending: ask again within the deadline.
                     time.sleep(self._delivery_poll)
                     continue
-                # A frame that declines the question is not an answer about this delivery, and
-                # believing its (absent) `delivery` key would read a supervisor that refused as a
-                # supervisor that said nothing had landed. It ends this watch the same way a
-                # silent socket does, and for the same reason: the journal is the witness left.
+                # A declining frame says nothing about this delivery; the journal is the witness left.
                 return self._report_of(
                     address,
                     last,
@@ -2099,13 +1580,8 @@ class LocalPtyHeadRuntime:
                 if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
                     return self._report_of(address, last, offered, floor, established=True, seq=seq)
             if time.monotonic() >= deadline:
-                # Past the substrate's own bound, plus the grace, and the delivery it declared
-                # that bound for has still not ended. That is not a delivery going well and it is
-                # not one this runtime gave up on early — it is a substrate that overran a promise
-                # it made, so nobody witnessed an ending and there is none to report. `established`
-                # is `False` and the journal gets the last word; if it has nothing either, the
-                # fate is unknown and closes the head, because bytes may be sitting on its
-                # terminal.
+                # The substrate overran its own bound without ending the delivery: unestablished
+                # unless the journal has it, and fatal, since bytes may be on the terminal.
                 return self._report_of(
                     address,
                     last,
@@ -2132,13 +1608,9 @@ class LocalPtyHeadRuntime:
         detail: str = "",
         seq: int = 0,
     ) -> DeliveryReport:
-        """What reached the head's terminal, from `status` and corroborated by the journal.
+        """What reached the head's terminal, from `status`, corroborated by the journal.
 
-        `status` is the authority while it answers and the journal is the second witness, in that
-        order and not the other way round: a delivery of which not one byte landed is a real fact
-        about a real payload, and the record of it is in `status` first. When `status` cannot be
-        had at all the order reverses of necessity — the journal is then the only witness left,
-        and a journalled delivery is an established one however the socket ended.
+        A journalled delivery is established however the socket ended.
         """
         state = str(delivery.get("state") or protocol.DELIVERY_IN_FLIGHT)
         written = int(delivery.get("written_bytes") or 0)
@@ -2149,9 +1621,7 @@ class LocalPtyHeadRuntime:
                 continue
             journalled = True
             seq = max(seq, int(event.get("seq") or 0))
-            # The journal counts what the kernel took, which is the same number `status` reports.
-            # Where they can differ is time: the record is written when the delivery ends, so a
-            # journal that has it is a journal that saw the end of it.
+            # The same count `status` reports; the record is written when the delivery ends.
             written = int(event.get("bytes") or written)
             state = str(event.get("state") or state)
         return _delivery_report(
@@ -2167,13 +1637,9 @@ class LocalPtyHeadRuntime:
         )
 
     def _accepted_records(self, address: _Address, floor: int) -> tuple[dict[str, Any], ...]:
-        """The journal's `input.accepted` records written after this delivery was offered.
+        """The journal's `input.accepted` records above `floor`; empty when it cannot be read.
 
-        Bounded by the journal's own sequence rather than matched on the delivery id alone. The id
-        is unique within one supervisor incarnation and the journal outlives incarnations, so in a
-        run directory that was ever reused the id by itself would let an old record answer for a
-        new payload. A journal that cannot be read at all is not evidence of anything and says so
-        by being empty.
+        The floor keeps an earlier incarnation's record with the same delivery id from answering.
         """
         try:
             events = local_pty.read_tail(address.journal_path).of_kind(local_pty.INPUT_ACCEPTED)
@@ -2193,19 +1659,11 @@ class LocalPtyHeadRuntime:
     def _delivery_that_did_not_arrive(
         self, run: HeadRun, report: DeliveryReport, lease: Any, epoch: int
     ) -> DeliverReceipt:
-        """A delivery that was offered, ended, and did not arrive whole: the outcome it is.
+        """A delivery that ended without arriving whole, keyed on `report.outcome` alone.
 
-        Every branch here is keyed on `report.outcome` — the name decided once, upstream — and on
-        nothing else. All three are endings, because the wait was the substrate's own: there is no
-        branch here for a delivery that has not finished, and that absence is the point. What each
-        outcome costs the head:
-
-          * `DELIVERY_LEFT_A_PREFIX` and `DELIVERY_UNESTABLISHED`: the head. Admission closes here
-            and at the supervisor, the reason is remembered so that every later refusal carries
-            it, and the lease is kept because the head has been given something and may be working
-            on it;
-          * `DELIVERY_LANDED_NOTHING`: the turn only. Nothing reached the terminal, so no turn was
-            started and the lease is handed back; the head is still worth delivering to.
+        `DELIVERY_LEFT_A_PREFIX` and `DELIVERY_UNESTABLISHED` close the head (`_close_head`) and
+        keep the lease, since the head may be working on what it got. `DELIVERY_LANDED_NOTHING`
+        hands back the lease only.
         """
         if report.fatal:
             self._close_head(run, report)
@@ -2227,17 +1685,9 @@ class LocalPtyHeadRuntime:
         )
 
     def _close_head(self, run: HeadRun, report: DeliveryReport) -> None:
-        """Hand this head no more work, here and at the process that owns it.
+        """Hand this head no more work, here and at its supervisor, remembering the reason.
 
-        One place rather than two branches of `deliver`, because a prefix on the terminal and a
-        fate nobody could establish are the same fact about the same terminal — this runtime hands
-        it no more work — and they must not be able to drift apart. The reason differs and travels
-        on every later refusal; the consequence does not.
-
-        It is one place for `start` as well as for `deliver`, and that is the whole of the rule:
-        the payload a bring-up delivers is a payload like any other, so a launch prompt that left a
-        prefix or went unwitnessed closes the head here rather than in a second version of this
-        rule on the abandon path. `_abandon_bring_up` calls it before it stops the head.
+        The single place for every fatal outcome, from `deliver` and `_abandon_bring_up` alike.
         """
         self._fatal[run.run_id] = (
             DRAIN_AFTER_PARTIAL_DELIVERY
@@ -2260,10 +1710,8 @@ class LocalPtyHeadRuntime:
     def _status_of(self, run: HeadRun, report: DeliveryReport) -> str:
         """`HEAD_GONE` only for a head established to have ended; `HEAD_ALIVE` for the rest.
 
-        A delivery that failed says the head's terminal closed under it, which is the head ending.
-        An unestablished delivery says nothing about the head at all, so the launch identity is
-        asked — and answers `HEAD_ALIVE` for every reading that is not a positive death, because a
-        head that cannot be read about is emphatically not a head that has gone.
+        A failed delivery means the terminal closed under it. For an unestablished one the launch
+        identity is asked, and anything but a positive death is `HEAD_ALIVE`.
         """
         if report.state == protocol.DELIVERY_FAILED:
             return HEAD_GONE
@@ -2298,13 +1746,8 @@ class LocalPtyHeadRuntime:
     ) -> StartReceipt:
         """End a head whose prompt never arrived, and say what the ending left behind.
 
-        A bring-up whose launch prompt ended fatally closes admission exactly as a later delivery
-        does, and through the same call: `_close_head` is the one place that rule lives, so `start`
-        and `deliver` cannot come to disagree about what a fatal outcome costs a head. It matters
-        precisely when the stop below does not confirm — the head is then still there, with a
-        prefix of its launch prompt possibly on its terminal, and it must not be delivered to
-        again. A confirmed stop makes the question moot: `stop` forgets the head, admission and
-        fatal reason with it.
+        A fatal launch-prompt outcome closes the head first (`_close_head`), which matters when the
+        stop does not confirm: the head may hold a prefix and must not be delivered to again.
         """
         detail = refusal.reason if refusal is not None else (report.detail if report else "")
         if report is not None and report.fatal:
@@ -2334,19 +1777,11 @@ class LocalPtyHeadRuntime:
     def _close_substrate_admission(
         self, run: HeadRun, initiator: StopInitiator
     ) -> tuple[bool, Any, int, _Probe | None]:
-        """Tell the process that owns this head to take no more input, and read the answer back.
+        """Tell the supervisor to take no more input, and read the answer back.
 
-        `head_signalled` is claimed from `status` rather than from the request having been sent:
-        the drain is only true of the head once the supervisor says it is draining. The third
-        value is that same frame's `journal_seq`, so the caller's epoch is the head's own sequence
-        after the drain was written and not a number derived anywhere else; zero means the
-        read-back said nothing, and `advance_to` leaves the epoch alone for it.
-
-        The fourth is that read-back as this file's one status value, handed back so the caller's
-        rehydration is made out of it instead of dialling for a second frame. It is `None` for
-        every ending where no status was read at all — no socket, a refused drain, a supervisor
-        that stopped answering — and the caller then asks for itself, which is still one request
-        for the section.
+        Returns `(head_signalled, evidence, journal_seq, probe)`. `head_signalled` comes from the
+        read-back `status`, not from the request being sent; `journal_seq` is that frame's (0 when
+        none); `probe` is that frame for the caller's rehydration, `None` when no status was read.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -2358,9 +1793,8 @@ class LocalPtyHeadRuntime:
                     return False, answer, 0, None
                 status = client.status()
                 if not status.get("ok"):
-                    # The drain was accepted and the read-back was declined. `head_signalled` is
-                    # claimed from what `status` says, so a frame that says nothing about draining
-                    # cannot support the claim — and the refusal it does carry is the evidence.
+                    # Drain accepted, read-back declined: `head_signalled` cannot be claimed, and
+                    # the refusal is the evidence.
                     return False, status, 0, _Probe(answer=status)
                 return (
                     bool(status.get("draining")),
@@ -2372,16 +1806,10 @@ class LocalPtyHeadRuntime:
             return False, str(exc), 0, None
 
     def _ask_to_stop(self, address: _Address, initiator: StopInitiator, signal_name: str) -> Any:
-        """Ask the supervisor to end its head. A supervisor that is gone is not a failure here.
+        """Ask the supervisor to end its head; a supervisor that is gone is not a failure here.
 
-        A head whose supervisor has died is exactly the case where the confirmation below matters:
-        nothing was asked, and whether the head is gone is still decided by its launch identity.
-
-        This is the one reader in this file that does not test `ok` before it returns, and that is
-        the point of it rather than an omission: the answer is carried as evidence and is never
-        believed by anything. A refusal, an unknown op and a supervisor that died mid-request all
-        mean the same thing here — the stop was not taken by the socket — and `_await_head_gone`
-        decides the outcome from the launch identity either way.
+        The one reader that does not test `ok`: the answer is evidence only, and `_await_head_gone`
+        decides the outcome from the launch identity.
         """
         try:
             with self._connect(address) as client:
@@ -2390,12 +1818,9 @@ class LocalPtyHeadRuntime:
             return {"ok": False, "error": OBSERVE_SUPERVISOR_UNREACHABLE, "detail": str(exc)}
 
     def _await_head_gone(self, address: _Address, run: HeadRun) -> bool:
-        """Wait for the head's own process to be gone, by the identity that named it.
+        """Wait for the head's process to be gone, by its launch identity rather than the socket.
 
-        Not the socket disappearing: that says the supervisor let go, which is a fact about the
-        supervisor. A head whose identity record was never written — a bring-up stopped before its
-        shell got that far — is answered by the journal's `run.exited` instead, because there is
-        nothing else that could ever say yes.
+        A head whose identity record was never written is answered by the journal's `run.exited`.
         """
         deadline = time.monotonic() + self._stop_timeout
         while True:
@@ -2410,17 +1835,10 @@ class LocalPtyHeadRuntime:
             time.sleep(_CONFIRM_POLL_SECONDS)
 
     def _turn_still_running(self, run: HeadRun, probe: _Probe | None = None) -> str:
-        """Whether the turn this runtime holds a lease for is still running, and how it knows.
+        """Why the turn this runtime holds a lease for is still running, or `""` once it ended.
 
-        The supervisor is asked rather than assumed: a lease granted three ticks ago and never seen
-        to close is stale knowledge, and refusing every later delivery on it would strand the head.
-        A supervisor that cannot be reached is not permission — "I could not tell" is a refusal the
-        caller is told about, not a prompt written over a running turn.
-
-        `probe` is this critical section's one status frame, and every caller inside a section that
-        already took one passes it: the rehydration that adopted the lease and the question of
-        whether that lease's turn is still open are two readings of one answer, not two questions,
-        and asking twice cost the second request obligation 3 does not allow.
+        The supervisor is asked, through the section's `probe` when there is one. A supervisor that
+        cannot be asked or read counts as running, never as permission.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -2448,15 +1866,13 @@ class LocalPtyHeadRuntime:
         rotatable: bool,
         exc: BaseException,
     ) -> ObserveReceipt:
-        """A socket that did not answer, classified by the head's process rather than by the socket.
+        """A socket that did not answer, classified by the head's process rather than the socket.
 
-        The two are different facts and the product has killed live heads by collapsing them: a
-        supervisor that died leaves a head running and orphaned, and reporting that as a head that
-        has gone is how its replacement is opened beside it.
+        A dead supervisor can leave a live, orphaned head; reporting it gone would open a
+        replacement beside it.
         """
         if self._identity_says_dead(address):
-            # A lease outstanding on a process that no longer exists is stale by definition: the
-            # turn it names ended when the process did.
+            # A lease on a process that no longer exists is stale.
             self.activity.release(run.run_id)
             return ObserveReceipt(
                 status=HEAD_GONE,
@@ -2490,14 +1906,8 @@ class LocalPtyHeadRuntime:
 class _DurableHead:
     """What outlived the process that granted this head's turn, as one value.
 
-    `source` is what said it, and it is on the value rather than derived from which fields are
-    filled in, because "the head is not draining" and "nobody could tell me whether it is" are two
-    answers and this backend is not allowed to spell them the same way.
-
-    `seq` is the head's journal sequence — strictly increasing, recovered from the file when the
-    journal is opened, and therefore the same scale in every tick. It is what the activity epoch is
-    raised to, which is the whole of obligation 5: a number a process hands out and another process
-    can compare.
+    `source` says which witness answered, so "not draining" and "unknown" never look alike. `seq`
+    is the journal sequence the activity epoch is raised to.
     """
 
     source: str
@@ -2509,28 +1919,12 @@ class _DurableHead:
 
 
 def _journal_state(address: _Address, run_id: str) -> _DurableHead:
-    """This head's shape, derived from a bounded tail of the journal its supervisor left behind.
+    """This head's shape from a bounded tail of its journal, replayed in sequence order.
 
-    The derivation is a replay in sequence order rather than a search for the newest record of
-    each kind, because the two disagree exactly where it matters: a `turn.started` with no
-    `turn.finished` after it is an open turn, and the same record followed by `run.exited` is not —
-    it is a turn that ended with the process, and a head whose turn ended that way is rotatable.
-    `run.started` resets everything, so a run directory that was reused cannot have a previous
-    incarnation's drain or turn answer for this one.
-
-    A window with nothing in it for this run is `REHYDRATED_UNKNOWN`, and the caller fails closed
-    on it.
-
-    **So is a window that cannot account for itself** (secretary-1479). `read_tail` says four
-    separate things about what it handed back — the last record was cut off, some records could
-    not be read, the sequence did not increase, the window began mid-history — and every one of
-    them means the same thing to *this* derivation: an event that would have closed admission may
-    be the record that was torn, the record that was unreadable, or the record that scrolled out
-    of the window. A replay that ignores them announces "this head is not draining" on the
-    strength of not having seen the drain, which is the one sentence a fail-closed reader is not
-    allowed to say. The sequence such a window ends on is still true and is still carried, because
-    a number the journal actually wrote is comparable whatever else was lost; what is refused is
-    the *shape*, and the caller closes admission on it and invents no lease.
+    A replay, not a newest-record search: `turn.started` then `run.exited` is an ended turn, not an
+    open one, and `run.started` resets the replay. A window with no record of this run, or one that
+    cannot account for itself (torn last record, unreadable records, unordered sequence, begun
+    mid-history), is `REHYDRATED_UNKNOWN`, still carrying its last sequence.
     """
     try:
         result = local_pty.read_tail(address.journal_path)
@@ -2557,11 +1951,9 @@ def _journal_state(address: _Address, run_id: str) -> _DurableHead:
 class _JournalReplay:
     """One run's records folded in sequence order: the head's shape as of the last of them.
 
-    The first five fields are what `_journal_state` has always derived. The rest are the times the
-    vitality reading needs (secretary-1739), carried on the same fold so that the two readers can
-    never disagree about when a turn opened or closed. Every time is the journal's own `at`, and
-    `times_valid` is false when a record whose time a field needs carried none a reader may
-    believe: the admission reader ignores it, the vitality reader refuses the whole window.
+    The time fields serve the vitality reading (`head_run_turn_reading`) from the same fold. Times
+    are the journal's `at`; `times_valid` is false when a needed one was unusable (the admission
+    reader ignores it, the vitality reader refuses the window).
     """
 
     draining: bool = False
@@ -2659,34 +2051,20 @@ def head_run_turn_reading(
 ) -> dict[str, Any]:
     """Whether this run's head is in a turn, and since when, from its supervisor's journal.
 
-    The vitality reading of the journal (secretary-1739): the Turn axis a local-pty head had no
-    source for, and a progress cursor that moves only on new screen content (since secretary-1738
-    `provider.progressed` is written for a line the head's screen had not shown in this turn). It
-    is the same bounded tail and the same fold as `_journal_state`, answered as data:
+    The vitality reading, over the same bounded tail and fold as `_journal_state`:
 
       * `turn` is `active` while the last `turn.started` has no `turn.finished` after it, else
         `idle`;
-      * `turn_since` is when that state began: the open turn's `turn.started`, or, for an idle
-        head, the later of the last `turn.finished`, `input.accepted` and `turn.started`, so a
-        delivery that reached the head restarts the clock even before its turn is folded;
-      * `progress_seq`/`progress_at` are the last `provider.progressed` in the window, 0 when the
-        window holds none.
+      * `turn_since` is the open turn's `turn.started`, or for an idle head the latest of
+        `turn.finished`, `input.accepted` and `turn.started`;
+      * `progress_seq`/`progress_at` are the last `provider.progressed` in the window, 0 if none.
 
-    **Every failure is an answer, never an exception** (the one guard of this source). A journal
-    that cannot be read, a window that holds no record of this run, a torn last line, any line the
-    strict validator (`_strict_record`) refuses -- another run's, out of order, or carrying a value
-    its writer could not have written -- a head the journal says exited, and a run with no turn yet
-    all come back as `{"state": "unavailable", "reason": ...}`. The caller reads that as a channel
-    that did not answer, never as a head that stopped. The window is read raw (`tail_window`),
-    because `read_tail` coerces `seq` for the admission reader and a coerced value must not become
-    stall evidence.
-
-    A window that began mid-history (`partial_head`, the usual case: a worker's journal outgrows
-    `JOURNAL_TAIL_BYTES` within minutes) is not refused as `_journal_state` refuses it. That reader
-    must not say "no drain" on the strength of a drain it may not have seen; this one asks only
-    about the turn, and the turn state after a `turn.started`, `turn.finished`, `run.started` or
-    `run.exited` depends on nothing older. So a partial window answers when it holds one of them,
-    and is unavailable when it does not.
+    Never raises: an unreadable journal, no record of this run, a torn last line, any line
+    `_strict_record` refuses, an exited head, or no turn yet all return
+    `{"state": "unavailable", "reason": ...}`, read by callers as no answer, not a stopped head.
+    The window is read raw (`tail_window`) so no coerced value becomes stall evidence. A window
+    begun mid-history answers when it holds a turn boundary (`turn.*`, `run.started`,
+    `run.exited`), since the turn state depends on nothing older.
     """
     try:
         return _turn_reading(
@@ -2701,11 +2079,8 @@ def head_run_screen_lines(
 ) -> dict[str, Any]:
     """This run's head screen as text lines, rendered from its supervisor's output buffer.
 
-    Read-only: one `status` and one `output` request, nothing typed and nothing drained. The output
-    tail is fed to the same bounded `ScreenModel` the supervisor judges progress with, at the head's
-    own terminal size, so the lines are what the head's screen shows, not the raw byte stream. Used
-    by the dispatcher's first-turn provider-failure reader (secretary-1799) for a Claude head whose
-    session transcript could not be bound. Every failure is an answer: `{"state": "unavailable"}`.
+    Read-only (one `status` and one `output` request), rendered with the supervisor's `ScreenModel`
+    at the head's terminal size. Every failure returns `{"state": "unavailable"}`.
     """
     from ummanu.runtime.head.local_pty.screen import ScreenModel
 
@@ -2780,16 +2155,12 @@ def _strict_int(value: Any) -> bool:
 
 
 def _strict_record(line: bytes, run_id: str, previous: dict[str, Any] | None) -> dict[str, Any] | str:
-    """One window line as the record its writer wrote, or why it is not one (secretary-1739 r2).
+    """One window line as the record its writer wrote, or why it is not one.
 
-    The vitality reading's one validator, applied to every line before the replay and never
-    coercing: `read_tail` turns a `seq` of `"12"` or `1e300` into an integer for the admission
-    reader, and a coerced value must not become stall evidence. A record of this run needs
-    `schema_version` exactly 1, `kind` a known string, `run_id` this run's string, `seq` a JSON
-    integer in `(0, 2**63)` greater than the line before, `at` a finite number inside
-    `[2000, 2100)`, and `turn` an integer in `(0, 2**63)` wherever present (required on the kinds
-    that always carry it). A blank line, bytes that are not UTF-8 JSON, a record of another run
-    and any failed field are all the same answer: the whole window is refused.
+    Never coerces. Requires `schema_version` exactly 1, a known `kind`, this run's `run_id`, `seq`
+    a JSON integer in `(0, 2**63)` above the previous line's, `at` finite in `[2000, 2100)`, and
+    `turn` an integer in `(0, 2**63)` wherever present (required on `_TURN_NUMBERED` kinds). Any
+    failure refuses the whole window.
     """
     try:
         record = json.loads(line.decode("utf-8"))
@@ -2837,9 +2208,7 @@ def _supervisor_state(status: Mapping[str, Any]) -> _DurableHead:
     return _DurableHead(
         source=REHYDRATED_FROM_SUPERVISOR,
         seq=int(status.get("journal_seq") or 0),
-        # A supervisor that is stopping this head is one that has already closed its admission —
-        # it writes `drain.requested` before `run.stopping` — and reading only `draining` would
-        # miss the half-second between the two.
+        # `stopping` counts as draining: `drain.requested` is written before `run.stopping`.
         draining=bool(status.get("draining")) or bool(status.get("stopping")),
         turn_open=bool(status.get("turn_open")),
         turn=int(status.get("turn") or 0),
@@ -2849,13 +2218,11 @@ def _supervisor_state(status: Mapping[str, Any]) -> _DurableHead:
 
 @dataclass
 class _Probe:
-    """A section's bounded question to the supervisor, and everything it answered.
+    """A section's bounded status request to the supervisor, and what came of it.
 
-    A value rather than three call sites, because "the supervisor said this", "the socket did not
-    answer" and "the socket answered something that is not a status" are three different facts and
-    every one of them decides something different. A successful path gets one request. A request
-    that failed before returning a frame gets one recovery attempt, whose bit is consumed before
-    the request is made; a third request is therefore unavailable by construction.
+    One of `status`, `answer` (a frame that is not a readable status) or `error` is set. A failed
+    request grants one recovery attempt, consumed by `spend_retry` before it is made, so a third
+    request is impossible.
     """
 
     #: The frame the supervisor answered, when it answered one this runtime can read.
@@ -2876,13 +2243,10 @@ class _Probe:
 
     @property
     def transient(self) -> bool:
-        """Whether the refusal that came back is one the substrate clears by itself.
+        """Whether the refusal that came back is a bound the substrate clears by itself.
 
-        The line between class 2 and class 3 of secretary-1479, drawn on the name the supervisor
-        put in the frame rather than on the fact that this runtime got no state out of it. A live
-        supervisor at its connection bound says `connection_limit` and means "not you, not now";
-        reading that as "nobody can say what this head is" is how a bound that clears in
-        milliseconds came to close a head's admission for the life of the process.
+        Decided by the error name in the frame, never by the absence of a state: such a refusal
+        must not close admission.
         """
         return isinstance(self.answer, Mapping) and _is_transient_bound(self.answer)
 
@@ -2908,17 +2272,10 @@ class _Refusal:
 
 
 def _refusal_status(error: str) -> str:
-    """Which status a refusal the supervisor *stated* is, by what it refused with.
+    """The status of a refusal the supervisor stated, by its error name, for every verb.
 
-    One mapping for every verb that is refused before it asked for anything, because the fact is
-    the same one whichever verb met it: the supervisor said no, and it said no with a name.
-
-    Only a head the supervisor says has gone is `HEAD_GONE`. Both bounds — the attach limit and
-    the connection limit — are refusals worth making again the moment somebody else lets go, and
-    reporting a live head sitting at one of them as a head that ended is exactly the collapse
-    ("alive looks dead") this sprint exists to remove. Anything else the supervisor can refuse
-    with is an answer *from* a live supervisor about a live head, so it is `HEAD_ALIVE` too: what
-    was asked did not happen, and the head is still the caller's to account for.
+    A self-clearing bound is `HEAD_BUSY`; only `ERROR_HEAD_GONE` is `HEAD_GONE`; anything else is
+    `HEAD_ALIVE`: a live supervisor refused, and the head is still the caller's to account for.
     """
     if _is_transient_bound({"error": error}):
         return HEAD_BUSY
@@ -2930,11 +2287,8 @@ def _refusal_status(error: str) -> str:
 def _declared_bound(admitted: Mapping[str, Any]) -> float:
     """The bound the substrate put on the delivery it just admitted, in seconds.
 
-    Read off the delivery record the supervisor answered with, so it is the bound of *this*
-    delivery on *this* head — the `delivery_seconds` the head was raised with — rather than
-    anything this runtime remembers or was configured with. A record that declares none is answered
-    with the substrate's own default, which is the number a supervisor started without
-    `--delivery-seconds` uses; it is still one knob, owned one layer down.
+    Read off the admitted delivery record (the head's `delivery_seconds`); a record declaring none
+    gets the substrate's default.
     """
     try:
         bound = float(admitted.get("timeout_seconds") or 0.0)
@@ -2944,12 +2298,10 @@ def _declared_bound(admitted: Mapping[str, Any]) -> float:
 
 
 def _is_transient_bound(answer: Mapping[str, Any]) -> bool:
-    """Whether a refusal the supervisor stated is one of the bounds it clears by itself.
+    """Whether a stated refusal is one of the bounds the substrate clears by itself.
 
-    The connection bound and the attach bound are refusals of a *caller*, made by a live
-    supervisor about a live head, and they stop holding the moment somebody else lets go. Neither
-    is ever a fact about a delivery, a turn or a head's life, which is why every reader that meets
-    one answers `HEAD_BUSY` and none of them closes anything.
+    The connection and attach bounds refuse a caller, not the head: every reader answers
+    `HEAD_BUSY` and closes nothing.
     """
     return str(answer.get("error") or "") in (
         protocol.ERROR_CONNECTION_LIMIT,
@@ -2967,15 +2319,10 @@ def _refusal_detail(answer: Mapping[str, Any]) -> str:
 
 
 def _stated_refusal(answer: Mapping[str, Any]) -> _Refusal:
-    """A refusal the supervisor stated to a question asked *before* any payload was offered.
+    """A refusal the supervisor stated to a question asked before any payload was offered.
 
-    The second half of this backend's rule about delivery state, and it is the half a stated
-    refusal makes the difference for: state is never invented, and a state the substrate stated is
-    never thrown away. A frame that is not `ok` is the supervisor declining the question — the
-    connection bound is the reachable one, and it is a bound the substrate itself treats as normal
-    and self-clearing — so it classifies as a refusal *before* the offer, never as an unknown fate
-    after one. Reading such a frame for its contents and going on to write is how a head nothing
-    had touched came to be closed for the rest of this runtime's life.
+    A non-`ok` frame here (in practice the connection bound) is a refusal before the offer, never an
+    unknown fate after one.
     """
     error = str(answer.get("error") or "")
     detail = _refusal_detail(answer)
@@ -2988,27 +2335,22 @@ def _stated_refusal(answer: Mapping[str, Any]) -> _Refusal:
 
 
 def _admission_refusal(answer: Mapping[str, Any]) -> _Refusal:
-    """The substrate's own refusal of a payload, as the status the boundary already has for it.
+    """The substrate's own refusal of a payload, as a boundary status.
 
-    Every one of these left the head's terminal exactly as it was, which is why none of them is
-    `HEAD_OK` with a delivery attached and why the turn is handed back for all of them.
+    Each one left the terminal untouched, so none is `HEAD_OK` and the turn is handed back.
     """
     error = str(answer.get("error") or "")
     detail = str(answer.get("detail") or error)
     if _is_transient_bound(answer):
-        # The connection this offer was made on met a bound of the substrate rather than the head:
-        # the supervisor wrote the refusal and let go without reading the request, so nothing was
-        # offered. It is the same fact `_refusal_status` names for a question refused before an
-        # offer, and it is `HEAD_BUSY` here for the same reason — a limit that clears itself is
-        # never a head that ended, was drained, or is anything but worth asking again.
+        # Refused at a self-clearing bound without the request being read: nothing was offered,
+        # so `HEAD_BUSY`, as in `_refusal_status`.
         return _Refusal(HEAD_BUSY, detail, HeadNudgeFailed(detail), answer)
     if error == protocol.ERROR_DRAINING:
         return _Refusal(HEAD_DRAINING, detail, HeadNudgeFailed(detail), answer)
     if error == protocol.ERROR_HEAD_GONE:
         return _Refusal(HEAD_GONE, detail, HeadNudgeFailed(detail), answer)
     if error == protocol.ERROR_INPUT_IN_FLIGHT:
-        # Somebody else's payload holds the floor. Worth making again once it lands, and never
-        # interleaved with it.
+        # Another payload holds the floor: worth retrying once it lands, never interleaved.
         return _Refusal(HEAD_BUSY, detail, HeadNudgeFailed(detail), answer)
     # An oversized payload and everything else: the head is untouched and still the caller's.
     return _Refusal(HEAD_ALIVE, detail, HeadNudgeFailed(detail), answer)
@@ -3044,12 +2386,9 @@ def _outcome_of(
 ) -> DeliveryOutcome:
     """The delivery evidence for a payload that provably reached the head's terminal.
 
-    `confirmed` rather than `accepted`, and it is the stronger word on purpose: on this backend the
-    proof is the supervisor's own count of the bytes the kernel took, corroborated by the journal,
-    rather than a session manager's report that a send was accepted.
-
-    An agent's prompt (`_deliver_prompt`) carries its submits beside the line: `turn_confirmed` is
-    then whether a turn was seen to start, and the line is `payload_left_in_composer` when not.
+    `DELIVERY_CONFIRMED`: the proof is the supervisor's count of bytes the kernel took, corroborated
+    by the journal. For an agent's prompt with submits, `turn_confirmed` says whether a turn was
+    seen to start, and `payload_left_in_composer` is set when not.
     """
     payload_bytes, payload_hash = payload_fingerprint(pointer.text)
     evidence = DeliveryEvidence(
@@ -3089,12 +2428,10 @@ def _outcome_of(
 
 
 def _spawn_status(exc: local_pty.LocalPtySpawnError) -> str:
-    """Which of the four things a refused bring-up left behind.
+    """Which status a refused bring-up left behind.
 
-    A timeout and an `already_running` refusal both mean something may be running that this
-    bring-up did not account for, which is `HEAD_ALIVE` — the same distinction `HeadSpawnAborted`
-    draws on the legacy path, and for the same reason: treating it as a failure is how live heads
-    get a second head opened beside them.
+    Incomplete cleanup, a timeout or `already_running` may leave something running: `HEAD_ALIVE`,
+    as `HeadSpawnAborted` on the legacy path, so no second head is opened beside it.
     """
     if not exc.cleanup_complete or exc.reason in ("timeout", "already_running"):
         return HEAD_ALIVE
@@ -3131,49 +2468,34 @@ def _in_flight(status: Mapping[str, Any]) -> bool:
 
 
 def _has_exited(address: _Address) -> bool:
-    """Whether the journal says the head's process ended.
+    """Whether the journal's bounded tail holds a `run.exited`.
 
-    A bounded tail, like every journal read this backend makes: `run.exited` is the last thing
-    written about an incarnation, so a window at the end of the file is where it is if it is
-    anywhere. A window that has scrolled past an older incarnation's exit answers `False`, which is
-    the safe direction — this is only ever asked to *confirm* that a head is gone.
+    Only used to confirm a head is gone, so a window past an older exit answering `False` is safe.
     """
     return bool(local_pty.read_tail(address.journal_path).of_kind(local_pty.RUN_EXITED))
 
 
 def head_run_journal(run_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], ...]:
-    """Everything one head's supervisor wrote about it, read from outside its lifecycle.
+    """Everything one head's supervisor wrote about it, read whole from outside its lifecycle.
 
-    The whole journal rather than a bounded tail, because the caller this exists for is asking what
-    a finished run *did* — its `run.exited` and the exit code or signal on it — and a bounded read
-    would answer "I did not see one" for a head that printed enough afterwards. A missing file is an
-    empty journal: a run directory that was swept says nothing, and saying nothing is not a claim
-    that the head never ended.
-
-    `OSError` is deliberately not caught: an unreadable journal is a source failure the caller has
-    to be able to report as one, and returning an empty tuple for it would make "I could not read
-    this" indistinguishable from "there is nothing here".
+    Whole rather than a tail, so a finished run's `run.exited` is always found. A missing file is
+    an empty journal; `OSError` propagates, so "unreadable" stays distinct from "empty".
     """
     return head_run_journal_read(run_dir).events
 
 
 def head_run_journal_read(run_dir: str | os.PathLike[str]) -> local_pty.JournalReadResult:
-    """`head_run_journal` with what the read had to leave out, for a reader that must say so.
+    """`head_run_journal` with what the read left out (`malformed`, `truncated_tail`).
 
-    The same whole-file read, returned as the reader's own result: `malformed` counts complete
-    lines that were not usable records, and `truncated_tail` says the last line was torn. A
-    diagnostic that shows the records without these would present a damaged journal as a clean
-    one. Read-only, and `OSError` propagates for the same reason it does there.
+    For a reader that must not present a damaged journal as a clean one. `OSError` propagates.
     """
     return local_pty.read_events(Path(run_dir) / protocol.JOURNAL_NAME)
 
 
 def head_run_supervisor_files(run_dir: str | os.PathLike[str]) -> tuple[Path, Path]:
-    """Where one head's supervisor keeps its lock and its pid file, for a reader outside it.
+    """`(supervisor.lock, supervisor.pid)` under the run directory, for a reader outside it.
 
-    The pair is `(supervisor.lock, supervisor.pid)` under the run directory. Nothing is opened: a
-    diagnostic that wants the lease reads the kernel's lock table for the first and the pid in the
-    second, and must never take the lock itself.
+    Nothing is opened; a reader must never take the lock itself.
     """
     root = Path(run_dir)
     return root / protocol.SUPERVISOR_LOCK_NAME, root / protocol.SUPERVISOR_PID_NAME
@@ -3181,14 +2503,12 @@ def head_run_supervisor_files(run_dir: str | os.PathLike[str]) -> tuple[Path, Pa
 
 @dataclass(frozen=True)
 class SupervisorLease:
-    """Who holds one run's supervisor lock, as the kernel's lock table says, and what the files say.
+    """Who holds one run's supervisor lock, per the kernel's lock table, and what the files say.
 
-    `lock_readable` is false when `supervisor.lock` itself could not be read; nothing else was
-    then looked at. `table_readable` is false when the lock was read but `/proc/locks` was not, so
-    the pids the files hold are known and the holder is not. `error` says what failed in either
-    case. With both true, an empty `holders` means no process holds the lock. `content_error` is
-    set when either file was read but holds something other than a pid (bytes that are not UTF-8,
-    say); the pid it would have given is then `None`, and nothing was raised.
+    `lock_readable` false: `supervisor.lock` could not be read and nothing else was looked at.
+    `table_readable` false: `/proc/locks` could not be read, so the holder is unknown. `error` says
+    what failed. With both true, empty `holders` means no process holds the lock. `content_error`
+    is set when a file held something other than a pid; that pid is then `None`.
     """
 
     lock_readable: bool
@@ -3203,12 +2523,10 @@ class SupervisorLease:
 def head_run_supervisor_lease(run_dir: str | os.PathLike[str]) -> SupervisorLease:
     """Read who holds this run's supervisor lock without taking it, for a reader outside the run.
 
-    A supervisor takes an exclusive `flock` on `supervisor.lock` for its whole life and writes its
-    pid into the file; the kernel drops the lock when that process ends. So the holder comes from
-    `/proc/locks`, where reading is an observation rather than an attempt on the lock, and the pids
-    in `supervisor.lock` and `supervisor.pid` are reported beside it. A lock no process holds says
-    no supervisor owns the run; a head it left behind can still be running, which is the
-    heartbeat's question, not this one's.
+    A supervisor holds an exclusive `flock` on `supervisor.lock` for its life, so the holder comes
+    from `/proc/locks`; the pids in `supervisor.lock` and `supervisor.pid` are reported beside it.
+    An unheld lock means no supervisor owns the run; whether its head still runs is the
+    heartbeat's question.
     """
     path, pid_path = head_run_supervisor_files(run_dir)
     try:

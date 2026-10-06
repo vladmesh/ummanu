@@ -10,11 +10,10 @@ from typing import Any
 def head_run_binding(value: Any) -> tuple[str, str]:
     """Bind a serialized HeadRun using the deployed provider's immutable contract.
 
-    Codex v1 hashes exactly seven spec fields. Never grow that projection when the
-    persisted spec grows: memory limits, runtime and scope generation are enforced
-    by the lifecycle owner, not by a provider journal. Non-Codex sources retain
-    their existing serialized-spec contract. No persisted digest is rewritten or
-    accepted via an alternate hash.
+    Codex v1 hashes exactly seven spec fields and must never grow with the persisted spec (limits,
+    runtime and scope generation are enforced by the lifecycle owner). Other adapters hash the
+    serialized spec. Persisted digests are never rewritten or matched via an alternate hash. See
+    docs/HEAD_SCOPES.md "Provider identity and scope ownership".
     """
     if not isinstance(value, dict):
         return "", ""

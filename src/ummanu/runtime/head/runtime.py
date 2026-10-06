@@ -1,37 +1,10 @@
-"""`HeadRuntime`: the one typed boundary a head's life is lived through.
+"""`HeadRuntime`: the one typed boundary for a head's lifecycle; `local_pty_head` implements it.
 
-`operations` once held three free functions, and every caller supplied its own session host, its
-own transport and its own error handling around them. That stopped working once there were two
-backends, because "which backend is this head on" had to be decided again at every call site — and
-because half of what a head backend can do (observe a head, ask it to wind down, attach to it) had
-no home among three functions that open, write into and close a pane. The Orca backend those
-functions served was removed in secretary-1725; `local_pty_head` is the implementation.
-
-So the six verbs live on one object:
-
-  * **`start`** brings a head up and, when it is given a pointer, points it at its task;
-  * **`deliver`** puts one prompt into a head that is already running;
-  * **`observe`** reads what the backend can actually say about the head right now;
-  * **`request_drain`** asks the head to take no more work;
-  * **`stop`** ends it and records who ended it;
-  * **`attach`** hands a caller the live head's own stream.
-
-Three decisions make this a boundary rather than a namespace:
-
-  * **every verb answers with a receipt, never with a bool, a dict or an exception the caller has
-    to `isinstance` its way through.** A receipt says which of four things happened — it worked, it
-    was refused because the head was busy or draining, it was refused with something still alive, or
-    it was refused and nothing of the attempt is left — and it carries the operation's own refusal
-    unchanged in `failure`, so `HeadSpawnAborted` never arrives looking like `HeadSpawnFailed`;
-  * **a verb a backend cannot honestly perform answers `unsupported`, and says so in the receipt.**
-    Not `False`, not an empty dict, not an invented `busy=False`. A caller can tell "this head is
-    not busy" from "this backend cannot tell you whether it is busy" only if the two are different
-    values;
-  * **busyness is not a lifecycle state.** `HeadRun.working` is the durable history of a head having
-    been given its task; whether a turn is running *right now* is a `TurnLease` and a monotonic
-    activity epoch, both of which live here, in the runtime, next to the backend that can see them.
-    A record read back from disk cannot answer a question about the present, and this is where that
-    stops being pretended.
+Six verbs: `start`, `deliver`, `observe`, `request_drain`, `stop`, `attach`. Every verb answers
+with a receipt (never a bool, dict or exception); a refusal carries the operation's own error
+unchanged in `failure`, and a verb the backend cannot honestly perform answers `unsupported`.
+Busyness is not a lifecycle state: `HeadRun.working` is durable history, while "a turn is running
+now" is a `TurnLease` plus a per-head activity epoch kept here. See docs/HEAD_RUNTIME.md.
 """
 
 from __future__ import annotations
@@ -46,17 +19,14 @@ from .run import HeadRun, StopInitiator
 from .spec import HeadSpec
 from .task_ref import TaskRef
 
-# The verb did what it says it does.
 HEAD_OK = "ok"
-# Refused because the head was busy — mid-turn, or a pane held in a dialog. Nothing of this attempt
-# is left behind and the attempt is worth making again.
+# Refused: mid-turn or a pane held in a dialog. Nothing left behind; worth retrying.
 HEAD_BUSY = "busy"
-# Refused because a drain was requested for this head: this runtime hands it no more work.
+# Refused: a drain was requested, so this runtime hands the head no more work.
 HEAD_DRAINING = "draining"
-# Refused with something still alive — a pane that would not close, a stop that could not be
-# confirmed, a head whose process this refusal says nothing about. The caller still owns it.
+# Refused with something still alive (pane not closed, stop unconfirmed); the caller still owns it.
 HEAD_ALIVE = "alive"
-# Refused, and nothing of what the verb touched survived it.
+# Refused, and nothing the verb touched survived.
 HEAD_GONE = "gone"
 # This backend cannot honestly perform or answer this verb. Never a disguised `no`.
 HEAD_UNSUPPORTED = "unsupported"
@@ -76,15 +46,10 @@ class TurnLeaseError(RuntimeError):
 
 @dataclass(frozen=True)
 class TurnLease:
-    """One turn a head was handed, for as long as that turn is running.
+    """One running turn of a head, granted on delivery and released when the backend sees it end.
 
-    Deliberately not a field of `HeadRun`: a run is written to disk and read back a tick later by
-    another process, and a value that outlives the turn it describes cannot be the answer to "is a
-    turn running now". The lease lives in the runtime, is granted when a prompt is delivered, and is
-    released when the backend sees that turn end.
-
-    `granted_at_epoch` is the activity epoch at the moment of the grant, so a caller holding an old
-    lease can tell that the head has been doing things since.
+    Not a field of `HeadRun`: a persisted run cannot answer "is a turn running now".
+    `granted_at_epoch` lets a holder of an old lease see the head has acted since.
     """
 
     lease_id: str
@@ -98,36 +63,14 @@ class TurnLease:
 
 
 class HeadActivity:
-    """What one runtime knows about each head it owns: its epoch, its turn, and its admission.
+    """Per-head activity epoch, turn lease and admission, read under the owning runtime's lock.
 
-    Three facts per head, in one place, because the runtime that owns them takes one lock around all
-    three and a decision made of two of them must not be able to see them at different moments.
-
-      * the **activity epoch** only ever goes up, and goes up whenever the backend sees *that head*
-        do something — its pane opened, it took a prompt, it printed. It is how a caller tells
-        "nothing has happened since I last looked" from "I cannot tell", and it is per head: a
-        counter shared with every other head would make "this head has been quiet" false the moment
-        any other head did anything;
-      * the **turn lease** says a turn is running, and there is at most one per head;
-      * **admission** is whether this runtime will hand this head further work. A drain closes it;
-        it is not the turn, and closing it never touches the turn that is running.
-
-    `ticks` is the runtime-wide count of everything this runtime has seen any of its heads do. It is
-    kept because it is genuinely useful for diagnostics — how much has happened at all — and it is
-    named separately from `epoch` so that no quiescence decision can be made on it by accident.
-
-    Nothing here is durable, and nothing here locks: a runtime that has just been constructed knows
-    nothing and says so by holding no lease, an epoch of zero and an open admission. Serialising
-    access is the job of the runtime that owns this object.
-
-    **A runtime whose backend has a durable witness puts what it knows back here rather than
-    keeping a second copy of it** (secretary-1479). Knowing nothing is the right *initial* state
-    and the wrong *final* one for a control plane whose every tick is a new process: `advance_to`
-    and `adopt` are how a backend that can still ask the head — a supervisor on a socket, a
-    journal on disk — restores the epoch and the turn that its own predecessor granted. They only
-    ever move this object in the direction the head itself already went, which is why neither of
-    them is a setter: an epoch cannot be lowered, and a turn cannot be adopted over one that is
-    already held.
+    The epoch is monotone and per head, moving whenever the backend sees that head act. At most
+    one lease per head. Admission (closed by a drain) is independent of the running turn. `ticks`
+    is a runtime-wide diagnostic count and must never feed a quiescence decision. Not durable and
+    not locked; the owning runtime serialises access. A backend with a durable witness restores
+    state via `advance_to` and `adopt`, which only move forward: an epoch is never lowered and an
+    adopted turn never replaces a held one.
     """
 
     def __init__(self) -> None:
@@ -139,11 +82,7 @@ class HeadActivity:
 
     @property
     def ticks(self) -> int:
-        """Everything this runtime has seen any of its heads do, counted once.
-
-        Deliberately not what a stop-if-quiescent compares: another head's activity moves this, and
-        a check that used it would read a quiet head as a busy one.
-        """
+        """Runtime-wide activity count; never compare it for quiescence (other heads move it)."""
         return self._ticks
 
     def epoch(self, run_id: str) -> int:
@@ -151,11 +90,9 @@ class HeadActivity:
         return self._epochs.get(run_id, 0)
 
     def acted(self, run_id: str) -> int:
-        """Record that this head was made to do something, and return the epoch that follows.
+        """Record that the runtime made this head act; return the new epoch.
 
-        The runtime calls this for the things it performs itself — a pane opened, a prompt taken, a
-        head ended. What a *read* of a pane says goes through `observed`, which is allowed to say
-        nothing happened.
+        Pane reads go through `observed` instead, which may report no activity.
         """
         if not run_id:
             return 0
@@ -165,31 +102,20 @@ class HeadActivity:
         return epoch
 
     def noted(self, run_id: str = "") -> int:
-        """Count one thing this runtime did, and move no head's epoch by doing it.
+        """Count one runtime action in `ticks` without moving any head's epoch.
 
-        The half of `acted` that a backend with a durable witness still wants (secretary-1479).
-        On such a backend the epoch a caller is handed is the head's own journal sequence, so a
-        process-local increment beside it is not a smaller version of the same number — it is a
-        different scale, and the tick that reads it next cannot compare it to anything. `ticks`
-        is a diagnostic and stays one; this is how it goes on being kept without the epoch being
-        synthesised. The head's id is taken so that a reader of this call sees which head the
-        runtime was working on, and is deliberately not used for anything else.
+        Used by backends whose epoch is the head's journal sequence, where a local increment would
+        be on a different scale. `run_id` is documentary only.
         """
         del run_id
         self._ticks += 1
         return self._ticks
 
     def observed(self, run_id: str, *, output_at: float = 0.0) -> int:
-        """Record what a pane read said about this head, and return the epoch that follows.
+        """Record a pane read with output clock `output_at`; return the resulting epoch.
 
-        `output_at` is the pane's own output clock. Two things are *not* activity here, and both
-        would destroy the one property the epoch exists for:
-
-          * the same clock twice — an inventory that keeps returning the same timestamp says the
-            head has been quiet, which is exactly the fact a caller watching for progress needs;
-          * a pane with no output clock of its own — "I looked and the pane cannot tell me when it
-            last printed" is not "the head printed something", and moving the epoch on it makes
-            "silent" indistinguishable from "unobserved".
+        A repeated clock value or a missing clock (`0`) is not activity: moving the epoch on either
+        would make "silent" indistinguishable from "unobserved".
         """
         if not run_id or not output_at:
             return self.epoch(run_id)
@@ -199,14 +125,10 @@ class HeadActivity:
         return self.acted(run_id)
 
     def advance_to(self, run_id: str, epoch: int) -> int:
-        """Raise this head's epoch to what a durable witness says it is, and never lower it.
+        """Raise this head's epoch to a durable witness's value; never lower it.
 
-        The epoch is monotone per head, and monotone has to mean *across the process boundary*
-        too: the runtime that reads it in one tick is not the object that moved it in the last
-        one. A witness that could move this number down would make "nothing has happened since I
-        last looked" true of a head that had been working, which is the one thing the epoch
-        exists to make impossible; so a smaller number, a zero and an unknown are all no-ops, and
-        the answer is always the epoch this head ends up with.
+        Monotone across processes: a smaller value, zero or unknown is a no-op. Returns the
+        resulting epoch.
         """
         if not run_id or epoch <= 0:
             return self.epoch(run_id)
@@ -217,12 +139,9 @@ class HeadActivity:
         return epoch
 
     def adopt(self, run_id: str, lease: TurnLease) -> TurnLease:
-        """Take over a turn this runtime did not grant, and hand back the turn that is now held.
+        """Adopt a turn granted by a predecessor process; return the lease now held.
 
-        The counterpart of `grant` for a turn that was handed out by a process that has since
-        gone: it is not a second grant, so it does not raise over an outstanding lease — the
-        outstanding one *is* the answer, and a caller rehydrating a head it already knows about
-        must not be told that its own knowledge is a conflict.
+        Unlike `grant`, an outstanding lease is not a conflict: it is returned as the answer.
         """
         if not run_id or lease.run_id != run_id:
             raise TurnLeaseError("an adopted lease names the head it was adopted for")
@@ -241,12 +160,10 @@ class HeadActivity:
         return run_id in self._leases
 
     def grant(self, run_id: str, subject: str = "") -> TurnLease:
-        """Hand this head a turn. Refuses while one is outstanding — a head runs one turn.
+        """Hand this head a turn; raises `TurnLeaseError` while one is outstanding.
 
-        There is deliberately no `renew`. A grant over an outstanding lease used to release it
-        first, which made the newest delivery the running turn and quietly evicted the one it
-        interrupted; the caller that wanted that has to be refused instead, so this raises and the
-        runtime turns the refusal into a receipt.
+        There is no `renew`: evicting the running turn for a newer delivery must be refused, and
+        the runtime turns the refusal into a receipt.
         """
         if not run_id:
             raise TurnLeaseError("a turn lease names the head it was granted to")
@@ -293,18 +210,11 @@ class HeadActivity:
 
 @dataclass(frozen=True)
 class HeadReceipt:
-    """What one verb did, in terms a caller can route on without catching anything.
+    """What one verb did, routable without catching anything.
 
-    `failure` carries the operation's own refusal object unchanged, so a caller that needs the
-    distinction the operation drew — an aborted bring-up is not a failed one — reads it from the
-    same type it always did rather than from a re-derived string.
-
-    `epoch` is *this head's* activity epoch, not the runtime's, so it is the value to hand back to a
-    stop that must only happen while the head has stayed quiet. `rotation_ready` is the runtime
-    saying that this head is done — its admission is closed and the last turn it held has ended, so
-    it can be replaced. It is a value rather than something a caller derives from a drain it
-    remembers requesting and a `lease` field that is `None`, because those two are read at different
-    moments and the conjunction of them is not a fact anybody observed.
+    `failure` carries the operation's own error unchanged (an aborted bring-up is not a failed
+    one). `epoch` is this head's activity epoch, the value a stop-if-quiescent hands back.
+    `rotation_ready` means admission is closed and the last turn has ended, observed together.
     """
 
     status: str
@@ -355,19 +265,10 @@ class StartReceipt(HeadReceipt):
 class DeliverReceipt(HeadReceipt):
     """One prompt put in front of a running head, and what the delivery boundary saw.
 
-    `delivery_state` is the distinction a backend whose transport *admits* a payload before the
-    payload lands owes its callers, and it is on the boundary rather than on that backend because a
-    consumer must not have to know which backend it is talking to before it can tell "the head has
-    it" from "the head has part of it". Its values are the substrate's own words for what a
-    delivery ended as — `complete`, `stalled`, `failed` — plus `unknown`, which is not a state a
-    delivery is in but the backend saying it could not establish which of them this one reached; a
-    consumer must not read it as any of them, and least of all as "nothing landed". A delivery
-    still in flight is deliberately not among them: a backend reports what a delivery *did*, and a
-    backend that could return before its substrate had finished writing is one whose `ok` a
-    consumer would have to second-guess. It is empty for a backend whose delivery is finished by
-    the time the verb returns, which is what `HEAD_OK` already meant there. `delivered_bytes` and
-    `offered_bytes` are the two numbers that make a partial arrival impossible to read as a whole
-    one: they are only ever both reported, never one of them.
+    `delivery_state` is empty when delivery completes before the verb returns (then `HEAD_OK`
+    means arrived); otherwise `complete`, `stalled`, `failed`, or `unknown` (could not establish
+    which; never read it as "nothing landed"). In-flight is never reported. `delivered_bytes` and
+    `offered_bytes` are always reported together so a partial arrival cannot read as whole.
     """
 
     delivery: DeliveryOutcome | None = None
@@ -377,12 +278,7 @@ class DeliverReceipt(HeadReceipt):
 
     @property
     def arrived(self) -> bool:
-        """Whether the whole payload provably reached the head.
-
-        The predicate a caller routes on instead of `ok` when it cares about the bytes rather than
-        about the attempt. A backend that reports no delivery state says so by leaving it empty,
-        and there `ok` is the same statement it always was.
-        """
+        """Whether the whole payload provably reached the head; route on this, not `ok`, for bytes."""
         if not self.ok:
             return False
         return not self.delivery_state or self.delivery_state == "complete"
@@ -390,12 +286,10 @@ class DeliverReceipt(HeadReceipt):
 
 @dataclass(frozen=True)
 class ObserveReceipt(HeadReceipt):
-    """What the backend can say about this head right now — and nothing it cannot.
+    """What the backend can say about this head right now, and nothing it cannot.
 
-    Every field that a backend may be unable to answer is `None` rather than a default, because a
-    caller must be able to tell "not busy" from "not knowable". `busy` in particular is read from
-    the turn lease and the pane's own readiness, never from `HeadRun.working`: a lifecycle state
-    read back from disk is history, not a statement about this second.
+    Unanswerable fields are `None`, so "not busy" differs from "not knowable". `busy` comes from
+    the turn lease and pane readiness, never from `HeadRun.working`.
     """
 
     handle: str = ""
@@ -410,10 +304,8 @@ class ObserveReceipt(HeadReceipt):
 class DrainReceipt(HeadReceipt):
     """A request that a head take no more work.
 
-    Two separate facts, because a backend can honestly own one without the other: `draining` is
-    whether this runtime will hand the head further work, and `head_signalled` is whether the head
-    itself was told to wind down. A backend that can only do the first says so here rather than
-    reporting a drain it did not perform.
+    `draining`: this runtime hands the head no more work. `head_signalled`: the head itself was
+    told to wind down. A backend reports only what it actually did.
     """
 
     draining: bool = False
@@ -427,10 +319,9 @@ class StopReceipt(HeadReceipt):
 
 @dataclass(frozen=True)
 class AttachReceipt(HeadReceipt):
-    """A caller joined to a live head's stream, or the reason this backend cannot join it.
+    """A caller joined to a live head's stream, or why this backend cannot join it.
 
-    `handle` and `leaf` are how the head is addressed in whatever the backend calls its session, for
-    a caller that can do something with an address even when it cannot be handed a stream.
+    `handle` and `leaf` address the head in the backend's session even when no stream is given.
     """
 
     handle: str = ""
@@ -438,11 +329,10 @@ class AttachReceipt(HeadReceipt):
 
 
 class HeadRuntime(Protocol):
-    """One head backend, as everything above it is allowed to see one.
+    """One head backend as seen from above: six verbs, each with its own receipt.
 
-    Six verbs, each answering with its own receipt. An implementation may take backend-specific
-    keyword options, but nothing above this boundary may reach past it to a pane, a session manager or
-    a pty to perform any part of a head's lifecycle.
+    Implementations may take backend-specific keyword options; nothing above this boundary may
+    reach a pane, session manager or pty directly.
     """
 
     def start(

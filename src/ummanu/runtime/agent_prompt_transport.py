@@ -1,10 +1,7 @@
-"""The validation policy and wire form of one interactive agent prompt.
+"""Validation policy and wire form of one interactive agent prompt.
 
-Every prompt is checked here before it goes near a terminal, and given the one body form its
-adapter receives: Codex takes a bracketed paste, Claude a plain body. The terminal write itself
-belongs to the head backend. The Orca pane send that used to live here was removed with the pane
-host (secretary-1725); `AGENT_PROMPT_TRANSPORT_VERSION` and `TRANSPORT_POLICY` stay because
-`DeliveryEvidence` records them.
+Codex gets a bracketed paste, Claude a plain body; the terminal write belongs to the head backend.
+`AGENT_PROMPT_TRANSPORT_VERSION` and `TRANSPORT_POLICY` are recorded in `DeliveryEvidence`.
 """
 
 from __future__ import annotations
@@ -13,8 +10,8 @@ from dataclasses import dataclass
 from typing import Any
 
 AGENT_PROMPT_TRANSPORT_VERSION = "agent-prompt-v2"
-# One prompt is bounded with a substantial margin below the 128 KiB Linux limit on one argv
-# element, so the same body can travel as a single argument. The framing bytes count against it.
+# Well below the 128 KiB Linux limit on one argv element, so the body can travel as a single
+# argument. Framing bytes count against it.
 AGENT_PROMPT_MAX_BYTES = 64 * 1024
 BRACKETED_PASTE_START = "\x1b[200~"
 BRACKETED_PASTE_END = "\x1b[201~"
@@ -75,15 +72,11 @@ class AgentPromptTransportError(RuntimeError):
 def prepare_agent_prompt(text: str, *, adapter: str) -> PreparedAgentPrompt:
     """Validate prompt data before any terminal interaction and choose its wire form.
 
-    Line endings are normalised first and everything else is judged after.  A carriage return is
-    not an instruction: the board's own web form submits every textarea with CRLF, so a card
-    edited there would otherwise make each launch over that card a permanent transport rejection
-    — a worse outcome than the unframed send this replaces.  Rewriting CR to LF changes no
-    instruction and cannot forge the frame, whose delimiters are ESC-introduced.
 
-    Past that, the explicit policy rejects ESC and every remaining C0 control.  Replacing those
-    would make a user-visible prompt differ from the durable task document; rejection keeps the
-    framing delimiter unforgeable without silently changing an instruction.
+    CR/CRLF is normalised to LF first: the board's web form submits textareas with CRLF, and the
+    rewrite changes no instruction nor can it forge the ESC-introduced frame. Then ESC and every
+    other C0 control except tab/newline is rejected, not replaced, so the prompt never silently
+    differs from the durable task document and the frame delimiter stays unforgeable.
     """
     normalized_adapter = str(adapter or "").lower()
     receipt = PromptTransportReceipt(adapter=normalized_adapter)

@@ -1,19 +1,12 @@
-"""Which model and reasoning effort a provider session actually ran, read from its own journal.
+"""The model and reasoning effort a provider session actually ran, read from its own journal.
 
-A head's configuration names a model the way its operator spells it — `opus`, or nothing at all
-under `cli_default` — and the CLI resolves that name at startup. The only record of what it resolved
-to is the provider's session journal, so this module reads it there and nowhere else:
+* Claude: per assistant message, ``message.model`` (full id) and the record's ``effort``; CLI-
+  synthesized messages carry model ``<synthetic>`` and name no model.
+* Codex: per ``turn_context`` record, payload ``model`` and ``effort`` (``reasoning_effort`` in
+  older rollouts).
 
-* Claude writes one record per assistant message; ``message.model`` is the full model id
-  (`claude-opus-5-5`) and the record's own ``effort`` is the reasoning effort it ran with. A message
-  the CLI synthesized itself (an API error, an interrupt) carries the model ``<synthetic>`` and names
-  no model at all.
-* Codex writes one ``turn_context`` record per turn; its payload names ``model`` and ``effort``
-  (``reasoning_effort`` in older rollouts).
-
-Both answers are session-wide through the last record read: a session can switch models, so every
-distinct model is kept in order of its last use, and the last one is the model the session ended on.
-Nothing here raises on a record it does not recognise; such a record names nothing.
+Sessions can switch models, so every distinct model is kept in order of last use; the last is the
+model the session ended on. Unrecognised records name nothing and never raise.
 """
 
 from __future__ import annotations
@@ -84,8 +77,7 @@ def codex_session_models(records: Iterable[Any]) -> ProviderModels:
 def codex_rollout_path(codex_home: Path | str, thread_id: str) -> Path | None:
     """The rollout Codex keeps for one thread, ``sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl``.
 
-    The thread id is the file name's suffix and the date directories are the thread's start, so the
-    lookup is one glob over them; ``None`` when no file or more than one answers.
+    ``None`` when no file or more than one matches.
     """
     if not thread_id or "/" in thread_id or "*" in thread_id:
         return None
