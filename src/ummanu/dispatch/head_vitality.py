@@ -279,7 +279,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pid_heartbeat(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
-        """Wrap one ``dispatcher_watchdog.head_process_status`` answer.
+        """Wrap one ``dispatch.watchdog.head_process_status`` answer.
 
         The heartbeat is authoritative about the ``Process`` axis and about nothing else. Its
         inconclusive states (file not yet written, unreadable, wrong version) are observations of a
@@ -338,7 +338,7 @@ class VitalitySnapshot:
         previous_cursor: str = "",
         observed_at: float,
     ) -> VitalitySnapshot:
-        """Wrap one ``dispatcher_tui.provider_progress_for_run`` answer against the earlier cursor.
+        """Wrap one ``dispatch.tui.provider_progress_for_run`` answer against the earlier cursor.
 
         ``previous_cursor`` is the opaque cursor of this exact run's previous snapshot of this
         exact source (empty before the first observation). Only the admitted, bound evidence counts
