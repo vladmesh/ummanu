@@ -35,7 +35,9 @@ it through, and handing that record back to `start` is what makes a bring-up ove
 still working a refusal (`HEAD_BUSY`) rather than a second head. A failed-closed tick changes
 nothing: it raises no head and stops none, leaves `head_run.json` and `active_report.json` as they
 are and closes no report. A head an earlier tick raised finishes its turn under its own supervisor,
-and the next tick with a usable profile finds it through `head_run.json` as usual.
+and the next tick with a usable profile finds it through `head_run.json` as usual. A head that
+finished its turn and stayed up idle is retired by the next tick (`_retire_idle_head`), so a role is
+not held off duty by a head with nothing left to do.
 
 One role, one owner of its head. A `terminal_handle.json` left over from the retired pane backend
 names a pane as this role's owner. The fence is the file's existence, not its parsed content, so an
