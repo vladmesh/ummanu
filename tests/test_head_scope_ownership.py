@@ -391,6 +391,29 @@ class OwnershipTests(unittest.TestCase):
                 owner.stop_and_prove_empty()
         self.assertFalse(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
 
+    def test_scope_unloaded_before_stop_is_settled_not_refused(self) -> None:
+        # The head left on its own, systemd unloaded its transient scope, and `systemctl stop` then
+        # finds no unit. The cgroup proof decides; the stop does not fail as "not loaded".
+        owner = self.owner("unloaded-scope")
+        membership = self.membership(owner)
+        not_loaded = subprocess.CompletedProcess(
+            [], 5, stderr=f"Failed to stop {scope_unit(owner.run_id)}: Unit {scope_unit(owner.run_id)} not loaded.\n".encode(),
+        )
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=not_loaded):
+            membership.write_text("populated 0\n")
+            owner.stop_and_prove_empty()
+        self.assertTrue(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
+
+    def test_scope_not_loaded_with_live_members_still_refuses(self) -> None:
+        owner = self.owner("unloaded-but-populated")
+        self.membership(owner)
+        not_loaded = subprocess.CompletedProcess([], 5, stderr=b"Unit x.scope not loaded.\n")
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=not_loaded), \
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.time.monotonic", side_effect=[0.0, 11.0]):
+            with self.assertRaisesRegex(MemoryScopeError, "still has members"):
+                owner.stop_and_prove_empty()
+        self.assertFalse(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
+
     def test_unreadable_membership_cannot_settle_exact_generation(self) -> None:
         owner = self.owner("unreadable-membership")
         membership = self.membership(owner)

@@ -62,6 +62,16 @@ def native_scope_state(unit: str) -> dict[str, str]:
     return fields
 
 
+#: `systemctl stop` of a unit systemd no longer has loaded: exit status 5 (LSB "program is not
+#: installed") with "Unit <name> not loaded." on stderr.
+SYSTEMCTL_UNIT_NOT_LOADED = 5
+
+
+def _unit_not_loaded(returncode: int, detail: str) -> bool:
+    """Whether a failed `systemctl stop` only says the unit is already gone."""
+    return returncode == SYSTEMCTL_UNIT_NOT_LOADED and "not loaded" in detail
+
+
 def launch_identity(pid: int) -> str | None:
     try:
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
@@ -424,7 +434,13 @@ class ScopedHeadLifecycle:
             raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {exc}") from exc
         if stopped.returncode != 0:
             detail = stopped.stderr.decode("utf-8", errors="replace").strip()
-            raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {detail}")
+            # A transient scope is unloaded as soon as its last process leaves. A head asked to stop
+            # through its socket usually takes its supervisor with it, so systemd can unload the
+            # scope between the cgroup look above and this stop. That is not a refusal: the unit is
+            # already gone, and the membership proof below settles it either way (an absent or
+            # unpopulated cgroup is empty; a populated one still refuses).
+            if not _unit_not_loaded(stopped.returncode, detail):
+                raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {detail}")
         deadline = time.monotonic() + 10.0
         while True:
             try:
