@@ -1278,9 +1278,14 @@ class LocalPtyHeadRuntime:
             self.activity.close_admission(run_id)
             self._admission_notes.setdefault(run_id, DELIVER_STATE_UNKNOWN)
             return
-        if state.exited or self._identity_says_dead(address):
-            # Positively ended: adopt no lease (a supervisor killed mid-turn leaves `turn.started`
-            # last, a lease nothing could release) and close admission.
+        identity_ended = (
+            state.source != REHYDRATED_FROM_SUPERVISOR and self._identity_says_dead(address)
+        )
+        if state.exited or identity_ended:
+            # A live supervisor is the authoritative witness for its incarnation. A reused run
+            # directory can still hold the previous incarnation's dead launch identity until the
+            # new head writes its own; that stale record must not end the head that just answered.
+            # Without a supervisor answer, the launch identity remains the positive liveness proof.
             self.activity.close_admission(run_id)
             self._admission_notes.setdefault(run_id, DELIVER_HEAD_ENDED)
             return
@@ -2468,11 +2473,27 @@ def _in_flight(status: Mapping[str, Any]) -> bool:
 
 
 def _has_exited(address: _Address) -> bool:
-    """Whether the journal's bounded tail holds a `run.exited`.
+    """Whether the current journal incarnation has a complete `run.exited`.
 
-    Only used to confirm a head is gone, so a window past an older exit answering `False` is safe.
+    Run directories and journals are reused. An exit from an earlier incarnation cannot confirm
+    that the head started after it is gone, and a damaged tail cannot prove which incarnation its
+    final records belong to. The launch identity remains the primary stop witness.
     """
-    return bool(local_pty.read_tail(address.journal_path).of_kind(local_pty.RUN_EXITED))
+    try:
+        reading = local_pty.read_tail(address.journal_path)
+    except OSError:
+        return False
+    if reading.truncated_tail or reading.malformed or not reading.ordered:
+        return False
+    started = max(
+        (int(event.get("seq") or 0) for event in reading.of_kind(local_pty.RUN_STARTED)),
+        default=0,
+    )
+    exited = max(
+        (int(event.get("seq") or 0) for event in reading.of_kind(local_pty.RUN_EXITED)),
+        default=0,
+    )
+    return bool(started and exited > started)
 
 
 def head_run_journal(run_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], ...]:
@@ -2618,7 +2639,7 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
             raise ValueError("cleanup scope owner binding differs from its recorded head")
         if recorded_only:
             continue
-        if record.get("workspace") == workspace or record.get("task") == task_identity:
+        if record.get("workspace") == workspace or record.get("task") == task_identity:  # noqa: SIM102
             if (owner.run_id, owner.generation) not in known:
                 if record.get("cleanup_complete") and not record.get("launch_allowed"):
                     # A retained terminal flag cannot bless a reused live unit.

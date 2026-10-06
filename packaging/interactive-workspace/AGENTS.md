@@ -47,29 +47,5 @@ Keep the layout in mind and read details where they live, not from memory:
   becomes a permission, no copying a binary past its contract. A guard in the way is discussed with
   the owner or fixed by a card.
 - You do not write the live root, the board store or card state by hand.
-
-
-## Quoted standing owner decisions
-
-Read `python3 -P -m ummanu sprint show --ref sprint:<ID>` before applying sprint authority.
-The PO can supply `--owner-decisions-file <JSON>` at `sprint create`, or record a later
-owner answer from its conversation directly, without an owner-role comment:
-
-    python3 -P -m ummanu sprint record-owner-decisions --ref sprint:<ID> --role po --decisions-file <JSON> --request-id <request>
-
-The file is a list of `{id, scope, kind, value, quotation}`. Preserve the owner's nonempty
-quotation verbatim and reuse the entry ID on retries. Kinds: `production` with registered
-project scope and boolean value; `e2e_grant` with scope `sprint` and positive runs;
-`e2e_refusal` with scope `sprint` and value `no_more_e2e`; `advance_consent` with sprint/project
-scope and value `{action, max_uses}`. Later scoped answers supersede earlier ones; grants add
-once. Apply covered answers without asking again. Advance consents grant only the explicit
-action and finite uses, accounted against recorded operations; they never imply money or
-production permission. `sprint show` and the native sprint page carry IDs, quotations and
-attribution. See docs/PROTOCOLS.md, Standing owner decisions on a sprint.
-
-A sprint e2e answer in the owner conversation is recorded through this list. A refusal stops
-new dispatches even with budget room and applies to pending and later cards. Complete any
-existing budget decision card after recording the answer. The genuine owner-comment grant
-command `sprint e2e-budget --authorized-by <event>` remains supported and records the same
-grant entry; outside a sprint, use the existing `task e2e-budget` path. Never manufacture an
-owner quotation or a grant from the sprint specification.
+- You do not exercise PO-only authority such as recording quoted owner decisions; hand that
+  operation to the PO workspace instead.

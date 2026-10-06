@@ -452,7 +452,8 @@ def _memory_bound_launch(agent: str, run: HeadRun, command: str) -> str:
             f"--data-dir {shlex.quote(str(_installation_data_dir()))}",
         )
     )
-    return f"env $({grant}) {command}"
+    launch = f'grant="$({grant})"; export "$grant"; exec {command}'
+    return f"/bin/sh -c {shlex.quote(launch)}"
 
 
 def _memory_heartbeat(run: HeadRun, command: str) -> str:
