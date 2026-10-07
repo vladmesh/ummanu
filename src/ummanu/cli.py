@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ummanu import state_repo
 from ummanu.backup import create_backups, verify_backup
@@ -45,6 +46,7 @@ from ummanu.dispatch.commands import (
 )
 from ummanu.dispatch.pause import ProductionPause
 from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
+from ummanu.dispatch.tick_telemetry import tick_p95_finding, tick_statistics
 from ummanu.gate import run_gate
 from ummanu.head_health import (
     PROBE_BROKEN,
@@ -641,6 +643,8 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"{finding['agent']}: {finding['message']}")
         elif finding["code"] == "head_fallback":
             print(f"error: head fallback: {finding['message']}")
+        elif finding["code"] == "dispatcher_tick_p95_slow":
+            print(f"red: {finding['code']}: {finding['message']}")
         elif str(finding["code"]).startswith("live_root."):
             print(f"{finding['code']}: {finding['message']}")
         if accepted(finding):
@@ -793,6 +797,7 @@ def run_status(args: argparse.Namespace) -> int:
             f"last tick: #{last_tick['seq']} {last_tick['status']} at {last_tick['at']} "
             f"in {_duration_text(last_tick['duration_ms'])}"
         )
+    _print_tick_measurements(snapshot["dispatcher"])
     checkpoint = snapshot["checkpoint"]
     print(
         f"checkpoint: {checkpoint.get('checkpoint_status') or 'pending'} "
@@ -800,6 +805,24 @@ def run_status(args: argparse.Namespace) -> int:
     )
     print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
     return 0
+
+
+def _print_tick_measurements(dispatcher: dict[str, Any]) -> None:
+    statistics = dispatcher.get("tick_statistics") or tick_statistics({})
+    count = statistics["sample_count"]
+    if count:
+        print(
+            f"tick durations: {count} samples, p50 {_duration_text(statistics['p50_duration_ms'])}, "
+            f"p95 {_duration_text(statistics['p95_duration_ms'])}"
+        )
+    else:
+        print("tick durations: unavailable (0 samples)")
+    last = dispatcher["last_tick"]
+    phases = last.get("phases") if last else None
+    if phases:
+        print("last tick phases: " + ", ".join(f"{name} {_duration_text(ms)}" for name, ms in phases.items()))
+    else:
+        print("last tick phases: unavailable")
 
 
 def _duration_text(value: float | None) -> str:
@@ -913,6 +936,9 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         for row in recovery["resources"]
     ]
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
+    tick_finding = tick_p95_finding(production)
+    if tick_finding is not None:
+        findings.append(tick_finding)
     if provenance is not None:
         findings.append(provenance)
     findings.extend(checkpoint_rpo)
