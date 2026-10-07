@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from ummanu.dispatch.cleanup import serialized
-
 import contextlib
-import copy
 import contextvars
+import copy
 import json
 import time
 import uuid
@@ -25,8 +23,9 @@ from ummanu.board.terminal_taxonomy import (
 from ummanu.checkpoint import checkpoint_snapshot
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.claim import claim_ready_task
+from ummanu.dispatch.cleanup import serialized
+from ummanu.dispatch.e2e_after_merge import after_merge_snapshot, reconcile_after_merge
 from ummanu.dispatch.host import CommandHostRuntime
-from ummanu.dispatch.provider_failure import is_provider_unavailable_return
 from ummanu.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
@@ -42,14 +41,14 @@ from ummanu.dispatch.observer import (
     retry_pending_observer_stops,
 )
 from ummanu.dispatch.observer_fence import fenced_task, observer_fence
-from ummanu.dispatch.pause_ops import auto_resume_expired_freeze
 from ummanu.dispatch.origin_returns import reconcile_origin_returns
+from ummanu.dispatch.pause_ops import auto_resume_expired_freeze
 from ummanu.dispatch.po_cards import completion_state
-from ummanu.dispatch.wait_cards import pending_wait_blockers
-from ummanu.dispatch.e2e_after_merge import after_merge_snapshot, reconcile_after_merge
 from ummanu.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
+from ummanu.dispatch.provider_failure import is_provider_unavailable_return
 from ummanu.dispatch.state import (
     DispatcherRecord,
+    attempt_request_id as _attempt_request_id,
     close_divergence,
     divergence_is_open,
     is_claim_skip,
@@ -58,10 +57,8 @@ from ummanu.dispatch.state import (
     record_divergence,
     request_token,
 )
-from ummanu.dispatch.state import (
-    attempt_request_id as _attempt_request_id,
-)
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
+from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.sprints import SprintWriter, budget_thresholds
 from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY, TaskError
 
@@ -268,7 +265,7 @@ def _record_failed_tick(runtime: Any, exc: BaseException) -> None:
             },
         )
         runtime.production_state.save(payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         return
 
 
@@ -422,15 +419,17 @@ def _production_tick_work(
     outcome_outcomes = attempt_accounting.publish_pending_attempt_outcomes(runtime)
     cleanup_outcomes = []
     if isinstance(runtime.host, CommandHostRuntime) and runtime.host.mode == "real":
+        # A few intents per tick: each replay rereads and rewrites the whole journal under the
+        # tick's lock, and `replay_cursor` carries the rest to later ticks.
         cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
                              "status": item["status"], "reason": item["reason"]}
-                            for item in runtime.cleanup.replay(limit=20)]
+                            for item in runtime.cleanup.replay(limit=5)]
 
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
         fence = observer_fence(runtime, payload, pause_mode=str(pause.get("mode") or ""))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         # An unfinished fence authorizes no downstream work.
         return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)
     fence_outcomes = list(fence.get("outcomes") or [])
@@ -465,12 +464,12 @@ def _production_tick_work(
         errors.append(_unexpected_error("", exc))
     try:
         outcomes += _reconcile_sprint_budget(runtime)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         errors.append(_unexpected_error("", exc))
     # Reconcile after budget accounting so hard stops prevent replacement launches.
     try:
         outcomes += reconcile_observers(runtime, payload, pause_mode=str(pause.get("mode") or ""))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         observer_errors.append(_unexpected_error("", exc))
     errors = observer_errors + errors
     claims_allowed = pause.get("mode") != "drain"
@@ -479,7 +478,7 @@ def _production_tick_work(
             ready_outcome = _production_claim_ready(
                 runtime, records, payload, fence=fence, blocked_scopes=blocked_scopes
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
             errors.append(_unexpected_error("", exc))
         else:
             if ready_outcome is not None:
@@ -555,7 +554,7 @@ def _frozen_tick_body(runtime: Any, payload: dict[str, Any], result: dict[str, A
     # during the freeze is retried. Nothing else about an observer is touched here.
     try:
         observer_stops = retry_pending_observer_stops(runtime, payload)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         observer_stops = []
         # A freeze itself is healthy; a retry that raised inside it is not, and telemetry keys
         # health off the status. Say so in both places rather than reporting the frozen tick as a
@@ -703,7 +702,7 @@ def _checkpoint_push_due(pusher: Any, state: dict[str, Any], now: float) -> bool
         return False
     try:
         return bool(due(state, now=now))
-    except Exception:
+    except Exception:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         # A pusher that cannot answer its own public window contract gets a
         # fresh preparation and then records its own delivery failure. It must
         # not turn a failed preflight into permission to send an old snapshot.
@@ -749,7 +748,7 @@ def _write_checkpoint(runtime: Any, state: dict[str, Any], now: float) -> dict[s
     else:
         try:
             raw = writer.write().to_json()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
             raw = {"status": "blocked", "reason": f"{type(exc).__name__}: {exc}"}
     result = dict(state)
     status = str(raw.get("status") or "blocked")
@@ -845,7 +844,7 @@ def _push_checkpoint(runtime: Any, state: dict[str, Any], now: float) -> dict[st
     assert pusher is not None
     try:
         result = pusher.push(state, now=now)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         return _failed_push(state, exc, now)
     result = dict(result)
     # ``CheckpointPusher`` records this itself. Keep a pre-cadence compatible
@@ -1173,7 +1172,7 @@ def production_run(
             try:
                 last = runtime.production_tick()
                 failures = 0 if last.get("status") == "ok" else failures + 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
                 failures += 1
                 last = {
                     "status": "degraded",
@@ -1219,7 +1218,7 @@ def _advance_active(
         except TaskError as exc:
             errors.append({"ref": str(task.get("ref") or ""), "code": exc.code, "message": exc.message})
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
             errors.append(_unexpected_error(str(task.get("ref") or ""), exc))
             continue
         if outcome.get("status") == "blocked":
@@ -1262,7 +1261,7 @@ def _fence_failed_tick(
     record_tick_telemetry(payload, result)
     try:
         runtime.production_state.save(payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         # Reporting the refusal matters more than recording it: the cards are already untouched.
         result["state_save"] = "failed"
     return result
@@ -1499,7 +1498,7 @@ def _current_card(runtime: Any, ref: str) -> dict[str, Any] | None:
         return runtime.reader.show(ref)
     except TaskError as exc:
         return {"ref": ref, "state": "not_found"} if exc.code == "not_found" else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         return None
 
 

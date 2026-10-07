@@ -12,11 +12,14 @@ import unittest
 from contextlib import redirect_stderr
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 
 from tests.retired_board import RETIRED_STORE
 from ummanu.board import backend
-from ummanu.tasks import TaskError
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.tasks import TaskError, project_card_by_reference
 
 
 class EntityIdentityTests(unittest.TestCase):
@@ -164,6 +167,33 @@ class DriverRefusalTests(unittest.TestCase):
         self.assertIsInstance(error, TaskError)
         self.assertEqual((error.code, error.exit_code), ("backend_error", 1))
 
+
+
+class ArchivedReferenceTests(unittest.TestCase):
+    """An archived card's live duplicate is looked for only where one can exist."""
+
+    ARCHIVED: ClassVar[dict[str, object]] = {"id": 7, "reference": "ummanu-7", "is_active": 0}
+    LIVE: ClassVar[dict[str, object]] = {"id": 9, "reference": "ummanu-7", "is_active": 1}
+
+    def calls(self, client: object) -> list[str]:
+        called: list[str] = []
+
+        def call(method: str, **fields: object) -> object:
+            called.append(method)
+            return dict(self.ARCHIVED) if method == "getTaskByReference" else [dict(self.LIVE)]
+
+        client.call = call  # type: ignore[attr-defined]
+        self.result = project_card_by_reference(client, 1, "ummanu-7")  # type: ignore[arg-type]
+        return called
+
+    def test_the_store_answers_an_archived_card_without_listing_the_board(self) -> None:
+        # `task_ref` is the store's primary key, so the archived row is the only one.
+        self.assertEqual(self.calls(SqlCardClient.__new__(SqlCardClient)), ["getTaskByReference"])
+        self.assertEqual(self.result, self.ARCHIVED)
+
+    def test_another_client_still_prefers_a_live_duplicate(self) -> None:
+        self.assertEqual(self.calls(SimpleNamespace()), ["getTaskByReference", "getAllTasks"])
+        self.assertEqual(self.result, self.LIVE)
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
