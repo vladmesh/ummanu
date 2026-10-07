@@ -449,6 +449,12 @@ def _recover_pending(runtime: Any, payload: dict[str, Any], records: dict[str, A
     changed = False
     outcomes = []
     for card in cards:
+        # The snapshot row already carries the mark: only a pending or budget-waiting one
+        # earns the per-card show and supersession reads. A mark that turns pending after
+        # the snapshot is picked up next tick.
+        listed = e2e_record.e2e_state(card).after_merge
+        if listed is None or listed.state not in {AM_PENDING, AM_BUDGET_WAIT}:
+            continue
         try:
             task = runtime.reader.show(card["ref"])
             mark = e2e_record.e2e_state(task).after_merge

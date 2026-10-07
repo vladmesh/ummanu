@@ -1490,6 +1490,24 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(heads[0]["lifecycle"], "exited")
         self.assertEqual(len(self.stops), 10)
 
+    def test_remembering_the_same_intent_again_does_not_rewrite_the_journal(self):
+        journal = CleanupJournal(Path(self.enterContext(tempfile.TemporaryDirectory())))
+        task = {"id": 7, "ref": "ummanu-7", "project": "ummanu"}
+        record = {"attempt_id": "attempt-1", "worker_head_run": {"run_id": "run-1", "lifecycle": "running"}}
+        value = journal.read()
+        key, changed = journal.remember_into(value, task, record)
+        self.assertTrue(changed)
+        self.assertEqual(journal.remember_into(value, task, copy.deepcopy(record)), (key, False))
+        journal.remember(task, record)
+        with mock.patch.object(journal, "save", wraps=journal.save) as save:
+            self.assertEqual(journal.remember(task, copy.deepcopy(record)), key)
+            save.assert_not_called()
+            moved = {**record, "worker_head_run": {"run_id": "run-1", "lifecycle": "exited"}}
+            self.assertEqual(journal.remember_into(journal.read(), task, moved), (key, True))
+            journal.remember(task, moved)
+            save.assert_called_once()
+        self.assertEqual(journal.read()["intents"][key]["heads"][0]["lifecycle"], "exited")
+
     def test_oversized_heads_list_compacts_on_next_checkpoint(self):
         worker = self.head().to_json()
         reviewer = self.head("reviewer", "review-generation").to_json()

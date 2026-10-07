@@ -662,9 +662,15 @@ def project_card_by_reference(
     client: SqlCardClient, project_id: int, reference: str
 ) -> dict[str, Any] | None:
     """Return the live card for a reference when an archived duplicate exists."""
+    from ummanu.board.sql_cards import SqlCardClient
+
     card = client.call("getTaskByReference", project_id=project_id, reference=reference)
     if not isinstance(card, dict) or _task_is_active(card):
         return card if isinstance(card, dict) else None
+    # The store's `task_ref` is the primary key: an archived row has no active duplicate,
+    # so the full board read is only for a client without that guarantee.
+    if isinstance(client, SqlCardClient):
+        return card
     active_cards = client.call("getAllTasks", project_id=project_id, status_id=1)
     if not isinstance(active_cards, list):
         raise TaskError("backend_error", "board store returned an invalid task list", 1)

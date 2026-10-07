@@ -422,9 +422,11 @@ def _production_tick_work(
     outcome_outcomes = attempt_accounting.publish_pending_attempt_outcomes(runtime)
     cleanup_outcomes = []
     if isinstance(runtime.host, CommandHostRuntime) and runtime.host.mode == "real":
+        # A few intents per tick: each replay rereads and rewrites the whole journal under the
+        # tick's lock, and `replay_cursor` carries the rest to later ticks.
         cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
                              "status": item["status"], "reason": item["reason"]}
-                            for item in runtime.cleanup.replay(limit=20)]
+                            for item in runtime.cleanup.replay(limit=5)]
 
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.

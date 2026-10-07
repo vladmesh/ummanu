@@ -274,6 +274,8 @@ class CleanupJournal:
                 previous["identity"] = identity
                 return key, True
             return key, False
+        # Saves rewrite the whole journal with fsync: report a change only when this intent differs.
+        before = copy.deepcopy(previous)
         intent = previous or {"task": copy.deepcopy(task), "record": copy.deepcopy(record),
                               "identity": identity, "heads": [], "progress": {},
                               "status": "owned", "reason": "", "disposition": "owned"}
@@ -296,7 +298,7 @@ class CleanupJournal:
         if disposition != "owned":
             intent["status"] = "pending"
         value["intents"][key] = intent
-        return key, True
+        return key, intent != before
 
     @serialized
     def request(self, task: dict[str, Any], disposition: str,
