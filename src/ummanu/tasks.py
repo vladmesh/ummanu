@@ -122,7 +122,13 @@ from ummanu.board.task_routing import (
     impact_bounds_refusal,
 )
 from ummanu.board.transitions import BoardProtocolError
-from ummanu.dispatch.cleanup import CleanupJournal, capacity_serialized, ownership_recovery, reference_lock
+from ummanu.dispatch.cleanup import (
+    CleanupJournal,
+    bulk_lane,
+    capacity_serialized,
+    ownership_recovery,
+    reference_lock,
+)
 from ummanu.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -5186,7 +5192,9 @@ class TaskWriter:
         """
         scope = getattr(self.client, "transaction", None)
         try:
-            with scope() if scope is not None else contextlib.nullcontext():
+            # Creates and after-merge admission can open SQL before reaching a
+            # card fence. Order their transaction against bulk recovery first.
+            with bulk_lane(self.data_dir), scope() if scope is not None else contextlib.nullcontext():
                 yield
         except (owner_events.OwnerEventError, BoardEventPending) as exc:
             cause = exc.__cause__ if isinstance(exc, BoardEventPending) else exc

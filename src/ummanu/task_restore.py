@@ -780,6 +780,19 @@ def reconcile_restore_order(
     references: list[str],
     request_id: str,
 ) -> None:
+    from ummanu.dispatch.cleanup import bulk_lane
+
+    with bulk_lane(writer.data_dir, exclusive=True):
+        _reconcile_restore_order(writer, column, swimlane, references, request_id)
+
+
+def _reconcile_restore_order(
+    writer: Any,
+    column: str,
+    swimlane: str,
+    references: list[str],
+    request_id: str,
+) -> None:
     """Repair one active restore group under its own resumable audit boundary."""
     from ummanu.tasks import TaskError, _now, _positive_int
 
@@ -869,12 +882,9 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
     ):
         raise TaskError("backend_error", "pending restore order is invalid", 1)
 
-    from ummanu.dispatch.cleanup import reference_lock
+    from ummanu.dispatch.cleanup import bulk_lane
 
-    with ExitStack() as fences:
-        for reference in sorted(references):
-            fences.enter_context(reference_lock(writer.data_dir, reference))
-        fences.enter_context(reference_lock(writer.data_dir, "capacity", lane="admission"))
+    with bulk_lane(writer.data_dir, exclusive=True):
         live, rows = _live_restore_group(writer, column, swimlane)
         while live != references:
             if set(live) != set(references):

@@ -28,6 +28,13 @@ row lock covers only the short admission/commit check and is released before any
 subprocess or filesystem disposal. Release admits `done` cleanup in Assessment;
 heads and workspace are disposed there, and claim settlement waits for Done.
 
+The shared `dispatcher/board-bulk.lock` lane comes before card effects, capacity,
+SQL and `cleanup.lock`; independent shared holders do not serialize head commands.
+Board import and resumable group-order repair take this lane exclusively once,
+without per-card descriptors. Restore keeps `.restore.lock` and sprint admission
+ahead of the lane. Disposal finishes before an exclusive restore starts; subsequent
+admission revalidates restored ownership by key.
+
 Claims count live capacity keys and revalidate each peer, independently of the tick
 snapshot. A separate admission fence orders concurrent claims and moves into active
 states; comment/report writes rely on their SQL transactions. Head settlement calls the runtime selected by each durable

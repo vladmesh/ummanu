@@ -9,7 +9,6 @@ import sys
 import tarfile
 import tempfile
 import uuid
-from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,7 +42,7 @@ from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
 from ummanu.data import init_layout
-from ummanu.dispatch.cleanup import reference_lock
+from ummanu.dispatch.cleanup import bulk_lane
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.config import DEFAULT_DIM as DEFAULT_MEMORY_DIM
 from ummanu.product_issues import (
@@ -130,121 +129,109 @@ def import_normalized_board(
         if instance is None:
             raise RestoreError("restore requires the target instance to bind its board")
         client = board_client(instance, serves=(CARD, SPRINT))
-    cards = _normalized_cards(
-        data_dir, registered_project_ids=(registered_projects(instance) if instance else None)
-    )
-    board_id, _, _ = TaskReader(client)._board()
-    references = {card["reference"] for card in cards} | {
-        str(row["reference"]) for row in all_project_cards(client, board_id) if row.get("reference")
-    }
-    # Bulk restore also changes state and claim. Acquire its Card fences before
-    # opening SQL, in a stable order, including existing cards that reconciliation
-    # may repair before importing. No repair waits for a Card fence behind capacity.
-    with ExitStack() as fences:
-        for reference in sorted(references):
-            fences.enter_context(reference_lock(data_dir, reference))
-        fences.enter_context(reference_lock(data_dir, "capacity", lane="admission"))
-        if not client._depth:
-            with client.transaction():
-                return _import_normalized_board(data_dir, client=client, instance=instance)
-        return _import_normalized_board(data_dir, client=client, instance=instance)
+    from ummanu.sprints import sprint_admission_lock
+
+    data_dir = data_dir.expanduser().resolve()
+    # Keep restore/sprint admission ahead of the ownership lane, and keep the
+    # lane outside SQL so a waiting recovery never holds board rows.
+    try:
+        with file_lock(data_dir / "board" / ".restore.lock"), sprint_admission_lock(data_dir), \
+                bulk_lane(data_dir, exclusive=True):
+            if not client._depth:
+                with client.transaction():
+                    return _import_normalized_board(data_dir, client=client, instance=instance)
+            return _import_normalized_board(data_dir, client=client, instance=instance)
+    except TaskError as exc:
+        raise RestoreError(exc.message) from None
 
 
 def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance: Path | None = None) -> int:
     """Populate an empty board from the normalized export and prove parity on every retry."""
-    from ummanu.sprints import sprint_admission_lock
+    cards = _normalized_cards(
+        data_dir, registered_project_ids=(registered_projects(instance) if instance else None)
+    )
+    sprints = _normalized_sprints(data_dir)
+    # Validate both sets before the first backend write.
+    _check_sql_sprint_current_tasks(cards, sprints)
+    _check_restored_observers(sprints, instance)
+    _check_restored_executors(sprints)
+    _check_restored_admission(sprints, instance)
+    reader = TaskReader(client)
+    writer = TaskWriter(client, data_dir=data_dir)
+    _, unresolved = writer.reconcile(defer_restore_comments=True, defer_bulk_restore=True)
+    if unresolved:
+        raise RestoreError("board audit repair is required before restore")
+    _set_restore_phase(client, "inventory")
+    board_id, columns, swimlanes = reader._board()
+    existing = _existing_board_cards(client, board_id)
+    unexpected = set(existing) - {card["reference"] for card in cards}
+    if unexpected:
+        raise RestoreError("board is not empty or does not match normalized restore data")
+    # Read once before writes for idempotency and backend-audit binding.
+    existing_sprints = _existing_sprints(data_dir, client, sprints)
+    prefix = _restore_request_prefix(data_dir, writer.audit, set(existing) | set(existing_sprints))
+    _validate_deferred_restore_comments(writer.audit, cards, sprints, prefix)
+    # The writes follow `board.import_order.IMPORT_PHASES`, the one statement of their order:
+    # history first, so a restored row claiming an exported request finds its `requests`
+    # row (`issue_comment_claims_its_request`); the record kinds, comments, closure, order
+    # and sprints after it.
+    _restore_board_history(data_dir, writer.audit)
+    ordered_cards = sorted(cards, key=_restore_card_order)
+    columns, swimlanes = _ensure_restore_swimlanes(
+        client, board_id, columns, swimlanes, ordered_cards
+    )
+    from ummanu.task_restore import restore_cards_batched
 
-    data_dir = data_dir.expanduser().resolve()
-    # Restoring open sprints is set admission against create and reopen.
-    with file_lock(data_dir / "board" / ".restore.lock"), sprint_admission_lock(data_dir):
-        try:
-            cards = _normalized_cards(
-                data_dir, registered_project_ids=(registered_projects(instance) if instance else None)
-            )
-            sprints = _normalized_sprints(data_dir)
-            # Validate both sets before the first backend write.
-            _check_sql_sprint_current_tasks(cards, sprints)
-            _check_restored_observers(sprints, instance)
-            _check_restored_executors(sprints)
-            _check_restored_admission(sprints, instance)
-            reader = TaskReader(client)
-            writer = TaskWriter(client, data_dir=data_dir)
-            _, unresolved = writer.reconcile(defer_restore_comments=True, defer_bulk_restore=True)
-            if unresolved:
-                raise RestoreError("board audit repair is required before restore")
-            _set_restore_phase(client, "inventory")
-            board_id, columns, swimlanes = reader._board()
-            existing = _existing_board_cards(client, board_id)
-            unexpected = set(existing) - {card["reference"] for card in cards}
-            if unexpected:
-                raise RestoreError("board is not empty or does not match normalized restore data")
-            # Read once before writes for idempotency and backend-audit binding.
-            existing_sprints = _existing_sprints(data_dir, client, sprints)
-            prefix = _restore_request_prefix(data_dir, writer.audit, set(existing) | set(existing_sprints))
-            _validate_deferred_restore_comments(writer.audit, cards, sprints, prefix)
-            # The writes follow `board.import_order.IMPORT_PHASES`, the one statement of their order:
-            # history first, so a restored row claiming an exported request finds its `requests`
-            # row (`issue_comment_claims_its_request`); the record kinds, comments, closure, order
-            # and sprints after it.
-            _restore_board_history(data_dir, writer.audit)
-            ordered_cards = sorted(cards, key=_restore_card_order)
-            columns, swimlanes = _ensure_restore_swimlanes(
-                client, board_id, columns, swimlanes, ordered_cards
-            )
-            from ummanu.task_restore import restore_cards_batched
+    restore_cards_batched(
+        writer,
+        ordered_cards,
+        board_id=board_id,
+        columns=columns,
+        swimlanes=swimlanes,
+        existing=existing,
+        request_prefix=prefix,
+    )
+    _set_restore_phase(client, "proof")
+    setup = reader.restore_snapshot()
+    _require_card_snapshot(data_dir, cards, setup)
+    from ummanu.task_restore import commit_restored_cards
 
-            restore_cards_batched(
-                writer,
-                ordered_cards,
-                board_id=board_id,
-                columns=columns,
-                swimlanes=swimlanes,
-                existing=existing,
-                request_prefix=prefix,
-            )
-            _set_restore_phase(client, "proof")
-            setup = reader.restore_snapshot()
-            _require_card_snapshot(data_dir, cards, setup)
-            from ummanu.task_restore import commit_restored_cards
+    commit_restored_cards(writer, ordered_cards, setup, request_prefix=prefix)
+    _set_restore_phase(client, "proof")
+    _restore_card_comments_batched(writer, ordered_cards, setup, prefix)
+    from ummanu.task_restore import close_restored_cards_batched
 
-            commit_restored_cards(writer, ordered_cards, setup, request_prefix=prefix)
-            _set_restore_phase(client, "proof")
-            _restore_card_comments_batched(writer, ordered_cards, setup, prefix)
-            from ummanu.task_restore import close_restored_cards_batched
-
-            close_restored_cards_batched(client, ordered_cards, setup, board_id=board_id)
-            _set_restore_phase(client, "closure")
-            post_close = reader.restore_snapshot()
-            _require_card_snapshot(data_dir, cards, post_close)
-            _set_restore_phase(client, "order")
-            _reconcile_restored_order(writer, cards, post_close, prefix)
-            _set_restore_phase(client, "final_parity")
-            actual = reader.restore_snapshot()
-            _require_card_snapshot(data_dir, cards, actual)
-            if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
-                _update_restore_state(data_dir, board="failed", board_parity="failed")
-                raise RestoreError("board parity check failed")
-            if _restored_order_mismatch(cards, actual):
-                _update_restore_state(data_dir, board="failed", board_parity="failed")
-                raise RestoreError("board parity check failed: restored card order")
-            _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
-            pending_comments = [
-                event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
-            ]
-            if pending_comments:
-                raise RestoreError("board comment audit repair is required before restore can complete")
-        except TaskError as exc:
-            raise RestoreError(exc.message) from None
-        _update_restore_state(
-            data_dir,
-            board="complete",
-            board_parity="complete",
-            board_count=len(cards),
-            sprints="complete",
-            sprint_parity="complete",
-            sprint_count=len(sprints),
-        )
-        return len(cards)
+    close_restored_cards_batched(client, ordered_cards, setup, board_id=board_id)
+    _set_restore_phase(client, "closure")
+    post_close = reader.restore_snapshot()
+    _require_card_snapshot(data_dir, cards, post_close)
+    _set_restore_phase(client, "order")
+    _reconcile_restored_order(writer, cards, post_close, prefix)
+    _set_restore_phase(client, "final_parity")
+    actual = reader.restore_snapshot()
+    _require_card_snapshot(data_dir, cards, actual)
+    if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
+        _update_restore_state(data_dir, board="failed", board_parity="failed")
+        raise RestoreError("board parity check failed")
+    if _restored_order_mismatch(cards, actual):
+        _update_restore_state(data_dir, board="failed", board_parity="failed")
+        raise RestoreError("board parity check failed: restored card order")
+    _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
+    pending_comments = [
+        event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
+    ]
+    if pending_comments:
+        raise RestoreError("board comment audit repair is required before restore can complete")
+    _update_restore_state(
+        data_dir,
+        board="complete",
+        board_parity="complete",
+        board_count=len(cards),
+        sprints="complete",
+        sprint_parity="complete",
+        sprint_count=len(sprints),
+    )
+    return len(cards)
 
 
 def _restore_board_history(data_dir: Path, audit: Any) -> None:

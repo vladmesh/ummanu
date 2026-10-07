@@ -63,15 +63,49 @@ def _path_lock(target: Path) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def bulk_lane(data_dir: Path, *, exclusive: bool = False) -> Iterator[None]:
+    """One descriptor orders bulk recovery against concurrent per-card effects.
+
+    Shared holders use independent file descriptions, so threads on different
+    cards do not serialize. Nested callers reuse this thread's current mode.
+    A shared holder cannot silently upgrade and authorize an unfenced bulk write.
+    """
+    path = str(Path(data_dir).resolve() / "dispatcher" / "board-bulk.lock")
+    held = getattr(_held, "bulk_lanes", {})
+    if path in held:
+        if exclusive and not held[path]:
+            raise HostError("bulk ownership write cannot upgrade a shared lane")
+        yield
+        return
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        _held.bulk_lanes = {**held, path: exclusive}
+        try:
+            yield
+        finally:
+            _held.bulk_lanes = held
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
 def reference_lock(data_dir: Path, reference: str, *, lane: str = "effects") -> Iterator[None]:
     """Separate long lifecycle work from the short board/cleanup effect fence.
 
     Board writers never take the lifecycle lane. The effects lane orders state or
     claim changes against actual workspace disposal and the launch syscall.
     """
-    token = hashlib.sha256(reference.encode()).hexdigest()
-    with _path_lock(Path(data_dir).resolve() / "dispatcher" / lane / (token + ".lock")):
-        yield
+    root = Path(data_dir).resolve()
+    with bulk_lane(root) if lane == "effects" else contextlib.nullcontext():
+        if (lane in {"effects", "admission"}
+                and getattr(_held, "bulk_lanes", {}).get(str(root / "dispatcher" / "board-bulk.lock"))):
+            # The exclusive bulk owner already excludes every per-card writer.
+            # Reconciliation through their normal helpers needs no extra files.
+            yield
+            return
+        token = hashlib.sha256(reference.encode()).hexdigest()
+        with _path_lock(root / "dispatcher" / lane / (token + ".lock")):
+            yield
 
 
 def lifecycle(method):
