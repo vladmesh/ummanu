@@ -101,7 +101,7 @@ class TickMeasurementTests(unittest.TestCase):
         self.assertEqual(
             last["phases"],
             {
-                "snapshot": 150.0,
+                "snapshot": 50.0,
                 "reconcile": 170.0,
                 "cleanup": 30.0,
                 "after-merge": 170.0,
@@ -110,7 +110,7 @@ class TickMeasurementTests(unittest.TestCase):
                 "other": 260.0,
             },
         )
-        self.assertEqual(self.runtime.reader.list.call_count, 3)
+        self.assertEqual(self.runtime.reader.list.call_count, 1)
         self.save.assert_called_once()
         self.runtime.cleanup.replay.assert_called_once_with(limit=5)
 
@@ -143,8 +143,8 @@ class TickMeasurementTests(unittest.TestCase):
         ):
             result = production.production_tick(self.runtime)
         self.assertEqual(result["status"], "critical")
-        self.assertEqual(self.last()["phases"], {"reconcile": 40.0, "cleanup": 30.0, "other": 30.0})
-        self.runtime.reader.list.assert_not_called()
+        self.assertEqual(self.last()["phases"], {"snapshot": 50.0, "reconcile": 40.0, "cleanup": 30.0, "other": 30.0})
+        self.runtime.reader.list.assert_called_once()
         self.save.assert_called_once()
 
     def test_frozen_tick_records_checkpoint_without_board_reads(self):

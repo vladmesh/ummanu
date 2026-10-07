@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.dispatch.observer import (
     DRAIN_DEFERRED_REASON,
     ObserverRecord,
@@ -95,7 +96,7 @@ def observer_fence(runtime: Any, payload: dict[str, Any], *, pause_mode: str = "
     try:
         open_sprints = {
             str(sprint.get("ref") or ""): sprint
-            for sprint in runtime.sprints.list(statuses={"open"})
+            for sprint in select_sprints(runtime.sprints, statuses={"open"})
             if str(sprint.get("ref") or "")
         }
     except (TaskError, HostError) as exc:
@@ -186,7 +187,7 @@ def _sprint_linked_cards(runtime: Any) -> dict[str, str]:
     Raises rather than answering `{}`: this is the blind path's only view of which cards belong to a
     sprint, and an empty answer would read as "no card belongs to one".
     """
-    cards = runtime.reader.list()
+    cards = select_cards(runtime.reader)
     return {
         str(card.get("ref") or ""): str(card.get("sprint") or "")
         for card in cards
@@ -452,7 +453,7 @@ def _fenced_card_refs(runtime: Any, sprints: set[str], projects: set[str]) -> se
     """
     if not sprints and not projects:
         return set()
-    cards = runtime.reader.list()
+    cards = select_cards(runtime.reader)
     return {
         str(card.get("ref") or "")
         for card in cards

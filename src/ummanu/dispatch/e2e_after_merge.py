@@ -98,6 +98,7 @@ from ummanu.board.e2e_record import (
     E2eState,
 )
 from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
+from ummanu.board.tick_snapshot import current_snapshot, select_cards
 from ummanu.dispatch.e2e import (
     AFTER_MERGE_REF_PREFIX,
     E2E_CLOCK_MARGIN_SECONDS,
@@ -265,12 +266,17 @@ def reconcile_after_merge(
     # The board, including drained queues, is authoritative. Isolate each carrier:
     # one unreadable released run must not starve any other disposition.
     try:
-        cards = list(runtime.reader.restore_snapshot().values())
+        snapshot = current_snapshot(runtime.reader)
+        if snapshot is not None and snapshot.archive_error is not None:
+            raise snapshot.archive_error
+        cards = select_cards(runtime.reader, include_archived=True) if snapshot is not None else (
+            runtime.reader.list() + runtime.reader.archived_after_merge_cards()
+        )
     except (TaskError, ValueError, TypeError, KeyError) as exc:
         cards = []
         outcomes.append(_outcome("", "e2e-after-merge-route-unread", status="degraded", reason=str(exc)))
         try:
-            cards = runtime.reader.list()
+            cards = select_cards(runtime.reader)
         except (TaskError, ValueError, TypeError, KeyError) as active_exc:
             outcomes.append(_outcome("", "e2e-after-merge-route-unread", status="degraded", reason=str(active_exc)))
     # Released 0024 hotfix creates can name a carrier outside the active listing.

@@ -20,6 +20,7 @@ from ummanu.board.terminal_taxonomy import (
     budget_event_type,
     read_terminal_taxonomy,
 )
+from ummanu.board.tick_snapshot import current_snapshot, select_cards, tick_snapshot
 from ummanu.checkpoint import checkpoint_snapshot
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.claim import claim_ready_task
@@ -444,6 +445,18 @@ def _production_tick_work(
     pause: dict[str, Any],
     auto_resume: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Own and discard the board view even when a phase raises or returns early."""
+    with tick_snapshot(runtime.reader):
+        return _production_tick_with_snapshot(runtime, payload, records, pause, auto_resume)
+
+
+def _production_tick_with_snapshot(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    pause: dict[str, Any],
+    auto_resume: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Everything the tick does with the records it has loaded."""
     payload.update(
         {
@@ -476,6 +489,13 @@ def _production_tick_work(
                                 for item in runtime.cleanup.replay(limit=5)]
 
     observer_errors: list[dict[str, str]] = []
+    try:
+        with tick_phase("snapshot"):
+            snapshot = current_snapshot(runtime.reader)
+            assert snapshot is not None
+            snapshot.load()
+    except Exception as exc:  # noqa: BLE001 - an unreadable snapshot authorizes no work
+        return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)
     # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
         with tick_phase("reconcile"):
@@ -1585,8 +1605,7 @@ def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[st
 
 
 def _production_tasks(runtime: Any, states: set[str]) -> list[dict[str, Any]]:
-    with tick_phase("snapshot"):
-        return sorted(runtime.reader.list(states=states), key=_task_sort_key)
+    return sorted(select_cards(runtime.reader, states=states), key=_task_sort_key)
 
 
 def _production_tick_active(
