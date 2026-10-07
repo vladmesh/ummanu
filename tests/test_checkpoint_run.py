@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.fakes.upgrade import FakeUnitInstaller
 from ummanu import checkpoint, cli, data, status
 from ummanu._fsutil import try_file_lock, write_json
 from ummanu.board.sql_cards import SqlCardClient
@@ -29,7 +30,9 @@ from ummanu.host import (
     build_doctor_expectations,
     build_plan,
     load_packaged_units,
+    manifest_text,
 )
+from ummanu.host_apply import ApplyInputs, apply_host
 from ummanu.infra import checkpoint_run
 from ummanu.tasks import TaskError
 
@@ -371,7 +374,11 @@ class CheckpointUnitTests(unittest.TestCase):
         self.assertEqual(len(findings), 2)
         self.assertTrue(all(finding["severity"] == "red" for finding in findings))
         self.assertEqual(
-            assess_unit_runtime({"ummanu-checkpoint.service": (False, False)}, collected)[0].actual, "failed"
+            {(finding["code"], finding["message"]) for finding in findings},
+            {
+                ("checkpoint.unit_unhealthy", "checkpoint unit ummanu-checkpoint.service is failed"),
+                ("checkpoint.unit_unhealthy", "checkpoint unit ummanu-checkpoint.timer is missing"),
+            },
         )
         collected.inventory.units.add("ummanu-checkpoint.timer")
         collected.inventory.unit_states.clear()
@@ -386,6 +393,48 @@ class CheckpointUnitTests(unittest.TestCase):
         self.assertFalse(
             any("checkpoint" in item.name for item in build_plan(self.instance, [], packaged=self.packaged))
         )
+
+    def test_failed_oneshots_do_not_start_during_reconcile(self):
+        expected = build_doctor_expectations(self.instance, [], packaged=self.packaged)
+        failed = {
+            "ummanu-curator.service",
+            "ummanu-dispatcher-production.service",
+            "ummanu-instance-maintenance.service",
+            "ummanu-checkpoint.service",
+        }
+        for name in failed:
+            self.assertEqual(expected.unit_runtime[name], (False, False))
+        states = {
+            name: ("enabled" if enabled else "static", "active" if active else "inactive")
+            for name, (enabled, active) in expected.unit_runtime.items()
+        }
+        states.update(dict.fromkeys(failed, ("static", "failed")))
+        collected = CollectResult(HostInventory(units=set(expected.units), unit_states=states))
+        self.assertEqual(assess_unit_runtime(expected.unit_runtime, collected), [])
+        self.assertEqual(
+            cli.checkpoint_unit_findings(expected, collected),
+            [{"code": "checkpoint.unit_unhealthy", "severity": "red",
+              "message": "checkpoint unit ummanu-checkpoint.service is failed"}],
+        )
+
+        desired = build_plan(self.instance, [], packaged=self.packaged)
+        units = FakeUnitInstaller(
+            {unit.name: unit.content for unit in self.packaged},
+            {name for name, (_, active) in states.items() if active == "active"},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "host-managed.json"
+            manifest.write_text(manifest_text(desired), encoding="utf-8")
+            inputs = ApplyInputs(self.instance, [], collected.inventory, desired, manifest, self.packaged)
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run):
+                    result = apply_host(inputs, units=units, dry_run=dry_run)
+                    self.assertTrue(result.ok, result.render())
+                    self.assertEqual({change.name for change in result.changes}, expected.units)
+                    self.assertTrue(all(change.action == "unchanged" for change in result.changes))
+                    self.assertEqual(result.runtime_findings, [])
+                    self.assertEqual(result.runtime_changes, [])
+                    self.assertEqual(units.calls, [])
 
     def test_timer_run_budget_and_preserved_window_fit_five_minute_rpo(self):
         units = {unit.name: unit.content.decode() for unit in self.packaged}
