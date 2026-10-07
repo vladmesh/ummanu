@@ -30,6 +30,10 @@ class HostError(Exception):
         self.bring_up_cause = bring_up_cause
 
 
+class OwnershipChanged(HostError):
+    """An unlocked preparation lost admission; preserve the newer board owner."""
+
+
 #: `ummanu.dispatch.launch.CAUSE_WORKSPACE_CONTRACT`, spelled here because `launch` imports this
 #: module: a legacy record is this card's own contract failing, never a host to retry.
 _LEGACY_RECORD_BRING_UP_CAUSE = "workspace_contract"

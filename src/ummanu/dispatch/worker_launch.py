@@ -30,71 +30,33 @@ from ummanu.dispatch.launch import (
     STAGE_CLAIM,
     STAGE_RESPAWN,
     WORKER_ROLE,
-)
-from ummanu.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
-)
-from ummanu.dispatch.launch import (
     bring_up_blocked_reason as _bring_up_blocked_reason,
-)
-from ummanu.dispatch.launch import (
     bring_up_terminal_reason as _bring_up_terminal_reason,
-)
-from ummanu.dispatch.launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
-)
-from ummanu.dispatch.launch import (
     clear_launch_intent as _clear_launch_intent,
-)
-from ummanu.dispatch.launch import (
     confirm_launch_intent as _confirm_launch_intent,
-)
-from ummanu.dispatch.launch import (
     launch_aborted as _launch_aborted,
-)
-from ummanu.dispatch.launch import (
     launch_delivery_receipt as _launch_delivery_receipt,
-)
-from ummanu.dispatch.launch import (
     launch_intent_unwritable as _launch_intent_unwritable,
-)
-from ummanu.dispatch.launch import (
     launch_left_a_head as _launch_left_a_head,
-)
-from ummanu.dispatch.launch import (
     launch_pid_file as _launch_pid_file,
-)
-from ummanu.dispatch.launch import (
     mark_launch_aborted as _mark_launch_aborted,
-)
-from ummanu.dispatch.launch import (
     write_launch_intent as _write_launch_intent,
 )
 from ummanu.dispatch.state import (
     DispatcherRecord,
     HeadlessRecoveryEpisode,
     PersistedHeadlessRecoveryEpisode,
-)
-from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
-)
-from ummanu.dispatch.state import (
     claim_actual as _claim_actual,
-)
-from ummanu.dispatch.state import (
     claim_mismatch as _claim_mismatch,
-)
-from ummanu.dispatch.state import (
     record_divergence as _record_divergence,
 )
-from ummanu.dispatch.types import HeadLaunchAborted, HostError
+from ummanu.dispatch.types import HeadLaunchAborted, HostError, OwnershipChanged
 from ummanu.dispatch.watchdog import (
     head_process_status as _head_process_status,
-)
-from ummanu.dispatch.watchdog import (
     reset_idle as _reset_idle,
-)
-from ummanu.dispatch.watchdog import (
     reset_wait as _reset_wait,
 )
 
@@ -434,6 +396,10 @@ def _worker_launch_failure(
     attempt_id: str,
 ) -> dict[str, Any] | None:
     """The aborted-launch outcome when this failure may have left a worker running, else None."""
+    if isinstance(exc, OwnershipChanged):
+        # The write-ahead intent remains evidence for normal reconciliation.
+        # A preparation refusal cannot block the card its new owner just moved.
+        return {"status": "skipped", "step": step, "pilot_ref": ref, "reason": str(exc)}
     _record_worker_delivery_evidence(record, exc, failure=True)
     if not isinstance(exc, HeadLaunchAborted):
         if not _launch_left_a_head(record):

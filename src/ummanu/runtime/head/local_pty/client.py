@@ -9,21 +9,22 @@ socket answers, the journal has `run.started`, and the head wrote its launch ide
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from ..memory import MemoryScopeError
-from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
+from .scoped_lifecycle import ScopedHeadLifecycle
 
 SUPERVISOR_MODULE = "ummanu.runtime.head.local_pty.supervisor"
 SCOPE_LAUNCHER_MODULE = "ummanu.runtime.head.local_pty.scope_launcher"
@@ -110,6 +111,7 @@ def spawn_head(
     memory_limit_mib: int | None = None,
     owner_unit: str = "",
     scope_generation: str = "",
+    launch_admission: Callable[[], contextlib.AbstractContextManager[Any]] | None = None,
 ) -> HeadHandle:
     """Bring one head up under a supervisor that outlives this process; wait until it answers.
 
@@ -191,8 +193,13 @@ def spawn_head(
             argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
             pythonpath=launch_env["PYTHONPATH"],
         )
+    intermediate = None
     try:
-        with open(log_path, "ab", buffering=0) as log:
+        # Board ownership is checked at the launch syscall, after scope/setup work.
+        # Release its per-card fence before waiting for readiness or delivering a prompt.
+        with (
+            launch_admission() if launch_admission is not None else contextlib.nullcontext()
+        ), open(log_path, "ab", buffering=0) as log:
             intermediate = subprocess.Popen(
                 argv,
                 cwd=str(cwd) if cwd else None,
@@ -208,6 +215,19 @@ def spawn_head(
     except (OSError, subprocess.SubprocessError) as exc:
         error = LocalPtySpawnError("scope_failed", f"head scope launcher failed: {exc}")
         raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already) from exc
+    except Exception as exc:  # admission can fail before or after the launch syscall
+        if intermediate is not None:
+            intermediate.wait()
+            # A failed SQL commit after Popen cannot attest absence, even if the
+            # supervisor has not yet written its heartbeat. Retain exact intent.
+            raise LocalPtySpawnError("admission_failed", str(exc), cleanup_complete=False,
+                                     scope_generation=scope_generation) from exc
+        if lifecycle is not None:
+            error = _after_failed_launch(LocalPtySpawnError("admission_refused", str(exc)),
+                                        lifecycle, journal_path, socket_path, already)
+            if not error.cleanup_complete:
+                raise error from exc
+        raise
     if memory_limit_mib is not None and status != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
         error = LocalPtySpawnError("scope_failed", f"head scope did not start (exit {status}): {tail}")
@@ -347,7 +367,7 @@ class SupervisorClient:
         except OSError:
             pass
 
-    def __enter__(self) -> SupervisorClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
@@ -458,9 +478,9 @@ class SupervisorClient:
         deadline = time.monotonic() + timeout
         while True:
             delivery = self.status().get("delivery")
-            if isinstance(delivery, dict) and (delivery_id is None or delivery.get("id") == delivery_id):
-                if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
-                    return delivery
+            if (isinstance(delivery, dict) and (delivery_id is None or delivery.get("id") == delivery_id)
+                    and delivery.get("state") != protocol.DELIVERY_IN_FLIGHT):
+                return delivery
             if time.monotonic() >= deadline:
                 raise LocalPtyError(
                     f"delivery {delivery_id} was still in flight after {timeout:g}s: {delivery}"

@@ -24,7 +24,7 @@ from ummanu.board.tick_snapshot import current_snapshot, select_cards, tick_snap
 from ummanu.checkpoint import checkpoint_snapshot
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.claim import claim_ready_task
-from ummanu.dispatch.cleanup import serialized
+from ummanu.dispatch.cleanup import ownership_lock
 from ummanu.dispatch.e2e_after_merge import after_merge_snapshot, reconcile_after_merge
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.launch import (
@@ -341,7 +341,8 @@ class ProductionState:
         return payload
 
     def save(self, payload: dict[str, Any]) -> None:
-        write_json(self.path, payload)
+        with ownership_lock(self.root.parent):
+            write_json(self.path, payload)
 
     def records(self, payload: dict[str, Any]) -> dict[str, DispatcherRecord]:
         raw = payload.get("records") or {}
@@ -387,7 +388,6 @@ def production_observe(runtime: Any) -> dict[str, Any]:
     }
 
 
-@serialized
 def production_tick(runtime: Any) -> dict[str, Any]:
     with tick_clock(), try_file_lock(runtime.production_state.tick_lock) as acquired:
         if not acquired:
@@ -1095,7 +1095,6 @@ def _probe_runtime(runtime: Any) -> Any:
     return probe
 
 
-@serialized
 def production_probe(runtime: Any) -> dict[str, Any]:
     """Run a real tick with every write replaced by an abort.
 

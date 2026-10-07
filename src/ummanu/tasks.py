@@ -121,9 +121,8 @@ from ummanu.board.task_routing import (
     default_review,
     impact_bounds_refusal,
 )
-from ummanu.board.tick_snapshot import select_cards
 from ummanu.board.transitions import BoardProtocolError
-from ummanu.dispatch.cleanup import CleanupJournal, ownership_lock, serialized
+from ummanu.dispatch.cleanup import CleanupJournal, capacity_serialized, ownership_recovery, reference_lock
 from ummanu.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -709,6 +708,14 @@ class TaskReader:
     def __init__(self, client: SqlCardClient, board_name: str = "Pipeline") -> None:
         self.client = client
         self.board_name = board_name
+
+    def capacity_peers(self) -> list[dict[str, Any]]:
+        """Live capacity keys, independent of a tick's selection snapshot."""
+        from ummanu.board.sql_cards import SqlCardClient
+
+        if isinstance(self.client, SqlCardClient):
+            return [{"ref": reference} for reference in self.client.call("getCapacityReferences")]
+        return self.list(states=set(ACTIVE_STATES))
 
     def list(
         self,
@@ -2643,7 +2650,7 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import source_obligation
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             task = self.reader.show(reference)
             current = e2e_record.e2e_state(task)
@@ -2691,7 +2698,7 @@ class TaskWriter:
         for reference, task in tasks.items():
             if str(task.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
                 raise TaskError("validation", f"{reference} is not a code card; it carries no e2e runs", 2)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             for reference in sorted(states):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             tasks = {reference: self.reader.show(reference) for reference in states}
@@ -2748,7 +2755,7 @@ class TaskWriter:
                                run: e2e_record.E2eRun) -> e2e_record.E2eState:
         """Update this run under the carrier lock, retaining newer marks and other runs."""
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             task = self.reader.show(reference)
             current = e2e_record.e2e_state(task)
@@ -2779,7 +2786,7 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import owns_mark
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             refs = {reference, carrier} | ({run.hotfix} if run.hotfix else set()) | ({run.disposition} if run.disposition else set())
             for ref in sorted(refs):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (ref,))
@@ -2818,9 +2825,8 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import owns_mark
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
-            # All nested native creates use this same ownership lock first.
-            # Read only identity before locks; actual evidence is reread below.
+        with self._mutation():
+            # Read only identity before row locks; actual evidence is reread below.
             initial = e2e_record.e2e_state(self.reader.show(carrier)).after_merge_run(run.dispatch_id)
             refs = {carrier, *(item["ref"] for item in run.covered)}
             known = self.audit.committed_event(execution_field.DISPOSITION_PREFIX + run.dispatch_id)
@@ -2912,7 +2918,7 @@ class TaskWriter:
         except (ValueError, TaskError) as exc:
             if isinstance(exc, TaskError) and exc.code != "not_found":
                 raise
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             for reference in sorted(refs):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             tasks, missing = {}, []
@@ -3566,7 +3572,7 @@ class TaskWriter:
             finished += 1
         return finished
 
-    @serialized
+    @capacity_serialized
     def claim(
         self,
         *,
@@ -3636,7 +3642,7 @@ class TaskWriter:
             # capacity, which is how many heads the installation runs at once.
             headed = [
                 active
-                for selected in select_cards(self.reader, states=set(ACTIVE_STATES))
+                for selected in self.reader.capacity_peers()
                 if (active := self.reader.show(selected["ref"]))["state"] in ACTIVE_STATES
                 and active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
             ]
@@ -4035,7 +4041,6 @@ class TaskWriter:
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
             )
 
-    @serialized
     def _transition_card(
         self,
         *,
@@ -4066,7 +4071,10 @@ class TaskWriter:
         lists that class of state as one this backend does not have.
         """
         try:
-            with self._mutation():
+            with reference_lock(self.data_dir, reference), (
+                reference_lock(self.data_dir, "capacity", lane="admission")
+                if target.value in ACTIVE_STATES else contextlib.nullcontext()
+            ), self._mutation():
                 def finish_with_wait(entity: Any) -> None:
                     if finish is not None:
                         finish(entity)
@@ -5098,7 +5106,6 @@ class TaskWriter:
             "replayed": result.replayed,
         }
 
-    @serialized
     def _write(
         self,
         kind: str,
@@ -5149,7 +5156,11 @@ class TaskWriter:
                 "event_id": event_id,
                 "replayed": True,
             }
-        with self._mutation():
+        ownership_change = kind in {"claimed", "moved", "archived", "completed", "restored", "retired"}
+        with (reference_lock(self.data_dir, reference) if ownership_change else contextlib.nullcontext()), (
+            reference_lock(self.data_dir, "capacity", lane="admission")
+            if kind in {"claimed", "moved", "restored"} else contextlib.nullcontext()
+        ), self._mutation():
             return self._write_effect(
                 kind, role, actor, reference, request_id, payload, mutation, identity=identity
             )
@@ -5384,6 +5395,7 @@ class TaskWriter:
                 unresolved += 1
         return repaired, unresolved
 
+    @ownership_recovery
     def _finish_pending_transition(self, event: dict[str, Any]) -> None:
         """Finish one typed pending Card transition: prove it, clean up, then commit it.
 
@@ -5413,6 +5425,7 @@ class TaskWriter:
                     raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
         self.board_host.recover_transition(str(event["request_id"]))
 
+    @ownership_recovery
     def _finish_pending_cleanup(
         self,
         event: dict[str, Any],
@@ -5795,10 +5808,9 @@ class TaskWriter:
         except HostError as exc:
             raise TaskError("live_work", str(exc), 3) from exc
 
-    @serialized
     def settle_cleanup_claim(self, expected: dict[str, Any], worker: str) -> None:
         """Called only by the cleanup owner after verified head and Git settlement."""
-        with self._mutation():
+        with reference_lock(self.data_dir, expected["ref"]), self._mutation():
             task = self.reader.show(expected["ref"])
             if (task["id"] != expected["id"] or task.get("claim") != expected.get("claim")
                     or task.get("claim", {}).get("worker") != worker

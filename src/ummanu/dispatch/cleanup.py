@@ -3,12 +3,13 @@
 CleanupJournal is the only producer of dispatcher/cleanup.json. CleanupOwner is
 its replay owner; inventory is its supported reader. Board archive and close
 only request settlement. They never destroy work from inside a board transaction.
-The installation lock also covers claims, launch/replacement and dispatcher ticks.
+The installation lock covers journal publication and ownership admission only.
 """
 
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import copy
 import fcntl
 import functools
@@ -24,7 +25,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from ummanu.dispatch.types import HostError
+from ummanu.dispatch.types import HostError, OwnershipChanged
 from ummanu.infra import git_worktree
 
 _locks: dict[str, threading.RLock] = {}
@@ -34,8 +35,15 @@ _held = threading.local()
 
 @contextlib.contextmanager
 def ownership_lock(data_dir: Path) -> Iterator[None]:
+    """Short journal/ownership mutations; never host work or a dispatcher tick."""
+    with _path_lock(Path(data_dir).resolve() / "dispatcher" / "cleanup.lock"):
+        yield
+
+
+@contextlib.contextmanager
+def _path_lock(target: Path) -> Iterator[None]:
     """Reentrant in one thread, exclusive across threads and installed processes."""
-    path = str(Path(data_dir).resolve() / "dispatcher" / "cleanup.lock")
+    path = str(target)
     with _guard:
         lock = _locks.setdefault(path, threading.RLock())
     with lock:
@@ -54,7 +62,71 @@ def ownership_lock(data_dir: Path) -> Iterator[None]:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
 
+@contextlib.contextmanager
+def reference_lock(data_dir: Path, reference: str, *, lane: str = "effects") -> Iterator[None]:
+    """Separate long lifecycle work from the short board/cleanup effect fence.
+
+    Board writers never take the lifecycle lane. The effects lane orders state or
+    claim changes against actual workspace disposal and the launch syscall.
+    """
+    token = hashlib.sha256(reference.encode()).hexdigest()
+    with _path_lock(Path(data_dir).resolve() / "dispatcher" / lane / (token + ".lock")):
+        yield
+
+
+def lifecycle(method):
+    """One host/cleanup operation per reference, with no board writer behind it."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        subject = args[0] if args else kwargs.get("task", kwargs.get("sprint"))
+        reference = (subject.get("ref") if isinstance(subject, dict)
+                     else getattr(subject, "sprint", "") or getattr(subject, "worker", ""))
+        with reference_lock(self.data_dir, str(reference), lane="lifecycle"):
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+def capacity_serialized(method):
+    """Only admission/state transactions, never cleanup proofs or host calls."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        # Always take the card fence first. A slow disposal of one card must not
+        # monopolize installation capacity while a transition waits for it.
+        with reference_lock(self.data_dir, kwargs["reference"]), \
+                reference_lock(self.data_dir, "capacity", lane="admission"), self._mutation():
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+def owner_operation(method):
+    """Protect an owner's transient manifest context, without blocking board writers."""
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._operations:
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+def ownership_recovery(method):
+    """A legacy pending occurrence gets the same fences as its original write."""
+    @functools.wraps(method)
+    def wrapped(self, event, *args, **kwargs):
+        with reference_lock(self.data_dir, str(event["ref"])), \
+                reference_lock(self.data_dir, "capacity", lane="admission"), self._mutation():
+            return method(self, event, *args, **kwargs)
+    return wrapped
+
+
 def serialized(method):
+    @functools.wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with ownership_lock(self.data_dir):
+            return method(self, *args, **kwargs)
+    return wrapped
+
+
+def journal_mutation(method):
+    """One producer's read/modify/publication, with thread-local replay targeting."""
     @functools.wraps(method)
     def wrapped(self, *args, **kwargs):
         with ownership_lock(self.data_dir):
@@ -197,7 +269,8 @@ class CleanupJournal:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.path = self.data_dir / "dispatcher" / "cleanup.json"
-        self._targets: set[str] | None = None
+        self._targets: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+            "cleanup_targets", default=None)
 
     def read(self) -> dict[str, Any]:
         try:
@@ -215,17 +288,21 @@ class CleanupJournal:
     @contextlib.contextmanager
     def targeted(self, keys: set[str]) -> Iterator[None]:
         """Saves inside write back only these intents; every other stored value stays as it was read."""
-        previous, self._targets = self._targets, set(keys)
+        token = self._targets.set(set(keys))
         try:
             yield
         finally:
-            self._targets = previous
+            self._targets.reset(token)
 
-    def save(self, value: dict[str, Any]) -> None:
+    @serialized
+    def save(self, value: dict[str, Any], *, generated: bool = False) -> None:
         """Fsync both the intent and its publication before allowing effects."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        selected = value["intents"].keys() if self._targets is None else self._targets
-        document = value if self._targets is None else self.read()
+        targets = self._targets.get()
+        selected = value["intents"].keys() if targets is None else targets
+        document = value if targets is None else self.read()
+        if generated:
+            document["generated"] = value["generated"]
         fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".cleanup-")
         try:
             for key in selected:
@@ -247,14 +324,14 @@ class CleanupJournal:
             if os.path.exists(name):
                 os.unlink(name)
 
-    @serialized
+    @journal_mutation
     def generated(self, path: Path, body: str | bytes) -> None:
         value = self.read()
         data = body if isinstance(body, bytes) else body.encode()
         value["generated"][str(path.absolute())] = hashlib.sha256(data).hexdigest()
-        self.save(value)
+        self.save(value, generated=True)
 
-    @serialized
+    @journal_mutation
     def remember(self, task: dict[str, Any], record: dict[str, Any], *,
                  identity: dict[str, Any] | None = None, disposition: str = "owned") -> str:
         value = self.read()
@@ -301,7 +378,29 @@ class CleanupJournal:
         value["intents"][key] = intent
         return key, intent != before
 
-    @serialized
+    @journal_mutation
+    def commit_intent(self, key: str, intent: dict[str, Any]) -> None:
+        """Commit one replay result into the latest journal, retaining other producers.
+
+        Identity acquired by a concurrent remember is new admission evidence. A
+        replay planned without it cannot overwrite it or publish stale settlement.
+        """
+        value = self.read()
+        previous = value["intents"].get(key)
+        # A direct exact-run stop can checkpoint a receipt without a cleanup
+        # obligation. Never resurrect a missing admitted cleanup obligation.
+        if (previous is None and "disposition" in intent) or (previous is not None and any(
+                previous.get(field) != intent.get(field)
+                for field in ("identity", "record", "disposition"))):
+            raise HostError("cleanup intent ownership changed while work was unlocked")
+        merged = copy.deepcopy(intent)
+        for head in (previous or {}).get("heads", []):
+            _merge_head(merged["heads"], head)
+        value["intents"][key] = merged
+        with self.targeted({key}):
+            self.save(value)
+
+    @journal_mutation
     def request(self, task: dict[str, Any], disposition: str,
                 record: dict[str, Any] | None = None) -> str:
         if record is None:
@@ -332,7 +431,7 @@ class CleanupJournal:
                 return (owned or matches)[-1]
         return self.remember(task, record or {}, disposition=disposition)
 
-    @serialized
+    @journal_mutation
     def observer_handoff(self, sprint: dict[str, Any]) -> str | None:
         """Stage the external observer obligation in the existing close transaction."""
         try:
@@ -376,13 +475,14 @@ class CleanupOwner:
         self.runtime = runtime
         self.data_dir = Path(runtime.data_dir)
         self.journal = CleanupJournal(self.data_dir)
+        self._operations = threading.RLock()
         # While a manifest is planned, every effect site appends here instead of acting.
         self._planned: list[dict[str, Any]] | None = None
         self._plan_removed: set[str] = set()
         # While a targeted replay runs, the manifest entry its operator reviewed.
         self._reviewed: dict[str, Any] | None = None
+        self._admitted: dict[str, Any] | None = None
 
-    @serialized
     def remember(self, task: dict[str, Any], record: Any) -> str:
         binding = self.runtime.catalog.binding(task["project"])
         branch = "pipeline/" + task["ref"]
@@ -398,7 +498,6 @@ class CleanupOwner:
                     pass
         return self.journal.remember(task, record.to_json(), identity=identity)
 
-    @serialized
     def cleanup(self, task: dict[str, Any], record: Any, disposition: str) -> dict[str, Any]:
         key = self.remember(task, record)
         self.journal.request(task, disposition, record.to_json())
@@ -418,7 +517,6 @@ class CleanupOwner:
             raise HostError("current dispatcher ownership was unavailable")
         return value
 
-    @serialized
     def cleanup_observer(self, record: Any) -> dict[str, Any]:
         from ummanu.observer_root import observer_root_repo
         sprint = self.runtime.sprints.show(record.sprint, include_cards=False)
@@ -442,10 +540,12 @@ class CleanupOwner:
         key = self.journal.remember(task, raw, identity=identity, disposition=disposition)
         return self.replay_one(key)
 
-    def _validate_owner(self, intent: dict[str, Any]) -> dict[str, Any]:
+    def _validate_owner(self, intent: dict[str, Any],
+                        current: dict[str, Any] | None = None) -> dict[str, Any]:
         task = intent["task"]
         if task.get("kind") == "observer":
-            current = self.runtime.sprints.show(task["ref"], include_cards=False)
+            if current is None:
+                current = self.runtime.sprints.show(task["ref"], include_cards=False)
             if current["id"] != task["id"]:
                 raise HostError("cleanup observer sprint identity changed")
             if intent["disposition"] == "observer-close" and current["status"] != "closed":
@@ -453,11 +553,11 @@ class CleanupOwner:
             # A replaced generation may settle only its own recorded runs; the
             # workspace belongs to its successor from now on.
             return {**current, "claim": {}, "successor": self._observer_successor(intent)}
-        current = self.runtime.reader.show(task["ref"])
+        if current is None:
+            current = self.runtime.reader.show(task["ref"])
         if current["id"] != task["id"] or current["project"] != task["project"]:
             raise HostError("cleanup card identity changed")
         if (current.get("state") in {"in_progress", "validate", "review", "assessment", "ready"}
-                and (intent["disposition"] != "done" or current.get("state") != "assessment")
                 and not current.get("closed")):
             raise HostError("cleanup card is still admitted for work")
         record = intent["record"]
@@ -487,6 +587,58 @@ class CleanupOwner:
                                            for raw in intent["heads"]):
                     raise HostError("cleanup target has a newer launch intent")
         return current
+
+    @contextlib.contextmanager
+    def admission(self, task: dict[str, Any], *, intent: dict[str, Any] | None = None,
+                  launch: bool = False) -> Iterator[dict[str, Any]]:
+        """The one cleanup/launch ownership admission and commit barrier.
+
+        Effects are ordered against board state/claim mutations by the per-card
+        fence. Only the live key/claim check holds cleanup.lock; host work does not.
+        The same barrier is used again after unlocked proofs, before destruction.
+        """
+        client = getattr(self.runtime.reader, "client", None)
+        transaction = getattr(client, "transaction", None)
+        with reference_lock(self.data_dir, task["ref"]), (
+            transaction() if transaction is not None else contextlib.nullcontext()
+        ):
+            if transaction is not None and not client.call(
+                "lockOwnershipReference", reference=task["ref"], observer=task.get("kind") == "observer"
+            ):
+                raise OwnershipChanged("cleanup/launch primary key no longer exists")
+            # The SQL row fence keeps this key read stable through admission
+            # and its effect. Network reads and row contention precede the flock.
+            reader = (self.runtime.sprints if task.get("kind") == "observer"
+                      else self.runtime.reader)
+            current = (reader.show(task["ref"], include_cards=False)
+                       if task.get("kind") == "observer" else reader.show(task["ref"]))
+            with ownership_lock(self.data_dir):
+                if launch:
+                    if (current["id"] != task["id"] or current.get("closed")
+                            or (task.get("kind") == "observer" and current["status"] != task["status"])
+                            or (task.get("kind") != "observer" and
+                                (current.get("state") != task.get("state")
+                                 or current.get("project") != task.get("project")
+                                 or current.get("claim") != task.get("claim")))):
+                        raise OwnershipChanged("launch ownership changed since admission")
+                    refusal = self.journal.admission_refusal(task["ref"])
+                    if refusal:
+                        raise HostError(refusal)
+                else:
+                    assert intent is not None
+                    if self._planned is None:
+                        key = _intent_key(task["ref"], str(intent["record"].get("attempt_id") or ""))
+                        fresh = self.journal.read()["intents"].get(key)
+                        if fresh is None or any(fresh.get(field) != intent.get(field)
+                                                for field in ("identity", "record", "disposition")):
+                            raise HostError("cleanup intent changed since admission; workspace retained")
+                    current = self._validate_owner(intent, current=current)
+                    observed = {field: copy.deepcopy(current.get(field))
+                                for field in ("id", "state", "status", "closed", "claim", "successor")}
+                    if self._admitted is not None and self._admitted != observed:
+                        raise HostError("cleanup ownership changed since admission; workspace retained")
+                    self._admitted = observed
+            yield current
 
     def _observer_successor(self, intent: dict[str, Any]) -> str:
         """The generation:launch that replaced this observer intent, or "" while it is current."""
@@ -730,6 +882,10 @@ class CleanupOwner:
             require(boundary)
 
     def _settle_claim(self, intent: dict[str, Any]) -> None:
+        with self.admission(intent["task"], intent=intent):
+            self._settle_claim_admitted(intent)
+
+    def _settle_claim_admitted(self, intent: dict[str, Any]) -> None:
         current = self._validate_owner(intent)
         claim = current.get("claim") or {}
         if claim.get("worker"):
@@ -784,9 +940,7 @@ class CleanupOwner:
         if self._planned is not None:
             return
         key = _intent_key(intent["task"]["ref"], str(intent["record"].get("attempt_id") or ""))
-        value = self.journal.read()
-        value["intents"][key] = copy.deepcopy(intent)
-        self.journal.save(value)
+        self.journal.commit_intent(key, intent)
 
     def _shared_removal_proof(self, intent: dict[str, Any]) -> str:
         """An attempt can reuse a directory whose later owner settled its Git effects."""
@@ -894,42 +1048,43 @@ class CleanupOwner:
                 "environment": "absent" if missing else self._environment_owner(intent, path)})
             self._plan_removed.add(workspace)
             return
-        # No forced removal: first delete only exact generated bytes whose
-        # ownership was validated above. Git independently refuses dirty work.
-        generated = self.journal.read()["generated"]
-        for name, digest in generated.items():
-            file = Path(name)
-            # Nested generated files, such as an editable install's metadata, qualify only through
-            # real directories of this workspace: a symlinked parent never leads the unlink outside.
-            if (file.is_relative_to(path) and file != path and file.parent.resolve() == file.parent
-                    and file.is_file() and not file.is_symlink()
-                    and hashlib.sha256(file.read_bytes()).hexdigest() == digest):
-                file.unlink()
-        if not missing and self._environment_owner(intent, path) == "dispatcher":
-            namespace = _canonical(path / ".ummanu-task-env")
-            stat = namespace.stat()
-            intent["generated_environment"] = {"device": stat.st_dev, "inode": stat.st_ino,
-                                               "owner": "ummanu-dispatcher", "workspace": workspace,
-                                               "schema_version": 1}
-            intent["progress"]["environment_removal_started"] = True
+        with self.admission(intent["task"], intent=intent):
+            # No forced removal: first delete only exact generated bytes whose
+            # ownership was validated above. Git independently refuses dirty work.
+            generated = self.journal.read()["generated"]
+            for name, digest in generated.items():
+                file = Path(name)
+                # Nested generated files, such as an editable install's metadata, qualify only through
+                # real directories of this workspace: a symlinked parent never leads the unlink outside.
+                if (file.is_relative_to(path) and file != path and file.parent.resolve() == file.parent
+                        and file.is_file() and not file.is_symlink()
+                        and hashlib.sha256(file.read_bytes()).hexdigest() == digest):
+                    file.unlink()
+            if not missing and self._environment_owner(intent, path) == "dispatcher":
+                namespace = _canonical(path / ".ummanu-task-env")
+                stat = namespace.stat()
+                intent["generated_environment"] = {"device": stat.st_dev, "inode": stat.st_ino,
+                                                   "owner": "ummanu-dispatcher", "workspace": workspace,
+                                                   "schema_version": 1}
+                intent["progress"]["environment_removal_started"] = True
+                self._checkpoint_intent(intent)
+                shutil.rmtree(namespace)
+            # Admit Git only after exact identity, author-work and retention proof.
+            intent["progress"]["removal_started"] = True
             self._checkpoint_intent(intent)
-            shutil.rmtree(namespace)
-        # Admit Git only after exact identity, author-work and retention proof.
-        intent["progress"]["removal_started"] = True
-        self._checkpoint_intent(intent)
-        def run_git(args, cwd):
-            capture = getattr(self.runtime.host, "run_capture", None)
-            if callable(capture):
-                return capture(["git", "-C", str(cwd), *args], "owned cleanup Git")
-            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30,
-                                  check=False)
-        if missing:
-            removed = git_worktree.remove(run_git, repo, path,
-                                         admitted_missing=lambda: self._admitted_registration(intent, repo))
-        else:
-            removed = git_worktree.remove(run_git, repo, path)
-        if not removed:
-            raise HostError("cleanup worktree removal failed; directory or registration remains")
+            def run_git(args, cwd):
+                capture = getattr(self.runtime.host, "run_capture", None)
+                if callable(capture):
+                    return capture(["git", "-C", str(cwd), *args], "owned cleanup Git")
+                return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30,
+                                      check=False)
+            if missing:
+                removed = git_worktree.remove(run_git, repo, path,
+                                             admitted_missing=lambda: self._admitted_registration(intent, repo))
+            else:
+                removed = git_worktree.remove(run_git, repo, path)
+            if not removed:
+                raise HostError("cleanup worktree removal failed; directory or registration remains")
 
     def _published(self, repo: Path, tip: str) -> bool:
         return bool(_git(repo, "for-each-ref", "--format=%(refname)", "--contains=" + tip,
@@ -977,23 +1132,34 @@ class CleanupOwner:
                                   "base": "refs/heads/" + base, "base_tip": main,
                                   "merged": True, "published": True})
             return
-        # The integration witness and candidate tip are locked and verified in
-        # one native Git ref transaction. Never use branch -D after a stale probe.
-        command = f"start\nverify refs/heads/{base} {main}\ndelete {ref} {tip}\nprepare\ncommit\n"
-        intent["progress"]["ref_delete_admitted"] = {"ref": ref, "tip": tip, "integration_tip": main}
-        self._checkpoint_intent(intent)
-        result = subprocess.run(["git", "-C", str(repo), "update-ref", "--stdin"], input=command,
-                                capture_output=True, text=True, timeout=30, check=False)
-        if result.returncode:
-            raise HostError("cleanup ref transaction refused a changed or locked tip")
+        with self.admission(intent["task"], intent=intent):
+            # The integration witness and candidate tip are locked and verified in
+            # one native Git ref transaction. Never use branch -D after a stale probe.
+            command = f"start\nverify refs/heads/{base} {main}\ndelete {ref} {tip}\nprepare\ncommit\n"
+            intent["progress"]["ref_delete_admitted"] = {"ref": ref, "tip": tip, "integration_tip": main}
+            self._checkpoint_intent(intent)
+            result = subprocess.run(["git", "-C", str(repo), "update-ref", "--stdin"], input=command,
+                                    capture_output=True, text=True, timeout=30, check=False)
+            if result.returncode:
+                raise HostError("cleanup ref transaction refused a changed or locked tip")
 
     def _save(self, value: dict[str, Any]) -> None:
         if self._planned is None:
-            self.journal.save(value)
+            targets = self.journal._targets.get()
+            if targets is None:
+                raise HostError("cleanup replay has no admitted intent target")
+            for key in targets:
+                self.journal.commit_intent(key, value["intents"][key])
 
-    @serialized
+    @owner_operation
     def replay_one(self, key: str) -> dict[str, Any]:
-        return self._replay(self.journal.read(), key)
+        task = self.journal.read()["intents"][key]["task"]
+        with reference_lock(self.data_dir, task["ref"], lane="lifecycle"), self.journal.targeted({key}):
+            self._admitted = None
+            try:
+                return self._replay(self.journal.read(), key)
+            finally:
+                self._admitted = None
 
     def _replay(self, value: dict[str, Any], key: str) -> dict[str, Any]:
         intent = value["intents"][key]
@@ -1014,8 +1180,8 @@ class CleanupOwner:
                 self._save(value)
                 return intent
         try:
-            current = self._validate_owner(intent)
-            successor = current.get("successor", "")
+            with self.admission(intent["task"], intent=intent) as current:
+                successor = current.get("successor", "")
             self._scope_fence(intent, replaced=bool(successor))
             self._stop(intent, workspace_owned=not successor)
             intent["progress"]["heads_stopped"] = True
@@ -1063,7 +1229,6 @@ class CleanupOwner:
         self._save(value)
         return intent
 
-    @serialized
     def replay(self, *, limit: int = 20) -> list[dict[str, Any]]:
         if not 1 <= limit <= 100:
             raise HostError("cleanup replay limit must be between 1 and 100")
@@ -1075,9 +1240,10 @@ class CleanupOwner:
         selected = keys[:limit]
         result = [self.replay_one(key) for key in selected]
         if selected:
-            fresh = self.journal.read()
-            fresh["replay_cursor"] = selected[-1]
-            self.journal.save(fresh)
+            with ownership_lock(self.data_dir):
+                fresh = self.journal.read()
+                fresh["replay_cursor"] = selected[-1]
+                self.journal.save(fresh)
         return result
 
     def _bindings(self, project: str | None = None) -> dict[str, dict[str, Any]]:
@@ -1096,7 +1262,7 @@ class CleanupOwner:
             raise Preserved("card is still active")
         return "archive" if task.get("closed") else "done"
 
-    @serialized
+    @owner_operation
     def inventory(self, *, project: str | None = None) -> dict[str, Any]:
         """Read actual registered Git residue, including archived cards with no record.
 
@@ -1220,6 +1386,7 @@ class CleanupOwner:
             return self._planned
         finally:
             self._planned, self._plan_removed = None, set()
+            self._admitted = None
 
     def _branch_manifest(self, project: str, row: dict[str, Any], task: dict[str, Any] | None,
                          value: dict[str, Any]) -> dict[str, Any]:
@@ -1298,7 +1465,7 @@ class CleanupOwner:
             return entry, None, key  # Not admitted: nothing is adopted or written.
         return entry, lambda: self._adopt_branch(task, repo, ref, tip, reviewed=entry), key
 
-    @serialized
+    @owner_operation
     def replay_targets(self, project: str, targets: list[tuple[str, str]]) -> list[dict[str, Any]]:
         """Replay only the named targets of one registered project, each at the manifest read.
 

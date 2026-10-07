@@ -5,6 +5,8 @@ component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
 unit tests/test_tick_telemetry.py
 unit tests/test_tick_board_snapshot.py
+component tests/test_narrow_cleanup_lock.py
+integration-board tests/test_cleanup_lock_sql.py
 component tests/test_runtime_scope_inventory.py
 unit tests/test_dead_pane_history.py
 unit tests/test_codex_home_launch_config.py

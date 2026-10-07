@@ -2055,7 +2055,7 @@ def run_instance_maintenance(args: argparse.Namespace) -> int:
 
 def run_residue_maintenance(args: argparse.Namespace) -> int:
     from ummanu.dispatch.bootstrap import runtime_from_args
-    from ummanu.dispatch.cleanup import UnknownProject, ownership_lock
+    from ummanu.dispatch.cleanup import UnknownProject
     from ummanu.dispatch.types import DispatcherError, HostError
     project = getattr(args, "project", None)
     targets = list(getattr(args, "target", None) or [])
@@ -2073,11 +2073,10 @@ def run_residue_maintenance(args: argparse.Namespace) -> int:
         return 2
     try:
         runtime = runtime_from_args(args.instance, None, host_mode="real", owner="instance-maintenance")
-        with ownership_lock(runtime.data_dir):
-            result: dict = {}
-            if args.residue_replay:
-                result["replay"] = runtime.cleanup.replay_targets(project, list(zip(targets, digests)))
-            result.update(runtime.cleanup.inventory(project=project))
+        result: dict = {}
+        if args.residue_replay:
+            result["replay"] = runtime.cleanup.replay_targets(project, list(zip(targets, digests)))
+        result.update(runtime.cleanup.inventory(project=project))
         failed = (any(row["status"] == "pending" for row in result["intents"] + result["residue"])
                   or any(item["status"] in {"pending", "refused"} for item in result.get("replay", [])))
         print(json.dumps({"status": "pending" if failed else "ok", **result}, sort_keys=True))

@@ -128,6 +128,17 @@ class CountingStore(SqlCardClient):
         self.point_reads.append(str(task_id))
         return copy.deepcopy(self.rows.get(task_id))
 
+    def _rpc_getCapacityReferences(self):
+        from ummanu.tasks import ACTIVE_STATES
+        active_columns = {identifier for identifier, title in BOARD_COLUMNS
+                          if title.lower().replace(" ", "_") in ACTIVE_STATES}
+        return [row["reference"] for row in self.rows.values()
+                if row["project_id"] == BOARD_ID and row["is_active"]
+                and row["column_id"] in active_columns]
+
+    def _rpc_lockOwnershipReference(self, *, reference, observer=False):
+        return any(row["reference"] == reference for row in self.rows.values())
+
     def _rpc_getNextTaskReference(self, *, project):
         numbers = [int(row["reference"].removeprefix(project + "-")) for row in self.rows.values()
                    if row["reference"].startswith(project + "-")]

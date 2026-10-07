@@ -19,9 +19,16 @@ real-mode `CommandHostRuntime` contract. Recording host doubles exercise real
 gate/vitality policy while simulating their effects; declaring real policy mode
 alone does not make a host a Git cleanup owner.
 
-The installation ownership lock serializes task claims/transitions, dispatcher
-ticks/probes, record saves, worker/reviewer/observer launch and replacement, and
-cleanup proof/effects. Head settlement calls the runtime selected by each durable
+`dispatcher/cleanup.lock` covers only short cleanup-journal publications, dispatcher
+ownership saves and live ownership admission/commit checks; ticks, Git proofs, head
+setup, launch readiness, delivery and stop run outside it. `CleanupOwner.admission`
+revalidates the primary key, state and claim before effects; per-reference lifecycle
+and effect fences and a PostgreSQL row lock prevent replacement or disposal of a
+changed owner without putting unrelated head commands behind host operations.
+
+Claims count live capacity keys and revalidate each peer, independently of the tick
+snapshot. A separate admission fence orders concurrent claims and moves into active
+states; comment/report writes rely on their SQL transactions. Head settlement calls the runtime selected by each durable
 HeadRun. Scoped runs still require `ScopedHeadLifecycle` generation matching and
 recursive empty-scope proof. Genuinely deployed unscoped local-pty runs use their
 existing launch identity fences. PID death never substitutes for scoped cleanup.

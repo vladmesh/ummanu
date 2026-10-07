@@ -451,6 +451,7 @@ class LocalPtyHeadRuntime:
         pid_file: str = "",
         scope_generation: str = "",
         transport: Any = None,
+        launch_admission: Callable[[], AbstractContextManager[Any]] | None = None,
         **ignored: Any,
     ) -> StartReceipt:
         """Bring one head up under its own supervisor and point it at its task.
@@ -485,6 +486,7 @@ class LocalPtyHeadRuntime:
             env=env,
             pid_file=pid_file,
             scope_generation=scope_generation,
+            launch_admission=launch_admission,
         )
         live = receipt.run
         if pointer is None or transport is None or live is None or not receipt.ok:
@@ -532,6 +534,7 @@ class LocalPtyHeadRuntime:
         env: Mapping[str, str] | None,
         pid_file: str,
         scope_generation: str,
+        launch_admission: Callable[[], AbstractContextManager[Any]] | None = None,
     ) -> StartReceipt:
         """`start` under the lock: the refusals, the spawn and a bare pointer's one delivery."""
         with self._lock:
@@ -582,6 +585,7 @@ class LocalPtyHeadRuntime:
                     **({"memory_limit_mib": spec.memory_limit_mib} if spec.memory_limit_mib is not None else {}),
                     **({"scope_generation": scope_generation} if scope_generation else {}),
                     **designated,
+                    **({"launch_admission": launch_admission} if launch_admission is not None else {}),
                 )
             except local_pty.LocalPtySpawnError as exc:
                 retained = candidate if not exc.cleanup_complete else run
