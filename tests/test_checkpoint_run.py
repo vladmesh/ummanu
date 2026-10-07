@@ -475,11 +475,13 @@ class BoardCutTests(unittest.TestCase):
                     "export_sprint_entities",
                     side_effect=lambda instance, actual: read([{"client": actual}]),
                 ),
+                mock.patch("ummanu.sprints.sprint_client") as sprint_factory,
             ):
                 cards, history, sprints = data._read_board_cut(root, root, reader, None)
             self.assertEqual(cards, [{"reference": "demo-1"}])
             self.assertEqual(history, [])
             self.assertIs(sprints[0]["client"], client)
+            sprint_factory.assert_not_called()
             client.read_snapshot.assert_called_once_with()
             with try_file_lock(root / "dispatcher" / "board-bulk.lock") as acquired:
                 self.assertTrue(acquired)

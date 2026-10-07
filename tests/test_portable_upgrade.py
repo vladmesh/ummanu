@@ -31,8 +31,7 @@ from tests.retired_board import (
     legacy_runtime_lines,
     write_stale_leftovers,
 )
-from ummanu import cli as cli_module
-from ummanu import installation, role_skills, upgrade
+from ummanu import cli as cli_module, installation, role_skills, upgrade
 from ummanu.cli import main as cli_main
 from ummanu.config import validate_instance
 from ummanu.head_registry import (
@@ -488,7 +487,7 @@ class PackagedRuntimeParityTests(PortableFixture):
             data_dir=self.data,
             runtime_user="operator",
         )
-        self.assertEqual(len(packaged), 18)
+        self.assertEqual(len(packaged), 20)
         from ummanu.infra.doctor_record import TIMEOUT_SECONDS
 
         service = self.units.files["ummanu-doctor.service"].decode()
@@ -512,7 +511,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                 self.assertIn(b"User=operator", unit.content)
             if unit.oneshot and not unit.installable:
                 self.assertNotIn(unit.name, self.units.active)
-        for component in ("steward", "retro", "steward-deep-sweep", "doctor"):
+        for component in ("steward", "retro", "steward-deep-sweep", "doctor", "checkpoint"):
             self.assertIn(f"ummanu-{component}.timer", self.units.enabled)
             self.assertIn(
                 f"Unit=ummanu-{component}.service".encode(),
@@ -528,7 +527,7 @@ class PackagedRuntimeParityTests(PortableFixture):
     def test_inactive_and_disabled_timers_fail_both_consumers_and_reconcile_unchanged_bytes(self):
         manifest = (self.data / "host-managed.json").read_bytes()
         before = dict(self.units.files)
-        for component in ("steward", "retro", "steward-deep-sweep", "doctor"):
+        for component in ("steward", "retro", "steward-deep-sweep", "doctor", "checkpoint"):
             for enabled, action in ((True, "start"), (False, "enable")):
                 name = f"ummanu-{component}.timer"
                 with self.subTest(name=name, enabled=enabled):
@@ -817,7 +816,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         managed, error = strict_manifest(self.data / "host-managed.json")
         self.assertEqual(error, "")
         self.assertTrue(pair <= {resource.name for resource in managed})
-        self.assertEqual(len(self.units.files), 18)
+        self.assertEqual(len(self.units.files), 20)
         files = dict(self.units.files)
         manifest = (self.data / "host-managed.json").read_bytes()
         state = self.data / "dispatcher" / "production-state.json"
