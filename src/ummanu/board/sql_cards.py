@@ -917,14 +917,15 @@ class SqlCardClient:
 
     def _rpc_getNextTaskReference(self, *, project: str) -> str:
         # Products and issues have product:/issue: references, never project-N.
-        # Read the numeric high-water mark, including archives, without enumerating
-        # rows. The caller still holds the allocation lock and checks the live key.
+        # Read the numeric high-water mark, including archives, without returning
+        # rows. A punctuation range is unsafe under locale-dependent collations;
+        # the literal prefix is the membership test. The caller holds the allocation
+        # lock and checks the live key.
         prefix = project + "-"
         rows = self._query(
             "SELECT coalesce(max(substring(task_ref FROM %s)::numeric), 0) FROM tasks "
-            "WHERE task_ref >= %s AND task_ref < %s "
-            "AND starts_with(task_ref, %s) AND substring(task_ref FROM %s) ~ '^[0-9]+$'",
-            (len(prefix) + 1, prefix, project + ".", prefix, len(prefix) + 1),
+            "WHERE starts_with(task_ref, %s) AND substring(task_ref FROM %s) ~ '^[0-9]+$'",
+            (len(prefix) + 1, prefix, len(prefix) + 1),
         )
         return prefix + str(int(rows[0][0]) + 1)
 

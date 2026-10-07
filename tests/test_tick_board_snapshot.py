@@ -413,6 +413,26 @@ class TickBoardSnapshotTests(unittest.TestCase):
             self.assertEqual(select_sprints(self.runtime.sprints, statuses={"open"}), [])
             self.assertEqual(len(self.store.sprint_reads), 1)
 
+    def test_invalid_allocation_writes_no_card_or_pending_event(self):
+        original = self.store.call
+        for reply in ({"unexpected": "shape"}, None, False, "other-7", "demo-0", "demo-7-tail"):
+            with self.subTest(reply=reply), mock.patch.object(
+                self.store, "call", side_effect=lambda method, reply=reply, **params: (
+                    reply if method == "getNextTaskReference" else original(method, **params)
+                )
+            ), self.assertRaisesRegex(TaskError, "invalid task reference") as raised:
+                self.writer._create_backend(
+                    project="demo", task_type="code", title="Hotfix", description="Repair failure", target="blocked",
+                    reference="", blocked_by="", head="", review_head="", slug="", base_branch="", seed_ref="",
+                    supersedes="", complexity="standard", family_preference="auto", codex_launch_mode="",
+                    sprint="", review="required", live_impact=False, touches_production="", steward_report=False,
+                    event={"backend": {}}, request_id="invalid-allocation")
+            self.assertEqual(raised.exception.code, "backend_error")
+            self.assertEqual(set(self.store.rows), {1, 2, 3, 4, 5, 6, record_key("sprint", SPRINT)})
+            self.assertEqual(self.store.writes, [])
+            self.assertEqual(self.store.audit.log, [])
+            self.assertEqual(self.store.audit.pending, {})
+
 
 if __name__ == "__main__":
     unittest.main()

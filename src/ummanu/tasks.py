@@ -684,7 +684,10 @@ def next_project_reference(client: SqlCardClient, project_id: int, project: str)
     from ummanu.board.sql_cards import SqlCardClient
 
     if isinstance(client, SqlCardClient):
-        return client.call("getNextTaskReference", project=project)
+        reference = client.call("getNextTaskReference", project=project)
+        if not isinstance(reference, str) or not re.fullmatch(re.escape(project) + r"-[1-9][0-9]*", reference):
+            raise TaskError("backend_error", "board store returned an invalid task reference", 1)
+        return reference
     return next_reference(all_project_cards(client, project_id), f"{project}-")
 
 
