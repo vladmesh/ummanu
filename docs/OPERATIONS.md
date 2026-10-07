@@ -864,6 +864,8 @@ against the thresholds a sprint is judged on.
 | --- | --- | --- |
 | one web request | `journalctl -u ummanu-web.service` | `127.0.0.1 GET /sprints 200 4612.3ms` — client, verb, request target, HTTP status, and the milliseconds the application spent on it. One line per answered request, including a HEAD, a refusal and a contained 500. |
 | one dispatcher tick | the dispatcher journal, and `ummanu status` | `dispatcher.last_tick` carries `duration_ms` beside the outcome already recorded for that tick (`seq`, `at`, `status`, `healthy`, `actions`). The human `ummanu status` prints it as `last tick: #12 ok at ... in 4322 ms`. |
+
+`dispatcher.tick_statistics` reports `sample_count`, `p50_duration_ms` and `p95_duration_ms` from the durable last-100-tick ring using nearest-rank percentiles; `dispatcher.last_tick.phases` gives exclusive phase milliseconds, including `other`, and unavailable measurements appear as null in JSON or unavailable in text. Doctor emits the red `dispatcher_tick_p95_slow` finding when at least 20 valid samples have p95 above 300 000 ms.
 | one checkpoint run | `ummanu status` | `checkpoint.checkpoint_duration_ms`, printed by `ummanu status` and by `ummanu doctor` as `checkpoint: committed in 2100 ms`. Every outcome carries its own number, including an unchanged run and a blocked one — a no-change checkpoint still regenerated the whole projection. |
 
 The web duration is the application's part of the answer — reading the body, handling the request,

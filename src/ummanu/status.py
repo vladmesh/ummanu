@@ -17,6 +17,7 @@ from ummanu.dispatch.observer import observer_snapshot
 from ummanu.dispatch.pause import ProductionPause
 from ummanu.dispatch.review import command_terminal_status
 from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.tick_telemetry import duration_ms, phase_ms, tick_statistics
 from ummanu.dispatch.types import HostError
 from ummanu.host import (
     CollectResult,
@@ -125,6 +126,7 @@ def collect_status(
             "divergences": _divergences(production),
             "reconciliation": _reconciliation(production),
             "last_tick": _last_tick(production),
+            "tick_statistics": tick_statistics(production),
         },
         "checkpoint": checkpoint,
         "memory": _memory_status(data_dir),
@@ -393,9 +395,8 @@ def _last_tick(production: dict[str, Any]) -> dict[str, Any] | None:
         "degraded_count": int(_float(entry.get("degraded_count"))),
         # Null, not zero, for a tick recorded before this field existed: a state file written by
         # the previous release has no duration, and 0 ms would be a measurement nobody made.
-        "duration_ms": (
-            float(duration) if isinstance(duration, (int, float)) and not isinstance(duration, bool) else None
-        ),
+        "duration_ms": duration_ms(duration),
+        "phases": phase_ms(entry.get("phases")),
     }
 
 

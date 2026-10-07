@@ -57,6 +57,7 @@ from ummanu.dispatch.state import (
     record_divergence,
     request_token,
 )
+from ummanu.dispatch.tick_telemetry import TICK_TELEMETRY_RECENT_KEPT
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.sprints import SprintWriter, budget_thresholds
@@ -84,16 +85,48 @@ CHECKPOINT_INTERVAL_SECONDS = 5 * 60
 #: reason to know the time. A context variable is set once, at the top of `production_tick`, and read
 #: back by `record_tick_telemetry`, which is the one place every one of those records is built.
 _TICK_STARTED: contextvars.ContextVar[float | None] = contextvars.ContextVar("tick_started", default=None)
+_TICK_PHASES: contextvars.ContextVar[dict[str, float] | None] = contextvars.ContextVar("tick_phases", default=None)
+_TICK_PHASE_STACK: contextvars.ContextVar[list[list[float]] | None] = contextvars.ContextVar(
+    "tick_phase_stack", default=None
+)
 
 
 @contextlib.contextmanager
 def tick_clock() -> Iterator[None]:
     """Run the wall clock of one tick, for the duration every terminal record carries."""
     token = _TICK_STARTED.set(time.perf_counter())
+    phases_token = _TICK_PHASES.set({})
+    stack_token = _TICK_PHASE_STACK.set([])
     try:
         yield
     finally:
+        _TICK_PHASE_STACK.reset(stack_token)
+        _TICK_PHASES.reset(phases_token)
         _TICK_STARTED.reset(token)
+
+
+@contextlib.contextmanager
+def tick_phase(name: str) -> Iterator[None]:
+    """Accumulate exclusive elapsed milliseconds, including a phase interrupted by an exception.
+
+    Board snapshots can occur inside launches. Subtract nested spans from their parent so each
+    millisecond belongs to one phase. Outside a tick this helper has no clock or side effects.
+    """
+    phases = _TICK_PHASES.get()
+    stack = _TICK_PHASE_STACK.get()
+    if phases is None or stack is None:
+        yield
+        return
+    frame = [time.perf_counter(), 0.0]
+    stack.append(frame)
+    try:
+        yield
+    finally:
+        elapsed = (time.perf_counter() - frame[0]) * 1000.0
+        stack.pop()
+        phases[name] = phases.get(name, 0.0) + max(0.0, elapsed - frame[1])
+        if stack:
+            stack[-1][1] += elapsed
 
 
 def tick_duration_ms() -> float | None:
@@ -142,6 +175,15 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
     # Health includes action outcomes, not only top-level status.
     degradations = degraded_actions(result.get("actions"))
+    duration = tick_duration_ms()
+    phases = {name: round(elapsed, 3) for name, elapsed in (_TICK_PHASES.get() or {}).items()}
+    if duration is not None:
+        # Independent rounding can overshoot a very short tick by a few microseconds.
+        excess = round(sum(phases.values()) - duration, 3)
+        if excess > 0 and phases:
+            largest = max(phases, key=lambda name: phases[name])
+            phases[largest] = round(max(0.0, phases[largest] - excess), 3)
+        phases["other"] = round(max(0.0, duration - sum(phases.values())), 3)
     entry = {
         "seq": seq,
         "at": now_rfc3339(),
@@ -150,7 +192,8 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         "healthy": status in HEALTHY_TICK_STATUSES and not degradations,
         # How long this tick ran, beside the outcome it ran to. The record is made right before the
         # save, so it covers everything the tick did up to the moment it became durable.
-        "duration_ms": tick_duration_ms(),
+        "duration_ms": duration,
+        "phases": phases,
         "reason": str(result.get("reason") or ""),
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
@@ -176,6 +219,12 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     }
     telemetry["tick_seq"] = seq
     telemetry["last"] = entry
+    recent = telemetry.get("recent")
+    recent = recent[-(TICK_TELEMETRY_RECENT_KEPT - 1):] if isinstance(recent, list) else []
+    telemetry["recent"] = [
+        *recent,
+        {key: entry[key] for key in ("seq", "at", "status", "healthy", "duration_ms", "phases")},
+    ]
     unhealthy = [item for item in (telemetry.get("unhealthy") or []) if isinstance(item, dict)]
     if entry["healthy"]:
         telemetry["last_healthy_at"] = entry["at"]
@@ -419,16 +468,18 @@ def _production_tick_work(
     outcome_outcomes = attempt_accounting.publish_pending_attempt_outcomes(runtime)
     cleanup_outcomes = []
     if isinstance(runtime.host, CommandHostRuntime) and runtime.host.mode == "real":
-        # A few intents per tick: each replay rereads and rewrites the whole journal under the
-        # tick's lock, and `replay_cursor` carries the rest to later ticks.
-        cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
-                             "status": item["status"], "reason": item["reason"]}
-                            for item in runtime.cleanup.replay(limit=5)]
+        with tick_phase("cleanup"):
+            # A few intents per tick: each replay rereads and rewrites the whole journal under the
+            # tick's lock, and `replay_cursor` carries the rest to later ticks.
+            cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
+                                 "status": item["status"], "reason": item["reason"]}
+                                for item in runtime.cleanup.replay(limit=5)]
 
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
-        fence = observer_fence(runtime, payload, pause_mode=str(pause.get("mode") or ""))
+        with tick_phase("reconcile"):
+            fence = observer_fence(runtime, payload, pause_mode=str(pause.get("mode") or ""))
     except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         # An unfinished fence authorizes no downstream work.
         return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)
@@ -441,48 +492,51 @@ def _production_tick_work(
     fenced_refs = set(fence.get("refs") or ()) | {
         str(task.get("ref") or "") for task in cycle if fenced_task(fence, task)
     }
-    reconcile_outcomes = _reconcile_production(
-        runtime, records, payload, active_refs, fenced_refs=fenced_refs, fence=fence
-    )
-    # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
-    # reconciliation did: those are stamped by every tick regardless of code version, so a
-    # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
-    # on the strength of a field that predates the reconciliation pass itself.
-    payload["last_reconciled_at"] = now_rfc3339()
-    outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
+    with tick_phase("reconcile"):
+        reconcile_outcomes = _reconcile_production(
+            runtime, records, payload, active_refs, fenced_refs=fenced_refs, fence=fence
+        )
+        # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
+        # reconciliation did: those are stamped by every tick regardless of code version, so a
+        # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
+        # on the strength of a field that predates the reconciliation pass itself.
+        payload["last_reconciled_at"] = now_rfc3339()
+        outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
     outcomes = cleanup_outcomes + usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     # After the releases of this tick, before the observers: a merge whose base has no CI resolves
     # `absent` in the tick that merged it, and a result written here is delivered below.
-    try:
-        outcomes += reconcile_post_merge_watches(runtime, payload, records)
-    except Exception as exc:  # noqa: BLE001 - a watch that cannot be read must not stop the tick
-        errors.append(_unexpected_error("", exc))
-    # Right after the watches that queue them: each project's after-merge e2e run (secretary-1807).
-    try:
-        outcomes += reconcile_after_merge(runtime, payload, records)
-    except Exception as exc:  # noqa: BLE001 - an after-merge queue that cannot advance must not stop the tick
-        errors.append(_unexpected_error("", exc))
+    with tick_phase("after-merge"):
+        try:
+            outcomes += reconcile_post_merge_watches(runtime, payload, records)
+        except Exception as exc:  # noqa: BLE001 - a watch that cannot be read must not stop the tick
+            errors.append(_unexpected_error("", exc))
+        # Right after the watches that queue them: each project's after-merge e2e run (secretary-1807).
+        try:
+            outcomes += reconcile_after_merge(runtime, payload, records)
+        except Exception as exc:  # noqa: BLE001 - an after-merge queue that cannot advance must not stop the tick
+            errors.append(_unexpected_error("", exc))
     try:
         outcomes += _reconcile_sprint_budget(runtime)
     except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         errors.append(_unexpected_error("", exc))
     # Reconcile after budget accounting so hard stops prevent replacement launches.
-    try:
-        outcomes += reconcile_observers(runtime, payload, pause_mode=str(pause.get("mode") or ""))
-    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
-        observer_errors.append(_unexpected_error("", exc))
-    errors = observer_errors + errors
-    claims_allowed = pause.get("mode") != "drain"
-    if claims_allowed:
+    with tick_phase("launches"):
         try:
-            ready_outcome = _production_claim_ready(
-                runtime, records, payload, fence=fence, blocked_scopes=blocked_scopes
-            )
+            outcomes += reconcile_observers(runtime, payload, pause_mode=str(pause.get("mode") or ""))
         except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
-            errors.append(_unexpected_error("", exc))
-        else:
-            if ready_outcome is not None:
-                outcomes.append(ready_outcome)
+            observer_errors.append(_unexpected_error("", exc))
+        errors = observer_errors + errors
+        claims_allowed = pause.get("mode") != "drain"
+        if claims_allowed:
+            try:
+                ready_outcome = _production_claim_ready(
+                    runtime, records, payload, fence=fence, blocked_scopes=blocked_scopes
+                )
+            except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
+                errors.append(_unexpected_error("", exc))
+            else:
+                if ready_outcome is not None:
+                    outcomes.append(ready_outcome)
     # Last, after every move this tick made (a claim can Block a decision/operation card): every
     # return the origin-return outbox holds undelivered goes to the PO session that cut its card.
     try:
@@ -491,7 +545,8 @@ def _production_tick_work(
         errors.append(_unexpected_error("", exc))
 
     runtime.production_state.put_records(payload, records)
-    checkpoint, push = _coordinate_checkpoint(runtime, payload)
+    with tick_phase("checkpoint"):
+        checkpoint, push = _coordinate_checkpoint(runtime, payload)
     payload["last_tick_finished_at"] = now_rfc3339()
     # Caught degraded actions and checkpoint failures degrade the terminal tick.
     checkpoint_blocked = bool(checkpoint and checkpoint.get("status") == "blocked")
@@ -572,7 +627,8 @@ def _frozen_tick_body(runtime: Any, payload: dict[str, Any], result: dict[str, A
         result["actions"] = observer_stops
         if degraded_actions(observer_stops):
             result["status"] = "degraded"
-    checkpoint, push = _coordinate_checkpoint(runtime, payload)
+    with tick_phase("checkpoint"):
+        checkpoint, push = _coordinate_checkpoint(runtime, payload)
     if checkpoint is not None:
         result["checkpoint"] = checkpoint
         if checkpoint.get("status") == "blocked":
@@ -1529,7 +1585,8 @@ def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[st
 
 
 def _production_tasks(runtime: Any, states: set[str]) -> list[dict[str, Any]]:
-    return sorted(runtime.reader.list(states=states), key=_task_sort_key)
+    with tick_phase("snapshot"):
+        return sorted(runtime.reader.list(states=states), key=_task_sort_key)
 
 
 def _production_tick_active(
