@@ -1852,105 +1852,106 @@ class TaskWriter:
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
         # read through createTask prevents two local task-create processes assigning one ref.
-        with reference_allocation_lock(self.data_dir), self._mutation():
+        with reference_allocation_lock(self.data_dir):
             board_id, columns, swimlanes = self.reader._board()
             created_ref = reference or next_project_reference(self.client, board_id, project)
-            # One question for both paths. A caller-supplied reference may name a card that
-            # already exists, and an allocated one is only as free as the enumeration it was
-            # counted from, so neither is written before the backend is asked about that exact
-            # reference. Archived rows answer too: they hold their reference for good.
-            if project_card_by_reference(self.client, board_id, created_ref):
-                raise TaskError("validation", f"task reference {created_ref} is already claimed", 2)
-            column_id = _target_column_id(columns, target)
-            if column_id is None:
-                raise TaskError("backend_error", "board schema is invalid", 1)
-            swimlane_id = _matching_swimlane(swimlanes, project)
-            # Persist the allocation before the atomic backend write. A process that dies
-            # after createTask still leaves a recoverable, already-reserved reference.
-            event["ref"] = created_ref
-            self.audit.stage(request_id, event)
-            task_id = _positive_int(
-                self.client.call(
-                    "createTask",
-                    project_id=board_id,
-                    title=title,
-                    description=description,
-                    column_id=column_id,
-                    swimlane_id=swimlane_id or 0,
-                    reference=created_ref,
-                )
-            )
-            if task_id is None:
-                raise TaskError("backend_error", "board store rejected the write", 1)
-            event["task_id"] = entity_id("task", task_id)
-            event["backend"]["task_id"] = task_id
-            try:
+            with reference_lock(self.data_dir, created_ref), self._mutation():
+                # One question for both paths. A caller-supplied reference may name a card that
+                # already exists, and an allocated one is only as free as the enumeration it was
+                # counted from, so neither is written before the backend is asked about that exact
+                # reference. Archived rows answer too: they hold their reference for good.
+                if project_card_by_reference(self.client, board_id, created_ref):
+                    raise TaskError("validation", f"task reference {created_ref} is already claimed", 2)
+                column_id = _target_column_id(columns, target)
+                if column_id is None:
+                    raise TaskError("backend_error", "board schema is invalid", 1)
+                swimlane_id = _matching_swimlane(swimlanes, project)
+                # Persist the allocation before the atomic backend write. A process that dies
+                # after createTask still leaves a recoverable, already-reserved reference.
+                event["ref"] = created_ref
                 self.audit.stage(request_id, event)
-            except OSError as exc:
-                raise _CommittedWriteError() from exc
-            try:
-                reference_persisted = self.reader.show_id(task_id)["ref"] == created_ref
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
-            if not reference_persisted:
-                raise _CommittedWriteError()
-            try:
-                values = {
-                    "record_type": "task",
-                    "task_type": task_type,
-                    "project": project,
-                    "complexity": complexity,
-                    "family_preference": family_preference,
-                    "review": review,
-                }
-                if live_impact:
-                    values["live_impact"] = "1"
-                if touches_production:
-                    # Not a column: a typed field of the extension bag (board/production_rights.py).
-                    values[TOUCHES_PRODUCTION] = touches_production
-                if wait_spec:
-                    # Not a column either: the wait card's spec (board/wait_card.py).
-                    values[wait_card.WAIT_SPEC] = wait_spec
-                if po_origin:
-                    # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
-                    values[origin_field.PO_ORIGIN] = po_origin
-                if po_execution:
-                    values[execution_field.PO_EXECUTION] = po_execution
-                if blocked_by:
-                    values["blocked_by"] = blocked_by
-                if head:
-                    values["head"] = head
-                if review_head:
-                    values["review_head"] = review_head
-                if slug:
-                    values["slug"] = slug
-                if base_branch:
-                    values["base_branch"] = base_branch
-                if seed_ref:
-                    values["seed_ref"] = seed_ref
-                if supersedes:
-                    values["supersedes"] = supersedes
-                if codex_launch_mode:
-                    values["codex_launch_mode"] = codex_launch_mode
-                if sprint:
-                    values["sprint_ref"] = sprint
-                if steward_report:
-                    values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
-                self.client.call("saveTaskMetadata", task_id=task_id, values=values)
-                if steward_report:
-                    created = self.reader.show_id(task_id)
-                    if not (
-                        created["state"] == "in_progress"
-                        and created["project"] == project
-                        and created["type"] == "research"
-                        and created.get("record_type") == "task"
-                        and created["claim"]["worker"] == slug
-                        and _is_steward_report(created)
-                    ):
-                        raise _CommittedWriteError()
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
-            return created_ref
+                task_id = _positive_int(
+                    self.client.call(
+                        "createTask",
+                        project_id=board_id,
+                        title=title,
+                        description=description,
+                        column_id=column_id,
+                        swimlane_id=swimlane_id or 0,
+                        reference=created_ref,
+                    )
+                )
+                if task_id is None:
+                    raise TaskError("backend_error", "board store rejected the write", 1)
+                event["task_id"] = entity_id("task", task_id)
+                event["backend"]["task_id"] = task_id
+                try:
+                    self.audit.stage(request_id, event)
+                except OSError as exc:
+                    raise _CommittedWriteError() from exc
+                try:
+                    reference_persisted = self.reader.show_id(task_id)["ref"] == created_ref
+                except Exception as exc:
+                    raise _CommittedWriteError() from exc
+                if not reference_persisted:
+                    raise _CommittedWriteError()
+                try:
+                    values = {
+                        "record_type": "task",
+                        "task_type": task_type,
+                        "project": project,
+                        "complexity": complexity,
+                        "family_preference": family_preference,
+                        "review": review,
+                    }
+                    if live_impact:
+                        values["live_impact"] = "1"
+                    if touches_production:
+                        # Not a column: a typed field of the extension bag (board/production_rights.py).
+                        values[TOUCHES_PRODUCTION] = touches_production
+                    if wait_spec:
+                        # Not a column either: the wait card's spec (board/wait_card.py).
+                        values[wait_card.WAIT_SPEC] = wait_spec
+                    if po_origin:
+                        # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
+                        values[origin_field.PO_ORIGIN] = po_origin
+                    if po_execution:
+                        values[execution_field.PO_EXECUTION] = po_execution
+                    if blocked_by:
+                        values["blocked_by"] = blocked_by
+                    if head:
+                        values["head"] = head
+                    if review_head:
+                        values["review_head"] = review_head
+                    if slug:
+                        values["slug"] = slug
+                    if base_branch:
+                        values["base_branch"] = base_branch
+                    if seed_ref:
+                        values["seed_ref"] = seed_ref
+                    if supersedes:
+                        values["supersedes"] = supersedes
+                    if codex_launch_mode:
+                        values["codex_launch_mode"] = codex_launch_mode
+                    if sprint:
+                        values["sprint_ref"] = sprint
+                    if steward_report:
+                        values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
+                    self.client.call("saveTaskMetadata", task_id=task_id, values=values)
+                    if steward_report:
+                        created = self.reader.show_id(task_id)
+                        if not (
+                            created["state"] == "in_progress"
+                            and created["project"] == project
+                            and created["type"] == "research"
+                            and created.get("record_type") == "task"
+                            and created["claim"]["worker"] == slug
+                            and _is_steward_report(created)
+                        ):
+                            raise _CommittedWriteError()
+                except Exception as exc:
+                    raise _CommittedWriteError() from exc
+                return created_ref
 
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
@@ -4947,7 +4948,7 @@ class TaskWriter:
         # state §7.3 says this backend does not have: a closed card beside a staged request.  For a
         # client without transactions `_mutation()` is nothing at all, so the ambiguity below — and the pending
         # record `reconcile` settles from it — is untouched.
-        with self._mutation():
+        with reference_lock(self.data_dir, reference), self._mutation():
             self.audit.stage(request_id, event)
             try:
                 # This is the final guard immediately before the destructive call.
@@ -5535,6 +5536,7 @@ class TaskWriter:
             and metadata.get("record_type") not in _TYPED_RECORD_TYPES
         )
 
+    @ownership_recovery
     def _finish_pending_retired(self, event: dict[str, Any]) -> None:
         """Prove a retained close or repeat it only for its original Done episode."""
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}

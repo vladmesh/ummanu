@@ -7,6 +7,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from tests.fakes.tasks import CardSeed
 from tests.sql_backend_fixtures import CardStoreCase
@@ -103,16 +104,25 @@ class CleanupLockSqlTests(CardStoreCase):
         comment_client = SqlCardClient(self.client.credentials, self.root)
         self.addCleanup(comment_client.close)
         comment_writer = TaskWriter(comment_client, data_dir=self.root)
-        with owner.admission(task, launch=True):
+        show = self.writer.reader.show
+
+        def admission_read(*args, **kwargs):
+            self.assertGreater(self.client._depth, 0)
             thread = threading.Thread(target=raw_move)
             thread.start()
+            self.addCleanup(thread.join, 5)
             self.assertTrue(attempted.wait(3))
             self.assertFalse(finished.wait(.1))
             started = time.monotonic()
             comment_writer.comment(role="po", actor="test-po", reference="alpha-1", body="during admission",
                                    request_id="admission-comment")
             self.assertLess(time.monotonic() - started, 1)
-        thread.join(5)
+            return show(*args, **kwargs)
+
+        with mock.patch.object(self.writer.reader, "show", side_effect=admission_read), \
+                owner.admission(task, launch=True):
+            self.assertEqual(self.client._depth, 0)
+            self.assertTrue(finished.wait(5))
         self.assertTrue(finished.is_set())
         self.assertEqual(failures, [])
         self.assertEqual(self.writer.reader.show("alpha-1")["state"], "in_progress")

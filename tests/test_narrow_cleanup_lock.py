@@ -16,9 +16,12 @@ from unittest import mock
 
 from tests import test_owned_cleanup as owned_fixtures, test_tick_board_snapshot as tick_fixtures
 from tests.fakes.dispatcher import FakeCatalog
+from ummanu import restore
 from ummanu.board.fake import MemoryAudit
+from ummanu.board.host import TransitionRequest
+from ummanu.board.models import Actor, CardState, EntityKind
 from ummanu.board.tick_snapshot import tick_snapshot
-from ummanu.dispatch import cleanup, production
+from ummanu.dispatch import assessment_decision, cleanup, production, release_lifecycle
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.types import HostError, OwnershipChanged
@@ -354,6 +357,226 @@ class NarrowCleanupLockTests(unittest.TestCase):
             self.assertFalse(any(isinstance(node, ast.Name) and node.id in {"serialized", "ownership_lock"}
                                  for node in ast.walk(tree)), method.__name__)
 
+    def assessment_record(self):
+        self.store.rows[1]["column_id"] = 5
+        self.store.meta[1]["claim"] = self.fixture.record.worker
+        self.fixture.task = self.writer.reader.show("sample-1")
+        self.fixture.head("worker", generation="")
+        self.fixture.head("review", generation="")
+        self.fixture.state({"sample-1": self.fixture.record.to_json()})
+        return self.fixture.task, self.fixture.record
+
+    def test_assessment_release_disposes_before_done_claim_settlement(self):
+        task, record = self.assessment_record()
+        result = self.owner.cleanup(task, record, "done")
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["reason"], "cleanup awaits terminal board claim settlement")
+        self.assertCountEqual(self.fixture.stops, [("run-worker", ""), ("run-review", "")])
+        self.assertFalse(self.fixture.workspace.exists())
+        self.assertTrue(result["progress"]["workspace_removed"])
+        self.assertFalse(result["progress"].get("claim_settled"))
+        self.assertEqual(self.writer.reader.show("sample-1")["claim"]["worker"], record.worker)
+
+    def test_assessment_rework_between_admission_and_removal_preserves_workspace(self):
+        task, record = self.assessment_record()
+        entered, release = threading.Event(), threading.Event()
+        original = self.owner._dirty
+        results = []
+
+        def proof(*args):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return original(*args)
+
+        with mock.patch.object(self.owner, "_dirty", side_effect=proof):
+            thread, errors = self.blocked_thread(
+                lambda: results.append(self.owner.cleanup(task, record, "done")), entered, release)
+            self.writer.move(role="po", actor="test-po", reference="sample-1", target="in_progress",
+                             reason="rework", request_id="assessment-race-rework")
+            release.set()
+            thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(results[0]["status"], "pending")
+        self.assertTrue(self.fixture.workspace.exists())
+        self.assertNotIn("removal_started", results[0]["progress"])
+        self.assertEqual(self.writer.reader.show("sample-1")["state"], "in_progress")
+
+    def test_assessment_decision_release_reaches_real_host_teardown(self):
+        task, record = self.assessment_record()
+        host = self.fixture.host
+        host.mode = "real"
+        host.cleanup_owner = self.owner
+        host._refuse_legacy_record = lambda *a: None
+        host._require_production_runtime = lambda *a: None
+        host.teardown = MethodType(CommandHostRuntime.teardown, host)
+        host.complete_green = lambda *a: None
+        runtime = self.owner.runtime
+        runtime.save_records = lambda *a: None
+        records = {"sample-1": record}
+
+        def terminal(*args, **kwargs):
+            self.assertEqual(self.writer.reader.show("sample-1")["state"], "assessment")
+            self.assertFalse(self.fixture.workspace.exists())
+            self.assertEqual(len(self.fixture.stops), 2)
+            self.store.rows[1]["column_id"] = 7
+
+        with mock.patch.object(assessment_decision, "recorded_decision", return_value=("release", "release", ())), \
+                mock.patch.object(release_lifecycle.e2e_stage, "run_stage", return_value=None), \
+                mock.patch.object(release_lifecycle, "read_release_gate", return_value=(None, object())), \
+                mock.patch("ummanu.dispatch.gate_lifecycle.accept_green_gate", return_value=None), \
+                mock.patch.object(release_lifecycle, "decision_pointer", return_value="release"), \
+                mock.patch.object(release_lifecycle.attempt_accounting, "terminal_effect", side_effect=terminal):
+            result = assessment_decision.advance_assessment(runtime, task, records, {}, "release-attempt")
+        self.assertEqual(result["to"], "done")
+        self.assertEqual(result["cleanup"]["reason"], "cleanup awaits terminal board claim settlement")
+        self.assertTrue(result["cleanup"]["progress"]["workspace_removed"])
+        self.assertEqual(records, {})
+
+    def test_final_journal_conflict_is_pending_and_replay_does_not_repeat_effects(self):
+        self.fixture.head(generation="")
+        key = self.fixture.request()
+        original = self.owner.journal.commit_intent
+        conflicted = False
+
+        def commit(intent_key, intent):
+            nonlocal conflicted
+            if intent_key == key and intent["status"] == "completed" and not conflicted:
+                conflicted = True
+                fresh = self.owner.journal.read()
+                fresh["intents"][key]["record"]["concurrent_revision"] = "fresh-owner-evidence"
+                self.owner.journal.save(fresh)
+            return original(intent_key, intent)
+
+        with mock.patch.object(self.owner.journal, "commit_intent", side_effect=commit), \
+                mock.patch.object(cleanup.git_worktree, "remove", wraps=cleanup.git_worktree.remove) as remove:
+            results = self.owner.replay()
+            self.assertTrue(conflicted)
+            self.assertEqual(results[0]["status"], "pending")
+            pending = self.owner.journal.read()["intents"][key]
+            self.assertEqual(pending["record"]["concurrent_revision"], "fresh-owner-evidence")
+            self.assertIn("ownership changed", pending["reason"])
+            self.assertEqual(self.owner.replay()[0]["status"], "completed")
+            self.assertEqual(remove.call_count, 1)
+        self.assertEqual(self.fixture.stops, [("run-worker", "")])
+
+    def test_disposal_runs_without_sql_transaction(self):
+        self.fixture.head(generation="")
+        key = self.fixture.request()
+        namespace = self.fixture.workspace / ".ummanu-task-env"
+        namespace.mkdir()
+        self.fixture.host._decide_workspace_environment_ownership = (
+            lambda path: "dispatcher" if namespace.exists() else "absent")
+        active = False
+
+        @contextlib.contextmanager
+        def transaction():
+            nonlocal active
+            self.assertFalse(active)
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        remove = cleanup.git_worktree.remove
+
+        def dispose(*args, **kwargs):
+            self.assertFalse(active)
+            self.assertTrue(lock_free(self.data))
+            return remove(*args, **kwargs)
+
+        call = self.store.call
+        rmtree = cleanup.shutil.rmtree
+
+        def check(method, **kwargs):
+            if method == "lockOwnershipReference":
+                self.assertTrue(active)
+            return call(method, **kwargs)
+
+        def remove_environment(*args, **kwargs):
+            self.assertFalse(active)
+            return rmtree(*args, **kwargs)
+
+        with mock.patch.object(self.store, "transaction", side_effect=transaction), \
+                mock.patch.object(cleanup.git_worktree, "remove", side_effect=dispose) as disposal, \
+                mock.patch.object(self.store, "call", side_effect=check), \
+                mock.patch.object(cleanup.shutil, "rmtree", side_effect=remove_environment) as environment:
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        disposal.assert_called_once()
+        environment.assert_called_once_with(namespace)
+        self.assertFalse(active)
+
+    def test_direct_card_transition_waits_for_disposal_fence_but_comment_finishes(self):
+        key = self.fixture.request()
+        entered, release = threading.Event(), threading.Event()
+        attempted, finished = threading.Event(), threading.Event()
+        failures = []
+        remove = cleanup.git_worktree.remove
+
+        def dispose(*args, **kwargs):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return remove(*args, **kwargs)
+
+        def move():
+            attempted.set()
+            try:
+                self.writer.board_host.transition(TransitionRequest(
+                    EntityKind.CARD, "sample-1", CardState.READY, Actor("po", "test-po"),
+                    "reopen after disposal", request_id="direct-transition"))
+            except Exception as exc:  # noqa: BLE001 - relay the writer thread's failure
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        with mock.patch.object(cleanup.git_worktree, "remove", side_effect=dispose):
+            disposal, errors = self.blocked_thread(lambda: self.owner.replay_one(key), entered, release)
+            writer = threading.Thread(target=move)
+            writer.start()
+            self.addCleanup(writer.join, 5)
+            self.assertTrue(attempted.wait(3))
+            self.assertFalse(finished.wait(.1))
+            started = time.monotonic()
+            self.writer.comment(role="po", actor="test-po", reference="sample-1", body="during disposal",
+                                request_id="disposal-comment")
+            self.assertLess(time.monotonic() - started, 1)
+            release.set()
+            disposal.join(5)
+            writer.join(5)
+        self.assertEqual(errors, [])
+        self.assertEqual(failures, [])
+        self.assertTrue(finished.is_set())
+        self.assertEqual(self.writer.reader.show("sample-1")["state"], "ready")
+
+    def test_restore_fences_nonexported_existing_card_before_sql(self):
+        attempted, acquired = threading.Event(), threading.Event()
+
+        def existing_card():
+            attempted.set()
+            with cleanup.reference_lock(self.data, "demo-2"):
+                acquired.set()
+
+        thread = threading.Thread(target=existing_card)
+        self.addCleanup(thread.join, 5)
+
+        @contextlib.contextmanager
+        def transaction():
+            # Restore reconciliation can write this existing, nonexported card.
+            # Its effect fence must precede SQL/capacity, rather than wait there.
+            thread.start()
+            self.assertTrue(attempted.wait(3))
+            self.assertFalse(acquired.wait(.1))
+            yield
+
+        with mock.patch.object(restore, "_normalized_cards", return_value=[{"reference": "sample-1"}]), \
+                mock.patch.object(restore, "_import_normalized_board", return_value=0), \
+                mock.patch.object(self.store, "transaction", side_effect=transaction):
+            self.assertEqual(restore.import_normalized_board(self.data, client=self.store), 0)
+        thread.join(5)
+        self.assertTrue(acquired.is_set())
+
     def test_admission_board_reads_run_outside_global_lock(self):
         original = self.writer.reader.show
 
@@ -417,7 +640,7 @@ class NarrowCleanupLockTests(unittest.TestCase):
         owner = cleanup.CleanupOwner(SimpleNamespace(data_dir=self.data, sprints=reader))
         task = {**current, "kind": "observer"}
         with owner.admission(task, launch=True):
-            self.assertTrue(active)
+            self.assertFalse(active)
             self.assertTrue(lock_free(self.data))
         self.assertFalse(active)
         client.call.assert_called_once_with("lockOwnershipReference", reference="sprint:1", observer=True)

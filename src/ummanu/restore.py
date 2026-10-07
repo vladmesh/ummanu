@@ -9,6 +9,7 @@ import sys
 import tarfile
 import tempfile
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,6 +43,7 @@ from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
 from ummanu.data import init_layout
+from ummanu.dispatch.cleanup import reference_lock
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.config import DEFAULT_DIM as DEFAULT_MEMORY_DIM
 from ummanu.product_issues import (
@@ -128,10 +130,24 @@ def import_normalized_board(
         if instance is None:
             raise RestoreError("restore requires the target instance to bind its board")
         client = board_client(instance, serves=(CARD, SPRINT))
-    if not client._depth:
-        with client.transaction():
-            return _import_normalized_board(data_dir, client=client, instance=instance)
-    return _import_normalized_board(data_dir, client=client, instance=instance)
+    cards = _normalized_cards(
+        data_dir, registered_project_ids=(registered_projects(instance) if instance else None)
+    )
+    board_id, _, _ = TaskReader(client)._board()
+    references = {card["reference"] for card in cards} | {
+        str(row["reference"]) for row in all_project_cards(client, board_id) if row.get("reference")
+    }
+    # Bulk restore also changes state and claim. Acquire its Card fences before
+    # opening SQL, in a stable order, including existing cards that reconciliation
+    # may repair before importing. No repair waits for a Card fence behind capacity.
+    with ExitStack() as fences:
+        for reference in sorted(references):
+            fences.enter_context(reference_lock(data_dir, reference))
+        fences.enter_context(reference_lock(data_dir, "capacity", lane="admission"))
+        if not client._depth:
+            with client.transaction():
+                return _import_normalized_board(data_dir, client=client, instance=instance)
+        return _import_normalized_board(data_dir, client=client, instance=instance)
 
 
 def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance: Path | None = None) -> int:

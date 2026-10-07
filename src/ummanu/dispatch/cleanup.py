@@ -401,6 +401,36 @@ class CleanupJournal:
             self.save(value)
 
     @journal_mutation
+    def defer_intent(self, key: str, attempted: dict[str, Any], reason: str) -> dict[str, Any]:
+        """Retain a failed replay against fresh evidence without reverting its owner."""
+        value = self.read()
+        current = value["intents"].get(key)
+        if current is None:
+            raise HostError("cleanup intent disappeared while recording replay refusal")
+        if all(current.get(field) == attempted.get(field)
+               for field in ("identity", "record", "disposition")):
+            pending = copy.deepcopy(attempted)
+            for head in current["heads"]:
+                _merge_head(pending["heads"], head)
+        else:
+            pending = copy.deepcopy(current)
+            # Exact stop receipts remain true even if a producer updated the
+            # obligation. Never carry destructive progress to a changed owner.
+            for head in attempted["heads"]:
+                if head.get("lifecycle") == "exited" and any(
+                    all(head.get(field) == old.get(field) for field in
+                        ("run_id", "scope_generation", "spec", "workspace", "task_ref", "role"))
+                    for old in pending["heads"]
+                ):
+                    _merge_head(pending["heads"], head)
+        pending["status"] = "pending"
+        pending["reason"] = reason[:1000]
+        value["intents"][key] = pending
+        with self.targeted({key}):
+            self.save(value)
+        return pending
+
+    @journal_mutation
     def request(self, task: dict[str, Any], disposition: str,
                 record: dict[str, Any] | None = None) -> str:
         if record is None:
@@ -558,7 +588,8 @@ class CleanupOwner:
         if current["id"] != task["id"] or current["project"] != task["project"]:
             raise HostError("cleanup card identity changed")
         if (current.get("state") in {"in_progress", "validate", "review", "assessment", "ready"}
-                and not current.get("closed")):
+                and not current.get("closed")
+                and (intent["disposition"] != "done" or current.get("state") != "assessment")):
             raise HostError("cleanup card is still admitted for work")
         record = intent["record"]
         claim = current.get("claim") or {}
@@ -601,44 +632,52 @@ class CleanupOwner:
                   else self.runtime.reader)
         client = getattr(reader, "client", None)
         transaction = getattr(client, "transaction", None)
-        with reference_lock(self.data_dir, task["ref"]), (
-            transaction() if transaction is not None else contextlib.nullcontext()
-        ):
-            if transaction is not None and not client.call(
-                "lockOwnershipReference", reference=task["ref"], observer=task.get("kind") == "observer"
-            ):
-                raise OwnershipChanged("cleanup/launch primary key no longer exists")
-            # The SQL row fence keeps this key read stable through admission
-            # and its effect. Network reads and row contention precede the flock.
-            current = (reader.show(task["ref"], include_cards=False)
-                       if task.get("kind") == "observer" else reader.show(task["ref"]))
-            with ownership_lock(self.data_dir):
-                if launch:
-                    if (current["id"] != task["id"] or current.get("closed")
-                            or (task.get("kind") == "observer" and current["status"] != task["status"])
-                            or (task.get("kind") != "observer" and
-                                (current.get("state") != task.get("state")
-                                 or current.get("project") != task.get("project")
-                                 or current.get("claim") != task.get("claim")))):
-                        raise OwnershipChanged("launch ownership changed since admission")
-                    refusal = self.journal.admission_refusal(task["ref"])
-                    if refusal:
-                        raise HostError(refusal)
-                else:
-                    assert intent is not None
-                    if self._planned is None:
-                        key = _intent_key(task["ref"], str(intent["record"].get("attempt_id") or ""))
-                        fresh = self.journal.read()["intents"].get(key)
-                        if fresh is None or any(fresh.get(field) != intent.get(field)
-                                                for field in ("identity", "record", "disposition")):
-                            raise HostError("cleanup intent changed since admission; workspace retained")
-                    current = self._validate_owner(intent, current=current)
-                    observed = {field: copy.deepcopy(current.get(field))
-                                for field in ("id", "state", "status", "closed", "claim", "successor")}
-                    if self._admitted is not None and self._admitted != observed:
-                        raise HostError("cleanup ownership changed since admission; workspace retained")
-                    self._admitted = observed
+        with reference_lock(self.data_dir, task["ref"]):
+            with transaction() if transaction is not None else contextlib.nullcontext():
+                current = self._admission_check(task, reader, client, intent=intent, launch=launch)
+            # Only the effect fence spans disposal or Popen. The short row
+            # transaction above is committed before any subprocess or unlink.
             yield current
+
+    def _admission_check(self, task: dict[str, Any], reader: Any, client: Any, *,
+                         intent: dict[str, Any] | None, launch: bool) -> dict[str, Any]:
+        """Key revalidation inside the caller's short SQL transaction and effect fence."""
+        transaction = getattr(client, "transaction", None)
+        if transaction is not None and not client.call(
+            "lockOwnershipReference", reference=task["ref"], observer=task.get("kind") == "observer"
+        ):
+            raise OwnershipChanged("cleanup/launch primary key no longer exists")
+        # The SQL row fence keeps this key read stable through this short
+        # check. Network reads and row contention precede the flock.
+        current = (reader.show(task["ref"], include_cards=False)
+                   if task.get("kind") == "observer" else reader.show(task["ref"]))
+        with ownership_lock(self.data_dir):
+            if launch:
+                if (current["id"] != task["id"] or current.get("closed")
+                        or (task.get("kind") == "observer" and current["status"] != task["status"])
+                        or (task.get("kind") != "observer" and
+                            (current.get("state") != task.get("state")
+                             or current.get("project") != task.get("project")
+                             or current.get("claim") != task.get("claim")))):
+                    raise OwnershipChanged("launch ownership changed since admission")
+                refusal = self.journal.admission_refusal(task["ref"])
+                if refusal:
+                    raise HostError(refusal)
+            else:
+                assert intent is not None
+                if self._planned is None:
+                    key = _intent_key(task["ref"], str(intent["record"].get("attempt_id") or ""))
+                    fresh = self.journal.read()["intents"].get(key)
+                    if fresh is None or any(fresh.get(field) != intent.get(field)
+                                            for field in ("identity", "record", "disposition")):
+                        raise HostError("cleanup intent changed since admission; workspace retained")
+                current = self._validate_owner(intent, current=current)
+                observed = {field: copy.deepcopy(current.get(field))
+                            for field in ("id", "state", "status", "closed", "claim", "successor")}
+                if self._admitted is not None and self._admitted != observed:
+                    raise HostError("cleanup ownership changed since admission; workspace retained")
+                self._admitted = observed
+        return current
 
     def _observer_successor(self, intent: dict[str, Any]) -> str:
         """The generation:launch that replaced this observer intent, or "" while it is current."""
@@ -1156,8 +1195,18 @@ class CleanupOwner:
         task = self.journal.read()["intents"][key]["task"]
         with reference_lock(self.data_dir, task["ref"], lane="lifecycle"), self.journal.targeted({key}):
             self._admitted = None
+            value = self.journal.read()
             try:
-                return self._replay(self.journal.read(), key)
+                return self._replay(value, key)
+            except HostError as exc:
+                # A checkpoint/final publication can lose a same-intent race.
+                # It is a retryable obligation, not a failure of the whole tick.
+                try:
+                    return self.journal.defer_intent(key, value["intents"][key], str(exc))
+                except HostError as publication:
+                    pending = copy.deepcopy(value["intents"][key])
+                    pending.update(status="pending", reason=(str(exc) + "; " + str(publication))[:1000])
+                    return pending
             finally:
                 self._admitted = None
 

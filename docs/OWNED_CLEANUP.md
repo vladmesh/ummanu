@@ -23,8 +23,10 @@ alone does not make a host a Git cleanup owner.
 ownership saves and live ownership admission/commit checks; ticks, Git proofs, head
 setup, launch readiness, delivery and stop run outside it. `CleanupOwner.admission`
 revalidates the primary key, state and claim before effects; per-reference lifecycle
-and effect fences and a PostgreSQL row lock prevent replacement or disposal of a
-changed owner without putting unrelated head commands behind host operations.
+and effect fences order ownership mutations against disposal, while the PostgreSQL
+row lock covers only the short admission/commit check and is released before any
+subprocess or filesystem disposal. Release admits `done` cleanup in Assessment;
+heads and workspace are disposed there, and claim settlement waits for Done.
 
 Claims count live capacity keys and revalidate each peer, independently of the tick
 snapshot. A separate admission fence orders concurrent claims and moves into active

@@ -869,46 +869,52 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
     ):
         raise TaskError("backend_error", "pending restore order is invalid", 1)
 
-    live, rows = _live_restore_group(writer, column, swimlane)
-    while live != references:
-        if set(live) != set(references):
-            raise TaskError("backend_error", "restore order group does not match normalized records", 1)
-        mismatch = next(index for index, reference in enumerate(references) if live[index] != reference)
-        reference = references[mismatch]
-        task_id = _positive_int(rows[reference].get("id"))
-        if task_id is None:
-            raise TaskError("backend_error", "board store returned an invalid task", 1)
-        board_id, columns, swimlanes = writer.reader._board()
-        column_id = next((identifier for identifier, title in columns.items() if title == column), None)
-        swimlane_id = next(
-            (identifier for identifier, name in swimlanes.items() if name == swimlane),
-            0,
-        )
-        if column_id is None or (swimlane and not swimlane_id):
-            raise TaskError("backend_error", "restored order group is unavailable", 1)
-        try:
-            answer = writer.client.call(
-                "moveTaskPosition",
-                project_id=board_id,
-                task_id=task_id,
-                column_id=column_id,
-                position=mismatch + 1,
-                swimlane_id=swimlane_id,
-            )
-        except Exception as exc:  # noqa: BLE001 - a lost move reply is reconciled below.
-            if refused_in_transaction(writer.client, exc):
-                raise store_refusal(f"order move for {reference}", exc) from None
-            answer = None
-        if answer is True:
-            live.remove(reference)
-            live.insert(mismatch, reference)
-            continue
+    from ummanu.dispatch.cleanup import reference_lock
+
+    with ExitStack() as fences:
+        for reference in sorted(references):
+            fences.enter_context(reference_lock(writer.data_dir, reference))
+        fences.enter_context(reference_lock(writer.data_dir, "capacity", lane="admission"))
         live, rows = _live_restore_group(writer, column, swimlane)
-        if live[: mismatch + 1] != references[: mismatch + 1]:
-            raise TaskError("backend_error", "board store move result is uncertain", 1)
-    proven, _ = _live_restore_group(writer, column, swimlane)
-    if proven != references:
-        raise TaskError("backend_error", "restored order repair could not be verified", 1)
+        while live != references:
+            if set(live) != set(references):
+                raise TaskError("backend_error", "restore order group does not match normalized records", 1)
+            mismatch = next(index for index, reference in enumerate(references) if live[index] != reference)
+            reference = references[mismatch]
+            task_id = _positive_int(rows[reference].get("id"))
+            if task_id is None:
+                raise TaskError("backend_error", "board store returned an invalid task", 1)
+            board_id, columns, swimlanes = writer.reader._board()
+            column_id = next((identifier for identifier, title in columns.items() if title == column), None)
+            swimlane_id = next(
+                (identifier for identifier, name in swimlanes.items() if name == swimlane),
+                0,
+            )
+            if column_id is None or (swimlane and not swimlane_id):
+                raise TaskError("backend_error", "restored order group is unavailable", 1)
+            try:
+                answer = writer.client.call(
+                    "moveTaskPosition",
+                    project_id=board_id,
+                    task_id=task_id,
+                    column_id=column_id,
+                    position=mismatch + 1,
+                    swimlane_id=swimlane_id,
+                )
+            except Exception as exc:  # noqa: BLE001 - a lost move reply is reconciled below.
+                if refused_in_transaction(writer.client, exc):
+                    raise store_refusal(f"order move for {reference}", exc) from None
+                answer = None
+            if answer is True:
+                live.remove(reference)
+                live.insert(mismatch, reference)
+                continue
+            live, rows = _live_restore_group(writer, column, swimlane)
+            if live[: mismatch + 1] != references[: mismatch + 1]:
+                raise TaskError("backend_error", "board store move result is uncertain", 1)
+        proven, _ = _live_restore_group(writer, column, swimlane)
+        if proven != references:
+            raise TaskError("backend_error", "restored order repair could not be verified", 1)
 
 
 def _live_restore_group(
