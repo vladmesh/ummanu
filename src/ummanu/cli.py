@@ -71,6 +71,7 @@ from ummanu.host import (
 )
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from ummanu.host_commands import add_reconcile_subcommands
+from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 from ummanu.infra.doctor_findings import accepted, active_findings, apply_acceptance
 from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
@@ -391,6 +392,10 @@ def build_parser() -> argparse.ArgumentParser:
     backup.set_defaults(handler=not_implemented("backup"))
 
     add_restore_subcommands(subparsers)
+
+    checkpoint = subparsers.add_parser("checkpoint-run", help="prepare and push the instance checkpoint")
+    _add_instance(checkpoint, help="path to an instance dir or instance.yaml")
+    checkpoint.set_defaults(handler=run_checkpoint_command)
 
     maintenance = subparsers.add_parser(
         "instance-maintenance",
@@ -905,19 +910,24 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
             {"code": "unit_runtime", "message": finding}
             for finding in _unit_runtime_findings(expected, collected)
         )
+        findings.extend(checkpoint_unit_findings(expected, collected))
     provenance = production_runtime_provenance_finding(report, inspect_runtime=not args.offline)
     dispatcher = dispatcher_findings(
         report, collected, inspect_live=not args.offline, provenance=provenance
     )
-    checkpoint_rpo = checkpoint_rpo_findings(report) + snapshot_foreign_commit_findings(report)
+    checkpoint_rpo = (
+        checkpoint_rpo_findings(report) + checkpoint_cut_lag_findings(report)
+        + snapshot_foreign_commit_findings(report)
+    )
     checkpoint_plain = checkpoint_findings(report)
     checkpoint = [f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo] + checkpoint_plain
     secret_store = secret_store_findings(report)
     production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    checkpoint_state = load_checkpoint_state(report.data_dir)
     checkpoint_snapshot_value = checkpoint_snapshot(
         report.instance_path.parent,
-        write_state=production.get("checkpoint"),
-        push_state=production.get("checkpoint_push"),
+        write_state=checkpoint_state.get("checkpoint"),
+        push_state=checkpoint_state.get("checkpoint_push"),
         data_dir=report.data_dir,
     )
     recovery = collect_recovery_inventory(
@@ -1479,10 +1489,11 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     if report.data_dir is None:
         return []
     data_dir = report.data_dir
-    production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    production = load_checkpoint_state(data_dir)
     if findings is None:
         findings = [
-            f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo_findings(report)
+            f"{finding['severity']}: {finding['message']}"
+            for finding in checkpoint_rpo_findings(report) + checkpoint_cut_lag_findings(report)
         ] + checkpoint_findings(report)
     if "checkpoint" not in production and "checkpoint_push" not in production:
         if findings:
@@ -1510,6 +1521,41 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     return findings
 
 
+def checkpoint_unit_findings(expected, collected: CollectResult) -> list[dict[str, object]]:
+    """One-shot services may be inactive, but a missing or failed checkpoint owner is red."""
+    if "units" in collected.errors:
+        return []
+    findings = []
+    for name in sorted(expected.units):
+        if not name.endswith(("checkpoint.service", "checkpoint.timer")):
+            continue
+        state = collected.inventory.unit_states.get(name)
+        reason = "missing" if name not in collected.inventory.units else (
+            "failed" if state and state[1] == "failed" else ""
+        )
+        if reason:
+            findings.append({"code": "checkpoint.unit_unhealthy", "severity": "red",
+                             "message": f"checkpoint unit {name} is {reason}"})
+    return findings
+
+
+def checkpoint_cut_lag_findings(report) -> list[dict[str, object]]:
+    if report.data_dir is None:
+        return []
+    state = load_checkpoint_state(report.data_dir)
+    snapshot = checkpoint_snapshot(
+        report.instance_path.parent, write_state=state.get("checkpoint"),
+        push_state=state.get("checkpoint_push"), data_dir=report.data_dir,
+    )
+    epoch = snapshot.get("last_checkpoint_prepared_epoch") or 0.0
+    age = snapshot.get("last_checkpoint_prepared_age_minutes")
+    stale = time.time() - epoch > 15 * 60 if epoch > 0 else age is not None and age > 15
+    if not stale:
+        return []
+    return [{"code": "checkpoint.cut_lag_exceeded", "severity": "red",
+             "message": f"last successful checkpoint cut is {age} min old (limit 15 min)"}]
+
+
 def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
     """A checkpoint that has not published for longer than the RPO, as a classified finding.
 
@@ -1519,7 +1565,7 @@ def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
     """
     if report.data_dir is None:
         return []
-    production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    production = load_checkpoint_state(report.data_dir)
     if "checkpoint" not in production and "checkpoint_push" not in production:
         return []
     snapshot = checkpoint_snapshot(
@@ -1567,7 +1613,7 @@ def snapshot_foreign_commit_findings(report) -> list[dict[str, object]]:
 def checkpoint_findings(report) -> list[str]:
     if report.data_dir is None:
         return []
-    production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    production = load_checkpoint_state(report.data_dir)
     findings: list[str] = []
     if "checkpoint" in production or "checkpoint_push" in production:
         snapshot = checkpoint_snapshot(
@@ -2030,6 +2076,20 @@ def run_backup_create(args: argparse.Namespace) -> int:
         print(f"version: {result.manifest['version']}")
     print("status: ok")
     return 0
+
+
+def run_checkpoint_command(args: argparse.Namespace) -> int:
+    from ummanu.dispatch.bootstrap import runtime_from_args
+    from ummanu.dispatch.types import DispatcherError, HostError
+
+    try:
+        runtime = runtime_from_args(args.instance, None, host_mode="real", owner="checkpoint")
+        result = run_checkpoint(runtime)
+    except (DispatcherError, HostError, OSError, RuntimeError) as exc:
+        print(json.dumps({"status": "failed", "step": "checkpoint-run", "reason": str(exc)}, sort_keys=True))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 1 if result["status"] == "failed" else 0
 
 
 def run_instance_maintenance(args: argparse.Namespace) -> int:

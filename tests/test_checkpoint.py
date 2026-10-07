@@ -42,7 +42,7 @@ from ummanu.checkpoint import (
     verify_analytics_checkpoint,
 )
 from ummanu.data import DataExport, export_board
-from ummanu.dispatch.production import _coordinate_checkpoint
+from ummanu.infra.checkpoint_run import _coordinate_checkpoint
 from ummanu.routing_journal import attempts
 from ummanu.secret_store import import_env_file, initialize_store, set_secret
 from ummanu.secret_words import RECOVERY_WORDS

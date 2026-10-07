@@ -723,6 +723,8 @@ PROBLEM_SEVERITY: dict[str, str] = {
     "checkpoint.last_failed": "red",
     # No checkpoint has reached the remote for longer than the 30-minute RPO (`rpo_problem`).
     "checkpoint.rpo_exceeded": "red",
+    "checkpoint.cut_lag_exceeded": "red",
+    "checkpoint.unit_unhealthy": "red",
     # The snapshot branch holds a commit the exporter did not make (`snapshot_foreign_commits`).
     "snapshot.foreign_commit": "red",
     "secret_store.key_unusable": "red",

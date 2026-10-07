@@ -2,7 +2,7 @@
 
 Templates for the ummanu runtime units: production dispatcher ticks, the memory service, the PO
 service, the web transport and its front, curator, steward (including the deep sweep), retro, the
-periodic `doctor` record and the daily instance maintenance. There is no scheduled backup unit: the
+periodic `doctor` record, independent checkpoint and daily instance maintenance. There is no scheduled backup unit: the
 git checkpoint is the recovery contract ([Recovery](../../docs/RECOVERY.md)), and `backup create` is
 a manual, optional cold archive.
 
@@ -64,3 +64,21 @@ dispatcher. It has no `PartOf=`/`BindsTo=` coupling to the web, so a web restart
 (`Restart=always` brings it back on the new code) once no turn runs; see
 [Operations](../../docs/OPERATIONS.md#the-po-service). Scheduler-backed roles must have exactly one
 owner: the systemd timer here.
+
+`ummanu-checkpoint.timer` starts `ummanu checkpoint-run` 30 seconds after boot and every minute
+from the previous activation, including during freeze and drain. The coordinator retains its
+five-minute preparation and thirty-minute push windows. A minute divides the preparation window;
+a four-minute trigger would skip the second activation and stretch cuts to eight minutes. With
+roughly 50-second runs, steady-state cuts finish every five minutes. Accuracy is one second and
+there is no randomized delay. The monotonic timer resumes promptly on boot without requiring a
+persisted calendar trigger. CPU batch scheduling, Nice=10 and best-effort I/O priority 7 yield to
+the dispatcher. The service's 3600-second timeout exceeds the existing per-command Git and push
+bounds; hung work still becomes a failed unit observable by doctor.
+
+The checkpoint owns `dispatcher/checkpoint.lock` and atomically replaces
+`dispatcher/checkpoint-state.json`. It takes neither the tick lock nor `cleanup.lock`. Readers
+and the first run use legacy production-state checkpoint records only while the new file is
+absent. The board projection holds `board-bulk.lock` shared during its SQL read-only REPEATABLE
+READ cut, including metadata, comments, audit and sprints; publication and Git run after release.
+The instance repository writer lock continues to protect commit publication. The component is
+enabled when omitted, so upgrade installs both units for existing instances.

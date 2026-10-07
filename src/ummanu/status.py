@@ -26,6 +26,7 @@ from ummanu.host import (
     build_doctor_expectations,
 )
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
+from ummanu.infra.checkpoint_run import load_checkpoint_state
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
 from ummanu.runtime import interactive_workspace
 from ummanu.secret_store import store_health
@@ -80,10 +81,11 @@ def collect_status(
             else LiveHostSource(resolve_runtime_owner(instance_dir)[0])
         )
         collected = source.collect(expected)
+    checkpoint_state = load_checkpoint_state(data_dir)
     checkpoint = checkpoint_snapshot(
         report.instance_path.parent,
-        write_state=_object(production.get("checkpoint")),
-        push_state=_object(production.get("checkpoint_push")),
+        write_state=_object(checkpoint_state.get("checkpoint")),
+        push_state=_object(checkpoint_state.get("checkpoint_push")),
         data_dir=report.data_dir,
     )
     # Status is a pollable metadata snapshot. Provider-backed readiness is therefore cache-only;

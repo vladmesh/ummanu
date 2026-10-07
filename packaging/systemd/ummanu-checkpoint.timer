@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the independent Ummanu instance checkpoint
+
+[Timer]
+# A minute divides the coordinator's five-minute preparation window. Cheap intervening runs
+# preserve that window; a four-minute timer would skip once and stretch it to eight minutes.
+OnBootSec=30
+OnUnitActiveSec=60
+AccuracySec=1
+Unit=ummanu-checkpoint.service
+
+[Install]
+WantedBy=timers.target

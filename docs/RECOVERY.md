@@ -137,7 +137,7 @@ has one writer ([Writers](#writers)):
   .ummanu-state-writer.lock                  the shared writer lock, host-local
 ```
 
-The board and the run journals are not in the live root. The tick exports them from the backend into
+The board and the run journals are not in the live root. The checkpoint service exports them from the backend into
 the data directory, and every cut takes `state/board` and `state/runs` from that export, never from
 the live root.
 
@@ -246,10 +246,12 @@ pointing the export at another installation's memory.
 
 ## Cadence and RPO
 
-- The dispatcher ticks every 60 s. The exporter prepares a cut at most once per five-minute cadence
-  window; a cut whose tree equals the tip's makes no commit.
+- `ummanu-checkpoint.timer` activates `ummanu checkpoint-run` every 60 s, starting 30 s after boot.
+  The exporter prepares a cut at most once per five-minute cadence window; a cut whose tree equals
+  the tip's makes no commit. The minute divides that window, preserving five-minute steady-state
+  cuts with roughly 50-second runs. Freeze and drain do not stop this independent timer.
 - A remote push is attempted in its own 30-minute window, fast-forward only. A due push window forces
-  one fresh, verified preparation in that tick before pushing.
+  one fresh, verified preparation in that checkpoint run before pushing.
 - Durable RPO on machine loss is 30 minutes. Commits in the local snapshot repository give
   fine-grained history but do not survive the machine.
 
@@ -263,7 +265,7 @@ exporter is the only code that commits, and only into the snapshot repository:
 
 | Writer | Writes | When | Lock |
 |---|---|---|---|
-| snapshot exporter (`checkpoint.SnapshotExporter`, picked by `checkpoint.tick_checkpoint_writer`) | the snapshot repository's `main`; reads the live root, never writes it | the dispatcher tick, at the [cadence](#cadence-and-rpo) | the tick lock, then the shared writer lock |
+| snapshot exporter (`checkpoint.SnapshotExporter`, picked by `checkpoint.tick_checkpoint_writer`) | the snapshot repository's `main`; reads the live root, never writes it | the checkpoint service, at the [cadence](#cadence-and-rpo) | the checkpoint singleton lock, then the shared writer lock |
 | memory writer (`memory_write`, `memory.canon`) | `state/memory` | `memory commit`/`supersede`, the memory pack of `upgrade` | `<data>/memory/.write.lock`, then the shared writer lock |
 | knowledge writer (`knowledge_write`) | `state/knowledge` | `knowledge write`, the sprint-close closeout, the dispatcher's research-report transfer | the shared writer lock |
 | secret writer (`secret_store`) | `secrets/` | `secret init/set/import/remove`, `secret checkpoint-github set`, every re-encryption of a value (`list` and `materialize` write no store file) | the shared writer lock |
@@ -291,7 +293,7 @@ maintains `.gitignore`: what leaves the host is decided by the export allowlist
 
 ### The exporter
 
-Per window, under the tick lock and the shared writer lock, the exporter:
+Per window, under the checkpoint singleton lock and the shared writer lock, the exporter:
 
 1. reads the tip of the snapshot branch, the base of the compare-and-swap below;
 2. passes the [validation gate](#validation-gate) and stages `state/board` and `state/runs` from the
@@ -320,7 +322,7 @@ runs one exporter window into an explicit repository. It takes only the writer l
 `.git` the live root may still have. It prints the result as JSON, exits 0 on `committed` or
 `unchanged`, and never pushes. The stand comparison and the cutover use it.
 
-**Push.** The tick's `CheckpointPusher` (`checkpoint.tick_checkpoint_pusher`) publishes
+**Push.** The checkpoint service's `CheckpointPusher` (`checkpoint.tick_checkpoint_pusher`) publishes
 `refs/heads/main` of the snapshot repository: the 30-minute window, the fresh preparation a due
 window forces, fast-forward only, the `diverged` stop on a remote tip the snapshot history does not
 contain, the managed GitHub credential from the live root's secret store, and the shared lock. The
@@ -385,7 +387,7 @@ store files (`secrets/catalog.yaml`, `secrets/installation-key.json`, `secrets/v
 ### Before the cutover
 
 A live root that still has `.git` (an installation not cut over yet, red `live_root.git_work_tree`)
-keeps the legacy tick: `checkpoint.CheckpointWriter` commits `state/board` and `state/runs` into the
+keeps the legacy writer: `checkpoint.CheckpointWriter` commits `state/board` and `state/runs` into the
 work tree and, because the Git-free writers no longer commit, stages their files in the same commit
 (`checkpoint.LEGACY_LIVE_PATHS`: `state/memory`, `state/knowledge` and the three exported secret-store
 paths); the pusher publishes the work tree's branch. The dispatcher once also landed card branches
@@ -445,7 +447,7 @@ not a hard memory limit. On a plain live root `upgrade`'s `instance-packing` ste
 and doctor checks nothing; the bare snapshot repository gets none of these settings.
 
 `gc.auto=0` and `maintenance.auto=false` stop every `git commit` from starting Git's implicit
-`gc --auto`, which would otherwise pack the repository inside whichever checkpoint tick first crosses
+`gc --auto`, which would otherwise pack the repository inside whichever checkpoint run first crosses
 the loose-object threshold. Packing runs from `ummanu-instance-maintenance.timer` instead (daily,
 `Persistent=true`): its service runs `ummanu instance-maintenance`, which is `git gc --auto` with
 Git's stock thresholds (6,700 loose objects, 50 packs) restated on the command line, so a quiet day
@@ -472,10 +474,28 @@ ignore inherited API overrides. Its JSON journal result contains bounded counts,
 space and failure findings, without raw Docker output. A Docker failure makes the service fail and
 does not widen any subsequent deletion scope.
 
+The periodic owner atomically replaces `<data>/dispatcher/checkpoint-state.json` with its write and
+push records under `<data>/dispatcher/checkpoint.lock`. Status, doctor and the first independent run
+read the legacy production-state records only while this file is absent. Once present, even a
+malformed or unreadable new file cannot revive legacy success. The production tick takes neither
+checkpoint work nor its failures into its own outcome.
+
+The board cut is one read-only REPEATABLE READ transaction over cards, Product/Issue rows, batched
+metadata and comments, request/audit history and sprints on the same client. `board-bulk.lock` is
+shared only for these reads, preventing overlap with bulk recovery; normal transactional board
+writers can commit while the cut sees its earlier snapshot. Dispatcher state and run JSON files can
+be replaced while exported: a read sees one complete version through atomic rename, and append-only
+run history is checked against the preceding checkpoint. The cut need not coincide with a whole tick
+boundary. Recovery treats run/claim state as inert bookkeeping and reconciles it against the coherent
+board projection, so a completed board transaction or complete state-file version remains a valid
+recovery point. The instance writer lock protects the live-root memory, knowledge and secret files
+through publication and commit. Config edits remain operator-owned and must finish as complete
+files before their next checkpoint window.
+
 ## Validation gate
 
-Before each cut the state passes a fail-closed check. If any item fails, the tick skips the
-checkpoint, records the reason in status and retries next tick:
+Before each cut the state passes a fail-closed check. If any item fails, the checkpoint service
+records the blocking reason in status and retries on its next timer activation:
 
 - task audit is settled with no pending board mutation. The audit is the one the card client names
   (`tasks.task_audit_for`): staged `requests` rows. If the card client cannot be established the
@@ -485,7 +505,7 @@ checkpoint, records the reason in status and retries next tick:
   card references are unique, all before local export or canonical files are replaced;
 - memory staging is empty;
 - the secret scan is clean over every file of the cut, the manifest included (on a live root not yet
-  cut over: over `state/` and every file the legacy tick commits beside board and runs). The memory
+  cut over: over `state/` and every file the legacy writer commits beside board and runs). The memory
   and knowledge writers run the same scan over their own text before writing.
 
 ### Analytics checkpoint seal v2
@@ -593,9 +613,11 @@ push, last operation attempt and its age, lag in minutes and commits, and `remot
 never reported as a fresh preparation. The attempt timestamp does not replace the last successful
 push timestamp.
 
-A blocked checkpoint degrades the production tick and its telemetry; the dispatcher retries on the
-next tick. If the push window was due, the push is recorded as withheld instead of sending an older
-snapshot. Unit health and the steward must not read such a tick as healthy.
+A blocked checkpoint records its failure independently of production tick telemetry; the checkpoint
+service retries on the next timer activation. If the push window was due, the push is recorded as
+withheld instead of sending an older snapshot. Doctor reports missing or failed checkpoint units as
+`checkpoint.unit_unhealthy` and cuts older than 15 minutes as `checkpoint.cut_lag_exceeded`, both red.
+The existing remote RPO finding remains `checkpoint.rpo_exceeded`.
 
 Past the 30-minute RPO, `doctor` and the dashboard lamp report a red `checkpoint.rpo_exceeded`
 finding that names what stopped publication. If preparation is failing, that is the gate's reason
@@ -603,7 +625,7 @@ and the time it began failing (`failing_since_at`); otherwise it is the push fai
 commits nothing, so the unpushed lag stays at zero while it is blocked. For that case the exposure
 is counted from the last successful preparation. On PostgreSQL the gate first settles audit rows left
 staged by a dead writer (`docs/BOARD_STORE.md` §3.9). A stale row therefore blocks for the grace
-period plus one tick, not until an operator repairs it.
+period plus one checkpoint activation, not until an operator repairs it.
 
 `status --json` has a `secret_store` section: initialised or not, secret count, last catalog change,
 whether a usable installation key exists, and a materialisation-target summary, with no value, key or
@@ -783,7 +805,7 @@ What `bootstrap` leaves and what `recover` then does, per shape:
 | --- | --- | --- |
 | `bootstrap` | the plain live root with no `.git`, the snapshot repository at the tip with its marker, the data directory laid out, the stamp | a shallow Git checkout as the live root, the stamp |
 | `recover` | finds the live root of the same tip (the stamp and `board-store.env` are host-local, not a divergence) and the repository at the tip, so nothing is cloned again; runs the [sequence](#sequence) on the extracted tree | fetches and fast-forwards the checkout; runs the [sequence](#sequence) on it |
-| first tick | the live root is not a work tree, so the exporter commits on top of the recovered tip and the pusher publishes it | the live root is a work tree: the legacy tick, with both `live_root.*` findings red until the cutover |
+| first checkpoint run | the live root is not a work tree, so the exporter commits on top of the recovered tip and the pusher publishes it | the live root is a work tree: the legacy writer, with both `live_root.*` findings red until the cutover |
 
 A rerun of either command is idempotent: the same tip, no second board import, the store credentials
 kept.

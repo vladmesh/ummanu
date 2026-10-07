@@ -544,6 +544,15 @@ class SqlCardClient:
             raise
 
     @contextlib.contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Pin all checkpoint rows, metadata, comments and audit to one read-only cut."""
+        if self._depth:
+            raise SqlCardError("a read snapshot must start outside a mutation transaction")
+        with self.transaction():
+            self._execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            yield
+
+    @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
         """One transaction on this thread's pinned connection; other threads' ones wait their turn.
 

@@ -19,19 +19,21 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
-from ummanu._fsutil import file_lock, try_file_lock
+from ummanu._fsutil import file_lock, try_file_lock, write_json
 from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from ummanu.checkpoint import CheckpointResult
 from ummanu.cli import main as task_main
-from ummanu.dispatch import assessment_decision as dispatcher_assessment_decision
-from ummanu.dispatch import attempt_accounting
-from ummanu.dispatch import attempt_usage as attempt_usage_module
-from ummanu.dispatch import host as dispatcher_host_module
-from ummanu.dispatch import runtime as dispatcher_module
-from ummanu.dispatch import wait_vitality as dispatcher_wait_vitality
-from ummanu.dispatch import worker_continuation as dispatcher_worker_continuation
-from ummanu.dispatch import worker_launch as dispatcher_worker_launch
-from ummanu.dispatch import worker_report as dispatcher_worker_report
+from ummanu.dispatch import (
+    assessment_decision as dispatcher_assessment_decision,
+    attempt_accounting,
+    attempt_usage as attempt_usage_module,
+    host as dispatcher_host_module,
+    runtime as dispatcher_module,
+    wait_vitality as dispatcher_wait_vitality,
+    worker_continuation as dispatcher_worker_continuation,
+    worker_launch as dispatcher_worker_launch,
+    worker_report as dispatcher_worker_report,
+)
 from ummanu.dispatch.bootstrap import default_data_dir
 from ummanu.dispatch.gate import (
     GATE_PENDING_STALL_SECONDS,
@@ -94,6 +96,7 @@ from ummanu.dispatch.types import (
     DispatcherError,
     HostError,
 )
+from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 from ummanu.projects.contract import (
     BROAD_CHECK_NOT_DECLARED,
     CANNOT_ATTEST_PROJECT,
@@ -114,11 +117,9 @@ from tests.dispatcher_fixtures import (
     PromptAfterStartCatalog,
     RecordingReviewHost,
     SupervisedBackend,
+    clear_env as _clear_env,
     ensure_attempt,
     write_heartbeat,
-)
-from tests.dispatcher_fixtures import (
-    clear_env as _clear_env,
 )
 from tests.fakes.dispatcher import (
     FakeCatalog,
@@ -177,10 +178,10 @@ from ummanu.runtime.head import (
     HeadRun,
     HeadSpec,
     TaskRef,
+    operations as head_ops,
     render_head_command,
     wrap_role_command,
 )
-from ummanu.runtime.head import operations as head_ops
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.prompt_document import (
     NUDGE_MAX_BYTES,
@@ -1360,48 +1361,49 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         divergence = payload["controlled_divergences"][0]
         self.assertEqual(divergence["status"], "open")
 
-    def test_production_tick_writes_the_checkpoint_at_the_end(self) -> None:
+    def test_checkpoint_run_writes_its_own_state(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(
             CheckpointResult(status="committed", commit="abc123", board_cards=2)
         )
 
-        result = self.runtime.production_tick()
+        result = run_checkpoint(self.runtime)
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["checkpoint"]["status"], "committed")
         self.assertEqual(result["checkpoint"]["commit"], "abc123")
-        payload = self.runtime.production_state.load()
+        payload = load_checkpoint_state(self.runtime.data_dir)
         self.assertEqual(payload["checkpoint"]["commit"], "abc123")
 
-    def test_blocked_checkpoint_degrades_the_tick(self) -> None:
+    def test_blocked_checkpoint_does_not_degrade_the_tick(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(
             CheckpointResult(status="blocked", reason="secret detected in state/board/cards.ndjson")
         )
-
+        checkpoint = run_checkpoint(self.runtime)
+        self.assertEqual(checkpoint["status"], "failed")
+        self.assertEqual(checkpoint["checkpoint"]["status"], "blocked")
+        self.assertIn("secret detected", checkpoint["checkpoint"]["reason"])
         result = self.runtime.production_tick()
-
-        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(result["actions"][0]["step"], "claim")
-        self.assertEqual(result["checkpoint"]["status"], "blocked")
-        self.assertIn("secret detected", result["checkpoint"]["reason"])
+        self.assertNotIn("checkpoint", result)
         telemetry = self.runtime.production_state.load()["tick_telemetry"]["last"]
-        self.assertFalse(telemetry["healthy"])
-        self.assertEqual(telemetry["degradations"][-1]["step"], "checkpoint")
-        self.assertIn("secret detected", telemetry["degradations"][-1]["reason"])
+        self.assertTrue(telemetry["healthy"])
+        self.assertEqual(telemetry["degradations"], [])
+        self.assertNotIn("checkpoint", telemetry["phases"])
 
-    def test_production_tick_pushes_and_carries_the_push_state_forward(self) -> None:
+    def test_checkpoint_run_pushes_and_carries_the_push_state_forward(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         pusher = FakePusher({"status": "pushed", "last_push_commit": "abc123"})
         self.runtime.checkpoint_push = pusher
 
-        result = self.runtime.production_tick()
+        result = run_checkpoint(self.runtime)
 
         self.assertEqual(result["checkpoint_push"]["status"], "pushed")
-        payload = self.runtime.production_state.load()
+        payload = load_checkpoint_state(self.runtime.data_dir)
         self.assertEqual(payload["checkpoint_push"]["last_push_commit"], "abc123")
 
-        self.runtime.production_tick()
-        # The window lives in state, so a sub-five-minute tick neither prepares
+        run_checkpoint(self.runtime)
+        # The window lives in state, so a sub-five-minute run neither prepares
         # another snapshot nor contacts the remote.
         self.assertEqual(len(pusher.calls), 1)
 
@@ -1409,22 +1411,21 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         """The constrained runtime seam still permits its pre-cadence push-only path."""
         self.runtime.checkpoint_push = FakePusher({"status": "pushed", "last_push_commit": "abc123"})
 
-        result = self.runtime.production_tick()
+        result = run_checkpoint(self.runtime)
 
         self.assertEqual(result["status"], "ok")
         self.assertNotIn("checkpoint", result)
         self.assertEqual(result["checkpoint_push"]["status"], "pushed")
 
-    def test_failed_push_leaves_the_tick_working(self) -> None:
+    def test_failed_push_is_reported_by_the_checkpoint_owner(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         self.runtime.checkpoint_push = FakePusher(
             {"status": "failed", "reason": "could not resolve host github.com", "failures": 3}
         )
 
-        result = self.runtime.production_tick()
+        result = run_checkpoint(self.runtime)
 
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["actions"][0]["step"], "claim")
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(result["checkpoint_push"]["status"], "failed")
         self.assertEqual(result["checkpoint_push"]["failures"], 3)
 
@@ -1432,9 +1433,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         self.runtime.checkpoint_push = FakePusher(RuntimeError("ssh agent is gone"))
 
-        result = self.runtime.production_tick()
+        result = run_checkpoint(self.runtime)
 
-        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(result["checkpoint_push"]["status"], "failed")
         self.assertIn("ssh agent is gone", result["checkpoint_push"]["reason"])
         self.assertGreater(result["checkpoint_push"]["attempted_epoch"], 0)
@@ -1450,7 +1451,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 "remote_diverged": True,
             }
         )
-        self.runtime.production_tick()
+        run_checkpoint(self.runtime)
 
         observed = self.runtime.production_observe()
 
@@ -1459,17 +1460,17 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("remote push withheld", observed["checkpoint"]["push_reason"])
         self.assertIn("unresolved pending", observed["checkpoint"]["blocked_reason"])
 
-    def test_checkpoint_crash_is_contained_in_the_tick_result(self) -> None:
+    def test_checkpoint_crash_is_contained_in_the_checkpoint_result(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(RuntimeError("git is gone"))
 
-        result = self.runtime.production_tick()
+        result = run_checkpoint(self.runtime)
 
-        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["status"], "failed")
         self.assertEqual(result["checkpoint"]["status"], "blocked")
         self.assertIn("git is gone", result["checkpoint"]["reason"])
 
-    def test_checkpoint_cadence_skips_sub_five_minute_ticks_without_contacting_git_or_remote(self) -> None:
-        """The one-minute dispatcher cycle still runs while export work stays quiet."""
+    def test_checkpoint_cadence_skips_sub_five_minute_runs_without_contacting_git_or_remote(self) -> None:
+        """The one-minute timer cycle still runs while export work stays quiet."""
         clock = [1_000.0]
         checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         pusher = FakePusher({"status": "unchanged", "last_push_commit": "abc123"})
@@ -1477,16 +1478,16 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.checkpoint = checkpoint
         self.runtime.checkpoint_push = pusher
 
-        self.runtime.production_tick()
+        run_checkpoint(self.runtime)
         for minute in range(1, 5):
             clock[0] = 1_000.0 + minute * 60
-            result = self.runtime.production_tick()
+            result = run_checkpoint(self.runtime)
             self.assertEqual(result["checkpoint"]["status"], "skipped")
 
         self.assertEqual(checkpoint.calls, 1)
         self.assertEqual(len(pusher.calls), 1)
         clock[0] = 1_300.0
-        self.runtime.production_tick()
+        run_checkpoint(self.runtime)
         self.assertEqual(checkpoint.calls, 2)
 
     def test_checkpoint_failure_retries_before_the_next_cadence_deadline_and_withholds_push(self) -> None:
@@ -1497,21 +1498,21 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.checkpoint = checkpoint
         self.runtime.checkpoint_push = pusher
 
-        first = self.runtime.production_tick()
+        first = run_checkpoint(self.runtime)
         self.assertEqual(first["checkpoint"]["status"], "blocked")
         self.assertEqual(first["checkpoint_push"]["status"], "skipped")
         self.assertEqual(pusher.calls, [])
-        payload = self.runtime.production_state.load()
+        payload = load_checkpoint_state(self.runtime.data_dir)
         self.assertTrue(payload["checkpoint"]["retry_pending"])
         self.assertNotIn("last_success_epoch", payload["checkpoint"])
 
         checkpoint.outcome = CheckpointResult(status="unchanged", board_cards=2)
         clock[0] += 60
-        second = self.runtime.production_tick()
+        second = run_checkpoint(self.runtime)
         self.assertEqual(second["checkpoint"]["status"], "unchanged")
         self.assertEqual(checkpoint.calls, 2)
         self.assertEqual(len(pusher.calls), 1)
-        payload = self.runtime.production_state.load()
+        payload = load_checkpoint_state(self.runtime.data_dir)
         self.assertFalse(payload["checkpoint"]["retry_pending"])
         self.assertNotIn("last_failure_reason", payload["checkpoint"])
 
@@ -1523,23 +1524,23 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.checkpoint = checkpoint
         self.runtime.checkpoint_push = pusher
 
-        self.runtime.production_tick()
+        run_checkpoint(self.runtime)
         clock[0] = 990.0
-        self.runtime.production_tick()
+        run_checkpoint(self.runtime)
         self.assertEqual(checkpoint.calls, 2, "a rollback cannot park checkpointing")
 
         # The ordinary deadline is still in the future, but a deliberately due
-        # remote window gets a newly prepared snapshot in this same tick.
-        payload = self.runtime.production_state.load()
+        # remote window gets a newly prepared snapshot in this same run.
+        payload = load_checkpoint_state(self.runtime.data_dir)
         payload["checkpoint_push"]["attempted_epoch"] = -900.0
-        self.runtime.production_state.save(payload)
+        write_json(self.runtime.data_dir / "dispatcher" / "checkpoint-state.json", payload)
         clock[0] = 1_100.0
-        result = self.runtime.production_tick()
+        result = run_checkpoint(self.runtime)
         self.assertEqual(checkpoint.calls, 3)
         self.assertEqual(result["checkpoint_push"]["status"], "unchanged")
         self.assertEqual(len(pusher.calls), 3)
 
-    def test_older_checkpoint_payload_is_due_on_its_first_upgraded_tick(self) -> None:
+    def test_older_checkpoint_payload_is_due_on_its_first_independent_run(self) -> None:
         checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         self.runtime.checkpoint = checkpoint
         self.runtime.production_state.save(
@@ -1553,10 +1554,10 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             }
         )
 
-        self.runtime.production_tick()
+        run_checkpoint(self.runtime)
 
         self.assertEqual(checkpoint.calls, 1)
-        self.assertIn("last_success_epoch", self.runtime.production_state.load()["checkpoint"])
+        self.assertIn("last_success_epoch", load_checkpoint_state(self.runtime.data_dir)["checkpoint"])
 
     def test_production_tick_repeat_does_not_launch_second_workspace(self) -> None:
         self.runtime.production_tick()

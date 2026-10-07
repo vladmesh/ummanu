@@ -694,7 +694,7 @@ def assess_unit_runtime(
         enabled, active = state
         if need_enabled and enabled != "enabled":
             findings.append(UnitRuntimeFinding(name, "enabled", enabled))
-        if need_active and active != "active":
+        if active == "failed" or (need_active and active != "active"):
             findings.append(UnitRuntimeFinding(name, "active", active))
     return findings
 
