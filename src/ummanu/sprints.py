@@ -58,7 +58,7 @@ from ummanu.board.sprint_write import (
     SprintWriteSnapshot,
 )
 from ummanu.board.tick_snapshot import select_cards, select_sprints
-from ummanu.dispatch.cleanup import CleanupJournal, serialized
+from ummanu.dispatch.cleanup import CleanupJournal
 from ummanu.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 from ummanu.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -2608,7 +2608,6 @@ class SprintWriter:
         )
         return closed
 
-    @serialized
     @_sql_atomic
     def _close_atomic(
         self,

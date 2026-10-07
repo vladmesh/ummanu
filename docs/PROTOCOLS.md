@@ -1761,7 +1761,7 @@ has a run in flight its pending cards wait. When it has none and the set is not 
   under `after_merge_runs`, with `covered` (`{ref, merge_sha}` each), the branch, and what paid for it;
   every covered card's mark says `covered` with that dispatch id. All of it is one write,
   `TaskWriter.record_after_merge_intent`, in the transaction that charges the run. It rereads the
-  actual pending marks and supersession under the ownership lock then sorted source locks, preserves
+  actual pending marks and supersession under sorted SQL source row locks, preserves
   existing run/charge records, and refuses stale snapshots without a charge. The production state
   names the run in flight after that write. If its projection save is lost, recovery discovers the
   carrier's committed intent without another charge or POST; an unconfirmed prior effect uses the
@@ -5008,8 +5008,8 @@ Ready/In progress again restores the operation as the live holder; corrected com
 then reaches the same consumer. Old charges, run evidence and both completion events
 remain historical. Nothing spends again until current ordinary admission succeeds.
 
-Reconciliation takes the existing ownership lock before sorted operation/carrier/
-source/hotfix/follow-up row locks, then rereads run identity, committed create,
+Reconciliation takes sorted operation/carrier/source/hotfix/follow-up row locks
+in its SQL transaction, then rereads run identity, committed create,
 completion, supersession and current covered marks, preserving newer merge/run/holder state. Receipt and marks commit in
 one transaction before queue projection saves and publication. `disposition_result`
 on the existing e2e run holds the receipt; `after_merge.holder` distinguishes a live

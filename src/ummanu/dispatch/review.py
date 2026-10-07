@@ -43,6 +43,7 @@ from ummanu.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     HeadLaunchAborted,
     HostError,
+    OwnershipChanged,
 )
 from ummanu.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
@@ -999,6 +1000,8 @@ def start_review(
     try:
         launch = runtime.host.start_review(task, record)
     except Exception as exc:  # noqa: BLE001 — classify every host launch refusal
+        if isinstance(exc, OwnershipChanged):
+            return {"status": "skipped", "step": "review", "pilot_ref": ref, "reason": str(exc)}
         # Normalize and persist prompt evidence once; infrastructure failures carry none.
         _record_review_delivery_failure(record, exc)
         if isinstance(exc, HeadLaunchAborted):

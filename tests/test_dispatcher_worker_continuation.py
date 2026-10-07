@@ -4,17 +4,25 @@ from __future__ import annotations
 
 import ast
 import copy
-from dataclasses import replace
 import inspect
-from types import SimpleNamespace
+import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from ummanu.board import Actor, BoardEventPending, Card, CardState, EntityKind, SqlBoardHost, TransitionRequest
+from ummanu.board import (
+    Actor,
+    BoardEventPending,
+    Card,
+    CardState,
+    EntityKind,
+    SqlBoardHost,
+    TransitionRequest,
+)
 from ummanu.board.fake import MemoryAudit
-from ummanu.dispatch import attempt_accounting
-from ummanu.dispatch import worker_continuation as continuation_module
+from ummanu.dispatch import attempt_accounting, worker_continuation as continuation_module
 from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from ummanu.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
@@ -465,12 +473,13 @@ class DecisionNativeReplayTests(unittest.TestCase):
     """Exercise the native host's strict replay seam without opening a SQL store."""
 
     def setUp(self):
+        self.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(attempt_accounting, "_attempt_outcome_obligation", return_value=None))
         self.reset_native()
 
     def reset_native(self):
         self.audit = MemoryAudit()
-        self.host = SqlBoardHost(mock.sentinel.client, data_dir="/unused", audit=self.audit)
+        self.host = SqlBoardHost(mock.sentinel.client, data_dir=str(self.data_dir), audit=self.audit)
         self.card = Card("sample-1", "Decision replay", CardState.ASSESSMENT)
         self.host.read = mock.Mock(side_effect=lambda *_: self.card)
         self.host._move_card = mock.Mock(side_effect=self.move_card)
@@ -507,9 +516,9 @@ class DecisionNativeReplayTests(unittest.TestCase):
                         self.reset_native()
                         # The native host stages its own intent and performs the move; a failed
                         # journal append leaves that exact owned record for recovery.
-                        with mock.patch.object(self.audit, "append", side_effect=OSError("lost commit")):
-                            with self.assertRaises(BoardEventPending):
-                                self.effect(decision, original)
+                        with mock.patch.object(self.audit, "append", side_effect=OSError("lost commit")), \
+                                self.assertRaises(BoardEventPending):
+                            self.effect(decision, original)
                         owned = self.host.canon.event("decision-move")
                         if committed:
                             self.host.canon.commit("decision-move", owned)
@@ -553,9 +562,9 @@ class DecisionNativeReplayTests(unittest.TestCase):
                              ("target_state", "blocked"), ("data", {"foreign": True})):
             with self.subTest(field=field):
                 foreign = replace(owned, **{field: value})
-                with mock.patch.object(self.host.canon, "event", return_value=foreign):
-                    with self.assertRaisesRegex(ValueError, "another operation or payload"):
-                        self.effect("release", "new pointer")
+                with mock.patch.object(self.host.canon, "event", return_value=foreign), \
+                        self.assertRaisesRegex(ValueError, "another operation or payload"):
+                    self.effect("release", "new pointer")
                 self.assertEqual(self.host.canon.committed("decision-move"), owned)
                 self.assertEqual(self.host._move_card.call_count, 1)
 

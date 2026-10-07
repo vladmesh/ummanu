@@ -915,6 +915,29 @@ class SqlCardClient:
             ('%"after_merge%',),
         )
 
+    def _rpc_getCapacityReferences(self) -> list[str]:
+        """Admission needs fresh keys, including cards activated by another process.
+
+        This filtered primary-key query is not a full board/metadata hydration.
+        TaskWriter revalidates each peer while its capacity admission lock is held.
+        """
+        from ummanu.tasks import ACTIVE_STATES
+
+        return [row[0] for row in self._query(
+            "SELECT task_ref FROM tasks WHERE NOT archived AND state = ANY(%s) ORDER BY task_ref",
+            (list(ACTIVE_STATES),),
+        )]
+
+    def _rpc_lockOwnershipReference(self, *, reference: str, observer: bool = False) -> bool:
+        """Fence state/claim updates in the caller's cleanup/launch transaction.
+
+        NO KEY UPDATE still permits a head's comment foreign-key check. Acquire
+        this before cleanup.lock, so a contended SQL row never holds the flock.
+        """
+        table, key = ("sprints", "ref") if observer else ("tasks", "task_ref")
+        return bool(self._query(f"SELECT {key} FROM {table} WHERE {key}=%s FOR NO KEY UPDATE",
+                                (reference,)))
+
     def _rpc_getNextTaskReference(self, *, project: str) -> str:
         # Products and issues have product:/issue: references, never project-N.
         # Read the numeric high-water mark, including archives, without returning

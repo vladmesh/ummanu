@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import uuid
@@ -44,6 +45,7 @@ from ummanu.board.models import (
 )
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.board.transitions import BoardProtocolError, transition, transition_for
+from ummanu.dispatch.cleanup import reference_lock
 from ummanu.product_issues import ProductIssueStore, product_swimlane_id
 from ummanu.sprints import SprintReader
 from ummanu.tasks import (
@@ -339,6 +341,22 @@ class SqlBoardHost:
         return MutationResult(self.read(EntityKind.ISSUE, entity.ref), event)
 
     def transition(
+        self,
+        operation: TransitionRequest,
+        *,
+        finish: Callable[[Card], None] | None = None,
+    ) -> MutationResult:
+        """Fence direct Card callers as well as the TaskWriter facade."""
+        if operation.kind is not EntityKind.CARD or self.data_dir is None:
+            return self._transition(operation, finish=finish)
+        with reference_lock(self.data_dir, operation.ref), (
+            reference_lock(self.data_dir, "capacity", lane="admission")
+            if operation.target in {CardState.IN_PROGRESS, CardState.VALIDATE, CardState.ASSESSMENT}
+            else contextlib.nullcontext()
+        ):
+            return self._transition(operation, finish=finish)
+
+    def _transition(
         self,
         operation: TransitionRequest,
         *,

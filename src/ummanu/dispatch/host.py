@@ -37,7 +37,7 @@ from ummanu.codex_provider_events import (
 )
 from ummanu.config import validate_instance
 from ummanu.dispatch import production_checkout
-from ummanu.dispatch.cleanup import CleanupJournal, serialized
+from ummanu.dispatch.cleanup import CleanupJournal, lifecycle
 from ummanu.dispatch.e2e import parse_e2e
 from ummanu.dispatch.gate import (
     GateResult,
@@ -965,7 +965,7 @@ class CommandHostRuntime:
         except HeadSpecError as exc:
             raise HostError(f"cannot resolve the prompt adapter for head {head!r}: {exc}") from None
 
-    @serialized
+    @lifecycle
     def prepare_worker(
         self,
         task: dict[str, Any],
@@ -1042,7 +1042,7 @@ class CommandHostRuntime:
             "head_run": dict(launched.head_run),
         }
 
-    @serialized
+    @lifecycle
     def restart_worker(
         self, task: dict[str, Any], record: DispatcherRecord, *, heartbeat_run_id: str = ""
     ) -> LaunchedHead:
@@ -1197,7 +1197,7 @@ class CommandHostRuntime:
         """Where this sprint's observer heartbeat writes its pid."""
         return _observer_pid_file(reference)
 
-    @serialized
+    @lifecycle
     def prepare_observer(
         self,
         sprint: dict[str, Any],
@@ -1302,6 +1302,7 @@ class CommandHostRuntime:
             f"{reference} observer",
             _launch_command(heartbeat_owner, launch.command, pid_file, heartbeat),
             env=dict(grant.launch_identity),
+            **({"launch_task": {**sprint, "kind": "observer"}} if self.cleanup_owner is not None else {}),
         )
         ingress = self._codex_provider_ingress(lifecycle_run)
         if ingress is not None:
@@ -1392,7 +1393,6 @@ class CommandHostRuntime:
             "head_run": lifecycle_run.to_json(),
         }
 
-    @serialized
     def stop_observer(self, record: Any) -> None:
         """End one observer head and give back what its bring-up took.
 
@@ -1461,7 +1461,6 @@ class CommandHostRuntime:
             return int(durable(observer_run))
         return runtime.activity.epoch(observer_run.run_id)
 
-    @serialized
     def stop_observer_if_quiescent(
         self, record: Any, expected_activity_epoch: int, head_process_alive: bool
     ) -> bool:
@@ -1790,7 +1789,7 @@ class CommandHostRuntime:
             "reason": "no provider/terminal-safe continuation recovery capability is available",
         }
 
-    @serialized
+    @lifecycle
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
         """Bring the reviewer up as a second head inside the worker's own worktree.
 
@@ -2712,7 +2711,6 @@ class CommandHostRuntime:
         """Shut this card's worker head down and confirm it. Raises when it cannot be confirmed."""
         self._freeze_worker(record)
 
-    @serialized
     def teardown(self, record: DispatcherRecord) -> dict[str, Any] | None:
         """Request owned Done cleanup and return its actual durable disposition.
 
@@ -3048,6 +3046,12 @@ class CommandHostRuntime:
             raise error
         return result
 
+    def _launch_admission(self, task: dict[str, Any] | None) -> contextlib.AbstractContextManager[Any]:
+        owner = self.cleanup_owner
+        if owner is None or task is None:
+            return contextlib.nullcontext()
+        return owner.admission(task, launch=True)
+
     def _launch(
         self,
         workspace: str,
@@ -3199,6 +3203,7 @@ class CommandHostRuntime:
             role=role,
             run=preflight_run,
             scope_generation=preflight_run.scope_generation,
+            launch_admission=lambda: self._launch_admission(task),
             commit=ingress.commit_run if ingress is not None else None,
         )
         if not receipt.ok:
@@ -3463,6 +3468,7 @@ class CommandHostRuntime:
         command: str,
         *,
         env: Mapping[str, str] | None = None,
+        launch_task: dict[str, Any] | None = None,
     ) -> head_ops.HeadRun:
         """Bring a head up in a pane of its own, with no prompt delivered by the bring-up.
 
@@ -3482,6 +3488,7 @@ class CommandHostRuntime:
             role=run.role,
             run=run,
             scope_generation=run.scope_generation,
+            launch_admission=lambda: self._launch_admission(launch_task),
         )
         if not receipt.ok:
             raise HostError(receipt.reason)

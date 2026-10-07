@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
+from ummanu.dispatch.cleanup import bulk_lane
 from ummanu.runtime.references import next_reference, reference_allocation_lock
 from ummanu.tasks import (
     _STATE_BY_COLUMN,
@@ -242,7 +243,7 @@ def apply_reference_repair(
         raise TaskError("validation", "repair reason contains credential material", 2)
     if len(task_ids) != len(set(task_ids)):
         raise TaskError("validation", "apply backend IDs must be unique", 2)
-    with reference_allocation_lock(writer.data_dir):
+    with bulk_lane(writer.data_dir, exclusive=True), reference_allocation_lock(writer.data_dir):
         pending = [writer.audit.event(_request_id(request_id, task_id)) for task_id in task_ids]
         existing = [event for event in pending if event is not None]
         if existing and len(existing) == len(task_ids):
@@ -310,11 +311,12 @@ def apply_reference_repair(
 def finish_pending_reference_repair(
     writer: TaskWriter, event: dict[str, Any], *, _allocation_locked: bool = False
 ) -> None:
-    if _allocation_locked:
-        _finish_pending_reference_repair_locked(writer, event)
-        return
-    with reference_allocation_lock(writer.data_dir):
-        _finish_pending_reference_repair_locked(writer, event)
+    with bulk_lane(writer.data_dir, exclusive=True):
+        if _allocation_locked:
+            _finish_pending_reference_repair_locked(writer, event)
+            return
+        with reference_allocation_lock(writer.data_dir):
+            _finish_pending_reference_repair_locked(writer, event)
 
 
 def _finish_pending_reference_repair_locked(writer: TaskWriter, event: dict[str, Any]) -> None:
