@@ -168,6 +168,16 @@ class DispositionTests(unittest.TestCase):
         self.assertEqual({entry["ref"] for entry in queue["pending"]}, {self.source, self.carrier, "ummanu-6"})
         self.assertEqual(queue["budget_waits"][0]["cards"], ["ummanu-6"])
 
+    def test_a_retry_settled_in_this_pass_is_recovered_in_this_pass(self):
+        # The snapshot is read while both marks are still blocked; the retry returns them to pending.
+        self.complete(self.outcome())
+        payload = {}
+        with mock.patch.object(e2e_after_merge, "_advance", return_value=[]):
+            e2e_after_merge.reconcile_after_merge(self.runtime, payload, {})
+        self.assertEqual(self.mark().state, "pending")
+        queue = e2e_after_merge.queues(payload)["ummanu"]
+        self.assertEqual({entry["ref"] for entry in queue["pending"]}, {self.source, self.carrier})
+
     def test_decline_settles_live_wait_retaining_evidence_and_charge(self):
         self.complete(self.outcome("decline"))
         self.reconcile()
@@ -631,7 +641,7 @@ class DispositionTests(unittest.TestCase):
                 if terminal == "done":
                     self.cards[hotfix]["state"] = "done"
                 else:
-                    self.writer._card_superseded = lambda ref: ref == hotfix
+                    self.writer._card_superseded = lambda ref, hotfix=hotfix: ref == hotfix
                 before = copy.deepcopy(self.cards)
                 with mock.patch.object(e2e_after_merge, "_create_disposition") as create:
                     e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
@@ -658,6 +668,7 @@ class DispositionTests(unittest.TestCase):
 
     def test_terminal_hotfix_route_roundtrips_schema_and_keeps_genuine_escalation(self):
         from jsonschema import Draft202012Validator
+
         from ummanu.board.owner_handover import OWNER_ESCALATION
         from ummanu.data import normalize_board_card
         operation, hotfix = self.released_hotfix()
@@ -700,7 +711,7 @@ class DispositionTests(unittest.TestCase):
         self.assertEqual(e2e_record.e2e_state(self.show(hotfix)).hotfix_route.result["action"], "decline")
 
     def test_released_red_hotfix_mixed_marks_recovers_one_current_holder(self):
-        operation, hotfix = self.released_hotfix()
+        operation, _hotfix = self.released_hotfix()
         state = e2e_record.e2e_state(self.show(self.carrier))
         state.after_merge.merge_sha, state.after_merge.dispatch_id = "new", "new-run"
         self.cards[self.carrier]["extensions"]["extra"]["e2e"] = state.text()

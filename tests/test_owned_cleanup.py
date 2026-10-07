@@ -18,6 +18,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.fakes.dispatcher import FakeCatalog, FakeHost
+from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu.broad_check import run_broad_check
 from ummanu.cli import build_parser, run_residue_maintenance
 from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner, UnknownProject, ownership_lock
@@ -31,8 +33,6 @@ from ummanu.observer_root import observer_root_repo
 from ummanu.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.role_env import workspace_tool_cache_env
-from tests.fakes.dispatcher import FakeCatalog, FakeHost
-from tests.production_runtime_fixtures import registered_production_runtime
 
 
 def git(repo: Path, *args: str) -> str:
@@ -156,9 +156,8 @@ class OwnedCleanupTests(unittest.TestCase):
                 raise KeyboardInterrupt("Git interrupted before admin removal")
             return native(args, **kwargs)
         native = subprocess.run
-        with mock.patch("ummanu.infra.git_worktree.subprocess.run", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch("ummanu.infra.git_worktree.subprocess.run", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         self.assertFalse(self.workspace.exists())
         self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
         return key
@@ -226,9 +225,8 @@ class OwnedCleanupTests(unittest.TestCase):
         def interrupted(intent, repo):
             remove(intent, repo)
             raise KeyboardInterrupt("crash before ref settlement")
-        with mock.patch.object(self.owner, "_remove_workspace", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch.object(self.owner, "_remove_workspace", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         (self.repo / "file").write_text("replacement published work\n")
         git(self.repo, "commit", "--quiet", "-am", "replacement")
         newer = git(self.repo, "rev-parse", "HEAD")
@@ -436,7 +434,7 @@ class OwnedCleanupTests(unittest.TestCase):
             calls.append(args)
             if args[3:5] == ["worktree", "list"]:
                 (admin / "HEAD").write_text(self.base + "\n")
-            return subprocess.run(args, capture_output=True, text=True)
+            return subprocess.run(args, capture_output=True, text=True, check=False)
         self.host.run_capture = capture
         result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending", result["reason"])
@@ -456,7 +454,7 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_shared_primitive_missing_directory_needs_owner_proof(self):
         self.interrupt_git_directory_removal()
         def run(args, cwd):
-            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=False)
         self.assertFalse(git_worktree.remove(run, self.repo, self.workspace))
         self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
 
@@ -527,9 +525,8 @@ class OwnedCleanupTests(unittest.TestCase):
         def interrupted(intent, repo):
             remove(intent, repo)
             raise KeyboardInterrupt("crash after successful Git removal")
-        with mock.patch.object(self.owner, "_remove_workspace", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch.object(self.owner, "_remove_workspace", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         self.assertFalse(self.workspace.exists())
         result = CleanupOwner(self.runtime).replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])
@@ -541,9 +538,8 @@ class OwnedCleanupTests(unittest.TestCase):
         def interrupted(intent, repo, base):
             delete(intent, repo, base)
             raise KeyboardInterrupt("crash after successful ref transaction")
-        with mock.patch.object(self.owner, "_delete_branch", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch.object(self.owner, "_delete_branch", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         self.assertEqual(CleanupOwner(self.runtime).replay_one(key)["status"], "completed")
 
     def test_prior_attempts_reusing_the_same_workspace_reconcile_after_later_cleanup(self):
@@ -613,9 +609,8 @@ class OwnedCleanupTests(unittest.TestCase):
         def interrupted(path):
             (Path(path) / "owner.json").unlink()
             raise KeyboardInterrupt("interrupted environment removal")
-        with mock.patch("ummanu.dispatch.cleanup.shutil.rmtree", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch("ummanu.dispatch.cleanup.shutil.rmtree", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])
         self.assertFalse(self.workspace.exists())
@@ -786,7 +781,7 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_shared_git_removal_refuses_foreign_registration_and_ignored_files(self):
         from ummanu.infra.git_worktree import remove
         def capture(args, cwd):
-            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=False)
         (self.workspace / "ignored").write_text("author work")
         self.assertFalse(remove(capture, self.repo, self.workspace))
         (self.workspace / "ignored").unlink()
@@ -826,9 +821,8 @@ class OwnedCleanupTests(unittest.TestCase):
             return SimpleNamespace(ok=True, reason="", run=run.finishing(initiator).exited())
         self.backend.stop = stop
         key = self.request()
-        with mock.patch.object(self.owner, "_remove_workspace", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch.object(self.owner, "_remove_workspace", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         saved = self.owner.journal.read()["intents"][key]
         self.assertTrue(HeadRun.from_json(saved["heads"][-1]).settled)
         self.assertEqual(CleanupOwner(self.runtime).replay_one(key)["status"], "completed")
@@ -855,9 +849,8 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_a_settled_scoped_run_still_reaches_the_runtime_empty_proof_on_replay(self):
         self.head()
         key = self.request()
-        with mock.patch.object(self.owner, "_remove_workspace", side_effect=KeyboardInterrupt):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch.object(self.owner, "_remove_workspace", side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         self.stop_failure = True
         result = CleanupOwner(self.runtime).replay_one(key)
         self.assertEqual(result["status"], "pending")
@@ -1000,7 +993,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(self.owner.journal.admission_refusal(self.task["ref"]), "")
 
     def test_production_probe_cannot_replay_or_capture_durable_cleanup(self):
-        from ummanu.dispatch.production import _probe_runtime, ProbeAbort
+        from ummanu.dispatch.production import ProbeAbort, _probe_runtime
         self.request()
         before = self.owner.journal.path.read_bytes()
         self.runtime.cleanup = self.owner
@@ -1079,10 +1072,10 @@ class OwnedCleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(HostError, "stop pending"):
                 host.stop_observer(observer)
             self.stop_failure = False
-            with mock.patch("ummanu.dispatch.cleanup._registered",
-                            side_effect=HostError("worktree registrations are unreadable")):
-                with self.assertRaisesRegex(HostError, "unreadable"):
-                    host.stop_observer(observer)
+            with (mock.patch("ummanu.dispatch.cleanup._registered",
+                             side_effect=HostError("worktree registrations are unreadable")),
+                  self.assertRaisesRegex(HostError, "unreadable")):
+                host.stop_observer(observer)
             intent = next(iter(self.owner.journal.read()["intents"].values()))
             self.assertEqual(intent["status"], "pending")
             self.assertTrue(intent["progress"]["heads_stopped"])
@@ -1306,7 +1299,7 @@ class OwnedCleanupTests(unittest.TestCase):
         before = self.owner.journal.path.read_bytes()
         self.owner.replay_one(key)
         self.assertEqual(self.owner.journal.path.read_bytes(), before)
-        _, path, observer = self.observer()
+        _, _path, observer = self.observer()
         self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
 
     def test_legacy_empty_intent_waits_for_a_terminal_card(self):
@@ -1393,7 +1386,7 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_observer_stop_failure_still_raises_while_cards_wait(self):
         self.task["claim"]["worker"] = self.record.worker
         self.request("close")
-        _, path, observer = self.observer()
+        _, _path, observer = self.observer()
         self.stop_failure = True
         result = self.owner.cleanup_observer(observer)
         self.assertEqual(result["status"], "pending")
@@ -1405,7 +1398,7 @@ class OwnedCleanupTests(unittest.TestCase):
         return hashlib.sha256(("sprint:1:" + record.generation + ":" + str(record.launches)).encode()).hexdigest()
 
     def replaced_observers(self):
-        repo, path, first = self.observer()
+        _repo, path, first = self.observer()
         first.launches, first.launched_at = 1, 100.0
         second_run = HeadRun(run_id="observer-run-2", spec=HeadSpec(
             profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
@@ -1435,7 +1428,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(path.is_dir())
 
     def test_replacement_observer_intent_cannot_stop_the_predecessor(self):
-        path, first, second, fenced, _ = self.replaced_observers()
+        path, _first, second, fenced, _ = self.replaced_observers()
         result = self.owner.cleanup_observer(second)
         self.assertEqual(result["status"], "completed", result["reason"])
         self.assertEqual(self.stops, [("observer-run-2", "")])
@@ -1532,9 +1525,8 @@ class OwnedCleanupTests(unittest.TestCase):
         def interrupted(intent, **kwargs):
             stop(intent, **kwargs)
             raise KeyboardInterrupt("crash after stop before saving heads_stopped")
-        with mock.patch.object(self.owner, "_stop", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch.object(self.owner, "_stop", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         saved = self.owner.journal.read()["intents"][key]
         self.assertFalse(saved["progress"]["heads_stopped"])
         self.assertTrue(self.workspace.exists())
@@ -1553,10 +1545,11 @@ class OwnedCleanupTests(unittest.TestCase):
     def scoped_predecessor(self, *, role="observer", task="sprint:1", workspace=None, completed=True):
         """Launch 1 as a scoped run under a real local-PTY runtime root, replaced by launch 2."""
         from dataclasses import replace
+
         from ummanu.runtime.head.identity import head_process_status
         from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
         from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
-        path, first, second, _, _ = self.replaced_observers()
+        path, first, _second, _, _ = self.replaced_observers()
         heartbeat = self.root / "observer.pid"
         old = replace(HeadRun.from_json(first.head_run), scope_generation="old-scope", pid_file=str(heartbeat))
         first.head_run = old.finishing(StopInitiator(actor="test")).exited().to_json()
@@ -1748,9 +1741,8 @@ class OwnedCleanupTests(unittest.TestCase):
         def interrupted(intent, **kwargs):
             stop(intent, **kwargs)
             raise KeyboardInterrupt("crash after stop before saving heads_stopped")
-        with mock.patch.object(self.owner, "_stop", side_effect=interrupted):
-            with self.assertRaises(KeyboardInterrupt):
-                self.owner.replay_one(key)
+        with mock.patch.object(self.owner, "_stop", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
         self.assertFalse(self.owner.journal.read()["intents"][key]["progress"]["heads_stopped"])
         self.assertTrue(self.workspace.exists())
         result = CleanupOwner(self.runtime).replay_one(key)

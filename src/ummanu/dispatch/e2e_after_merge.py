@@ -69,8 +69,16 @@ from dataclasses import asdict, dataclass
 from datetime import timedelta
 from typing import Any
 
-from ummanu.board import e2e_budget, e2e_disposition, e2e_record, owner_decisions, owner_events, po_execution, wait_card
-from ummanu.board import po_origin as origin_field
+from ummanu.board import (
+    e2e_budget,
+    e2e_disposition,
+    e2e_record,
+    owner_decisions,
+    owner_events,
+    po_execution,
+    po_origin as origin_field,
+    wait_card,
+)
 from ummanu.board.e2e_record import (
     AFTER_MERGE,
     AM_BLOCKED,
@@ -280,10 +288,14 @@ def reconcile_after_merge(
         except (TaskError, ValueError, TypeError, KeyError) as exc:
             outcomes.append(_outcome(str(hotfix.get("project") or ""), "e2e-after-merge-route-unread",
                                      ref=hotfix["ref"], status="degraded", reason=str(exc)))
+    # A disposition settled below can return its covered marks to pending in this same pass.
+    settled: set[str] = set()
     for carrier_ref in sorted(carriers):
         try:
             carrier = runtime.reader.show(carrier_ref)
-            run_ids = [run.dispatch_id for run in e2e_record.e2e_state(carrier).after_merge_runs]
+            runs = e2e_record.e2e_state(carrier).after_merge_runs
+            run_ids = [run.dispatch_id for run in runs]
+            settled.update(item["ref"] for run in runs for item in run.covered)
         except (TaskError, ValueError, TypeError, KeyError) as exc:
             outcomes.append(_outcome("", "e2e-after-merge-route-unread", ref=carrier_ref,
                                      status="degraded", reason=str(exc)))
@@ -296,7 +308,7 @@ def reconcile_after_merge(
             except (TaskError, HostError, OSError, ValueError, TypeError, KeyError) as exc:
                 outcomes.append(_outcome(str(carrier["project"]), "e2e-after-merge-disposition-unread",
                                          ref=carrier_ref, status="degraded", reason=str(exc)))
-    outcomes += _recover_pending(runtime, payload, records, cards)
+    outcomes += _recover_pending(runtime, payload, records, cards, settled)
     for project in sorted(queues(payload)):
         try:
             outcomes += _advance(runtime, payload, records, project)
@@ -444,16 +456,16 @@ def _reconcile_disposition(runtime: Any, payload: dict[str, Any], records: dict[
 
 
 def _recover_pending(runtime: Any, payload: dict[str, Any], records: dict[str, Any],
-                     cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                     cards: list[dict[str, Any]], settled: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """Pending marks survive queue deletion and committed-transition/save crashes."""
     changed = False
     outcomes = []
     for card in cards:
-        # The snapshot row already carries the mark: only a pending or budget-waiting one
-        # earns the per-card show and supersession reads. A mark that turns pending after
-        # the snapshot is picked up next tick.
+        # The snapshot row already carries the mark: only a pending or budget-waiting one, or a
+        # card a disposition of this pass covers, earns the per-card show and supersession reads.
+        # Any other mark that turns pending after the snapshot is picked up next tick.
         listed = e2e_record.e2e_state(card).after_merge
-        if listed is None or listed.state not in {AM_PENDING, AM_BUDGET_WAIT}:
+        if card["ref"] not in settled and (listed is None or listed.state not in {AM_PENDING, AM_BUDGET_WAIT}):
             continue
         try:
             task = runtime.reader.show(card["ref"])

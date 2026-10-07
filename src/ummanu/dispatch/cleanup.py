@@ -19,9 +19,10 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from ummanu.dispatch.types import HostError
 from ummanu.infra import git_worktree
@@ -65,7 +66,7 @@ def _read_git(repo: Path | str, *args: str) -> subprocess.CompletedProcess[str]:
     """Every Git read of the cleanup owner: with no optional locks, `status` never refreshes the
     index, so inventory and manifest planning write nothing into a repository or worktree."""
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30,
-                          env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+                          env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}, check=False)
 
 
 def _git(repo: Path, *args: str, allow: bool = False) -> str:
@@ -309,11 +310,11 @@ class CleanupJournal:
                 payload = json.loads(state.read_text())
                 records = payload.get("records", {})
                 if not isinstance(records, dict):
-                    raise ValueError("invalid records")
+                    raise TypeError("invalid records")
                 record = records.get(task["ref"], {})
             except FileNotFoundError:
                 record = {}
-            except (OSError, ValueError, AttributeError) as exc:
+            except (OSError, ValueError, TypeError, AttributeError) as exc:
                 raise HostError("cleanup cannot read dispatcher ownership") from exc
         if not record:
             # Attach to the retained obligation whatever its disposition: a completed or
@@ -455,10 +456,10 @@ class CleanupOwner:
         current = self.runtime.reader.show(task["ref"])
         if current["id"] != task["id"] or current["project"] != task["project"]:
             raise HostError("cleanup card identity changed")
-        if current.get("state") in {"in_progress", "validate", "review", "assessment", "ready"}:
-            if intent["disposition"] != "done" or current.get("state") != "assessment":
-                if not current.get("closed"):
-                    raise HostError("cleanup card is still admitted for work")
+        if (current.get("state") in {"in_progress", "validate", "review", "assessment", "ready"}
+                and (intent["disposition"] != "done" or current.get("state") != "assessment")
+                and not current.get("closed")):
+            raise HostError("cleanup card is still admitted for work")
         record = intent["record"]
         claim = current.get("claim") or {}
         if claim.get("worker") and claim.get("worker") != record.get("worker"):
@@ -630,9 +631,9 @@ class CleanupOwner:
         # A malformed/unknown head is never absence evidence. Keep the original
         # identities after a stop; its receipt can be retried after a crash.
         record = intent["record"]
-        if intent["task"].get("kind") == "observer" and not record.get("head_run"):
-            if record.get("handle") or record.get("pid_file") or record.get("head_possible"):
-                raise HostError("cleanup observer head ownership is missing")
+        if (intent["task"].get("kind") == "observer" and not record.get("head_run")
+                and (record.get("handle") or record.get("pid_file") or record.get("head_possible"))):
+            raise HostError("cleanup observer head ownership is missing")
         roles = () if intent["task"].get("kind") == "observer" else (("worker", "worker_head_run"), ("review", "review_head_run"))
         for role, field in roles:
             if (record.get("handle" if role == "worker" else "review_handle")
@@ -901,9 +902,9 @@ class CleanupOwner:
             # Nested generated files, such as an editable install's metadata, qualify only through
             # real directories of this workspace: a symlinked parent never leads the unlink outside.
             if (file.is_relative_to(path) and file != path and file.parent.resolve() == file.parent
-                    and file.is_file() and not file.is_symlink()):
-                if hashlib.sha256(file.read_bytes()).hexdigest() == digest:
-                    file.unlink()
+                    and file.is_file() and not file.is_symlink()
+                    and hashlib.sha256(file.read_bytes()).hexdigest() == digest):
+                file.unlink()
         if not missing and self._environment_owner(intent, path) == "dispatcher":
             namespace = _canonical(path / ".ummanu-task-env")
             stat = namespace.stat()
@@ -920,7 +921,8 @@ class CleanupOwner:
             capture = getattr(self.runtime.host, "run_capture", None)
             if callable(capture):
                 return capture(["git", "-C", str(cwd), *args], "owned cleanup Git")
-            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30)
+            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30,
+                                  check=False)
         if missing:
             removed = git_worktree.remove(run_git, repo, path,
                                          admitted_missing=lambda: self._admitted_registration(intent, repo))
@@ -981,7 +983,7 @@ class CleanupOwner:
         intent["progress"]["ref_delete_admitted"] = {"ref": ref, "tip": tip, "integration_tip": main}
         self._checkpoint_intent(intent)
         result = subprocess.run(["git", "-C", str(repo), "update-ref", "--stdin"], input=command,
-                                capture_output=True, text=True, timeout=30)
+                                capture_output=True, text=True, timeout=30, check=False)
         if result.returncode:
             raise HostError("cleanup ref transaction refused a changed or locked tip")
 
@@ -1052,10 +1054,10 @@ class CleanupOwner:
                 try:
                     self._settle_claim(intent)
                     intent["progress"]["preservation_verified"] = exc.verified
-                except Exception as settlement:
+                except Exception as settlement:  # noqa: BLE001 - a failed obligation is retained as pending evidence
                     intent["status"] = "pending"
                     intent["reason"] += "; " + str(settlement)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a failed obligation is retained as pending evidence
             intent["status"] = "pending"
             intent["reason"] = str(exc)[:1000]
         self._save(value)
@@ -1135,7 +1137,7 @@ class CleanupOwner:
                         manifest.append(_manifest_entry(row["target"], name, "preserved", row["reason"],
                                                         [], {"worktree": worktree}))
                         rows.append(row)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - a failed obligation is retained as pending evidence
                 rows.append({"project": name, "status": "pending", "reason": str(exc)[:500]})
         result: dict[str, Any] = {"intents": self.journal.summary(project=project or ""), "residue": rows}
         for key in sorted(recorded):
@@ -1194,7 +1196,7 @@ class CleanupOwner:
                 raise Preserved("historical worktree needs exact attempt and head ownership evidence")
             row["reason"] = "owned branch-only residue; eligible for exact-tip replay"
             return row, task
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - a failed obligation is retained as pending evidence
             row["reason"] = str(exc)[:500]
         return row, None
 
