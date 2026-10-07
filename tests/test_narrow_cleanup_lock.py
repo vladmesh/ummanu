@@ -368,6 +368,63 @@ class NarrowCleanupLockTests(unittest.TestCase):
             key = self.fixture.request()
             self.owner.replay_one(key)
 
+    def test_observer_cleanup_without_card_reader_stops_and_removes_workspace(self):
+        _, path, record = self.fixture.observer()
+        owner = cleanup.CleanupOwner(SimpleNamespace(
+            data_dir=self.data, host=self.fixture.host, sprints=self.fixture.runtime.sprints))
+        result = owner.cleanup_observer(record)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertEqual(self.fixture.stops, [("observer-run", "")])
+        self.assertFalse(path.exists())
+        self.assertTrue(result["progress"]["claim_settled"])
+
+    def test_observer_stop_refusal_without_card_reader_preserves_workspace(self):
+        _, path, record = self.fixture.observer()
+        self.fixture.stop_failure = True
+        owner = cleanup.CleanupOwner(SimpleNamespace(
+            data_dir=self.data, host=self.fixture.host, sprints=self.fixture.runtime.sprints))
+        result = owner.cleanup_observer(record)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("simulated stop failure", result["reason"])
+        self.assertEqual(self.fixture.stops, [("observer-run", "")])
+        self.assertTrue(path.exists())
+        self.assertFalse(result["progress"]["heads_stopped"])
+
+    def test_observer_launch_fences_the_sprint_readers_client(self):
+        active = False
+
+        @contextlib.contextmanager
+        def transaction():
+            nonlocal active
+            self.assertTrue(lock_free(self.data))
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        current = {"id": "sprint-1", "ref": "sprint:1", "status": "open"}
+
+        def show(reference, *, include_cards):
+            self.assertTrue(active)
+            self.assertTrue(lock_free(self.data))
+            self.assertEqual(reference, "sprint:1")
+            self.assertFalse(include_cards)
+            return copy.deepcopy(current)
+
+        client = mock.Mock(transaction=transaction)
+        reader = SimpleNamespace(client=client, show=show)
+        owner = cleanup.CleanupOwner(SimpleNamespace(data_dir=self.data, sprints=reader))
+        task = {**current, "kind": "observer"}
+        with owner.admission(task, launch=True):
+            self.assertTrue(active)
+            self.assertTrue(lock_free(self.data))
+        self.assertFalse(active)
+        client.call.assert_called_once_with("lockOwnershipReference", reference="sprint:1", observer=True)
+        current["status"] = "closed"
+        with self.assertRaisesRegex(OwnershipChanged, "launch ownership changed"), owner.admission(task, launch=True):
+            self.fail("changed sprint admitted")
+
 
 class TickPhaseLockTests(unittest.TestCase):
     def test_cleanup_lock_free_in_every_tick_phase(self):

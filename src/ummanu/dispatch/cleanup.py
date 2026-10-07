@@ -597,7 +597,9 @@ class CleanupOwner:
         fence. Only the live key/claim check holds cleanup.lock; host work does not.
         The same barrier is used again after unlocked proofs, before destruction.
         """
-        client = getattr(self.runtime.reader, "client", None)
+        reader = (self.runtime.sprints if task.get("kind") == "observer"
+                  else self.runtime.reader)
+        client = getattr(reader, "client", None)
         transaction = getattr(client, "transaction", None)
         with reference_lock(self.data_dir, task["ref"]), (
             transaction() if transaction is not None else contextlib.nullcontext()
@@ -608,8 +610,6 @@ class CleanupOwner:
                 raise OwnershipChanged("cleanup/launch primary key no longer exists")
             # The SQL row fence keeps this key read stable through admission
             # and its effect. Network reads and row contention precede the flock.
-            reader = (self.runtime.sprints if task.get("kind") == "observer"
-                      else self.runtime.reader)
             current = (reader.show(task["ref"], include_cards=False)
                        if task.get("kind") == "observer" else reader.show(task["ref"]))
             with ownership_lock(self.data_dir):
