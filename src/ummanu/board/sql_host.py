@@ -42,6 +42,7 @@ from ummanu.board.models import (
     Sprint,
     SprintState,
 )
+from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.board.transitions import BoardProtocolError, transition, transition_for
 from ummanu.product_issues import ProductIssueStore, product_swimlane_id
 from ummanu.sprints import SprintReader
@@ -98,13 +99,13 @@ class SqlBoardHost:
         if kind is EntityKind.CARD:
             return tuple(
                 _card(record)
-                for record in TaskReader(self.client).list()
+                for record in select_cards(TaskReader(self.client))
                 if record.get("record_type") not in {"issue", "product"}
             )
         if kind is EntityKind.SPRINT:
             return tuple(
                 _sprint(record)
-                for record in SprintReader(self.client, data_dir=self.data_dir).list(create=False)
+                for record in select_sprints(SprintReader(self.client, data_dir=self.data_dir), create=False)
             )
         store = self._product_issues()
         if kind is EntityKind.PRODUCT:
@@ -156,7 +157,7 @@ class SqlBoardHost:
                 try:
                     reference_row = self._raw_by_ref(entity.ref)
                     marker_row = self._raw_by_marker(request_id)
-                except Exception:
+                except Exception:  # noqa: BLE001 - failed correlation retains the uncertain occurrence
                     return
                 if reference_row is not None or marker_row is not None:
                     return
@@ -173,11 +174,10 @@ class SqlBoardHost:
             if row is None:
                 raise BoardProtocolError("created Product/Issue row was not found")
             task_id = self._row_id(row)
-            if row.get("reference") != entity.ref or row.get("description") != entity.description:
-                if not self.client.call(
-                    "updateTask", id=task_id, reference=entity.ref, description=entity.description
-                ):
-                    raise BoardProtocolError("board store rejected Product/Issue details")
+            if (row.get("reference") != entity.ref or row.get("description") != entity.description) and not self.client.call(
+                "updateTask", id=task_id, reference=entity.ref, description=entity.description
+            ):
+                raise BoardProtocolError("board store rejected Product/Issue details")
             if (
                 self.client.call("saveTaskMetadata", task_id=task_id, values=self._metadata_for(entity))
                 is not True
@@ -512,7 +512,7 @@ class SqlBoardHost:
                 raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
             if event.kind not in {EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED}:
                 raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
-            content = self.render_marker(event)
+            self.render_marker(event)
             task = TaskReader(self.client).show(event.ref)
             if not self._marker_is_proven(event, task):
                 raise BoardProtocolError("pending Card marker comment is not proven on the board store")
@@ -717,12 +717,11 @@ class SqlBoardHost:
             current = self.read(EntityKind.ISSUE, operation.ref)
             if not isinstance(current, Issue):
                 raise BoardProtocolError("Issue transition resolved a non-Issue entity")
-            declaration = None
         else:
             current = self.read(EntityKind.ISSUE, operation.ref)
             if not isinstance(current, Issue):
                 raise BoardProtocolError("Issue transition resolved a non-Issue entity")
-            successor, declaration = transition(current, operation.target)
+            successor, _declaration = transition(current, operation.target)
             if not isinstance(successor, Issue):
                 raise BoardProtocolError("Issue transition resolved an invalid successor")
             successor = Issue(
@@ -1493,7 +1492,7 @@ def _product_from_payload(data: dict[str, Any]) -> Product:
     try:
         projects = data["projects"]
         if not isinstance(projects, list):
-            raise ValueError("projects")
+            raise TypeError("projects")
         return Product(
             str(data["ref"]),
             str(data["title"]),

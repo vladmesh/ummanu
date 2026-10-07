@@ -644,8 +644,14 @@ class SqlCardClient:
         if handler is None:
             raise SqlCardError(f"the board store does not serve {method}")
         # One call is one session: its statements and its commit share a connection.
-        with self._session():
-            return handler(**params)
+        try:
+            with self._session():
+                return handler(**params)
+        finally:
+            if not method.startswith("get"):
+                from ummanu.board.tick_snapshot import board_write
+
+                board_write(self, params)
 
     def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
         """Run the calls and answer in call order.
@@ -885,6 +891,43 @@ class SqlCardClient:
             return self.records.row_by_reference(reference)
         rows = self._rows("task_ref = %s", (reference,))
         return rows[0] if rows else None
+
+    def _rpc_getBoardRows(self, *, project_id: int) -> list[dict[str, Any]]:
+        """One complete enumeration for checkpoint exports, including archived records."""
+        if int(project_id) == SPRINT_BOARD_ID:
+            return self.sprints.rows()
+        return self._rows() + self.records.rows()
+
+    def _rpc_getTaskById(self, *, project_id: int, task_id: int) -> dict[str, Any] | None:
+        """An exact Card transport key, including an archived Card during recovery."""
+        if int(project_id) != BOARD_ID or card_transport_key(task_id) is None:
+            return None
+        rows = self._rows("board_key = %s", (task_id,))
+        return rows[0] if rows else None
+
+    def _rpc_getArchivedAfterMergeTasks(self, *, project_id: int) -> list[dict[str, Any]]:
+        if int(project_id) != BOARD_ID:
+            return []
+        # e2e is JSON text in the extension bag. Match its after_merge keys without
+        # casting: a malformed record must reach the normal per-carrier error path.
+        return self._rows(
+            f"archived AND extensions->'{EXTENSION_BAG}'->>'e2e' LIKE %s",
+            ('%"after_merge%',),
+        )
+
+    def _rpc_getNextTaskReference(self, *, project: str) -> str:
+        # Products and issues have product:/issue: references, never project-N.
+        # Read the numeric high-water mark, including archives, without returning
+        # rows. A punctuation range is unsafe under locale-dependent collations;
+        # the literal prefix is the membership test. The caller holds the allocation
+        # lock and checks the live key.
+        prefix = project + "-"
+        rows = self._query(
+            "SELECT coalesce(max(substring(task_ref FROM %s)::numeric), 0) FROM tasks "
+            "WHERE starts_with(task_ref, %s) AND substring(task_ref FROM %s) ~ '^[0-9]+$'",
+            (len(prefix) + 1, prefix, len(prefix) + 1),
+        )
+        return prefix + str(int(rows[0][0]) + 1)
 
     def _ref_of(self, task_id: Any) -> str:
         key = card_transport_key(task_id)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from ummanu.dispatch.cleanup import CleanupJournal, serialized
-
 import fcntl
 import functools
 import hashlib
@@ -15,8 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ummanu.board import e2e_budget as sprint_e2e
-from ummanu.board import owner_events, owner_decisions
+from ummanu.board import e2e_budget as sprint_e2e, owner_decisions, owner_events
 from ummanu.board.backend import (
     BoardIdentityError,
     entity_id,
@@ -44,21 +41,15 @@ from ummanu.board.sprint_close import (
 from ummanu.board.sprint_read import (
     BUDGET_EVENT_TYPES,
     BUDGET_RECORDED_EVENT_TYPES,
+    BUDGET_UNCHARGED_EVENT_TYPES as BUDGET_UNCHARGED_EVENT_TYPES,
     BUDGET_UNCHARGED_FIELD,
+    BUDGET_UNCHARGED_INFRASTRUCTURE as BUDGET_UNCHARGED_INFRASTRUCTURE,
     RESUME_FIELDS,
     SprintBudget,
     SprintReadMetadata,
     SprintResume,
-    sprint_string_list,
-)
-from ummanu.board.sprint_read import (
-    BUDGET_UNCHARGED_EVENT_TYPES as BUDGET_UNCHARGED_EVENT_TYPES,
-)
-from ummanu.board.sprint_read import (
-    BUDGET_UNCHARGED_INFRASTRUCTURE as BUDGET_UNCHARGED_INFRASTRUCTURE,
-)
-from ummanu.board.sprint_read import (
     budget_thresholds as _read_budget_thresholds,
+    sprint_string_list,
 )
 from ummanu.board.sprint_write import (
     SprintCreateIntent,
@@ -66,6 +57,8 @@ from ummanu.board.sprint_write import (
     SprintReopenIntent,
     SprintWriteSnapshot,
 )
+from ummanu.board.tick_snapshot import select_cards, select_sprints
+from ummanu.dispatch.cleanup import CleanupJournal, serialized
 from ummanu.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 from ummanu.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -201,7 +194,7 @@ def require_active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]
 def refresh_active_sprint_projects(data_dir: str | Path, reader: Any) -> None:
     """Seed the index from the live board without racing a sprint mutation."""
     with _sprint_guard_index_lock(data_dir):
-        _replace_active_sprint_projects(data_dir, reader.list(statuses={"open"}, create=False))
+        _replace_active_sprint_projects(data_dir, select_sprints(reader, statuses={"open"}, create=False))
 
 
 def _replace_active_sprint_projects(data_dir: str | Path, sprints: list[dict[str, Any]]) -> None:
@@ -661,7 +654,7 @@ class SprintReader:
             include_resume_freshness=False,
         )
         if include_cards:
-            sprint["cards"] = TaskReader(self.client).list(sprint=reference)
+            sprint["cards"] = select_cards(TaskReader(self.client), sprint=reference)
         if include_resume_freshness:
             sprint["resume_freshness"] = self._resume_freshness(sprint, sprint.get("resume"), audit=audit)
         return sprint
@@ -739,7 +732,7 @@ class SprintReader:
         read and never created -- `TaskReader` has no `create` -- so this stays a read.
         """
         linked: dict[str, list[dict[str, Any]]] = {}
-        for card in TaskReader(self.client).list():
+        for card in select_cards(TaskReader(self.client)):
             linked.setdefault(str(card.get("sprint") or ""), []).append(card)
         return linked
 
@@ -793,7 +786,7 @@ class SprintReader:
         committed audit is consumed at most once.
         """
         return self.status_views(
-            self.list(create=create),
+            select_sprints(self, create=create),
             self.linked_cards(),
             observers=observers,
             headless=headless,
@@ -1816,7 +1809,7 @@ class SprintWriter:
         """
         others = [
             sprint
-            for sprint in self.reader.list(statuses={"open"}, create=False)
+            for sprint in select_sprints(self.reader, statuses={"open"}, create=False)
             if not (
                 (excluding and sprint["ref"] == excluding)
                 or (excluding_id is not None and _sprint_number(sprint) == excluding_id)
@@ -2799,7 +2792,7 @@ class SprintWriter:
         """Freeze this close's task set before any archival write."""
         if not sprint.has_reservations:
             return SprintCloseTargets()
-        cards = TaskReader(self.client).list(sprint=sprint.ref)
+        cards = select_cards(TaskReader(self.client), sprint=sprint.ref)
         return SprintCloseTargets.from_cards(cards)
 
     def _check_staged_decisions(

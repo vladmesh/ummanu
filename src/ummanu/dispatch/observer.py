@@ -53,6 +53,7 @@ from enum import Enum
 from typing import Any
 
 from ummanu.board import owner_events
+from ummanu.board.tick_snapshot import select_sprints
 from ummanu.codex_provider_events import CodexProviderSourceError
 from ummanu.dispatch.heartbeat import sprint_task
 from ummanu.dispatch.launch import merge_launch_head_run
@@ -596,7 +597,7 @@ def reconcile_observers(
     try:
         open_sprints = {
             str(sprint.get("ref") or ""): sprint
-            for sprint in runtime.sprints.list(statuses={"open"})
+            for sprint in select_sprints(runtime.sprints, statuses={"open"})
             if str(sprint.get("ref") or "")
         }
     except (TaskError, HostError) as exc:

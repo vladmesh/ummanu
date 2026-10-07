@@ -42,8 +42,7 @@ from ummanu.routing_journal import (
     routing_head_snapshot_from_launch,
     routing_payload,
 )
-from ummanu.runtime.head import HeadRun as LifecycleHeadRun
-from ummanu.runtime.head import HeadSpec, TaskRef
+from ummanu.runtime.head import HeadRun as LifecycleHeadRun, HeadSpec, TaskRef
 from ummanu.sprints import refresh_active_sprint_projects
 from ummanu.tasks import (
     _STATE_BY_COLUMN,
@@ -1003,16 +1002,18 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def _pending_typed_move(self, request_id: str, target: str = "ready") -> int:
         """Leave the supported post-effect failure: the column moved, its event did not commit."""
         self.place_card("ummanu-468", "in_progress")
-        with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
-            with self.assertRaisesRegex(TaskError, "audit repair"):
-                self.writer.move(
-                    role="dispatcher",
-                    actor="d",
-                    reference="ummanu-468",
-                    target=target,
-                    reason="",
-                    request_id=request_id,
-                )
+        with (
+            mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")),
+            self.assertRaisesRegex(TaskError, "audit repair"),
+        ):
+            self.writer.move(
+                role="dispatcher",
+                actor="d",
+                reference="ummanu-468",
+                target=target,
+                reason="",
+                request_id=request_id,
+            )
         self.assertEqual(self.writer.reader.show("ummanu-468")["state"], target)
         # The cleanup this edge owes the board runs inside the transition, so it is already
         # complete when only the commit fails.
@@ -1404,14 +1405,16 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_restore_comment_retry_uses_digest_occurrence_not_history_index(self) -> None:
         self.add_comment("ummanu-468", "first")
-        with self.board_loses_reply("createComment"):
-            with self.assertRaisesRegex(TaskError, "audit repair"):
-                self.writer.restore_comment(
-                    reference="ummanu-468",
-                    body="second",
-                    occurrence=0,
-                    request_id="restore-second-lost-reply",
-                )
+        with (
+            self.board_loses_reply("createComment"),
+            self.assertRaisesRegex(TaskError, "audit repair"),
+        ):
+            self.writer.restore_comment(
+                reference="ummanu-468",
+                body="second",
+                occurrence=0,
+                request_id="restore-second-lost-reply",
+            )
         self.writer.restore_comment(
             reference="ummanu-468",
             body="second",
@@ -1420,14 +1423,16 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
         self.assertEqual(self.card_comments("ummanu-468"), ["first", "second"])
 
-        with self.board_loses_reply("createComment"):
-            with self.assertRaisesRegex(TaskError, "audit repair"):
-                self.writer.restore_comment(
-                    reference="ummanu-468",
-                    body="second",
-                    occurrence=1,
-                    request_id="restore-duplicate-lost-reply",
-                )
+        with (
+            self.board_loses_reply("createComment"),
+            self.assertRaisesRegex(TaskError, "audit repair"),
+        ):
+            self.writer.restore_comment(
+                reference="ummanu-468",
+                body="second",
+                occurrence=1,
+                request_id="restore-duplicate-lost-reply",
+            )
         self.writer.restore_comment(
             reference="ummanu-468",
             body="second",
@@ -1800,16 +1805,16 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         before = self.board_snapshot()
         original_call = self.client.call
 
-        def invalid_task_list(method: str, **params: object) -> object:
-            if method == "getAllTasks":
+        def invalid_task_reference(method: str, **params: object) -> object:
+            if method == "getNextTaskReference":
                 return {"unexpected": "shape"}
             return original_call(method, **params)
 
         with (
-            mock.patch.object(self.client, "call", side_effect=invalid_task_list),
+            mock.patch.object(self.client, "call", side_effect=invalid_task_reference),
             mock.patch("ummanu.sprints.sprint_guard_index_initialized", return_value=True),
             self.open_sprint() as sprint,
-            self.assertRaisesRegex(TaskError, "invalid task list") as raised,
+            self.assertRaisesRegex(TaskError, "invalid task reference") as raised,
         ):
             self.writer.create(
                 role="observer",
@@ -1835,12 +1840,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                     self.client,
                     "call",
                     side_effect=lambda method, reply=reply, **params: (
-                        reply if method == "getAllTasks" else original_call(method, **params)
+                        reply if method == "getNextTaskReference" else original_call(method, **params)
                     ),
                 ),
                 mock.patch("ummanu.sprints.sprint_guard_index_initialized", return_value=True),
                 self.open_sprint() as sprint,
-                self.assertRaisesRegex(TaskError, "invalid task list") as raised,
+                self.assertRaisesRegex(TaskError, "invalid task reference") as raised,
             ):
                 self.writer.create(
                     role="observer",
@@ -1908,36 +1913,40 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         holds: the card must not be created under someone else's reference.
         """
         before = self.board_snapshot()
-        with mock.patch.object(tasks, "next_project_reference", return_value="ummanu-468"):
-            with self.open_sprint() as sprint:
-                with self.assertRaisesRegex(TaskError, "ummanu-468 is already claimed") as raised:
-                    self.writer.create(
-                        role="observer",
-                        actor="observer",
-                        project="ummanu",
-                        task_type="code",
-                        title="Collides",
-                        request_id="allocated-collision",
-                        sprint=sprint,
-                    )
+        with (
+            mock.patch.object(tasks, "next_project_reference", return_value="ummanu-468"),
+            self.open_sprint() as sprint,
+            self.assertRaisesRegex(TaskError, "ummanu-468 is already claimed") as raised,
+        ):
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="ummanu",
+                task_type="code",
+                title="Collides",
+                request_id="allocated-collision",
+                sprint=sprint,
+            )
 
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
     def test_explicit_reference_collision_is_still_refused(self) -> None:
         before = self.board_snapshot()
-        with self.open_sprint() as sprint:
-            with self.assertRaisesRegex(TaskError, "ummanu-468 is already claimed") as raised:
-                self.writer.create(
-                    role="observer",
-                    actor="observer",
-                    project="ummanu",
-                    task_type="code",
-                    title="Duplicate",
-                    reference="ummanu-468",
-                    request_id="explicit-collision",
-                    sprint=sprint,
-                )
+        with (
+            self.open_sprint() as sprint,
+            self.assertRaisesRegex(TaskError, "ummanu-468 is already claimed") as raised,
+        ):
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="ummanu",
+                task_type="code",
+                title="Duplicate",
+                reference="ummanu-468",
+                request_id="explicit-collision",
+                sprint=sprint,
+            )
 
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
@@ -3152,7 +3161,7 @@ class DoneRetentionTests(CardStoreCase):
 
         def race(method: str, **params: object) -> object:
             nonlocal reads
-            if method == "getAllTasks" and params.get("status_id") == 1:
+            if method == "getTaskByReference" and params.get("reference") == "ummanu-468":
                 reads += 1
                 if reads == 2:
                     self.client.set_moved(12, 200)
@@ -3171,7 +3180,7 @@ class DoneRetentionTests(CardStoreCase):
 
         def race(method: str, **params: object) -> object:
             nonlocal reads
-            if method == "getAllTasks" and params.get("status_id") == 1:
+            if method == "getTaskByReference" and params.get("reference") == "ummanu-468":
                 reads += 1
                 if reads == 2:
                     self.client.move(12, "ready")
@@ -4875,9 +4884,11 @@ class ReportDurabilityGateTests(CardStoreCase):
     def test_cwd_is_the_default_workspace(self) -> None:
         writer = TaskWriter(self.client, data_dir=str(Path(self.tmpdir.name) / "data"))  # type: ignore[arg-type]
         (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
-        with mock.patch("ummanu.tasks.Path.cwd", return_value=self.workspace):
-            with self.assertRaises(TaskError) as caught:
-                writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ok")
+        with (
+            mock.patch("ummanu.tasks.Path.cwd", return_value=self.workspace),
+            self.assertRaises(TaskError) as caught,
+        ):
+            writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ok")
         self.assertEqual(caught.exception.code, "uncommitted")
 
 

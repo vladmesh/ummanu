@@ -79,6 +79,21 @@ class SqlTaskReaderTests(SqlBoardCase):
         self.assertEqual(set(snapshot), {"ummanu-468", "old-1"})
         self.assertIn("comments", snapshot["ummanu-468"])
 
+    def test_reference_high_water_uses_literal_prefix_and_includes_archive(self) -> None:
+        # The store's default locale need not put '-' before '.'. A punctuation
+        # range once excluded every existing reference on the CI PostgreSQL.
+        for key, reference, archived in (
+            (100001, "ummanu-1404", True),
+            (100002, "ummanu-9", False),
+            (100003, "ummanu-child-9000", False),
+            (100004, "ummanu.9000", False),
+            (100005, "ummanu-9000-tail-1", False),
+        ):
+            self.client.add_card(key, reference, closed=archived, project=None)
+        self.assertEqual(self.client.call("getNextTaskReference", project="ummanu"), "ummanu-1405")
+        self.assertEqual(self.client.call("getNextTaskReference", project="unused"), "unused-1")
+        self.assertEqual(self.client.call("getNextTaskReference", project="ummanu-child"), "ummanu-child-9001")
+
     def test_steward_signal_cards_report_the_bounded_view(self) -> None:
         cards = self.reader.steward_signal_cards(project="ummanu")
 

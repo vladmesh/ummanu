@@ -52,6 +52,7 @@ from ummanu.board import wait_card
 from ummanu.board.completion_evidence import is_wait
 from ummanu.board.production_rights import WAIT_KIND, WAIT_OUTCOME_INPUT, card_facts
 from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
+from ummanu.board.tick_snapshot import select_cards
 from ummanu.board.wait_card import (
     ACCEPTED,
     CANCELLED,
@@ -70,10 +71,13 @@ from ummanu.board.wait_card import (
 from ummanu.dispatch.gate import _HTTP_STATUS_RE, GateTransportError, _gh_api
 from ummanu.dispatch.helpers import _worker_id
 from ummanu.dispatch.po_delivery import deliver, open_successor
-from ummanu.dispatch.state import DispatcherRecord, request_token
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
-from ummanu.dispatch.state import new_attempt_id as _new_attempt_id
-from ummanu.dispatch.state import record_attempt as _record_attempt
+from ummanu.dispatch.state import (
+    DispatcherRecord,
+    attempt_request_id as _attempt_request_id,
+    new_attempt_id as _new_attempt_id,
+    record_attempt as _record_attempt,
+    request_token,
+)
 from ummanu.dispatch.types import HostError
 from ummanu.tasks import TaskError, recorded_card_transition
 
@@ -590,10 +594,13 @@ def _deliver_dependents(runtime: Any, task: dict[str, Any], result: dict[str, An
     key = str(result.get("key") or "")
     outcome = str(result.get("outcome") or "")
     try:
-        cards = runtime.reader.list(states=set(_DEPENDENT_STATES))
+        cards = select_cards(runtime.reader, states=set(_DEPENDENT_STATES))
         dependents = [card for card in cards if ref in _blocker_refs(card) and card.get("ref") != ref]
         for dependent in sorted(dependents, key=lambda card: str(card.get("ref") or "")):
             other = str(dependent["ref"])
+            dependent = runtime.reader.show(other)
+            if ref not in _blocker_refs(dependent) or dependent.get("state") not in _DEPENDENT_STATES:
+                continue
             body = render_dependent_comment(ref, result)
             runtime.writer.comment(
                 role="dispatcher",

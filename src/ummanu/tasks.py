@@ -121,6 +121,7 @@ from ummanu.board.task_routing import (
     default_review,
     impact_bounds_refusal,
 )
+from ummanu.board.tick_snapshot import select_cards
 from ummanu.board.transitions import BoardProtocolError
 from ummanu.dispatch.cleanup import CleanupJournal, ownership_lock, serialized
 from ummanu.projects.integration_base import (
@@ -667,6 +668,11 @@ def project_card_by_reference(
 
 def project_card_by_id(client: SqlCardClient, project_id: int, task_id: int) -> dict[str, Any] | None:
     """Return the exact board row named by a recorded board task id."""
+    from ummanu.board.backend import card_transport_key
+    from ummanu.board.sql_cards import SqlCardClient
+
+    if isinstance(client, SqlCardClient) and card_transport_key(task_id) is not None:
+        return client.call("getTaskById", project_id=project_id, task_id=task_id)
     for card in all_project_cards(client, project_id):
         if _positive_int(card.get("id")) == task_id:
             return card
@@ -675,6 +681,13 @@ def project_card_by_id(client: SqlCardClient, project_id: int, task_id: int) -> 
 
 def next_project_reference(client: SqlCardClient, project_id: int, project: str) -> str:
     """Allocate the reference immediately after this project's board-wide high-water mark."""
+    from ummanu.board.sql_cards import SqlCardClient
+
+    if isinstance(client, SqlCardClient):
+        reference = client.call("getNextTaskReference", project=project)
+        if not isinstance(reference, str) or not re.fullmatch(re.escape(project) + r"-[1-9][0-9]*", reference):
+            raise TaskError("backend_error", "board store returned an invalid task reference", 1)
+        return reference
     return next_reference(all_project_cards(client, project_id), f"{project}-")
 
 
@@ -732,6 +745,15 @@ class TaskReader:
             result.append(normalized)
         self._attach_origin_returns(result)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
+
+    def archived_after_merge_cards(self) -> list[dict[str, Any]]:
+        """Archived e2e carriers/marks, without the archive's comments or unrelated rows."""
+        project_id, columns, swimlanes = self._board()
+        rows = self.client.call("getArchivedAfterMergeTasks", project_id=project_id)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise TaskError("backend_error", "board store returned invalid archived carriers", 1)
+        metadata = self._metadata_of(rows)
+        return [self._normalize(row, columns, swimlanes, metadata[_task_number(row)], comments=None) for row in rows]
 
     def _attach_origin_returns(self, cards: list[dict[str, Any]]) -> None:
         """Fill each delegated card's `origin.returns` from its outbox rows, in one read (secretary-1792).
@@ -873,6 +895,7 @@ class TaskReader:
         """
         # The installed head registry remains the authority for legacy effective-head values;
         # this is deliberately not a dependency on pipeline board operations or its export CLI.
+        from ummanu.board.sql_cards import SqlCardClient
         from ummanu.runtime.heads import HeadRegistryError, default_head, reviewer_head
 
         def role_default_or_blank(lookup: Callable[[], str]) -> str:
@@ -884,7 +907,13 @@ class TaskReader:
                 return ""
 
         project_id, columns, swimlanes = self._board()
-        cards = all_project_cards(self.client, project_id)
+        cards = (
+            self.client.call("getBoardRows", project_id=project_id)
+            if isinstance(self.client, SqlCardClient)
+            else all_project_cards(self.client, project_id)
+        )
+        if not isinstance(cards, list):
+            raise TaskError("backend_error", "board store returned an invalid task list", 1)
         rows = [card for card in cards if isinstance(card, dict)]
         task_ids = [_task_number(card) for card in rows]
         answers = self.client.call_batch(
@@ -3607,8 +3636,9 @@ class TaskWriter:
             # capacity, which is how many heads the installation runs at once.
             headed = [
                 active
-                for active in self.reader.list(states=set(ACTIVE_STATES))
-                if active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
+                for selected in select_cards(self.reader, states=set(ACTIVE_STATES))
+                if (active := self.reader.show(selected["ref"]))["state"] in ACTIVE_STATES
+                and active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
             ]
             for active in headed:
                 if (
@@ -5442,7 +5472,13 @@ class TaskWriter:
         done_id = next((identifier for identifier, title in columns.items() if title == "Done"), None)
         if done_id is None:
             raise TaskError("backend_error", "board schema is invalid", 1)
-        rows = all_project_cards(self.client, board_id)
+        from ummanu.board.sql_cards import SqlCardClient
+
+        if isinstance(self.client, SqlCardClient):
+            row = project_card_by_reference(self.client, board_id, reference)
+            rows = [row] if row is not None else []
+        else:
+            rows = all_project_cards(self.client, board_id)
         matches = [
             row
             for row in rows

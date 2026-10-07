@@ -68,7 +68,11 @@ class DispositionTests(unittest.TestCase):
         self.writer.client = SimpleNamespace(_query=mock.Mock(return_value=[]), call=save)
         self.writer._role = lambda role, allowed, actor: self.assertEqual(role, "dispatcher")
         self.writer.reader = SimpleNamespace(show=self.show, list=lambda: [self.show(ref) for ref in self.cards])
-        self.writer.reader.restore_snapshot = lambda: {card["ref"]: card for card in self.writer.reader.list()}
+        self.writer.reader.archived_after_merge_cards = lambda: [
+            self.show(ref) for ref, card in self.cards.items()
+            if card.get("closed") and (state := e2e_record.e2e_state(card))
+            and (state.after_merge or state.after_merge_runs)
+        ]
         self.writer.audit = SimpleNamespace(committed_event=lambda request: self.hotfix_created
             if request.startswith(e2e_record.AFTER_MERGE_HOTFIX_REQUEST_PREFIX) else self.created,
                                             events=lambda ref, **kw: copy.deepcopy(self.events) if ref == self.operation else [])
@@ -515,7 +519,6 @@ class DispositionTests(unittest.TestCase):
         source = e2e_record.e2e_state(self.show(self.source))
         source.after_merge.decision = ""
         self.cards[self.source]["extensions"]["extra"]["e2e"] = source.text()
-        self.writer.reader.restore_snapshot = lambda: {ref: self.show(ref) for ref in self.cards}
         self.writer.reader.list = lambda: [self.show(ref) for ref in self.cards if not self.cards[ref].get("closed")]
         self.complete(self.outcome("decline"))
         e2e_after_merge.reconcile_after_merge(self.runtime, {}, {})
