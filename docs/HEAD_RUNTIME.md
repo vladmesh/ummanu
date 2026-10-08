@@ -102,6 +102,86 @@ screen do not progress again after eviction. `turn.finished.output_bytes` still 
 output in the turn, including folded windows; `turn.finished.folded_windows` reports any folds
 still pending at the end. Quiet turn timing is unchanged.
 
+## Production prompt handoffs
+
+An agent prompt is typed, its echo turn is let close, Enter is sent alone, and a turn is seen to
+take it (`_deliver_prompt`). Interactive callers wait for all of that. The production dispatcher's
+advance pass does not (ummanu-140, ummanu-142): it installs one `HandoffBudget` around
+`advance_active` (`HANDOFF_WAIT_BUDGET_SECONDS`, 4 s for the whole pass), and its worker
+continuation and reviewer launch prompts are `PromptHandoff`s (`runtime/head/handoff.py`).
+
+- One boundary. `LocalPtyHeadRuntime._handoff_prompt` (and `handoff_floor`, `handoff_started`) run
+  inside one `HandoffOperation`, and its deadline is handed to the client itself
+  (`SupervisorClient.connect(..., remaining=operation.remaining)`). The client recomputes what is
+  left before the connect and before every `sendall` and every `recv` of every framed exchange
+  (status, admission, the follower, a fatal close's drain and read-back), so a reply that arrives in
+  pieces, behind stale or pushed frames, or after a slow send cannot outlast it; with nothing left
+  nothing is attempted, and no minimum is ever granted. What the operation really took is charged.
+  An allowance that runs out is pending at the handoff's stage, never the fatal unestablished
+  outcome and never a second offer: an admitted write goes on (`DELIVERY_PENDING`), and the next
+  pass reads its end. An offer whose answer was lost is read the same way: the supervisor's loop
+  handles a whole request frame (well under `_READ_CHUNK`) on an already-registered connection in
+  the same pass that accepts any later connection, and reads the later one's request only in a
+  later pass, so the next status already shows the offer (runtime-component test
+  `test_an_offer_whose_answer_is_never_read_is_settled_before_a_later_connection_is_answered`). A
+  frame cut off by the deadline mid-send is never admitted.
+- A partial line is refused at once, and closes the head here; the supervisor is told only within
+  the allowance. A drain that does not fit is owed, not claimed: the partial line stays in the
+  journal above the handoff's floor, every later pass refuses it again and tells the supervisor from
+  its own allowance, and the caller's confirmed stop precedes any replacement.
+- Fair share. Each card is served `what is left / cards not yet served` (`HandoffBudget.card`), so a
+  slow first card cannot leave a later one nothing. An effect (the line, an Enter) starts only with
+  `HANDOFF_EFFECT_RESERVE_SECONDS` of the share left.
+- The caller makes the handoff durable before its first effect: the head journal's sequence then
+  (`floor`) and when it was opened. A continuation keeps it on `WorkerContinuation.handoff`; a
+  reviewer launch uses its fresh run's whole journal (floor 0) and its launch intent's time. A
+  worker whose supervisor gives no floor gets nothing woken or typed that pass, and no blocking flow.
+- Where a handoff stands is read, never remembered: first `status` (a line or an Enter of this
+  handoff still being written), then the journal above the floor (the typed line's
+  `input.accepted`, each `:submit` one, the output of the turn the latest submit opened). A typed
+  line is not typed again, an accepted or in-flight Enter is not sent again, at most
+  `SUBMIT_ATTEMPTS` are sent, and the blocking flow's bounds (`prompt_settle` before typing and
+  before a submit, `submit_confirm` + `prompt_settle` for one submit's turn) are measured from the
+  durable times. A folded spinner is no confirmation; past those bounds the outcome is the blocking
+  flow's own `prompt_typed_but_no_turn_started` with the pane busy.
+- Settle. `status.output_idle_seconds` answers it in one frame. For a supervisor started before it
+  existed the runtime keeps, across ticks, the first frame that showed the head's incarnation (its
+  and the head's pids), journal sequence and output count: while all four are unchanged the head
+  printed nothing in between. A restart of the dispatcher starts that watch again. A settle wait is
+  taken only when quiet is due within the share, never to watch a noisy head.
+- A stage this pass cannot finish answers `HEAD_BUSY` with `handoff_stage` (`settle`, `typed`,
+  `submitted`); the next tick continues it. Pending spends no busy or launch attempt. A journal that
+  cannot say how far it got (window short of the floor, a second incarnation, the line twice) is
+  `prompt_handoff_unestablished`, a refusal the caller's recovery owns, never a retype.
+- Liveness is one rule for both callers (`dispatch/handoff_liveness.py`), on every pending stage
+  and whether or not the supervisor answered: the exact-source provider cursor of the exact HeadRun,
+  never a heartbeat, a valid advisory ingress event, the echo, a spinner or an accepted Enter. An
+  unmoved cursor spends one no-progress attempt each time the stall outlasts the next step of the
+  busy schedule (30, 90, 210 s), read off durable times. The worker's continuation reaches it first
+  in `_production_continuation`, and a source that is unavailable or names another run takes its
+  existing terminal outcome; three attempts reach the safe-recovery rung and then the
+  identity-fenced replacement. The worker's next recovery action is read off the persisted episode
+  on every pass (`_production_liveness_step`): recorded terminal or identity-fenced debt, a safe
+  recovery found unavailable and an unanswered safe-recovery intent go to the confirmed-stop
+  replacement before anything is observed (the capability is never called twice, and an
+  unconfirmed stop is retried on later passes, with no delivery behind it); an exhaustion recorded
+  without a rung enters the ladder even when this pass counts nothing new; the response window is
+  judged from its persisted deadline; and the one return to delivery after a safe recovery is
+  marked used, durably, before that delivery. Progress resets only what is uncommitted. A reviewer launch reaches it in `resolve_launch_intent`, before the
+  heartbeat grace, the retry's backoff, a pending receipt or adoption can return
+  (`review.reviewer_pending_liveness`): its episode lives on the launch's delivery record, an
+  unavailable source before its first prompt counts on the same schedule (`UnprovenSchedule`), and
+  exhaustion or a foreign source is the existing end of an undeliverable launch, a confirmed stop
+  through the intent and a relaunch, spending no delivery attempt. A verdict or report already on
+  the card wins over the pending obligation. A pending pass writes only what changed.
+- Writer fence. A reviewer's `start` types nothing; `start_review` stops the worker (or confirms a
+  retained one suspended) before raising the pending launch, and `nudge_review_delivery` makes that
+  fence again before any later pass types (a non-retained worker's stop is recorded on the intent).
+- Telemetry: each card's `handoff_ms` (what its handoffs really cost) and bounded
+  `{stage, subject, ms, allowed_ms, outcome}` entries (`cards[].handoffs`); the tick's
+  `handoff` entry carries the allowance and what the pass spent. A card's `ms` less its
+  `handoff_ms` is its non-handoff cost (gate, board, provider probes, documents).
+
 ## The runtime default
 
 `ummanu.runtime.head_runtimes` owns the vocabulary and what an absent `runtime` means, and

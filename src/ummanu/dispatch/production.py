@@ -68,6 +68,13 @@ from ummanu.dispatch.tick_telemetry import (
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.infra.checkpoint_run import load_checkpoint_state
+from ummanu.runtime.head.handoff import (
+    active_budget,
+    handoff_budget,
+    handoff_card,
+    handoff_stage_mark,
+    handoff_stages_since,
+)
 from ummanu.sprints import SprintWriter, budget_thresholds
 from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY, TaskError
 
@@ -94,6 +101,8 @@ _TICK_PHASE_STACK: contextvars.ContextVar[list[list[float]] | None] = contextvar
     "tick_phase_stack", default=None
 )
 _TICK_CARDS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar("tick_cards", default=None)
+#: What the advance pass's head handoffs were allowed and really spent, for the tick entry.
+_TICK_HANDOFF: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("tick_handoff", default=None)
 
 
 @contextlib.contextmanager
@@ -103,10 +112,12 @@ def tick_clock() -> Iterator[None]:
     phases_token = _TICK_PHASES.set({})
     stack_token = _TICK_PHASE_STACK.set([])
     cards_token = _TICK_CARDS.set([])
+    handoff_token = _TICK_HANDOFF.set({})
     try:
         with tick_counting():
             yield
     finally:
+        _TICK_HANDOFF.reset(handoff_token)
         _TICK_CARDS.reset(cards_token)
         _TICK_PHASE_STACK.reset(stack_token)
         _TICK_PHASES.reset(phases_token)
@@ -151,12 +162,36 @@ def tick_card(ref: str, records: int) -> Iterator[None]:
         yield
         return
     started = time.perf_counter()
+    mark = handoff_stage_mark()
+    budget = active_budget()
+    spent = budget.spent if budget is not None else 0.0
     try:
         yield
     finally:
         after = tick_counter_values() or before
+        handoffs = handoff_stages_since(mark)
+        handoff_ms = round((budget.spent - spent) * 1000.0, 3) if budget is not None else 0.0
         cards.append({"ref": ref, "ms": round((time.perf_counter() - started) * 1000.0, 3), "records": records,
-                      **{name: after[name] - before[name] for name in after}})
+                      **{name: after[name] - before[name] for name in after},
+                      # What this card's head handoffs really cost (waits and supervisor requests
+                      # alike), and each stage with its own cost; `ms` less this is the rest.
+                      **({"handoff_ms": handoff_ms} if handoffs or handoff_ms else {}),
+                      **({"handoffs": handoffs} if handoffs else {})})
+
+
+def note_tick_handoff(budget: Any) -> None:
+    """Keep what the pass's head handoffs were allowed and really spent, for this tick's entry."""
+    held = _TICK_HANDOFF.get()
+    if held is None:
+        return
+    held.update(
+        {
+            "allowance_ms": round(budget.seconds * 1000.0, 3),
+            "spent_ms": round(budget.spent * 1000.0, 3),
+            "cards": budget.cards,
+            "stages_dropped": budget.dropped,
+        }
+    )
 
 
 def tick_duration_ms() -> float | None:
@@ -234,6 +269,8 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         "phases": phases,
         "counters": counters,
         "cards": cards,
+        # The head handoff allowance of the advance pass, and what it really cost.
+        **({"handoff": dict(handoff)} if (handoff := _TICK_HANDOFF.get()) else {}),
         "reason": str(result.get("reason") or ""),
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
@@ -563,8 +600,14 @@ def _production_tick_with_snapshot(
         # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
         # on the strength of a field that predates the reconciliation pass itself.
         payload["last_reconciled_at"] = now_rfc3339()
-    with tick_phase("advance_active"):
+    # Every head handoff this pass makes shares one allowance, each card its fair share of what is
+    # left: a handoff that needs more stays pending at its stage and the next tick continues it
+    # (`runtime.head.handoff`).
+    with tick_phase("advance_active"), handoff_budget(
+        cards=sum(1 for task in active_tasks if not is_steward_report(task))
+    ) as handoff:
         outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
+    note_tick_handoff(handoff)
     outcomes = cleanup_outcomes + usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     # After the releases of this tick, before the observers: a merge whose base has no CI resolves
     # `absent` in the tick that merged it, and a result written here is delivered below.
@@ -1035,7 +1078,7 @@ def _advance_active(
         if is_steward_report(task):
             continue
         try:
-            with tick_card(str(task.get("ref") or ""), len(records)):
+            with tick_card(str(task.get("ref") or ""), len(records)), handoff_card():
                 outcome = _production_tick_active(runtime, task, records, payload)
         except TaskError as exc:
             errors.append({"ref": str(task.get("ref") or ""), "code": exc.code, "message": exc.message})

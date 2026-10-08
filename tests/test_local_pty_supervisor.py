@@ -24,6 +24,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Self
 from unittest import mock
 
 from ummanu.dispatch.watchdog import (
@@ -31,9 +32,7 @@ from ummanu.dispatch.watchdog import (
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from ummanu.runtime.head.local_pty import journal as journal_module
-from ummanu.runtime.head.local_pty import protocol
-from ummanu.runtime.head.local_pty import supervisor as supervisor_module
+from ummanu.runtime.head.local_pty import journal as journal_module, protocol, supervisor as supervisor_module
 from ummanu.runtime.head.local_pty.client import (
     HeadHandle,
     LocalPtySpawnError,
@@ -57,8 +56,8 @@ from ummanu.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
-from ummanu.runtime.head.memory import scope_unit
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.memory import scope_unit
 
 REPO = Path(__file__).resolve().parents[1]
 CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
@@ -213,6 +212,68 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
         self._await(arrived, timeout=timeout, message=f"{marker!r} never appeared in {seen[-400:]!r}")
         return seen
+
+    def test_an_offer_whose_answer_is_never_read_is_settled_before_a_later_connection_is_answered(self) -> None:
+        """ummanu-142: what a production handoff relies on after its admission answer was lost.
+
+        The handoff's connection has already been answered once (it is registered with the loop)
+        when it sends its offer; its deadline then passes and it closes without reading the answer.
+        The next pass opens a new connection and asks `status`. The loop reads a request before it
+        answers any connection accepted after it was sent, so that status already shows the offer:
+        admitted, so it is never offered again. A frame cut off before its end is never admitted.
+        """
+        handle = self._start(run_id="offer-order")
+        watcher = self._client(handle)
+
+        def written() -> bool:
+            return watcher.status()["delivery"]["state"] != protocol.DELIVERY_IN_FLIGHT
+
+        for attempt in range(12):
+            offering = handle.connect()
+            self.assertTrue(offering.status()["ok"])
+            subject = f"handoff-{attempt}"
+            frame = protocol.encode_frame(
+                {
+                    "op": protocol.OP_INPUT,
+                    "data": protocol.encode_payload(f"line {attempt}\n".encode()),
+                    "subject": subject,
+                    protocol.REQUEST_ID: 7,
+                }
+            )
+            offering._conn.sendall(frame)
+            offering.close()  # the answer is never read
+            later = handle.connect()
+            delivery = later.status()["delivery"]
+            later.close()
+            self.assertIsNotNone(delivery, f"attempt {attempt}: the offer was not settled first")
+            self.assertEqual(delivery["subject"], subject, f"attempt {attempt}")
+            self._await(written, message="the admitted line was never written")
+        cut = handle.connect()
+        self.assertTrue(cut.status()["ok"])
+        partial = protocol.encode_frame(
+            {"op": protocol.OP_INPUT, "data": protocol.encode_payload(b"never\n"), "subject": "cut-off", protocol.REQUEST_ID: 8}
+        )
+        cut._conn.sendall(partial[: len(partial) // 2])
+        cut.close()
+        later = handle.connect()
+        self.assertNotEqual(later.status()["delivery"]["subject"], "cut-off", "a frame cut off is never admitted")
+        later.close()
+
+    def test_status_says_how_long_the_head_has_printed_nothing(self) -> None:
+        """ummanu-140: one status answers whether a head is settled, so a handoff need not watch it.
+
+        The count restarts at the head's output, not at a turn's start: `turn.started` is the
+        supervisor's bookkeeping, and only what the head printed says it is not quiet.
+        """
+        handle = self._start(run_id="idle-seconds")
+        client = self._client(handle)
+        self.assertTrue(client.send_input("hello\n")["ok"])
+        self._await_output(client, b"ECHO hello")
+        self._await(lambda: client.status()["output_idle_seconds"] >= 0.5, message="the idle count never grew")
+        quiet = client.status()["output_idle_seconds"]
+        self.assertTrue(client.send_input("again\n")["ok"])
+        self._await_output(client, b"ECHO again")
+        self.assertLess(client.status()["output_idle_seconds"], quiet)
 
     # -- the screen the provider-failure reader sees (secretary-1799) ------------------------
 
@@ -1107,10 +1168,12 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 sys.executable,
                 "-P",
                 "-c",
-                "import sys;sys.path.insert(0, sys.argv[1]);"
-                "from ummanu.runtime.head.local_pty.journal import read_events;"
-                "import json;result=read_events(sys.argv[2]);"
-                "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))",
+                (
+                    "import sys;sys.path.insert(0, sys.argv[1]);"
+                    "from ummanu.runtime.head.local_pty.journal import read_events;"
+                    "import json;result=read_events(sys.argv[2]);"
+                    "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))"
+                ),
                 str(REPO / "src"),
                 str(handle.journal_path),
             ],
@@ -1265,7 +1328,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 read_bytes.append(len(data))
                 return data
 
-            def __enter__(self) -> _AppendingHandle:
+            def __enter__(self) -> Self:
                 return self
 
             def __exit__(self, *exc_info: object) -> None:

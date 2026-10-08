@@ -53,8 +53,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..command import with_pid_heartbeat
-from ..memory import MemoryScopeError, ScopeEvidence, OOM_STREAM_ENV, read_oom_victim
-from .scoped_lifecycle import ScopedHeadLifecycle
+from ..memory import OOM_STREAM_ENV, MemoryScopeError, ScopeEvidence, read_oom_victim
 from . import protocol
 from .journal import (
     DRAIN_REQUESTED,
@@ -68,6 +67,7 @@ from .journal import (
     TURN_STARTED,
     JournalWriter,
 )
+from .scoped_lifecycle import ScopedHeadLifecycle
 from .screen import ScreenModel
 
 #: A turn is over when the head has said nothing for this long. The substrate cannot see a
@@ -232,6 +232,9 @@ class Supervisor:
         self._turn_id = 0
         self._turn_bytes = 0
         self._last_output_at = 0.0
+        # Monotonic: when the head last printed, or when this supervisor began if it has not yet.
+        # A turn's start is not output, so this is kept apart from `_last_output_at`.
+        self._printed_mono = time.monotonic()
         self._progress_bytes = 0
         self._progress_at = 0.0
         self._progress_window_bytes = 0
@@ -644,6 +647,7 @@ class Supervisor:
     def _record_output(self, chunk: bytes) -> None:
         self._screen.feed(chunk)
         self._output_total += len(chunk)
+        self._printed_mono = time.monotonic()
         self._output += chunk
         if len(self._output) > protocol.OUTPUT_BUFFER_BYTES:
             excess = len(self._output) - protocol.OUTPUT_BUFFER_BYTES
@@ -947,6 +951,9 @@ class Supervisor:
             "cols": self.cols,
             "journal_seq": self._journal.seq if self._journal else 0,
             "output_bytes": self._output_total,
+            # How long the head has printed nothing, since its last output or, if it has printed
+            # nothing yet, since this supervisor began: one status answers "is it settled".
+            "output_idle_seconds": round(max(0.0, time.monotonic() - self._printed_mono), 3),
             "dropped_bytes": self._output_dropped,
             "attached": sum(1 for other in self._clients.values() if other.attached),
             "attach_limit": protocol.ATTACH_MAX_CLIENTS,
