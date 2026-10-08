@@ -25,8 +25,8 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from pathlib import Path, PurePosixPath
-from typing import Any
+from pathlib import Path
+from typing import Any, Self
 
 from ummanu.dispatch.tick_telemetry import tick_count
 from ummanu.dispatch.types import HostError, OwnershipChanged
@@ -331,12 +331,13 @@ def _begin_attempt(intent: dict[str, Any]) -> None:
 _CACHE_DIRECTORIES = frozenset({".pytest_cache", "__pycache__", ".venv"})
 
 
-def _cache_name(name: str) -> bool:
-    """A relative Git path strictly inside a cache directory: never the cache itself or a directory."""
-    parts = PurePosixPath(name).parts
-    return bool(parts) and not (name.endswith("/") or PurePosixPath(name).is_absolute()
-                                or any(part in {"", ".", ".."} for part in parts)
-                                or not any(part in _CACHE_DIRECTORIES for part in parts[:-1]))
+def _cache_parts(name: str) -> tuple[str, ...] | None:
+    """The components of a relative Git path strictly inside a cache directory, or None: never the
+    cache itself, a directory row, an absolute path or one with an empty, `.` or `..` component."""
+    parts = tuple(name.split("/"))
+    if any(part in {"", ".", ".."} for part in parts) or not any(part in _CACHE_DIRECTORIES for part in parts[:-1]):
+        return None
+    return parts
 
 
 def _open_below(root: int, parts: tuple[str, ...]) -> int:
@@ -353,38 +354,81 @@ def _open_below(root: int, parts: tuple[str, ...]) -> int:
     return directory
 
 
-def _cache_entry(root: int, name: str) -> bool:
-    """A regular file strictly inside a cache directory, reached from the pinned root through real
-    directories only. A symlinked cache, parent or leaf, or a nested repository Git reports as a
-    directory, is not one: route 4 excludes every symlink path."""
-    if not _cache_name(name):
-        return False
-    parts = PurePosixPath(name).parts
-    try:
-        directory = _open_below(root, parts[:-1])
-    except OSError:
-        return False
-    try:
-        mode = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode
-    except OSError:
-        return False
-    finally:
-        os.close(directory)
-    return stat_mode.S_ISREG(mode)
+#: The one cache whose leaf symlinks are disposable (ummanu-135): a virtual environment links its
+#: interpreter outside itself and `lib64` beside it. Such a link goes as the directory entry it is.
+_LINKED_CACHE = ".venv"
 
 
-def _unlink_confined(root: int, name: str) -> None:
-    """Unlink one regular cache file below the pinned root; nothing on the way is followed."""
-    if not _cache_name(name):
+def _disposable_leaf(parts: tuple[str, ...], mode: int) -> bool:
+    """The one leaf type policy of classification and effect, for an entry reached through real
+    directories only: a regular file in any cache, or a symlink strictly inside a real `.venv`
+    (dangling, to a file or to a directory alike). A link's target is never stat'ed or opened."""
+    return stat_mode.S_ISREG(mode) or (stat_mode.S_ISLNK(mode) and _LINKED_CACHE in parts[:-1])
+
+
+class _ConfinedDirectories:
+    """Parent directories below one pinned root, for one pass over Git's path-sorted rows.
+
+    Every component is opened from its real parent with O_NOFOLLOW, exactly as `_open_below` does;
+    only a directory the previous row already reached is not opened again. At most one descriptor
+    per depth of the current path is held, and the pass closes them all. A held directory renamed
+    away mid-pass stays the one this pass reached through real parents; no link is ever entered.
+    """
+
+    def __init__(self, root: int) -> None:
+        self._root = root
+        self._open: list[tuple[str, int]] = []
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self._keep(0)
+
+    def _keep(self, depth: int) -> None:
+        while len(self._open) > depth:
+            os.close(self._open.pop()[1])
+
+    def parent(self, parts: tuple[str, ...]) -> int:
+        """The real directory root/parts[:-1] of one entry; an OSError if any component is not one."""
+        parents = parts[:-1]
+        if parents == tuple(name for name, _ in self._open):
+            return self._open[-1][1] if self._open else self._root
+        depth = 0
+        while depth < min(len(self._open), len(parents)) and self._open[depth][0] == parents[depth]:
+            depth += 1
+        self._keep(depth)
+        for part in parents[depth:]:
+            directory = self._open[-1][1] if self._open else self._root
+            self._open.append((part, os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                             dir_fd=directory)))
+        return self._open[-1][1] if self._open else self._root
+
+
+def _cache_entry(directories: _ConfinedDirectories, name: str) -> bool:
+    """A disposable leaf (see `_disposable_leaf`) strictly inside a cache directory, reached from the
+    pinned root through real directories only. A symlinked cache or parent, a leaf link outside a
+    real `.venv`, or a nested repository Git reports as a directory, is not one."""
+    parts = _cache_parts(name)
+    if parts is None:
+        return False
+    try:
+        mode = os.stat(parts[-1], dir_fd=directories.parent(parts), follow_symlinks=False).st_mode
+    except OSError:
+        return False
+    return _disposable_leaf(parts, mode)
+
+
+def _unlink_confined(directories: _ConfinedDirectories, name: str) -> None:
+    """Unlink one disposable cache entry below the pinned root; nothing on the way, and no link
+    target, is followed: the type is read again without following and unlink removes the entry."""
+    parts = _cache_parts(name)
+    if parts is None:
         raise HostError("cleanup cache entry is not inside a cache directory: " + name)
-    parts = PurePosixPath(name).parts
-    directory = _open_below(root, parts[:-1])
-    try:
-        if not stat_mode.S_ISREG(os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode):
-            raise HostError("cleanup cache entry is no longer a regular file: " + name)
-        os.unlink(parts[-1], dir_fd=directory)
-    finally:
-        os.close(directory)
+    directory = directories.parent(parts)
+    if not _disposable_leaf(parts, os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode):
+        raise HostError("cleanup cache entry is no longer a disposable file or venv link: " + name)
+    os.unlink(parts[-1], dir_fd=directory)
 
 
 @contextlib.contextmanager
@@ -1635,8 +1679,8 @@ class CleanupOwner:
 
         Include ignored files. Only bytes written by the prompt producer, the existing exact
         environment namespace contract and, for the exact workspace of a card this replay's
-        admission saw Done, Git-ignored regular files inside its Python caches (see `_cache_entry`)
-        can be disposable. Every later admission must see that same state. Status and cache
+        admission saw Done, Git-ignored regular files inside its Python caches and leaf links inside
+        its real `.venv` (see `_cache_entry`) can be disposable. Every later admission must see that same state. Status and cache
         classification read the recorded directory through its pinned descriptor (`root`, or one
         pinned here), never through a path that could be substituted. It reads only.
         """
@@ -1653,21 +1697,25 @@ class CleanupOwner:
         environment = self._environment_owner(intent, path)
         done = (intent["task"].get("kind") != "observer"
                 and (self._admitted or {}).get("state") == "done")
-        for row in status.split("\0"):
-            if not row:
-                continue
-            name = row[3:]
-            file = path / name
-            if row[:2] in {"??", "!!"}:
-                if name.startswith(".ummanu-task-env/") and environment == "dispatcher":
+        prefix = str(path) + "/"
+        with _ConfinedDirectories(root) as directories:
+            for row in status.split("\0"):
+                if not row:
                     continue
-                expected = generated.get(str(file))
-                if expected and not file.is_symlink() and file.is_file() and hashlib.sha256(file.read_bytes()).hexdigest() == expected:
-                    continue
-                if row[:2] == "!!" and done and _cache_entry(root, name):
-                    caches.append(name)
-                    continue
-            dirty.append(row)
+                name = row[3:]
+                if row[:2] in {"??", "!!"}:
+                    if name.startswith(".ummanu-task-env/") and environment == "dispatcher":
+                        continue
+                    # `str(path / name)` for Git's normalized names, without a Path per row.
+                    expected = generated.get(prefix + name.rstrip("/"))
+                    if expected:
+                        file = path / name
+                        if not file.is_symlink() and file.is_file() and hashlib.sha256(file.read_bytes()).hexdigest() == expected:
+                            continue
+                    if row[:2] == "!!" and done and _cache_entry(directories, name):
+                        caches.append(name)
+                        continue
+                dirty.append(row)
         return dirty, caches
 
     def _environment_owner(self, intent: dict[str, Any], path: Path) -> str:
@@ -1857,7 +1905,7 @@ class CleanupOwner:
             if not missing:
                 # Board and journal admission does not cover the filesystem: the exact recorded
                 # workspace is revalidated and pinned, and the same predicate runs again inside it.
-                # Only its Git-ignored regular cache files go, unlinked through that descriptor.
+                # Only its Git-ignored cache files and venv links go, unlinked through that descriptor.
                 if _identity(repo, workspace, identity["branch"].removeprefix("refs/heads/")
                              if identity["branch"] else "") != identity:
                     raise HostError("cleanup workspace, registration or HEAD changed before its cache "
@@ -1866,8 +1914,9 @@ class CleanupOwner:
                     dirty, caches = self._dirty(intent, path, root)
                     if dirty:
                         raise HostError("cleanup workspace changed since its dirty check; workspace retained")
-                    for name in caches:
-                        _unlink_confined(root, name)
+                    with _ConfinedDirectories(root) as directories:
+                        for name in caches:
+                            _unlink_confined(directories, name)
             # No forced removal: first delete only exact generated bytes whose
             # ownership was validated above. Git independently refuses dirty work.
             generated = self.journal.generated_digests()
