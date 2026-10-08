@@ -42,11 +42,27 @@ MAX_COUNTER = 2**53
 #:   flush_journal   publishing a changed cleanup projection into the journal
 #:   flush_lock      waiting for the ownership lock, in the flush and in its journal publication
 #:   flush_write     putting the records into the production state and writing it
+#: A release, decided in Assessment or automatic after a green verdict, first taken or replayed:
+#:   assessment      the Assessment advance outside the stages below: decision intake and replay,
+#:                   rework and reslice, and the release's own orchestration
+#:   release_e2e     the release audit's e2e stage outside its gate read
+#:   release_gate    the fresh release gate and readiness read, and accepting its green result
+#:   release_runtime the production runtime fence before and after the merge
+#:   release_merge   the remote delivery: the pull request's base read and its irreversible merge,
+#:                   or the push onto the integration base
+#:   release_refresh the post-merge fetch and checkout refresh, the production activation included
+#:   release_landed  reading the landed commit back and opening the post-merge watch
+#:   release_evidence the completion evidence: a research report transfer and the fresh card read
+#:   release_teardown tearing the round down: the teardown, or stopping the heads of a blocked path
+#:   release_terminal the terminal board move and outcome, a refused activation's operation and
+#:                   comment, and dropping the record
 #: The card's `ms` less all of them is `unclassified`, measured, never dropped.
 CARD_STAGES = (
     "board_read", "ingress", "launch", "report", "headless", "comments", "gate", "observation",
     "provider", "vitality", "lifecycle", "flush", "flush_card_read", "flush_identity", "flush_journal",
-    "flush_lock", "flush_write",
+    "flush_lock", "flush_write", "assessment", "release_e2e", "release_gate", "release_runtime",
+    "release_merge", "release_refresh", "release_landed", "release_evidence", "release_teardown",
+    "release_terminal",
 )
 CARD_STAGE_REMAINDER = "unclassified"
 

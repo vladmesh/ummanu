@@ -184,7 +184,11 @@ continuation and reviewer launch prompts are `PromptHandoff`s (`runtime/head/han
   splits the same `ms` by where it was spent (`tick_telemetry.CARD_STAGES`: the fresh board read,
   provider ingress, report, observation, provider failure, vitality, lifecycle, and each record
   flush apart from its card reads, workspace identity, journal publication, ownership-lock wait and
-  state write), each millisecond once, the rest as `unclassified`. Handoffs are spent inside those
+  state write), each millisecond once, the rest as `unclassified`. A release, decided or automatic,
+  first taken or replayed, splits further at its effect sites: the fresh release gate and its e2e
+  stage, the production runtime fence, the remote merge, the checkout refresh and activation, the
+  landed-commit read and watch, completion evidence, teardown and the terminal move, with an
+  Assessment advance's own rest as `assessment`. Handoffs are spent inside those
   stages and are not subtracted from them. A card recorded before stages existed has none: unknown.
 
 ## The runtime default

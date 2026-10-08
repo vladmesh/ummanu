@@ -8,12 +8,12 @@ from ummanu.board.protocol_artifacts import (
     ArtifactOwnershipViolation,
     validate_rework_prerequisites,
 )
-from ummanu.dispatch import release_lifecycle
-from ummanu.dispatch import attempt_accounting
-from ummanu.dispatch.helpers import _last_marker_body
+from ummanu.dispatch import attempt_accounting, release_lifecycle
 from ummanu.dispatch.decision_pointer import decision_pointer
+from ummanu.dispatch.helpers import _last_marker_body
 from ummanu.dispatch.review_verdict import complete_park as _complete_park
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
+from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.types import STOPPED_BY_REVIEW_VERDICT, HostError
 from ummanu.dispatch.worker_continuation import (
     begin_red_transition as _begin_red_transition,
@@ -34,6 +34,18 @@ def advance_assessment(
     Decision intake/replay and the rework/reslice effects live here. A release delegates to the
     package-owned release/merge/completion lifecycle.
     """
+    # The parent of the release stages: what they leave of the advance is its own measured cost.
+    with tick_stage("assessment"):
+        return _advance_assessment(runtime, task, records, payload, attempt_id)
+
+
+def _advance_assessment(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+) -> dict[str, Any]:
     ref = task["ref"]
     record = records.get(ref)
     if record is None:

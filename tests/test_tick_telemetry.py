@@ -13,11 +13,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu import cli, status
-from ummanu.dispatch import cleanup as cleanup_module, production, runtime as runtime_module, wait_vitality
+from ummanu.dispatch import (
+    assessment_decision,
+    cleanup as cleanup_module,
+    gate_lifecycle,
+    production,
+    release_lifecycle,
+    runtime as runtime_module,
+    wait_vitality,
+)
 from ummanu.dispatch.cleanup import CleanupOwner
+from ummanu.dispatch.entrypoint_guard import EntrypointMoved
+from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.production_checkout import ProductionActivationRefused
 from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.tick_telemetry import (
     CARD_STAGES,
     MAX_DURATION_MS,
@@ -32,7 +45,9 @@ from ummanu.dispatch.tick_telemetry import (
     tick_stage,
     tick_statistics,
 )
+from ummanu.dispatch.types import HostError
 from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
+from ummanu.tasks import TaskError
 
 # The real pass; the fixture below replaces it with a timed seam.
 ADVANCE_ACTIVE = production._advance_active
@@ -799,3 +814,260 @@ class CardStageTests(unittest.TestCase):
             named |= set(re.findall(r'tick_stage(?:_entering)?\("([^"]+)"', path.read_text(encoding="utf-8")))
         self.assertEqual(named - set(CARD_STAGES), set())
         self.assertEqual(set(CARD_STAGES) - named, set())
+
+
+RELEASE_REF = "sample-158"
+RELEASE_SHA = "a" * 40
+#: What each leaf of a release costs here, in ms: the ordinary Assessment release adds up to the
+#: 15.354 s the production release of 81442 left unclassified, plus 3 ms no stage names.
+RELEASE_LEAVES = {
+    "merge pr base": 600, "merge pr": 5601, "merge push": 5601, "post-merge fetch": 800,
+    "post-merge fast-forward": 1200, "post-merge commit": 500, "post-merge landed commit": 100,
+    "runtime:release-before": 150, "runtime:release-after": 150, "gate": 3000, "teardown": 1500, "stop": 300,
+}
+
+
+class _ReleaseHost(CommandHostRuntime):
+    """`complete_green`'s merge paths, teardown and gate over leaf commands that only spend time."""
+
+    def __init__(self, root, clock, *, ci):
+        catalog = SimpleNamespace(
+            adapter=lambda project: {"validation": {"ci": ci}},
+            integration_base=lambda project, override: "main",
+            binding=lambda project: {"repo": str(root / "project")},
+            instance_dir=str(root / "instance"),
+            project_default_branch=lambda project: "main",
+        )
+        super().__init__(catalog, root, mode="real", production_runtime=registered_production_runtime(root))
+        self.clock = clock
+        self.calls = []
+        self.fail = {}
+
+    def leaf(self, label, result=None):
+        self.calls.append(label)
+        self.clock.now += RELEASE_LEAVES[label] / 1000
+        if label in self.fail:
+            raise self.fail.pop(label)
+        return result
+
+    def _decide_workspace_environment_ownership(self, workspace):
+        return "dispatcher"
+
+    def _require_production_runtime(self, boundary, within=None):
+        return self.leaf("runtime:" + boundary)
+
+    def _remote_git_checked(self, project, checkout, args, label):
+        return self.leaf(label)
+
+    def _run(self, args, label, *, cwd=None):
+        stdout = {"merge pr base": "main\n", "post-merge commit": RELEASE_SHA + "\n",
+                  "post-merge landed commit": RELEASE_SHA + "\n"}.get(label, "")
+        return self.leaf(label, SimpleNamespace(stdout=stdout, stderr="", returncode=0))
+
+    def gate_check(self, task, record):
+        return self.leaf("gate", GateResult("green", "all checks passed"))
+
+    def teardown(self, record):
+        return self.leaf("teardown", {"workspace": "removed"})
+
+    def stop(self, record):
+        self.leaf("stop")
+
+
+class ReleaseStageTests(unittest.TestCase):
+    """A release's cost by effect site, through the real Assessment, release and merge orchestration."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.clock = Clock()
+        self.reads = 0
+
+        def read():
+            self.reads += 1
+            return self.clock.now
+
+        self.enterContext(mock.patch.object(production.time, "perf_counter", read))
+        self.host = _ReleaseHost(self.root, self.clock, ci="github")
+        self.committed = {}
+
+        def board(ms, result):
+            def write(**kwargs):
+                self.clock.now += ms / 1000
+                if isinstance(result, Exception):
+                    raise result
+                self.committed[kwargs["request_id"]] = {"event_id": kwargs["request_id"], "ref": "op-1"}
+                return result
+
+            return write
+
+        self.board = board
+        writer = mock.Mock()
+        writer.create.side_effect = board(200, {"task": {"ref": "op-1"}})
+        writer.comment.side_effect = board(100, {})
+        audit = mock.Mock()
+        audit.events.side_effect = self.clock.work(100, [])  # the decision's audit history
+        audit.committed_event.side_effect = self.committed.get
+        self.runtime = SimpleNamespace(
+            data_dir=self.root, owner="unit-test", production_state=production.ProductionState(self.root),
+            host=self.host, reader=mock.Mock(), cleanup=mock.Mock(), writer=writer, audit=audit,
+        )
+        self.runtime.save_records = functools.partial(DispatcherRuntime.save_records, self.runtime)
+        self.runtime.reader.show.side_effect = self.clock.work(150, {"ref": RELEASE_REF, "comments": []})
+        self.accounting = mock.Mock()
+        self.accounting.terminal_effect.side_effect = self.clock.work(900)  # the board move and outcome
+        write = production.write_json
+
+        def slow_write(path, payload):
+            self.clock.now += 0.050
+            write(path, payload)
+
+        for target, name, value in (
+            (assessment_decision, "recorded_decision", self.clock.work(250, ("release", "Ship it.", ()))),
+            (release_lifecycle, "attempt_accounting", self.accounting),
+            (gate_lifecycle, "accept_green_gate", self.clock.work(400)),  # the release gate attestation
+            (production, "write_json", slow_write),
+        ):
+            self.enterContext(mock.patch.object(target, name, value))
+        self.record = DispatcherRecord(
+            worker="w", workspace=str(self.root / "ws"), handle="", head="codex", review_head="claude",
+            attempt_id="attempt-1", comment_baseline=0, review_baseline=0, state="assessment", claimed_at=0.0,
+        )
+        self.record.worker_continuation.begin_park("review", 0, "review:green", "green")
+        self.record.worker_continuation.confirm_park()
+        self.records = {RELEASE_REF: self.record}
+        self.payload = {}
+
+    def task(self, kind="code"):
+        return {"ref": RELEASE_REF, "type": kind, "project": "sample", "sprint": "sprint:1",
+                "state": "assessment", "workspace": {}, "comments": []}
+
+    def tick(self, advance):
+        """One card of a production tick: 3 ms of routing no stage names, then `advance`."""
+        outcome = None
+        with production.tick_clock():
+            with production.tick_card(RELEASE_REF, 1):
+                self.clock.now += 0.003
+                outcome = advance()
+            telemetry = {}
+            production.record_tick_telemetry(telemetry, {"status": "ok"})
+        card = telemetry["tick_telemetry"]["last"]["cards"][0]
+        self.assertAlmostEqual(sum(card["stages"].values()), card["ms"], delta=0.001 * len(card["stages"]))
+        return outcome, card, telemetry
+
+    def assess(self, kind="code"):
+        return lambda: assessment_decision.advance_assessment(
+            self.runtime, self.task(kind), self.records, self.payload, "attempt-1"
+        )
+
+    def test_an_ordinary_release_splits_into_its_effect_sites(self):
+        outcome, card, telemetry = self.tick(self.assess())
+        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(self.host.calls, [
+            "gate", "runtime:release-before", "merge pr base", "merge pr", "post-merge fetch",
+            "post-merge fast-forward", "runtime:release-after", "post-merge commit", "teardown",
+        ])
+        self.assertEqual(card["ms"], 15354.0)
+        # Before these stages the same release read flush 0, flush_lock 0, flush_write 100 and
+        # unclassified 15254: everything but its two flushes was opaque.
+        self.assertEqual(card["stages"], {
+            "flush": 0.0, "flush_lock": 0.0, "flush_write": 100.0,
+            "assessment": 450.0, "release_e2e": 0.0, "release_gate": 3400.0, "release_runtime": 300.0,
+            "release_merge": 6201.0, "release_refresh": 2000.0, "release_landed": 500.0,
+            "release_teardown": 1500.0, "release_terminal": 900.0, "unclassified": 3.0,
+        })
+        self.assertEqual(card["save_records"], 2)
+        # The tick's own phases and counters are untouched by the card's breakdown.
+        last = telemetry["tick_telemetry"]["last"]
+        self.assertEqual(last["counters"]["save_records"], 2)
+        self.assertNotIn("stages", last.get("phases") or {})
+        self.assertEqual(set(telemetry["tick_telemetry"]["recent"][0]),
+                         {"seq", "at", "status", "healthy", "duration_ms", "phases"})
+        shown = status._last_tick(telemetry)
+        self.assertEqual(shown["cards"][0]["stages"], card["stages"])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cli._print_tick_measurements({"tick_statistics": tick_statistics(telemetry), "last_tick": shown})
+        self.assertIn("release_merge 6201 ms, release_refresh 2000 ms, release_landed 500 ms", output.getvalue())
+
+    def test_a_push_release_names_the_push_as_its_merge(self):
+        self.host = self.runtime.host = _ReleaseHost(self.root, self.clock, ci="local")
+        outcome, card, _ = self.tick(self.assess())
+        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(self.host.calls[2:6], ["merge push", "post-merge fetch", "post-merge fast-forward",
+                                                "runtime:release-after"])
+        self.assertEqual({name: card["stages"][name] for name in (
+            "release_runtime", "release_merge", "release_refresh", "release_landed")},
+            {"release_runtime": 300.0, "release_merge": 5601.0, "release_refresh": 2000.0, "release_landed": 100.0})
+
+    def test_an_interrupted_base_read_keeps_its_time_and_blocks_the_card(self):
+        self.host.fail["merge pr base"] = HostError("gh: connection reset")
+        outcome, card, _ = self.tick(self.assess())
+        self.assertEqual((outcome["status"], outcome["reason"]), ("blocked", "merge failed"))
+        self.assertNotIn("merge pr", self.host.calls)
+        self.assertEqual(card["stages"], {
+            "flush": 0.0, "flush_lock": 0.0, "flush_write": 50.0,
+            "assessment": 450.0, "release_e2e": 0.0, "release_gate": 3400.0, "release_runtime": 150.0,
+            "release_merge": 600.0, "release_teardown": 300.0, "release_terminal": 900.0, "unclassified": 3.0,
+        })
+        self.assertEqual(self.accounting.terminal_effect.call_args.kwargs["target"], "blocked")
+        self.assertNotIn(RELEASE_REF, self.records)
+
+    def test_a_merged_release_refused_activation_replays_without_a_second_merge(self):
+        refusal = EntrypointMoved(target=RELEASE_SHA, package="ummanu", missing="src/ummanu/__main__.py")
+        self.host.fail["post-merge fast-forward"] = ProductionActivationRefused(
+            refusal, checkout=self.root / "project", old="b" * 40
+        )
+        # The refusal's comment does not reach the board: the obligation stays with the record.
+        self.runtime.writer.comment.side_effect = self.board(100, TaskError("unavailable", "board down", 1))
+        outcome, card, _ = self.tick(self.assess())
+        self.assertEqual(outcome["action"], "production-activation-recovery-pending")
+        self.assertIsNotNone(self.records[RELEASE_REF].activation_recovery)
+        self.assertEqual(card["stages"], {
+            "flush": 0.0, "flush_lock": 0.0, "flush_write": 50.0,
+            "assessment": 450.0, "release_e2e": 0.0, "release_gate": 3400.0, "release_runtime": 150.0,
+            "release_merge": 6201.0, "release_refresh": 2000.0, "release_landed": 500.0,
+            "release_terminal": 300.0, "unclassified": 3.0,
+        })
+        self.runtime.writer.comment.side_effect = self.board(100, {})
+        outcome, card, _ = self.tick(self.assess())
+        self.assertEqual(outcome["status"], "blocked")
+        self.assertEqual(self.host.calls.count("merge pr"), 1)
+        self.assertEqual(self.runtime.writer.create.call_count, 1)
+        self.assertEqual(card["stages"], {
+            "flush": 0.0, "flush_lock": 0.0, "flush_write": 100.0,
+            "assessment": 450.0, "release_e2e": 0.0, "release_gate": 3400.0,
+            "release_teardown": 300.0, "release_terminal": 1000.0, "unclassified": 3.0,
+        })
+
+    def test_an_automatic_release_shares_the_effect_sites(self):
+        def automatic():
+            with tick_stage("lifecycle"):
+                return release_lifecycle.release_effect(
+                    self.runtime, self.task(), self.record, self.records, self.payload, "attempt-1",
+                    step="review", move_reason="review:green",
+                )
+
+        outcome, card, _ = self.tick(automatic)
+        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(card["stages"], {
+            "lifecycle": 0.0, "flush": 0.0, "flush_lock": 0.0, "flush_write": 100.0,
+            "release_runtime": 300.0, "release_merge": 6201.0, "release_refresh": 2000.0,
+            "release_landed": 500.0, "release_teardown": 1500.0, "release_terminal": 900.0,
+            "unclassified": 3.0,
+        })
+
+    def test_a_release_without_a_candidate_reads_its_completion_evidence(self):
+        with mock.patch.object(release_lifecycle, "missing_completion_evidence", return_value=""):
+            outcome, card, _ = self.tick(self.assess("infra"))
+        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(self.host.calls, ["teardown"])
+        self.assertEqual(card["stages"], {
+            "flush": 0.0, "flush_lock": 0.0, "flush_write": 50.0, "assessment": 450.0,
+            "release_evidence": 150.0, "release_teardown": 1500.0, "release_terminal": 900.0,
+            "unclassified": 3.0,
+        })
+
+    def test_a_release_outside_a_card_reads_no_clock(self):
+        outcome = self.assess()()
+        self.assertEqual(outcome["to"], "done")
+        self.assertEqual(self.reads, 0)
