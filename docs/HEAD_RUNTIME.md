@@ -111,12 +111,24 @@ advance pass does not (ummanu-140, ummanu-142): it installs one `HandoffBudget` 
 continuation and reviewer launch prompts are `PromptHandoff`s (`runtime/head/handoff.py`).
 
 - One boundary. `LocalPtyHeadRuntime._handoff_prompt` (and `handoff_floor`, `handoff_started`) run
-  inside one `HandoffOperation`: every supervisor request (connect, `status`, admission, following
-  an admitted write) and every wait is cut to its deadline, and what it really took is charged.
+  inside one `HandoffOperation`, and its deadline is handed to the client itself
+  (`SupervisorClient.connect(..., remaining=operation.remaining)`). The client recomputes what is
+  left before the connect and before every `sendall` and every `recv` of every framed exchange
+  (status, admission, the follower, a fatal close's drain and read-back), so a reply that arrives in
+  pieces, behind stale or pushed frames, or after a slow send cannot outlast it; with nothing left
+  nothing is attempted, and no minimum is ever granted. What the operation really took is charged.
   An allowance that runs out is pending at the handoff's stage, never the fatal unestablished
   outcome and never a second offer: an admitted write goes on (`DELIVERY_PENDING`), and the next
-  pass reads its end. An offer whose answer was lost is read the same way, since the supervisor acts
-  on a request before it answers any later connection.
+  pass reads its end. An offer whose answer was lost is read the same way: the supervisor's loop
+  handles a whole request frame (well under `_READ_CHUNK`) on an already-registered connection in
+  the same pass that accepts any later connection, and reads the later one's request only in a
+  later pass, so the next status already shows the offer (runtime-component test
+  `test_an_offer_whose_answer_is_never_read_is_settled_before_a_later_connection_is_answered`). A
+  frame cut off by the deadline mid-send is never admitted.
+- A partial line is refused at once, and closes the head here; the supervisor is told only within
+  the allowance. A drain that does not fit is owed, not claimed: the partial line stays in the
+  journal above the handoff's floor, every later pass refuses it again and tells the supervisor from
+  its own allowance, and the caller's confirmed stop precedes any replacement.
 - Fair share. Each card is served `what is left / cards not yet served` (`HandoffBudget.card`), so a
   slow first card cannot leave a later one nothing. An effect (the line, an Enter) starts only with
   `HANDOFF_EFFECT_RESERVE_SECONDS` of the share left.
@@ -141,13 +153,20 @@ continuation and reviewer launch prompts are `PromptHandoff`s (`runtime/head/han
   `submitted`); the next tick continues it. Pending spends no busy or launch attempt. A journal that
   cannot say how far it got (window short of the floor, a second incarnation, the line twice) is
   `prompt_handoff_unestablished`, a refusal the caller's recovery owns, never a retype.
-- Liveness is the dispatcher's, on every pending stage (`_production_liveness_step`): the exact-source
-  provider cursor of the retained HeadRun, never the echo, a spinner or an accepted Enter. An
+- Liveness is one rule for both callers (`dispatch/handoff_liveness.py`), on every pending stage
+  and whether or not the supervisor answered: the exact-source provider cursor of the exact HeadRun,
+  never a heartbeat, a valid advisory ingress event, the echo, a spinner or an accepted Enter. An
   unmoved cursor spends one no-progress attempt each time the stall outlasts the next step of the
-  busy schedule (30, 90, 210 s), which reaches the existing safe-recovery rung and then the
-  identity-fenced replacement; an unavailable or foreign source takes the existing terminal outcome.
-  A new report wins over the pending obligation. A pending pass writes the record only when
-  something durable changed (the cursor's read time is not such a change).
+  busy schedule (30, 90, 210 s), read off durable times. The worker's continuation reaches it first
+  in `_production_continuation`, and a source that is unavailable or names another run takes its
+  existing terminal outcome; three attempts reach the safe-recovery rung and then the
+  identity-fenced replacement. A reviewer launch reaches it in `resolve_launch_intent`, before the
+  heartbeat grace, the retry's backoff, a pending receipt or adoption can return
+  (`review.reviewer_pending_liveness`): its episode lives on the launch's delivery record, an
+  unavailable source before its first prompt counts on the same schedule (`UnprovenSchedule`), and
+  exhaustion or a foreign source is the existing end of an undeliverable launch, a confirmed stop
+  through the intent and a relaunch, spending no delivery attempt. A verdict or report already on
+  the card wins over the pending obligation. A pending pass writes only what changed.
 - Writer fence. A reviewer's `start` types nothing; `start_review` stops the worker (or confirms a
   retained one suspended) before raising the pending launch, and `nudge_review_delivery` makes that
   fence again before any later pass types (a non-retained worker's stop is recorded on the intent).

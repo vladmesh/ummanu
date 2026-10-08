@@ -342,8 +342,15 @@ class SupervisorClient:
     The `HeadRuntime` backend turns these answers into receipts.
     """
 
-    def __init__(self, conn: socket.socket) -> None:
+    def __init__(self, conn: socket.socket, *, remaining: Callable[[], float] | None = None) -> None:
         self._conn = conn
+        # A caller's absolute deadline, as the seconds left before it (`remaining()`): when given,
+        # every blocking call this connection makes (`sendall`, each `recv`) is bounded by what is
+        # left of it at that moment, never by a timeout set once and reused across calls, and none is
+        # made once nothing is left. The connection's own timeout still bounds each call too.
+        self._remaining = remaining
+        gettimeout = getattr(conn, "gettimeout", None)
+        self._timeout = gettimeout() if callable(gettimeout) else None
         self._inbox = bytearray()
         self._request_seq = 0
         #: Answers to questions this client stopped waiting for, discarded rather than returned.
@@ -351,7 +358,25 @@ class SupervisorClient:
         self.attached = False
 
     @classmethod
-    def connect(cls, socket_path: str | os.PathLike[str], *, timeout: float = 5.0) -> SupervisorClient:
+    def connect(
+        cls,
+        socket_path: str | os.PathLike[str],
+        *,
+        timeout: float = 5.0,
+        remaining: Callable[[], float] | None = None,
+    ) -> SupervisorClient:
+        """Connect within `timeout`; with `remaining`, within what is left of the caller's deadline too.
+
+        Nothing is attempted once that deadline has passed: the refusal is a `TimeoutError` cause,
+        as a connection that ran out of time would be.
+        """
+        if remaining is not None:
+            left = remaining()
+            if left <= 0:
+                raise LocalPtyError(f"no time is left to reach the supervisor at {socket_path}") from TimeoutError(
+                    "the caller's deadline has passed"
+                )
+            timeout = min(timeout, left)
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         conn.settimeout(timeout)
         try:
@@ -359,7 +384,20 @@ class SupervisorClient:
         except OSError as exc:
             conn.close()
             raise LocalPtyError(f"no supervisor answers at {socket_path}: {exc}") from exc
-        return cls(conn)
+        return cls(conn, remaining=remaining)
+
+    def bound_by(self, remaining: Callable[[], float]) -> None:
+        """Bound every later blocking call of this connection by what is left of a caller's deadline."""
+        self._remaining = remaining
+
+    def _bounded(self) -> None:
+        """Bound the next blocking call by what is left of the caller's deadline, if it set one."""
+        if self._remaining is None:
+            return
+        left = self._remaining()
+        if left <= 0:
+            raise TimeoutError("the caller's deadline has passed")
+        self._conn.settimeout(left if self._timeout is None else min(left, self._timeout))
 
     def close(self) -> None:
         try:
@@ -382,6 +420,7 @@ class SupervisorClient:
                 line = bytes(self._inbox[:index])
                 del self._inbox[: index + 1]
                 return protocol.decode_frame(line)
+            self._bounded()
             chunk = self._conn.recv(65536)
             if not chunk:
                 raise LocalPtyError("the supervisor closed the connection")
@@ -416,6 +455,7 @@ class SupervisorClient:
         self._request_seq += 1
         request_id = self._request_seq
         try:
+            self._bounded()
             self._conn.sendall(protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id}))
         except OSError:
             # At the connection bound the supervisor writes a refusal and closes before any request,
@@ -443,8 +483,10 @@ class SupervisorClient:
         """Set the per-request answer timeout for this connection.
 
         The connect bound suits reaching a silent supervisor, not watching a slow operation; a
-        caller that knows the substrate's bound for what it watches sets it from that.
+        caller that knows the substrate's bound for what it watches sets it from that. A deadline
+        given at `connect` still bounds every call below this timeout.
         """
+        self._timeout = timeout
         self._conn.settimeout(timeout)
 
     def status(self) -> dict[str, Any]:

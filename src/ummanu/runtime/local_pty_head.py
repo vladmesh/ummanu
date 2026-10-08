@@ -28,8 +28,10 @@ Invariants:
   a payload whose admission answer or end did not come back within the caller's allowance. It is
   not fatal and not retried: the substrate goes on writing it, and the next pass reads its end from
   `status` and the journal.
-- Inside a production handoff every supervisor request is cut to the operation's deadline
-  (`_connect`, `_probe`, `_put`, `_follow`); everywhere else the bounds are what they always were.
+- Inside a production handoff every supervisor request is cut to the operation's deadline: the
+  client is given it (`_connect`) and recomputes what is left before every `sendall` and `recv` of
+  the framed exchange, so `_probe`, `_put`, `_follow_within` and a fatal close cannot outlast it, and
+  nothing is attempted once it has passed. Everywhere else the bounds are what they always were.
 - A fatal outcome closes admission here and on the substrate, and every later `deliver` is
   `HEAD_DRAINING` naming the reason: a prefix cannot be taken back (`TCIFLUSH` drops only unread
   input) and the next payload would be read as one line with it. An unknown fate may hide one.
@@ -238,9 +240,6 @@ DELIVER_DEFERRED = "handoff_allowance_spent"
 DELIVER_PENDING = "delivery_pending"
 #: What a probe that was not made, for want of allowance, says.
 HANDOFF_ALLOWANCE_SPENT = "this pass's head handoff allowance is spent"
-#: The least time any socket request is given, so a deadline a hair away is not a zero timeout
-#: (which a socket reads as non-blocking).
-_MIN_SOCKET_SECONDS = 0.001
 
 #: Stop-if-quiescent refusal tokens, the same as the legacy backend's.
 STOP_TURN_IN_FLIGHT = "turn_in_flight"
@@ -1962,9 +1961,6 @@ class LocalPtyHeadRuntime:
             return _Probe(error=TimeoutError(HANDOFF_ALLOWANCE_SPENT))
         try:
             with self._connect(address, operation) as client:
-                if operation is not None:
-                    # The connection took some of it: the answer gets only what is left.
-                    client.set_timeout(max(operation.remaining(), _MIN_SOCKET_SECONDS))
                 answer = client.status()
         except _UNREACHABLE as exc:
             return _Probe(error=exc, retry_available=operation is None)
@@ -2070,11 +2066,20 @@ class LocalPtyHeadRuntime:
     def _connect(
         self, address: _Address, operation: HandoffOperation | None = None
     ) -> local_pty.SupervisorClient:
-        """A connection bounded by `connect_timeout`, or by what is left of a handoff `operation`."""
-        timeout = self._connect_timeout
-        if operation is not None:
-            timeout = min(timeout, max(operation.remaining(), _MIN_SOCKET_SECONDS))
-        return local_pty.SupervisorClient.connect(address.socket_path, timeout=timeout)
+        """A connection bounded by `connect_timeout`, and inside a handoff `operation` by its deadline.
+
+        The operation's deadline goes to the client itself (`SupervisorClient(remaining=...)`), so it
+        bounds the connect and then every `sendall` and every `recv` of every framed exchange on the
+        connection by what is left of it at that moment; with nothing left nothing is attempted.
+        """
+        if operation is None:
+            return local_pty.SupervisorClient.connect(address.socket_path, timeout=self._connect_timeout)
+        client = local_pty.SupervisorClient.connect(
+            address.socket_path, timeout=self._connect_timeout, remaining=operation.remaining
+        )
+        # Whatever handed the connection over, the operation's deadline is the one that bounds it.
+        client.bound_by(operation.remaining)
+        return client
 
     def _process_alive(self, address: _Address, run: HeadRun) -> bool:
         """Whether the head's process is alive, by the launch identity alone.
@@ -2169,10 +2174,6 @@ class LocalPtyHeadRuntime:
             floor = int(status.get("journal_seq") or 0)
             if before_offer is not None:
                 before_offer()
-            if operation is not None:
-                # The supervisor decides admission from held state, at once; what is left of the
-                # allowance (at least a socket's minimum) bounds the answer.
-                client.set_timeout(max(operation.remaining(), _MIN_SOCKET_SECONDS))
             try:
                 answer = client.send_input(payload, subject=subject)
             except _UNREACHABLE as exc:
@@ -2295,7 +2296,6 @@ class LocalPtyHeadRuntime:
             if left <= 0:
                 return _pending_report(offered, floor, "admitted, and still being written when this "
                                        "pass's allowance ran out", last, seq)
-            client.set_timeout(max(left, _MIN_SOCKET_SECONDS))
             try:
                 status = client.status()
             except _UNREACHABLE as exc:
@@ -2426,8 +2426,11 @@ class LocalPtyHeadRuntime:
         """Hand this head no more work, here and at its supervisor, remembering the reason.
 
         The single place for every fatal outcome, from `deliver` and `_abandon_bring_up` alike.
-        Inside a handoff `operation` the supervisor is told within what is left of it, and never
-        given less than `HANDOFF_EFFECT_RESERVE_SECONDS`: a fatal close is worth that much.
+        Inside a handoff `operation` the supervisor is told only within what is left of it, and not
+        at all once nothing is: the head is closed here at once either way, and what the supervisor
+        was not told is owed by the durable evidence that made the outcome fatal (a partial line in
+        the journal, which every later pass of the handoff refuses again and tells the supervisor
+        again from its own allowance) and by the caller's confirmed stop before any replacement.
         """
         self._fatal[run.run_id] = (
             DRAIN_AFTER_PARTIAL_DELIVERY
@@ -2445,15 +2448,7 @@ class LocalPtyHeadRuntime:
                     else DELIVER_UNKNOWN_IS_FATAL
                 ),
             ),
-            **(
-                {}
-                if operation is None
-                else {
-                    "timeout": min(
-                        self._connect_timeout, max(operation.remaining(), HANDOFF_EFFECT_RESERVE_SECONDS)
-                    )
-                }
-            ),
+            **({} if operation is None else {"operation": operation}),
         )
 
     def _status_of(self, run: HeadRun, report: DeliveryReport) -> str:
@@ -2524,7 +2519,7 @@ class LocalPtyHeadRuntime:
         )
 
     def _close_substrate_admission(
-        self, run: HeadRun, initiator: StopInitiator, *, timeout: float | None = None
+        self, run: HeadRun, initiator: StopInitiator, *, operation: HandoffOperation | None = None
     ) -> tuple[bool, Any, int, _Probe | None]:
         """Tell the supervisor to take no more input, and read the answer back.
 
@@ -2535,12 +2530,11 @@ class LocalPtyHeadRuntime:
         address = self._address(run)
         if address is None or not address.socket_path.exists():
             return False, OBSERVE_NO_RUN_DIRECTORY, 0, None
+        if operation is not None and operation.remaining() <= 0:
+            # Nothing is left of the handoff's allowance: no request is made, and nothing is claimed.
+            return False, HANDOFF_ALLOWANCE_SPENT, 0, None
         try:
-            with (
-                self._connect(address)
-                if timeout is None
-                else local_pty.SupervisorClient.connect(address.socket_path, timeout=timeout)
-            ) as client:
+            with self._connect(address, operation) as client:
                 answer = client.drain(initiator.actor or "dispatcher")
                 if not answer.get("ok"):
                     return False, answer, 0, None

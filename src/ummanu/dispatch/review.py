@@ -7,7 +7,17 @@ from dataclasses import replace
 from typing import Any
 
 from ummanu.dispatch import attempt_accounting
-from ummanu.dispatch.helpers import scrub_host_output
+from ummanu.dispatch.handoff_liveness import (
+    LAUNCH_LIVENESS_KEY,
+    LAUNCH_UNPROVEN_KEY,
+    PENDING_UNPROVABLE,
+    UnprovenSchedule,
+    durable_view,
+    no_progress_exhausted,
+    observe_pending_handoff,
+    provider_evidence,
+)
+from ummanu.dispatch.helpers import _last_marker, scrub_host_output
 from ummanu.dispatch.launch import (
     LAUNCH_DELIVERY_MAX_ATTEMPTS,
     REVIEW_ROLE,
@@ -26,10 +36,12 @@ from ummanu.dispatch.launch import (
     defer_pending_launch_delivery,
     forget_role_head,
     launch_aborted,
+    launch_intent,
     launch_intent_unwritable,
     launch_left_a_head,
     mark_launch_aborted,
     pane_state_label,
+    stop_undeliverable_launch,
     undelivered_launch_delivery,
     write_launch_intent,
 )
@@ -57,7 +69,7 @@ from ummanu.dispatch.watchdog import (
     review_launch_abort_stuck_ticks as _review_launch_abort_stuck_ticks,
     wait_cycle_token as _wait_cycle_token,
 )
-from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.dispatch.worker_lifecycle import WorkerContinuationLiveness, head_run_binding
 from ummanu.runtime.head import HeadRun, HeadRunError
 from ummanu.runtime.head.handoff import handoff_pending_stage
 from ummanu.runtime.head_runtime_backends import head_runtime_name
@@ -577,6 +589,99 @@ def _reviewer_launch_aborted(
         role=REVIEW_ROLE,
         reason=scrub_host_output(str(exc)),
     )
+
+
+def reviewer_pending_liveness(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    record: DispatcherRecord,
+    intent: dict[str, Any],
+    step: str,
+) -> dict[str, Any] | None:
+    """A reviewer launch whose production handoff is pending, under the shared liveness rule.
+
+    Reached from `resolve_launch_intent` before its heartbeat grace, the retry's backoff, a pending
+    receipt or adoption can return in its place, whatever stage the handoff stopped at and whether
+    or not its supervisor answered. In the card's precedence:
+
+    1. A verdict this round's reviewer already posted is the authoritative completion: the delivery
+       is confirmed by it and the launch goes on to adoption, over any stale pending stage.
+    2. The exact-source provider cursor of the reviewer's own HeadRun (`review_head_run`), on the
+       shared rule (`handoff_liveness.observe_pending_handoff`). The episode lives on the launch's
+       delivery record, so a restart neither resets nor repeats its schedule. A head raised for this
+       handoff has no provider record before it takes its prompt, so an unavailable source counts as
+       no progress on the same schedule; a source naming another HeadRun is unprovable.
+    3. No-progress exhausted, or an unprovable source: the existing bounded end of an undeliverable
+       launch, a confirmed stop through the intent and a relaunch (`stop_undeliverable_launch`). It
+       spends no delivery attempt, and nothing of the handoff is retried or replayed.
+
+    Returns the tick's outcome when this settles the launch, None to go on. Writes only what changed.
+    """
+    delivery = undelivered_launch_delivery(intent)
+    if not delivery or not delivery.get("handoff"):
+        return None
+    ref = task["ref"]
+    written = durable_view(record)
+    now = time.time()
+    if _last_marker(task, record.review_baseline, {"review:green", "review:red"}):
+        record.launch_intent = {
+            **intent,
+            "delivery": {**delivery, "state": "confirmed", "next_at": 0.0, "confirmed_at": now, "confirmed_by": "verdict"},
+        }
+        records[ref] = record
+        runtime.save_records(payload, records)
+        return None
+    stored = delivery.get(LAUNCH_LIVENESS_KEY)
+    episode = (
+        WorkerContinuationLiveness.from_json(stored)
+        if isinstance(stored, dict)
+        else WorkerContinuationLiveness.begin(record.review_head_run)
+    )
+    unproven = UnprovenSchedule.from_json(delivery.get(LAUNCH_UNPROVEN_KEY))
+    seen = observe_pending_handoff(
+        episode,
+        provider_evidence(runtime, task, record, "review"),
+        now=now,
+        head_run=record.review_head_run,
+        unproven=unproven,
+    )
+    record.launch_intent = {
+        **intent,
+        "delivery": {
+            **delivery,
+            LAUNCH_LIVENESS_KEY: episode.to_json(),
+            LAUNCH_UNPROVEN_KEY: unproven.to_json(),
+        },
+    }
+    exhausted = no_progress_exhausted(episode, unproven)
+    if seen.verdict == PENDING_UNPROVABLE or exhausted:
+        why = (
+            f"its provider made no progress in {max(episode.busy_attempts, unproven.attempts)} scheduled looks"
+            if exhausted
+            else f"its provider source cannot be trusted for this run ({episode.reason or seen.observation})"
+        )
+        return stop_undeliverable_launch(
+            runtime,
+            payload,
+            records,
+            ref,
+            record,
+            launch_intent(record),
+            REVIEW_ROLE,
+            step,
+            readiness=str(delivery.get("state") or ""),
+            attempts=int(delivery.get("attempts") or 0),
+            reason=(
+                f"the reviewer's handoff stayed pending and {why}; it has been stopped and the "
+                "launch is made again"
+            ),
+        )
+    if durable_view(record) != written:
+        records[ref] = record
+        runtime.save_records(payload, records)
+    return None
 
 
 def retry_busy_reviewer_launch_delivery(

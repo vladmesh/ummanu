@@ -18,11 +18,14 @@ set raises `TimeoutError` after that bound, as a socket does. No test sleeps.
 from __future__ import annotations
 
 import json
+import socket
 import tempfile
+import threading
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar
 from unittest import mock
 
 from ummanu.dispatch import launch, production, review as dispatcher_review
@@ -48,7 +51,7 @@ from ummanu.runtime.head.handoff import (
     handoff_budget,
     handoff_pending_stage,
 )
-from ummanu.runtime.head.local_pty import JournalReadResult, protocol
+from ummanu.runtime.head.local_pty import JournalReadResult, client as client_module, protocol
 from ummanu.runtime.head.local_pty.journal import JOURNAL_SCHEMA_VERSION
 from ummanu.runtime.head.local_pty.supervisor import Supervisor
 from ummanu.runtime.head.operations import NudgePointer
@@ -129,6 +132,12 @@ class ScriptedSupervisor:
         self.admission_delay = admission_delay
         self.connect_delay = connect_delay
         self.reachable = True
+        # How the answers travel back: in how many pieces, after which stale or pushed frames, and
+        # after how long a drain is answered and a request is taken off the socket.
+        self.fragments = 1
+        self.stale: list[dict[str, Any]] = []
+        self.drain_delay = 0.002
+        self.send_delay = 0.0
         # An unchanged screen (a spinner): the real supervisor folds its windows, journalling nothing.
         self.folding = False
         self.supervisor_pid, self.head_pid = 4001, 4002
@@ -270,6 +279,20 @@ class ScriptedSupervisor:
             status["output_idle_seconds"] = round(max(0.0, self.clock.now - self.last_output), 3)
         return status
 
+    def handle(self, request: dict[str, Any]) -> tuple[dict[str, Any], float]:
+        """Act on one request as it is read, and say how long its answer takes to travel back."""
+        op = request.get("op")
+        if op == protocol.OP_STATUS:
+            return self.status(), self.status_delay
+        if op == protocol.OP_INPUT:
+            return self.input(protocol.decode_payload(request.get("data")), str(request.get("subject") or "")), (
+                self.admission_delay
+            )
+        if op == protocol.OP_DRAIN:
+            self.drained = True
+            return {"ok": True}, self.drain_delay
+        return {"ok": False, "error": protocol.ERROR_UNKNOWN_OP}, 0.0
+
     def input(self, payload: bytes, subject: str) -> dict[str, Any]:
         self.advance()
         if self.drained:
@@ -293,67 +316,101 @@ class ScriptedSupervisor:
         return {"ok": True, "accepted": True, "accepted_bytes": len(payload), "delivery": self.view(), "turn": self.turn}
 
 
-class FakeClient:
-    """The `SupervisorClient` surface the runtime uses, answering from a `ScriptedSupervisor`."""
+class ScriptedSocket:
+    """The socket under a real `SupervisorClient`, on the fake clock, wired to one scripted supervisor.
 
-    def __init__(self, supervisor: ScriptedSupervisor, timeout: float) -> None:
-        self.supervisor = supervisor
+    The client does its own framing over it: what `sendall` writes is split into request frames, the
+    supervisor acts on each one as it reads it (before its answer travels back, as the real
+    supervisor's loop does), and the encoded answer arrives `delay` seconds later in `fragments`
+    pieces, after any `stale` frames queued ahead of it. A `recv` whose next piece is further away
+    than the timeout the client set for that call advances the clock by that timeout and raises
+    `TimeoutError`, as a socket does; one already due returns at once.
+    """
+
+    def __init__(self, sockets: SupervisorSockets) -> None:
+        self.sockets = sockets
+        self.supervisor: ScriptedSupervisor | None = None
+        self.timeout: float | None = None
+        self.inbox = bytearray()
+        self.arriving: list[tuple[float, bytes]] = []
+        self.timeouts: list[float] = []
+
+    def settimeout(self, timeout: float | None) -> None:
         self.timeout = timeout
 
-    def __enter__(self) -> Self:
-        return self
+    def gettimeout(self) -> float | None:
+        return self.timeout
 
-    def __exit__(self, *exc_info: object) -> None:
-        return None
+    def _wait(self, seconds: float) -> None:
+        assert self.supervisor is not None
+        clock = self.supervisor.clock
+        self.timeouts.append(-1.0 if self.timeout is None else self.timeout)
+        if self.timeout is not None and seconds > self.timeout:
+            clock.advance(self.timeout)
+            raise TimeoutError("timed out")
+        clock.advance(max(0.0, seconds))
+
+    def connect(self, path: str) -> None:
+        supervisor = self.sockets.supervisors[str(path)]
+        self.supervisor = supervisor
+        supervisor.connects += 1
+        if not supervisor.reachable:
+            raise ConnectionRefusedError(f"no supervisor at {path}")
+        self._wait(supervisor.connect_delay)
+
+    def sendall(self, data: bytes) -> None:
+        supervisor = self.supervisor
+        assert supervisor is not None
+        self._wait(supervisor.send_delay)
+        self.inbox += data
+        while (index := self.inbox.find(b"\n")) >= 0:
+            request = protocol.decode_frame(bytes(self.inbox[:index]))
+            del self.inbox[: index + 1]
+            answer, delay = supervisor.handle(request)
+            answer = {**answer, protocol.REQUEST_ID: request.get(protocol.REQUEST_ID)}
+            now = supervisor.clock.now
+            frames = [protocol.encode_frame(frame) for frame in supervisor.stale]
+            supervisor.stale = []
+            frame = protocol.encode_frame(answer)
+            pieces = max(1, supervisor.fragments)
+            size = -(-len(frame) // pieces)
+            parts = [frame[at : at + size] for at in range(0, len(frame), size)]
+            for stale in frames:
+                self.arriving.append((now, stale))
+            for number, part in enumerate(parts, start=1):
+                self.arriving.append((now + delay * number / len(parts), part))
+
+    def recv(self, size: int) -> bytes:
+        assert self.supervisor is not None
+        if not self.arriving:
+            self._wait(float("inf"))
+        at, chunk = self.arriving[0]
+        self._wait(at - self.supervisor.clock.now)
+        self.arriving.pop(0)
+        return chunk
 
     def close(self) -> None:
         return None
 
-    def set_timeout(self, timeout: float) -> None:
-        self.timeout = timeout
-
-    def _answer_after(self, delay: float) -> None:
-        if delay > self.timeout:
-            self.supervisor.clock.advance(self.timeout)
-            raise TimeoutError("timed out")
-        self.supervisor.clock.advance(delay)
-
-    def status(self) -> dict[str, Any]:
-        self._answer_after(self.supervisor.status_delay)
-        return self.supervisor.status()
-
-    def send_input(self, data: bytes | str, *, subject: str = "") -> dict[str, Any]:
-        payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-        # The supervisor reads the request and acts on it before its answer travels back.
-        answer = self.supervisor.input(payload, subject)
-        self._answer_after(self.supervisor.admission_delay)
-        return answer
-
-    def drain(self, actor: str) -> dict[str, Any]:
-        self.supervisor.drained = True
-        return {"ok": True}
-
 
 class SupervisorSockets:
-    """`SupervisorClient.connect`, answered by whichever scripted supervisor owns the socket path."""
+    """The socket module `SupervisorClient.connect` uses, answered by the scripted supervisors."""
+
+    AF_UNIX = socket.AF_UNIX
+    SOCK_STREAM = socket.SOCK_STREAM
 
     def __init__(self) -> None:
         self.supervisors: dict[str, ScriptedSupervisor] = {}
+        self.opened: list[ScriptedSocket] = []
 
     def add(self, supervisor: ScriptedSupervisor) -> ScriptedSupervisor:
         self.supervisors[str(supervisor.run_dir / protocol.SOCKET_NAME)] = supervisor
         return supervisor
 
-    def connect(self, socket_path: Any, *, timeout: float = 5.0) -> FakeClient:
-        supervisor = self.supervisors[str(socket_path)]
-        supervisor.connects += 1
-        if not supervisor.reachable:
-            raise local_pty.LocalPtyError(f"no supervisor answers at {socket_path}") from ConnectionRefusedError()
-        if supervisor.connect_delay > timeout:
-            supervisor.clock.advance(timeout)
-            raise local_pty.LocalPtyError(f"no supervisor answers at {socket_path}") from TimeoutError()
-        supervisor.clock.advance(supervisor.connect_delay)
-        return FakeClient(supervisor, timeout)
+    def socket(self, *_args: Any) -> ScriptedSocket:
+        opened = ScriptedSocket(self)
+        self.opened.append(opened)
+        return opened
 
 
 @dataclass
@@ -367,7 +424,7 @@ class HandoffTestCase(unittest.TestCase):
         self.root = Path(tempfile.mkdtemp(prefix="h", dir="/tmp"))
         self.clock = FakeClock()
         self.sockets = SupervisorSockets()
-        patcher = mock.patch.object(local_pty.SupervisorClient, "connect", self.sockets.connect)
+        patcher = mock.patch.object(client_module, "socket", self.sockets)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.runs = 0
@@ -610,6 +667,201 @@ class NoSupervisorRequestEscapesTheAllowanceTests(HandoffTestCase):
         receipt, _, took = self.tick(run, self.handoff(supervisor))
         self.assertEqual(receipt.handoff_stage, HANDOFF_SETTLE)
         self.assertAlmostEqual(took, 4.0, places=6, msg="the 5 s connect bound is cut to the allowance")
+
+
+class TheDeadlineBoundsTheWholeFramedExchangeTests(HandoffTestCase):
+    """review-11 BLOCKER-budget-escape: the deadline reaches every syscall of the real client.
+
+    A socket timeout bounds one blocking call, not a framed request. The operation's deadline is
+    given to `SupervisorClient` itself, which recomputes what is left before `connect`, `sendall`
+    and each `recv`, and attempts nothing once it is gone; so a reply that arrives in pieces, after
+    stale or pushed frames, or after a slow send cannot outlast it.
+    """
+
+    def test_a_status_answered_in_three_pieces_over_9s_costs_the_4s_allowance(self) -> None:
+        supervisor, run = self.head(status_delay=9.0)
+        supervisor.fragments = 3
+        receipt, budget, took = self.tick(run, self.handoff(supervisor))
+        self.assertEqual(receipt.handoff_stage, HANDOFF_SETTLE)
+        self.assertIn("did not answer within this pass's allowance", receipt.reason)
+        self.assertAlmostEqual(took, 4.0, places=6, msg="the review's repro took and charged 9 s here")
+        self.assertAlmostEqual(budget.spent, 4.0, places=6)
+        [opened] = self.sockets.opened
+        receive_bounds = opened.timeouts[-2:]
+        self.assertAlmostEqual(receive_bounds[0], 4.0 - 0.001, places=6, msg="the first recv got what was left")
+        self.assertAlmostEqual(receive_bounds[1], 1.0 - 0.001, places=6, msg="the second only what was left then")
+
+    def test_stale_and_pushed_frames_ahead_of_the_answer_spend_the_same_deadline(self) -> None:
+        supervisor, run = self.head(status_delay=3.5)
+        supervisor.stale = [{"event": protocol.EVENT_OUTPUT, "data": ""}, {protocol.REQUEST_ID: 99, "ok": True}]
+        supervisor.fragments = 2
+        receipt, _, took = self.tick(run, self.handoff(supervisor), budget=2.0)
+        self.assertEqual(receipt.handoff_stage, HANDOFF_SETTLE)
+        self.assertAlmostEqual(took, 2.0, places=6)
+
+    def test_an_admission_answer_in_pieces_is_pending_at_the_deadline_and_never_offered_twice(self) -> None:
+        supervisor, run = self.head(admission_delay=9.0)
+        supervisor.fragments = 3
+        handoff = self.handoff(supervisor)
+        first, _, took = self.tick(run, handoff)
+        self.assertAlmostEqual(took, 4.0, places=6)
+        self.assertEqual(first.status, HEAD_BUSY)
+        self.assertIsNone(first.failure)
+        self.assertEqual(supervisor.offered, [SUBJECT])
+        supervisor.admission_delay, supervisor.fragments = 0.002, 1
+        self.clock.advance(60.0)
+        self.assertEqual(self.tick(run, handoff)[0].status, HEAD_OK)
+        self.assertEqual(supervisor.offered, [SUBJECT, f"{SUBJECT}:submit"])
+
+    def test_a_follower_whose_status_comes_in_pieces_stops_at_the_deadline(self) -> None:
+        supervisor, run = self.head(write_seconds=9.0)
+        handoff = self.handoff(supervisor)
+        supervisor.status_delay, supervisor.fragments = 0.9, 3
+        receipt, _, took = self.tick(run, handoff)
+        self.assertLessEqual(took, 4.0 + 1e-6)
+        self.assertEqual(receipt.handoff_stage, HANDOFF_TYPED)
+        self.assertEqual(supervisor.offered, [SUBJECT])
+
+    def test_a_deadline_that_passes_during_the_send_offers_nothing(self) -> None:
+        supervisor, run = self.head()
+        handoff = self.handoff(supervisor)
+
+        class SlowSecondSend(ScriptedSocket):
+            """The status goes out at once; the line's own send would need 5 s, past the allowance."""
+
+            sent = 0
+
+            def sendall(inner, data: bytes) -> None:
+                SlowSecondSend.sent += 1
+                supervisor.send_delay = 0.0 if SlowSecondSend.sent == 1 else 5.0
+                ScriptedSocket.sendall(inner, data)
+
+        with mock.patch.object(self.sockets, "socket", lambda *_a: SlowSecondSend(self.sockets)):
+            receipt, _, took = self.tick(run, handoff)
+        self.assertLessEqual(took, 4.0 + 1e-6)
+        self.assertEqual(receipt.status, HEAD_BUSY)
+        self.assertEqual(receipt.handoff_stage, HANDOFF_SETTLE, "the line never reached the supervisor")
+        self.assertEqual(supervisor.offered, [])
+        supervisor.send_delay = 0.0
+        self.clock.advance(60.0)
+        self.assertEqual(self.tick(run, handoff)[0].status, HEAD_OK)
+        self.assertEqual(supervisor.offered, [SUBJECT, f"{SUBJECT}:submit"], "typed once, after nothing was taken")
+
+    def test_a_native_socket_fragmenting_its_answer_cannot_outlast_the_operation(self) -> None:
+        """The review's socketpair repro: 0.12 s allowed against a reply spread over 0.24 s."""
+        _, run = self.head()
+        client_end, server_end = socket.socketpair()
+        self.addCleanup(client_end.close)
+        frame = protocol.encode_frame({"ok": True, "alive": True, "journal_seq": 2, protocol.REQUEST_ID: 1})
+        cut = len(frame) // 3
+
+        def respond() -> None:
+            try:
+                server_end.recv(65536)
+                for piece in (frame[:cut], frame[cut : 2 * cut], frame[2 * cut :]):
+                    time.sleep(0.08)
+                    server_end.sendall(piece)
+            except OSError:
+                pass
+            finally:
+                server_end.close()
+
+        class Connected:
+            """A real connected socket whose `connect` was already made by `socketpair`."""
+
+            def __init__(self, *_args: Any) -> None:
+                self.real = client_end
+
+            def connect(self, _path: str) -> None:
+                return None
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self.real, name)
+
+        peer = threading.Thread(target=respond)
+        peer.start()
+        runtime = self.runtime()
+        native = mock.Mock(AF_UNIX=socket.AF_UNIX, SOCK_STREAM=socket.SOCK_STREAM, socket=Connected)
+        with (
+            mock.patch.object(client_module, "socket", native),
+            handoff_budget(0.12, clock=time.monotonic) as budget,
+            budget.operation(SUBJECT) as operation,
+        ):
+            probe = runtime._probe(runtime._address(run), operation)
+        peer.join(timeout=2.0)
+        self.assertIsNone(probe.status, "the reply was not complete within the deadline")
+        self.assertTrue(probe.timed_out)
+        # Real scheduling: the deadline is the bound, give or take a scheduler's slice.
+        self.assertLess(budget.spent, 0.12 + 0.05, "each recv got a fresh socket timeout")
+        self.assertGreaterEqual(budget.spent, 0.11)
+
+
+class AFatalPrefixIsClosedWithinTheAllowanceTests(HandoffTestCase):
+    """The partial line stays a fatal refusal at once; the remote drain spends only real allowance."""
+
+    def journal_a_prefix(self, supervisor: ScriptedSupervisor) -> None:
+        supervisor.append(
+            "input.accepted", 0.0, subject=SUBJECT, bytes=7, offered_bytes=60, complete=False, state="stalled", delivery=1
+        )
+
+    def test_with_no_allowance_the_prefix_is_refused_without_a_single_connection(self) -> None:
+        supervisor, run = self.head(connect_delay=3.0)
+        handoff = self.handoff(supervisor)
+        self.journal_a_prefix(supervisor)
+        receipt, budget, took = self.tick(run, handoff, budget=0.0)
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertFalse(receipt.ok)
+        self.assertEqual((supervisor.connects, took, budget.spent), (0, 0.0, 0.0), "no 0.5 s is invented")
+        self.assertFalse(supervisor.drained, "and no drain is claimed")
+
+    def test_a_drain_the_allowance_cannot_finish_is_owed_and_paid_by_a_later_pass(self) -> None:
+        supervisor, run = self.head()
+        handoff = self.handoff(supervisor)
+        self.journal_a_prefix(supervisor)
+        supervisor.connect_delay = 9.0
+        receipt, _, took = self.tick(run, handoff)
+        self.assertFalse(receipt.ok)
+        self.assertAlmostEqual(took, 4.0, places=6)
+        self.assertFalse(supervisor.drained)
+        # A restarted dispatcher: the journal still holds the prefix, so it is refused again, never
+        # retyped, and this pass's allowance tells the supervisor and reads it back.
+        supervisor.connect_delay = 0.001
+        self.clock.advance(60.0)
+        again, _, _ = self.tick(run, handoff)
+        self.assertFalse(again.ok)
+        self.assertTrue(supervisor.drained)
+        self.assertEqual(supervisor.offered, [])
+
+    def test_a_slow_drain_readback_ends_at_the_deadline_without_a_claim(self) -> None:
+        supervisor, run = self.head()
+        handoff = self.handoff(supervisor)
+        self.journal_a_prefix(supervisor)
+        supervisor.status_delay, supervisor.fragments = 1.0, 1
+        supervisor.drain_delay = 9.0
+        receipt, _, took = self.tick(run, handoff)
+        self.assertFalse(receipt.ok)
+        self.assertLessEqual(took, 4.0 + 1e-6)
+
+
+class ThreeSlowPeersAndAQuietOneTests(HandoffTestCase):
+    def test_three_peers_with_fragmented_slow_status_fit_and_a_quiet_fourth_still_moves(self) -> None:
+        slow = [self.head(status_delay=9.0) for _ in range(3)]
+        for supervisor, _ in slow:
+            supervisor.fragments = 3
+        quiet = self.head()
+        heads = [*slow, quiet]
+        handoffs = [self.handoff(supervisor) for supervisor, _ in heads]
+        for tick in range(3):
+            started = self.clock.now
+            with handoff_budget(4.0, cards=4, clock=self.clock.monotonic) as budget:
+                for (_, run), handoff in zip(heads, handoffs, strict=True):
+                    with budget.card():
+                        self.deliver(run, handoff)
+            self.assertLessEqual(self.clock.now - started, 4.0 + 1e-6, f"tick {tick}")
+            self.assertAlmostEqual(budget.spent, self.clock.now - started, places=6)
+            self.clock.advance(10.0)
+        self.assertEqual(quiet[0].offered, [SUBJECT, f"{SUBJECT}:submit"])
+        self.assertTrue(all(supervisor.offered == [] for supervisor, _ in slow))
 
 
 class TheFloorAndTheStartAreReadInsideTheAllowanceTests(HandoffTestCase):
@@ -1201,6 +1453,264 @@ class ReviewerLaunchHandoffTests(unittest.TestCase):
         )
         self.assertEqual(result["action"], "review-launch-delivery-unavailable")
         self.assertEqual(launch_delivery(self.record.launch_intent)["attempts"], 1)
+
+
+class AReviewerPendingHandoffAnswersToTheSharedLivenessRuleTests(HandoffTestCase):
+    """review-11 BLOCKER-reviewer-pending-liveness, through the real `resolve_launch_intent`.
+
+    The reviewer's head is behind the scripted supervisor and its exact heartbeat is live. Its
+    pending handoff reaches `review.reviewer_pending_liveness` before the retry, the backoff or
+    adoption can return: exact-source provider looks on the shared schedule, the existing confirmed
+    stop and relaunch when they are exhausted, and nothing typed again.
+    """
+
+    REVIEW_RUN: ClassVar[dict[str, Any]] = {
+        "run_id": "r1",
+        "workspace": "/unused",
+        "task_ref": {"kind": "card", "ref": "sample-1"},
+        "role": "reviewer",
+        "spec": {"profile_id": "claude", "adapter": "claude"},
+    }
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.task = {"ref": "sample-1", "comments": []}
+        self.record = DispatcherRecord(
+            worker="worker-1",
+            workspace="/unused",
+            handle="",
+            head="codex",
+            review_head="claude",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="review_starting",
+            claimed_at=1.0,
+        )
+        self.record.review_head_run = dict(self.REVIEW_RUN)
+        self.record.launch_intent = {
+            "role": "review",
+            "head": "claude",
+            "at": EPOCH,
+            "run_id": "r1",
+            "leaf": "leaf-r1",
+            "pid_file": "/tmp/r1.pid",
+            "task": "card:sample-1",
+            "aborted": True,
+            "head_run": dict(self.REVIEW_RUN),
+        }
+        launch.defer_pending_launch_delivery(
+            self.record, {"subject": "reviewer-launch", "handoff_stage": HANDOFF_SETTLE}, worker_fenced=True
+        )
+        self.records = {"sample-1": self.record}
+        self.payload: dict[str, Any] = {}
+        self.runtime = mock.Mock()
+        self.cursor = "cursor-1"
+        self.source_state = "unavailable"
+        self.runtime.host.provider_progress.side_effect = self.provider
+        alive = mock.patch.object(launch, "launch_intent_liveness", return_value={"alive": True, "pid_known": True})
+        alive.start()
+        self.addCleanup(alive.stop)
+        wall = mock.patch.object(dispatcher_review.time, "time", side_effect=lambda: self.clock.wall())
+        wall.start()
+        self.addCleanup(wall.stop)
+
+    def provider(self, _task, record, kind):
+        self.assertEqual(kind, "review")
+        if self.source_state != "observed":
+            return {"state": self.source_state, "reason": "exact source says so"}
+        from ummanu.runtime.head_run_binding import head_run_binding
+
+        run_id, fingerprint = head_run_binding(record.review_head_run)
+        return {
+            "state": "observed",
+            "admission": "accepted",
+            "head_run_id": run_id,
+            "head_run_fingerprint": fingerprint,
+            "source": "claude-transcript",
+            "source_fingerprint": "b" * 32,
+            "cursor": self.cursor,
+        }
+
+    def pending_nudge(self, stage: str) -> None:
+        def nudge(*_args):
+            error = HostError(f"retained reviewer document nudge is pending: production handoff pending at {stage}")
+            error.evidence = {"subject": "reviewer-launch", "handoff_stage": stage}
+            raise error
+
+        self.runtime.host.nudge_review_delivery.side_effect = nudge
+
+    def resolve(self) -> dict[str, Any] | None:
+        with handoff_budget(4.0, clock=self.clock.monotonic):
+            return launch.resolve_launch_intent(self.runtime, self.task, self.records, self.payload)
+
+    def test_twelve_recoveries_two_hours_apart_reach_the_confirmed_stop_with_nothing_retyped(self) -> None:
+        # The review's repro: a live exact heartbeat, a supervisor that never answers in time.
+        supervisor, run = self.head(status_delay=6.0)
+        handoff = self.handoff(supervisor)
+        backend = self.runtime_for_reviewer = self.runtime_()
+
+        def nudge(*_args):
+            receipt = backend.deliver(
+                run, POINTER, subject="reviewer-launch", transport=Transport(), handoff=handoff
+            )
+            error = HostError(receipt.reason)
+            error.evidence = receipt.evidence.to_json() if receipt.evidence is not None else {}
+            raise error
+
+        self.runtime.host.nudge_review_delivery.side_effect = nudge
+        outcomes = []
+        for _ in range(12):
+            outcomes.append(self.resolve())
+            if outcomes[-1] and outcomes[-1]["action"] == "review-launch-undeliverable":
+                break
+            self.clock.advance(7200.0)
+        self.assertEqual(outcomes[-1]["action"], "review-launch-undeliverable")
+        self.assertLessEqual(len(outcomes), 4, "three scheduled looks, then the existing end")
+        self.assertEqual(outcomes[0]["action"], "review-launch-handoff-pending")
+        self.runtime.host.stop_review.assert_called_once()
+        self.assertGreaterEqual(self.runtime.host.provider_progress.call_count, 3, "exact-source looks were made")
+        self.assertEqual(supervisor.offered, [], "nothing typed, nothing replayed")
+        delivery = launch.launch_delivery(self.record.launch_intent or {}) if self.record.launch_intent else {}
+        self.assertEqual(int(delivery.get("attempts") or 0), 0, "no delivery attempt was spent by expiry")
+
+    def runtime_(self) -> LocalPtyHeadRuntime:
+        return self.runtime_factory()
+
+    def runtime_factory(self) -> LocalPtyHeadRuntime:
+        return HandoffTestCase.runtime(self)
+
+    def test_every_pending_stage_with_a_stalled_cursor_ends_the_same_way(self) -> None:
+        for stage in (HANDOFF_SETTLE, HANDOFF_TYPED, HANDOFF_SUBMITTED):
+            with self.subTest(stage=stage):
+                self.setUp()
+                self.source_state = "observed"
+                self.pending_nudge(stage)
+                actions = []
+                for _ in range(8):
+                    result = self.resolve()
+                    actions.append(result["action"] if result else None)
+                    if actions[-1] == "review-launch-undeliverable":
+                        break
+                    self.clock.advance(120.0)
+                self.assertEqual(actions[-1], "review-launch-undeliverable")
+                self.runtime.host.stop_review.assert_called_once()
+
+    def test_provider_progress_keeps_it_alive_and_is_not_a_delivery(self) -> None:
+        self.source_state = "observed"
+        self.pending_nudge(HANDOFF_SUBMITTED)
+        for step in range(8):
+            self.cursor = f"cursor-{step}"
+            result = self.resolve()
+            self.assertEqual(result["action"], "review-launch-handoff-pending")
+            self.clock.advance(120.0)
+        self.runtime.host.stop_review.assert_not_called()
+        self.assertEqual(launch.launch_delivery(self.record.launch_intent)["state"], LAUNCH_DELIVERY_HANDOFF_PENDING)
+
+    def test_a_source_naming_another_head_run_ends_it_at_once(self) -> None:
+        self.source_state = "identity_mismatch"
+        self.pending_nudge(HANDOFF_TYPED)
+        result = self.resolve()
+        self.assertEqual(result["action"], "review-launch-undeliverable")
+        self.runtime.host.stop_review.assert_called_once()
+        self.runtime.host.nudge_review_delivery.assert_not_called()
+
+    def test_a_source_unavailable_before_its_first_prompt_can_still_baseline_later(self) -> None:
+        self.pending_nudge(HANDOFF_SETTLE)
+        self.resolve()
+        self.clock.advance(20.0)
+        self.source_state = "observed"
+        self.assertEqual(self.resolve()["action"], "review-launch-handoff-pending")
+        episode = launch.launch_delivery(self.record.launch_intent)["liveness"]
+        self.assertTrue(episode["baseline_established"])
+        self.assertFalse(episode["source_rejected"])
+
+    def test_a_verdict_already_on_the_card_wins_over_a_deferred_stage(self) -> None:
+        self.pending_nudge(HANDOFF_SUBMITTED)
+        self.task["comments"] = [{"marker": "review:green", "body": "[review:green] fine"}]
+        self.resolve()
+        self.runtime.host.nudge_review_delivery.assert_not_called()
+        self.runtime.host.provider_progress.assert_not_called()
+        self.assertEqual(self.record.state, "reviewing", "adopted as the launch it was")
+
+    def test_an_unchanged_pending_pass_writes_nothing(self) -> None:
+        self.source_state = "observed"
+        self.pending_nudge(HANDOFF_TYPED)
+        self.resolve()
+        self.clock.advance(1.0)
+        self.resolve()  # the first look at the unmoved cursor is new liveness evidence
+        self.runtime.save_records.reset_mock()
+        self.clock.advance(5.0)
+        self.assertEqual(self.resolve()["action"], "review-launch-handoff-pending")
+        self.runtime.save_records.assert_not_called()
+
+
+class TheSharedLivenessRuleTests(unittest.TestCase):
+    """`handoff_liveness`: the one rule both callers apply, read back from what they persist."""
+
+    RUN: ClassVar[dict[str, Any]] = AReviewerPendingHandoffAnswersToTheSharedLivenessRuleTests.REVIEW_RUN
+
+    def evidence(self, cursor: str = "c1", state: str = "observed") -> dict[str, Any]:
+        from ummanu.runtime.head_run_binding import head_run_binding
+
+        run_id, fingerprint = head_run_binding(self.RUN)
+        return {
+            "state": state,
+            "admission": "accepted",
+            "head_run_id": run_id,
+            "head_run_fingerprint": fingerprint,
+            "source": "s",
+            "source_fingerprint": "c" * 32,
+            "cursor": cursor,
+        }
+
+    def test_the_schedule_survives_a_restart_and_spends_one_attempt_a_look(self) -> None:
+        from ummanu.dispatch import handoff_liveness as rule
+        from ummanu.dispatch.worker_lifecycle import WorkerContinuationLiveness
+
+        episode = WorkerContinuationLiveness.begin(self.RUN)
+        self.assertEqual(rule.observe_pending_handoff(episode, self.evidence(), now=500.0, head_run=self.RUN).verdict,
+                         rule.PENDING_QUIET)
+        verdicts = []
+        for now in (510.0, 540.0, 1500.0, 1501.0, 1502.0):
+            episode = WorkerContinuationLiveness.from_json(episode.to_json())  # a new process every look
+            verdicts.append(rule.observe_pending_handoff(episode, self.evidence(), now=now, head_run=self.RUN).verdict)
+        self.assertEqual(verdicts, ["quiet", "attempt", "attempt", "attempt", "quiet"])
+        self.assertTrue(rule.no_progress_exhausted(episode))
+
+    def test_heartbeats_and_receipts_are_not_inputs_only_the_cursor_is(self) -> None:
+        from ummanu.dispatch import handoff_liveness as rule
+        from ummanu.dispatch.worker_lifecycle import WorkerContinuationLiveness
+
+        episode = WorkerContinuationLiveness.begin(self.RUN)
+        rule.observe_pending_handoff(episode, self.evidence(), now=500.0, head_run=self.RUN)
+        self.assertEqual(
+            rule.observe_pending_handoff(episode, self.evidence("c2"), now=1500.0, head_run=self.RUN).verdict,
+            rule.PENDING_PROGRESSED,
+        )
+        self.assertEqual(episode.busy_attempts, 0)
+
+    def test_an_unavailable_source_is_unprovable_unless_the_caller_counts_it(self) -> None:
+        from ummanu.dispatch import handoff_liveness as rule
+        from ummanu.dispatch.worker_lifecycle import WorkerContinuationLiveness
+
+        unavailable = {"state": "unavailable", "reason": "no transcript"}
+        worker = WorkerContinuationLiveness.begin(self.RUN)
+        self.assertEqual(
+            rule.observe_pending_handoff(worker, unavailable, now=0.0, head_run=self.RUN).verdict, rule.PENDING_UNPROVABLE
+        )
+        reviewer = WorkerContinuationLiveness.begin(self.RUN)
+        unproven = rule.UnprovenSchedule()
+        verdicts = []
+        for now in (1000.0, 1031.0, 1091.0, 1211.0):
+            unproven = rule.UnprovenSchedule.from_json(unproven.to_json())
+            verdicts.append(
+                rule.observe_pending_handoff(reviewer, unavailable, now=now, head_run=self.RUN, unproven=unproven).verdict
+            )
+            # The episode itself stays a clean, unbaselined one a reload accepts.
+            self.assertEqual(WorkerContinuationLiveness.from_json(reviewer.to_json()), reviewer)
+        self.assertEqual(verdicts, ["quiet", "attempt", "attempt", "attempt"])
+        self.assertTrue(rule.no_progress_exhausted(reviewer, unproven))
 
 
 class TheReviewerIsFencedBeforeItsPromptTests(unittest.TestCase):

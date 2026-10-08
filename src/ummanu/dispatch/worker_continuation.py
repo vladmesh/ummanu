@@ -15,6 +15,13 @@ from typing import Any
 
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
+from ummanu.dispatch.handoff_liveness import (
+    PENDING_ATTEMPT,
+    PENDING_UNPROVABLE,
+    durable_view,
+    observe_pending_handoff,
+    provider_evidence,
+)
 from ummanu.dispatch.helpers import scrub_host_output
 from ummanu.dispatch.host import _record_worker_delivery_evidence
 from ummanu.dispatch.launch import (
@@ -553,10 +560,10 @@ def _production_continuation(
     """
     ref = task["ref"]
     continuation = record.worker_continuation
-    written = [_durable_view(record)]
+    written = [durable_view(record)]
 
     def persist() -> None:
-        current = _durable_view(record)
+        current = durable_view(record)
         if current != written[0]:
             records[ref] = record
             runtime.save_records(payload, records)
@@ -671,23 +678,26 @@ def _production_liveness_step(
     phase: str,
     persist: Callable[[], None],
 ) -> dict[str, Any] | None:
-    """Exact-source provider liveness for a pending production continuation, whatever its stage.
+    """The shared pending-handoff liveness rule (`handoff_liveness`), on the retained worker's ladder.
 
-    Independent of the delivery: what the handoff typed, the echo, a spinner or an accepted Enter
-    is not provider progress, and only the provider's own cursor for this exact HeadRun moves the
-    ladder. An unavailable or mismatched source takes the existing terminal outcome. A cursor that
-    has not moved spends one no-progress attempt each time the stall outlasts the next step of the
-    busy schedule (30 s, then 90 s, then 210 s since its last progress), so a pending stage that
-    never ends reaches the existing safe-recovery rung and then the identity-fenced replacement.
-    The schedule is read off durable times, so a pass that spends nothing writes nothing.
+    Independent of the delivery and of whether its supervisor answered this pass. An unavailable or
+    mismatched source takes the existing terminal outcome at once (the worker was baselined before
+    it was woken); an unmoved cursor spends attempts on the shared schedule, and the third reaches the
+    existing safe-recovery rung and then the identity-fenced replacement.
     """
     now = time.time()
-    observation = _observe_retained_continuation_progress(runtime, task, record, now=now)
-    blocked = _block_unadmitted_continuation_liveness(
-        runtime, task, record, records, payload, attempt_id, phase=phase, observation=observation
+    liveness = record.worker_continuation_liveness
+    seen = observe_pending_handoff(
+        liveness, _retained_provider_evidence(runtime, task, record), now=now, head_run=record.worker_head_run
     )
-    if blocked is not None:
-        return blocked
+    if liveness.admitted:
+        record.worker_continuation.busy_attempts = liveness.busy_attempts
+    if seen.progressed:
+        record.worker_continuation.busy_next_at = 0.0
+    if seen.verdict == PENDING_UNPROVABLE:
+        return _block_unadmitted_continuation_liveness(
+            runtime, task, record, records, payload, attempt_id, phase=phase, observation=seen.observation
+        )
     window = _continuation_recovery_window(
         runtime,
         task,
@@ -696,33 +706,18 @@ def _production_liveness_step(
         payload,
         attempt_id,
         phase=phase,
-        fresh_provider_progress=observation == "progressed",
+        fresh_provider_progress=seen.progressed,
         now=now,
         persist=persist,
     )
     if window is not None:
         return window
-    liveness = record.worker_continuation_liveness
-    if liveness.state != ContinuationLivenessState.STALLED:
-        return None
-    stalled_since = max(liveness.last_provider_progress_at, liveness.first_observed_at)
-    if liveness.busy_attempts >= _no_progress_attempts_due(now - stalled_since):
+    if seen.verdict != PENDING_ATTEMPT:
         return None
     liveness.no_progress_evidence = _continuation_no_progress_evidence(record, liveness.state)
-    liveness.note_busy(now)
     record.worker_continuation.busy_attempts = liveness.busy_attempts
     persist()
     return _advance_no_progress_continuation(runtime, task, record, records, payload, attempt_id, phase=phase)
-
-
-def _no_progress_attempts_due(stalled_for: float) -> int:
-    """How many no-progress attempts a stall this long has earned on the busy schedule."""
-    due, threshold, step = 0, float(BUSY_RETRY_INITIAL_SECONDS), float(BUSY_RETRY_INITIAL_SECONDS)
-    while stalled_for >= threshold and due < CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS:
-        due += 1
-        step *= 2
-        threshold += step
-    return due
 
 
 def _production_busy(
@@ -778,21 +773,6 @@ def _stop_and_restart(
     )
 
 
-def _durable_view(record: DispatcherRecord) -> dict[str, Any]:
-    """The record as written, less the one stamp every provider read refreshes.
-
-    `last_provider_observed_at` says only when the cursor was last read; a pass whose read changed
-    nothing else has nothing to write.
-    """
-    view = record.to_json()
-    liveness = view.get("worker_continuation_liveness")
-    if isinstance(liveness, dict):
-        view["worker_continuation_liveness"] = {
-            key: value for key, value in liveness.items() if key != "last_provider_observed_at"
-        }
-    return view
-
-
 def _open_continuation_handoff(runtime: Any, record: DispatcherRecord) -> None:
     """Fix this delivery's production handoff at the worker journal's current sequence.
 
@@ -831,20 +811,7 @@ def _observe_retained_continuation_progress(
     now: float,
 ) -> str:
     """Persist provider progress before a continuation interprets `tui-idle`."""
-    try:
-        evidence = getattr(
-            runtime.host,
-            "provider_progress",
-            lambda _task, _record, _kind: {
-                "state": "unavailable",
-                "reason": "host has no provider-progress probe",
-            },
-        )(task, record, "worker")
-    except Exception as exc:  # noqa: BLE001 - evidence must retain any host refusal.
-        evidence = {
-            "state": "unavailable",
-            "reason": f"provider-progress probe failed: {scrub_host_output(str(exc))}",
-        }
+    evidence = _retained_provider_evidence(runtime, task, record)
     liveness = record.worker_continuation_liveness
     if not liveness.bound and record.worker_continuation.busy_attempts:
         # An old busy count is audit data, never an exact-source observation for the ladder.
@@ -858,6 +825,11 @@ def _observe_retained_continuation_progress(
     if observation == "progressed":
         record.worker_continuation.busy_next_at = 0.0
     return observation
+
+
+def _retained_provider_evidence(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> Any:
+    """The exact-source provider answer for the retained worker's HeadRun; a refusal is evidence too."""
+    return provider_evidence(runtime, task, record, "worker")
 
 
 def _block_unadmitted_continuation_liveness(

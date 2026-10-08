@@ -903,6 +903,16 @@ def resolve_launch_intent(
             "head": str(intent.get("head") or ""),
             "reason": "launch heartbeat names a live process with a mismatching launch identity",
         }
+    if role == REVIEW_ROLE and liveness["alive"]:
+        # A reviewer whose production handoff is pending answers to the shared liveness rule before
+        # anything below (the heartbeat grace, the retry's backoff, a pending receipt, adoption) can
+        # return in its place. Delayed import avoids the dispatcher_review launch-intent cycle.
+        from ummanu.dispatch.review import reviewer_pending_liveness
+
+        settled = reviewer_pending_liveness(runtime, task, records, payload, record, intent, step)
+        if settled is not None:
+            return settled
+        intent = launch_intent(record)
     if liveness["alive"] and not liveness["pid_known"]:
         # Leave a starting head alone until its heartbeat grace resolves.
         return {
@@ -1159,6 +1169,46 @@ def _adopt_launch_intent(
     }
 
 
+def stop_undeliverable_launch(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    ref: str,
+    record: DispatcherRecord,
+    intent: dict[str, Any],
+    role: str,
+    step: str,
+    *,
+    readiness: str,
+    attempts: int,
+    reason: str,
+) -> dict[str, Any]:
+    """The bounded end of a launch that will not be given its pointer: stopped, then made again.
+
+    The head is stopped through its own intent first, and only a confirmed stop takes the intent
+    back for the ordinary path to relaunch; an unconfirmed stop keeps it, so no second head opens
+    beside the first.
+    """
+    failure = stop_launch_intent(runtime, record, intent, role)
+    if failure is None:
+        keep_reserved_round(runtime, record, intent)
+    records[ref] = record
+    _persist_quietly(runtime, payload, records)
+    if failure is not None:
+        return head_stop_unconfirmed(step=step, ref=ref, attempt_id=record.attempt_id, role=role, reason=failure)
+    return {
+        "status": "degraded",
+        "step": step,
+        "pilot_ref": ref,
+        "attempt_id": record.attempt_id,
+        "action": f"{role}-launch-undeliverable",
+        "head": str(intent.get("head") or ""),
+        "readiness": readiness,
+        "attempts": attempts,
+        "reason": reason,
+    }
+
+
 def refuse_undelivered_launch(
     runtime: Any,
     payload: dict[str, Any],
@@ -1187,29 +1237,22 @@ def refuse_undelivered_launch(
     head = str(intent.get("head") or "")
     now = time.time()
     if attempts >= LAUNCH_DELIVERY_MAX_ATTEMPTS:
-        failure = stop_launch_intent(runtime, record, intent, role)
-        if failure is None:
-            keep_reserved_round(runtime, record, intent)
-        records[ref] = record
-        _persist_quietly(runtime, payload, records)
-        if failure is not None:
-            return head_stop_unconfirmed(
-                step=step, ref=ref, attempt_id=record.attempt_id, role=role, reason=failure
-            )
-        return {
-            "status": "degraded",
-            "step": step,
-            "pilot_ref": ref,
-            "attempt_id": record.attempt_id,
-            "action": f"{role}-launch-undeliverable",
-            "head": head,
-            "readiness": state,
-            "attempts": attempts,
-            "reason": (
+        return stop_undeliverable_launch(
+            runtime,
+            payload,
+            records,
+            ref,
+            record,
+            intent,
+            role,
+            step,
+            readiness=state,
+            attempts=attempts,
+            reason=(
                 f"the {role_label(role)} head never accepted its pointer in {attempts} attempts "
                 f"({pane_state_label(state)}); it has been stopped and the launch is made again"
             ),
-        }
+        )
     next_at = float(undelivered.get("next_at") or 0.0)
     if next_at and now < next_at:
         return {

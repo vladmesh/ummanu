@@ -14,10 +14,11 @@ So a production handoff is resumable instead:
   written) and, above the floor, its journal (the typed line, every submit, the output of the turn a
   submit opened). Nothing that evidence already proves is done twice.
 - Every supervisor request the handoff makes (connect, `status`, admission, following an admitted
-  write, settle, echo, submit, confirmation) runs inside one `HandoffOperation`. Its deadline is the
-  card's share of the tick's `HandoffBudget`, every socket bound is cut to what is left of it, and the
-  time it really took is charged, so the tick's handoffs cost at most the allowance however many cards
-  it serves. An allowance that runs out leaves the handoff pending at its stage; an admitted write is
+  write, settle, echo, submit, confirmation, a fatal close) runs inside one `HandoffOperation`. Its
+  deadline is the card's share of the tick's `HandoffBudget`; the supervisor client is given it and
+  recomputes what is left before every connect, send and receive of a framed exchange, attempting
+  nothing once it is gone; and the time it really took is charged, so the tick's handoffs cost at
+  most the allowance however many cards it serves. An allowance that runs out leaves the handoff pending at its stage; an admitted write is
   never cancelled by it, and the next tick continues the same handoff.
 - The allowance is shared fairly: each card gets what is left divided by the cards not yet served
   (`HandoffBudget.card`), so a slow first card can never leave a later one nothing.
@@ -39,7 +40,8 @@ from typing import Any
 #: How long, in total, one production tick may spend on head handoffs, across all of its cards.
 HANDOFF_WAIT_BUDGET_SECONDS = 4.0
 #: An effect (the line or an Enter) is started only with this much of the card's share left: the
-#: admission answer and the start of the write must fit, or the effect waits for the next tick.
+#: admission answer and the start of the write must fit, or the effect waits for the next tick. It
+#: only withholds an effect; it never grants time the share does not have.
 HANDOFF_EFFECT_RESERVE_SECONDS = 0.5
 #: Stage entries one tick keeps; the rest are counted, not kept.
 HANDOFF_STAGES_KEPT = 32

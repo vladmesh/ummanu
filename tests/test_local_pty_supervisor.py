@@ -213,6 +213,52 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self._await(arrived, timeout=timeout, message=f"{marker!r} never appeared in {seen[-400:]!r}")
         return seen
 
+    def test_an_offer_whose_answer_is_never_read_is_settled_before_a_later_connection_is_answered(self) -> None:
+        """ummanu-142: what a production handoff relies on after its admission answer was lost.
+
+        The handoff's connection has already been answered once (it is registered with the loop)
+        when it sends its offer; its deadline then passes and it closes without reading the answer.
+        The next pass opens a new connection and asks `status`. The loop reads a request before it
+        answers any connection accepted after it was sent, so that status already shows the offer:
+        admitted, so it is never offered again. A frame cut off before its end is never admitted.
+        """
+        handle = self._start(run_id="offer-order")
+        watcher = self._client(handle)
+
+        def written() -> bool:
+            return watcher.status()["delivery"]["state"] != protocol.DELIVERY_IN_FLIGHT
+
+        for attempt in range(12):
+            offering = handle.connect()
+            self.assertTrue(offering.status()["ok"])
+            subject = f"handoff-{attempt}"
+            frame = protocol.encode_frame(
+                {
+                    "op": protocol.OP_INPUT,
+                    "data": protocol.encode_payload(f"line {attempt}\n".encode()),
+                    "subject": subject,
+                    protocol.REQUEST_ID: 7,
+                }
+            )
+            offering._conn.sendall(frame)
+            offering.close()  # the answer is never read
+            later = handle.connect()
+            delivery = later.status()["delivery"]
+            later.close()
+            self.assertIsNotNone(delivery, f"attempt {attempt}: the offer was not settled first")
+            self.assertEqual(delivery["subject"], subject, f"attempt {attempt}")
+            self._await(written, message="the admitted line was never written")
+        cut = handle.connect()
+        self.assertTrue(cut.status()["ok"])
+        partial = protocol.encode_frame(
+            {"op": protocol.OP_INPUT, "data": protocol.encode_payload(b"never\n"), "subject": "cut-off", protocol.REQUEST_ID: 8}
+        )
+        cut._conn.sendall(partial[: len(partial) // 2])
+        cut.close()
+        later = handle.connect()
+        self.assertNotEqual(later.status()["delivery"]["subject"], "cut-off", "a frame cut off is never admitted")
+        later.close()
+
     def test_status_says_how_long_the_head_has_printed_nothing(self) -> None:
         """ummanu-140: one status answers whether a head is settled, so a handoff need not watch it.
 
