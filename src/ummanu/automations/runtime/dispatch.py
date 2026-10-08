@@ -452,7 +452,10 @@ def _memory_bound_launch(agent: str, run: HeadRun, command: str) -> str:
             f"--data-dir {shlex.quote(str(_installation_data_dir()))}",
         )
     )
-    launch = f'grant="$({grant})"; export "$grant"; exec {command}'
+    # `exec env`, not bare `exec`: the rendered head command leads with installation assignments
+    # (`TA_RUNTIME_ENV_FILE=… UMMANU_INSTANCE=… python3 …`) and POSIX `exec` takes them as the program
+    # name, so the head exits 127 before its prompt is delivered.
+    launch = f'grant="$({grant})"; export "$grant"; exec env {command}'
     return f"/bin/sh -c {shlex.quote(launch)}"
 
 
