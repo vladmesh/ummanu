@@ -327,7 +327,7 @@ class CodexProviderEventIngress:
         updated = self.run.with_fanout_policy(policy)
         try:
             self.persist(updated)
-        except Exception:
+        except Exception:  # noqa: BLE001 - advisory cursor telemetry never fails its caller
             # Cursor telemetry is best effort.  Do not manufacture a non-durable source state or
             # turn a writer failure into a signal, block, replacement, or liveness input.
             return
@@ -344,7 +344,7 @@ class CodexProviderEventIngress:
         updated = self.run.with_fanout_policy(policy)
         try:
             self.persist(updated)
-        except Exception:
+        except Exception:  # noqa: BLE001 - diagnostic telemetry never fails its caller
             # The prior durable run stays authoritative when diagnostic telemetry cannot be
             # written.  In particular, do not invoke lifecycle callbacks or raise into delivery.
             return

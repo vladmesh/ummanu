@@ -15,17 +15,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.dispatcher import FakeCatalog
-from tests.fanout_fixtures import accepted_transport_run
 from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu.codex_provider_events import (
     CodexProviderEventIngress,
 )
-from ummanu.dispatch import launch as dispatcher_launch
-from ummanu.dispatch import observer as dispatcher_observer
-from ummanu.dispatch import review as dispatcher_review
-from ummanu.dispatch import worker_continuation
+from ummanu.dispatch import (
+    launch as dispatcher_launch,
+    observer as dispatcher_observer,
+    review as dispatcher_review,
+    worker_continuation,
+)
 from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.launch import (
@@ -39,12 +39,8 @@ from ummanu.dispatch.launch import (
 from ummanu.dispatch.observer import (
     OBSERVER_ROLE,
     ObserverRecord,
-    _bind_codex_provider_ingress,
-)
-from ummanu.dispatch.observer import (
     _adopt_launch_intent as adopt_observer_launch_intent,
-)
-from ummanu.dispatch.observer import (
+    _bind_codex_provider_ingress,
     _write_launch_intent as write_observer_launch_intent,
 )
 from ummanu.dispatch.production import ProductionState
@@ -70,8 +66,8 @@ from ummanu.runtime.head import (
     HeadSpec,
     StartReceipt,
     TaskRef,
+    operations as head_ops,
 )
-from ummanu.runtime.head import operations as head_ops
 from ummanu.runtime.head_run_binding import head_run_binding
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 

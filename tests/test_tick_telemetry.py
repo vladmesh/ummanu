@@ -27,7 +27,6 @@ from ummanu.dispatch.tick_telemetry import (
 )
 from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 
-
 # The real pass; the fixture below replaces it with a timed seam.
 ADVANCE_ACTIVE = production._advance_active
 
