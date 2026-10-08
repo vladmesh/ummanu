@@ -58,7 +58,13 @@ from ummanu.dispatch.state import (
     record_divergence,
     request_token,
 )
-from ummanu.dispatch.tick_telemetry import TICK_TELEMETRY_RECENT_KEPT
+from ummanu.dispatch.tick_telemetry import (
+    TICK_CARDS_KEPT,
+    TICK_TELEMETRY_RECENT_KEPT,
+    tick_count,
+    tick_counter_values,
+    tick_counting,
+)
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.infra.checkpoint_run import load_checkpoint_state
@@ -87,6 +93,7 @@ _TICK_PHASES: contextvars.ContextVar[dict[str, float] | None] = contextvars.Cont
 _TICK_PHASE_STACK: contextvars.ContextVar[list[list[float]] | None] = contextvars.ContextVar(
     "tick_phase_stack", default=None
 )
+_TICK_CARDS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar("tick_cards", default=None)
 
 
 @contextlib.contextmanager
@@ -95,9 +102,12 @@ def tick_clock() -> Iterator[None]:
     token = _TICK_STARTED.set(time.perf_counter())
     phases_token = _TICK_PHASES.set({})
     stack_token = _TICK_PHASE_STACK.set([])
+    cards_token = _TICK_CARDS.set([])
     try:
-        yield
+        with tick_counting():
+            yield
     finally:
+        _TICK_CARDS.reset(cards_token)
         _TICK_PHASE_STACK.reset(stack_token)
         _TICK_PHASES.reset(phases_token)
         _TICK_STARTED.reset(token)
@@ -125,6 +135,26 @@ def tick_phase(name: str) -> Iterator[None]:
         phases[name] = phases.get(name, 0.0) + max(0.0, elapsed - frame[1])
         if stack:
             stack[-1][1] += elapsed
+
+
+@contextlib.contextmanager
+def tick_card(ref: str) -> Iterator[None]:
+    """Attribute one card's advance time (inclusive) and the writes it made, inside its phase.
+
+    A breakdown of `advance_active`, not a phase of its own: it adds nothing to the phase sum.
+    """
+    cards = _TICK_CARDS.get()
+    before = tick_counter_values()
+    if cards is None or before is None:
+        yield
+        return
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        after = tick_counter_values() or before
+        cards.append({"ref": ref, "ms": round((time.perf_counter() - started) * 1000.0, 3),
+                      **{name: after[name] - before[name] for name in after}})
 
 
 def tick_duration_ms() -> float | None:
@@ -182,6 +212,9 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
             largest = max(phases, key=lambda name: phases[name])
             phases[largest] = round(max(0.0, phases[largest] - excess), 3)
         phases["other"] = round(max(0.0, duration - sum(phases.values())), 3)
+    # Counted before this terminal record's own save, which is the one write a tick always makes.
+    counters = tick_counter_values()
+    cards = sorted(_TICK_CARDS.get() or [], key=lambda card: -card["ms"])[:TICK_CARDS_KEPT]
     entry = {
         "seq": seq,
         "at": now_rfc3339(),
@@ -192,6 +225,8 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         # save, so it covers everything the tick did up to the moment it became durable.
         "duration_ms": duration,
         "phases": phases,
+        "counters": counters,
+        "cards": cards,
         "reason": str(result.get("reason") or ""),
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
@@ -221,6 +256,7 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     recent = recent[-(TICK_TELEMETRY_RECENT_KEPT - 1):] if isinstance(recent, list) else []
     telemetry["recent"] = [
         *recent,
+        # Counters and per-card details stay on `last` and the unhealthy entries: the ring is bounded.
         {key: entry[key] for key in ("seq", "at", "status", "healthy", "duration_ms", "phases")},
     ]
     unhealthy = [item for item in (telemetry.get("unhealthy") or []) if isinstance(item, dict)]
@@ -340,6 +376,7 @@ class ProductionState:
     def save(self, payload: dict[str, Any]) -> None:
         with ownership_lock(self.root.parent):
             write_json(self.path, payload)
+        tick_count("production_state_saves")
 
     def records(self, payload: dict[str, Any]) -> dict[str, DispatcherRecord]:
         raw = payload.get("records") or {}
@@ -480,8 +517,8 @@ def _production_tick_with_snapshot(
     cleanup_outcomes = []
     if isinstance(runtime.host, CommandHostRuntime) and runtime.host.mode == "real":
         with tick_phase("cleanup"):
-            # A few intents per tick: each replay rereads and rewrites the whole journal under the
-            # tick's lock, and `replay_cursor` carries the rest to later ticks.
+            # A few intents per tick: each replay reads and replaces only its own intent file, and
+            # `replay_cursor` carries the rest to later ticks.
             cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
                                  "status": item["status"], "reason": item["reason"]}
                                 for item in runtime.cleanup.replay(limit=5)]
@@ -496,7 +533,7 @@ def _production_tick_with_snapshot(
         return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)
     # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
-        with tick_phase("reconcile"):
+        with tick_phase("fence"):
             fence = observer_fence(runtime, payload, pause_mode=str(pause.get("mode") or ""))
     except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         # An unfinished fence authorizes no downstream work.
@@ -510,7 +547,7 @@ def _production_tick_with_snapshot(
     fenced_refs = set(fence.get("refs") or ()) | {
         str(task.get("ref") or "") for task in cycle if fenced_task(fence, task)
     }
-    with tick_phase("reconcile"):
+    with tick_phase("reconcile_production"):
         reconcile_outcomes = _reconcile_production(
             runtime, records, payload, active_refs, fenced_refs=fenced_refs, fence=fence
         )
@@ -519,6 +556,7 @@ def _production_tick_with_snapshot(
         # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
         # on the strength of a field that predates the reconciliation pass itself.
         payload["last_reconciled_at"] = now_rfc3339()
+    with tick_phase("advance_active"):
         outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
     outcomes = cleanup_outcomes + usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     # After the releases of this tick, before the observers: a merge whose base has no CI resolves
@@ -771,7 +809,8 @@ class _ProbeCleanup:
         self._inner = inner
 
     def __getattr__(self, name: str) -> Any:
-        if name in {"cleanup", "cleanup_observer", "remember", "replay", "replay_one", "replay_targets"}:
+        if name in {"cleanup", "cleanup_observer", "remember", "remember_record", "replay", "replay_one",
+                    "replay_targets"}:
             def effect(*args: Any, **kwargs: Any) -> Any:
                 raise ProbeAbort("owned-cleanup", {})
             return effect
@@ -989,7 +1028,8 @@ def _advance_active(
         if is_steward_report(task):
             continue
         try:
-            outcome = _production_tick_active(runtime, task, records, payload)
+            with tick_card(str(task.get("ref") or "")):
+                outcome = _production_tick_active(runtime, task, records, payload)
         except TaskError as exc:
             errors.append({"ref": str(task.get("ref") or ""), "code": exc.code, "message": exc.message})
             continue

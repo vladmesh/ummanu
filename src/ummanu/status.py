@@ -17,7 +17,14 @@ from ummanu.dispatch.observer import observer_snapshot
 from ummanu.dispatch.pause import ProductionPause
 from ummanu.dispatch.review import command_terminal_status
 from ummanu.dispatch.state import DispatcherRecord
-from ummanu.dispatch.tick_telemetry import duration_ms, phase_ms, tick_statistics
+from ummanu.dispatch.tick_telemetry import (
+    card_details,
+    counter_values,
+    duration_ms,
+    phase_ms,
+    reconcile_ms,
+    tick_statistics,
+)
 from ummanu.dispatch.types import HostError
 from ummanu.host import (
     CollectResult,
@@ -398,7 +405,12 @@ def _last_tick(production: dict[str, Any]) -> dict[str, Any] | None:
         # Null, not zero, for a tick recorded before this field existed: a state file written by
         # the previous release has no duration, and 0 ms would be a measurement nobody made.
         "duration_ms": duration_ms(duration),
-        "phases": phase_ms(entry.get("phases")),
+        "phases": (phases := phase_ms(entry.get("phases"))),
+        # The aggregate the reconcile budget is judged by: its exclusive sub-phases summed.
+        "reconcile_ms": reconcile_ms(phases),
+        # Writes made before the terminal save, and the slowest cards' advance; null before 131.
+        "counters": counter_values(entry.get("counters")),
+        "cards": card_details(entry.get("cards")),
     }
 
 

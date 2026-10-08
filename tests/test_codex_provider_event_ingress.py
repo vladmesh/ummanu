@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.fakes.dispatcher import FakeCatalog
 from tests.fanout_fixtures import accepted_transport_run
 from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu.codex_provider_events import (
@@ -25,6 +26,7 @@ from ummanu.dispatch import launch as dispatcher_launch
 from ummanu.dispatch import observer as dispatcher_observer
 from ummanu.dispatch import review as dispatcher_review
 from ummanu.dispatch import worker_continuation
+from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.launch import (
     REVIEW_ROLE,
@@ -45,6 +47,7 @@ from ummanu.dispatch.observer import (
 from ummanu.dispatch.observer import (
     _write_launch_intent as write_observer_launch_intent,
 )
+from ummanu.dispatch.production import ProductionState
 from ummanu.dispatch.provider_failure import provider_failure_for_persisted_run, provider_failure_for_run
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import DispatcherRecord
@@ -1015,7 +1018,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
 
         self.assertEqual(
             [run.fanout_policy["provider_source"]["cursor"]["line"] for run in self.written],
-            [0, 1, 2, 3, 4],
+            # The binding, then one advisory cursor write for the whole scan (ummanu-131).
+            [0, 4],
         )
         self.assertEqual(self.written[-1].fanout_policy["events"], [])
         self.assertEqual(self.stops, [])
@@ -2006,6 +2010,178 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             sent_by_the_launch,
             "watchdog adoption did not redeliver or replace",
         )
+
+
+class ProviderScanWriteStormTests(unittest.TestCase):
+    """One scan of ordinary rollout lines costs a constant number of durable writes (ummanu-131).
+
+    The real record flush of a real-mode runtime is used: every provider persist reaches
+    `DispatcherRuntime.save_records`, the cleanup journal and the production state.
+    """
+
+    LINES = 1000
+
+    def setUp(self) -> None:
+        self.helper = CodexProviderEventIngressTests("test_binds_new_session_and_cursor_before_any_provider_event")
+        self.helper.setUp()
+        self.addCleanup(self.helper.tearDown)
+        self.data = self.helper.root / "data"
+        runtime = object.__new__(DispatcherRuntime)
+        runtime.data_dir = self.data
+        runtime.catalog = FakeCatalog()
+        runtime.host = CommandHostRuntime(runtime.catalog, self.data, mode="real")
+        runtime.reader = SimpleNamespace(show=lambda ref: {"id": 1, "ref": ref, "project": "sample", "claim": {}})
+        runtime.production_state = ProductionState(self.data)
+        runtime.cleanup = CleanupOwner(runtime)
+        self.runtime = runtime
+        self.record = DispatcherRecord(
+            worker="sample-1-worker",
+            workspace=str(self.helper.workspace),
+            handle="",
+            head="codex-extra",
+            review_head="claude",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=1.0,
+        )
+        self.record.worker_head_run = json.loads(json.dumps(self.helper._run().to_json()))
+        self.records = {"sample-1": self.record}
+        self.cleanup_replacements: list[str] = []
+        replace = os.replace
+
+        def counted(source, target, *args, **kwargs):
+            if str(target).startswith(str(self.data / "dispatcher" / "cleanup")):
+                self.cleanup_replacements.append(str(target))
+            return replace(source, target, *args, **kwargs)
+
+        self.enterContext(mock.patch("ummanu.dispatch.cleanup.os.replace", side_effect=counted))
+        self.saves = self.enterContext(
+            mock.patch.object(runtime.production_state, "save", wraps=runtime.production_state.save)
+        )
+
+    def _ingress(self, run: HeadRun | None = None, persist=None) -> CodexProviderEventIngress:
+        captured = {}
+        with mock.patch.object(
+            self.runtime.host,
+            "configure_codex_provider_ingress",
+            side_effect=lambda _run, *, persist, stop, block: captured.update(persist=persist),
+        ):
+            self.runtime.bind_codex_provider_ingress(
+                self.record, self.records, {}, role=WORKER_ROLE, reference="sample-1"
+            )
+        return CodexProviderEventIngress(
+            run or HeadRun.from_json(self.record.worker_head_run),
+            persist or captured["persist"],
+            stop=lambda current, reason: self.helper.stops.append((current.run_id, reason)),
+            block=self.helper.blocks.append,
+        )
+
+    def _ordinary(self, count: int) -> list[dict]:
+        return [
+            {"type": "event_msg", "payload": {"type": "agent_message", "thread_id": "parent-1", "n": index}}
+            for index in range(count)
+        ]
+
+    def _collaboration(self) -> dict:
+        return {
+            "type": "item.completed",
+            "item": {"type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1"},
+        }
+
+    def _cursor(self) -> int:
+        return self.record.worker_head_run["fanout_policy"]["provider_source"]["cursor"]["line"]
+
+    def test_a_thousand_ordinary_lines_cost_a_constant_number_of_writes(self) -> None:
+        self.helper._write_source(*self._ordinary(self.LINES))
+        ingress = self._ingress()
+
+        ingress.poll()
+
+        # The binding, then one cursor write for the whole scan.
+        self.assertEqual(self._cursor(), self.LINES + 2)
+        self.assertLessEqual(len(self.cleanup_replacements), 2, self.cleanup_replacements)
+        self.assertEqual(self.saves.call_count, 2)
+        self.assertEqual(ingress.run.fanout_policy["events"], [])
+
+        # A second scan of as many new lines moves only the advisory cursor: one state save, and the
+        # cleanup projection is unchanged, so the journal is neither read nor written.
+        self.helper._append_records(*self._ordinary(self.LINES))
+        self.cleanup_replacements.clear()
+        with mock.patch.object(CleanupJournal, "load_intent", wraps=self.runtime.cleanup.journal.load_intent) as reads:
+            ingress.poll()
+        self.assertEqual(self._cursor(), 2 * self.LINES + 2)
+        self.assertEqual(self.cleanup_replacements, [])
+        reads.assert_not_called()
+        self.assertEqual(self.saves.call_count, 3)
+        for file in (self.data / "dispatcher" / "cleanup").rglob("*.json"):
+            self.assertLessEqual(file.stat().st_size, 1_000_000)
+
+    def test_meaningful_event_is_durable_at_its_own_line_inside_a_batched_scan(self) -> None:
+        self.helper._write_source(*self._ordinary(500), self._collaboration(), *self._ordinary(500))
+        written: list[HeadRun] = []
+        ingress = self._ingress()
+        persist = ingress.persist
+
+        def recorded(run: HeadRun) -> None:
+            persist(run)
+            written.append(run)
+
+        ingress.persist = recorded
+        ingress.poll()
+
+        event_line = 2 + 500 + 1
+        cursors = [run.fanout_policy["provider_source"]["cursor"]["line"] for run in written]
+        # Binding, the event at its own cursor (never ahead of it), then the end of the scan.
+        self.assertEqual(cursors, [0, event_line, 2 + 1001])
+        self.assertEqual(written[1].fanout_policy["events"][0]["source_sequence"], event_line)
+        self.assertEqual(len(ingress.run.fanout_policy["events"]), 1)
+        self.assertEqual(self.saves.call_count, 3)
+        self.assertEqual((self.helper.stops, self.helper.blocks), ([], []))
+
+    def test_crash_before_the_scan_cursor_write_rescans_without_duplicate_events(self) -> None:
+        self.helper._write_source(*self._ordinary(300), self._collaboration(), *self._ordinary(300))
+        durable: list[dict] = []
+        ingress = self._ingress()
+        persist = ingress.persist
+
+        def crash_at_scan_end(run: HeadRun) -> None:
+            if run.fanout_policy["provider_source"]["cursor"]["line"] == 2 + 601:
+                raise KeyboardInterrupt("process died before the advisory cursor write")
+            persist(run)
+            durable.append(json.loads(json.dumps(run.to_json())))
+
+        ingress.persist = crash_at_scan_end
+        with self.assertRaises(KeyboardInterrupt):
+            ingress.poll()
+        # The restarted dispatcher resumes from what was durable: the event at its own line.
+        restored = HeadRun.from_json(durable[-1])
+        self.assertEqual(restored.fanout_policy["provider_source"]["cursor"]["line"], 2 + 301)
+        self.assertEqual(self.record.worker_head_run["fanout_policy"]["provider_source"]["cursor"]["line"], 2 + 301)
+        restarted = self._ingress(restored)
+        restarted.poll()
+        self.assertEqual(len(restarted.run.fanout_policy["events"]), 1)
+        self.assertEqual(restarted.run.fanout_policy["provider_source"]["cursor"]["line"], 2 + 601)
+        self.assertEqual((self.helper.stops, self.helper.blocks), ([], []))
+
+    def test_failed_scan_cursor_write_keeps_the_durable_cursor_and_retries_next_poll(self) -> None:
+        self.helper._write_source(*self._ordinary(200))
+        ingress = self._ingress()
+        ingress.poll()
+        self.helper._append_records(*self._ordinary(200))
+        persist = ingress.persist
+
+        def fail(_run: HeadRun) -> None:
+            raise OSError("disk full")
+
+        ingress.persist = fail
+        ingress.poll()
+        self.assertEqual(self._cursor(), 202)
+        self.assertEqual(ingress.run.fanout_policy["provider_source"]["cursor"]["line"], 202)
+        ingress.persist = persist
+        ingress.poll()
+        self.assertEqual(self._cursor(), 402)
 
 
 if __name__ == "__main__":

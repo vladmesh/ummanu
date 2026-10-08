@@ -1,6 +1,6 @@
 """Durable ownership and settlement of card and observer Git residue.
 
-CleanupJournal is the only producer of dispatcher/cleanup.json. CleanupOwner is
+CleanupJournal is the only producer of dispatcher/cleanup/. CleanupOwner is
 its replay owner; inventory is its supported reader. Board archive and close
 only request settlement. They never destroy work from inside a board transaction.
 The installation lock covers journal publication and ownership admission only.
@@ -20,11 +20,12 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from ummanu.dispatch.tick_telemetry import tick_count
 from ummanu.dispatch.types import HostError, OwnershipChanged
 from ummanu.infra import git_worktree
 
@@ -160,10 +161,15 @@ def serialized(method):
 
 
 def journal_mutation(method):
-    """One producer's read/modify/publication, with thread-local replay targeting."""
+    """One producer's read/modify/publication, with thread-local replay targeting.
+
+    The per-intent layout is published (migrating a v1 journal) before the producer reads, so a
+    mutation never compares a v1 value with a migrated one.
+    """
     @functools.wraps(method)
     def wrapped(self, *args, **kwargs):
         with ownership_lock(self.data_dir):
+            self._ensure()
             return method(self, *args, **kwargs)
     return wrapped
 
@@ -299,18 +305,153 @@ def _identity(repo: Path, workspace: str, branch: str) -> dict[str, Any]:
     return result
 
 
+#: Every active file of the journal stays under this bound; the archived v1 document does not.
+INTENT_FILE_LIMIT = 1_000_000
+_LAYOUT_VERSION = 2
+_GENERATED_BUCKETS = "0123456789abcdef"
+# The fan-out attestation a cleanup head keeps: its verdict, the binding a HeadRun read checks,
+# and the first events. The provider source (with its session baseline), progress source and
+# prompt identity are launch telemetry that no stop, fence or settlement reads.
+_FANOUT_KEPT = ("version", "state", "terminal_state", "reason", "run_id", "role", "model", "binary_path",
+                "binary_digest", "cli_version", "tool_schema_digest", "provider_schema_verdict", "event_count")
+_FANOUT_EVENTS_KEPT = 8
+_HEAD_RUN_FIELDS = ("head_run", "worker_head_run", "review_head_run")
+# The dispatcher record fields CleanupOwner, admission, stop and settlement read: attempt and
+# workspace ownership, every head field that proves a head may have run, the launch intent's run
+# and the observer generation/launch order. Everything else in a record is its own telemetry.
+_RECORD_KEPT = ("attempt_id", "worker", "workspace", "sprint", "generation", "launches", "launched_at",
+                "head_possible", "launch_intent", *_HEAD_FIELDS)
+
+
+def _compact_run(raw: Any) -> Any:
+    """A cleanup copy of one persisted HeadRun: identity, lifecycle and stop receipt intact."""
+    if not isinstance(raw, dict) or not isinstance(raw.get("fanout_policy"), dict):
+        return raw
+    policy = raw["fanout_policy"]
+    compact = {name: policy[name] for name in _FANOUT_KEPT if name in policy}
+    if isinstance(compact.get("reason"), str):
+        compact["reason"] = compact["reason"][:500]
+    events = policy.get("events")
+    if isinstance(events, list):
+        # A non-empty log stays non-empty, so a read never upgrades it to a clean policy.
+        compact["events"] = events[:_FANOUT_EVENTS_KEPT]
+        if len(events) > _FANOUT_EVENTS_KEPT:
+            compact["event_count"] = len(events)
+    elif "events" in policy:
+        compact["events"] = events
+    return {**raw, "fanout_policy": compact}
+
+
+def _compact_record_runs(record: dict[str, Any]) -> dict[str, Any]:
+    record = dict(record)
+    for field in _HEAD_RUN_FIELDS:
+        if isinstance(record.get(field), dict):
+            record[field] = _compact_run(record[field])
+    launch = record.get("launch_intent")
+    if isinstance(launch, dict) and isinstance(launch.get("head_run"), dict):
+        record["launch_intent"] = {**launch, "head_run": _compact_run(launch["head_run"])}
+    return record
+
+
+def cleanup_record(record: dict[str, Any]) -> dict[str, Any]:
+    """The projection of a dispatcher record an obligation keeps (see `_RECORD_KEPT`)."""
+    kept = {field: record[field] for field in _RECORD_KEPT if field in record}
+    launch = kept.get("launch_intent")
+    if isinstance(launch, dict):
+        kept["launch_intent"] = {"head_run": launch["head_run"]} if "head_run" in launch else {}
+    # Compacted before the copy, so the dropped launch telemetry is never copied.
+    return copy.deepcopy(_compact_record_runs(kept))
+
+
+def _compact_intent(intent: dict[str, Any]) -> None:
+    """In place, so the caller's copy and the stored one compare equal afterwards."""
+    # Compacts lists that grew before heads were keyed by run and generation.
+    intent["heads"] = _compact_heads([_compact_run(head) for head in intent["heads"]])
+    intent["record"] = _compact_record_runs(intent["record"])
+
+
+def _replace_file(path: Path, body: bytes) -> None:
+    """Atomic replace with the file and its directory entry durable before return."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=path.parent, prefix=".cleanup-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+        _fsync_directory(path.parent)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def _fsync_directory(path: Path) -> None:
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _valid_intent(value: Any) -> bool:
+    return (isinstance(value, dict) and isinstance(value.get("task"), dict)
+            and isinstance(value.get("record"), dict) and isinstance(value.get("heads"), list)
+            and isinstance(value.get("progress"), dict) and isinstance(value.get("status"), str)
+            and isinstance(value.get("disposition"), str))
+
+
 class CleanupJournal:
+    """One file per obligation under dispatcher/cleanup/, each atomically replaced with fsync.
+
+    `cleanup/meta.json` holds the replay cursor, `cleanup/generated/` the generated-file digests
+    in sixteen buckets, `cleanup/intents/<key>.json` one intent. A mutation reads and replaces only
+    its own intent file; inventory and replay walk the directory. The directory is published by one
+    rename, so it exists only complete. The released v1 `cleanup.json` is migrated into it once,
+    under the ownership lock, and then archived beside it; the archive is never read again.
+    """
+
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
-        self.path = self.data_dir / "dispatcher" / "cleanup.json"
+        root = self.data_dir / "dispatcher"
+        self.path = root / "cleanup"
+        self.legacy = root / "cleanup.json"
+        self.archive = root / "cleanup.v1-archive.json"
+        self._staging = root / ".cleanup-migrating"
         self._targets: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
             "cleanup_targets", default=None)
+        # Actual replacements made through this instance, by kind, and the bytes they wrote.
+        self.writes: dict[str, int] = {"intent": 0, "meta": 0, "generated": 0, "layout": 0, "bytes": 0}
 
-    def read(self) -> dict[str, Any]:
+    # Layout ------------------------------------------------------------------------------------
+
+    def _intent_path(self, key: str, root: Path | None = None) -> Path:
+        if len(key) != 64 or any(character not in _GENERATED_BUCKETS for character in key):
+            raise HostError("cleanup intent key is malformed")
+        return (root or self.path) / "intents" / (key + ".json")
+
+    def _bucket_path(self, name: str, root: Path | None = None) -> Path:
+        return (root or self.path) / "generated" / (hashlib.sha256(name.encode()).hexdigest()[0] + ".json")
+
+    def _published(self) -> bool:
+        if self.path.is_dir():
+            return True
+        if os.path.lexists(self.path):
+            raise HostError("cleanup evidence unreadable: " + str(self.path) + " is not a journal directory")
+        return False
+
+    @staticmethod
+    def _load(path: Path) -> Any:
         try:
-            value = json.loads(self.path.read_text())
+            return json.loads(path.read_bytes())
+        except (OSError, ValueError) as exc:
+            raise HostError(f"cleanup evidence unreadable: {exc}") from exc
+
+    def _read_legacy(self) -> dict[str, Any] | None:
+        try:
+            value = json.loads(self.legacy.read_text())
         except FileNotFoundError:
-            return {"version": 1, "intents": {}, "generated": {}}
+            return None
         except (OSError, ValueError) as exc:
             raise HostError(f"cleanup evidence unreadable: {exc}") from exc
         if (not isinstance(value, dict) or value.get("version") != 1
@@ -318,6 +459,174 @@ class CleanupJournal:
                 or not isinstance(value.get("generated"), dict)):
             raise HostError("cleanup evidence has an unsupported shape")
         return value
+
+    def _meta(self) -> dict[str, Any]:
+        meta = self._load(self.path / "meta.json")
+        if not isinstance(meta, dict) or meta.get("version") != _LAYOUT_VERSION:
+            raise HostError("cleanup evidence has an unsupported shape")
+        return meta
+
+    # Reads -------------------------------------------------------------------------------------
+
+    def read(self) -> dict[str, Any]:
+        """The whole journal as one value, for inventory, replay selection and whole-journal proofs."""
+        if not self._published():
+            legacy = self._read_legacy()
+            if legacy is not None:
+                return legacy
+            # A concurrent migration may have published the layout and archived the file meanwhile.
+            if not self._published():
+                return {"version": _LAYOUT_VERSION, "intents": {}, "generated": {}, "replay_cursor": ""}
+        meta = self._meta()
+        intents = {}
+        for file in sorted((self.path / "intents").glob("*.json")):
+            intent = self._load(file)
+            if not _valid_intent(intent):
+                raise HostError("cleanup evidence has an unsupported shape: " + file.name)
+            intents[file.stem] = intent
+        return {"version": _LAYOUT_VERSION, "intents": intents, "generated": self.generated_digests(),
+                "replay_cursor": str(meta.get("replay_cursor") or "")}
+
+    def load_intent(self, key: str) -> dict[str, Any] | None:
+        """One intent, reading only its own file (or the unmigrated v1 document)."""
+        if not self._published():
+            legacy = self._read_legacy()
+            if legacy is not None or not self._published():
+                return copy.deepcopy((legacy or {"intents": {}})["intents"].get(key))
+        path = self._intent_path(key)
+        if not path.exists():
+            return None
+        intent = self._load(path)
+        if not _valid_intent(intent):
+            raise HostError("cleanup evidence has an unsupported shape: " + path.name)
+        return intent
+
+    def intent(self, key: str) -> dict[str, Any]:
+        intent = self.load_intent(key)
+        if intent is None:
+            raise KeyError(key)
+        return intent
+
+    def intent_state(self, key: str) -> tuple[int, ...] | None:
+        """The stored file's identity: any replacement by any producer changes it. No bytes are read."""
+        try:
+            stat = self._intent_path(key).stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
+
+    def generated_digests(self) -> dict[str, str]:
+        """The generated-file digests alone, without reading any intent file."""
+        if not self._published():
+            return self.read()["generated"]
+        generated: dict[str, str] = {}
+        for file in sorted((self.path / "generated").glob("*.json")):
+            bucket = self._load(file)
+            if not isinstance(bucket, dict):
+                raise HostError("cleanup evidence has an unsupported shape: generated/" + file.name)
+            generated.update(bucket)
+        return generated
+
+    # Writes ------------------------------------------------------------------------------------
+
+    def _replace(self, path: Path, body: bytes, kind: str) -> None:
+        _replace_file(path, body)
+        self.writes[kind] += 1
+        self.writes["bytes"] += len(body)
+        if kind == "intent":
+            tick_count("cleanup_intent_writes")
+        tick_count("cleanup_bytes_written", len(body))
+
+    def _encode_intent(self, key: str, intent: dict[str, Any]) -> bytes:
+        _compact_intent(intent)
+        body = json.dumps(intent, sort_keys=True).encode()
+        if len(body) > INTENT_FILE_LIMIT:
+            # Fields of the record no cleanup path reads go first; ownership evidence never does.
+            intent["record"] = cleanup_record(intent["record"])
+            body = json.dumps(intent, sort_keys=True).encode()
+        if len(body) > INTENT_FILE_LIMIT:
+            raise HostError(f"cleanup intent {key} needs {len(body)} bytes after compaction, over the "
+                            f"{INTENT_FILE_LIMIT}-byte bound; its stored obligation is unchanged")
+        return body
+
+    def _write_intent(self, key: str, intent: dict[str, Any]) -> None:
+        body = self._encode_intent(key, intent)
+        path = self._intent_path(key)
+        try:
+            if path.read_bytes() == body:
+                return
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise HostError(f"cleanup evidence unreadable: {exc}") from exc
+        self._replace(path, body, "intent")
+
+    def _write_meta(self, cursor: str) -> None:
+        body = json.dumps({"version": _LAYOUT_VERSION, "replay_cursor": cursor}, sort_keys=True).encode()
+        self._replace(self.path / "meta.json", body, "meta")
+
+    def _ensure(self) -> None:
+        """Under ownership_lock: publish the layout, migrating the v1 journal once if there is one."""
+        if self._published():
+            if os.path.lexists(self.legacy):
+                # Publication finished before a crash; the legacy file is already fully migrated.
+                self._archive_legacy()
+            return
+        legacy = self._read_legacy()
+        self._stage(legacy or {"version": 1, "intents": {}, "generated": {}})
+        self._publish()
+        if legacy is not None:
+            self._archive_legacy()
+
+    def _stage(self, value: dict[str, Any]) -> None:
+        """Build the complete new layout beside the journal. An earlier unpublished copy is discarded:
+        until publication the v1 document stays the only evidence."""
+        if os.path.lexists(self._staging):
+            shutil.rmtree(self._staging)
+        root = self._staging
+        files: list[tuple[Path, bytes]] = []
+        for key, intent in sorted(value["intents"].items()):
+            if not _valid_intent(intent):
+                raise HostError("cleanup evidence has an unsupported shape: intent " + str(key))
+            # Freshly parsed and owned here: compaction replaces record and heads, nothing else changes.
+            migrated = {**intent, "record": cleanup_record(intent["record"])}
+            files.append((self._intent_path(key, root), self._encode_intent(key, migrated)))
+        buckets: dict[Path, dict[str, str]] = {}
+        for name, digest in value["generated"].items():
+            buckets.setdefault(self._bucket_path(name, root), {})[name] = digest
+        files += [(path, json.dumps(bucket, sort_keys=True).encode()) for path, bucket in sorted(buckets.items())]
+        meta = {"version": _LAYOUT_VERSION, "replay_cursor": str(value.get("replay_cursor") or "")}
+        files.append((root / "meta.json", json.dumps(meta, sort_keys=True).encode()))
+        (root / "intents").mkdir(parents=True)
+        (root / "generated").mkdir()
+        for path, body in files:
+            self._replace(path, body, "layout")
+        _fsync_directory(root)
+
+    def _publish(self) -> None:
+        os.rename(self._staging, self.path)
+        _fsync_directory(self.path.parent)
+
+    def _archive_legacy(self) -> None:
+        """Keep the v1 document under a name nothing reads; never delete it."""
+        target, index = self.archive, 1
+        while os.path.lexists(target):
+            target = self.archive.with_name(f"cleanup.v1-archive.{index}.json")
+            index += 1
+        os.rename(self.legacy, target)
+        _fsync_directory(self.legacy.parent)
+
+    @serialized
+    def migrate(self) -> bool:
+        """Migrate a v1 journal now, if there is one; True when this call migrated it.
+
+        With no v1 journal nothing is written: the layout is created by the first mutation.
+        """
+        if not os.path.lexists(self.legacy):
+            return False
+        pending = not self._published()
+        self._ensure()
+        return pending
 
     @contextlib.contextmanager
     def targeted(self, keys: set[str]) -> Iterator[None]:
@@ -330,45 +639,53 @@ class CleanupJournal:
 
     @serialized
     def save(self, value: dict[str, Any], *, generated: bool = False) -> None:
-        """Fsync both the intent and its publication before allowing effects."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        """Fsync each changed intent file and its publication before allowing effects.
+
+        Only intents named by the value (or the current targets) are written, each only if its bytes
+        differ; every other intent file is left untouched.
+        """
+        self._ensure()
         targets = self._targets.get()
-        selected = value["intents"].keys() if targets is None else targets
-        document = value if targets is None else self.read()
+        selected = [key for key in (value["intents"] if targets is None else sorted(targets))
+                    if key in value["intents"]]
+        for key in selected:
+            self._write_intent(key, value["intents"][key])
+        if targets is None and "replay_cursor" in value and \
+                str(value["replay_cursor"] or "") != str(self._meta().get("replay_cursor") or ""):
+            self._write_meta(str(value["replay_cursor"] or ""))
         if generated:
-            document["generated"] = value["generated"]
-        fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".cleanup-")
-        try:
-            for key in selected:
-                if key in value["intents"]:
-                    # Compacts lists that grew before heads were keyed by run and generation.
-                    value["intents"][key]["heads"] = _compact_heads(value["intents"][key]["heads"])
-                    document["intents"][key] = value["intents"][key]
-            with os.fdopen(fd, "w") as handle:
-                json.dump(document, handle, sort_keys=True)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(name, self.path)
-            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(directory)
-            finally:
-                os.close(directory)
-        finally:
-            if os.path.exists(name):
-                os.unlink(name)
+            for name, digest in value["generated"].items():
+                self._record_generated(name, digest)
+
+    def _record_generated(self, name: str, digest: str) -> None:
+        path = self._bucket_path(name)
+        bucket = self._load(path) if path.exists() else {}
+        if not isinstance(bucket, dict):
+            raise HostError("cleanup evidence has an unsupported shape: generated/" + path.name)
+        if bucket.get(name) != digest:
+            bucket[name] = digest
+            self._replace(path, json.dumps(bucket, sort_keys=True).encode(), "generated")
 
     @journal_mutation
     def generated(self, path: Path, body: str | bytes) -> None:
-        value = self.read()
         data = body if isinstance(body, bytes) else body.encode()
-        value["generated"][str(path.absolute())] = hashlib.sha256(data).hexdigest()
-        self.save(value, generated=True)
+        self._record_generated(str(path.absolute()), hashlib.sha256(data).hexdigest())
+
+    @journal_mutation
+    def set_replay_cursor(self, cursor: str) -> None:
+        if str(self._meta().get("replay_cursor") or "") != cursor:
+            self._write_meta(cursor)
+
+    def _single(self, key: str) -> dict[str, Any]:
+        """A journal value holding just this intent, as read under the caller's lock."""
+        intent = self.load_intent(key)
+        return {"intents": {} if intent is None else {key: intent}}
 
     @journal_mutation
     def remember(self, task: dict[str, Any], record: dict[str, Any], *,
                  identity: dict[str, Any] | None = None, disposition: str = "owned") -> str:
-        value = self.read()
+        key = _intent_key(str(task["ref"]), str(record.get("attempt_id") or ""))
+        value = self._single(key)
         key, changed = self.remember_into(value, task, record, identity=identity, disposition=disposition)
         if changed:
             self.save(value)
@@ -380,13 +697,16 @@ class CleanupJournal:
                       disposition: str = "owned") -> tuple[str, bool]:
         """Stage the obligation in `value` only; the effect manifest plans against this same copy."""
         key = _intent_key(str(task["ref"]), str(record.get("attempt_id") or ""))
+        # Only what cleanup reads is retained, so record telemetry (cursors, timestamps, evidence of
+        # other subsystems) never changes the obligation or causes a write.
+        record = cleanup_record(record)
         previous = value["intents"].get(key)
         if previous and previous.get("disposition") != "owned":
             if not previous.get("identity") and identity and not previous["progress"].get("removal_started"):
                 previous["identity"] = identity
                 return key, True
             return key, False
-        # Saves rewrite the whole journal with fsync: report a change only when this intent differs.
+        # Each save fsyncs this intent's file: report a change only when this intent differs.
         before = copy.deepcopy(previous)
         intent = previous or {"task": copy.deepcopy(task), "record": copy.deepcopy(record),
                               "identity": identity, "heads": [], "progress": {},
@@ -399,7 +719,7 @@ class CleanupJournal:
                     if old.get(field) != identity.get(field):
                         raise HostError("cleanup ownership changed within the recorded attempt")
             intent["identity"] = identity
-        intent["record"] = copy.deepcopy(record)
+        intent["record"] = record
         launch = record.get("launch_intent") or {}
         for head in (*(record.get(field) for field in ("worker_head_run", "review_head_run", "head_run")),
                      launch.get("head_run")):
@@ -419,7 +739,7 @@ class CleanupJournal:
         Identity acquired by a concurrent remember is new admission evidence. A
         replay planned without it cannot overwrite it or publish stale settlement.
         """
-        value = self.read()
+        value = self._single(key)
         previous = value["intents"].get(key)
         # A direct exact-run stop can checkpoint a receipt without a cleanup
         # obligation. Never resurrect a missing admitted cleanup obligation.
@@ -437,7 +757,7 @@ class CleanupJournal:
     @journal_mutation
     def defer_intent(self, key: str, attempted: dict[str, Any], reason: str) -> dict[str, Any]:
         """Retain a failed replay against fresh evidence without reverting its owner."""
-        value = self.read()
+        value = self._single(key)
         current = value["intents"].get(key)
         if current is None:
             raise HostError("cleanup intent disappeared while recording replay refusal")
@@ -490,7 +810,7 @@ class CleanupJournal:
                 value["intents"][key]["disposition"] = disposition
                 value["intents"][key]["status"] = "pending"
             if owned:
-                self.save(value)
+                self.save({"intents": {key: value["intents"][key] for key in owned}})
             if matches:
                 return (owned or matches)[-1]
         return self.remember(task, record or {}, disposition=disposition)
@@ -546,21 +866,59 @@ class CleanupOwner:
         # While a targeted replay runs, the manifest entry its operator reviewed.
         self._reviewed: dict[str, Any] | None = None
         self._admitted: dict[str, Any] | None = None
+        # The cleanup projection each record flush last published, by card ref (see remember_record).
+        self._remembered: dict[str, dict[str, Any]] = {}
 
-    def remember(self, task: dict[str, Any], record: Any) -> str:
-        binding = self.runtime.catalog.binding(task["project"])
-        branch = "pipeline/" + task["ref"]
+    def _workspace_identity(self, project: str, reference: str, record: Any) -> dict[str, Any] | None:
+        binding = self.runtime.catalog.binding(project)
         identity = None
         if record.workspace and Path(record.workspace).exists():
-            expected = self.data_dir / "workspaces" / task["project"] / record.worker
+            expected = self.data_dir / "workspaces" / project / record.worker
             if Path(record.workspace).absolute() == expected.absolute():
                 try:
-                    identity = _identity(Path(binding["repo"]), record.workspace, branch)
+                    identity = _identity(Path(binding["repo"]), record.workspace, "pipeline/" + reference)
                 except HostError:
                     # Retain unknown/legacy records too, before reconciliation
                     # can drop them. Absence of proof authorizes no effects.
                     pass
+        return identity
+
+    def remember(self, task: dict[str, Any], record: Any) -> str:
+        identity = self._workspace_identity(task["project"], task["ref"], record)
         return self.journal.remember(task, record.to_json(), identity=identity)
+
+    def remember_record(self, reference: str, record: Any, card: Callable[[], dict[str, Any]]) -> str:
+        """`remember` for the dispatcher's record flush: no journal read or write while unchanged.
+
+        The projection is what the journal would store (the cleanup record and the workspace
+        identity) under its intent key. It is published through `remember`, with all of its
+        ownership checks, whenever it differs from the last one this owner published, the attempt
+        changed, or the intent file was replaced by anyone since (a stat, no bytes read).
+        """
+        raw = record.to_json()
+        key = _intent_key(reference, str(raw.get("attempt_id") or ""))
+        cached = self._remembered.get(reference)
+        task = None
+        if cached is None or cached["key"] != key:
+            task = card()
+            project = str(task["project"])
+        else:
+            project = cached["project"]
+        identity = self._workspace_identity(project, reference, record)
+        digest = hashlib.sha256(json.dumps([cleanup_record(raw), identity], sort_keys=True,
+                                           default=str).encode()).hexdigest()
+        state = self.journal.intent_state(key)
+        if (cached is not None and state is not None
+                and (cached["key"], cached["digest"], cached["state"]) == (key, digest, state)):
+            return key
+        if task is None:
+            task = card()
+        with ownership_lock(self.data_dir):
+            self.journal.remember(task, raw, identity=identity)
+            state = self.journal.intent_state(key)
+        self._remembered[reference] = {"key": key, "project": str(task["project"]), "digest": digest,
+                                       "state": state}
+        return key
 
     def cleanup(self, task: dict[str, Any], record: Any, disposition: str) -> dict[str, Any]:
         key = self.remember(task, record)
@@ -701,7 +1059,7 @@ class CleanupOwner:
                 assert intent is not None
                 if self._planned is None:
                     key = _intent_key(task["ref"], str(intent["record"].get("attempt_id") or ""))
-                    fresh = self.journal.read()["intents"].get(key)
+                    fresh = self.journal.load_intent(key)
                     if fresh is None or any(fresh.get(field) != intent.get(field)
                                             for field in ("identity", "record", "disposition")):
                         raise HostError("cleanup intent changed since admission; workspace retained")
@@ -979,7 +1337,7 @@ class CleanupOwner:
             raise HostError("cleanup workspace status is unreadable")
         status = result.stdout
         dirty = []
-        generated = self.journal.read()["generated"]
+        generated = self.journal.generated_digests()
         environment = self._environment_owner(intent, path)
         for row in status.split("\0"):
             if not row:
@@ -1124,7 +1482,7 @@ class CleanupOwner:
         with self.admission(intent["task"], intent=intent):
             # No forced removal: first delete only exact generated bytes whose
             # ownership was validated above. Git independently refuses dirty work.
-            generated = self.journal.read()["generated"]
+            generated = self.journal.generated_digests()
             for name, digest in generated.items():
                 file = Path(name)
                 # Nested generated files, such as an editable install's metadata, qualify only through
@@ -1226,10 +1584,14 @@ class CleanupOwner:
 
     @owner_operation
     def replay_one(self, key: str) -> dict[str, Any]:
-        task = self.journal.read()["intents"][key]["task"]
+        # Replay plans against the stored (migrated) form, which its checkpoints compare with.
+        self.journal.migrate()
+        task = self.journal.intent(key)["task"]
         with reference_lock(self.data_dir, task["ref"], lane="lifecycle"), self.journal.targeted({key}):
             self._admitted = None
-            value = self.journal.read()
+            # Only this intent: whole-journal proofs (owners, shared removal, observer order) read
+            # the journal themselves, and every checkpoint writes back only this key.
+            value = {"intents": {key: self.journal.intent(key)}}
             try:
                 return self._replay(value, key)
             except HostError as exc:
@@ -1315,6 +1677,7 @@ class CleanupOwner:
     def replay(self, *, limit: int = 20) -> list[dict[str, Any]]:
         if not 1 <= limit <= 100:
             raise HostError("cleanup replay limit must be between 1 and 100")
+        self.journal.migrate()
         value = self.journal.read()
         keys = [key for key, intent in sorted(value["intents"].items())
                 if intent["status"] in {"pending", "preserved"}]
@@ -1323,10 +1686,7 @@ class CleanupOwner:
         selected = keys[:limit]
         result = [self.replay_one(key) for key in selected]
         if selected:
-            with ownership_lock(self.data_dir):
-                fresh = self.journal.read()
-                fresh["replay_cursor"] = selected[-1]
-                self.journal.save(fresh)
+            self.journal.set_replay_cursor(selected[-1])
         return result
 
     def _bindings(self, project: str | None = None) -> dict[str, dict[str, Any]]:
@@ -1493,7 +1853,9 @@ class CleanupOwner:
         task = intent["task"]
         inputs = {"task": {field: task.get(field) for field in ("id", "ref", "project", "kind")},
                   "attempt_id": intent["record"].get("attempt_id"), "disposition": intent["disposition"],
-                  "status": intent["status"], "identity": intent.get("identity"), "heads": intent["heads"]}
+                  "status": intent["status"], "identity": intent.get("identity"),
+                  # The stored form: the same digest before and after the v1 journal is migrated.
+                  "heads": _compact_heads([_compact_run(head) for head in intent["heads"]])}
         effects: list[dict[str, Any]] = []
         try:
             if intent["status"] == "completed":
@@ -1557,6 +1919,7 @@ class CleanupOwner:
         intents and the replay cursor are never touched.
         """
         binding = self._bindings(project)[project]
+        self.journal.migrate()
         names = [target for target, _ in targets]
         if not 1 <= len(names) <= MAX_REPLAY_TARGETS:
             raise HostError(f"cleanup replay takes 1..{MAX_REPLAY_TARGETS} explicit targets")

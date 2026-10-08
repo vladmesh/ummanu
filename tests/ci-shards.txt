@@ -7,6 +7,7 @@ unit tests/test_tick_telemetry.py
 unit tests/test_checkpoint_run.py
 unit tests/test_tick_board_snapshot.py
 component tests/test_narrow_cleanup_lock.py
+component tests/test_cleanup_journal_layout.py
 component tests/test_bulk_ownership_lane.py
 integration-board tests/test_cleanup_lock_sql.py
 component tests/test_runtime_scope_inventory.py

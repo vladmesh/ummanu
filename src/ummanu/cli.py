@@ -826,8 +826,17 @@ def _print_tick_measurements(dispatcher: dict[str, Any]) -> None:
     phases = last.get("phases") if last else None
     if phases:
         print("last tick phases: " + ", ".join(f"{name} {_duration_text(ms)}" for name, ms in phases.items()))
+        if last.get("reconcile_ms") is not None:
+            print(f"last tick reconcile: {_duration_text(last['reconcile_ms'])}")
     else:
         print("last tick phases: unavailable")
+    counters = last.get("counters") if last else None
+    if counters:
+        print("last tick writes: " + ", ".join(f"{name} {value}" for name, value in counters.items()))
+    for card in (last.get("cards") or []) if last else []:
+        print(f"last tick card {card['ref']}: {_duration_text(card.get('ms'))}, records "
+              f"{card.get('save_records', 0)}, cleanup intents {card.get('cleanup_intent_writes', 0)} "
+              f"({card.get('cleanup_bytes_written', 0)} bytes), state saves {card.get('production_state_saves', 0)}")
 
 
 def _duration_text(value: float | None) -> str:

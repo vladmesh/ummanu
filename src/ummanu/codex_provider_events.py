@@ -227,6 +227,11 @@ class CodexProviderEventIngress:
                 self._unknown("Codex provider source cursor no longer matches the bound event journal")
                 return
             fresh = [line for line in lines if line.number > cursor_line]
+        # An ordinary line only moves the advisory cursor. It is kept in memory and written once at
+        # the end of the scan, or carried by the next event's durable recorder write: one durable
+        # write per scan instead of one per rollout line. A crash before that write rescans these
+        # lines, which produce no events and therefore no duplicate effects.
+        unsaved: SourceLine | None = None
         for line in fresh:
             events = list(
                 _provider_events(
@@ -236,8 +241,9 @@ class CodexProviderEventIngress:
                 )
             )
             if not events:
-                self._advance_cursor(source, line)
+                unsaved = line
                 continue
+            unsaved = None
             for raw_event in events:
                 durable_run = self.run
                 run = self._run_at_cursor(source, line)
@@ -260,6 +266,8 @@ class CodexProviderEventIngress:
                 self.run = outcome.run if outcome.event else durable_run
             # A source line which resulted in events was persisted by the recorder at its cursor
             # when possible.  A failed telemetry write leaves the preceding durable run in force.
+        if unsaved is not None:
+            self._advance_cursor(source, unsaved)
 
     def _verify_binding(self, source: Mapping[str, Any]) -> tuple[dict[str, Any], list[SourceLine]] | None:
         if not _source_descriptor_matches_run(source, self.run):
