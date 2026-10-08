@@ -154,32 +154,48 @@ only to an attempt this owner reserved. A due time that is not a finite number i
 float range (`10**400` included) is malformed and due at once.
 
 The production tick's cleanup phase is the one automatic replay, and it runs on one
-elapsed allowance (`REPLAY_ALLOWANCE`, 3.5 s on the stdlib monotonic clock, under the
-sprint's 5 s phase bound) that covers selection, admission, every wait and effect and
-the final cursor publication. Nothing nested restarts it: lock waits (`cleanup.lock`,
-the bulk and effect lanes, the board writer's fences) poll for what is left; each Git
-child is bounded by `GIT_TIMEOUT` (30 s) cut to it and killed and reaped at that bound,
-the host's removal child with its process group; the head stop receives `remaining`,
-which cuts the runtime's own lock, supervisor exchange, scope termination and exit
-confirmation; the ownership row lock sets `lock_timeout` and `statement_timeout` for
-the rest of its short transaction; the status classification, cache unlinks and the
-environment namespace walk check it between entries. A card whose lifecycle lane is
-held by another owner is skipped at once. A due intent is reserved only while
-`ATTEMPT_FLOOR` (1 s) is left, and no workspace, Git removal or ref stage starts with
-less than `EFFECT_FLOOR` (0.5 s). Only journal publications that record the outcome may
-use `PUBLICATION_GRACE` (0.5 s) more. An exhausted allowance raises `Deferred`, an
-ordinary refusal: the attempt ends `pending` with its durable progress and its reserved
-cooldown, never as completed, verified or terminal. A skipped intent was never reserved,
-keeps its due time and lies ahead of the cursor for the next tick. A Git or stop effect
-cut at its bound is ambiguous, and the next attempt re-proves identity first exactly as
-after a crash (`removal_started`, `environment_removal_started`, `ref_delete_admitted`,
-retained stop receipts). Indivisible calls (one `fsync`, one `stat`/`unlink`, a killed
-child's reap) can overrun the allowance by their own duration. Selection reads only the
-intent files replaced since the owner last read them. The tick records the invocation
-under `cleanup` in its telemetry entry: allowance and spent milliseconds, due,
-attempted, deferred, skipped, busy and lost counts, where it was cut, and its intent,
-meta and generated publications and bytes. Teardown, inactive reconciliation, observer
-stop/close and the targeted maintenance replay pass no allowance and keep their waits.
+monotonic deadline (`REPLAY_ALLOWANCE`, 4 s, under the sprint's 5 s phase bound) from
+before its selection until it returns. Its last `PUBLICATION_RESERVE` (0.5 s) is kept
+for the journal publications that record outcomes and the cursor; no work, wait or
+effect is admitted into it and nothing extends the deadline. Nested paths read what is
+left and never restart it:
+
+- lock waits (`cleanup.lock`, the bulk and effect lanes, the board writer's fences) poll
+  for what is left; a card whose lifecycle lane another owner holds is skipped at once;
+- the board store client (`SqlCardClient.within`) cuts its pool wait, a new connection
+  and its schema gate, the turn of `transaction()` and every statement, standalone or in
+  a transaction, by setting `statement_timeout` and `lock_timeout` `LOCAL` again before
+  each statement; the settings end with their transaction and the bound with the replay;
+- every cleanup Git child runs in its own process group (`_proc.run_isolated`) within
+  what is left: one still running when only `_TERMINATE_SECONDS` remain gets `SIGTERM`
+  to its whole group, so Git removes the lock files of an unfinished ref transaction
+  itself and a hook or helper it ran ends with it, then the group is killed, and the
+  drain and reap get only what is left. Nothing it started can act after the call;
+- the head stop receives `remaining` (runtime lock, supervisor exchange, scope
+  termination, exit confirmation), and so does the scope fence (each run directory read
+  and each native disappearance proof);
+- intent selection, journal and generated-digest reads, status classification, cache
+  and generated-file unlinks and the environment namespace walk (removing entries as it
+  reads them) check the allowance before each entry.
+
+A due intent is reserved only while `ATTEMPT_FLOOR` (1 s) of work allowance is left, and
+no workspace, Git removal or ref stage starts with less than `EFFECT_FLOOR` (0.5 s). An
+exhausted allowance raises `Deferred`, an ordinary refusal: the attempt ends `pending`
+with its durable progress and reserved cooldown, never completed, verified or terminal.
+A skipped intent was never reserved and keeps its due time. Selection reads intents in
+rotation order from the cursor, one at a time and only as far as the attempts go, so
+slow reads never starve the attempts; the cursor then advances past what was attempted,
+lost or read as not due, never past a due intent left waiting, and is written once, only
+when something was attempted or the selection stopped short of the journal. A Git or stop effect ended at
+its bound is re-proved by the next attempt as after a crash (`removal_started`,
+`environment_removal_started`, `ref_delete_admitted`, retained stop receipts). A Git
+leader that outlives `SIGTERM` (an uninterruptible call) may leave a lock file; cleanup
+never removes one, and the ref transaction's refusal names it. Teardown, inactive
+reconciliation, observer stop/close and the targeted maintenance replay pass no
+allowance and keep their waits. The tick records the invocation under `cleanup` in its
+telemetry entry: allowance and spent milliseconds, the due, attempted, deferred,
+skipped, busy, lost and unread counts, where it was cut, and its intent, meta and
+generated publications and bytes.
 
 Supported maintenance surfaces:
 

@@ -3631,8 +3631,10 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
     known = {(run.run_id, run.scope_generation): run for run in runs}
     task_identity = _binding_of(task)
     directories = ([protocol.run_dir_for(root, run.run_id) for run in runs] if recorded_only
-                   else list(root.iterdir()))
+                   else root.iterdir())
     for directory in directories:
+        if remaining is not None and remaining() <= 0:
+            raise ValueError("the caller's deadline passed while cleanup scope ownership was read")
         if directory.is_symlink():
             raise ValueError("cleanup scope directory is substituted")
         if not directory.is_dir():

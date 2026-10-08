@@ -137,7 +137,7 @@ class CountingStore(SqlCardClient):
                 if row["project_id"] == BOARD_ID and row["is_active"]
                 and row["column_id"] in active_columns]
 
-    def _rpc_lockOwnershipReference(self, *, reference, observer=False, wait_ms=None):
+    def _rpc_lockOwnershipReference(self, *, reference, observer=False):
         return any(row["reference"] == reference for row in self.rows.values())
 
     def _rpc_getNextTaskReference(self, *, project):

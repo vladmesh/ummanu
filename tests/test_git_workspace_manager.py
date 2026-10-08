@@ -17,18 +17,19 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
+from types import SimpleNamespace
+
+from ummanu.dispatch.cleanup import CleanupOwner
 from unittest import mock
 
-from tests.fakes.dispatcher import FakeCatalog
-from tests.production_runtime_fixtures import registered_production_runtime
-from ummanu.dispatch.cleanup import CleanupOwner
 from ummanu.dispatch.host import CommandHostRuntime, LaunchedHead
 from ummanu.dispatch.launch import CAUSE_WORKSPACE_CONTRACT
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import HostError, LegacyDispatcherRecord
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from tests.fakes.dispatcher import FakeCatalog
+from tests.production_runtime_fixtures import registered_production_runtime
 
 PROJECT = "sample"
 ORCA_BINDING = "sample_orca"
@@ -92,9 +93,9 @@ class _RecordingHost(CommandHostRuntime):
         self._record(args)
         return super()._run(args, label, cwd=cwd)
 
-    def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
+    def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
         self._record(args)
-        return super().run_capture(args, label, cwd=cwd, timeout=timeout)
+        return super().run_capture(args, label, cwd=cwd)
 
     # What a bring-up does besides the workspace is not what these tests are about.
     def _prepare_workspace_environment(self, workspace: str, *, project: str = "") -> None:

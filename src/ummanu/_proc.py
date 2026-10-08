@@ -8,7 +8,7 @@ import selectors
 import signal
 import subprocess
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import IO, TextIO, cast
 
@@ -42,6 +42,8 @@ def run_isolated(
     env: Mapping[str, str] | None = None,
     timeout: float | None = None,
     cwd: str | Path | None = None,
+    pass_fds: Sequence[int] = (),
+    within: Callable[[], float] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a child in its own process group; when it returns, normally or by timeout, nothing it
     started is left in that group.
@@ -60,6 +62,13 @@ def run_isolated(
 
     A command that deliberately leaves its group (``setsid``, a daemon) is outside this contract:
     it is not swept, and it can hold the reap open for at most the grace period.
+
+    ``within`` is what is left of a caller's own deadline. Everything the call does then fits in
+    it, with no grace of its own: the child runs until ``_TERMINATE_SECONDS`` of it are left (or
+    ``timeout``, if sooner); a child still running is asked to end with ``SIGTERM`` to its whole
+    group, which lets Git remove its own lock files, for at most that tail; then the group is
+    killed, and the drain and the reap get only what is left. A timed-out call's
+    ``TimeoutExpired`` says in ``killed`` whether the leader outlived ``SIGTERM``.
     """
     process = subprocess.Popen(
         argv,
@@ -70,17 +79,29 @@ def run_isolated(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=True,
+        pass_fds=tuple(pass_fds),
     )
     pump = _Pump(process, input)
+    grace = None if within is None else lambda: max(0.0, within())
+    killed = False
     try:
-        exited = pump.until_leader_exits(timeout)
+        run_for = timeout
+        if within is not None:
+            run_for = max(0.0, within() - _TERMINATE_SECONDS)
+            run_for = run_for if timeout is None else min(timeout, run_for)
+        exited = pump.until_leader_exits(run_for)
+        if not exited and within is not None:
+            _signal_group(process, signal.SIGTERM)
+            killed = not pump.until_leader_exits(min(_TERMINATE_SECONDS, max(0.0, within())))
     except BaseException:
-        _end_group(process, pump)
+        _end_group(process, pump, grace)
         raise
-    stdout, stderr = _end_group(process, pump)
+    stdout, stderr = _end_group(process, pump, grace)
     if not exited:
-        assert timeout is not None  # only a timeout ends the pump before the leader exits
-        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr)
+        assert run_for is not None  # only a timeout ends the pump before the leader exits
+        expired = subprocess.TimeoutExpired(argv, run_for, output=stdout, stderr=stderr)
+        expired.killed = killed  # type: ignore[attr-defined]
+        raise expired
     return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
 
 
@@ -93,8 +114,25 @@ _REAP_GRACE_SECONDS = 5.0
 # Without a pidfd, how often the leader is checked for an exit while its output is read.
 _LEADER_POLL_SECONDS = 0.05
 
+# Inside a caller's deadline, the tail of it a child still running gets to end itself on SIGTERM.
+_TERMINATE_SECONDS = 0.25
 
-def _end_group(process: subprocess.Popen[str], pump: _Pump) -> tuple[str, str]:
+
+def _signal_group(process: subprocess.Popen[str], signum: int) -> None:
+    """`signum` to the child's whole group, or to the leader alone when no member may be signalled."""
+    try:
+        os.killpg(process.pid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        try:
+            process.send_signal(signum)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _end_group(process: subprocess.Popen[str], pump: _Pump,
+               grace: Callable[[], float] | None = None) -> tuple[str, str]:
     """Kill what remains of the child's process group, drain its output, then reap its leader.
 
     ``killpg`` signals every member this process may signal and fails with EPERM only when it may
@@ -104,21 +142,13 @@ def _end_group(process: subprocess.Popen[str], pump: _Pump) -> tuple[str, str]:
     crosses identity through ``runuser``, which keeps its child in the group) may signal everyone.
     An already empty group (ESRCH) is the ordinary end of a command that left nothing behind.
     """
+    _signal_group(process, signal.SIGKILL)
     try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError:
-        try:
-            process.kill()
-        except (ProcessLookupError, PermissionError):
-            pass
-    try:
-        pump.drain(_REAP_GRACE_SECONDS)
+        pump.drain(_REAP_GRACE_SECONDS if grace is None else grace())
     finally:
         pump.close()
     try:
-        process.wait(timeout=_REAP_GRACE_SECONDS)
+        process.wait(timeout=_REAP_GRACE_SECONDS if grace is None else grace())
     except subprocess.TimeoutExpired:
         pass
     return pump.text()

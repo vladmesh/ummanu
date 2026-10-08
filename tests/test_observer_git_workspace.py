@@ -82,9 +82,9 @@ class _RecordingHost(CommandHostRuntime):
         self._record(args)
         return super()._run(args, label, cwd=cwd)
 
-    def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
+    def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
         self._record(args)
-        return super().run_capture(args, label, cwd=cwd, timeout=timeout)
+        return super().run_capture(args, label, cwd=cwd)
 
     def _open_head_pane(self, run, title, command, **_kwargs):  # type: ignore[override]
         self.events.append("head-start")

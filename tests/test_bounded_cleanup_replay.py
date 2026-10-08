@@ -9,14 +9,18 @@ Wall clock is asserted only against the sprint's phase bound; the rest is printe
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import math
 import os
 import shutil
+import signal
 import socket
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -25,12 +29,14 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from tests import test_owned_cleanup as owned_fixtures
+from tests import test_owned_cleanup as owned_fixtures, test_sql_card_pool as pool_fixtures
 from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu import _proc
+from ummanu.board.sql_cards import SqlCardClient
 from ummanu.dispatch import attempt_accounting, cleanup as cleanup_module, production
 from ummanu.dispatch.cleanup import (
     ATTEMPT_FLOOR,
-    PUBLICATION_GRACE,
+    PUBLICATION_RESERVE,
     REPLAY_ALLOWANCE,
     RETRY_COOLDOWN,
     CleanupOwner,
@@ -40,10 +46,13 @@ from ummanu.dispatch.types import HostError
 from ummanu.runtime.head import HeadRun
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
+from ummanu.tasks import TaskError
 
 #: The sprint's bound on the cleanup phase.
 PHASE_BOUND = 5.0
-COUNTS = ("due", "attempted", "deferred", "skipped", "busy", "lost")
+COUNTS = ("due", "attempted", "deferred", "skipped", "busy", "lost", "unread")
+#: What an invocation may take beyond its deadline: a single indivisible call and the return.
+OVERRUN = 0.3
 git = owned_fixtures.git
 journal_bytes = owned_fixtures.journal_bytes
 
@@ -77,11 +86,11 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         return {name: report[name] for name in COUNTS}
 
     def spend(self):
-        """Spend the running automatic replay's allowance now: its next bounded wait or effect
-        defers, while the journal publications recording that keep their grace."""
+        """Spend the running automatic replay's work allowance now: its next bounded wait or effect
+        defers, while the publications recording that keep the deadline's reserved tail."""
         allowance = cleanup_module._ALLOWANCE.get()
         self.assertIsNotNone(allowance, "only an automatic replay has an allowance")
-        allowance.deadline = allowance.clock()
+        allowance.deadline = allowance.clock() + allowance.reserve
 
     def spent_at(self, target, attribute, *, after=0):
         """`target.attribute`, spending the allowance as its call number `after + 1` begins."""
@@ -95,20 +104,23 @@ class BoundedCleanupReplayTests(unittest.TestCase):
             return native(*args, **kwargs)
         return mock.patch.object(target, attribute, side_effect=call), calls
 
-    def git_shim(self, slow_workspace: Path):
-        """`git` on PATH that hangs on `status` of one exact workspace (read through the pinned
-        descriptor too). The hang is Git's own pid (`exec`), recorded so the test can prove it gone."""
+    def git_shim(self, script: str):
+        """`git` on PATH: `script` (bash, the real argv in "$@") runs first, then the real Git. A
+        hang `exec`s in place after recording its pid, so the test can prove that process gone."""
         real = shutil.which("git")
         bin_dir = self.fixture.root / "shim-bin"
-        bin_dir.mkdir()
+        bin_dir.mkdir(exist_ok=True)
         self.hung = bin_dir / "hung-pids"
         shim = bin_dir / "git"
-        shim.write_text("#!/bin/bash\n"
-                        f'if [ "$1" = -C ] && [ "$3" = status ] && [ "$(readlink -f "$2")" = "{slow_workspace.resolve()}" ]; '
-                        f"then echo $$ >> {self.hung}; exec sleep 60; fi\n"
-                        f'exec {real} "$@"\n')
+        shim.write_text(f"#!/bin/bash\nHUNG={self.hung}\n{script}\nexec {real} \"$@\"\n")
         shim.chmod(0o755)
         return mock.patch.dict(os.environ, {"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+
+    @staticmethod
+    def hang_status_of(workspace: Path) -> str:
+        """Hang `git status` of one exact workspace, read through the pinned descriptor too."""
+        return (f'if [ "$1" = -C ] && [ "$3" = status ] && [ "$(readlink -f "$2")" = "{workspace.resolve()}" ]; '
+                'then echo $$ >> "$HUNG"; exec sleep 60; fi')
 
     def no_hung_git(self):
         """Every hung Git child was killed and reaped by the replay that started it."""
@@ -187,15 +199,18 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         cards = sorted((fixture.card(f"due-{n}", head=False) for n in range(6)), key=lambda card: card[0])
         slow_key, slow_workspace, _ = cards[0]
         stored = journal_bytes(self.owner.journal)
-        with self.git_shim(slow_workspace):
+        with self.git_shim(self.hang_status_of(slow_workspace)):
             entry, _, elapsed = self.production_cleanup_phase()
         self.no_hung_git()
         report = entry["cleanup"]
         # One allowance for the phase: the first intent's Git child was killed at it, and no other
         # due intent was admitted after it.
-        self.assertLess(elapsed, REPLAY_ALLOWANCE + PUBLICATION_GRACE + 0.5)
-        self.assertEqual(self.counts(report), {"due": 6, "attempted": 1, "deferred": 1, "skipped": 5,
-                                               "busy": 0, "lost": 0})
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        # Selection reads only as far as the attempts go: the next due one was read and skipped at
+        # the floor, the other four never read, none reserved; the cursor stops before the skipped.
+        self.assertEqual(self.counts(report), {"due": 2, "attempted": 1, "deferred": 1, "skipped": 1,
+                                               "busy": 0, "lost": 0, "unread": 4})
+        self.assertEqual(self.owner.journal.replay_cursor(), slow_key)
         self.assertEqual(report["allowance_ms"], REPLAY_ALLOWANCE * 1000)
         self.assertIn("Git status", report["deferred_at"])
         slow = self.owner.journal.intent(slow_key)
@@ -268,7 +283,7 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         self.assertLess(elapsed, 2.0)
         self.assertEqual([item["status"] for item in result], ["completed", "completed"])
         self.assertEqual(self.counts(self.owner.last_replay),
-                         {"due": 3, "attempted": 2, "deferred": 0, "skipped": 0, "busy": 1, "lost": 0})
+                         {"due": 3, "attempted": 2, "deferred": 0, "skipped": 0, "busy": 1, "lost": 0, "unread": 0})
         path = "intents/" + keys[0] + ".json"
         self.assertEqual(journal_bytes(self.owner.journal)[path], stored[path])
         release()
@@ -283,8 +298,9 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         stored = journal_bytes(self.owner.journal)
         result, elapsed = self.replay(allowance=1.0)
         self.assertEqual(result, [])
-        self.assertGreaterEqual(elapsed, 1.0)
-        self.assertLess(elapsed, 1.0 + PUBLICATION_GRACE + 0.5)
+        # The journal lock may be awaited into the publication tail, never past the deadline.
+        self.assertGreaterEqual(elapsed, 1.0 - 0.05)
+        self.assertLess(elapsed, 1.0 + OVERRUN)
         self.assertIn("cleanup.lock", self.owner.last_replay["deferred_at"])
         self.assertEqual(journal_bytes(self.owner.journal), stored)
 
@@ -330,10 +346,10 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         fixture.task["claim"]["worker"] = fixture.record.worker
         key = fixture.request()
         fixture.backend = self.stalled_supervisor(run)
-        result, elapsed = self.replay(allowance=1.5)
+        result, elapsed = self.replay(allowance=2.0)
         # Without the allowance this stop could wait its 5 s connect, the framed exchange and its
-        # 10 s exit confirmation; with it the whole replay ends within the allowance and its grace.
-        self.assertLess(elapsed, 1.5 + PUBLICATION_GRACE + 0.5)
+        # 10 s exit confirmation; with it the whole replay ends within its deadline.
+        self.assertLess(elapsed, 2.0 + OVERRUN)
         self.assertEqual([item["status"] for item in result], ["pending"])
         self.assertIn("allowance exhausted at head stop", result[0]["reason"])
         self.assertIn("deadline passed", result[0]["reason"])
@@ -375,10 +391,11 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         patch, calls = self.spent_at(cleanup_module, "_unlink_confined", after=100)
         with patch:
             self.replay()
-        self.assertEqual(len(calls), 256)
+        # Checked before every entry: the call that spent it was the last one made.
+        self.assertEqual(len(calls), 101)
         intent = self.owner.journal.intent(key)
         self.assertNotIn("removal_started", intent["progress"])
-        self.assertEqual(len(fixture.ignored_rows()), before - 256)
+        self.assertEqual(len(fixture.ignored_rows()), before - 101)
         self.assertIn(str(fixture.workspace), git(fixture.repo, "worktree", "list", "--porcelain"))
         self.assert_deferred_then_recovered(key, "ignored cache removal")
         self.assertEqual(fixture.snapshot(external), targets)
@@ -422,40 +439,30 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         self.assertTrue(self.fixture.workspace.exists())
         self.assert_deferred_then_recovered(key, "Git worktree removal admission")
 
-    def killed_removal(self, effect):
-        """The host's Git child for `worktree remove`, killed at the bound after `effect` (once)."""
-        fixture = self.fixture
-        killed = []
+    #: A real Git child of the automatic removal that hangs until the deadline ends its group.
+    HANG_REMOVAL = ('if [ "$3" = worktree ] && [ "$4" = remove ]; then {effect}echo $$ >> "$HUNG"; '
+                    'exec sleep 60; fi')
 
-        def capture(args, label, *, timeout=None):
-            self.assertIsNotNone(timeout, "an automatic replay's host Git child is bounded")
-            self.assertLessEqual(timeout, REPLAY_ALLOWANCE)
-            if args[3:5] == ["worktree", "remove"] and not killed:
-                killed.append(args)
-                effect()
-                self.spend()
-                raise HostError(label + " failed: timed out")
-            return subprocess.run(args, capture_output=True, text=True, check=False, timeout=timeout)
-        fixture.host.run_capture = capture
-        return killed
-
-    def test_git_removal_killed_before_its_effect_rechecks_identity_and_finishes(self):
+    def test_git_removal_ended_before_its_effect_rechecks_identity_and_finishes(self):
         key = self.due_card()
-        killed = self.killed_removal(lambda: None)
-        self.replay()
-        self.assertEqual(len(killed), 1)
+        with self.git_shim(self.HANG_REMOVAL.format(effect="")):
+            _, elapsed = self.replay()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        self.no_hung_git()
         intent = self.owner.journal.intent(key)
         self.assertTrue(intent["progress"]["removal_started"])
         self.assertNotIn("workspace_removed", intent["progress"])
         self.assertTrue(self.fixture.workspace.exists())
         self.assert_deferred_then_recovered(key, "Git worktree")
 
-    def test_git_removal_killed_after_the_directory_finishes_from_the_admitted_registration(self):
+    def test_git_removal_ended_after_the_directory_finishes_from_the_admitted_registration(self):
         fixture = self.fixture
         key = self.due_card()
-        killed = self.killed_removal(lambda: shutil.rmtree(fixture.workspace))
-        self.replay()
-        self.assertEqual(len(killed), 1)
+        # Git's own first effect, then a hang: the deadline ends the group between the two.
+        with self.git_shim(self.HANG_REMOVAL.format(effect='rm -rf "$5"; ')):
+            _, elapsed = self.replay()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        self.no_hung_git()
         intent = self.owner.journal.intent(key)
         self.assertTrue(intent["progress"]["removal_started"])
         self.assertFalse(fixture.workspace.exists())
@@ -524,7 +531,7 @@ class BoundedCleanupReplayTests(unittest.TestCase):
             report = self.owner.last_replay
             reports.append(self.counts(report))
             # Never more than the floor admits; a skipped intent is never written.
-            self.assertLessEqual(report["attempted"], math.floor((REPLAY_ALLOWANCE - ATTEMPT_FLOOR) / 0.9) + 1)
+            self.assertLessEqual(report["attempted"], math.floor((REPLAY_ALLOWANCE - PUBLICATION_RESERVE - ATTEMPT_FLOOR) / 0.9) + 1)
             self.assertEqual(report["writes"]["meta"], 1 if report["attempted"] else 0)
             self.assertEqual(self.owner.journal.writes["meta"] - before["meta"], report["writes"]["meta"])
             self.assertLessEqual(len(reports), 6)
@@ -620,14 +627,14 @@ class BoundedCleanupReplayTests(unittest.TestCase):
             self.assertEqual(owner.last_replay["writes"],
                              {name: owner.journal.writes[name] - writes[name] for name in writes})
             # Deferred: the next one, its allowance spent at its scope fence; it fails at its first Git read.
-            left = [key for key in keys if owner.journal.intent(key)["status"] != "completed"]
+            self.assertEqual(len([key for key in keys if owner.journal.intent(key)["status"] != "completed"]), 1)
             self.clock.advance(1)
             patch, _ = self.spent_at(owner, "_scope_fence")
             with patch:
                 result, elapsed = self.replay(owner)
             self.assertEqual([item["status"] for item in result], ["pending"])
-            self.assertEqual(self.counts(owner.last_replay), {"due": len(left), "attempted": 1, "deferred": 1,
-                                                              "skipped": len(left) - 1, "busy": 0, "lost": 0})
+            self.assertEqual({name: owner.last_replay[name] for name in ("due", "attempted", "deferred", "skipped")},
+                             {"due": 1, "attempted": 1, "deferred": 1, "skipped": 0})
             # The reservation, the heads-stopped checkpoint, the deferred outcome, and the cursor.
             self.assertEqual({name: owner.last_replay["writes"][name] for name in ("intent", "meta", "generated")},
                              {"intent": 3, "meta": 1, "generated": 0})
@@ -669,12 +676,408 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         fixture = self.fixture
         key = fixture.card("floor-0", head=False)[0]
         stored = journal_bytes(self.owner.journal)
-        result, _ = self.replay(allowance=ATTEMPT_FLOOR / 2)
+        result, _ = self.replay(allowance=PUBLICATION_RESERVE + ATTEMPT_FLOOR / 2)
         self.assertEqual(result, [])
         self.assertEqual(self.counts(self.owner.last_replay),
-                         {"due": 1, "attempted": 0, "deferred": 0, "skipped": 1, "busy": 0, "lost": 0})
+                         {"due": 1, "attempted": 0, "deferred": 0, "skipped": 1, "busy": 0, "lost": 0, "unread": 0})
         self.assertEqual(journal_bytes(self.owner.journal), stored)
         self.assertNotIn("retry", self.owner.journal.intent(key))
+
+
+    # -- the board store client, Git descendants and locks, slow enumeration (rework 3) -------------
+
+    def sql_client(self) -> SqlCardClient:
+        """A real `SqlCardClient` over the driver stand-in of `test_sql_card_pool`, as the reader's."""
+        self.enterContext(mock.patch("psycopg.connect",
+                                     side_effect=lambda *args, **kwargs: pool_fixtures._Connection(1)))
+        client = SqlCardClient(pool_fixtures._Credentials(), self.fixture.data)  # type: ignore[arg-type]
+        self.addCleanup(client.close)
+        self.fixture.runtime.reader.client = client
+        return client
+
+    def test_production_phase_awaits_a_held_board_transaction_only_within_its_deadline(self):
+        key = self.fixture.card("turn-1", head=False)[0]
+        client = self.sql_client()
+        release = self.hold(client.transaction)
+        entry, _, elapsed = self.production_cleanup_phase()
+        release()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        stored = self.owner.journal.intent(key)
+        self.assertEqual(stored["status"], "pending")
+        self.assertIn("allowance exhausted at the board store transaction's turn", stored["reason"])
+        self.assertEqual(stored["retry"]["next_attempt_at"], self.clock.now + RETRY_COOLDOWN)
+        self.assertEqual(entry["cleanup"]["deferred"], 1)
+        # The bound ended with the replay; an hour on, the same client completes the intent.
+        self.assertIsNone(client._local.remaining)
+        self.clock.advance(RETRY_COOLDOWN)
+        self.production_cleanup_phase()
+        self.assertEqual(self.owner.journal.intent(key)["status"], "completed")
+
+    def reference_hook(self, script: str) -> Path:
+        """An ordinary `reference-transaction` hook of the project repository."""
+        hook = self.fixture.repo / ".git" / "hooks" / "reference-transaction"
+        hook.write_text("#!/bin/bash\n" + script)
+        hook.chmod(0o755)
+        self.addCleanup(lambda: hook.unlink(missing_ok=True))
+        return hook
+
+    def git_locks(self) -> list[str]:
+        return sorted(str(path.relative_to(self.fixture.repo)) for path in (self.fixture.repo / ".git").rglob("*.lock"))
+
+    def hanging_hook(self) -> tuple[Path, Path, Path]:
+        """At `prepared`: a background writer and a helper holding Git's output pipe, both acting only
+        after the deadline (4.2 s), then a hang."""
+        root = self.fixture.root
+        late, piped, pids = root / "late-effect", root / "piped-effect", root / "hook-pids"
+        self.reference_hook(
+            'if [ "$1" = prepared ]; then\n'
+            f"  (sleep 4.2; printf late > {late}) </dev/null >/dev/null 2>&1 &\n"
+            f"  echo $! >> {pids}\n"
+            f"  (sleep 4.2; printf late > {piped}) &\n"
+            f"  echo $! >> {pids}; echo $$ >> {pids}\n"
+            "  exec sleep 8 </dev/null >/dev/null 2>&1\n"
+            "fi\n")
+        self.addCleanup(self.kill_recorded, pids)
+        return late, piped, pids
+
+    @staticmethod
+    def kill_recorded(pids: Path) -> None:
+        for raw in (pids.read_text().split() if pids.exists() else []):
+            try:
+                os.kill(int(raw), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def test_a_hanging_reference_hook_ends_with_its_transaction_and_leaves_no_lock(self):
+        fixture = self.fixture
+        key, _, _ = fixture.card("hook-1", head=False)
+        late, piped, pids = self.hanging_hook()
+        entry, _, elapsed = self.production_cleanup_phase()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        # Git, the hook and both of its children are gone before the replay returned: Git ended on
+        # SIGTERM and removed its own lock files, so nothing is left to write after the lanes go.
+        recorded = [int(raw) for raw in pids.read_text().split()]
+        self.assertEqual(len(recorded), 3)
+        for pid in recorded:
+            with self.assertRaises(ProcessLookupError, msg=f"hook process {pid} outlived the replay"):
+                os.kill(pid, 0)
+        self.assertEqual(self.git_locks(), [])
+        with cleanup_module.reference_lock(fixture.data, "hook-1", blocking=False), \
+                cleanup_module.reference_lock(fixture.data, "hook-1", lane="lifecycle", blocking=False):
+            pass
+        time.sleep(4.2)
+        self.assertFalse(late.exists())
+        self.assertFalse(piped.exists())
+        intent = self.owner.journal.intent(key)
+        self.assertEqual(intent["status"], "pending")
+        self.assertIn("allowance exhausted at Git update-ref (its process group was ended at the bound)",
+                      intent["reason"])
+        self.assertTrue(intent["progress"]["ref_delete_admitted"])
+        self.assertTrue(intent["progress"]["workspace_removed"])
+        self.assertEqual(git(fixture.repo, "rev-parse", "refs/heads/pipeline/hook-1"), fixture.base)
+        self.assertEqual(entry["cleanup"]["deferred"], 1)
+        # The hook still hangs an hour on: the same bounded refusal, with nothing stale behind it.
+        self.clock.advance(RETRY_COOLDOWN)
+        entry, _, elapsed = self.production_cleanup_phase()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        self.assertEqual(self.owner.journal.intent(key)["status"], "pending")
+        self.assertEqual(self.git_locks(), [])
+        # Once it answers, a reloaded owner deletes the ref through the same native transaction.
+        (fixture.repo / ".git" / "hooks" / "reference-transaction").unlink()
+        self.clock.advance(RETRY_COOLDOWN)
+        self.owner = CleanupOwner(fixture.runtime)
+        self.production_cleanup_phase()
+        self.assertEqual(self.owner.journal.intent(key)["status"], "completed")
+        self.assertEqual(git(fixture.repo, "for-each-ref", "refs/heads/pipeline/hook-1"), "")
+        self.assertEqual(self.git_locks(), [])
+
+    def test_after_an_ended_ref_transaction_a_changed_tip_is_retained(self):
+        fixture = self.fixture
+        key, _, _ = fixture.card("hook-2", head=False)
+        self.hanging_hook()
+        self.production_cleanup_phase()
+        self.assertTrue(self.owner.journal.intent(key)["progress"]["ref_delete_admitted"])
+        (fixture.repo / ".git" / "hooks" / "reference-transaction").unlink()
+        moved = git(fixture.repo, "commit-tree", fixture.base + "^{tree}", "-p", fixture.base, "-m", "author")
+        git(fixture.repo, "update-ref", "refs/heads/pipeline/hook-2", moved)
+        self.clock.advance(RETRY_COOLDOWN)
+        self.owner = CleanupOwner(fixture.runtime)
+        self.production_cleanup_phase()
+        intent = self.owner.journal.intent(key)
+        self.assertEqual(intent["status"], "preserved", intent["reason"])
+        self.assertIn("candidate ref changed; retained current tip " + moved, intent["reason"])
+        self.assertEqual(git(fixture.repo, "rev-parse", "refs/heads/pipeline/hook-2"), moved)
+        self.assertEqual(self.git_locks(), [])
+
+    def test_a_foreign_ref_lock_is_named_and_never_removed(self):
+        fixture = self.fixture
+        key, _, _ = fixture.card("lock-1", head=False)
+        for name in ("refs/heads/main.lock", "packed-refs.lock"):
+            with self.subTest(lock=name):
+                lock = fixture.repo / ".git" / name
+                lock.write_text("held by another writer\n")
+                identity = lock.stat().st_ino, lock.read_bytes()
+                self.production_cleanup_phase()
+                intent = self.owner.journal.intent(key)
+                self.assertEqual(intent["status"], "pending", intent["reason"])
+                self.assertIn("refused a changed or locked tip", intent["reason"])
+                self.assertIn(name.rsplit("/", 1)[-1], intent["reason"])
+                self.assertEqual((lock.stat().st_ino, lock.read_bytes()), identity)
+                self.assertEqual(git(fixture.repo, "rev-parse", "refs/heads/pipeline/lock-1"), fixture.base)
+                lock.unlink()
+                self.clock.advance(RETRY_COOLDOWN)
+        self.production_cleanup_phase()
+        self.assertEqual(self.owner.journal.intent(key)["status"], "completed")
+
+    def test_slow_namespace_enumeration_makes_bounded_progress_each_hour(self):
+        """20000 exactly owned entries, each enumeration step delayed 0.3 ms (injected latency)."""
+        fixture = self.fixture
+        key, workspace, _ = fixture.card("namespace-1", head=False)
+        namespace = workspace / ".ummanu-task-env"
+        namespace.mkdir()
+        (namespace / "owner.json").write_text(json.dumps({"owner": "ummanu-dispatcher", "schema_version": 1,
+                                                          "workspace": str(workspace)}))
+        for n in range(20000):
+            (namespace / f"entry-{n}").touch()
+        (fixture.repo / ".git" / "info" / "exclude").write_text(".ummanu-task-env/\n")
+        native = os.scandir
+
+        class SlowEntries:
+            def __init__(self, scan):
+                self.scan = scan
+
+            def __enter__(self):
+                self.scan.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.scan.__exit__(*args)
+
+            def __iter__(self):
+                for entry in self.scan:
+                    time.sleep(0.0003)
+                    yield entry
+
+        def scan(path):
+            result = native(path)
+            if isinstance(path, int) and Path(os.readlink(f"/proc/self/fd/{path}")) == namespace:
+                return SlowEntries(result)
+            return result
+        left, hours = [], []
+        with mock.patch.object(os, "scandir", side_effect=scan):
+            while self.owner.journal.intent(key)["status"] != "completed":
+                self.assertLess(len(hours), 8, hours)
+                entry, _, elapsed = self.production_cleanup_phase()
+                self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+                left.append(len(os.listdir(namespace)) if namespace.exists() else 0)
+                hours.append({"elapsed_s": round(elapsed, 3), "left": left[-1],
+                              "status": self.owner.journal.intent(key)["status"],
+                              "deferred_at": entry["cleanup"].get("deferred_at", "")})
+                self.clock.advance(RETRY_COOLDOWN)
+        # Every hour removed more of it; none restarted from the whole namespace.
+        self.assertGreater(len(hours), 1)
+        self.assertEqual(left, sorted(left, reverse=True))
+        self.assertEqual(len(set(left)), len(left))
+        self.assertFalse(workspace.exists())
+        print("slow namespace enumeration, hour by hour: " + json.dumps(hours))
+
+    def test_slow_intent_reads_still_reach_attempts_and_rotate_without_repeating(self):
+        """A cold reload each tick (as the oneshot production tick is), each selection read delayed."""
+        fixture = self.fixture
+        keys = []
+        for n in range(30):
+            ref = f"legacy-{n:02d}"
+            task = {**copy.deepcopy(fixture.task), "id": "task-" + ref, "ref": ref, "closed": True}
+            fixture.tasks[ref] = task
+            keys.append(self.owner.journal.remember(task, {}, disposition="close"))
+        keys.sort()
+        native_load = cleanup_module.CleanupJournal._load
+
+        def load(path):
+            # Only the selection's own reads are slow; the attempts read as fast as ever.
+            if sys._getframe(1).f_code.co_name == "due_keys" and path.parent.name == "intents":
+                time.sleep(0.2)
+            return native_load(path)
+        attempted, ticks = [], []
+        with mock.patch.object(cleanup_module.CleanupJournal, "_load", staticmethod(load)):
+            while len(attempted) < len(keys):
+                self.assertLess(len(ticks), 10, ticks)
+                self.clock.advance(60)
+                owner = CleanupOwner(fixture.runtime)
+                result, elapsed = self.replay(owner)
+                self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+                self.assertTrue(result, owner.last_replay)
+                attempted += [key for key in keys if owner.journal.intent(key).get("retry", {}).get("last_attempt_at")
+                              == self.clock.now]
+                ticks.append({"elapsed_s": round(elapsed, 3), **self.counts(owner.last_replay)})
+        # Each intent once, in rotation order: no tick re-read and re-attempted the same prefix.
+        self.assertEqual(attempted, keys)
+        print("slow selection reads: " + json.dumps(ticks))
+
+    def test_scope_fence_reads_no_further_run_directory_once_the_deadline_passed(self):
+        from ummanu.runtime.head import TaskRef
+        from ummanu.runtime.local_pty_head import fence_cleanup_scopes
+        root = self.fixture.data / "heads"
+        for n in range(50):
+            (root / f"run-{n:02d}").mkdir(parents=True)
+        left = [4.0]
+
+        def remaining():
+            left[0] -= 1
+            return left[0]
+        with self.assertRaisesRegex(ValueError, "deadline passed"):
+            fence_cleanup_scopes(root, "/nowhere", TaskRef.card("x-1"), [], remaining=remaining)
+        self.assertEqual(left[0], 0)
+
+
+class SqlDeadlineTests(pool_fixtures.PoolCase):
+    """`SqlCardClient.within`: one caller deadline over the pool, connection, turn and statements."""
+
+    pool_size = 2
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.bounds: list[tuple[str, tuple[Any, ...]]] = []
+        native = pool_fixtures._Cursor.execute
+
+        def execute(cursor, sql, params=()):
+            if "set_config('statement_timeout'" in sql:
+                self.bounds.append((sql, params))
+            return native(cursor, sql, params)
+        self.enterContext(mock.patch.object(pool_fixtures._Cursor, "execute", execute))
+
+    @staticmethod
+    def deadline(seconds: float):
+        end = time.monotonic() + seconds
+        return lambda: end - time.monotonic()
+
+    def hold(self, enter) -> threading.Event:
+        entered, release = threading.Event(), threading.Event()
+
+        def run():
+            with enter():
+                entered.set()
+                release.wait(10)
+        thread = threading.Thread(target=run)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(entered.wait(5))
+        return release
+
+    def test_every_statement_gets_only_what_is_left_and_none_renews_it(self) -> None:
+        self.read()  # an open connection: only statements are measured here
+        self.on_execute = lambda sql: time.sleep(0.3) if sql == "SELECT 1" else None
+        refused: list[str] = []
+        started = time.monotonic()
+        with self.client.within(self.deadline(1.0), lambda what: refused.append(what) or RuntimeError(what)), \
+                self.assertRaises(RuntimeError):
+            for _ in range(10):
+                self.read()
+        self.assertLess(time.monotonic() - started, 1.0 + 0.3 + 0.1)
+        milliseconds = [int(params[0][:-2]) for _, params in self.bounds]
+        self.assertGreaterEqual(len(milliseconds), 3)
+        self.assertEqual(milliseconds, sorted(milliseconds, reverse=True))
+        self.assertTrue(all(value <= 1000 for value in milliseconds))
+        # LOCAL to each statement's own transaction, which every session ends.
+        self.assertTrue(all(sql.count(", true)") == 2 for sql, _ in self.bounds))
+        # The stand-in driver has no server to cancel the last statement at its timeout; the next
+        # step that would wait, its connection borrow, is refused.
+        self.assertEqual(refused, ["borrowing a board store connection"])
+        # The bound ended with the block: the next read sets nothing.
+        count = len(self.bounds)
+        self.on_execute = None
+        self.read()
+        self.assertEqual(len(self.bounds), count)
+
+    def test_the_transaction_turn_is_awaited_only_within_the_deadline(self) -> None:
+        self.hold(self.client.transaction)
+        started = time.monotonic()
+        with self.client.within(self.deadline(0.5)), self.assertRaises(TaskError), self.client.transaction():
+            pass
+        self.assertLess(time.monotonic() - started, 0.5 + 0.2)
+
+    def test_the_pool_wait_is_cut_to_the_deadline(self) -> None:
+        def pinned():
+            session = self.client._session()
+            session.__enter__()
+            self.client.connection  # noqa: B018 - pins one of the two connections
+            return contextlib.closing(SimpleNamespace(close=lambda: session.__exit__(None, None, None)))
+        for _ in range(2):
+            self.hold(pinned)
+        started = time.monotonic()
+        with self.client.within(self.deadline(0.5)), self.assertRaises(TaskError) as raised:
+            self.read()
+        self.assertEqual(raised.exception.code, "backend_unavailable")
+        self.assertLess(time.monotonic() - started, 0.5 + 0.2)
+
+    def test_a_new_connection_and_its_schema_gate_get_only_what_is_left(self) -> None:
+        with self.client.within(self.deadline(1.5)), self.assertRaises(TaskError):
+            self.read()
+        self.assertEqual(self.opened, [])  # libpq counts whole seconds, at least 2: nothing was opened
+        options: list[dict[str, Any]] = []
+        connect = pool_fixtures._Connection
+
+        def connecting(conninfo, **kwargs):
+            options.append(kwargs)
+            connection = connect(len(self.opened))
+            self.opened.append(connection)
+            return connection
+        with mock.patch("psycopg.connect", side_effect=connecting), self.client.within(self.deadline(3.5)):
+            self.read()
+        self.assertEqual(options[0]["connect_timeout"], 3)
+        # The schema gate's read ran after its own bound, in a transaction it then ended.
+        self.assertTrue(self.opened[0].statements[0].startswith("SELECT set_config('statement_timeout'"))
+        self.assertGreaterEqual(self.opened[0].rollbacks, 1)
+
+    def test_a_read_snapshot_still_opens_with_its_isolation_statement(self) -> None:
+        self.read()
+        connection = self.opened[0]
+        before = len(connection.statements)
+        with self.client.within(self.deadline(5.0)), self.client.read_snapshot():
+            self.client._query("SELECT 1")
+        self.assertTrue(connection.statements[before].startswith("SET TRANSACTION ISOLATION LEVEL"))
+
+
+class IsolatedChildWithinTests(unittest.TestCase):
+    """`_proc.run_isolated(within=...)`: run, SIGTERM, SIGKILL, drain and reap inside one deadline."""
+
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    @staticmethod
+    def deadline(seconds: float):
+        end = time.monotonic() + seconds
+        return lambda: end - time.monotonic()
+
+    def test_a_running_group_gets_sigterm_first_and_no_member_outlives_the_call(self) -> None:
+        term, late = self.root / "term", self.root / "late"
+        script = (f'trap "printf term > {term}; exit 0" TERM; (sleep 2; printf late > {late}) & '
+                  "sleep 30 & wait")
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            _proc.run_isolated(["bash", "-c", script], timeout=30, within=self.deadline(1.0))
+        self.assertLess(time.monotonic() - started, 1.0 + 0.1)
+        self.assertFalse(raised.exception.killed)  # type: ignore[attr-defined]
+        self.assertTrue(term.exists())
+        time.sleep(2.2)
+        self.assertFalse(late.exists())
+
+    def test_a_leader_that_ignores_sigterm_is_killed_within_the_deadline(self) -> None:
+        started = time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            _proc.run_isolated(["bash", "-c", 'trap "" TERM; sleep 30'], timeout=30, within=self.deadline(1.0))
+        self.assertLess(time.monotonic() - started, 1.0 + 0.1)
+        self.assertTrue(raised.exception.killed)  # type: ignore[attr-defined]
+
+    def test_a_helper_that_left_the_group_cannot_hold_the_call_past_the_deadline(self) -> None:
+        pid = self.root / "pid"
+        script = f"setsid bash -c 'echo $$ > {pid}; exec sleep 5' & sleep 0.2; exit 0"
+        started = time.monotonic()
+        result = _proc.run_isolated(["bash", "-c", script], timeout=30, within=self.deadline(1.0))
+        self.addCleanup(lambda: os.kill(int(pid.read_text()), signal.SIGKILL))
+        self.assertEqual(result.returncode, 0)
+        self.assertLess(time.monotonic() - started, 1.0 + 0.1)
 
 
 if __name__ == "__main__":

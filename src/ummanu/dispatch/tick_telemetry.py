@@ -87,9 +87,10 @@ def card_details(value: Any) -> list[dict[str, Any]] | None:
 
 
 #: The counts of a cleanup replay's tick summary: due at selection, reserved attempts, attempts the
-#: allowance cut short, due intents it did not admit, intents whose lifecycle lane was busy, and
-#: reservations lost to another owner.
-CLEANUP_COUNTS = ("due", "attempted", "deferred", "skipped", "busy", "lost")
+#: allowance cut short, due intents it did not admit, intents whose lifecycle lane was busy,
+#: reservations lost to another owner, and intents whose eligibility the selection did not read
+#: (it had its limit of due intents, or the allowance ended it).
+CLEANUP_COUNTS = ("due", "attempted", "deferred", "skipped", "busy", "lost", "unread")
 #: The journal publications of the invocation, by file class, and their bytes.
 CLEANUP_WRITES = ("intent", "meta", "generated", "bytes")
 

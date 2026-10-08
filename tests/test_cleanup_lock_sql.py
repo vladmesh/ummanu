@@ -127,10 +127,17 @@ class CleanupLockSqlTests(CardStoreCase):
         self.assertEqual(failures, [])
         self.assertEqual(self.writer.reader.show("alpha-1")["state"], "in_progress")
 
-    def test_automatic_replay_row_lock_waits_only_its_allowance(self):
-        """ummanu-145: a contended ownership row costs the automatic replay at most its allowance, and
-        the bound ends with the caller's transaction."""
-        from ummanu.dispatch import cleanup
+    def deadline(self, seconds):
+        end = time.monotonic() + seconds
+        return lambda: end - time.monotonic()
+
+    def settings(self):
+        with self.client.transaction():
+            return self.client._query("SHOW lock_timeout"), self.client._query("SHOW statement_timeout")
+
+    def test_cleanup_deadline_bounds_a_held_row_slow_statements_and_a_cold_connection(self):
+        """ummanu-145: one caller deadline over the real driver; nothing renews it, nothing outlives it."""
+        unbounded = self.settings()
         holding, release = threading.Event(), threading.Event()
 
         def hold():
@@ -144,19 +151,33 @@ class CleanupLockSqlTests(CardStoreCase):
         self.addCleanup(thread.join, 10)
         self.addCleanup(release.set)
         self.assertTrue(holding.wait(5))
-        with self.client.transaction():
-            unbounded = self.client._query("SHOW lock_timeout"), self.client._query("SHOW statement_timeout")
-        token = cleanup._ALLOWANCE.set(cleanup.Allowance(0.5))
-        try:
-            started = time.monotonic()
-            with self.assertRaises(Exception), self.client.transaction():  # noqa: B017 - the driver's lock timeout
-                cleanup._lock_row(self.client, {"ref": "alpha-1"})
-            self.assertLess(time.monotonic() - started, 1.5)
-        finally:
-            cleanup._ALLOWANCE.reset(token)
+        # A held row: the lock wait is the deadline's, and the refusal rolls the transaction back.
+        started = time.monotonic()
+        with self.client.within(self.deadline(0.5)), self.assertRaises(TaskError), self.client.transaction():
+            self.client.call("lockOwnershipReference", reference="alpha-1")
+        self.assertLess(time.monotonic() - started, 1.5)
         release.set()
         thread.join(10)
-        with self.client.transaction():
-            self.assertEqual((self.client._query("SHOW lock_timeout"), self.client._query("SHOW statement_timeout")),
-                             unbounded)
-            self.assertTrue(self.client.call("lockOwnershipReference", reference="alpha-1"))
+        # Successive slow statements in one transaction: the second gets only what is left.
+        started = time.monotonic()
+        with self.client.within(self.deadline(1.0)), self.assertRaises(TaskError), self.client.transaction():
+            self.client._query("SELECT pg_sleep(0.6)")
+            self.client._query("SELECT pg_sleep(0.6)")
+        self.assertLess(time.monotonic() - started, 1.5)
+        # Standalone reads too, each a transaction of its own.
+        started = time.monotonic()
+        with self.client.within(self.deadline(1.0)), self.assertRaises(TaskError):
+            self.client._query("SELECT pg_sleep(0.6)")
+            self.client._query("SELECT pg_sleep(0.6)")
+        self.assertLess(time.monotonic() - started, 1.5)
+        # A cold client opens a connection only with the two seconds libpq can count, then works.
+        cold = SqlCardClient(self.client.credentials, self.root)
+        self.addCleanup(cold.close)
+        with cold.within(self.deadline(1.5)), self.assertRaises(TaskError):
+            cold._query("SELECT 1")
+        with cold.within(self.deadline(5.0)), cold.transaction():
+            self.assertTrue(cold.call("lockOwnershipReference", reference="alpha-1"))
+        # The bound ended with each transaction and each block: the client's own policy is back.
+        self.assertEqual(self.settings(), unbounded)
+        with cold.transaction():
+            self.assertEqual((cold._query("SHOW lock_timeout"), cold._query("SHOW statement_timeout")), unbounded)
