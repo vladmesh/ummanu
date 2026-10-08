@@ -1040,7 +1040,9 @@ class OwnedCleanupTests(unittest.TestCase):
             self.record.worker_progress_at = 1234.5
             self.record.gate_attestation = {"evidence": "changed"}
             run = dict(self.record.worker_head_run)
-            run["fanout_policy"] = {**run["fanout_policy"], "provider_source": {"cursor": {"line": 99}}}
+            run["fanout_policy"] = {**run["fanout_policy"], "provider_source": {
+                "version": 1, "kind": "codex_session_event_jsonl", "state": "unbound", "root": "/codex/sessions",
+                "baseline": [f"/codex/sessions/rollout-{n}.jsonl" for n in range(500)]}}
             self.record.worker_head_run = run
             self.flush()
         self.assertEqual(calls, [])
