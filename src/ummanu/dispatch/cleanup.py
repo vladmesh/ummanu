@@ -305,10 +305,12 @@ def _identity(repo: Path, workspace: str, branch: str) -> dict[str, Any]:
     return result
 
 
-#: Every active file of the journal stays under this bound; the archived v1 document does not.
+#: Every active file of the journal (intents, generated buckets, meta) stays under this bound,
+#: checked at the one publication seam; the archived v1 document does not.
 INTENT_FILE_LIMIT = 1_000_000
 _LAYOUT_VERSION = 2
-_GENERATED_BUCKETS = "0123456789abcdef"
+_HEX = "0123456789abcdef"
+_MAX_GENERATED_DEPTH = 64
 # The fan-out attestation a cleanup head keeps: its verdict, the binding a HeadRun read checks,
 # and the first events. The provider source (with its session baseline), progress source and
 # prompt identity are launch telemetry that no stop, fence or settlement reads.
@@ -375,6 +377,32 @@ def _compact_intent(intent: dict[str, Any]) -> None:
     intent["record"] = _compact_record_runs(intent["record"])
 
 
+def _generated_directory(root: Path, depth: int) -> Path:
+    return root / ("generated" if depth == 1 else f"generated-{depth}")
+
+
+def _generated_buckets(generated: dict[str, str], depth: int) -> dict[str, bytes]:
+    """Every path -> digest entry, in buckets named by the first `depth` hex digits of its path's hash."""
+    buckets: dict[str, dict[str, str]] = {}
+    for name, digest in generated.items():
+        buckets.setdefault(hashlib.sha256(name.encode()).hexdigest()[:depth], {})[name] = digest
+    return {prefix: json.dumps(bucket, sort_keys=True).encode() for prefix, bucket in buckets.items()}
+
+
+def _generated_layout(generated: dict[str, str], depth: int) -> tuple[int, dict[str, bytes]]:
+    """The shallowest depth from `depth` at which every bucket fits the file bound, with its buckets.
+
+    Every entry is kept: a map that cannot fit at any depth is refused before anything is written.
+    """
+    while depth <= _MAX_GENERATED_DEPTH:
+        buckets = _generated_buckets(generated, depth)
+        if all(len(body) <= INTENT_FILE_LIMIT for body in buckets.values()):
+            return depth, buckets
+        depth += 1
+    raise HostError("cleanup generated digests cannot be stored under the "
+                    f"{INTENT_FILE_LIMIT}-byte file bound; nothing was published")
+
+
 def _replace_file(path: Path, body: bytes) -> None:
     """Atomic replace with the file and its directory entry durable before return."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -409,8 +437,11 @@ def _valid_intent(value: Any) -> bool:
 class CleanupJournal:
     """One file per obligation under dispatcher/cleanup/, each atomically replaced with fsync.
 
-    `cleanup/meta.json` holds the replay cursor, `cleanup/generated/` the generated-file digests
-    in sixteen buckets, `cleanup/intents/<key>.json` one intent. A mutation reads and replaces only
+    `cleanup/meta.json` holds the replay cursor and the generated depth d; the generated-file digests
+    live in buckets named by the first d hex digits of each path's hash (`cleanup/generated/` at
+    d=1, `cleanup/generated-<d>/` deeper); `cleanup/intents/<key>.json` holds one intent. A bucket
+    that would outgrow the file bound deepens the whole map: it is rebuilt at the next depth, the
+    meta switch publishes it and only then is the old depth removed. A mutation reads and replaces only
     its own intent file; inventory and replay walk the directory. The directory is published by one
     rename, so it exists only complete. The released v1 `cleanup.json` is migrated into it once,
     under the ownership lock, and then archived beside it; the archive is never read again.
@@ -425,18 +456,21 @@ class CleanupJournal:
         self._staging = root / ".cleanup-migrating"
         self._targets: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
             "cleanup_targets", default=None)
-        # Actual replacements made through this instance, by kind, and the bytes they wrote.
-        self.writes: dict[str, int] = {"intent": 0, "meta": 0, "generated": 0, "layout": 0, "bytes": 0}
+        # Successful replacements made through this instance, by file class, and the bytes they wrote.
+        self.writes: dict[str, int] = {"intent": 0, "meta": 0, "generated": 0, "bytes": 0}
 
     # Layout ------------------------------------------------------------------------------------
 
     def _intent_path(self, key: str, root: Path | None = None) -> Path:
-        if len(key) != 64 or any(character not in _GENERATED_BUCKETS for character in key):
+        if len(key) != 64 or any(character not in _HEX for character in key):
             raise HostError("cleanup intent key is malformed")
         return (root or self.path) / "intents" / (key + ".json")
 
-    def _bucket_path(self, name: str, root: Path | None = None) -> Path:
-        return (root or self.path) / "generated" / (hashlib.sha256(name.encode()).hexdigest()[0] + ".json")
+    def _generated_depth(self) -> int:
+        depth = self._meta().get("generated_depth", 1)
+        if isinstance(depth, bool) or not isinstance(depth, int) or not 1 <= depth <= _MAX_GENERATED_DEPTH:
+            raise HostError("cleanup evidence has an unsupported shape: generated depth")
+        return depth
 
     def _published(self) -> bool:
         if self.path.is_dir():
@@ -521,21 +555,43 @@ class CleanupJournal:
         return stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size
 
     def generated_digests(self) -> dict[str, str]:
-        """The generated-file digests alone, without reading any intent file."""
+        """The generated-file digests alone, without reading any intent file.
+
+        Unlocked readers see the depth the meta names; a deepening published meanwhile is read again.
+        """
         if not self._published():
             return self.read()["generated"]
-        generated: dict[str, str] = {}
-        for file in sorted((self.path / "generated").glob("*.json")):
-            bucket = self._load(file)
-            if not isinstance(bucket, dict):
-                raise HostError("cleanup evidence has an unsupported shape: generated/" + file.name)
-            generated.update(bucket)
-        return generated
+        for _ in range(3):
+            depth = self._generated_depth()
+            generated: dict[str, str] = {}
+            try:
+                for file in sorted(_generated_directory(self.path, depth).glob("*.json")):
+                    bucket = self._load(file)
+                    if not isinstance(bucket, dict):
+                        raise HostError("cleanup evidence has an unsupported shape: generated/" + file.name)
+                    generated.update(bucket)
+            except HostError:
+                if self._generated_depth() == depth:
+                    raise
+                continue
+            if self._generated_depth() == depth:
+                return generated
+        raise HostError("cleanup generated digests kept changing depth while being read")
 
     # Writes ------------------------------------------------------------------------------------
 
-    def _replace(self, path: Path, body: bytes, kind: str) -> None:
+    def _replace(self, path: Path, body: bytes) -> None:
+        """The one publication seam of every journal file, migration staging included.
+
+        The file bound is checked before the replace, and only a completed replace is counted, by
+        what the file is: an intent written by a migration is an intent write.
+        """
+        if len(body) > INTENT_FILE_LIMIT:
+            raise HostError(f"cleanup journal file {path.name} would be {len(body)} bytes, over the "
+                            f"{INTENT_FILE_LIMIT}-byte bound; nothing was published")
         _replace_file(path, body)
+        kind = ("intent" if path.parent.name == "intents" else "meta" if path.name == "meta.json"
+                else "generated")
         self.writes[kind] += 1
         self.writes["bytes"] += len(body)
         if kind == "intent":
@@ -564,11 +620,11 @@ class CleanupJournal:
             pass
         except OSError as exc:
             raise HostError(f"cleanup evidence unreadable: {exc}") from exc
-        self._replace(path, body, "intent")
+        self._replace(path, body)
 
-    def _write_meta(self, cursor: str) -> None:
-        body = json.dumps({"version": _LAYOUT_VERSION, "replay_cursor": cursor}, sort_keys=True).encode()
-        self._replace(self.path / "meta.json", body, "meta")
+    def _write_meta(self, **changes: Any) -> None:
+        meta = {**self._meta(), **changes}
+        self._replace(self.path / "meta.json", json.dumps(meta, sort_keys=True).encode())
 
     def _ensure(self) -> None:
         """Under ownership_lock: publish the layout, migrating the v1 journal once if there is one."""
@@ -596,16 +652,17 @@ class CleanupJournal:
             # Freshly parsed and owned here: compaction replaces record and heads, nothing else changes.
             migrated = {**intent, "record": cleanup_record(intent["record"])}
             files.append((self._intent_path(key, root), self._encode_intent(key, migrated)))
-        buckets: dict[Path, dict[str, str]] = {}
-        for name, digest in value["generated"].items():
-            buckets.setdefault(self._bucket_path(name, root), {})[name] = digest
-        files += [(path, json.dumps(bucket, sort_keys=True).encode()) for path, bucket in sorted(buckets.items())]
-        meta = {"version": _LAYOUT_VERSION, "replay_cursor": str(value.get("replay_cursor") or "")}
+        depth, buckets = _generated_layout(value["generated"], 1)
+        generated = _generated_directory(root, depth)
+        files += [(generated / (prefix + ".json"), body) for prefix, body in sorted(buckets.items())]
+        meta = {"version": _LAYOUT_VERSION, "replay_cursor": str(value.get("replay_cursor") or ""),
+                "generated_depth": depth}
         files.append((root / "meta.json", json.dumps(meta, sort_keys=True).encode()))
         (root / "intents").mkdir(parents=True)
-        (root / "generated").mkdir()
+        generated.mkdir()
         for path, body in files:
-            self._replace(path, body, "layout")
+            self._replace(path, body)
+        _fsync_directory(generated)
         _fsync_directory(root)
 
     def _publish(self) -> None:
@@ -657,19 +714,43 @@ class CleanupJournal:
             self._write_intent(key, value["intents"][key])
         if targets is None and "replay_cursor" in value and \
                 str(value["replay_cursor"] or "") != str(self._meta().get("replay_cursor") or ""):
-            self._write_meta(str(value["replay_cursor"] or ""))
+            self._write_meta(replay_cursor=str(value["replay_cursor"] or ""))
         if generated:
             for name, digest in value["generated"].items():
                 self._record_generated(name, digest)
 
     def _record_generated(self, name: str, digest: str) -> None:
-        path = self._bucket_path(name)
+        depth = self._generated_depth()
+        directory = _generated_directory(self.path, depth)
+        path = directory / (hashlib.sha256(name.encode()).hexdigest()[:depth] + ".json")
         bucket = self._load(path) if path.exists() else {}
         if not isinstance(bucket, dict):
             raise HostError("cleanup evidence has an unsupported shape: generated/" + path.name)
-        if bucket.get(name) != digest:
-            bucket[name] = digest
-            self._replace(path, json.dumps(bucket, sort_keys=True).encode(), "generated")
+        if bucket.get(name) == digest:
+            return
+        bucket[name] = digest
+        body = json.dumps(bucket, sort_keys=True).encode()
+        if len(body) <= INTENT_FILE_LIMIT:
+            self._replace(path, body)
+            return
+        self._deepen_generated(depth, {**self.generated_digests(), name: digest})
+
+    def _deepen_generated(self, depth: int, generated: dict[str, str]) -> None:
+        """Rebuild the whole map one or more levels deeper, publish it by the meta switch, then drop
+        the old depth. Until the switch the old depth stays authoritative and complete."""
+        deeper, buckets = _generated_layout(generated, depth + 1)
+        directory = _generated_directory(self.path, deeper)
+        if os.path.lexists(directory):
+            shutil.rmtree(directory)  # an interrupted deepening; never named by the meta
+        directory.mkdir()
+        for prefix, body in sorted(buckets.items()):
+            self._replace(directory / (prefix + ".json"), body)
+        _fsync_directory(directory)
+        self._write_meta(generated_depth=deeper)
+        for stale in self.path.glob("generated*"):
+            if stale != directory and stale.is_dir():
+                shutil.rmtree(stale)
+        _fsync_directory(self.path)
 
     @journal_mutation
     def generated(self, path: Path, body: str | bytes) -> None:
@@ -679,7 +760,7 @@ class CleanupJournal:
     @journal_mutation
     def set_replay_cursor(self, cursor: str) -> None:
         if str(self._meta().get("replay_cursor") or "") != cursor:
-            self._write_meta(cursor)
+            self._write_meta(replay_cursor=cursor)
 
     def _single(self, key: str) -> dict[str, Any]:
         """A journal value holding just this intent, as read under the caller's lock."""

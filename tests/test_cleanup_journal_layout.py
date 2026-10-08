@@ -20,6 +20,7 @@ from ummanu.dispatch.cleanup import (
     _intent_key,
     cleanup_record,
 )
+from ummanu.dispatch.tick_telemetry import tick_counting
 from ummanu.dispatch.types import HostError
 from ummanu.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 
@@ -132,6 +133,21 @@ def legacy_journal(count: int = 300, *, largest: int = 3) -> dict:
     return {"version": 1, "intents": intents, "generated": generated, "replay_cursor": sorted(intents)[count // 2]}
 
 
+def skewed_generated(count: int, *, prefix: str = "0", start: int = 0) -> tuple[dict[str, str], int]:
+    """Ordinary TASK.md paths whose hashes all share one prefix, with the next unused index."""
+    generated, n = {}, start
+    while len(generated) < count:
+        name = f"/home/dev/ummanu-data/workspaces/ummanu/ummanu-{n}-worker/TASK.md"
+        n += 1
+        if hashlib.sha256(name.encode()).hexdigest().startswith(prefix):
+            generated[name] = hashlib.sha256(name.encode() + b"body").hexdigest()
+    return generated, n
+
+
+def active_files(journal: CleanupJournal) -> dict[str, int]:
+    return {str(path.relative_to(journal.path)): path.stat().st_size for path in journal.path.rglob("*.json")}
+
+
 def stored_files(journal: CleanupJournal) -> dict[str, tuple[int, int, int]]:
     return {str(path.relative_to(journal.path)): (path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_size)
             for path in journal.path.rglob("*") if path.is_file()}
@@ -238,7 +254,7 @@ class PerIntentLayoutTests(JournalTestCase):
         self.assertIn(own, changed)
         self.assertEqual({name for name in reads if name.startswith("intents/")}, {own})
         written = {kind: self.journal.writes[kind] - writes_before[kind] for kind in self.journal.writes}
-        self.assertEqual((written["intent"], written["meta"], written["generated"], written["layout"]), (3, 1, 1, 0))
+        self.assertEqual((written["intent"], written["meta"], written["generated"]), (3, 1, 1))
         self.assertLess(written["bytes"], 3 * INTENT_FILE_LIMIT)
         print(f"one-intent mutations: {written}")
 
@@ -305,6 +321,188 @@ class PerIntentLayoutTests(JournalTestCase):
         self.assertFalse(HeadRun.from_json(compact).fanout_clean)
         self.assertEqual(compact["fanout_policy"]["state"], "unknown")
         self.assertEqual(cleanup._compact_run(compact), compact)
+
+
+class GeneratedBoundTests(JournalTestCase):
+    """Generated digests are active journal files too: bounded, never truncated (ummanu-131 review 14)."""
+
+    def assert_bounded(self) -> None:
+        sizes = active_files(self.journal)
+        self.assertTrue(sizes)
+        self.assertLessEqual(max(sizes.values()), INTENT_FILE_LIMIT, max(sizes.items(), key=lambda item: item[1]))
+
+    def test_skewed_v1_generated_over_a_megabyte_migrates_into_bounded_buckets(self) -> None:
+        generated, after = skewed_generated(9000)
+        legacy = {"version": 1, "intents": {}, "generated": generated}
+        self.assertGreater(len(json.dumps(generated)), INTENT_FILE_LIMIT)
+        self.write_legacy(json.dumps(legacy).encode())
+        self.assertTrue(self.journal.migrate())
+        self.assert_bounded()
+        self.assertEqual(self.journal.generated_digests(), generated)
+        self.assertEqual(self.journal._generated_depth(), 2)
+        self.assertFalse((self.journal.path / "generated").exists())
+        # Ordinary producers keep adding to the same prefix; every digest stays readable.
+        more, _ = skewed_generated(40, start=after)
+        for name, digest in more.items():
+            self.journal._record_generated(name, digest)
+        self.assert_bounded()
+        self.assertEqual(self.journal.generated_digests(), {**generated, **more})
+
+    def test_ordinary_growth_across_the_bound_deepens_without_losing_a_digest(self) -> None:
+        generated, after = skewed_generated(7000)
+        self.write_legacy(json.dumps({"version": 1, "intents": {}, "generated": generated}).encode())
+        self.journal.migrate()
+        self.assertEqual(self.journal._generated_depth(), 1)
+        bucket = self.journal.path / "generated" / "0.json"
+        self.assertGreater(bucket.stat().st_size, INTENT_FILE_LIMIT - 30_000)
+        more, _ = skewed_generated(300, start=after)
+        replace = cleanup._replace_file
+        published = []
+        with tick_counting() as counters, mock.patch.object(
+                cleanup, "_replace_file", side_effect=lambda path, body: (replace(path, body), published.append(len(body)))):
+            for name, digest in more.items():
+                self.journal._record_generated(name, digest)
+        self.assertEqual(self.journal._generated_depth(), 2)
+        self.assertFalse((self.journal.path / "generated").exists())
+        self.assert_bounded()
+        self.assertEqual(self.journal.generated_digests(), {**generated, **more})
+        # Every completed replace (bucket writes, the deeper rebuild and the meta switch) and nothing else.
+        self.assertEqual(counters["cleanup_bytes_written"], sum(published))
+        self.assertEqual(counters["cleanup_intent_writes"], 0)
+
+    def test_crash_while_deepening_keeps_the_published_depth_complete(self) -> None:
+        generated, after = skewed_generated(7000)
+        self.write_legacy(json.dumps({"version": 1, "intents": {}, "generated": generated}).encode())
+        self.journal.migrate()
+        more, _ = skewed_generated(300, start=after)
+        replace = cleanup._replace_file
+        writes = []
+
+        def crash(path, body):
+            if "generated-2" in str(path):
+                writes.append(path)
+                if len(writes) == 5:
+                    raise OSError("power lost while deepening")
+            return replace(path, body)
+
+        names = iter(more.items())
+        written = {}
+        with mock.patch.object(cleanup, "_replace_file", side_effect=crash), self.assertRaises(OSError):
+            for name, digest in names:
+                self.journal.generated(Path(name), "unused")  # through the locked public API
+                written[name] = self.journal.generated_digests()[name]
+        # The meta still names depth 1, whose files are untouched and complete.
+        self.assertEqual(self.journal._generated_depth(), 1)
+        self.assertEqual(self.journal.generated_digests(), {**generated, **written})
+        self.assert_bounded()
+        # The retried write finishes the deepening from scratch.
+        for name, digest in more.items():
+            self.journal._record_generated(name, digest)
+        self.assertEqual(self.journal._generated_depth(), 2)
+        self.assertEqual(self.journal.generated_digests(), {**generated, **more})
+        self.assert_bounded()
+
+    def test_crash_after_the_depth_switch_reads_the_new_depth(self) -> None:
+        generated, after = skewed_generated(7000)
+        self.write_legacy(json.dumps({"version": 1, "intents": {}, "generated": generated}).encode())
+        self.journal.migrate()
+        more, _ = skewed_generated(300, start=after)
+        with mock.patch.object(cleanup.shutil, "rmtree", side_effect=OSError("crash before removal")), \
+                self.assertRaises(OSError):
+            for name, digest in more.items():
+                self.journal._record_generated(name, digest)
+        self.assertEqual(self.journal._generated_depth(), 2)
+        self.assertTrue((self.journal.path / "generated").exists())  # inactive, unread leftover
+        expected = self.journal.generated_digests()
+        self.assertLessEqual(set(generated), set(expected))
+        for name, digest in more.items():
+            self.journal._record_generated(name, digest)
+        self.assertEqual(self.journal.generated_digests(), {**generated, **more})
+
+    def test_crash_while_staging_a_deep_generated_map_resumes(self) -> None:
+        generated, _ = skewed_generated(9000)
+        value = intent("ummanu-1", "pending", heads=1)
+        legacy = {"version": 1, "intents": {"a" * 64: value}, "generated": generated}
+        body = json.dumps(legacy).encode()
+        self.write_legacy(body)
+        replace = cleanup._replace_file
+        calls = []
+
+        def crash(path, data):
+            calls.append(path)
+            if "generated-2" in str(path) and len([c for c in calls if "generated-2" in str(c)]) == 3:
+                raise OSError("power lost while staging generated")
+            return replace(path, data)
+
+        with mock.patch.object(cleanup, "_replace_file", side_effect=crash), self.assertRaises(OSError):
+            self.journal.migrate()
+        self.assertFalse(self.journal.path.exists())
+        self.assertEqual(self.journal.legacy.read_bytes(), body)
+        self.assertTrue(CleanupJournal(self.data).migrate())
+        self.assertEqual(self.journal.generated_digests(), generated)
+        self.assertEqual(set(self.journal.read()["intents"]), {"a" * 64})
+        self.assert_bounded()
+        self.assertEqual(self.journal.archive.read_bytes(), body)
+
+    def test_a_digest_that_cannot_fit_is_refused_before_publication(self) -> None:
+        self.journal.generated(Path("/data/workspaces/ummanu/x/TASK.md"), "body")
+        before = stored_files(self.journal)
+        with self.assertRaisesRegex(HostError, "nothing was published"):
+            self.journal.generated(Path("/data/" + "x" * INTENT_FILE_LIMIT), "body")
+        self.assertEqual(stored_files(self.journal), before)
+        self.assertEqual(list(self.journal.generated_digests()), ["/data/workspaces/ummanu/x/TASK.md"])
+
+    def test_the_publication_seam_checks_the_bound_before_every_replace(self) -> None:
+        with mock.patch.object(cleanup, "_replace_file") as replace, \
+                self.assertRaisesRegex(HostError, "over the 1000000-byte bound; nothing was published"):
+            self.journal._replace(self.journal.path / "intents" / ("a" * 64 + ".json"), b"x" * (INTENT_FILE_LIMIT + 1))
+        replace.assert_not_called()
+        self.assertEqual(self.journal.writes, {"intent": 0, "meta": 0, "generated": 0, "bytes": 0})
+
+
+class PublicationCountTests(JournalTestCase):
+    """Tick counters equal the files the journal actually published (ummanu-131 review 14)."""
+
+    def test_migrated_intents_are_counted_as_intent_writes(self) -> None:
+        intents = {}
+        for n in range(3):
+            value = intent(f"ummanu-{n}", "owned", baseline=0, events=0, heads=1)
+            intents[_intent_key(value["task"]["ref"], value["record"]["attempt_id"])] = value
+        generated, _ = skewed_generated(5)
+        self.write_legacy(json.dumps({"version": 1, "intents": intents, "generated": generated}).encode())
+        with tick_counting() as counters:
+            self.journal.migrate()
+        files = active_files(self.journal)
+        self.assertEqual(counters["cleanup_intent_writes"], len(list((self.journal.path / "intents").glob("*.json"))))
+        self.assertEqual(counters["cleanup_intent_writes"], 3)
+        self.assertEqual(counters["cleanup_bytes_written"], sum(files.values()))
+        self.assertEqual(self.journal.writes["intent"], 3)
+
+    def test_a_failed_replace_is_not_counted_and_its_retry_is(self) -> None:
+        value = intent("ummanu-1", "owned", heads=1)
+        key = self.journal.remember(value["task"], value["record"])
+        changed = self.journal.intent(key)
+        changed["reason"] = "retried"
+        replace = cleanup._replace_file
+        with tick_counting() as counters:
+            with mock.patch.object(cleanup, "_replace_file", side_effect=OSError("disk full")), \
+                    self.assertRaises(OSError):
+                self.journal.commit_intent(key, copy.deepcopy(changed))
+            self.assertEqual(counters["cleanup_intent_writes"], 0)
+            self.assertEqual(counters["cleanup_bytes_written"], 0)
+            with mock.patch.object(cleanup, "_replace_file", side_effect=replace):
+                self.journal.commit_intent(key, copy.deepcopy(changed))
+        size = (self.journal.path / "intents" / (key + ".json")).stat().st_size
+        self.assertEqual(counters["cleanup_intent_writes"], 1)
+        self.assertEqual(counters["cleanup_bytes_written"], size)
+
+    def test_outside_a_tick_publications_count_nothing(self) -> None:
+        value = intent("ummanu-1", "owned", heads=1)
+        self.journal.remember(value["task"], value["record"])
+        with tick_counting() as counters:
+            pass
+        self.assertEqual(counters["cleanup_intent_writes"], 0)
+        self.assertEqual(self.journal.writes["intent"], 1)
 
 
 class MigrationTests(JournalTestCase):

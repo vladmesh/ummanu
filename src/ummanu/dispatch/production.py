@@ -138,10 +138,12 @@ def tick_phase(name: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def tick_card(ref: str) -> Iterator[None]:
+def tick_card(ref: str, records: int) -> Iterator[None]:
     """Attribute one card's advance time (inclusive) and the writes it made, inside its phase.
 
-    A breakdown of `advance_active`, not a phase of its own: it adds nothing to the phase sum.
+    `records` is how many dispatcher records the advance was handed, apart from how many times it
+    flushed them (the `save_records` delta). A breakdown of `advance_active`, not a phase of its
+    own: it adds nothing to the phase sum.
     """
     cards = _TICK_CARDS.get()
     before = tick_counter_values()
@@ -153,7 +155,7 @@ def tick_card(ref: str) -> Iterator[None]:
         yield
     finally:
         after = tick_counter_values() or before
-        cards.append({"ref": ref, "ms": round((time.perf_counter() - started) * 1000.0, 3),
+        cards.append({"ref": ref, "ms": round((time.perf_counter() - started) * 1000.0, 3), "records": records,
                       **{name: after[name] - before[name] for name in after}})
 
 
@@ -212,8 +214,13 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
             largest = max(phases, key=lambda name: phases[name])
             phases[largest] = round(max(0.0, phases[largest] - excess), 3)
         phases["other"] = round(max(0.0, duration - sum(phases.values())), 3)
-    # Counted before this terminal record's own save, which is the one write a tick always makes.
     counters = tick_counter_values()
+    if counters is not None:
+        # Every caller saves this payload right after folding the entry in, and the entry is only
+        # ever read from that save, so a readable entry was carried by exactly one more successful
+        # state save than the seam had counted when it was built: its own. A failed terminal save
+        # leaves no entry, and the recovery record that replaces it counts its own save instead.
+        counters["production_state_saves"] += 1
     cards = sorted(_TICK_CARDS.get() or [], key=lambda card: -card["ms"])[:TICK_CARDS_KEPT]
     entry = {
         "seq": seq,
@@ -1028,7 +1035,7 @@ def _advance_active(
         if is_steward_report(task):
             continue
         try:
-            with tick_card(str(task.get("ref") or "")):
+            with tick_card(str(task.get("ref") or ""), len(records)):
                 outcome = _production_tick_active(runtime, task, records, payload)
         except TaskError as exc:
             errors.append({"ref": str(task.get("ref") or ""), "code": exc.code, "message": exc.message})

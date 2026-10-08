@@ -834,8 +834,9 @@ def _print_tick_measurements(dispatcher: dict[str, Any]) -> None:
     if counters:
         print("last tick writes: " + ", ".join(f"{name} {value}" for name, value in counters.items()))
     for card in (last.get("cards") or []) if last else []:
-        print(f"last tick card {card['ref']}: {_duration_text(card.get('ms'))}, records "
-              f"{card.get('save_records', 0)}, cleanup intents {card.get('cleanup_intent_writes', 0)} "
+        records = "unknown" if card.get("records") is None else card["records"]
+        print(f"last tick card {card['ref']}: {_duration_text(card.get('ms'))}, records {records}, "
+              f"flushes {card.get('save_records', 0)}, cleanup intents {card.get('cleanup_intent_writes', 0)} "
               f"({card.get('cleanup_bytes_written', 0)} bytes), state saves {card.get('production_state_saves', 0)}")
 
 

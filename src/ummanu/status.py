@@ -408,7 +408,8 @@ def _last_tick(production: dict[str, Any]) -> dict[str, Any] | None:
         "phases": (phases := phase_ms(entry.get("phases"))),
         # The aggregate the reconcile budget is judged by: its exclusive sub-phases summed.
         "reconcile_ms": reconcile_ms(phases),
-        # Writes made before the terminal save, and the slowest cards' advance; null before 131.
+        # The tick's successful writes, its own terminal save included, and the slowest cards' advance
+        # (records handed in, flushes and writes); null before 131.
         "counters": counter_values(entry.get("counters")),
         "cards": card_details(entry.get("cards")),
     }

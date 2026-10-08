@@ -204,7 +204,7 @@ class TickMeasurementTests(unittest.TestCase):
                         self.clock.now += 123456.789123
                         # Per-card details and every counter at their maximum: kept off the ring.
                         for card in range(TICK_CARDS_KEPT + 5):
-                            with production.tick_card("x" * 200 + str(card)):
+                            with production.tick_card("x" * 200 + str(card), 2**40):
                                 for counter in TICK_COUNTERS:
                                     tick_count(counter, 2**40)
                 production.record_tick_telemetry(payload, {"status": "degraded"})
@@ -219,15 +219,28 @@ class TickMeasurementTests(unittest.TestCase):
         without_ring = json.dumps(restarted, indent=2, sort_keys=True).encode()
         self.assertLessEqual(len(encoded) - len(without_ring), 50_000)
 
+    def state_writes(self):
+        """An independent count of state publications that completed, at the file writer itself."""
+        written = []
+        write = production.write_json
+
+        def counted(path, payload):
+            write(path, payload)
+            written.append(path)
+
+        self.enterContext(mock.patch.object(production, "write_json", side_effect=counted))
+        return written
+
     def test_advance_records_each_card_and_the_ticks_actual_writes(self):
-        writes = {"slow-1": (300, 3, 2, 4096), "quick-2": (20, 1, 0, 0)}
+        # Three dispatcher records go into every advance; one card flushes them five times, one never.
+        writes = {"slow-1": (300, 5, 2, 4096), "quick-2": (20, 0, 0, 0)}
+        records = {ref: SimpleNamespace(to_json=dict) for ref in ("slow-1", "quick-2", "held-3")}
+        published = self.state_writes()
 
         def advance(runtime, task, records, payload):
             ms, flushes, intents, written = writes[task["ref"]]
             self.clock.now += ms / 1000
-            for _ in range(flushes):
-                tick_count("save_records")
-                tick_count("production_state_saves")
+            tick_count("save_records", flushes)
             tick_count("cleanup_intent_writes", intents)
             tick_count("cleanup_bytes_written", written)
             return {"ref": task["ref"], "status": "ok"}
@@ -238,6 +251,7 @@ class TickMeasurementTests(unittest.TestCase):
             mock.patch.object(production, "_production_tick_active", side_effect=advance),
             mock.patch.object(production, "_production_tasks", return_value=tasks),
             mock.patch.object(production, "fenced_task", return_value=False),
+            mock.patch.object(self.runtime.production_state, "records", return_value=records),
         ):
             production.production_tick(self.runtime)
         last = self.last()
@@ -246,26 +260,43 @@ class TickMeasurementTests(unittest.TestCase):
         self.assertEqual(
             last["cards"],
             [
-                {"ref": "slow-1", "ms": 300.0, "save_records": 3, "cleanup_intent_writes": 2,
-                 "cleanup_bytes_written": 4096, "production_state_saves": 3},
-                {"ref": "quick-2", "ms": 20.0, "save_records": 1, "cleanup_intent_writes": 0,
-                 "cleanup_bytes_written": 0, "production_state_saves": 1},
+                {"ref": "slow-1", "ms": 300.0, "records": 3, "save_records": 5, "cleanup_intent_writes": 2,
+                 "cleanup_bytes_written": 4096, "production_state_saves": 0},
+                {"ref": "quick-2", "ms": 20.0, "records": 3, "save_records": 0, "cleanup_intent_writes": 0,
+                 "cleanup_bytes_written": 0, "production_state_saves": 0},
             ],
         )
-        # The terminal save that makes this record durable is the one write it cannot count.
         self.assertEqual(
             last["counters"],
-            {"save_records": 4, "cleanup_intent_writes": 2, "cleanup_bytes_written": 4096,
-             "production_state_saves": 4},
+            {"save_records": 5, "cleanup_intent_writes": 2, "cleanup_bytes_written": 4096,
+             "production_state_saves": len(published)},
         )
+        self.assertEqual(len(published), 1)
         self.assertNotIn("counters", production.ProductionState(self.root).load()["tick_telemetry"]["recent"][0])
         shown = status._last_tick(production.ProductionState(self.root).load())
         self.assertEqual(shown["reconcile_ms"], 420.0)
         self.assertEqual(shown["counters"], last["counters"])
         self.assertEqual(shown["cards"], last["cards"])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            cli._print_tick_measurements({"tick_statistics": tick_statistics({}), "last_tick": shown})
+        self.assertIn("last tick card slow-1: 300 ms, records 3, flushes 5,", output.getvalue())
+        self.assertIn("last tick card quick-2: 20 ms, records 3, flushes 0,", output.getvalue())
 
-    def test_failed_tick_keeps_its_counters(self):
-        def fail(*args, **kwargs):
+    def test_terminal_save_only_tick_counts_its_own_save(self):
+        published = self.state_writes()
+        production.production_tick(self.runtime)
+        self.assertEqual(len(published), 1)
+        self.assertEqual(
+            self.last()["counters"],
+            {"save_records": 0, "cleanup_intent_writes": 0, "cleanup_bytes_written": 0, "production_state_saves": 1},
+        )
+
+    def test_failed_tick_counts_every_completed_publication_once(self):
+        published = self.state_writes()
+
+        def fail(runtime, records, payload, *args, **kwargs):
+            runtime.production_state.save(payload)  # a mid-tick flush that completed
             tick_count("cleanup_intent_writes")
             tick_count("cleanup_bytes_written", 10)
             raise RuntimeError("failed")
@@ -277,13 +308,37 @@ class TickMeasurementTests(unittest.TestCase):
             production.production_tick(self.runtime)
         last = self.last()
         self.assertEqual(last["status"], "failed")
+        # The mid-tick flush and the recovery record's own save: both completed, each counted once.
+        self.assertEqual(len(published), 2)
+        self.assertEqual(last["counters"]["production_state_saves"], 2)
         self.assertEqual(last["counters"]["cleanup_intent_writes"], 1)
         self.assertEqual(last["counters"]["cleanup_bytes_written"], 10)
         self.assertEqual(last["cards"], [])
 
+    def test_failed_terminal_save_is_not_counted_and_its_recovery_is(self):
+        published = []
+        write = production.write_json
+        failures = [OSError("disk full")]
+
+        def flaky(path, payload):
+            if failures:
+                raise failures.pop()
+            write(path, payload)
+            published.append(path)
+
+        with (
+            mock.patch.object(production, "write_json", side_effect=flaky),
+            self.assertRaisesRegex(OSError, "disk full"),
+        ):
+            production.production_tick(self.runtime)
+        last = self.last()
+        self.assertEqual(last["status"], "failed")
+        self.assertEqual(len(published), 1)
+        self.assertEqual(last["counters"]["production_state_saves"], 1)
+
     def test_counters_and_cards_outside_a_tick_are_inert(self):
         tick_count("save_records")
-        with production.tick_card("outside"):
+        with production.tick_card("outside", 3):
             self.clock.now += 1
         self.assertIsNone(tick_counter_values())
         production.ProductionState(self.root).save({})
@@ -351,15 +406,16 @@ class TickReaderTests(unittest.TestCase):
                 self.assertIsNotNone(tick_p95_finding(production_state))
                 production_state["tick_telemetry"]["last"].update(
                     counters={"save_records": value, "cleanup_intent_writes": 3},
-                    cards=[value, {"ref": value, "ms": 1}, {"ref": "card-1", "ms": value, "save_records": value}],
+                    cards=[value, {"ref": value, "ms": 1, "records": 2},
+                           {"ref": "card-1", "ms": value, "records": value, "save_records": value}],
                 )
                 last = status._last_tick(production_state)
                 self.assertIsNone(last["duration_ms"])
                 self.assertEqual(last["phases"], {"good": 1.0})
                 self.assertIsNone(last["reconcile_ms"])
                 self.assertEqual(last["counters"], {"cleanup_intent_writes": 3})
-                strings = [{"ref": value, "ms": 1.0}] if isinstance(value, str) else []
-                self.assertEqual(last["cards"], [*strings, {"ref": "card-1", "ms": None}])
+                strings = [{"ref": value, "ms": 1.0, "records": 2}] if isinstance(value, str) else []
+                self.assertEqual(last["cards"], [*strings, {"ref": "card-1", "ms": None, "records": None}])
                 json.dumps(last, allow_nan=False)
         for recent in (None, {}, "bad", 100, [], [None, [], "bad", {}, {"duration_ms": None}]):
             with self.subTest(recent=recent):
@@ -382,7 +438,7 @@ class TickReaderTests(unittest.TestCase):
             duration_ms=500,
             phases={"fence": 40, "reconcile_production": 60, "advance_active": 320, "other": 80},
             counters=counters,
-            cards=[{"ref": "slow-1", "ms": 300, **counters}],
+            cards=[{"ref": "slow-1", "ms": 300, "records": 3, **counters}],
         )
         last = status._last_tick(data)
         self.assertEqual(last["reconcile_ms"], 420.0)
@@ -394,8 +450,8 @@ class TickReaderTests(unittest.TestCase):
         self.assertIn("last tick reconcile: 420 ms", text)
         self.assertIn("last tick writes: save_records 4, cleanup_intent_writes 2, cleanup_bytes_written 4096, "
                       "production_state_saves 4", text)
-        self.assertIn("last tick card slow-1: 300 ms, records 4, cleanup intents 2 (4096 bytes), state saves 4",
-                      text)
+        self.assertIn("last tick card slow-1: 300 ms, records 3, flushes 4, cleanup intents 2 (4096 bytes), "
+                      "state saves 4", text)
         # A tick recorded before these fields existed prints what it has and nothing invented.
         output = io.StringIO()
         with contextlib.redirect_stdout(output):

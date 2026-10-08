@@ -13,7 +13,7 @@ TICK_P95_MIN_SAMPLES = 20
 TICK_P95_THRESHOLD_MS = 300_000
 # Reject corrupt measurements beyond a year, including integers too large to convert to float.
 MAX_DURATION_MS = 366 * 24 * 60 * 60 * 1000
-#: The durable writes a tick made, counted where they happen rather than where they are requested.
+#: The durable writes a tick made, counted at their publication seams once they succeeded.
 TICK_COUNTERS = ("save_records", "cleanup_intent_writes", "cleanup_bytes_written", "production_state_saves")
 #: The reconcile pass as exclusive sub-phases; their sum is the aggregate reconcile cost.
 RECONCILE_PHASES = ("fence", "reconcile_production", "advance_active")
@@ -72,7 +72,10 @@ def card_details(value: Any) -> list[dict[str, Any]] | None:
     for item in value[:TICK_CARDS_KEPT]:
         if not isinstance(item, dict) or not isinstance(item.get("ref"), str):
             continue
+        records = item.get("records")
         cards.append({"ref": item["ref"][:200], "ms": duration_ms(item.get("ms")),
+                      "records": records if isinstance(records, int) and not isinstance(records, bool)
+                      and 0 <= records <= MAX_COUNTER else None,
                       **(counter_values(item) or {})})
     return cards
 
