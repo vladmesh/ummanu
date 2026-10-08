@@ -12,9 +12,11 @@ from __future__ import annotations
 import contextlib
 import copy
 import hashlib
+import inspect
 import json
 import math
 import os
+import re
 import shutil
 import signal
 import socket
@@ -23,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 import types
 import unittest
 from pathlib import Path
@@ -103,6 +106,20 @@ class StallingConnection(pool_fixtures._Connection):
     def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
         self._exchange("schema")
         return super().execute(sql, params)
+
+
+class AnsweringConnection(StallingConnection):
+    """A `StallingConnection` whose every exchange waits through the installed psycopg's own
+    `Connection.wait` on a pipe that already holds the reply, so each one answers at once."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__(number, {"settings", "command", "commit", "rollback", "schema"})
+        os.write(self.write_fd, b"x")
+        self.answered: list[str] = []
+
+    def _exchange(self, kind: str) -> None:
+        super()._exchange(kind)
+        self.answered.append(kind)
 
 
 #: The sprint's bound on the cleanup phase.
@@ -1359,6 +1376,32 @@ class SqlDeadlineTests(pool_fixtures.PoolCase):
         self.assertTrue(self.opened[-1].finished)
         self.assertEqual(self.client._open, 0)
 
+    def test_ordinary_and_bounded_exchanges_answer_through_the_installed_driver_wait(self) -> None:
+        """Schema gate, query, commit and rollback, without a deadline and within one, all wait
+        through the real `psycopg.Connection.wait`, which the wrapper calls with a `timeout`."""
+        def exchanges() -> None:
+            self.client._query("SELECT 1")
+            with self.client.transaction():
+                self.client._execute("UPDATE tasks SET title = title")
+            with contextlib.suppress(ValueError), self.client.transaction():
+                self.client._execute("UPDATE tasks SET title = title")
+                raise ValueError("the caller's own failure")
+
+        opened: list[AnsweringConnection] = []
+        with mock.patch("psycopg.connect",
+                        side_effect=lambda *a, **k: opened.append(AnsweringConnection(len(opened))) or opened[-1]):
+            exchanges()
+            ordinary = list(opened[0].answered)
+            with self.client.within(self.deadline(3.0)):
+                exchanges()
+        self.assertEqual(len(opened), 1)
+        connection = opened[0]
+        self.assertFalse(connection.finished)
+        self.assertEqual({"schema", "command", "commit", "rollback"}, set(ordinary))
+        self.assertNotIn("settings", ordinary)  # no deadline, no statement bound of ours
+        self.assertEqual({"settings", "command", "commit", "rollback"},
+                         set(connection.answered[len(ordinary):]))
+
     def test_without_a_deadline_the_driver_wait_is_its_own(self) -> None:
         calls: list[tuple[Any, ...]] = []
         connection = SimpleNamespace(wait=lambda *args: calls.append(args) or "answer", pgconn=None)
@@ -1367,6 +1410,19 @@ class SqlDeadlineTests(pool_fixtures.PoolCase):
         self.assertEqual(connection.wait("generator", 0.5, 7.0), "answer")
         # Unchanged arguments: the driver's own interval and no timeout of ours.
         self.assertEqual(calls, [("generator", 0.1, None), ("generator", 0.5, 7.0)])
+
+
+class DriverFloorTests(unittest.TestCase):
+    """The declared core driver is one whose `Connection.wait` takes the `timeout` that
+    `SqlCardClient._bound_waits` passes on every exchange; 3.3.5 and earlier take only an interval."""
+
+    def test_the_declared_driver_floor_has_the_native_wait_timeout(self) -> None:
+        manifest = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+        declared = [item for item in manifest["project"]["dependencies"] if item.startswith("psycopg[")]
+        self.assertEqual(declared, ["psycopg[binary]>=3.3.6"])
+        installed = tuple(int(part) for part in re.findall(r"\d+", psycopg.__version__)[:3])
+        self.assertGreaterEqual(installed, (3, 3, 6))
+        self.assertIn("timeout", inspect.signature(psycopg.Connection.wait).parameters)
 
 
 class IsolatedChildWithinTests(unittest.TestCase):

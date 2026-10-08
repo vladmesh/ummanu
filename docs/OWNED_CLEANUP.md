@@ -166,7 +166,8 @@ left and never restart it:
 - the board store client (`SqlCardClient.within`) cuts its pool wait, the turn of
   `transaction()`, and every exchange with the server: each connection's own driver wait
   (`psycopg` `Connection.wait`, behind every query, setting, schema read, commit, rollback
-  and unpin) gets what is left as its timeout. An exchange cut short closes its connection
+  and unpin) gets what is left as its `timeout`, an argument the driver takes from 3.3.6,
+  the declared floor (BOARD_STORE.md §5.8). An exchange cut short closes its connection
   (never reused) and is outcome-unknown: a COMMIT so cut may have committed, and the next
   attempt reads the board again before any effect; nothing is disposed from it. A new
   connection is made attempt by attempt (`conninfo_attempts`, one per resolved address),
