@@ -160,7 +160,14 @@ continuation and reviewer launch prompts are `PromptHandoff`s (`runtime/head/han
   busy schedule (30, 90, 210 s), read off durable times. The worker's continuation reaches it first
   in `_production_continuation`, and a source that is unavailable or names another run takes its
   existing terminal outcome; three attempts reach the safe-recovery rung and then the
-  identity-fenced replacement. A reviewer launch reaches it in `resolve_launch_intent`, before the
+  identity-fenced replacement. The worker's next recovery action is read off the persisted episode
+  on every pass (`_production_liveness_step`): recorded terminal or identity-fenced debt, a safe
+  recovery found unavailable and an unanswered safe-recovery intent go to the confirmed-stop
+  replacement before anything is observed (the capability is never called twice, and an
+  unconfirmed stop is retried on later passes, with no delivery behind it); an exhaustion recorded
+  without a rung enters the ladder even when this pass counts nothing new; the response window is
+  judged from its persisted deadline; and the one return to delivery after a safe recovery is
+  marked used, durably, before that delivery. Progress resets only what is uncommitted. A reviewer launch reaches it in `resolve_launch_intent`, before the
   heartbeat grace, the retry's backoff, a pending receipt or adoption can return
   (`review.reviewer_pending_liveness`): its episode lives on the launch's delivery record, an
   unavailable source before its first prompt counts on the same schedule (`UnprovenSchedule`), and

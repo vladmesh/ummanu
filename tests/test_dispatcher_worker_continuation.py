@@ -10,6 +10,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, ClassVar
 from unittest import mock
 
 from ummanu.board import (
@@ -719,6 +720,253 @@ class ProductionContinuationHandoffTests(unittest.TestCase):
         self.assertEqual(result["action"], "gate-red-worker-handoff-pending")
         self.runtime.host.resume_worker.assert_not_called()
         self.runtime.save_records.assert_not_called()
+
+
+class TheRecoveryDebtIsReadFromTheSavedRecordTests(ProductionContinuationHandoffTests):
+    """review-21 BLOCKER-worker-recovery-resumption: the next action comes from what is persisted.
+
+    Every case here dies, or is answered, at a write-ahead boundary of the existing no-progress
+    ladder, reloads the record exactly as it was saved (`DispatcherRecord.from_json`) and goes on
+    through the real production `recover_worker_continuation`, twelve passes two hours apart, with
+    an unchanged exact-source cursor and a host that keeps answering submitted-pending.
+    """
+
+    def submitted_and_stalled(self, phase: str) -> None:
+        """Two no-progress counts on the record; the next pass counts the third."""
+        self.retain()
+        self.runtime.host.resume_worker.side_effect = self.pending_error("submitted")
+        self.production(
+            continuation_module._deliver_red_continuation,
+            self.runtime, self.task, self.record, self.records, self.payload, "tick-attempt", phase=phase,
+        )
+        self.runtime.host.worker_handoff_started.return_value = "started"
+        for elapsed in (60, 120):
+            self.now = self.START + elapsed
+            self.production(self.recover)
+        self.assertEqual(self.record.worker_continuation_liveness.busy_attempts, 2)
+        self.now = self.START + 240
+
+    def die_when(self, predicate) -> dict[str, Any]:
+        """Run one pass that dies right after the first save `predicate` accepts; return that save."""
+        saved: list[dict[str, Any]] = []
+
+        def save(*_args):
+            saved.append(self.record.to_json())
+            if predicate(self.record):
+                raise SystemExit("the dispatcher died here")
+
+        self.runtime.save_records.side_effect = save
+        with self.assertRaises(SystemExit):
+            self.production(self.recover)
+        self.runtime.save_records.side_effect = None
+        return saved[-1]
+
+    def reload(self, snapshot: dict[str, Any]) -> None:
+        self.record = DispatcherRecord.from_json(snapshot)
+        self.records = {self.task["ref"]: self.record}
+
+    def later_passes(self, count: int = 12) -> list[str]:
+        for counted in (
+            self.runtime._stop_worker_confirmed,
+            self.runtime.host.safe_recover_worker_continuation,
+            self.runtime.host.resume_worker,
+        ):
+            counted.reset_mock()
+        actions = []
+        for _ in range(count):
+            self.now += 7200
+            result = self.production(self.recover)
+            actions.append(result["action"] if result else "")
+        return actions
+
+    def test_a_death_after_the_third_count_starts_recovery_exactly_once(self) -> None:
+        for phase in ("gate", "review"):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.submitted_and_stalled(phase)
+                snapshot = self.die_when(lambda record: record.worker_continuation_liveness.busy_attempts == 3)
+                self.assertEqual(snapshot["worker_continuation_liveness"]["recovery_rung"], "none")
+                self.reload(snapshot)
+                self.later_passes()
+                self.assertEqual(self.runtime.host.safe_recover_worker_continuation.call_count, 1)
+                self.assertGreaterEqual(self.runtime._stop_worker_confirmed.call_count, 1)
+                self.runtime.host.resume_worker.assert_not_called()
+                self.assertEqual(self.record.worker_continuation_liveness.terminal_outcome, "replacement")
+
+    def test_a_death_around_the_capability_never_calls_it_again_and_stops_the_worker(self) -> None:
+        for phase in ("gate", "review"):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.submitted_and_stalled(phase)
+                snapshot = self.die_when(
+                    lambda record: record.worker_continuation_liveness.recovery_rung
+                    == ContinuationRecoveryRung.SAFE_RECOVERY_PENDING
+                )
+                self.assertEqual(snapshot["worker_continuation_liveness"]["recovery_rung"], "safe_recovery_pending")
+                self.reload(snapshot)
+                self.later_passes()
+                self.runtime.host.safe_recover_worker_continuation.assert_not_called()
+                self.assertGreaterEqual(self.runtime._stop_worker_confirmed.call_count, 1)
+                self.runtime.host.resume_worker.assert_not_called()
+                self.assertIn("unconfirmed after dispatcher recovery", self.record.worker_continuation_liveness.reason)
+
+    def test_an_unconfirmed_terminal_stop_is_retried_until_confirmed_then_one_replacement(self) -> None:
+        for phase in ("gate", "review"):
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.submitted_and_stalled(phase)
+                unconfirmed = {"status": "degraded", "action": "worker-stop-unconfirmed"}
+                self.runtime._stop_worker_confirmed.return_value = unconfirmed
+                self.assertEqual(self.production(self.recover)["action"], "worker-stop-unconfirmed")
+                self.reload(self.record.to_json())
+                self.runtime.save_records.reset_mock()
+                actions = self.later_passes(4)
+                self.assertEqual(actions, ["worker-stop-unconfirmed"] * 4)
+                self.assertEqual(self.runtime._stop_worker_confirmed.call_count, 4, "the stop is retried")
+                self.runtime.host.resume_worker.assert_not_called()
+                self.runtime.save_records.assert_not_called()  # the debt is already on disk
+                # The cursor moves now: progress does not clear a recorded terminal outcome.
+                self.cursor = "cursor-moved"
+                self.assertEqual(self.later_passes(1), ["worker-stop-unconfirmed"])
+                self.runtime.host.resume_worker.assert_not_called()
+                # The stop is confirmed: one replacement, and no pending continuation behind it.
+                self.runtime._stop_worker_confirmed.return_value = None
+                self.relaunch.return_value = None
+                launched = mock.Mock()
+                with mock.patch.object(
+                    continuation_module, "_bring_up_worker_head", return_value=(launched, None)
+                ) as bring_up:
+                    first = self.later_passes(1)
+                    self.assertFalse(self.record.worker_continuation.delivery_pending)
+                    for _ in range(3):
+                        self.now += 7200
+                        self.assertIsNone(self.production(self.recover))
+                self.assertEqual(first, ["rework-started" if phase == "review" else "gate-red-rework"])
+                bring_up.assert_called_once()
+                self.runtime.host.resume_worker.assert_not_called()
+
+
+class TheRecoveryStateTableTests(ProductionContinuationHandoffTests):
+    """Every recorded recovery state, against what the provider says and what the host answers.
+
+    Each row is a persisted episode (built, saved and reloaded), one pass of the production
+    `recover_worker_continuation`, and what that pass may do: its outcome, whether the worker may be
+    stopped, the safe-recovery capability called or the handoff delivered, and whether anything is
+    written. A row's episode is what an earlier pass left on disk, not a path through this one.
+    """
+
+    Rung = ContinuationRecoveryRung
+
+    def episode(self, *, rung, attempts=0, outcome="", deadline_in=0.0, used=False, recovered_at=0.0):
+        self.retain()
+        self.runtime.host.resume_worker.side_effect = self.pending_error("submitted")
+        self.production(self.deliver)
+        self.runtime.host.worker_handoff_started.return_value = "started"
+        self.now += 10
+        self.production(self.recover)  # a first stalled look: an admitted, stalled episode
+        liveness = self.record.worker_continuation_liveness
+        liveness.busy_attempts = attempts
+        liveness.recovery_rung = rung
+        liveness.recovery_resume_used = used
+        if rung != self.Rung.NONE:
+            liveness.recovery_attempts = 1
+            liveness.recovery_attempted_at = recovered_at or self.now - 5
+        if deadline_in:
+            liveness.recovery_response_deadline = self.now + deadline_in
+        if outcome:
+            liveness.terminalize(outcome, f"recorded {outcome}")
+        self.record = DispatcherRecord.from_json(self.record.to_json())
+        self.records = {self.task["ref"]: self.record}
+        self.assertEqual(self.record.worker_continuation_liveness.recovery_rung, rung if not outcome else self.Rung.TERMINAL)
+        for counted in (
+            self.runtime._stop_worker_confirmed,
+            self.runtime.host.safe_recover_worker_continuation,
+            self.runtime.host.resume_worker,
+            self.runtime.save_records,
+        ):
+            counted.reset_mock()
+        self.resumed_with: list[dict[str, Any]] = []
+        saved: list[dict[str, Any]] = []
+        self.runtime.save_records.side_effect = lambda *_: saved.append(self.record.to_json())
+
+        def resume(*_args, **_kwargs):
+            self.resumed_with.append(copy.deepcopy(saved[-1]) if saved else self.record.to_json())
+            raise self.pending_error("submitted")
+
+        self.runtime.host.resume_worker.side_effect = resume
+
+    def source(self, kind: str) -> None:
+        if kind == "progressed":
+            self.cursor = "cursor-moved"
+        elif kind in {"unavailable", "identity_mismatch"}:
+            self.runtime.host.provider_progress.side_effect = lambda *_, state=kind: {"state": state, "reason": state}
+
+    ROWS: ClassVar[list[tuple[str, dict[str, Any], str, str, str, tuple[int, int, int]]]] = [
+        # name, episode, provider, marker, expected action, (stops, capability calls, deliveries)
+        ("terminal replacement", {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("terminal replacement, cursor moved", {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"}, "progressed", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("identity fenced", {"rung": Rung.NONE, "outcome": "identity_fenced"}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("ambiguous safe recovery", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("ambiguous safe recovery, cursor moved", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "progressed", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("ambiguous safe recovery, source foreign", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "identity_mismatch", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("response window open", {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": 30.0}, "unchanged", "", "gate-red-worker-recovery-window", (0, 0, 0)),
+        ("response window over, no progress", {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": -1.0}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("response window over, progress", {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": -1.0}, "progressed", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
+        ("resume once, not yet used", {"rung": Rung.SAFE_RECOVERY_RESUME_ONCE}, "unchanged", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
+        ("resume once used, exhausted again", {"rung": Rung.SAFE_RECOVERY_RESUME_ONCE, "attempts": 3, "used": True}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
+        ("exhausted, no rung yet", {"rung": Rung.NONE, "attempts": 3}, "unchanged", "", "worker-launch-intent-unwritable", (1, 1, 0)),
+        ("exhausted, no rung yet, progress", {"rung": Rung.NONE, "attempts": 3}, "progressed", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
+        ("exhausted, source unavailable", {"rung": Rung.NONE, "attempts": 3}, "unavailable", "", "gate-red-continuation-liveness-unavailable", (0, 0, 0)),
+        ("exhausted, source foreign", {"rung": Rung.NONE, "attempts": 3}, "identity_mismatch", "", "gate-red-continuation-liveness-unavailable", (0, 0, 0)),
+        ("quiet, nothing owed", {"rung": Rung.NONE}, "unchanged", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
+        ("terminal replacement, report arrived", {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"}, "unchanged", "report:done", "gate-red-reused-worker", (0, 0, 0)),
+        ("ambiguous safe recovery, report arrived", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "unchanged", "report:done", "gate-red-reused-worker", (0, 0, 0)),
+    ]
+
+    def test_each_recorded_state_takes_its_one_next_action(self) -> None:
+        for name, episode, provider, marker, action, (stops, capability, deliveries) in self.ROWS:
+            with self.subTest(row=name):
+                self.setUp()
+                self.episode(**episode)
+                self.source(provider)
+                self.now += 10
+                result = self.production(self.recover, marker or None)
+                self.assertEqual(result["action"], action)
+                self.assertEqual(self.runtime._stop_worker_confirmed.call_count, stops, "stops")
+                self.assertEqual(self.runtime.host.safe_recover_worker_continuation.call_count, capability, "capability")
+                self.assertEqual(self.runtime.host.resume_worker.call_count, deliveries, "deliveries")
+                if deliveries and episode["rung"] in {self.Rung.SAFE_RECOVERY_RESUME_ONCE, self.Rung.SAFE_RECOVERY_RESPONSE_WINDOW}:
+                    on_disk = self.resumed_with[0]["worker_continuation_liveness"]
+                    self.assertEqual(on_disk["recovery_rung"], "safe_recovery_resume_once")
+                    self.assertTrue(on_disk["recovery_resume_used"], "the one return was durable before the delivery")
+
+    def test_a_repeated_pass_over_unchanged_debt_or_window_writes_nothing(self) -> None:
+        for name, episode, stop in (
+            ("open window", {"rung": self.Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": 600.0}, None),
+            ("unconfirmed terminal stop", {"rung": self.Rung.NONE, "attempts": 3, "outcome": "replacement"},
+             {"status": "degraded", "action": "worker-stop-unconfirmed"}),
+        ):
+            with self.subTest(row=name):
+                self.setUp()
+                self.episode(**episode)
+                self.runtime._stop_worker_confirmed.return_value = stop
+                self.now += 10
+                self.production(self.recover)
+                self.runtime.save_records.reset_mock()
+                self.now += 10
+                self.production(self.recover)
+                self.runtime.save_records.assert_not_called()
+
+    def test_a_window_reloaded_after_its_deadline_decides_once(self) -> None:
+        self.episode(rung=self.Rung.SAFE_RECOVERY_RESPONSE_WINDOW, attempts=3, deadline_in=30.0)
+        self.now += 10
+        self.assertEqual(self.production(self.recover)["action"], "gate-red-worker-recovery-window")
+        self.record = DispatcherRecord.from_json(self.record.to_json())
+        self.records = {self.task["ref"]: self.record}
+        self.now += 60
+        self.assertEqual(self.production(self.recover)["action"], "worker-launch-intent-unwritable")
+        self.runtime.host.safe_recover_worker_continuation.assert_not_called()
+        self.runtime.host.resume_worker.assert_not_called()
 
 
 class ContinuationOwnershipTests(unittest.TestCase):

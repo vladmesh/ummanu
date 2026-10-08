@@ -19,6 +19,7 @@ from ummanu.dispatch.handoff_liveness import (
     PENDING_ATTEMPT,
     PENDING_UNPROVABLE,
     durable_view,
+    no_progress_exhausted,
     observe_pending_handoff,
     provider_evidence,
 )
@@ -610,19 +611,17 @@ def _production_continuation(
                 record, ref, attempt_id, phase, HANDOFF_SETTLE,
                 "the worker's supervisor did not answer within this pass's allowance",
             )
+        liveness = record.worker_continuation_liveness
+        if (
+            liveness.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE
+            and not liveness.recovery_resume_used
+        ):
+            # The recovery's one return to delivery is taken, durably (`persist` below, before the
+            # delivery), by the first pass that goes on to deliver. Once taken it stays taken: the
+            # handoff it allowed continues, and the next exhaustion ends the episode
+            # (`_advance_no_progress_continuation`) rather than minting another safe recovery.
+            liveness.allow_safe_recovery_resume_once()
         if started == HANDOFF_NOT_STARTED:
-            liveness = record.worker_continuation_liveness
-            # The recovery's one return to delivery is spent before it touches the pane.
-            if (
-                liveness.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE
-                and not liveness.allow_safe_recovery_resume_once()
-            ):
-                liveness.terminalize("replacement", "safe recovery resume was already spent")
-                persist()
-                return _restart_red_worker(
-                    runtime, task, record, records, payload, attempt_id,
-                    continuation_reason="safe recovery resume was already spent", phase=phase,
-                )
             try:
                 # Nothing of this delivery is on the worker: it must still be the suspended head the
                 # verdict left, or this would be a second writer.
@@ -678,13 +677,29 @@ def _production_liveness_step(
     phase: str,
     persist: Callable[[], None],
 ) -> dict[str, Any] | None:
-    """The shared pending-handoff liveness rule (`handoff_liveness`), on the retained worker's ladder.
+    """The worker's pending-recovery boundary: every pending production pass is decided here first.
 
-    Independent of the delivery and of whether its supervisor answered this pass. An unavailable or
-    mismatched source takes the existing terminal outcome at once (the worker was baselined before
-    it was woken); an unmoved cursor spends attempts on the shared schedule, and the third reaches the
-    existing safe-recovery rung and then the identity-fenced replacement.
+    The next action is read off the persisted episode on every pass, not off this pass's events.
+    `recover_worker_continuation` reaches it after a new report (which wins); `_production_continuation`
+    reaches it before its busy backoff, its started/deferred/floor answers and any delivery.
+
+    1. Recovery debt already recorded is paid before anything is observed
+       (`_recorded_recovery_debt`): a provider observation could not clear it, and nothing else
+       runs behind it.
+    2. Only then the shared pending-handoff liveness rule (`handoff_liveness`): the exact-source
+       cursor and its no-progress schedule. An unavailable or mismatched source takes the existing
+       terminal outcome at once (the worker was baselined before it was woken). Legitimate progress
+       resets what is uncommitted: the schedule's count, or an exhaustion no rung was taken for yet.
+    3. The response window, from its persisted deadline, with the progress seen since it opened.
+    4. Exhaustion, whether this pass counted it or an earlier one did and died before acting on it,
+       enters the existing ladder (`_advance_no_progress_continuation`), which makes its safe-recovery
+       intent durable before it calls the capability.
+
+    None means the durable state permits the ordinary handoff to go on.
     """
+    owed = _recorded_recovery_debt(runtime, task, record, records, payload, attempt_id, phase=phase, persist=persist)
+    if owed is not None:
+        return owed
     now = time.time()
     liveness = record.worker_continuation_liveness
     seen = observe_pending_handoff(
@@ -712,12 +727,58 @@ def _production_liveness_step(
     )
     if window is not None:
         return window
-    if seen.verdict != PENDING_ATTEMPT:
+    if seen.verdict == PENDING_ATTEMPT:
+        liveness.no_progress_evidence = _continuation_no_progress_evidence(record, liveness.state)
+        record.worker_continuation.busy_attempts = liveness.busy_attempts
+        persist()
+    if no_progress_exhausted(liveness) and liveness.recovery_rung in {
+        ContinuationRecoveryRung.NONE,
+        ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE,
+    }:
+        return _advance_no_progress_continuation(runtime, task, record, records, payload, attempt_id, phase=phase)
+    return None
+
+
+def _recorded_recovery_debt(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    phase: str,
+    persist: Callable[[], None],
+) -> dict[str, Any] | None:
+    """What a pending continuation already owes by its persisted episode, before any observation.
+
+    - A terminal outcome (`replacement`, `identity_fenced`), or a safe recovery found unavailable:
+      the identity-fenced replacement route, which stops the exact worker first and opens one
+      replacement only after a confirmed stop. An unconfirmed stop leaves the debt recorded, and the
+      next pass takes the same route again; neither moving progress nor a pending handoff resumes
+      ordinary delivery behind it.
+    - A safe-recovery intent with no answer recorded (`SAFE_RECOVERY_PENDING`): the capability may
+      have acted, so it is never called again; the conservative replacement, as above.
+
+    None for every other episode: what remains is decided with this pass's observation.
+    """
+    liveness = record.worker_continuation_liveness
+    rung = liveness.recovery_rung
+    if rung == ContinuationRecoveryRung.SAFE_RECOVERY_PENDING and not liveness.terminal:
+        liveness.terminalize("replacement", "safe recovery response was unconfirmed after dispatcher recovery")
+    elif rung == ContinuationRecoveryRung.SAFE_RECOVERY_UNAVAILABLE and not liveness.terminal:
+        liveness.terminalize("replacement", liveness.reason or "safe recovery was unavailable")
+    if not liveness.terminal:
         return None
-    liveness.no_progress_evidence = _continuation_no_progress_evidence(record, liveness.state)
-    record.worker_continuation.busy_attempts = liveness.busy_attempts
     persist()
-    return _advance_no_progress_continuation(runtime, task, record, records, payload, attempt_id, phase=phase)
+    reason = (
+        "continuation liveness HeadRun identity is fenced"
+        if liveness.terminal_outcome == "identity_fenced"
+        else liveness.reason or "the continuation's recovery reached its terminal outcome"
+    )
+    return _restart_red_worker(
+        runtime, task, record, records, payload, attempt_id, continuation_reason=reason, phase=phase
+    )
 
 
 def _production_busy(
