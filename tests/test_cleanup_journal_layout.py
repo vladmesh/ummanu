@@ -290,6 +290,23 @@ class PerIntentLayoutTests(JournalTestCase):
         self.assertGreater(len(json.dumps(value)), INTENT_FILE_LIMIT)
 
 
+    def test_compaction_never_upgrades_a_policy_a_head_run_read_refuses(self) -> None:
+        raw = head("ummanu-5", 0, baseline=0, events=0)
+        attested = {"version": 1, "state": "allowed", "terminal_state": "clean", "events": [], "run_id": raw["run_id"],
+                    "role": raw["role"], "model": "gpt-5.6-terra", "binary_path": "/usr/bin/codex",
+                    "binary_digest": "b" * 64, "cli_version": "codex 9", "tool_schema_digest": "c" * 64,
+                    "provider_schema_verdict": "no_callable_child_spawn_surface"}
+        self.assertTrue(HeadRun.from_json({**raw, "fanout_policy": attested}).fanout_clean)
+        # Required provider evidence that is missing makes the read unknown; dropping the source must not
+        # turn it back into a clean allow.
+        missing = {**raw, "fanout_policy": {**attested, "provider_source_required": True}}
+        self.assertFalse(HeadRun.from_json(missing).fanout_clean)
+        compact = cleanup._compact_run(missing)
+        self.assertFalse(HeadRun.from_json(compact).fanout_clean)
+        self.assertEqual(compact["fanout_policy"]["state"], "unknown")
+        self.assertEqual(cleanup._compact_run(compact), compact)
+
+
 class MigrationTests(JournalTestCase):
     def test_v1_journal_over_40_mb_migrates_without_loss_and_once(self) -> None:
         original, body = LegacyFixture.load()

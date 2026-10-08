@@ -327,7 +327,12 @@ def _compact_run(raw: Any) -> Any:
     """A cleanup copy of one persisted HeadRun: identity, lifecycle and stop receipt intact."""
     if not isinstance(raw, dict) or not isinstance(raw.get("fanout_policy"), dict):
         return raw
-    policy = raw["fanout_policy"]
+    from ummanu.runtime.head import HeadRun, HeadRunError, TaskRefError
+    try:
+        # The verdict as a HeadRun read sees it, so dropping the source can never upgrade it.
+        policy = HeadRun.from_json(raw).fanout_policy
+    except (HeadRunError, TaskRefError):
+        policy = raw["fanout_policy"]
     compact = {name: policy[name] for name in _FANOUT_KEPT if name in policy}
     if isinstance(compact.get("reason"), str):
         compact["reason"] = compact["reason"][:500]
