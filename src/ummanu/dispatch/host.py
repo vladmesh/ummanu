@@ -111,6 +111,7 @@ from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
     request_token as _request_token,
 )
+from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.tui import (
     DELIVERY_ACCEPTED,
     READINESS_BUSY,
@@ -2237,7 +2238,8 @@ class CommandHostRuntime:
         post-merge CI watch, or None when nothing was merged (noop mode, no workspace, automerge off):
         a release that merged nothing wakes the observer on its Done as before.
         """
-        self._require_production_runtime("release-before")
+        with tick_stage("release_runtime"):
+            self._require_production_runtime("release-before")
         if self.mode == "noop" or not record.workspace:
             return None
         self._decide_workspace_environment_ownership(record.workspace)
@@ -2256,16 +2258,17 @@ class CommandHostRuntime:
             except ProductionActivationRefused as exc:
                 # The pull request is merged; only the production activation was refused.
                 exc.landing = MergeLanding(
-                    sha=pr_merge_commit(self._run, branch, Path(record.workspace)),
+                    sha=self._landed_pr_commit(record, branch),
                     base=base,
                     path="github-pr",
                     ci=ci,
                     branch=branch,
                 )
                 raise
-            self._require_production_runtime("release-after")
+            with tick_stage("release_runtime"):
+                self._require_production_runtime("release-after")
             return MergeLanding(
-                sha=pr_merge_commit(self._run, branch, Path(record.workspace)),
+                sha=self._landed_pr_commit(record, branch),
                 base=base,
                 path="github-pr",
                 ci=ci,
@@ -2279,19 +2282,22 @@ class CommandHostRuntime:
         # (secretary-1541), and pushing a card that declared one onto `main` anyway would land an
         # increment on a branch it was never validated against.
         project = task["project"]
-        self._remote_git_checked(
-            project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
-        )
-        self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
+        with tick_stage("release_merge"):
+            self._remote_git_checked(
+                project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
+            )
         try:
-            self._advance_checkout(repo, f"origin/{base}")
+            with tick_stage("release_refresh"):
+                self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
+                self._advance_checkout(repo, f"origin/{base}")
         except ProductionActivationRefused as exc:
             # The push landed; only the production activation was refused.
             exc.landing = MergeLanding(
                 sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci
             )
             raise
-        self._require_production_runtime("release-after")
+        with tick_stage("release_runtime"):
+            self._require_production_runtime("release-after")
         return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
 
     def _advance_checkout(self, repo: Path, ref: str) -> None:
@@ -2309,12 +2315,18 @@ class CommandHostRuntime:
     def _pushed_branch_head(self, record: DispatcherRecord, branch: str) -> str:
         """The commit a `branch:base` push just landed. A non-fast-forward push is rejected, so after
         a successful one the base is exactly this branch head."""
-        try:
-            return self._run(
-                ["git", "-C", record.workspace, "rev-parse", branch], "post-merge landed commit"
-            ).stdout.strip()
-        except HostError:
-            return ""
+        with tick_stage("release_landed"):
+            try:
+                return self._run(
+                    ["git", "-C", record.workspace, "rev-parse", branch], "post-merge landed commit"
+                ).stdout.strip()
+            except HostError:
+                return ""
+
+    def _landed_pr_commit(self, record: DispatcherRecord, branch: str) -> str:
+        """The merge commit a pull request merge just landed, or "" when it cannot be read yet."""
+        with tick_stage("release_landed"):
+            return pr_merge_commit(self._run, branch, Path(record.workspace))
 
     def _require_pr_base(self, record: DispatcherRecord, branch: str, base: str) -> None:
         """Refuse the merge unless the open pull request for `branch` targets `base`.
@@ -2352,8 +2364,9 @@ class CommandHostRuntime:
         (secretary-1541). A pull request still pointing somewhere else — a card branch a stale PR was
         opened against — is refused here rather than merged into a branch nothing releases from.
         """
-        self._require_pr_base(record, branch, base)
-        self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
+        with tick_stage("release_merge"):
+            self._require_pr_base(record, branch, base)
+            self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         default_branch = self.catalog.project_default_branch(task["project"])
         # `gh pr merge` is the irreversible delivery boundary. Refreshing this checkout afterwards is
@@ -2361,10 +2374,11 @@ class CommandHostRuntime:
         # ff-only impossible: never report an already-merged card as failed because it did not apply.
         try:
             refresh_branch = base if base == default_branch else default_branch
-            self._remote_git_checked(
-                task["project"], repo, ["fetch", "origin", refresh_branch], "post-merge fetch"
-            )
-            self._advance_checkout(repo, f"origin/{refresh_branch}")
+            with tick_stage("release_refresh"):
+                self._remote_git_checked(
+                    task["project"], repo, ["fetch", "origin", refresh_branch], "post-merge fetch"
+                )
+                self._advance_checkout(repo, f"origin/{refresh_branch}")
         except ProductionActivationRefused:
             raise
         except HostError:
