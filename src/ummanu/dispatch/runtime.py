@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -923,7 +924,7 @@ class DispatcherRuntime:
                 if record.workspace:
                     # The card is read only when the journal is: an unchanged cleanup projection
                     # needs neither the board nor the journal.
-                    self.cleanup.remember_record(ref, record, lambda ref=ref: self.reader.show(ref))
+                    self.cleanup.remember_record(ref, record, functools.partial(self.reader.show, ref))
         with ownership_lock(self.data_dir):
             self.production_state.put_records(payload, records)
             payload["last_tick_at"] = now_rfc3339()
