@@ -15,14 +15,17 @@ import fcntl
 import functools
 import hashlib
 import json
+import math
 import os
 import shutil
+import stat as stat_mode
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ummanu.dispatch.tick_telemetry import tick_count
@@ -265,6 +268,100 @@ def _no_workspace_attempt(intent: dict[str, Any]) -> bool:
             and record.get("workspace", None) == "" and not intent.get("identity")
             and not intent["heads"] and not any(record.get(field) for field in _HEAD_FIELDS)
             and not (record.get("launch_intent") or {}).get("head_run"))
+
+
+#: An open obligation (pending, or preserved without a terminal outcome) is attempted at most once
+#: per this many seconds, by every entrypoint, across restarts and concurrent owners.
+RETRY_COOLDOWN = 3600.0
+#: The kinds of terminal outcome: dead ends no retry can change, each decided from current facts.
+TERMINAL_KINDS = ("workspace-disappeared", "registration-without-directory", "project-unregistered", "follows")
+
+
+def _terminal(intent: dict[str, Any]) -> dict[str, Any] | None:
+    """The intent's terminal outcome, if it has a well-formed one; anything else is no outcome."""
+    terminal = intent["progress"].get("terminal")
+    if (intent["status"] == "preserved" and isinstance(terminal, dict)
+            and terminal.get("kind") in TERMINAL_KINDS):
+        return terminal
+    return None
+
+
+def _next_attempt(intent: dict[str, Any]) -> float | None:
+    """The stored due time, or None when there is none this clock could have written."""
+    retry = intent.get("retry")
+    due = retry.get("next_attempt_at") if isinstance(retry, dict) else None
+    if isinstance(due, bool) or not isinstance(due, (int, float)) or not math.isfinite(due):
+        return None
+    return float(due)
+
+
+def _attempt_due(intent: dict[str, Any], now: float) -> bool:
+    """The one replay eligibility policy, for automatic replay, replay_one and targeted replay.
+
+    Only an open obligation is due: owned, completed and terminal intents never are. With no
+    stored due time (a legacy intent, or a malformed value) the first attempt is now. A due time
+    more than one cooldown ahead of `now` cannot have been written by this clock (it moved back, or
+    the value is hostile): it is distrusted and the obligation is due, so one early attempt
+    re-anchors it and nothing is hidden forever.
+    """
+    if intent["status"] not in {"pending", "preserved"} or _terminal(intent) is not None:
+        return False
+    due = _next_attempt(intent)
+    return due is None or due <= now or due > now + RETRY_COOLDOWN
+
+
+def _begin_attempt(intent: dict[str, Any]) -> None:
+    """Current refusal revokes admission's settlement signal before any effect of an attempt."""
+    intent["status"] = "pending"
+    intent["reason"] = ""
+    # Retained receipts survive, but current refusal must revoke admission's
+    # settlement signal rather than exposing a prior successful observation.
+    intent["progress"]["heads_stopped"] = False
+    intent["progress"]["preservation_verified"] = False
+    intent["progress"].pop("awaits_cards", None)
+    intent["progress"].pop("terminal", None)
+
+
+#: Disposable Python caches a Done card's exact workspace may hold, when Git ignores their contents.
+_CACHE_DIRECTORIES = frozenset({".pytest_cache", "__pycache__", ".venv"})
+
+
+def _cache_entry(path: Path, name: str) -> bool:
+    """An ignored entry strictly inside a cache directory reached through real directories only.
+
+    Every component from the workspace down to the entry's parent is a real directory (lstat), the
+    entry itself a regular file or a symlink (unlinked, never followed); a symlinked cache or parent,
+    a nested repository Git reports as a directory, or an entry naming the cache itself is not one.
+    """
+    parts = PurePosixPath(name).parts
+    if (not parts or name.endswith("/") or PurePosixPath(name).is_absolute()
+            or any(part in {"", ".", ".."} for part in parts)
+            or not any(part in _CACHE_DIRECTORIES for part in parts[:-1])):
+        return False
+    current = path
+    try:
+        for part in parts[:-1]:
+            current = current / part
+            if not stat_mode.S_ISDIR(os.lstat(current).st_mode):
+                return False
+        mode = os.lstat(path / name).st_mode
+    except OSError:
+        return False
+    return stat_mode.S_ISREG(mode) or stat_mode.S_ISLNK(mode)
+
+
+def _unlink_confined(path: Path, name: str) -> None:
+    """Unlink one entry below `path`, opening each parent without following a symlink."""
+    parts = PurePosixPath(name).parts
+    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        os.unlink(parts[-1], dir_fd=directory)
+    finally:
+        os.close(directory)
 
 
 def _identity(repo: Path, workspace: str, branch: str) -> dict[str, Any]:
@@ -871,6 +968,22 @@ class CleanupJournal:
         return pending
 
     @journal_mutation
+    def reserve_attempt(self, key: str, now: float) -> dict[str, Any] | None:
+        """Reserve this intent's next attempt, or None when it is not due (nothing is written then).
+
+        Under the ownership lock, so of concurrent owners only one reserves a due attempt. The due
+        time is durable before any effect: a crash after it waits out the cooldown like a refusal.
+        The same write begins the attempt, so no extra publication precedes the effects.
+        """
+        intent = self.load_intent(key)
+        if intent is None or not _attempt_due(intent, now):
+            return None
+        intent["retry"] = {"last_attempt_at": now, "next_attempt_at": now + RETRY_COOLDOWN}
+        _begin_attempt(intent)
+        self._write_intent(key, intent)
+        return intent
+
+    @journal_mutation
     def request(self, task: dict[str, Any], disposition: str,
                 record: dict[str, Any] | None = None) -> str:
         if record is None:
@@ -927,7 +1040,11 @@ class CleanupJournal:
         return [{"id": key, "ref": intent["task"]["ref"], "status": intent["status"],
                  "disposition": intent["disposition"], "reason": intent["reason"],
                  "identity": intent.get("identity"), "commit_proof": intent.get("commit_proof"),
-                 "progress": intent["progress"]}
+                 "progress": intent["progress"],
+                 # A terminal outcome is retained residue no replay will act on, named as such.
+                 "terminal": (_terminal(intent) or {}).get("kind", ""),
+                 "next_attempt_at": (_next_attempt(intent) if intent["status"] in {"pending", "preserved"}
+                                     and _terminal(intent) is None else None)}
                 for key, intent in sorted(self.read()["intents"].items())
                 if (not sprint or intent["task"].get("sprint") == sprint)
                 and (not project or _project_intent(intent, project))]
@@ -954,6 +1071,10 @@ class CleanupOwner:
         self._admitted: dict[str, Any] | None = None
         # The cleanup projection each record flush last published, by card ref (see remember_record).
         self._remembered: dict[str, dict[str, Any]] = {}
+        # The wall clock every attempt reservation and due check reads (stdlib unless injected).
+        self.clock: Callable[[], float] = getattr(runtime, "cleanup_clock", None) or time.time
+        # Whether this owner's last replay_one reserved and ran an attempt (under _operations).
+        self._attempted = False
 
     def _workspace_identity(self, project: str, reference: str, record: Any) -> dict[str, Any] | None:
         binding = self.runtime.catalog.binding(project)
@@ -1180,11 +1301,13 @@ class CleanupOwner:
         return ""
 
     def _unsettled_cards(self, sprint: str) -> list[str]:
+        # A terminal outcome is settled for this dependency only with its own stop and claim
+        # proof: no replay will ever change it, and its residue stays visible in the inventory.
         return sorted(key for key, other in self.journal.read()["intents"].items()
                       if other["task"].get("sprint") == sprint and other["task"].get("kind") != "observer"
                       and not (other["status"] == "completed" or
                                (other["status"] == "preserved"
-                                and other["progress"].get("preservation_verified")
+                                and (other["progress"].get("preservation_verified") or _terminal(other))
                                 and other["progress"].get("heads_stopped")
                                 and other["progress"].get("claim_settled"))))
 
@@ -1201,6 +1324,7 @@ class CleanupOwner:
         for flag in ("heads_stopped", "claim_settled", "preservation_verified"):
             intent["progress"][flag] = all(bool(other["progress"].get(flag)) for other in states)
         unsettled = [key for key, other in zip(owners, states) if other["status"] not in {"completed", "preserved"}]
+        intent["progress"].pop("terminal", None)
         if unsettled:
             intent["status"] = "pending"
             intent["reason"] = ("follows attempt owner " + ", ".join(unsettled) + ": "
@@ -1211,6 +1335,12 @@ class CleanupOwner:
         else:
             intent["status"] = "preserved"
             intent["reason"] = "; ".join(other["reason"] for other in states if other["status"] == "preserved")
+            terminal = [key for key, other in zip(owners, states) if _terminal(other) is not None]
+            # Ends with its owners only when each of them ended: completed, or terminal itself.
+            if terminal and all(other["status"] == "completed" or _terminal(other) is not None
+                                for other in states):
+                intent["progress"]["terminal"] = {"kind": "follows", "owners": terminal,
+                                                  "reason": intent["reason"][:1000]}
 
     def _terminal_card(self, current: dict[str, Any]) -> None:
         if not current.get("closed") and current.get("state") != "done":
@@ -1238,7 +1368,7 @@ class CleanupOwner:
             raise Preserved("missing exact workspace/attempt ownership proof")
         self._terminal_card(current)
         self._no_current_record(intent)
-        repo = _canonical(self.runtime.catalog.binding(intent["task"]["project"])["repo"])
+        repo = _canonical(self._project_binding(intent["task"]["project"])["repo"])
         ref = "refs/heads/pipeline/" + intent["task"]["ref"]
         tip = _ref_tip(repo, ref)
         if tip:
@@ -1270,6 +1400,24 @@ class CleanupOwner:
             else:
                 fence(intent["record"].get("workspace", ""), reference, runs)
 
+    def _project_binding(self, project: str) -> dict[str, Any]:
+        """The card project's binding; a project this installation does not register is terminal.
+
+        Decided from the catalog's registration table, never from a refusal's text: a registered
+        but disabled project, or a catalog with no readable table, is still the binding's own
+        (retryable) refusal. No repository is searched for, read or changed for an unregistered one.
+        """
+        catalog = self.runtime.catalog
+        registered = getattr(catalog, "registered_bindings", None)
+        if registered is None:
+            registered = getattr(catalog, "bindings", None)
+        if isinstance(registered, dict) and not any(
+                name in registered for name in (project, project.replace("_", "-"))):
+            raise Terminal("project-unregistered", "project " + project + " is not registered on this "
+                           "installation; no repository was read or changed, and any Git residue of the "
+                           "attempt is retained with its recorded identity")
+        return catalog.binding(project)
+
     def _binding(self, intent: dict[str, Any]) -> tuple[Path, str]:
         if intent["task"].get("kind") == "observer":
             from ummanu.observer_root import observer_root_repo
@@ -1278,7 +1426,7 @@ class CleanupOwner:
                     _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")):
                 raise HostError("cleanup observer repository changed")
             return repo, ""
-        binding = self.runtime.catalog.binding(intent["task"]["project"])
+        binding = self._project_binding(intent["task"]["project"])
         repo = _canonical(binding["repo"])
         base = (intent["task"].get("workspace") or {}).get("base_branch")
         allowed = [binding.get("default_branch") or "main", *(binding.get("integration_bases") or [])]
@@ -1415,16 +1563,24 @@ class CleanupOwner:
                                   "board_write": bool(claim.get("worker"))})
         intent["progress"]["claim_settled"] = True
 
-    def _dirty(self, intent: dict[str, Any], path: Path) -> list[str]:
-        # Include ignored files. Only bytes written by the prompt producer and
-        # the existing exact environment namespace contract can be disposable.
+    def _dirty(self, intent: dict[str, Any], path: Path) -> tuple[list[str], list[str]]:
+        """The one dirty predicate of planning, inventory and execution: dirty rows, disposable caches.
+
+        Include ignored files. Only bytes written by the prompt producer, the existing exact
+        environment namespace contract and, for the exact workspace of a card this replay's
+        admission saw Done, Git-ignored entries inside its Python caches (see `_cache_entry`) can
+        be disposable. Every later admission must see that same state. It reads only.
+        """
         result = _read_git(path, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "-z")
         if result.returncode:
             raise HostError("cleanup workspace status is unreadable")
         status = result.stdout
-        dirty = []
+        dirty: list[str] = []
+        caches: list[str] = []
         generated = self.journal.generated_digests()
         environment = self._environment_owner(intent, path)
+        done = (intent["task"].get("kind") != "observer"
+                and (self._admitted or {}).get("state") == "done")
         for row in status.split("\0"):
             if not row:
                 continue
@@ -1436,8 +1592,11 @@ class CleanupOwner:
                 expected = generated.get(str(file))
                 if expected and not file.is_symlink() and file.is_file() and hashlib.sha256(file.read_bytes()).hexdigest() == expected:
                     continue
+                if row[:2] == "!!" and done and _cache_entry(path, name):
+                    caches.append(name)
+                    continue
             dirty.append(row)
-        return dirty
+        return dirty, caches
 
     def _environment_owner(self, intent: dict[str, Any], path: Path) -> str:
         try:
@@ -1472,10 +1631,15 @@ class CleanupOwner:
 
     def _admitted_registration(self, intent: dict[str, Any], repo: Path) -> None:
         """The retained admin entry can finish a previously admitted Git effect."""
-        identity = intent["identity"]
-        path = _canonical(identity["workspace"])
+        path = _canonical(intent["identity"]["workspace"])
         if not intent["progress"].get("removal_started") or path.exists() or path.is_symlink():
             raise HostError("cleanup missing directory has no admitted removal proof")
+        self._retained_registration(intent, repo)
+
+    def _retained_registration(self, intent: dict[str, Any], repo: Path) -> None:
+        """The missing directory's registration, admin entry and ref are still exactly the recorded ones."""
+        identity = intent["identity"]
+        path = _canonical(identity["workspace"])
         common = _canonical(_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
         admin = _canonical(identity["admin"])
         if (str(common) != identity["common"] or admin.parent != common / "worktrees"
@@ -1541,19 +1705,29 @@ class CleanupOwner:
             if not intent["progress"].get("removal_started"):
                 shared = self._shared_removal_proof(intent)
                 if not shared:
-                    raise HostError("cleanup workspace disappeared without removal evidence")
+                    # Current facts, just read: no directory, no registration, no admin entry.
+                    raise Terminal("workspace-disappeared", "workspace directory, Git registration and "
+                                   "admin entry are gone without removal evidence; nothing was removed by "
+                                   "cleanup, and the candidate ref and recorded identity are retained")
                 intent["progress"]["workspace_disposed_by"] = shared
             self._verify_commits(intent, repo)
             return
         missing = not path.exists() and not path.is_symlink()
+        caches: list[str] = []
         if missing:
+            if not intent["progress"].get("removal_started"):
+                # Only the exact recorded registration may end this way; a changed one is a refusal.
+                self._retained_registration(intent, repo)
+                raise Terminal("registration-without-directory", "workspace directory is missing while its "
+                               "exact Git registration remains, with no admitted removal proof; the "
+                               "registration, admin entry and candidate ref are retained untouched")
             self._admitted_registration(intent, repo)
             self._verify_commits(intent, repo, preservation_verified=False)
         else:
             fresh = _identity(repo, workspace, identity["branch"].removeprefix("refs/heads/") if identity["branch"] else "")
             if fresh != identity:
                 raise HostError("cleanup workspace, registration or HEAD changed")
-            dirty = self._dirty(intent, path)
+            dirty, caches = self._dirty(intent, path)
             if dirty:
                 raise Preserved("dirty tracked, untracked or ignored work: " + "; ".join(dirty[:8]), verified=True)
             self._verify_commits(intent, repo)
@@ -1561,11 +1735,20 @@ class CleanupOwner:
             self._planned.append({
                 "effect": "remove-worktree", "path": workspace, "identity": identity,
                 "dirty": "missing directory; admitted removal resumes" if missing else "clean",
+                "ignored_caches": len(caches),
                 "commit_proof": intent.get("commit_proof"),
                 "environment": "absent" if missing else self._environment_owner(intent, path)})
             self._plan_removed.add(workspace)
             return
         with self.admission(intent["task"], intent=intent):
+            if not missing:
+                # The same predicate again, under this admission (which saw the card unchanged):
+                # only Git-ignored cache entries go, each unlinked without following a symlink.
+                dirty, caches = self._dirty(intent, path)
+                if dirty:
+                    raise HostError("cleanup workspace changed since its dirty check; workspace retained")
+                for name in caches:
+                    _unlink_confined(path, name)
             # No forced removal: first delete only exact generated bytes whose
             # ownership was validated above. Git independently refuses dirty work.
             generated = self.journal.generated_digests()
@@ -1670,39 +1853,47 @@ class CleanupOwner:
 
     @owner_operation
     def replay_one(self, key: str) -> dict[str, Any]:
+        """Attempt one intent when the eligibility policy says it is due; else return it untouched.
+
+        Every entrypoint (automatic replay, targeted replay, close, archive and teardown) reaches its
+        effects only through here, so none can bypass the cooldown.
+        """
+        intent, self._attempted = self._attempt(key)
+        return intent
+
+    def _attempt(self, key: str) -> tuple[dict[str, Any], bool]:
+        """The intent after this call, and whether an attempt was reserved and run."""
         # Replay plans against the stored (migrated) form, which its checkpoints compare with.
         self.journal.migrate()
         task = self.journal.intent(key)["task"]
         with reference_lock(self.data_dir, task["ref"], lane="lifecycle"), self.journal.targeted({key}):
             self._admitted = None
+            # Reserved before any Git, host or board effect; not due means nothing is read or written.
+            reserved = self.journal.reserve_attempt(key, self.clock())
+            if reserved is None:
+                return self.journal.intent(key), False
             # Only this intent: whole-journal proofs (owners, shared removal, observer order) read
             # the journal themselves, and every checkpoint writes back only this key.
-            value = {"intents": {key: self.journal.intent(key)}}
+            value = {"intents": {key: reserved}}
             try:
-                return self._replay(value, key)
+                return self._replay(value, key), True
             except HostError as exc:
                 # A checkpoint/final publication can lose a same-intent race.
                 # It is a retryable obligation, not a failure of the whole tick.
                 try:
-                    return self.journal.defer_intent(key, value["intents"][key], str(exc))
+                    return self.journal.defer_intent(key, value["intents"][key], str(exc)), True
                 except HostError as publication:
                     pending = copy.deepcopy(value["intents"][key])
                     pending.update(status="pending", reason=(str(exc) + "; " + str(publication))[:1000])
-                    return pending
+                    return pending, True
             finally:
                 self._admitted = None
 
     def _replay(self, value: dict[str, Any], key: str) -> dict[str, Any]:
         intent = value["intents"][key]
-        if intent["status"] in {"owned", "completed"}:
+        if intent["status"] in {"owned", "completed"} or _terminal(intent) is not None:
             return intent
-        intent["status"] = "pending"
-        intent["reason"] = ""
-        # Retained receipts survive, but current refusal must revoke admission's
-        # settlement signal rather than exposing a prior successful observation.
-        intent["progress"]["heads_stopped"] = False
-        intent["progress"]["preservation_verified"] = False
-        intent["progress"].pop("awaits_cards", None)
+        _begin_attempt(intent)
         self._save(value)
         if _empty_attempt(intent):
             owners = self._attempt_owners(intent)
@@ -1751,6 +1942,9 @@ class CleanupOwner:
                 try:
                     self._settle_claim(intent)
                     intent["progress"]["preservation_verified"] = exc.verified
+                    if isinstance(exc, Terminal):
+                        # Ends the obligation only with its heads' stop and claim proof in hand.
+                        intent["progress"]["terminal"] = {"kind": exc.kind, "reason": str(exc)[:1000]}
                 except Exception as settlement:  # noqa: BLE001 - a failed obligation is retained as pending evidence
                     intent["status"] = "pending"
                     intent["reason"] += "; " + str(settlement)
@@ -1765,8 +1959,9 @@ class CleanupOwner:
             raise HostError("cleanup replay limit must be between 1 and 100")
         self.journal.migrate()
         value = self.journal.read()
-        keys = [key for key, intent in sorted(value["intents"].items())
-                if intent["status"] in {"pending", "preserved"}]
+        now = self.clock()
+        # Only due intents take a slot: cooling and terminal ones are neither replayed nor written.
+        keys = [key for key, intent in sorted(value["intents"].items()) if _attempt_due(intent, now)]
         cursor = value.get("replay_cursor", "")
         keys = [key for key in keys if key > cursor] + [key for key in keys if key <= cursor]
         selected = keys[:limit]
@@ -2043,10 +2238,21 @@ class CleanupOwner:
                     results.append({**outcome, "status": "pending", "reason": str(exc)[:500]})
                     continue
                 self._reviewed = entry
+                self._attempted = False
                 try:
                     intent = self.replay_one(key)
                 finally:
                     self._reviewed = None
+            if not self._attempted:
+                terminal = _terminal(intent)
+                results.append({**outcome, "cleanup_id": key, "status": intent["status"],
+                                "reason": ("terminal " + terminal["kind"] + ": " + intent["reason"] if terminal
+                                           else "not due: next attempt at " + str(_next_attempt(intent))
+                                           if intent["status"] in {"pending", "preserved"}
+                                           else intent["reason"]),
+                                "next_attempt_at": None if terminal else _next_attempt(intent),
+                                "progress": intent["progress"]})
+                continue
             results.append({**outcome, "replayed": True, "cleanup_id": key, "status": intent["status"],
                             "reason": intent["reason"], "progress": intent["progress"]})
         return results
@@ -2109,3 +2315,15 @@ class Preserved(HostError):
     def __init__(self, reason: str, *, verified: bool = False):
         super().__init__(reason)
         self.verified = verified
+
+
+class Terminal(Preserved):
+    """A dead end decided from current facts: the obligation ends without removal or retention proof.
+
+    Never verified retention and never a completed removal; its residue stays retained and visible.
+    """
+
+    def __init__(self, kind: str, reason: str):
+        super().__init__(reason, verified=False)
+        assert kind in TERMINAL_KINDS
+        self.kind = kind

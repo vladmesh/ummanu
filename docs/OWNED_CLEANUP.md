@@ -60,8 +60,16 @@ workspace as preserved. Failed or mismatched head settlement remains pending.
 Before removal, the owner verifies canonical paths, catalog binding, common-dir,
 registration, Git admin path/file, inode, branch and exact HEAD. It preserves
 tracked, untracked and ignored author work and unpublished commits. Only prompt
-bytes recorded by the prompt producer, and the existing exactly owned
-`.ummanu-task-env` namespace, may be discarded. Author-modified prompts,
+bytes recorded by the prompt producer, the existing exactly owned
+`.ummanu-task-env` namespace and, for the exact workspace of a card the replay's
+admissions see Done, Git-ignored (`!!`) entries strictly inside a `.pytest_cache`,
+`__pycache__` or `.venv` directory (nested ones included) may be discarded. Every
+component down to such an entry is a real directory; a symlinked cache or parent,
+a tracked or untracked (`??`) cache name, any other ignored file, an observer
+workspace and a closed card that is not Done keep the workspace. The planner, the
+inventory and execution read one predicate; under the removal admission it is
+read again and each entry is unlinked through no-follow directory descriptors
+before the ordinary no-force `git worktree remove`. Author-modified prompts,
 check receipts, reports and other ignored files remain work unless their existing
 consumer has already settled them. Git removal uses no force, recursive directory
 fallback or broad metadata pruning, and confirms both directory and registration
@@ -91,16 +99,44 @@ and commit proof. If Git removes the directory before its admin entry, the owner
 revalidates the retained admin inode and `HEAD`/`gitdir`/`commondir`, common directory,
 path, registration and ref against that admission at the shared primitive's native
 removal boundary. Only that proof permits ordinary targeted `git worktree remove`
-to finish a missing-directory registration. A generic missing path, changed mapping,
-substitution or unreadable evidence remains pending. Registration and directory
+to finish a missing-directory registration. A changed mapping, substitution or
+unreadable evidence remains pending. Registration and directory
 absence precede ref/claim settlement. Environment deletion also retains its exact namespace
 identity before effects, so an interrupted deletion of its ownership file remains
 replayable without adopting a replacement namespace. Terminal stale matching claims are cleared only after
 verified head settlement; pending failures keep their owner. `completed`,
 `preserved` and `pending` are distinct dispositions. Delivery may reach Done with
 a pending cleanup receipt; it never turns that receipt into clean settlement.
-Every normal dispatcher tick replays a bounded, rotating batch so persistent
-failures or preserved work cannot starve newer intents.
+
+Some refusals are dead ends no retry can change. After the exact heads are stopped
+through the proof path above, they end as a terminal outcome: status `preserved`,
+`progress.terminal = {kind, reason}`, `preservation_verified` false and no removal,
+ref or admission flag. The kinds, each decided from facts read in that attempt:
+`workspace-disappeared` (no directory, registration or admin entry, and no
+admitted or shared removal proof), `registration-without-directory` (the directory
+is gone, its exact recorded registration, admin entry and ref remain and stay
+untouched; never disposed or pruned), `project-unregistered` (the catalog's
+registration table does not name the project; no repository is read) and `follows`
+(an empty-attempt duplicate whose attempt owners all completed or ended terminally).
+A registered but disabled project, an unreadable catalog, a changed or substituted
+admin, unreadable Git or board evidence, a live or unknown head, another active
+owner or a changed claim stay pending. The claim of a terminal outcome is settled
+as for any preservation with stopped heads. Summary and inventory rows name the
+kind in `terminal`; the residue and its recorded identity stay visible, and no
+entrypoint replays a terminal intent again. A later attempt of the card is a new key.
+
+One eligibility policy decides whether an open (pending or non-terminal preserved)
+intent is due: the tick's bounded rotating batch, `replay_one`, targeted replay and
+the close, archive and teardown callers all reach effects only through it. Before any
+Git, host or board effect the owner reserves the attempt under `cleanup.lock`, writing
+`retry = {last_attempt_at, next_attempt_at}` (one cooldown, 3600 s, later) into the
+intent with the attempt's begin state; of concurrent owners only one reserves. A
+crash after the reservation waits out the cooldown. An intent with no stored due time
+(legacy) is due at once; a missing, non-numeric or non-finite due time, or one more
+than a cooldown ahead of the clock (it moved back, or the value is hostile), is
+distrusted and due at once, and the attempt re-anchors it. A repeated request keeps
+the schedule. A not-due intent is neither read for effects nor written, and takes no
+slot of the batch; the cursor rotates over due intents only.
 
 Supported maintenance surfaces:
 
@@ -136,8 +172,9 @@ to finish and for card cleanup/verified preservation, then processes the observe
 last. Retained observer user work appears as preservation in the same inventory.
 Pending Git removal, registration, ref or claim settlement blocks observer stop,
 including after exact card heads are stopped. Preservation permits handoff only
-when the owner verified the retained disposition and settled heads and claims;
-missing ownership reported as preservation cannot stand in for that proof.
+when the owner verified the retained disposition, or ended it terminally, and
+settled heads and claims; missing ownership reported as preservation cannot stand
+in for that proof.
 A failed handoff or stop remains pending after board closure. Neither the closing
 observer nor a code worker cleans live residue. Installation and final residue
 proof belong to the subsequent authorized PO operation.
