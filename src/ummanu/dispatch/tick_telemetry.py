@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import math
+import time
 from collections.abc import Iterator
 from typing import Any
 
@@ -22,8 +23,37 @@ TICK_CARDS_KEPT = 10
 #: Head handoff stages (`runtime.head.handoff`) read back per card.
 TICK_CARD_HANDOFFS_KEPT = 12
 MAX_COUNTER = 2**53
+#: Where one card's advance spent its time (`tick_stage`), each millisecond in exactly one stage: a
+#: stage nested in another is taken out of its parent. A closed vocabulary, bounded per card:
+#:   board_read      the fresh card read the advance starts from
+#:   ingress         re-establishing and polling a run's provider event source
+#:   launch          settling a launch intent, launching or recovering a head
+#:   report          the worker report, its continuation, and the review verdict
+#:   headless        deciding whether the worker has a head at all
+#:   comments        delivering comments to a live worker
+#:   gate            the mechanical gate before a review
+#:   observation     the host's status of a waited-on head (heartbeat, terminal, provider, /proc)
+#:   provider        the persisted provider failure that outranks a stall reading
+#:   vitality        reducing the vitality episode and commenting a verdict change
+#:   lifecycle       the wait decision (wait, nudge, recover, escalate) and a verdict parked unreviewed
+#:   flush           a record flush (`save_records`) outside the parts below
+#:   flush_card_read the card reads the cleanup projection of a flush needs
+#:   flush_identity  the workspace identity of the cleanup projection
+#:   flush_journal   publishing a changed cleanup projection into the journal
+#:   flush_lock      waiting for the ownership lock, in the flush and in its journal publication
+#:   flush_write     putting the records into the production state and writing it
+#: The card's `ms` less all of them is `unclassified`, measured, never dropped.
+CARD_STAGES = (
+    "board_read", "ingress", "launch", "report", "headless", "comments", "gate", "observation",
+    "provider", "vitality", "lifecycle", "flush", "flush_card_read", "flush_identity", "flush_journal",
+    "flush_lock", "flush_write",
+)
+CARD_STAGE_REMAINDER = "unclassified"
 
 _COUNTERS: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar("tick_counters", default=None)
+_STAGES: contextvars.ContextVar[tuple[dict[str, float], list[list[float]]] | None] = contextvars.ContextVar(
+    "card_stages", default=None
+)
 
 
 @contextlib.contextmanager
@@ -46,6 +76,77 @@ def tick_count(name: str, amount: int = 1) -> None:
 def tick_counter_values() -> dict[str, int] | None:
     counters = _COUNTERS.get()
     return None if counters is None else {name: int(counters.get(name, 0)) for name in TICK_COUNTERS}
+
+
+@contextlib.contextmanager
+def card_staging() -> Iterator[dict[str, float]]:
+    """Accumulate one card's exclusive stage milliseconds; outside it `tick_stage` is a no-op."""
+    stages: dict[str, float] = {}
+    token = _STAGES.set((stages, []))
+    try:
+        yield stages
+    finally:
+        _STAGES.reset(token)
+
+
+@contextlib.contextmanager
+def tick_stage(name: str) -> Iterator[None]:
+    """Time a stage of the card being advanced, exclusive of the stages nested in it.
+
+    The time of a stage interrupted by an exception is kept, and the exception passes unchanged.
+    Outside a card, or for a name outside `CARD_STAGES`, nothing is read or kept.
+    """
+    held = _STAGES.get()
+    if held is None or name not in CARD_STAGES:
+        yield
+        return
+    stages, stack = held
+    frame = [time.perf_counter(), 0.0]
+    stack.append(frame)
+    try:
+        yield
+    finally:
+        elapsed = (time.perf_counter() - frame[0]) * 1000.0
+        stack.pop()
+        stages[name] = stages.get(name, 0.0) + max(0.0, elapsed - frame[1])
+        if stack:
+            stack[-1][1] += elapsed
+
+
+@contextlib.contextmanager
+def tick_stage_entering(name: str, manager: contextlib.AbstractContextManager[Any]) -> Iterator[None]:
+    """Enter `manager` (a lock) with its entry timed as stage `name`; the body is not part of it."""
+    with contextlib.ExitStack() as stack:
+        with tick_stage(name):
+            stack.enter_context(manager)
+        yield
+
+
+def stage_breakdown(stages: dict[str, float], card_ms: float) -> dict[str, float]:
+    """The card's stages rounded, with `unclassified` the rest of its inclusive `card_ms`.
+
+    The stages and the remainder sum to `card_ms` within 0.001 ms per stage: rounding that would
+    overshoot is taken off the largest stage, as the tick's phases do it.
+    """
+    breakdown = {name: round(stages[name], 3) for name in CARD_STAGES if name in stages}
+    excess = round(sum(breakdown.values()) - card_ms, 3)
+    if excess > 0 and breakdown:
+        largest = max(breakdown, key=lambda name: breakdown[name])
+        breakdown[largest] = round(max(0.0, breakdown[largest] - excess), 3)
+    breakdown[CARD_STAGE_REMAINDER] = round(max(0.0, card_ms - sum(breakdown.values())), 3)
+    return breakdown
+
+
+def card_stage_ms(value: Any) -> dict[str, float] | None:
+    """A card's recorded stages: known names with valid durations, or None when none survive."""
+    if not isinstance(value, dict):
+        return None
+    stages = {
+        name: measured
+        for name in (*CARD_STAGES, CARD_STAGE_REMAINDER)
+        if (measured := duration_ms(value.get(name))) is not None
+    }
+    return stages or None
 
 
 def counter_values(value: Any) -> dict[str, int] | None:
@@ -77,12 +178,15 @@ def card_details(value: Any) -> list[dict[str, Any]] | None:
         records = item.get("records")
         handoffs = handoff_stages(item.get("handoffs"))
         handoff_ms = duration_ms(item.get("handoff_ms"))
+        stages = card_stage_ms(item.get("stages"))
         cards.append({"ref": item["ref"][:200], "ms": duration_ms(item.get("ms")),
                       "records": records if isinstance(records, int) and not isinstance(records, bool)
                       and 0 <= records <= MAX_COUNTER else None,
                       **(counter_values(item) or {}),
                       **({"handoff_ms": handoff_ms} if handoff_ms is not None else {}),
-                      **({"handoffs": handoffs} if handoffs else {})})
+                      **({"handoffs": handoffs} if handoffs else {}),
+                      # Absent on a card recorded before stages existed, or with none valid: unknown.
+                      **({"stages": stages} if stages else {})})
     return cards
 
 

@@ -838,6 +838,10 @@ def _print_tick_measurements(dispatcher: dict[str, Any]) -> None:
         print(f"last tick card {card['ref']}: {_duration_text(card.get('ms'))}, records {records}, "
               f"flushes {card.get('save_records', 0)}, cleanup intents {card.get('cleanup_intent_writes', 0)} "
               f"({card.get('cleanup_bytes_written', 0)} bytes), state saves {card.get('production_state_saves', 0)}")
+        if card.get("stages"):
+            # Exclusive, so they add up to the card's time; a card recorded before stages has none.
+            print(f"last tick card {card['ref']} stages: "
+                  + ", ".join(f"{name} {_duration_text(ms)}" for name, ms in card["stages"].items()))
 
 
 def _duration_text(value: float | None) -> str:
