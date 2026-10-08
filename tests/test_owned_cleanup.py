@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import os
@@ -25,7 +26,8 @@ from ummanu.cli import build_parser, run_residue_maintenance
 from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner, UnknownProject, ownership_lock
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.observer import ObserverRecord
-from ummanu.dispatch.production import _reconcile_production
+from ummanu.dispatch.production import ProductionState, _reconcile_production
+from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import HostError
 from ummanu.infra import git_worktree
@@ -33,6 +35,15 @@ from ummanu.observer_root import observer_root_repo
 from ummanu.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.role_env import workspace_tool_cache_env
+
+
+def journal_bytes(journal: CleanupJournal) -> dict[str, bytes]:
+    """Every stored journal file, so an assertion of "nothing written" covers all of them."""
+    files = sorted(journal.path.rglob("*")) if journal.path.exists() else []
+    stored = {str(file.relative_to(journal.path)): file.read_bytes() for file in files if file.is_file()}
+    if journal.legacy.exists():
+        stored["<v1>"] = journal.legacy.read_bytes()
+    return stored
 
 
 def git(repo: Path, *args: str) -> str:
@@ -860,8 +871,8 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.exists())
 
     def test_unreadable_journal_never_adopts_residue(self):
-        self.request()
-        self.owner.journal.path.write_text("unreadable")
+        key = self.request()
+        (self.owner.journal.path / "intents" / (key + ".json")).write_text("unreadable")
         with self.assertRaises(HostError):
             self.owner.replay()
         self.assertTrue(self.workspace.exists())
@@ -992,10 +1003,128 @@ class OwnedCleanupTests(unittest.TestCase):
         self.owner.replay()
         self.assertEqual(self.owner.journal.admission_refusal(self.task["ref"]), "")
 
+    def flush(self, records=None, events=None):
+        """The dispatcher's real record flush, in real host mode, over this owner."""
+        runtime = SimpleNamespace(host=CommandHostRuntime(FakeCatalog(), self.data, mode="real"),
+                                  data_dir=self.data, cleanup=self.owner, reader=self.runtime.reader,
+                                  production_state=ProductionState(self.data))
+        if events is not None:
+            save = runtime.production_state.save
+            runtime.production_state.save = lambda payload: (events.append("state"), save(payload))
+        DispatcherRuntime.save_records(runtime, {}, records or {self.task["ref"]: self.record})
+
+    def journal_io(self):
+        """Every journal read and write path, and the card read, as one recording."""
+        calls = []
+        stack = contextlib.ExitStack()
+        for name in ("read", "load_intent", "save", "_replace", "remember"):
+            original = getattr(CleanupJournal, name)
+            stack.enter_context(mock.patch.object(
+                CleanupJournal, name, autospec=True,
+                side_effect=lambda *args, _name=name, _original=original, **kwargs: (
+                    calls.append(_name), _original(*args, **kwargs))[1]))
+        show = self.runtime.reader.show
+        self.runtime.reader.show = lambda ref: (calls.append("card"), show(ref))[1]
+        stack.callback(setattr, self.runtime.reader, "show", show)
+        return stack, calls
+
+    def test_unchanged_cleanup_projection_flush_does_no_journal_io(self):
+        self.head()
+        self.flush()
+        key = self.owner._remembered[self.task["ref"]]["key"]
+        stored = journal_bytes(self.owner.journal)
+        stack, calls = self.journal_io()
+        with stack:
+            self.flush()
+            # Telemetry only: progress stamps, other subsystems' evidence and the provider cursor.
+            self.record.worker_progress_at = 1234.5
+            self.record.gate_attestation = {"evidence": "changed"}
+            run = dict(self.record.worker_head_run)
+            run["fanout_policy"] = {**run["fanout_policy"], "provider_source": {
+                "version": 1, "kind": "codex_session_event_jsonl", "state": "unbound", "root": "/codex/sessions",
+                "baseline": [f"/codex/sessions/rollout-{n}.jsonl" for n in range(500)]}}
+            self.record.worker_head_run = run
+            self.flush()
+        self.assertEqual(calls, [])
+        self.assertEqual(journal_bytes(self.owner.journal), stored)
+        self.assertEqual(self.owner.journal.intent(key)["record"]["worker_head_run"]["lifecycle"], "spawned")
+
+    def test_lifecycle_change_is_journaled_before_the_state_save(self):
+        run = self.head()
+        self.flush()
+        events = []
+        replace = CleanupJournal._replace
+        with mock.patch.object(CleanupJournal, "_replace", autospec=True,
+                               side_effect=lambda journal, *args: (events.append("journal"),
+                                                                   replace(journal, *args))[1]):
+            self.record.worker_head_run = run.finishing(StopInitiator(actor="test")).exited().to_json()
+            self.flush(events=events)
+        self.assertEqual(events, ["journal", "state"])
+        key = self.owner._remembered[self.task["ref"]]["key"]
+        self.assertEqual(self.owner.journal.intent(key)["heads"][0]["lifecycle"], "exited")
+
+    def test_new_attempt_and_concurrent_mutations_are_not_hidden_by_the_cache(self):
+        self.head()
+        self.flush()
+        first = self.owner._remembered[self.task["ref"]]["key"]
+        # Another producer replaces the stored intent with an older record of the same attempt.
+        other = CleanupJournal(self.data)
+        stale = other.intent(first)
+        stale["record"] = {**stale["record"], "handle": "stale-handle"}
+        other.save({"intents": {first: stale}})
+        stack, calls = self.journal_io()
+        with stack:
+            self.flush()
+        self.assertIn("load_intent", calls)
+        self.assertNotEqual(other.intent(first)["record"].get("handle"), "stale-handle")
+        # A concurrent settlement request is re-read and left as it is: nothing to write.
+        other.request(self.task, "done", self.record.to_json())
+        stack, calls = self.journal_io()
+        with stack:
+            self.flush()
+        self.assertIn("load_intent", calls)
+        self.assertNotIn("_replace", calls)
+        self.assertEqual(other.intent(first)["disposition"], "done")
+        # A new attempt is a new obligation: the card is read again and its own intent written.
+        self.record.attempt_id = "attempt-2"
+        stack, calls = self.journal_io()
+        with stack:
+            self.flush()
+        self.assertIn("card", calls)
+        second = self.owner._remembered[self.task["ref"]]["key"]
+        self.assertNotEqual(second, first)
+        self.assertEqual(other.intent(second)["record"]["attempt_id"], "attempt-2")
+
+    def test_residue_views_answer_the_same_from_the_v1_journal_and_after_its_migration(self):
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        inventory = self.owner.inventory(project="sample")
+        rendered = self.residue_command(project="sample", expected_exit=1)
+        summary = self.owner.journal.summary(sprint="sprint:1")
+        refusal = self.owner.journal.admission_refusal(self.task["ref"])
+        value = self.owner.journal.read()
+        # The same obligations as the released single document, before its one migration.
+        shutil.rmtree(self.owner.journal.path)
+        self.owner.journal.legacy.write_text(json.dumps(
+            {"version": 1, "intents": value["intents"], "generated": value["generated"],
+             "replay_cursor": value["replay_cursor"]}, sort_keys=True))
+        self.assertEqual(self.owner.inventory(project="sample"), inventory)
+        self.assertEqual(self.residue_command(project="sample", expected_exit=1), rendered)
+        self.assertEqual(self.owner.journal.summary(sprint="sprint:1"), summary)
+        self.assertEqual(self.owner.journal.admission_refusal(self.task["ref"]), refusal)
+        self.assertFalse(self.owner.journal.path.exists(), "residue views stay read-only")
+        entry = self.entry(inventory, key)
+        result = self.owner.replay_targets("sample", [(key, entry["digest"])])
+        self.assertEqual(result[0]["status"], "completed", result[0]["reason"])
+        self.assertTrue(self.owner.journal.path.is_dir())
+        self.assertTrue(self.owner.journal.archive.exists())
+        self.assertFalse(self.owner.journal.legacy.exists())
+
     def test_production_probe_cannot_replay_or_capture_durable_cleanup(self):
         from ummanu.dispatch.production import ProbeAbort, _probe_runtime
         self.request()
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         self.runtime.cleanup = self.owner
         self.runtime.production_state = SimpleNamespace()
         self.runtime.po = SimpleNamespace()
@@ -1004,7 +1133,9 @@ class OwnedCleanupTests(unittest.TestCase):
             probe.cleanup.replay()
         with self.assertRaises(ProbeAbort):
             probe.cleanup.cleanup(self.task, self.record, "inactive")
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        with self.assertRaises(ProbeAbort):
+            probe.cleanup.remember_record(self.task["ref"], self.record, lambda: self.task)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertTrue(self.workspace.exists())
 
     def test_bounded_replay_rotates_past_persistent_failures(self):
@@ -1296,9 +1427,9 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.is_dir())
         self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
         self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         self.owner.replay_one(key)
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         _, _path, observer = self.observer()
         self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
 
@@ -1538,9 +1669,9 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_replaying_a_preserved_intent_twice_keeps_the_journal_identical(self):
         key = self.preserved_done_intent()
         self.owner.replay_one(key)
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         self.owner.replay_one(key)
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
 
     def scoped_predecessor(self, *, role="observer", task="sprint:1", workspace=None, completed=True):
         """Launch 1 as a scoped run under a real local-PTY runtime root, replaced by launch 2."""
@@ -1889,12 +2020,12 @@ class OwnedCleanupTests(unittest.TestCase):
         value = self.owner.journal.read()
         value["replay_cursor"] = key
         self.owner.journal.save(value)
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         inventory = self.owner.inventory()
         rendered = self.residue_command(expected_exit=1)  # The requested intent is still pending.
         self.assertEqual({row["project"] for row in rendered["residue"]}, {"sample", "instance"})
         self.assertLessEqual({key, foreign}, {entry["target"] for entry in inventory["manifest"]})
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertEqual(self.stops, [])
         self.assertTrue(self.workspace.exists())
         self.assertEqual(git(second, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"),
@@ -1904,7 +2035,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.head()
         self.task["claim"]["worker"] = self.record.worker
         key = self.request()
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         entry = self.entry(self.owner.inventory(project="sample"), key)
         self.assertEqual(entry["outcome"], "eligible", entry["reason"])
         self.assertEqual([effect["effect"] for effect in entry["effects"]],
@@ -1918,7 +2049,7 @@ class OwnedCleanupTests(unittest.TestCase):
                                     "merged": True, "published": True})
         self.assertEqual(claim, {"effect": "settle-claim", "worker": self.record.worker, "board_write": True})
         # No effect and no journal write: the effects above would all be admitted by a replay.
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertEqual(self.stops, [])
         self.assertTrue(self.workspace.exists())
         self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
@@ -1951,7 +2082,7 @@ class OwnedCleanupTests(unittest.TestCase):
         _, foreign = self.second_project()
         self.head()
         key = self.request()
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         foreign_ref = "refs/heads/pipeline/instance-2@" + self.base
         result = self.owner.replay_targets("sample", [(key, "0" * 64), ("f" * 64, "0" * 64),
                                                       (foreign, "0" * 64), (foreign_ref, "0" * 64)])
@@ -1959,7 +2090,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertIn("digest differs", result[0]["reason"])
         self.assertTrue(all("unknown target" in item["reason"] for item in result[1:]))
         self.assertFalse(any(item["replayed"] for item in result))
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertEqual(self.stops, [])
         self.assertTrue(self.workspace.exists())
         # A digest read before the evidence changed no longer admits the target.
@@ -1967,7 +2098,7 @@ class OwnedCleanupTests(unittest.TestCase):
         (self.workspace / "notes").write_text("new author work\n")
         result = self.owner.replay_targets("sample", [(key, digest)])
         self.assertEqual(result[0]["status"], "refused")
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         with self.assertRaises(HostError):
             self.owner.replay_targets("sample", [(str(index), "0" * 64) for index in range(21)])
         with self.assertRaises(HostError):
@@ -1975,7 +2106,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_global_replay_batch_no_longer_exists(self):
         self.request()
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         with mock.patch("ummanu.dispatch.bootstrap.runtime_from_args", side_effect=AssertionError("runtime")):
             for kwargs in ({}, {"project": "sample"}, {"targets": ["x"], "digests": ["y"]},
                            {"project": "sample", "targets": ["x"]}):
@@ -1985,7 +2116,7 @@ class OwnedCleanupTests(unittest.TestCase):
                 with mock.patch("builtins.print") as output:
                     self.assertEqual(run_residue_maintenance(args), 2)
                 self.assertEqual(json.loads(output.call_args.args[0])["status"], "refused")
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertTrue(self.workspace.exists())
         with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
             build_parser().parse_args(["instance-maintenance", "--residue-replay", "--limit", "20"])
@@ -2063,16 +2194,15 @@ class OwnedCleanupTests(unittest.TestCase):
         key = self.request()
         value = self.owner.journal.read()
         value["intents"][foreign]["heads"] = [run, copy.deepcopy(run)]
-        # A legacy on-disk journal, accepted by read(), before its next checkpoint.
-        self.owner.journal.path.write_text(json.dumps(value, sort_keys=True))
-        before = json.dumps(value["intents"][foreign], sort_keys=True)
+        # A stored intent file written before its next checkpoint (heads not yet compacted).
+        stored = self.owner.journal.path / "intents" / (foreign + ".json")
+        stored.write_text(json.dumps(value["intents"][foreign], sort_keys=True))
+        before = stored.read_bytes()
         entry = self.entry(self.owner.inventory(project="sample"), key)
         result = self.owner.replay_targets("sample", [(key, entry["digest"])])
         self.assertEqual(result[0]["status"], "completed", result[0]["reason"])
-        stored = json.loads(self.owner.journal.path.read_text())
-        self.assertEqual(json.dumps(stored["intents"][foreign], sort_keys=True), before)
-        self.assertEqual(len(stored["intents"][foreign]["heads"]), 2)
-        self.assertIn(before, self.owner.journal.path.read_text())
+        self.assertEqual(stored.read_bytes(), before)
+        self.assertEqual(len(json.loads(stored.read_bytes())["heads"]), 2)
 
     def test_inventory_leaves_the_real_git_index_unrefreshed(self):
         key = self.request()
@@ -2103,7 +2233,7 @@ class OwnedCleanupTests(unittest.TestCase):
         value = self.owner.journal.read()
         value["intents"][foreign]["identity"] = _identity(self.repo, "", "pipeline/sample-1")
         self.owner.journal.save(value)
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         inventory = self.owner.inventory(project="sample")
         row = next(row for row in inventory["residue"] if row.get("ref") == "refs/heads/pipeline/sample-1")
         self.assertIn("recorded ownership conflicts", row["reason"])
@@ -2116,7 +2246,7 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.replay_targets("sample", [(target, entry["digest"]), (foreign, entry["digest"])])
         self.assertEqual([(item["status"], item["replayed"]) for item in result],
                          [("preserved", False), ("refused", False)])
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertTrue(self.workspace.exists())
 
     def test_ref_with_a_worktree_is_preserved_despite_dispatcher_card_started(self):
@@ -2169,7 +2299,7 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_owned_attempt_of_a_terminal_card_plans_its_settlement_request_first(self):
         self.head()
         key = self.owner.remember(self.task, self.record)
-        before = self.owner.journal.path.read_bytes()
+        before = journal_bytes(self.owner.journal)
         self.task["state"] = "in_progress"
         entry = self.entry(self.owner.inventory(project="sample"), key)
         self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", "card is still active"))
@@ -2178,7 +2308,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.task["closed"] = True
         entry = self.entry(self.owner.inventory(project="sample"), key)
         self.assertEqual(entry["effects"][0], {"effect": "request-settlement", "disposition": "archive"})
-        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(journal_bytes(self.owner.journal), before)
         result = self.owner.replay_targets("sample", [(key, entry["digest"])])
         self.assertEqual(result[0]["status"], "completed", result[0]["reason"])
         self.assertEqual(self.owner.journal.read()["intents"][key]["disposition"], "archive")

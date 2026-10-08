@@ -670,5 +670,6 @@ class TickPhaseLockTests(unittest.TestCase):
                 mock.patch.object(production, "_production_mutation_guard", return_value=None):
             result = production.production_tick(fixture.runtime)
         self.assertEqual(result["errors"], [])
-        self.assertTrue({"snapshot", "reconcile", "after-merge", "launches"} <= set(phases))
+        self.assertTrue({"snapshot", "fence", "reconcile_production", "advance_active", "after-merge", "launches"}
+                        <= set(phases))
         self.assertNotIn("checkpoint", phases)

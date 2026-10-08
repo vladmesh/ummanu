@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import math
+from collections.abc import Iterator
 from typing import Any
 
 TICK_TELEMETRY_RECENT_KEPT = 100
@@ -10,6 +13,71 @@ TICK_P95_MIN_SAMPLES = 20
 TICK_P95_THRESHOLD_MS = 300_000
 # Reject corrupt measurements beyond a year, including integers too large to convert to float.
 MAX_DURATION_MS = 366 * 24 * 60 * 60 * 1000
+#: The durable writes a tick made, counted at their publication seams once they succeeded.
+TICK_COUNTERS = ("save_records", "cleanup_intent_writes", "cleanup_bytes_written", "production_state_saves")
+#: The reconcile pass as exclusive sub-phases; their sum is the aggregate reconcile cost.
+RECONCILE_PHASES = ("fence", "reconcile_production", "advance_active")
+#: Per-card advance details kept on the last and unhealthy entries, slowest first; never in the ring.
+TICK_CARDS_KEPT = 10
+MAX_COUNTER = 2**53
+
+_COUNTERS: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar("tick_counters", default=None)
+
+
+@contextlib.contextmanager
+def tick_counting() -> Iterator[dict[str, int]]:
+    """Count this tick's writes; outside it `tick_count` is a no-op."""
+    counters = {name: 0 for name in TICK_COUNTERS}
+    token = _COUNTERS.set(counters)
+    try:
+        yield counters
+    finally:
+        _COUNTERS.reset(token)
+
+
+def tick_count(name: str, amount: int = 1) -> None:
+    counters = _COUNTERS.get()
+    if counters is not None:
+        counters[name] = counters.get(name, 0) + amount
+
+
+def tick_counter_values() -> dict[str, int] | None:
+    counters = _COUNTERS.get()
+    return None if counters is None else {name: int(counters.get(name, 0)) for name in TICK_COUNTERS}
+
+
+def counter_values(value: Any) -> dict[str, int] | None:
+    """Accept only the named nonnegative integer counters; anything else is dropped."""
+    if not isinstance(value, dict):
+        return None
+    return {
+        name: raw
+        for name in TICK_COUNTERS
+        if not isinstance(raw := value.get(name), bool) and isinstance(raw, int) and 0 <= raw <= MAX_COUNTER
+    }
+
+
+def reconcile_ms(phases: dict[str, float] | None) -> float | None:
+    """The aggregate reconcile cost, from its sub-phases or the single phase older ticks recorded."""
+    if not phases:
+        return None
+    names = [name for name in ("reconcile", *RECONCILE_PHASES) if name in phases]
+    return round(sum(phases[name] for name in names), 3) if names else None
+
+
+def card_details(value: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(value, list):
+        return None
+    cards = []
+    for item in value[:TICK_CARDS_KEPT]:
+        if not isinstance(item, dict) or not isinstance(item.get("ref"), str):
+            continue
+        records = item.get("records")
+        cards.append({"ref": item["ref"][:200], "ms": duration_ms(item.get("ms")),
+                      "records": records if isinstance(records, int) and not isinstance(records, bool)
+                      and 0 <= records <= MAX_COUNTER else None,
+                      **(counter_values(item) or {})})
+    return cards
 
 
 def duration_ms(value: Any) -> float | None:

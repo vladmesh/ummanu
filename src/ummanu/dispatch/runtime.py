@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -102,6 +103,7 @@ from ummanu.dispatch.state import (
     now_rfc3339,
     outcome_terminal_path as _outcome_terminal_path,
 )
+from ummanu.dispatch.tick_telemetry import tick_count
 from ummanu.dispatch.types import (
     STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
@@ -916,10 +918,13 @@ class DispatcherRuntime:
 
     def save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         """Flush the dispatcher records into the production state."""
+        tick_count("save_records")
         if isinstance(self.host, CommandHostRuntime) and self.host.mode == "real":
             for ref, record in records.items():
                 if record.workspace:
-                    self.cleanup.remember(self.reader.show(ref), record)
+                    # The card is read only when the journal is: an unchanged cleanup projection
+                    # needs neither the board nor the journal.
+                    self.cleanup.remember_record(ref, record, functools.partial(self.reader.show, ref))
         with ownership_lock(self.data_dir):
             self.production_state.put_records(payload, records)
             payload["last_tick_at"] = now_rfc3339()
