@@ -180,7 +180,12 @@ continuation and reviewer launch prompts are `PromptHandoff`s (`runtime/head/han
 - Telemetry: each card's `handoff_ms` (what its handoffs really cost) and bounded
   `{stage, subject, ms, allowed_ms, outcome}` entries (`cards[].handoffs`); the tick's
   `handoff` entry carries the allowance and what the pass spent. A card's `ms` less its
-  `handoff_ms` is its non-handoff cost (gate, board, provider probes, documents).
+  `handoff_ms` is its non-handoff cost (gate, board, provider probes, documents). `cards[].stages`
+  splits the same `ms` by where it was spent (`tick_telemetry.CARD_STAGES`: the fresh board read,
+  provider ingress, report, observation, provider failure, vitality, lifecycle, and each record
+  flush apart from its card reads, workspace identity, journal publication, ownership-lock wait and
+  state write), each millisecond once, the rest as `unclassified`. Handoffs are spent inside those
+  stages and are not subtracted from them. A card recorded before stages existed has none: unknown.
 
 ## The runtime default
 

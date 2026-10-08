@@ -61,10 +61,13 @@ from ummanu.dispatch.state import (
 from ummanu.dispatch.tick_telemetry import (
     TICK_CARDS_KEPT,
     TICK_TELEMETRY_RECENT_KEPT,
+    card_staging,
     cleanup_summary,
+    stage_breakdown,
     tick_count,
     tick_counter_values,
     tick_counting,
+    tick_stage,
 )
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
@@ -159,7 +162,8 @@ def tick_card(ref: str, records: int) -> Iterator[None]:
 
     `records` is how many dispatcher records the advance was handed, apart from how many times it
     flushed them (the `save_records` delta). A breakdown of `advance_active`, not a phase of its
-    own: it adds nothing to the phase sum.
+    own: it adds nothing to the phase sum. `stages` splits the same inclusive `ms` by where it was
+    spent (`tick_stage`), the unattributed rest as `unclassified`.
     """
     cards = _TICK_CARDS.get()
     before = tick_counter_values()
@@ -170,18 +174,23 @@ def tick_card(ref: str, records: int) -> Iterator[None]:
     mark = handoff_stage_mark()
     budget = active_budget()
     spent = budget.spent if budget is not None else 0.0
+    stages: dict[str, float] = {}
     try:
-        yield
+        with card_staging() as stages:
+            yield
     finally:
+        ms = round((time.perf_counter() - started) * 1000.0, 3)
         after = tick_counter_values() or before
         handoffs = handoff_stages_since(mark)
         handoff_ms = round((budget.spent - spent) * 1000.0, 3) if budget is not None else 0.0
-        cards.append({"ref": ref, "ms": round((time.perf_counter() - started) * 1000.0, 3), "records": records,
+        cards.append({"ref": ref, "ms": ms, "records": records,
                       **{name: after[name] - before[name] for name in after},
                       # What this card's head handoffs really cost (waits and supervisor requests
-                      # alike), and each stage with its own cost; `ms` less this is the rest.
+                      # alike), and each stage with its own cost; `ms` less this is the rest. The
+                      # handoffs are spent inside the stages below, never subtracted from them.
                       **({"handoff_ms": handoff_ms} if handoffs or handoff_ms else {}),
-                      **({"handoffs": handoffs} if handoffs else {})})
+                      **({"handoffs": handoffs} if handoffs else {}),
+                      "stages": stage_breakdown(stages, ms)})
 
 
 def note_tick_handoff(budget: Any) -> None:
@@ -1421,7 +1430,8 @@ def _production_tick_active(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     ref = task["ref"]
-    task = runtime.reader.show(ref)
+    with tick_stage("board_read"):
+        task = runtime.reader.show(ref)
     record = records.get(ref)
     if record is not None and record.activation_recovery is not None:
         return runtime._tick_task(task, records, payload, record.attempt_id)

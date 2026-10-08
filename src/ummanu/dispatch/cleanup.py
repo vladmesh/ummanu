@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from ummanu import _proc
-from ummanu.dispatch.tick_telemetry import tick_count
+from ummanu.dispatch.tick_telemetry import tick_count, tick_stage, tick_stage_entering
 from ummanu.dispatch.types import HostError, OwnershipChanged
 from ummanu.infra import git_worktree
 
@@ -1489,7 +1489,8 @@ class CleanupOwner:
             project = str(task["project"])
         else:
             project = cached["project"]
-        identity = self._workspace_identity(project, reference, record)
+        with tick_stage("flush_identity"):
+            identity = self._workspace_identity(project, reference, record)
         digest = hashlib.sha256(json.dumps([cleanup_record(raw), identity], sort_keys=True,
                                            default=str).encode()).hexdigest()
         state = self.journal.intent_state(key)
@@ -1498,7 +1499,7 @@ class CleanupOwner:
             return key
         if task is None:
             task = card()
-        with ownership_lock(self.data_dir):
+        with tick_stage_entering("flush_lock", ownership_lock(self.data_dir)), tick_stage("flush_journal"):
             self.journal.remember(task, raw, identity=identity)
             state = self.journal.intent_state(key)
         self._remembered[reference] = {"key": key, "project": str(task["project"]), "digest": digest,
