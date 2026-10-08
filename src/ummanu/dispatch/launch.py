@@ -96,6 +96,9 @@ REVIEW_BUSY_RETRY_MAX_SECONDS = 5 * 60
 
 # The delivery state of a launch whose pointer the composer took.
 LAUNCH_DELIVERY_CONFIRMED = "confirmed"
+# The delivery state of a launch whose production handoff is still in progress (`runtime.head.handoff`):
+# not a refusal and not busy, so it spends no attempt and waits for no backoff.
+LAUNCH_DELIVERY_HANDOFF_PENDING = "handoff_pending"
 # How many ticks a launch may hold its card while its pointer is still unaccepted. Past this the
 # head is stopped and relaunched: a head that cannot be made sendable is replaced, and it never
 # sits indefinitely while the card reports progress.
@@ -212,6 +215,32 @@ def defer_launch_delivery(
     }
     record.launch_intent = intent
     return delay
+
+
+def defer_pending_launch_delivery(record: DispatcherRecord | None, evidence: dict[str, Any]) -> bool:
+    """Keep a launch whose production handoff is pending for the next tick; True if that changed it.
+
+    The attempt count and any earlier evidence stay as they were: a handoff in progress is neither a
+    refused pointer nor a busy pane, so it does not bring the launch closer to its replacement.
+    """
+    intent = dict(launch_intent(record))
+    if not intent:
+        return False
+    previous = launch_delivery(intent)
+    delivery = {
+        **previous,
+        "state": LAUNCH_DELIVERY_HANDOFF_PENDING,
+        "attempts": int(previous.get("attempts") or 0),
+        "next_at": 0.0,
+        "evidence": dict(evidence),
+        # Kept through the confirmation, so adoption can tell this launch is `start_review` continued.
+        "handoff": True,
+    }
+    if delivery == previous:
+        return False
+    intent["delivery"] = delivery
+    record.launch_intent = intent
+    return True
 
 
 def defer_busy_launch_delivery(
@@ -902,6 +931,23 @@ def resolve_launch_intent(
     return _adopt_launch_intent(runtime, task, records, payload, record, intent, role, step)
 
 
+def _retained_worker_kept_for_review(runtime: Any, record: DispatcherRecord, intent: dict[str, Any]) -> bool:
+    """Whether a reviewer adopted from a finished production handoff keeps the retained worker.
+
+    Only for a launch whose delivery a handoff carried (`defer_pending_launch_delivery`), and only
+    while the worker is provably gone or confirmably still suspended, the two cases `start_review`
+    itself accepts. A confirmation that fails is not a refusal here: the caller stops the worker.
+    """
+    if not launch_delivery(intent).get("handoff") or not record.worker_continuation.retained:
+        return False
+    try:
+        if not runtime.host.worker_retained_vanished(record):
+            runtime.host.confirm_worker_retained(record)
+    except HostError:
+        return False
+    return True
+
+
 def keep_reserved_round(runtime: Any, record: DispatcherRecord, intent: dict[str, Any]) -> None:
     """Carry the round a dropped worker intent reserved onto the record it was written over.
 
@@ -1043,18 +1089,23 @@ def _adopt_launch_intent(
         record.review_handle = handle
         record.review_leaf = leaf
         record.review_pid_file = str(intent.get("pid_file") or "")
-        try:
-            runtime.host.freeze_worker(record)
-        except HostError as exc:
-            _persist_quietly(runtime, payload, records)
-            return head_stop_unconfirmed(
-                step=step,
-                ref=ref,
-                attempt_id=record.attempt_id,
-                role=WORKER_ROLE,
-                reason=f"{type(exc).__name__}: {exc}",
-            )
-        forget_role_head(record, WORKER_ROLE)
+        # A launch a production handoff finished over several ticks is `start_review` continued,
+        # and it ends the way `start_review` ends: a retained worker whose suspension is confirmed
+        # stays suspended for the red verdict to continue. Anything less certain is stopped.
+        kept = _retained_worker_kept_for_review(runtime, record, intent)
+        if not kept:
+            try:
+                runtime.host.freeze_worker(record)
+            except HostError as exc:
+                _persist_quietly(runtime, payload, records)
+                return head_stop_unconfirmed(
+                    step=step,
+                    ref=ref,
+                    attempt_id=record.attempt_id,
+                    role=WORKER_ROLE,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            forget_role_head(record, WORKER_ROLE)
         record.state = "reviewing"
         record.review_started_at = record.review_progress_at = launched_at
         if not record.review_commit:

@@ -205,6 +205,7 @@ from ummanu.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
 from ummanu.runtime.head.children import read_head_children
+from ummanu.runtime.head.handoff import PromptHandoff, active_budget
 from ummanu.runtime.head_runtime_backends import (
     LegacyHeadRecordError,
     UnknownHeadRuntimeError,
@@ -1826,6 +1827,7 @@ class CommandHostRuntime:
             failover=bool(record.preferred_review_head),
             heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or ""),
             local_run_policy=local_run_policy,
+            handoff=_review_launch_handoff(record.launch_intent),
         )
         try:
             if record.worker_continuation.retained and self.worker_retained_vanished(record):
@@ -1894,6 +1896,7 @@ class CommandHostRuntime:
             task, REVIEW_ROLE, record.review_baseline, record.review_local_run_snapshot
         )
         document, nudge = self._review_document(task, record, local_run_policy=local_run_policy)
+        handoff = _review_launch_handoff(intent)
         try:
             receipt = self.head_runtime_for(run).deliver(
                 run,
@@ -1906,6 +1909,7 @@ class CommandHostRuntime:
                     before_send=ingress.bind_before_delivery if ingress is not None else None,
                 ),
                 subject="reviewer-launch",
+                **({"handoff": handoff} if handoff is not None else {}),
             )
         except LegacyDispatcherRecord:
             raise
@@ -1913,6 +1917,10 @@ class CommandHostRuntime:
             failure = HostError(f"retained reviewer document nudge was not delivered: {exc}")
             failure.evidence = _delivery_evidence_json(exc, "reviewer-launch")
             raise failure from None
+        if receipt.handoff_stage:
+            pending = HostError(f"retained reviewer document nudge is pending: {receipt.reason}")
+            pending.evidence = _delivery_evidence_json(receipt, "reviewer-launch")
+            raise pending from None
         if not receipt.ok:
             failure = HostError(f"retained reviewer document nudge was not delivered: {receipt.reason}")
             failure.evidence = _delivery_evidence_json(receipt.failure, "reviewer-launch")
@@ -3067,8 +3075,13 @@ class CommandHostRuntime:
         failover: bool = False,
         heartbeat_run_id: str = "",
         local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
+        handoff: PromptHandoff | None = None,
     ) -> LaunchedHead:
-        """Bring one head up and hand back the pane together with the configuration it started with."""
+        """Bring one head up and hand back the pane together with the configuration it started with.
+
+        A `handoff` makes the launch prompt the resumable production one: a head that is up with its
+        prompt pending is a `HeadLaunchAborted` whose evidence names the stage, kept by its intent.
+        """
         if role in {WORKER_ROLE, REVIEW_ROLE, "reviewer"}:
             self._require_production_runtime(f"{role}-launch")
             self._require_workspace_environment(workspace)
@@ -3205,6 +3218,7 @@ class CommandHostRuntime:
             scope_generation=preflight_run.scope_generation,
             launch_admission=lambda: self._launch_admission(task),
             commit=ingress.commit_run if ingress is not None else None,
+            **({"handoff": handoff} if handoff is not None and pointer is not None else {}),
         )
         if not receipt.ok:
             failed_run = receipt.run
@@ -3212,6 +3226,18 @@ class CommandHostRuntime:
                 # Delivery can refuse with a live pane before the bring-up returns normally. Bind
                 # that pane to the written heartbeat before persisting the failed launch intent.
                 _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=failed_run.leaf)
+            if receipt.handoff_stage and failed_run is not None:
+                # Up, and its prompt is not taken yet: the intent keeps this exact head and the next
+                # tick continues the same handoff (`retry_busy_reviewer_launch_delivery`).
+                raise HeadLaunchAborted(
+                    f"{subject} is pending: {receipt.reason}",
+                    handle=failed_run.handle,
+                    leaf=failed_run.leaf,
+                    workspace=workspace,
+                    pid_file=pid_file,
+                    evidence=_delivery_evidence_json(receipt, subject),
+                    head_run=failed_run.to_json(),
+                ) from None
             if receipt.failure is None:
                 # A refusal the boundary made on its own terms, before any operation ran: a
                 # bring-up over a turn this runtime is still holding is the one that exists. It
@@ -3667,7 +3693,14 @@ class CommandHostRuntime:
         self._nudge_worker(record, pointer, "worker comment continuation", subject="worker-comments")
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
-        """Resume an addressable retained worker and deliver its updated rework task."""
+        """Resume an addressable retained worker and deliver its updated rework task.
+
+        A continuation with a production handoff (`WorkerContinuation.handoff`) is delivered through
+        it. Once that handoff has written its line, a later call continues it: the document is not
+        rewritten, no report body is cleared and nothing is woken, because all of that happened
+        before the line it already typed. A handoff that is not finished raises a `HostError` whose
+        evidence names its stage (`handoff_pending_stage`).
+        """
         self._refuse_legacy_record(record, "resume the worker of")
         status = self._head_status(
             record.worker_pid_file,
@@ -3687,6 +3720,22 @@ class CommandHostRuntime:
         if continuation.delivery_confirmed:
             if status.get("stopped"):
                 raise HostError("confirmed retained continuation is no longer running")
+            return
+        handoff = continuation.handoff
+        if handoff is not None and self.worker_handoff_started(record) != "none":
+            if status.get("stopped"):
+                # It was woken for this line; suspended again since, it is not this handoff's head.
+                raise HostError("retained worker was suspended again while its continuation was pending")
+            try:
+                pointer = head_ops.NudgePointer.at_document(
+                    str(workspace / "TASK.md"),
+                    _continuation_note(record.report_generation, record.report_decision),
+                )
+            except PromptDocumentError as exc:
+                raise HostError(f"the continuation pointer could not be built: {exc}") from None
+            self._nudge_worker(
+                record, pointer, "retained worker continuation", subject="worker-continuation", handoff=handoff
+            )
             return
         if not status.get("stopped") and (
             _provider_turn_started(str(workspace), continuation.sent_at, adapter=adapter) is True
@@ -3744,7 +3793,42 @@ class CommandHostRuntime:
             "retained worker continuation",
             subject="worker-continuation",
             before_send=activate,
+            handoff=handoff,
         )
+
+    def worker_handoff_floor(self, record: DispatcherRecord) -> int | None:
+        """The worker journal's sequence now: where a production continuation handoff opens.
+
+        None when the worker's own supervisor does not answer, or this host raises no heads.
+        """
+        if self.mode == "noop":
+            return None
+        try:
+            self._refuse_legacy_record(record, "open a handoff to the worker of")
+            run = self.worker_lifecycle_run(record)
+            runtime = self.head_runtime_for(run)
+        except (HostError, LegacyDispatcherRecord, LegacyHeadRecordError, UnknownHeadRuntimeError):
+            return None
+        floor = getattr(runtime, "handoff_floor", None)
+        return floor(run) if callable(floor) else None
+
+    def worker_handoff_started(self, record: DispatcherRecord) -> str:
+        """Whether this continuation's handoff has written to the worker: none, started or unknown.
+
+        Read from the worker's own journal above the handoff's floor. `none` without a handoff.
+        """
+        handoff = record.worker_continuation.handoff
+        if handoff is None or self.mode == "noop":
+            return "none"
+        try:
+            run = self.worker_lifecycle_run(record)
+            runtime = self.head_runtime_for(run)
+        except (HostError, LegacyDispatcherRecord, LegacyHeadRecordError, UnknownHeadRuntimeError):
+            return "unknown"
+        started = getattr(runtime, "handoff_started", None)
+        if not callable(started):
+            return "unknown"
+        return str(started(run, "worker-continuation", handoff))
 
     def _nudge_worker(
         self,
@@ -3754,8 +3838,13 @@ class CommandHostRuntime:
         *,
         subject: str,
         before_send: Callable[[], None] | None = None,
+        handoff: PromptHandoff | None = None,
     ) -> None:
-        """Point this card's live worker at one thing, through the head operation (secretary-1412)."""
+        """Point this card's live worker at one thing, through the head operation (secretary-1412).
+
+        With a `handoff` the delivery is the resumable production one: a handoff left pending keeps
+        the run it bound and raises with evidence naming its stage.
+        """
         self._refuse_legacy_record(record, "deliver to the worker of")
         run = self.worker_lifecycle_run(record)
         ingress = self._codex_provider_ingress(run)
@@ -3782,6 +3871,7 @@ class CommandHostRuntime:
                     before_send=delivery_hook,
                 ),
                 subject=subject,
+                **({"handoff": handoff} if handoff is not None else {}),
             )
         except LegacyDispatcherRecord:
             raise
@@ -3789,6 +3879,13 @@ class CommandHostRuntime:
             failure = HostError(f"{what} was not delivered: {exc}")
             failure.evidence = getattr(exc, "evidence", None)
             raise failure from None
+        if receipt.handoff_stage:
+            if receipt.run is not None:
+                # What the delivery bound before typing (a Codex provider source) is this head's now.
+                record.worker_head_run = receipt.run.to_json()
+            pending = HostError(f"{what} is pending: {receipt.reason}")
+            pending.evidence = _delivery_evidence_json(receipt, subject)
+            raise pending from None
         if not receipt.ok:
             failure = HostError(f"{what} was not delivered: {receipt.reason}")
             failure.evidence = receipt.evidence
@@ -4867,6 +4964,19 @@ def _continuation_note(generation: int = 0, decision: str = "") -> str:
     if decision.strip():
         note += " Its observer decision outranks the findings below it."
     return note
+
+
+def _review_launch_handoff(intent: Any) -> PromptHandoff | None:
+    """The production handoff of a reviewer launch prompt, or None outside a production pass.
+
+    A reviewer head is raised for one launch prompt, so its handoff is the whole of that run's
+    journal (floor 0), opened when the launch intent was written before the spawn.
+    """
+    if active_budget() is None:
+        return None
+    opened = intent.get("at") if isinstance(intent, dict) else None
+    began_at = float(opened) if isinstance(opened, (int, float)) and opened > 0 else time.time()
+    return PromptHandoff(floor=0, began_at=began_at)
 
 
 def _delivery_evidence_json(carrier: Any, subject: str) -> dict[str, Any]:

@@ -23,6 +23,7 @@ from ummanu.dispatch.launch import (
     confirm_launch_intent,
     defer_busy_launch_delivery,
     defer_launch_delivery,
+    defer_pending_launch_delivery,
     forget_role_head,
     launch_aborted,
     launch_intent_unwritable,
@@ -58,6 +59,7 @@ from ummanu.dispatch.watchdog import (
 )
 from ummanu.dispatch.worker_lifecycle import head_run_binding
 from ummanu.runtime.head import HeadRun, HeadRunError
+from ummanu.runtime.head.handoff import handoff_pending_stage
 from ummanu.runtime.head_runtime_backends import head_runtime_name
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
@@ -521,6 +523,17 @@ def _reviewer_launch_aborted(
     evidence = getattr(exc, "evidence", None)
     if hasattr(evidence, "to_json"):
         evidence = evidence.to_json()
+    stage = handoff_pending_stage(exc)
+    if stage:
+        # The reviewer is up and its production handoff is not finished: the intent keeps this
+        # exact head, and the next tick continues the handoff before anything adopts it. Like a
+        # busy pane, nothing has been confirmed yet, so the worker is not frozen here either.
+        mark_launch_aborted(runtime, payload, records, ref, record, exc)
+        defer_pending_launch_delivery(record, evidence if isinstance(evidence, dict) else {})
+        record.state = "review_starting"
+        records[ref] = record
+        runtime.save_records(payload, records)
+        return _review_handoff_pending(record, ref, attempt_id, "review", stage, exc)
     busy = delivery_readiness_state(exc) == READINESS_BUSY
     if busy:
         # The pane was observed working before any document nudge was sent.  Its live heartbeat is
@@ -625,6 +638,13 @@ def retry_busy_reviewer_launch_delivery(
             evidence = evidence.to_json()
         if not isinstance(evidence, dict):
             evidence = {}
+        stage = handoff_pending_stage(exc)
+        if stage:
+            # Written only when the pending delivery changed: an unchanged handoff costs no write.
+            if defer_pending_launch_delivery(record, evidence):
+                records[ref] = record
+                runtime.save_records(payload, records)
+            return _review_handoff_pending(record, ref, record.attempt_id, step, stage, exc)
         _record_review_delivery_failure(record, exc)
         state = delivery_readiness_state(exc)
         if state == READINESS_BUSY:
@@ -722,6 +742,22 @@ def retry_busy_reviewer_launch_delivery(
     return None
 
 
+def _review_handoff_pending(
+    record: DispatcherRecord, ref: str, attempt_id: str, step: str, stage: str, exc: Exception
+) -> dict[str, Any]:
+    """The outcome of a reviewer launch whose production handoff continues next tick."""
+    return {
+        "status": "ok",
+        "step": step,
+        "pilot_ref": ref,
+        "attempt_id": record.attempt_id or attempt_id,
+        "action": "review-launch-handoff-pending",
+        "head": record.review_head,
+        "handoff_stage": stage,
+        "reason": scrub_host_output(str(exc)),
+    }
+
+
 def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) -> None:
     """Keep a reviewer prompt that did not land as durable card telemetry.
 
@@ -733,6 +769,9 @@ def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) ->
     if hasattr(evidence, "to_json"):
         evidence = evidence.to_json()
     if not isinstance(evidence, dict) or not evidence:
+        return
+    if handoff_pending_stage(evidence):
+        # A handoff still in progress is no refused prompt; its intent carries it (`retry_busy_...`).
         return
     record.review_delivery_evidence = dict(evidence)
     typed = record.review_delivery_evidence.evidence

@@ -65,6 +65,14 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.runtime.head import local_pty
+from ummanu.runtime.head.handoff import (
+    HANDOFF_SETTLE,
+    HANDOFF_SUBMITTED,
+    HANDOFF_TYPED,
+    HandoffBudget,
+    PromptHandoff,
+    active_budget,
+)
 from ummanu.runtime.head.identity import task_binding
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.scope_inventory import RuntimeScopeInventory
@@ -104,7 +112,9 @@ from ummanu.runtime.tui_delivery import (
     DELIVERY_CONFIRMED,
     READINESS_BUSY,
     READINESS_READY,
+    READINESS_UNKNOWN,
     STAGE_ENTER_ACCEPTED,
+    STAGE_NONE,
     STAGE_PAYLOAD_WRITTEN,
     STAGE_TURN_OBSERVED,
     DeliveryEvidence,
@@ -201,6 +211,8 @@ SUBMIT_CONFIRM_SECONDS = 20.0
 SUBMIT_ATTEMPTS = 2
 #: Why an agent prompt did not start a turn: it is in the composer, and no submit made it go.
 DELIVER_NOT_SUBMITTED = "prompt_typed_but_no_turn_started"
+#: Why a production handoff was refused rather than continued: its journal cannot say how far it got.
+DELIVER_HANDOFF_UNESTABLISHED = "prompt_handoff_unestablished"
 
 #: Stop-if-quiescent refusal tokens, the same as the legacy backend's.
 STOP_TURN_IN_FLIGHT = "turn_in_flight"
@@ -385,6 +397,9 @@ class LocalPtyHeadRuntime:
         prompt_poll: float | None = None,
         prompt_first_output: float | None = None,
         submit_confirm: float | None = None,
+        monotonic: Callable[[], float] | None = None,
+        wall: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         if not callable(head_process_status):
             raise LocalPtyRuntimeError(
@@ -413,6 +428,11 @@ class LocalPtyHeadRuntime:
             PROMPT_FIRST_OUTPUT_SECONDS if prompt_first_output is None else prompt_first_output
         )
         self._submit_confirm = float(SUBMIT_CONFIRM_SECONDS if submit_confirm is None else submit_confirm)
+        # The clocks a production handoff reads (`_handoff_prompt`), injectable so its stages can be
+        # driven by a fake clock. The blocking flow keeps reading `time` directly.
+        self._monotonic = monotonic or time.monotonic
+        self._wall = wall or time.time
+        self._sleep = sleep or time.sleep
         # Reentrant, so `stop_if_quiescent` can perform `stop`.
         self._lock = threading.RLock()
         # This backend alone tracks terminals left with an unfinished payload prefix.
@@ -452,6 +472,7 @@ class LocalPtyHeadRuntime:
         scope_generation: str = "",
         transport: Any = None,
         launch_admission: Callable[[], AbstractContextManager[Any]] | None = None,
+        handoff: PromptHandoff | None = None,
         **ignored: Any,
     ) -> StartReceipt:
         """Bring one head up under its own supervisor and point it at its task.
@@ -466,7 +487,9 @@ class LocalPtyHeadRuntime:
         proving the previous owner empty.
 
         A `pointer` with a `transport` is an agent's prompt, delivered as `deliver` does, after the
-        spawn and outside the lock.
+        spawn and outside the lock. With a `handoff` that delivery is the resumable production one: a
+        handoff this pass cannot finish keeps the head up and answers `HEAD_BUSY` with its
+        `handoff_stage`, and `deliver` with the same `handoff` continues it.
         """
         del title, ignored
         receipt = self._start_locked(
@@ -491,7 +514,24 @@ class LocalPtyHeadRuntime:
         live = receipt.run
         if pointer is None or transport is None or live is None or not receipt.ok:
             return receipt
-        delivered = self._deliver_prompt(live, pointer, subject or "head-launch", _wake_hook(transport))
+        if handoff is not None:
+            delivered = self._handoff_prompt(
+                live, pointer, subject or "head-launch", _wake_hook(transport), handoff
+            )
+            if delivered.handoff_stage:
+                # Up, and its prompt not yet taken: kept for the next tick, never abandoned for it.
+                return StartReceipt(
+                    status=HEAD_BUSY,
+                    run=delivered.run or live,
+                    reason=delivered.reason,
+                    evidence=delivered.evidence,
+                    epoch=delivered.epoch,
+                    lease=delivered.lease,
+                    rotation_ready=delivered.rotation_ready,
+                    handoff_stage=delivered.handoff_stage,
+                )
+        else:
+            delivered = self._deliver_prompt(live, pointer, subject or "head-launch", _wake_hook(transport))
         if delivered.ok:
             return StartReceipt(
                 status=HEAD_OK,
@@ -653,6 +693,7 @@ class LocalPtyHeadRuntime:
         *,
         subject: str = "",
         transport: Any = None,
+        handoff: PromptHandoff | None = None,
         **ignored: Any,
     ) -> DeliverReceipt:
         """Put one prompt in front of a running head and say what became of the bytes.
@@ -661,10 +702,15 @@ class LocalPtyHeadRuntime:
         neither queues. After admission the payload is followed to its end and the receipt carries
         its outcome; `ok` is only `DELIVERY_ARRIVED`. A `transport` marks the pointer as an agent's
         composer prompt, typed and then submitted separately (`_deliver_prompt`); only its
-        `before_send` hook is used (`_before_send`).
+        `before_send` hook is used (`_before_send`). A `handoff` makes that prompt the resumable
+        production handoff (`_handoff_prompt`).
         """
         del ignored
         if transport is not None:
+            if handoff is not None:
+                return self._handoff_prompt(
+                    run, pointer, subject or "head-nudge", _wake_hook(transport), handoff
+                )
             return self._deliver_prompt(run, pointer, subject or "head-nudge", _wake_hook(transport))
         return self._deliver_payload(run, pointer, subject or "head-nudge")
 
@@ -828,6 +874,396 @@ class LocalPtyHeadRuntime:
             rotation_ready=last.rotation_ready,
         )
 
+    def _handoff_prompt(
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        wake: Callable[[], Any] | None,
+        handoff: PromptHandoff,
+    ) -> DeliverReceipt:
+        """`_deliver_prompt` for the production dispatcher: resumable, one observation per stage.
+
+        Where the handoff stands is read from the head's journal above `handoff.floor`
+        (`_handoff_progress`), never remembered: a typed line is not typed again, an accepted submit
+        is not sent again, and a turn that took the prompt confirms it. Each stage may wait only out
+        of the tick's `HandoffBudget` (none installed: no waiting at all); a stage that budget cannot
+        finish answers `HEAD_BUSY` with `handoff_stage` and leaves the rest to the next call. The
+        outcomes this flow shares with `_deliver_prompt` are reached on the same evidence, and its
+        bounds (`prompt_settle` before typing and before a submit, `SUBMIT_ATTEMPTS`) are measured
+        from the durable times in the journal and in `handoff`, so they survive a dispatcher restart.
+        """
+        budget = active_budget() or HandoffBudget(0.0, clock=self._monotonic)
+        progress = self._handoff_read(run, subject, handoff.floor)
+        if progress.unknown:
+            return self._handoff_unestablished(run, pointer, subject, progress.unknown)
+        if progress.typed_prefix is not None:
+            # A dispatcher that died while its line was being written left part of it on the
+            # terminal: the same fatal outcome a live delivery reaches (`_delivery_that_did_not_arrive`).
+            report = _journalled_report(progress.typed_prefix, handoff.floor)
+            return self._delivery_that_did_not_arrive(run, report, None, self.activity.epoch(run.run_id))
+        live = run
+        if progress.typed is None:
+            if not self._handoff_settled(run, subject, handoff, budget):
+                return self._handoff_pending(
+                    run, pointer, subject, HANDOFF_SETTLE, "the head has not been seen quiet yet"
+                )
+            began = self._monotonic()
+            typed = self._deliver_payload(run, pointer, subject, wake=wake)
+            budget.note(subject, "type", (self._monotonic() - began) * 1000.0, typed.status)
+            if not typed.ok or not isinstance(typed.evidence, DeliveryReport):
+                return typed
+            report = typed.evidence
+            live = typed.run or run
+            progress = self._handoff_read(live, subject, handoff.floor)
+            if progress.typed is None:
+                # The supervisor journals `input.accepted` before it reports a delivery complete, so
+                # this is a journal the reader could not follow: say so rather than guess the stage.
+                return self._handoff_unestablished(
+                    live, pointer, subject, "the typed line is missing from the head's journal"
+                )
+        else:
+            report = _journalled_report(progress.typed, handoff.floor)
+        return self._handoff_submit(live, pointer, subject, report, progress, handoff, budget)
+
+    def _handoff_submit(
+        self,
+        live: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        report: DeliveryReport,
+        progress: _HandoffProgress,
+        handoff: PromptHandoff,
+        budget: HandoffBudget,
+    ) -> DeliverReceipt:
+        """Submit a typed line and see a turn take it, from wherever the journal says it stands."""
+        last: DeliverReceipt | None = None
+        while True:
+            if progress.confirmed:
+                return self._handoff_done(live, pointer, subject, report, progress)
+            if progress.submits and not progress.submit_finished:
+                # The latest submit's turn has not yet printed enough to say it took the prompt.
+                progress = self._handoff_await_journal(live, subject, handoff.floor, budget, progress)
+                if progress.unknown:
+                    return self._handoff_unestablished(live, pointer, subject, progress.unknown)
+                if progress.confirmed:
+                    return self._handoff_done(live, pointer, subject, report, progress)
+                if not progress.submit_finished:
+                    return self._handoff_pending(
+                        live,
+                        pointer,
+                        subject,
+                        HANDOFF_SUBMITTED,
+                        "the submitted prompt's turn has not shown that it took the prompt yet",
+                        report=report,
+                        progress=progress,
+                    )
+                continue
+            if progress.submits >= SUBMIT_ATTEMPTS:
+                return self._handoff_not_submitted(live, pointer, subject, report, progress, last)
+            idle = self._handoff_idle(live, subject, budget)
+            # Past `prompt_settle` from the typed line, the blocking flow's own bound, the submit is
+            # sent anyway and refused by the turn, as `_deliver_prompt` refuses it.
+            if idle is False and self._wall() - progress.typed_at < self._prompt_settle:
+                return self._handoff_pending(
+                    live,
+                    pointer,
+                    subject,
+                    HANDOFF_TYPED,
+                    "the typed line's echo turn has not closed yet",
+                    report=report,
+                    progress=progress,
+                )
+            before = self._output_bytes(live)
+            began = self._monotonic()
+            last = self._deliver_payload(live, pointer, f"{subject}:submit", SUBMIT_KEY)
+            budget.note(subject, "submit", (self._monotonic() - began) * 1000.0, last.status)
+            if not last.ok:
+                return self._handoff_not_submitted(live, pointer, subject, report, progress, last)
+            submitted = progress.submits
+            took = self._handoff_await_turn(live, subject, before, budget)
+            progress = self._handoff_read(live, subject, handoff.floor)
+            if progress.unknown:
+                return self._handoff_unestablished(live, pointer, subject, progress.unknown)
+            if took:
+                return self._handoff_done(live, pointer, subject, report, progress, confirmed=True)
+            if progress.submits <= submitted:
+                return self._handoff_unestablished(
+                    live, pointer, subject, "the accepted submit is missing from the head's journal"
+                )
+
+    def _handoff_read(self, run: HeadRun, subject: str, floor: int) -> _HandoffProgress:
+        address = self._address(run)
+        if address is None:
+            return _HandoffProgress(unknown="the head has no address to read its journal from")
+        try:
+            read = local_pty.read_tail(address.journal_path)
+        except (local_pty.JournalError, OSError) as exc:
+            return _HandoffProgress(unknown=f"the head's journal could not be read: {exc}")
+        return _handoff_progress(read, subject, floor)
+
+    def _handoff_settled(
+        self, run: HeadRun, subject: str, handoff: PromptHandoff, budget: HandoffBudget
+    ) -> bool:
+        """Whether the head may be typed into: quiet as `_await_settled` means it, or past its bound.
+
+        A supervisor that reports `output_idle_seconds` answers in one status. One that predates it
+        is watched for `prompt_quiet` within the budget, as `_await_settled` watches it. A head that
+        cannot be observed or is in a turn is not waited on: `_deliver_payload` refuses it by name.
+        """
+        began = self._monotonic()
+        deadline = began + budget.allowance()
+        printed, steady_since = -1, began
+        outcome = "pending"
+        while True:
+            seen = self.observe(run)
+            now = self._monotonic()
+            if not seen.ok or seen.busy:
+                outcome = "refused-at-type"
+                break
+            if self._wall() - handoff.began_at >= self._prompt_settle:
+                outcome = "bound"
+                break
+            current = _output_of(seen)
+            evidence = seen.evidence if isinstance(seen.evidence, Mapping) else {}
+            idle = evidence.get("output_idle_seconds")
+            if isinstance(idle, (int, float)) and not isinstance(idle, bool):
+                if idle >= self._prompt_quiet and (current > 0 or idle >= self._prompt_first_output):
+                    outcome = "quiet"
+                    break
+            elif current != printed:
+                printed, steady_since = current, now
+            elif now - steady_since >= self._prompt_quiet and (
+                printed > 0 or self._wall() - handoff.began_at >= self._prompt_first_output
+            ):
+                outcome = "quiet"
+                break
+            if now >= deadline:
+                break
+            self._sleep(min(self._prompt_poll, max(0.0, deadline - now)))
+        elapsed = self._monotonic() - began
+        budget.charge(elapsed)
+        budget.note(subject, "settle", elapsed * 1000.0, outcome)
+        return outcome != "pending"
+
+    def _handoff_idle(self, run: HeadRun, subject: str, budget: HandoffBudget) -> bool | None:
+        """Whether the typed line's echo turn has closed: True, False (still open), None (unknowable).
+
+        `_await_idle` within the budget. None is not a refusal: `_deliver_payload` makes it.
+        """
+        began = self._monotonic()
+        deadline = began + budget.allowance()
+        while True:
+            seen = self.observe(run)
+            if not seen.ok:
+                idle: bool | None = None
+                break
+            if not seen.busy:
+                idle = True
+                break
+            now = self._monotonic()
+            if now >= deadline:
+                idle = False
+                break
+            self._sleep(min(self._prompt_poll, max(0.0, deadline - now)))
+        elapsed = self._monotonic() - began
+        budget.charge(elapsed)
+        budget.note(subject, "echo", elapsed * 1000.0, {True: "closed", False: "open", None: "unobserved"}[idle])
+        return idle
+
+    def _handoff_await_turn(self, run: HeadRun, subject: str, before: int, budget: HandoffBudget) -> bool:
+        """`_await_turn` within the budget: `SUBMIT_CONFIRM_BYTES` printed past `before`."""
+        began = self._monotonic()
+        deadline = began + min(budget.allowance(), self._submit_confirm)
+        took = False
+        while True:
+            seen = self.observe(run)
+            if seen.status == HEAD_GONE:
+                break
+            if seen.ok and _output_of(seen) - before >= SUBMIT_CONFIRM_BYTES:
+                took = True
+                break
+            now = self._monotonic()
+            if now >= deadline:
+                break
+            self._sleep(min(self._prompt_poll, max(0.0, deadline - now)))
+        elapsed = self._monotonic() - began
+        budget.charge(elapsed)
+        budget.note(subject, "confirm", elapsed * 1000.0, "taken" if took else "pending")
+        return took
+
+    def _handoff_await_journal(
+        self,
+        run: HeadRun,
+        subject: str,
+        floor: int,
+        budget: HandoffBudget,
+        progress: _HandoffProgress,
+    ) -> _HandoffProgress:
+        """Re-read the journal within the budget until the latest submit's turn decides itself."""
+        began = self._monotonic()
+        deadline = began + min(budget.allowance(), self._submit_confirm)
+        while not (progress.unknown or progress.confirmed or progress.submit_finished):
+            now = self._monotonic()
+            if now >= deadline:
+                break
+            self._sleep(min(self._prompt_poll, max(0.0, deadline - now)))
+            progress = self._handoff_read(run, subject, floor)
+        elapsed = self._monotonic() - began
+        budget.charge(elapsed)
+        outcome = (
+            "unknown" if progress.unknown
+            else "taken" if progress.confirmed
+            else "turn-closed" if progress.submit_finished
+            else "pending"
+        )
+        budget.note(subject, "confirm", elapsed * 1000.0, outcome)
+        return progress
+
+    def _handoff_pending(
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        stage: str,
+        why: str,
+        *,
+        report: DeliveryReport | None = None,
+        progress: _HandoffProgress | None = None,
+    ) -> DeliverReceipt:
+        """A handoff this pass leaves for the next: `HEAD_BUSY` naming its stage, no failure."""
+        payload_bytes, payload_hash = payload_fingerprint(pointer.text)
+        submits = progress.submits if progress is not None else 0
+        evidence = DeliveryEvidence(
+            handle=run.handle,
+            subject=subject,
+            stage=(
+                STAGE_ENTER_ACCEPTED if submits else STAGE_PAYLOAD_WRITTEN if report is not None else STAGE_NONE
+            ),
+            payload_bytes=payload_bytes,
+            payload_sha256=payload_hash,
+            delivery_mode=NUDGE_FILE_MODE if pointer.document else "",
+            document_path=pointer.document,
+            adapter=run.spec.adapter,
+            body_write_accepted=report is not None,
+            body_bytes_written=report.written if report is not None else 0,
+            body_write_count=1 if report is not None else 0,
+            submit_write_accepted=submits > 0,
+            submit_bytes_written=submits,
+            submit_count=submits,
+            payload_left_in_composer=report is not None,
+            reason=why,
+            handoff_stage=stage,
+        )
+        return DeliverReceipt(
+            status=HEAD_BUSY,
+            run=run,
+            reason=f"production handoff pending at {stage}: {why}",
+            evidence=evidence,
+            delivery_state=report.state if report is not None else "",
+            delivered_bytes=report.written if report is not None else 0,
+            offered_bytes=report.offered if report is not None else 0,
+            epoch=self._durable_epoch(run),
+            lease=self.activity.lease(run.run_id),
+            rotation_ready=self.activity.rotatable(run.run_id),
+            handoff_stage=stage,
+        )
+
+    def _handoff_done(
+        self,
+        live: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        report: DeliveryReport,
+        progress: _HandoffProgress,
+        *,
+        confirmed: bool = True,
+    ) -> DeliverReceipt:
+        submits = max(progress.submits, 1)
+        return DeliverReceipt(
+            status=HEAD_OK,
+            run=live,
+            delivery=_outcome_of(
+                live, pointer, report, subject, submits=submits, submitted=submits, confirmed=confirmed
+            ),
+            delivery_state=report.state,
+            delivered_bytes=report.written,
+            offered_bytes=report.offered,
+            evidence=report,
+            epoch=self._durable_epoch(live),
+            lease=self.activity.lease(live.run_id),
+        )
+
+    def _handoff_not_submitted(
+        self,
+        live: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        report: DeliveryReport,
+        progress: _HandoffProgress,
+        last: DeliverReceipt | None,
+    ) -> DeliverReceipt:
+        """`_deliver_prompt`'s typed-and-not-taken outcome, from the journal's count of submits."""
+        outcome = _outcome_of(
+            live,
+            pointer,
+            report,
+            subject,
+            submits=progress.submits,
+            submitted=progress.submits,
+            confirmed=False,
+        )
+        evidence = outcome.evidence
+        if last is not None and last.status == HEAD_BUSY:
+            evidence.readiness_state = READINESS_BUSY
+        failed = last is not None and not last.ok
+        reason = f"{DELIVER_NOT_SUBMITTED}: {last.reason or last.status}" if failed else DELIVER_NOT_SUBMITTED
+        evidence.reason = reason
+        return DeliverReceipt(
+            status=last.status if failed else HEAD_ALIVE,
+            run=live,
+            reason=reason,
+            failure=HeadNudgeFailed(reason),
+            evidence=evidence,
+            delivery_state=report.state,
+            delivered_bytes=report.written,
+            offered_bytes=report.offered,
+            epoch=self._durable_epoch(live),
+            lease=self.activity.lease(live.run_id),
+            rotation_ready=self.activity.rotatable(live.run_id),
+        )
+
+    def _handoff_unestablished(
+        self, run: HeadRun, pointer: NudgePointer, subject: str, why: str
+    ) -> DeliverReceipt:
+        """A handoff whose state the journal cannot establish: neither pending nor retried blind.
+
+        Typing again could put a second line over the first, and calling it delivered would be a
+        guess, so it is a typed refusal the caller's recovery owns (`HEAD_ALIVE`).
+        """
+        payload_bytes, payload_hash = payload_fingerprint(pointer.text)
+        reason = f"{DELIVER_HANDOFF_UNESTABLISHED}: {why}"
+        return DeliverReceipt(
+            status=HEAD_ALIVE,
+            run=run,
+            reason=reason,
+            failure=HeadNudgeFailed(reason),
+            evidence=DeliveryEvidence(
+                handle=run.handle,
+                subject=subject,
+                payload_bytes=payload_bytes,
+                payload_sha256=payload_hash,
+                document_path=pointer.document,
+                adapter=run.spec.adapter,
+                readiness_state=READINESS_UNKNOWN,
+                reason=reason,
+            ),
+            delivery_state=DELIVERY_STATE_UNKNOWN,
+            epoch=self.activity.epoch(run.run_id),
+            lease=self.activity.lease(run.run_id),
+            rotation_ready=self.activity.rotatable(run.run_id),
+        )
+
     def _before_send(self, run: HeadRun, hook: Callable[[], Any]) -> HeadRun:
         """Run the caller's pre-send hook after admission and before `_put`, whatever the stop state.
 
@@ -893,6 +1329,33 @@ class LocalPtyHeadRuntime:
         """How much the head has printed in this supervisor's life, or 0 when it cannot be read."""
         seen = self.observe(run)
         return _output_of(seen) if seen.ok else 0
+
+    def handoff_floor(self, run: HeadRun) -> int | None:
+        """The journal sequence a production handoff opened now starts above, or None if unknowable.
+
+        Read from the supervisor's own `status` (one request), so it is the sequence of a live head;
+        a head that does not answer has no floor a handoff could safely start from.
+        """
+        address = self._address(run)
+        if address is None or not address.socket_path.exists():
+            return None
+        probe = self._probe(address)
+        status = probe.status if probe.error is None else None
+        if not isinstance(status, Mapping) or not status.get("alive"):
+            return None
+        seq = status.get("journal_seq")
+        return seq if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0 else None
+
+    def handoff_started(self, run: HeadRun, subject: str, handoff: PromptHandoff) -> str:
+        """Whether this handoff has written to the head: `none`, `started`, or `unknown`.
+
+        `started` once any of its line is on the terminal (whole or not), from the journal above the
+        floor. `unknown` when the journal cannot say: never read it as `none`.
+        """
+        progress = self._handoff_read(run, subject, handoff.floor)
+        if progress.unknown:
+            return "unknown"
+        return "started" if progress.typed is not None or progress.typed_prefix is not None else "none"
 
     def observe(self, run: HeadRun) -> ObserveReceipt:
         """What the substrate can say about this head now: its status, its journal, its process.
@@ -2434,6 +2897,125 @@ def _outcome_of(
             payload_left_in_composer=not confirmed,
         )
     return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
+
+
+@dataclass(frozen=True)
+class _HandoffProgress:
+    """How far one production handoff got, as the head's journal records it above the floor.
+
+    `typed` is the `input.accepted` that put the line on the terminal whole; `typed_prefix` one that
+    left only part of it. `submits` counts accepted submit keystrokes after it. `submit_bytes` is
+    the output the latest submit's turn has printed as far as the journal says (progress records,
+    then the turn's own total when it finishes). `unknown` says why none of this can be established.
+    """
+
+    unknown: str = ""
+    typed: Mapping[str, Any] | None = None
+    typed_prefix: Mapping[str, Any] | None = None
+    typed_at: float = 0.0
+    submits: int = 0
+    submit_at: float = 0.0
+    submit_turn: int = 0
+    submit_bytes: int = 0
+    submit_finished: bool = False
+
+    @property
+    def confirmed(self) -> bool:
+        """A submit's turn printed what a taken prompt prints (`SUBMIT_CONFIRM_BYTES`)."""
+        return self.submits > 0 and self.submit_bytes >= SUBMIT_CONFIRM_BYTES
+
+
+def _handoff_progress(read: Any, subject: str, floor: int) -> _HandoffProgress:
+    """Read one handoff's stage off a journal tail: the only place a production handoff is recalled.
+
+    Records at or below `floor` predate the handoff. A window that no longer reaches the floor, a
+    torn or out-of-order tail, a line typed twice, or a new supervisor incarnation after the line
+    are all unknown: absence of a record proves nothing there.
+    """
+    if read.malformed or not read.ordered:
+        return _HandoffProgress(unknown="the head's journal tail is not readable in order")
+    events = [event for event in read.events if isinstance(event.get("seq"), int)]
+    if read.partial_head and (not events or events[0]["seq"] > floor + 1):
+        return _HandoffProgress(unknown="the head's journal window no longer reaches this handoff's floor")
+    submit = f"{subject}:submit"
+    typed: Mapping[str, Any] | None = None
+    typed_at = 0.0
+    submits = 0
+    submit_at = 0.0
+    submit_turn = 0
+    submit_own_turn = False
+    submit_bytes = 0
+    submit_finished = False
+    open_turn = 0
+    for event in events:
+        seq = event["seq"]
+        kind = event.get("kind")
+        turn = event.get("turn") if isinstance(event.get("turn"), int) else 0
+        if kind == local_pty.TURN_STARTED:
+            open_turn = turn
+            if submits and not submit_turn and seq > floor:
+                submit_turn, submit_own_turn = turn, True
+        elif kind == local_pty.TURN_FINISHED:
+            if submits and turn == submit_turn and not submit_finished:
+                submit_finished = True
+                total = event.get("output_bytes")
+                if submit_own_turn and isinstance(total, int):
+                    # The turn's own count includes what was folded out of its progress records.
+                    submit_bytes = max(submit_bytes, total)
+            if turn == open_turn:
+                open_turn = 0
+        elif kind == local_pty.PROVIDER_PROGRESSED:
+            amount = event.get("output_bytes")
+            if submits and turn == submit_turn and not submit_finished and isinstance(amount, int):
+                submit_bytes += amount
+        elif seq <= floor:
+            continue
+        elif kind == local_pty.RUN_STARTED and typed is not None:
+            return _HandoffProgress(unknown="the head's supervisor started again after the line was typed")
+        elif kind == local_pty.INPUT_ACCEPTED and event.get("subject") == subject:
+            written = event.get("bytes") if isinstance(event.get("bytes"), int) else 0
+            if written <= 0:
+                continue  # it landed nothing: the terminal is as it was
+            if typed is not None:
+                return _HandoffProgress(unknown="this handoff's line was typed more than once")
+            if not event.get("complete"):
+                return _HandoffProgress(typed_prefix=event)
+            typed, typed_at = event, float(event.get("at") or 0.0)
+        elif kind == local_pty.INPUT_ACCEPTED and event.get("subject") == submit and typed is not None:
+            written = event.get("bytes") if isinstance(event.get("bytes"), int) else 0
+            if written <= 0:
+                continue
+            submits += 1
+            submit_at = float(event.get("at") or 0.0)
+            # An Enter into an open turn joins it; otherwise the supervisor opens one right after.
+            submit_turn, submit_own_turn = open_turn, False
+            submit_bytes, submit_finished = 0, False
+    return _HandoffProgress(
+        typed=typed,
+        typed_at=typed_at,
+        submits=submits,
+        submit_at=submit_at,
+        submit_turn=submit_turn,
+        submit_bytes=submit_bytes,
+        submit_finished=submit_finished,
+    )
+
+
+def _journalled_report(event: Mapping[str, Any], floor: int) -> DeliveryReport:
+    """The `DeliveryReport` a typed line's `input.accepted` stands for, when no live follow made one."""
+    written = event.get("bytes") if isinstance(event.get("bytes"), int) else 0
+    offered = event.get("offered_bytes") if isinstance(event.get("offered_bytes"), int) else written
+    return _delivery_report(
+        state=str(event.get("state") or ""),
+        written=written,
+        offered=offered,
+        established=True,
+        delivery_id=event.get("delivery") if isinstance(event.get("delivery"), int) else 0,
+        journalled=True,
+        floor=floor,
+        detail=str(event.get("detail") or ""),
+        seq=event.get("seq") if isinstance(event.get("seq"), int) else 0,
+    )
 
 
 def _spawn_status(exc: local_pty.LocalPtySpawnError) -> str:

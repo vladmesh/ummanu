@@ -81,6 +81,7 @@ integration-dispatcher tests/test_legacy_dispatcher_records.py
 integration-dispatcher tests/test_dispatcher_contracts.py
 unit tests/test_dispatcher_worker_report.py
 unit tests/test_dispatcher_worker_continuation.py
+unit tests/test_production_head_handoff.py
 component tests/test_worker_card_comments.py
 unit tests/test_post_merge_watch.py
 integration-dispatcher tests/test_dispatcher_gate_receipt.py

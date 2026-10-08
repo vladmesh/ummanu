@@ -146,6 +146,9 @@ class DeliveryEvidence:
     # True: the cursors are the backend's own; False: a tail digest stood in for them.
     cursor_from_backend: bool = False
     reason: str = ""
+    # A production handoff that is not finished yet stopped at this stage (`runtime.head.handoff`):
+    # settle, typed or submitted. Empty for every finished or refused delivery.
+    handoff_stage: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -193,6 +196,7 @@ class DeliveryEvidence:
             "cursor_moved": self.cursor_moved,
             "cursor_from_backend": self.cursor_from_backend,
             "reason": self.reason,
+            **({"handoff_stage": self.handoff_stage} if self.handoff_stage else {}),
         }
 
     @property

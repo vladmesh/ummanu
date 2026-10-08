@@ -19,6 +19,8 @@ TICK_COUNTERS = ("save_records", "cleanup_intent_writes", "cleanup_bytes_written
 RECONCILE_PHASES = ("fence", "reconcile_production", "advance_active")
 #: Per-card advance details kept on the last and unhealthy entries, slowest first; never in the ring.
 TICK_CARDS_KEPT = 10
+#: Head handoff stages (`runtime.head.handoff`) read back per card.
+TICK_CARD_HANDOFFS_KEPT = 8
 MAX_COUNTER = 2**53
 
 _COUNTERS: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar("tick_counters", default=None)
@@ -73,11 +75,26 @@ def card_details(value: Any) -> list[dict[str, Any]] | None:
         if not isinstance(item, dict) or not isinstance(item.get("ref"), str):
             continue
         records = item.get("records")
+        handoffs = handoff_stages(item.get("handoffs"))
         cards.append({"ref": item["ref"][:200], "ms": duration_ms(item.get("ms")),
                       "records": records if isinstance(records, int) and not isinstance(records, bool)
                       and 0 <= records <= MAX_COUNTER else None,
-                      **(counter_values(item) or {})})
+                      **(counter_values(item) or {}),
+                      **({"handoffs": handoffs} if handoffs else {})})
     return cards
+
+
+def handoff_stages(value: Any) -> list[dict[str, Any]]:
+    """A card's head handoff stages: stage, subject, outcome and a valid duration, bounded."""
+    if not isinstance(value, list):
+        return []
+    stages = []
+    for item in value[:TICK_CARD_HANDOFFS_KEPT]:
+        if not isinstance(item, dict) or not isinstance(item.get("stage"), str):
+            continue
+        stages.append({"stage": item["stage"][:20], "subject": str(item.get("subject") or "")[:80],
+                       "ms": duration_ms(item.get("ms")), "outcome": str(item.get("outcome") or "")[:40]})
+    return stages
 
 
 def duration_ms(value: Any) -> float | None:

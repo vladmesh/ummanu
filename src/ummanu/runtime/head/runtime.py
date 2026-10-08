@@ -259,6 +259,9 @@ class StartReceipt(HeadReceipt):
 
     delivery: DeliveryOutcome | None = None
     fallback_reason: str = ""
+    #: The head is up and its production handoff is pending at this stage (`HEAD_BUSY`): the bring-up
+    #: is kept, and the next tick continues the same handoff (`runtime.head.handoff`).
+    handoff_stage: str = ""
 
 
 @dataclass(frozen=True)
@@ -275,6 +278,9 @@ class DeliverReceipt(HeadReceipt):
     delivery_state: str = ""
     delivered_bytes: int = 0
     offered_bytes: int = 0
+    #: A production handoff not finished in this pass stopped at this stage (`HEAD_BUSY`). Whatever it
+    #: already wrote is in the head's journal, so retrying with the same `PromptHandoff` continues it.
+    handoff_stage: str = ""
 
     @property
     def arrived(self) -> bool:

@@ -68,6 +68,7 @@ from ummanu.dispatch.tick_telemetry import (
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.infra.checkpoint_run import load_checkpoint_state
+from ummanu.runtime.head.handoff import handoff_budget, handoff_stage_mark, handoff_stages_since
 from ummanu.sprints import SprintWriter, budget_thresholds
 from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY, TaskError
 
@@ -151,12 +152,16 @@ def tick_card(ref: str, records: int) -> Iterator[None]:
         yield
         return
     started = time.perf_counter()
+    mark = handoff_stage_mark()
     try:
         yield
     finally:
         after = tick_counter_values() or before
+        handoffs = handoff_stages_since(mark)
         cards.append({"ref": ref, "ms": round((time.perf_counter() - started) * 1000.0, 3), "records": records,
-                      **{name: after[name] - before[name] for name in after}})
+                      **{name: after[name] - before[name] for name in after},
+                      # The head handoff stages this card's advance ran, each with its own cost.
+                      **({"handoffs": handoffs} if handoffs else {})})
 
 
 def tick_duration_ms() -> float | None:
@@ -563,7 +568,9 @@ def _production_tick_with_snapshot(
         # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
         # on the strength of a field that predates the reconciliation pass itself.
         payload["last_reconciled_at"] = now_rfc3339()
-    with tick_phase("advance_active"):
+    # Every head handoff this pass makes shares one wait budget: a card's handoff that needs more
+    # than is left stays pending at its stage and the next tick continues it (`runtime.head.handoff`).
+    with tick_phase("advance_active"), handoff_budget():
         outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
     outcomes = cleanup_outcomes + usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     # After the releases of this tick, before the observers: a merge whose base has no CI resolves

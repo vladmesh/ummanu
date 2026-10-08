@@ -102,6 +102,31 @@ screen do not progress again after eviction. `turn.finished.output_bytes` still 
 output in the turn, including folded windows; `turn.finished.folded_windows` reports any folds
 still pending at the end. Quiet turn timing is unchanged.
 
+## Production prompt handoffs
+
+An agent prompt is typed, its echo turn is let close, Enter is sent alone, and a turn is seen to
+take it (`_deliver_prompt`). Interactive callers wait for all of that. The production dispatcher's
+reconcile pass does not (ummanu-140): it installs one `HandoffBudget` around `advance_active`
+(`HANDOFF_WAIT_BUDGET_SECONDS`, shared by every card of the tick), and its worker continuation and
+reviewer launch prompts are `PromptHandoff`s (`runtime/head/handoff.py`).
+
+- The caller makes the handoff durable before its first effect: the head journal's sequence then
+  (`floor`) and when it was opened. A continuation keeps it on `WorkerContinuation.handoff`; a
+  reviewer launch uses its fresh run's whole journal (floor 0) and its launch intent's time.
+- Where a handoff stands is read from the journal above the floor, never remembered: the typed
+  line's `input.accepted`, each `:submit` one, and the output of the turn the latest submit opened
+  (`provider.progressed`, then `turn.finished.output_bytes`). A typed line is not typed again, an
+  accepted Enter is not sent again, and at most `SUBMIT_ATTEMPTS` are sent.
+- Each stage is decided by one observation. `status.output_idle_seconds` answers settle in one
+  frame; a supervisor started before it existed is watched for quiet only out of the budget.
+  `prompt_settle` still bounds the settle and the echo wait, measured from the durable times.
+- A stage the budget cannot finish answers `HEAD_BUSY` with `handoff_stage` (`settle`, `typed`,
+  `submitted`); the next tick continues it. Pending spends no busy or launch attempt. A journal that
+  cannot say how far it got (window short of the floor, a second incarnation, the line twice) is
+  `prompt_handoff_unestablished`, a refusal the caller's recovery owns, never a retype.
+- Each stage leaves a bounded `{stage, subject, ms, outcome}` entry on its card in the tick
+  telemetry (`cards[].handoffs`).
+
 ## The runtime default
 
 `ummanu.runtime.head_runtimes` owns the vocabulary and what an absent `runtime` means, and

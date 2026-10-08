@@ -214,6 +214,22 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self._await(arrived, timeout=timeout, message=f"{marker!r} never appeared in {seen[-400:]!r}")
         return seen
 
+    def test_status_says_how_long_the_head_has_printed_nothing(self) -> None:
+        """ummanu-140: one status answers whether a head is settled, so a handoff need not watch it.
+
+        The count restarts at the head's output, not at a turn's start: `turn.started` is the
+        supervisor's bookkeeping, and only what the head printed says it is not quiet.
+        """
+        handle = self._start(run_id="idle-seconds")
+        client = self._client(handle)
+        self.assertTrue(client.send_input("hello\n")["ok"])
+        self._await_output(client, b"ECHO hello")
+        self._await(lambda: client.status()["output_idle_seconds"] >= 0.5, message="the idle count never grew")
+        quiet = client.status()["output_idle_seconds"]
+        self.assertTrue(client.send_input("again\n")["ok"])
+        self._await_output(client, b"ECHO again")
+        self.assertLess(client.status()["output_idle_seconds"], quiet)
+
     # -- the screen the provider-failure reader sees (secretary-1799) ------------------------
 
     def test_the_backend_renders_the_heads_screen_for_the_provider_failure_reader(self) -> None:
