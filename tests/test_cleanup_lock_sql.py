@@ -181,3 +181,16 @@ class CleanupLockSqlTests(CardStoreCase):
         self.assertEqual(self.settings(), unbounded)
         with cold.transaction():
             self.assertEqual((cold._query("SHOW lock_timeout"), cold._query("SHOW statement_timeout")), unbounded)
+
+    def test_cleanup_deadline_cuts_the_driver_wait_itself_and_discards_the_connection(self):
+        """ummanu-145: a raw statement with no server-side bound is cut by the driver wait seam."""
+        stalled = SqlCardClient(self.client.credentials, self.root)
+        self.addCleanup(stalled.close)
+        stalled._query("SELECT 1")  # pooled before the deadline, as the dispatcher's connection is
+        started = time.monotonic()
+        with stalled.within(self.deadline(1.0)), self.assertRaises(TaskError), stalled._session(), \
+                stalled.connection.cursor() as cursor:
+            cursor.execute("SELECT pg_sleep(3)")
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(stalled._open, 0)  # the cut connection was closed, never pooled again
+        self.assertEqual(stalled._query("SELECT 1"), [(1,)])

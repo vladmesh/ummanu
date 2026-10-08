@@ -3630,8 +3630,14 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
         return
     known = {(run.run_id, run.scope_generation): run for run in runs}
     task_identity = _binding_of(task)
+    def entries() -> Iterator[Path]:
+        # Entry by entry from the native iterator, so a caller's deadline is checked between them.
+        with os.scandir(root) as scan:
+            for entry in scan:
+                yield root / entry.name
+
     directories = ([protocol.run_dir_for(root, run.run_id) for run in runs] if recorded_only
-                   else root.iterdir())
+                   else entries())
     for directory in directories:
         if remaining is not None and remaining() <= 0:
             raise ValueError("the caller's deadline passed while cleanup scope ownership was read")

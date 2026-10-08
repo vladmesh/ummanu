@@ -110,6 +110,8 @@ def cleanup_summary(value: Any) -> dict[str, Any]:
             summary[name] = measured
     if isinstance(value.get("deferred_at"), str) and value["deferred_at"]:
         summary["deferred_at"] = value["deferred_at"][:200]
+    if value.get("cursor") in ("advanced", "unchanged", "unwritten"):
+        summary["cursor"] = value["cursor"]
     writes = value.get("writes")
     if isinstance(writes, dict):
         summary["writes"] = {name: raw for name in CLEANUP_WRITES

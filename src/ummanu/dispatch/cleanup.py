@@ -249,11 +249,19 @@ def capacity_serialized(method):
 
 
 def owner_operation(method):
-    """Protect an owner's transient manifest context, without blocking board writers."""
+    """Protect an owner's transient manifest context, without blocking board writers.
+
+    Inside an automatic replay the wait for another operation of the same owner (an inventory or a
+    targeted replay under its own policy) is bounded by the allowance (`_wait`); a refusal is
+    `Deferred` before anything is read, reserved or written. Nested use is reentrant as before.
+    """
     @functools.wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self._operations:
+        _wait("cleanup owner operation", lambda block: self._operations.acquire(blocking=block))
+        try:
             return method(self, *args, **kwargs)
+        finally:
+            self._operations.release()
     return wrapped
 
 
@@ -570,6 +578,23 @@ def _unlink_confined(directories: _ConfinedDirectories, name: str) -> None:
     if not _disposable_leaf(parts, os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode):
         raise HostError("cleanup cache entry is no longer a disposable file or venv link: " + name)
     os.unlink(parts[-1], dir_fd=directory)
+
+
+def _json_names(directory: Path, what: str) -> list[str]:
+    """The stems of `directory`'s `*.json` files, sorted, read entry by entry from the native
+    iterator with the current allowance checked before each. A scan cut short raises `Deferred`:
+    no caller ever takes a partial listing for the whole directory. A missing directory has none."""
+    names: list[str] = []
+    try:
+        scan = os.scandir(directory)
+    except FileNotFoundError:
+        return names
+    with scan:
+        for entry in scan:
+            _check(what)
+            if entry.name.endswith(".json"):
+                names.append(entry.name[:-len(".json")])
+    return sorted(names)
 
 
 def _remove_namespace(namespace: Path) -> None:
@@ -905,8 +930,9 @@ class CleanupJournal:
                 return {"version": _LAYOUT_VERSION, "intents": {}, "generated": {}, "replay_cursor": ""}
         meta = self._meta()
         intents = {}
-        for file in sorted((self.path / "intents").glob("*.json")):
+        for name in _json_names(self.path / "intents", "cleanup journal read"):
             _check("cleanup journal read")
+            file = self.path / "intents" / (name + ".json")
             intent = self._load(file)
             if not _valid_intent(intent):
                 raise HostError("cleanup evidence has an unsupported shape: " + file.name)
@@ -951,13 +977,7 @@ class CleanupJournal:
                 read.append(key)
                 yield key
             return
-        names: list[str] = []
-        with os.scandir(self.path / "intents") as entries:
-            for entry in entries:
-                _check("intent selection")
-                if entry.name.endswith(".json"):
-                    names.append(entry.name[:-len(".json")])
-        names.sort()
+        names = _json_names(self.path / "intents", "intent selection")
         self.selection_size = len(names)
         for key in [key for key in names if key > cursor] + [key for key in names if key <= cursor]:
             try:
@@ -1006,8 +1026,10 @@ class CleanupJournal:
             depth = self._generated_depth()
             generated: dict[str, str] = {}
             try:
-                for file in sorted(_generated_directory(self.path, depth).glob("*.json")):
+                directory = _generated_directory(self.path, depth)
+                for name in _json_names(directory, "generated digest read"):
                     _check("generated digest read")
+                    file = directory / (name + ".json")
                     bucket = self._load(file)
                     if not isinstance(bucket, dict):
                         raise HostError("cleanup evidence has an unsupported shape: generated/" + file.name)
@@ -1128,6 +1150,11 @@ class CleanupJournal:
         """
         if not os.path.lexists(self.legacy):
             return False
+        allowance = _allowance()
+        if allowance is not None:
+            # A one-time whole-document migration is no automatic replay's work: the dispatcher's
+            # ordinary journal writers migrate it, and the replay waits for them.
+            raise allowance.defer("v1 cleanup journal migration")
         pending = not self._published()
         self._ensure()
         return pending
@@ -1914,8 +1941,21 @@ class CleanupOwner:
 
     def _provenance(self, boundary: str) -> None:
         require = getattr(self.runtime.host, "_require_production_runtime", None)
-        if callable(require):
+        if not callable(require):
+            return
+        allowance = _allowance()
+        if allowance is None:
             require(boundary)
+            return
+        # The provenance probe is a child process: inside an automatic replay it runs within the
+        # allowance, and one cut short is the allowance's refusal, not a provenance verdict.
+        allowance.timeout(GIT_TIMEOUT, "runtime provenance " + boundary)
+        try:
+            require(boundary, allowance.remaining)
+        except HostError as exc:
+            if allowance.remaining() <= 0:
+                raise allowance.defer("runtime provenance " + boundary) from exc
+            raise
 
     def _settle_claim(self, intent: dict[str, Any]) -> None:
         with self.admission(intent["task"], intent=intent):
@@ -2417,7 +2457,7 @@ class CleanupOwner:
         budget = None if allowance is None else Allowance(allowance, clock=self.monotonic)
         writes = dict(self.journal.writes)
         report: dict[str, Any] = {"due": 0, "attempted": 0, "deferred": 0, "skipped": 0, "busy": 0, "lost": 0,
-                                  "unread": 0}
+                                  "unread": 0, "cursor": "unchanged"}
         token = _ALLOWANCE.set(budget)
         try:
             with contextlib.ExitStack() as bounded:
@@ -2491,23 +2531,24 @@ class CleanupOwner:
             return []
         report.update(due=len(due), attempted=len(attempted),
                       unread=max(0, self.journal.selection_size - len(read)))
-        # The cursor goes as far as this invocation got: past every key it attempted, lost, or read
-        # as not due, but never past a due one it left (skipped or busy). Written once, and only
-        # when something was attempted or the selection stopped short of the journal.
-        waiting = set(due) - set(attempted) - lost
-        frontier = cursor
-        for key in read:
-            if key in waiting:
-                break
-            frontier = key
+        # The cursor moves past everything this invocation observed: attempted, lost, skipped at
+        # the floor, refused by a busy lane or owner, or read as not due. A due intent left this way
+        # was never reserved (its due time is untouched) and is reached again on the next rotation;
+        # a slow first read can therefore never hold every later intent back. When the selection
+        # read the whole journal every due intent was observed, and the cursor rests on the last
+        # attempt as before. Written once, and only when there was due work or the selection
+        # stopped short, so an idle invocation writes nothing. `cursor` says whether it advanced.
+        frontier = read[-1] if read else cursor
+        if attempted and not report["unread"]:
+            frontier = attempted[-1]
+        if not (due or report["unread"]) or frontier == cursor:
+            report["cursor"] = "unchanged"
         else:
-            if not report["unread"] and attempted:
-                frontier = attempted[-1]
-        if (attempted or report["unread"]) and frontier != cursor:
             try:
                 self.journal.set_replay_cursor(frontier)
+                report["cursor"] = "advanced"
             except Deferred:
-                pass  # Fairness only: the attempted intents are cooling, so the next scan passes them.
+                report["cursor"] = "unwritten"
         return result
 
     def _bindings(self, project: str | None = None) -> dict[str, dict[str, Any]]:

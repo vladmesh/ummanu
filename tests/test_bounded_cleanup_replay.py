@@ -23,11 +23,14 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
+
+import psycopg
 
 from tests import test_owned_cleanup as owned_fixtures, test_sql_card_pool as pool_fixtures
 from tests.production_runtime_fixtures import registered_production_runtime
@@ -47,6 +50,60 @@ from ummanu.runtime.head import HeadRun
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 from ummanu.tasks import TaskError
+
+
+class Credentials:
+    """The driver stand-in's credentials, at a numeric address (no name resolution)."""
+
+    def conninfo(self) -> str:
+        return "host=127.0.0.1 port=5432 dbname=board user=app password=secret"
+
+
+class StallingCursor(pool_fixtures._Cursor):
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        kind = "settings" if "set_config('statement_timeout'" in sql else "command"
+        self.connection._exchange(kind)  # type: ignore[attr-defined]
+        return super().execute(sql, params)
+
+
+class StallingConnection(pool_fixtures._Connection):
+    """The driver stand-in whose exchanges wait through the installed psycopg's own
+    `Connection.wait` on a real pipe: an armed kind of exchange waits for a reply that never comes,
+    as a backend or transport that stops answering does."""
+
+    def __init__(self, number: int, stall: set[str]) -> None:
+        super().__init__(number)
+        self.read_fd, self.write_fd = os.pipe()
+        self.pgconn = SimpleNamespace(socket=self.read_fd, finish=self._finish)
+        self.stall = stall
+        self.finished = False
+        self.wait = types.MethodType(psycopg.Connection.wait, self)
+
+    def _finish(self) -> None:
+        self.closed = self.finished = True
+
+    def _exchange(self, kind: str) -> None:
+        if kind in self.stall:
+            def reply():
+                while not ((yield psycopg.waiting.WAIT_R) & psycopg.waiting.READY_R):
+                    pass
+            self.wait(reply())
+
+    def cursor(self) -> StallingCursor:
+        return StallingCursor(self)
+
+    def commit(self) -> None:
+        self._exchange("commit")
+        super().commit()
+
+    def rollback(self) -> None:
+        self._exchange("rollback")
+        super().rollback()
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+        self._exchange("schema")
+        return super().execute(sql, params)
+
 
 #: The sprint's bound on the cleanup phase.
 PHASE_BOUND = 5.0
@@ -210,7 +267,9 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         # the floor, the other four never read, none reserved; the cursor stops before the skipped.
         self.assertEqual(self.counts(report), {"due": 2, "attempted": 1, "deferred": 1, "skipped": 1,
                                                "busy": 0, "lost": 0, "unread": 4})
-        self.assertEqual(self.owner.journal.replay_cursor(), slow_key)
+        # The cursor passes the skipped one too: it is reached again on the next rotation.
+        self.assertEqual(self.owner.journal.replay_cursor(), cards[1][0])
+        self.assertEqual(report["cursor"], "advanced")
         self.assertEqual(report["allowance_ms"], REPLAY_ALLOWANCE * 1000)
         self.assertIn("Git status", report["deferred_at"])
         slow = self.owner.journal.intent(slow_key)
@@ -532,12 +591,16 @@ class BoundedCleanupReplayTests(unittest.TestCase):
             reports.append(self.counts(report))
             # Never more than the floor admits; a skipped intent is never written.
             self.assertLessEqual(report["attempted"], math.floor((REPLAY_ALLOWANCE - PUBLICATION_RESERVE - ATTEMPT_FLOOR) / 0.9) + 1)
-            self.assertEqual(report["writes"]["meta"], 1 if report["attempted"] else 0)
+            # The cursor at most once, only with due work observed, exactly when it says it advanced.
+            self.assertEqual(report["writes"]["meta"], 1 if report["cursor"] == "advanced" else 0)
+            self.assertTrue(report["due"] or report["cursor"] == "unchanged")
             self.assertEqual(self.owner.journal.writes["meta"] - before["meta"], report["writes"]["meta"])
             self.assertLessEqual(len(reports), 6)
-        # Each due intent once, in rotation order, before any is repeated.
+        # Each due intent exactly once before any is repeated. A key skipped at the floor is passed
+        # by the cursor and reached later in the rotation, so the order is the rotation's, not sorted.
         order = [HeadRun.from_json(card[2].worker_head_run).run_id for card in cards]
-        self.assertEqual(attempts, order)
+        self.assertEqual(len(attempts), len(order))
+        self.assertEqual(sorted(attempts), sorted(order))
         self.assertEqual(self.owner.journal.intent(cards[4][0])["status"], "pending")
         # Fresh work arrives: the next invocation reaches it, though the slow head is still there.
         key, _, record = fixture.card("fair-fresh")
@@ -680,8 +743,12 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         self.assertEqual(result, [])
         self.assertEqual(self.counts(self.owner.last_replay),
                          {"due": 1, "attempted": 0, "deferred": 0, "skipped": 1, "busy": 0, "lost": 0, "unread": 0})
-        self.assertEqual(journal_bytes(self.owner.journal), stored)
+        # The intent is byte-identical (no reservation); only the cursor moved past it.
+        after = journal_bytes(self.owner.journal)
+        self.assertEqual({name: body for name, body in after.items() if name != "meta.json"},
+                         {name: body for name, body in stored.items() if name != "meta.json"})
         self.assertNotIn("retry", self.owner.journal.intent(key))
+        self.assertEqual(self.owner.journal.replay_cursor(), key)
 
 
     # -- the board store client, Git descendants and locks, slow enumeration (rework 3) -------------
@@ -690,7 +757,7 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         """A real `SqlCardClient` over the driver stand-in of `test_sql_card_pool`, as the reader's."""
         self.enterContext(mock.patch("psycopg.connect",
                                      side_effect=lambda *args, **kwargs: pool_fixtures._Connection(1)))
-        client = SqlCardClient(pool_fixtures._Credentials(), self.fixture.data)  # type: ignore[arg-type]
+        client = SqlCardClient(Credentials(), self.fixture.data)  # type: ignore[arg-type]
         self.addCleanup(client.close)
         self.fixture.runtime.reader.client = client
         return client
@@ -930,6 +997,193 @@ class BoundedCleanupReplayTests(unittest.TestCase):
         self.assertEqual(left[0], 0)
 
 
+    # -- rework 5: driver waits, owner mutex, native enumeration, selection progress -----------------
+
+    def test_an_unanswered_admission_commit_is_ambiguous_and_launches_no_disposal(self):
+        fixture = self.fixture
+        key, workspace, _ = fixture.card("commit-1", head=False)
+        stall: set[str] = set()
+        opened: list[StallingConnection] = []
+
+        def connect(*args, **kwargs):
+            opened.append(StallingConnection(len(opened), stall))
+            return opened[-1]
+        self.enterContext(mock.patch("psycopg.connect", side_effect=connect))
+        client = SqlCardClient(Credentials(), fixture.data)  # type: ignore[arg-type]
+        self.addCleanup(client.close)
+        fixture.runtime.reader.client = client
+        client._query("SELECT 1")  # a pooled connection, as the dispatcher's is
+        stall.add("commit")
+        entry, _, elapsed = self.production_cleanup_phase()
+        stall.clear()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        intent = self.owner.journal.intent(key)
+        self.assertEqual(intent["status"], "pending")
+        self.assertIn("its outcome is unknown", intent["reason"])
+        # Nothing was disposed from the ambiguous admission, and its connection is never reused.
+        self.assertTrue(workspace.exists())
+        self.assertNotIn("removal_started", intent["progress"])
+        self.assertTrue(opened[0].finished)
+        self.assertNotIn(opened[0], client._idle)
+        self.assertEqual(entry["cleanup"]["deferred"], 1)
+        # An hour on, a reloaded owner reads the board again and completes it on a new connection.
+        self.clock.advance(RETRY_COOLDOWN)
+        self.owner = CleanupOwner(fixture.runtime)
+        self.production_cleanup_phase()
+        self.assertEqual(self.owner.journal.intent(key)["status"], "completed")
+        self.assertGreater(len(opened), 1)
+
+    def test_another_owner_operation_holds_the_owner_only_within_the_deadline(self):
+        fixture = self.fixture
+        keys = sorted(fixture.card(f"mutex-{n}", head=False)[0] for n in range(2))
+        release = self.hold(lambda: self.owner._operations)
+        stored = journal_bytes(self.owner.journal)
+        entry, _, elapsed = self.production_cleanup_phase()
+        release()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        report = entry["cleanup"]
+        self.assertEqual(report["attempted"], 0)
+        self.assertIn("cleanup owner operation", report["deferred_at"])
+        # Nothing was reserved: the intents are byte-identical and keep their due time.
+        after = journal_bytes(self.owner.journal)
+        for key in keys:
+            self.assertEqual(after["intents/" + key + ".json"], stored["intents/" + key + ".json"])
+            self.assertNotIn("retry", self.owner.journal.intent(key))
+        # Released, the same owner (nested operations included) completes both.
+        self.clock.advance(60)
+        self.production_cleanup_phase()
+        self.assertEqual([self.owner.journal.intent(key)["status"] for key in keys], ["completed"] * 2)
+
+    def test_a_slow_whole_journal_proof_defers_without_a_terminal_outcome(self):
+        """The shared-removal proof of a workspace removed outside cleanup reads the whole journal:
+        319 intents, each native enumeration step delayed 17 ms (injected latency)."""
+        fixture = self.fixture
+        key, workspace, _ = fixture.card("glob-1", head=False)
+        template = self.owner.journal.intent(key)
+        clones = {}
+        for n in range(318):
+            clone = copy.deepcopy(template)
+            clone["task"] = {**clone["task"], "id": f"clone-id-{n}", "ref": f"clone-ref-{n}"}
+            clone["status"] = "completed"
+            clones[hashlib.sha256(f"clone-{n}".encode()).hexdigest()] = clone
+        self.owner.journal.save({"intents": clones})
+        git(fixture.repo, "worktree", "remove", str(workspace))
+        intents = self.owner.journal.path / "intents"
+        reading = threading.local()
+        native_scan, native_read = os.scandir, cleanup_module.CleanupJournal.read
+        enumerated: list[str] = []
+
+        class Slow:
+            def __init__(self, scan):
+                self.scan = scan
+
+            def __enter__(self):
+                self.scan.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.scan.__exit__(*args)
+
+            def __iter__(self):
+                for entry in self.scan:
+                    time.sleep(0.017)
+                    enumerated.append(entry.name)
+                    yield entry
+
+        def scan(path):
+            result = native_scan(path)
+            return Slow(result) if getattr(reading, "on", False) and Path(path) == intents else result
+
+        def read(journal):
+            reading.on = True
+            try:
+                return native_read(journal)
+            finally:
+                reading.on = False
+        with mock.patch.object(os, "scandir", side_effect=scan), \
+                mock.patch.object(cleanup_module.CleanupJournal, "read", read):
+            _, _, elapsed = self.production_cleanup_phase()
+        self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+        self.assertGreater(len(enumerated), 0)
+        self.assertLess(len(enumerated), 319)  # cut between native entries, never after all of them
+        intent = self.owner.journal.intent(key)
+        self.assertEqual(intent["status"], "pending")
+        self.assertIn("allowance exhausted at cleanup journal read", intent["reason"])
+        self.assertNotIn("terminal", intent["progress"])
+        # Read whole an hour on, the proof decides: no shared removal, so a terminal outcome.
+        self.clock.advance(RETRY_COOLDOWN)
+        self.owner = CleanupOwner(fixture.runtime)
+        self.production_cleanup_phase()
+        fixture.assert_terminal(self.owner.journal.intent(key), "workspace-disappeared")
+
+    def test_a_persistently_slow_first_read_never_starves_later_intents(self):
+        """Cold reloads, the first key's eligibility read delayed 2.65 s every time (injected)."""
+        fixture = self.fixture
+        keys = sorted(fixture.card(f"starve-{n}", head=False)[0] for n in range(6))
+        native = cleanup_module.CleanupJournal._load
+        slow_reads: list[int] = []
+
+        def load(path):
+            if sys._getframe(1).f_code.co_name == "due_keys" and path.name == keys[0] + ".json":
+                slow_reads.append(1)
+                time.sleep(2.65)
+            return native(path)
+        ticks = []
+        with mock.patch.object(cleanup_module.CleanupJournal, "_load", staticmethod(load)):
+            for _ in range(3):
+                self.owner = CleanupOwner(fixture.runtime)
+                entry, _, elapsed = self.production_cleanup_phase()
+                self.assertLess(elapsed, REPLAY_ALLOWANCE + OVERRUN)
+                ticks.append({"elapsed_s": round(elapsed, 3), **entry["cleanup"],
+                              "at": self.owner.journal.replay_cursor()[:8]})
+                self.clock.advance(60)
+        # The first invocation passes the slow key without reserving it; the second reaches every
+        # later intent; the third comes back round to the slow one.
+        self.assertEqual(ticks[0]["skipped"], 1)
+        self.assertEqual(ticks[0]["cursor"], "advanced")
+        self.assertEqual([self.owner.journal.intent(key)["status"] for key in keys[1:]], ["completed"] * 5)
+        self.assertEqual(len(slow_reads), 2)
+        self.assertNotIn("retry", self.owner.journal.intent(keys[0]))
+        print("slow first read across cold reloads: " + json.dumps(ticks))
+
+    def test_a_cursor_the_deadline_left_unwritten_is_reported(self):
+        fixture = self.fixture
+        fixture.card("cursor-1", head=False)
+        with mock.patch.object(self.owner.journal, "set_replay_cursor",
+                               side_effect=cleanup_module.Deferred("publication tail spent")):
+            self.replay()
+        self.assertEqual(self.owner.last_replay["cursor"], "unwritten")
+        self.assertEqual(self.owner.journal.replay_cursor(), "")
+
+    def test_runtime_scope_owners_are_read_no_further_once_the_deadline_passed(self):
+        from ummanu.runtime.head.local_pty.scope_inventory import read_runtime_scopes
+        data = self.fixture.root / "runtime-data"
+        for n in range(50):
+            (data / "heads" / f"run-{n:02d}").mkdir(parents=True)
+        left = [4.0]
+
+        def remaining():
+            left[0] -= 1
+            return left[0]
+        inventory = read_runtime_scopes(data, {"ummanu-head-x.scope"}, remaining=remaining)
+        self.assertIn("deadline passed", inventory.errors["runtime_scopes"])
+        self.assertNotIn("ummanu-head-x.scope", inventory.disappeared)  # a partial scan proves no absence
+
+
+    def test_an_unmigrated_v1_journal_is_left_to_the_ordinary_writers(self):
+        legacy = self.owner.journal.legacy
+        legacy.parent.mkdir(parents=True, exist_ok=True)
+        legacy.write_text(json.dumps({"version": 1, "intents": {}, "generated": {}}))
+        result, elapsed = self.replay()
+        self.assertEqual(result, [])
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(self.owner.last_replay["deferred_at"], "v1 cleanup journal migration")
+        self.assertTrue(legacy.exists())
+        # The first ordinary journal writer migrates it; then the automatic replay proceeds.
+        self.assertTrue(self.owner.journal.migrate())
+        self.assertEqual(self.replay()[0], [])
+        self.assertEqual(self.owner.last_replay["deferred_at"], "")
+
 class SqlDeadlineTests(pool_fixtures.PoolCase):
     """`SqlCardClient.within`: one caller deadline over the pool, connection, turn and statements."""
 
@@ -937,6 +1191,10 @@ class SqlDeadlineTests(pool_fixtures.PoolCase):
 
     def setUp(self) -> None:
         super().setUp()
+        # A numeric host: under a deadline every connection attempt the driver would make is
+        # enumerated first (`conninfo_attempts`), which resolves names.
+        self.client = SqlCardClient(Credentials(), self.client.instance_dir,  # type: ignore[arg-type]
+                                    pool_size=self.pool_size, pool_wait_seconds=self.pool_wait_seconds)
         self.bounds: list[tuple[str, tuple[Any, ...]]] = []
         native = pool_fixtures._Cursor.execute
 
@@ -1039,6 +1297,78 @@ class SqlDeadlineTests(pool_fixtures.PoolCase):
         self.assertTrue(connection.statements[before].startswith("SET TRANSACTION ISOLATION LEVEL"))
 
 
+    def stalled(self, stall: set[str]) -> StallingConnection:
+        """The client's one connection, stalling the armed kinds of exchange."""
+        connection = StallingConnection(len(self.opened), stall)
+        self.opened.append(connection)
+        return connection
+
+    def test_every_driver_exchange_waits_only_within_the_deadline(self) -> None:
+        def command() -> None:
+            self.client._query("SELECT 1")
+
+        def commit() -> None:
+            with self.client.transaction():
+                self.client._execute("UPDATE tasks SET title = title")
+
+        def rollback() -> None:
+            with self.client.transaction():
+                self.client._execute("UPDATE tasks SET title = title")
+                raise ValueError("the caller's own failure")
+
+        def unpin() -> None:
+            # A failed statement leaves its session's connection aborted; the unpin rolls it back.
+            with contextlib.suppress(TaskError):
+                self.client._query("FAIL")
+
+        cases = {"settings": (command, "settings"), "command": (command, "command"), "commit": (commit, "commit"),
+                 "rollback": (rollback, "rollback"), "unpin": (unpin, "rollback")}
+        for name, (operation, kind) in cases.items():
+            with self.subTest(exchange=name):
+                stall: set[str] = set()
+                with mock.patch("psycopg.connect", side_effect=lambda *a, stall=stall, **k: self.stalled(stall)):
+                    self.client._query("SELECT 1")  # connected and pooled without a deadline
+                    connection = self.opened[-1]
+                    stall.add(kind)
+                    started = time.monotonic()
+                    raised = None
+                    with self.client.within(self.deadline(0.6)):
+                        try:
+                            operation()
+                        except BaseException as exc:  # noqa: BLE001 - what each case raised is checked below
+                            raised = exc
+                    elapsed = time.monotonic() - started
+                self.assertLess(elapsed, 0.6 + 0.2, name)
+                # The exchange's connection was closed and is never handed out again.
+                self.assertTrue(connection.finished, name)
+                self.assertNotIn(connection, self.client._idle, name)
+                if name == "rollback":
+                    # The caller's own failure stays what the caller sees.
+                    self.assertIsInstance(raised, ValueError)
+                elif name != "unpin":
+                    self.assertIsInstance(raised, TaskError, name)
+                    self.assertIn("outcome is unknown", str(raised))
+
+    def test_a_cold_connection_s_schema_gate_waits_only_within_the_deadline(self) -> None:
+        stall = {"schema"}
+        with mock.patch("psycopg.connect", side_effect=lambda *a, **k: self.stalled(stall)):
+            started = time.monotonic()
+            with self.client.within(self.deadline(2.2)), self.assertRaises(TaskError):
+                self.client._query("SELECT 1")
+            self.assertLess(time.monotonic() - started, 2.2 + 0.2)
+        self.assertTrue(self.opened[-1].finished)
+        self.assertEqual(self.client._open, 0)
+
+    def test_without_a_deadline_the_driver_wait_is_its_own(self) -> None:
+        calls: list[tuple[Any, ...]] = []
+        connection = SimpleNamespace(wait=lambda *args: calls.append(args) or "answer", pgconn=None)
+        self.client._bound_waits(connection)
+        self.assertEqual(connection.wait("generator"), "answer")
+        self.assertEqual(connection.wait("generator", 0.5, 7.0), "answer")
+        # Unchanged arguments: the driver's own interval and no timeout of ours.
+        self.assertEqual(calls, [("generator", 0.1, None), ("generator", 0.5, 7.0)])
+
+
 class IsolatedChildWithinTests(unittest.TestCase):
     """`_proc.run_isolated(within=...)`: run, SIGTERM, SIGKILL, drain and reap inside one deadline."""
 
@@ -1078,6 +1408,18 @@ class IsolatedChildWithinTests(unittest.TestCase):
         self.addCleanup(lambda: os.kill(int(pid.read_text()), signal.SIGKILL))
         self.assertEqual(result.returncode, 0)
         self.assertLess(time.monotonic() - started, 1.0 + 0.1)
+
+
+    def test_the_runtime_provenance_probe_runs_only_within_the_deadline(self) -> None:
+        from ummanu.dispatch.runtime_provenance import ProductionRuntime
+        interpreter = self.root / "python3"
+        interpreter.write_text("#!/bin/bash\nexec sleep 30\n")
+        interpreter.chmod(0o755)
+        runtime = ProductionRuntime(str(interpreter), str(self.root))
+        started = time.monotonic()
+        result = runtime.probe(self.deadline(0.8))
+        self.assertLess(time.monotonic() - started, 0.8 + 0.1)
+        self.assertEqual(result.classification, "interpreter_unavailable")
 
 
 if __name__ == "__main__":

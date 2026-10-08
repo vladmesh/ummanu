@@ -12,7 +12,7 @@ import json
 import os
 import stat
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +93,19 @@ def _json(fd: int) -> Any:
 
 def _unit_state(unit: str) -> dict[str, str]:
     return native_scope_state(unit)
+
+
+def _names(root: int, remaining: Callable[[], float] | None) -> Iterator[str]:
+    """`os.listdir(root)` as the native iterator yields it, a caller's deadline checked between
+    entries: a scan it cuts short raises, so absence is never read from a partial listing."""
+    if remaining is None:
+        yield from os.listdir(root)
+        return
+    with os.scandir(root) as scan:
+        for entry in scan:
+            if remaining() <= 0:
+                raise MemoryScopeError("the caller's deadline passed while runtime scope owners were read")
+            yield entry.name
 
 
 def _unit_state_within(remaining: Callable[[], float]) -> Callable[[str], dict[str, str]]:
@@ -221,7 +234,7 @@ def read_runtime_scopes(data_dir: Path, observed: set[str], *,
                 root_info = os.fstat(root)
                 if root_info.st_uid != uid or root_info.st_mode & 0o022:
                     raise MemoryScopeError("canonical runtime root is not private to this installation owner")
-                for name in os.listdir(root):
+                for name in _names(root, remaining):
                     info = os.stat(name, dir_fd=root, follow_symlinks=False)
                     if stat.S_ISLNK(info.st_mode):
                         raise MemoryScopeError("canonical runtime directory is a symlink")

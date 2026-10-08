@@ -438,28 +438,92 @@ class SqlCardClient:
                     )
                 self._pool.wait(remaining)
         try:
-            # libpq counts whole seconds and at least 2: a deadline with less left opens nothing.
-            left = self._left("opening a board store connection")
-            if left is not None and left < 2:
-                self._left_refuse("opening a board store connection")
-            with _translated("open a connection"):
-                import psycopg
-
-                connection = psycopg.connect(self.credentials.conninfo(), autocommit=False,
-                                             **({} if left is None else {"connect_timeout": int(left)}))
-            self._admit(connection, self if left is not None else None)
+            connection = self._open_connection()
+            self._admit(connection)
             return connection
         except BaseException:
             self._give_back(None)
             raise
 
-    def _left_refuse(self, what: str) -> None:
-        refuse = self._local.refuse
-        raise (refuse(what) if refuse is not None else
-               TaskError("backend_unavailable", f"too little of the caller's deadline is left for {what}", 1))
+    def _open_connection(self) -> Any:
+        """A new driver connection whose every exchange waits only within this thread's deadline.
 
-    @staticmethod
-    def _admit(connection: Any, bounded: SqlCardClient | None = None) -> None:
+        Without a deadline it is the driver's own connect, as ever. With one, each connection attempt
+        the driver would make (one per resolved host and address, `conninfo_attempts`) is made in
+        turn with what is left as its `connect_timeout`, whole seconds and at least 2 as libpq counts
+        them: no attempt is granted a fresh wait, and none is started without 2 s left.
+        """
+        import psycopg
+
+        if self._local.remaining is None:
+            with _translated("open a connection"):
+                connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
+        else:
+            from psycopg.conninfo import conninfo_attempts, conninfo_to_dict, make_conninfo
+
+            with _translated("resolve the board store address"):
+                attempts = conninfo_attempts(conninfo_to_dict(self.credentials.conninfo()))
+            failures: list[BaseException] = []
+            connection = None
+            for attempt in attempts:
+                left = self._left("opening a board store connection")
+                if left is None or left < 2:
+                    self._left_refuse("opening a board store connection")
+                try:
+                    connection = psycopg.connect(make_conninfo("", **attempt), autocommit=False,
+                                                 connect_timeout=int(left))
+                    break
+                except psycopg.Error as exc:
+                    failures.append(exc)
+            if connection is None:
+                with _translated("open a connection"):
+                    raise failures[-1] if failures else psycopg.OperationalError("no board store address")
+        self._bound_waits(connection)
+        return connection
+
+    def _bound_waits(self, connection: Any) -> None:
+        """Make the driver's own wait (`Connection.wait`, behind every query, commit, rollback and
+        setting) honour the deadline of the thread using the connection. Without one it is the
+        driver's wait unchanged. When the deadline is spent before an exchange, or passes during
+        one, the exchange's outcome is unknown: the connection is closed (never reused) and the
+        caller's refusal raised. A COMMIT cut this way may or may not have committed."""
+        native = getattr(connection, "wait", None)
+        if not callable(native):
+            return
+        local = self._local
+        refusal = self._refusal
+
+        def wait(gen: Any, interval: float = 0.1, timeout: float | None = None) -> Any:
+            remaining = local.remaining
+            if remaining is None:
+                return native(gen, interval, timeout)
+            left = remaining()
+            if left > 0:
+                try:
+                    return native(gen, interval, left if timeout is None else min(timeout, left))
+                except Exception as exc:
+                    import psycopg
+
+                    if not isinstance(exc, getattr(psycopg.errors, "_WaitTimeout", ())):
+                        raise
+            with contextlib.suppress(Exception):
+                connection.pgconn.finish()
+            raise refusal("a board store exchange (its connection was closed; its outcome is unknown)")
+
+        connection.wait = wait
+
+    def _refusal(self, what: str) -> BaseException:
+        """The refusal raised once this thread's deadline is spent, marked as such."""
+        refuse = self._local.refuse
+        error = (refuse(what) if refuse is not None else
+                 TaskError("backend_unavailable", f"the caller's deadline passed before {what}", 1))
+        error.deadline_refusal = True  # type: ignore[attr-defined]
+        return error
+
+    def _left_refuse(self, what: str) -> None:
+        raise self._refusal(what)
+
+    def _admit(self, connection: Any) -> None:
         """The schema gate, once per new connection: pooled ones were admitted when they opened.
 
         A refused connection is closed rather than pooled, so nothing remembers the refusal: the
@@ -468,9 +532,9 @@ class SqlCardClient:
         """
         try:
             with _translated("read its schema revision"):
-                if bounded is not None:
+                if self._local.remaining is not None:
                     with connection.cursor() as cursor:
-                        bounded._bound(cursor, "reading the board store schema revision")
+                        self._bound(cursor, "reading the board store schema revision")
                 schema_gate.require(connection, CardSchemaOwed)
                 if _transaction_state(connection) not in (None, "IDLE"):
                     connection.rollback()
@@ -524,9 +588,7 @@ class SqlCardClient:
             return None
         left = remaining()
         if left <= 0:
-            refuse = self._local.refuse
-            raise (refuse(what) if refuse is not None else
-                   TaskError("backend_unavailable", f"the caller's deadline passed before {what}", 1))
+            raise self._refusal(what)
         return left
 
     def _bound(self, cursor: Any, what: str) -> None:
@@ -576,10 +638,12 @@ class SqlCardClient:
             elif state == "INTRANS":
                 committing = True
                 connection.commit()
-        except Exception as exc:  # noqa: BLE001 - a connection that cannot end its work is not reused.
+        except Exception as exc:  # a connection that cannot end its work is not reused
             self._local.connection = connection
             self._discard()
             if committing:
+                if getattr(exc, "deadline_refusal", False):
+                    raise  # the deadline ended the COMMIT: its outcome is unknown, not refused
                 raise _driver_error("commit", exc) from None
             return
         if _unusable(connection):
@@ -659,11 +723,15 @@ class SqlCardClient:
             yield
         except BaseException as failure:
             # A rollback that itself fails must not hide what it was rolling back, so the
-            # original failure stays the cause of the refusal the caller sees.
+            # original failure stays the cause of the refusal the caller sees. A connection a
+            # deadline closed is not rolled back here: the server ends its transaction.
             try:
-                self.connection.rollback()
+                if not _unusable(self.connection):
+                    self.connection.rollback()
             except Exception as exc:  # noqa: BLE001 - every driver failure becomes one refusal.
                 suspect = True
+                if getattr(exc, "deadline_refusal", False) or getattr(failure, "deadline_refusal", False):
+                    raise failure from None
                 raise _driver_error("roll back", exc) from failure
             finally:
                 # Two pieces of state are derived from rows this transaction wrote and are wrong
