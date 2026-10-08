@@ -97,8 +97,12 @@ REVIEW_BUSY_RETRY_MAX_SECONDS = 5 * 60
 # The delivery state of a launch whose pointer the composer took.
 LAUNCH_DELIVERY_CONFIRMED = "confirmed"
 # The delivery state of a launch whose production handoff is still in progress (`runtime.head.handoff`):
-# not a refusal and not busy, so it spends no attempt and waits for no backoff.
+# not a refusal and not busy, so it spends no attempt and waits for no backoff. Its own bounds are the
+# handoff's (`prompt_settle`, `SUBMIT_ATTEMPTS`), which end it in a refusal this ladder counts.
 LAUNCH_DELIVERY_HANDOFF_PENDING = "handoff_pending"
+# Set on a launch's delivery once the worker was shut down, confirmed, before its reviewer was given
+# anything (`CommandHostRuntime._fence_worker_for_reviewer`); a retained worker is confirmed anew.
+LAUNCH_DELIVERY_WORKER_FENCED = "worker_fenced"
 # How many ticks a launch may hold its card while its pointer is still unaccepted. Past this the
 # head is stopped and relaunched: a head that cannot be made sendable is replaced, and it never
 # sits indefinitely while the card reports progress.
@@ -217,11 +221,14 @@ def defer_launch_delivery(
     return delay
 
 
-def defer_pending_launch_delivery(record: DispatcherRecord | None, evidence: dict[str, Any]) -> bool:
+def defer_pending_launch_delivery(
+    record: DispatcherRecord | None, evidence: dict[str, Any], *, worker_fenced: bool = False
+) -> bool:
     """Keep a launch whose production handoff is pending for the next tick; True if that changed it.
 
-    The attempt count and any earlier evidence stay as they were: a handoff in progress is neither a
-    refused pointer nor a busy pane, so it does not bring the launch closer to its replacement.
+    The attempt count stays as it was: a handoff in progress is neither a refused pointer nor a busy
+    pane, so it does not bring the launch closer to its replacement. `worker_fenced` records that the
+    host made the writer fence before the reviewer was given anything; once set it stays set.
     """
     intent = dict(launch_intent(record))
     if not intent:
@@ -235,6 +242,7 @@ def defer_pending_launch_delivery(record: DispatcherRecord | None, evidence: dic
         "evidence": dict(evidence),
         # Kept through the confirmation, so adoption can tell this launch is `start_review` continued.
         "handoff": True,
+        **({LAUNCH_DELIVERY_WORKER_FENCED: True} if worker_fenced or previous.get(LAUNCH_DELIVERY_WORKER_FENCED) else {}),
     }
     if delivery == previous:
         return False

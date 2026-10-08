@@ -525,11 +525,13 @@ def _reviewer_launch_aborted(
         evidence = evidence.to_json()
     stage = handoff_pending_stage(exc)
     if stage:
-        # The reviewer is up and its production handoff is not finished: the intent keeps this
-        # exact head, and the next tick continues the handoff before anything adopts it. Like a
-        # busy pane, nothing has been confirmed yet, so the worker is not frozen here either.
+        # The reviewer is up and nothing has been typed into it yet: the intent keeps this exact
+        # head, and the next tick continues the handoff before anything adopts it. The host made the
+        # writer fence before raising this, and checks it again before it types (`start_review`,
+        # `nudge_review_delivery`).
         mark_launch_aborted(runtime, payload, records, ref, record, exc)
-        defer_pending_launch_delivery(record, evidence if isinstance(evidence, dict) else {})
+        # The host raises a pending launch only after its writer fence held (`start_review`).
+        defer_pending_launch_delivery(record, evidence if isinstance(evidence, dict) else {}, worker_fenced=True)
         record.state = "review_starting"
         records[ref] = record
         runtime.save_records(payload, records)
@@ -641,7 +643,8 @@ def retry_busy_reviewer_launch_delivery(
         stage = handoff_pending_stage(exc)
         if stage:
             # Written only when the pending delivery changed: an unchanged handoff costs no write.
-            if defer_pending_launch_delivery(record, evidence):
+            # `nudge_review_delivery` raises a pending one only behind its writer fence.
+            if defer_pending_launch_delivery(record, evidence, worker_fenced=True):
                 records[ref] = record
                 runtime.save_records(payload, records)
             return _review_handoff_pending(record, ref, record.attempt_id, step, stage, exc)

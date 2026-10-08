@@ -10,7 +10,6 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from typing import ClassVar
 from unittest import mock
 
 from ummanu.board import (
@@ -417,126 +416,309 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
 
 
 class ProductionContinuationHandoffTests(unittest.TestCase):
-    """ummanu-140: in production the continuation is a resumable handoff, not a blocking wait.
+    """ummanu-142: in production the continuation is one resumable handoff, not a blocking wait.
 
-    The worker's journal is the handoff's cursor (`runtime.head.handoff`); here the host answers
-    for it. What these pin is the dispatcher's half: the floor is durable with the delivery boundary
-    before the worker is woken, a pending stage spends no busy attempt and restarts nothing, a
-    handoff that already typed into the worker it woke is continued without the suspension check it
-    has itself made false, and an unchanged pending step writes nothing.
+    The worker's own status and journal are the handoff's cursor (`runtime.head.handoff`); here the
+    host answers for them. What these pin is the dispatcher's half: the floor is durable with the
+    delivery boundary before the worker is woken; a supervisor that gives no floor gets nothing
+    woken or typed and no blocking flow; every pending stage, settle, typed or submitted, keeps the
+    exact-source provider ladder and its terminal outcomes; a pending pass that changed nothing
+    durable writes nothing; and a new report wins over the pending obligation.
     """
 
-    setUp = WorkerContinuationBoundaryTests.setUp
+    setUp_boundary = WorkerContinuationBoundaryTests.setUp
     open_round = WorkerContinuationBoundaryTests.open_round
     provider_evidence = WorkerContinuationBoundaryTests.provider_evidence
     retain = WorkerContinuationBoundaryTests.retain
     deliver = WorkerContinuationBoundaryTests.deliver
     recover = WorkerContinuationBoundaryTests.recover
 
-    PENDING: ClassVar[dict[str, str]] = {"subject": "worker-continuation", "stage": "payload_written", "handoff_stage": "typed",
-               "reason": "the typed line's echo turn has not closed yet"}
+    START = 1_800_000_000.0
 
-    def pending_error(self, evidence=None):
-        error = HostError("retained worker continuation is pending: production handoff pending at typed")
-        error.evidence = dict(evidence or self.PENDING)
+    def setUp(self) -> None:
+        self.setUp_boundary()
+        self.now = self.START
+        self.cursor = "cursor-1"
+        self.runtime.host.worker_handoffs.return_value = True
+        self.runtime.host.worker_handoff_floor.return_value = 41
+        self.runtime.host.worker_handoff_started.return_value = "none"
+        self.runtime.host.provider_progress.side_effect = lambda *_: self.provider_evidence(cursor=self.cursor)
+        self.runtime.host.safe_recover_worker_continuation.return_value = {
+            "state": "unavailable",
+            "reason": "no provider-safe recovery here",
+        }
+        clock = mock.patch.object(continuation_module.time, "time", side_effect=lambda: self.now)
+        clock.start()
+        self.addCleanup(clock.stop)
+        relaunch = mock.patch.object(
+            continuation_module, "_write_worker_relaunch_intent", return_value="relaunch is out of this test"
+        )
+        self.relaunch = relaunch.start()
+        self.addCleanup(relaunch.stop)
+
+    def pending_error(self, stage: str = "typed") -> HostError:
+        error = HostError(f"retained worker continuation is pending: production handoff pending at {stage}")
+        error.evidence = {
+            "subject": "worker-continuation",
+            "stage": "payload_written" if stage != "settle" else "none",
+            "handoff_stage": stage,
+            "reason": f"pending at {stage}",
+        }
         return error
+
+    def production(self, call, *args, **kwargs):
+        with handoff_budget():
+            return call(*args, **kwargs)
+
+    def opened(self, stage: str = "typed"):
+        """A first pass: the boundary and its handoff are durable, and the handoff is left pending."""
+        self.retain()
+        self.runtime.host.resume_worker.side_effect = self.pending_error(stage)
+        result = self.production(self.deliver)
+        self.assertEqual(result["action"], "gate-red-worker-handoff-pending")
+        return result
 
     def test_the_floor_is_durable_before_the_wake_and_a_pending_stage_spends_nothing(self) -> None:
         self.retain()
-        self.runtime.host.worker_handoff_floor.return_value = 41
         saved = []
         self.runtime.save_records.side_effect = lambda *_: saved.append(self.record.to_json())
         woken_with = []
 
-        def resume(*_args):
+        def resume(*_args, **_kwargs):
             woken_with.append(copy.deepcopy(saved[-1]))
             raise self.pending_error()
 
         self.runtime.host.resume_worker.side_effect = resume
-        with handoff_budget():
-            result = self.deliver()
+        result = self.production(self.deliver)
         self.assertEqual(result["action"], "gate-red-worker-handoff-pending")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["handoff_stage"], "typed")
-        self.assertEqual(woken_with[0]["worker_continuation"]["handoff"]["floor"], 41,
+        on_disk = woken_with[0]
+        self.assertEqual(on_disk["worker_continuation"]["handoff"]["floor"], 41,
                          "the handoff's floor is on disk before anything is woken or typed")
+        self.assertEqual(on_disk["worker_continuation"]["stage"], WorkerContinuationStage.DELIVERY_PENDING.value)
+        self.assertTrue(on_disk["worker_continuation_liveness"]["baseline_established"],
+                        "and so is the provider baseline")
+        self.assertEqual(self.runtime.host.resume_worker.call_args.kwargs, {"handoff_started": "none"})
         continuation = self.record.worker_continuation
         self.assertTrue(continuation.delivery_pending)
-        self.assertEqual(continuation.handoff.floor, 41)
         self.assertEqual((continuation.busy_attempts, continuation.busy_next_at), (0, 0.0))
         self.assertEqual(self.record.worker_continuation_liveness.busy_attempts, 0)
         self.assertEqual(self.record.worker_delivery_failures, 0)
         self.runtime._stop_worker_confirmed.assert_not_called()
         self.runtime.open_worker_round.assert_not_called()
 
-    def test_the_next_tick_continues_it_without_reconfirming_a_suspension_it_ended(self) -> None:
-        self.test_the_floor_is_durable_before_the_wake_and_a_pending_stage_spends_nothing()
+    def test_a_started_handoff_is_continued_without_the_suspension_check_and_with_its_liveness(self) -> None:
+        self.opened()
         self.runtime.host.resume_worker.side_effect = None
         self.runtime.host.worker_handoff_started.return_value = "started"
         # The worker is running now, woken by this handoff: the suspension check would refuse it.
         self.runtime.host.confirm_worker_retained.side_effect = HostError("not suspended")
         self.runtime.host.confirm_worker_retained.reset_mock()
         self.runtime.host.provider_progress.reset_mock()
-        with handoff_budget():
-            result = self.recover()
+        self.now += 10
+        result = self.production(self.recover)
         self.assertEqual(result["action"], "gate-red-reused-worker")
         self.runtime.host.confirm_worker_retained.assert_not_called()
-        self.runtime.host.provider_progress.assert_not_called()
+        self.runtime.host.provider_progress.assert_called_once()
+        self.assertEqual(self.runtime.host.resume_worker.call_args.kwargs, {"handoff_started": "started"})
         self.runtime._stop_worker_confirmed.assert_not_called()
         self.runtime.open_worker_round.assert_called_once_with(self.record, round_number=2)
 
-    def test_an_unchanged_pending_step_writes_nothing(self) -> None:
-        self.test_the_floor_is_durable_before_the_wake_and_a_pending_stage_spends_nothing()
-        self.runtime.host.worker_handoff_started.return_value = "started"
-        self.runtime.host.resume_worker.side_effect = self.pending_error()
-        self.runtime.save_records.reset_mock()
-        self.runtime.save_records.side_effect = None
-        with handoff_budget():
-            result = self.recover()
-        self.assertEqual(result["action"], "gate-red-worker-handoff-pending")
-        self.runtime.save_records.assert_not_called()
-        # A stage that moved is written once.
-        self.runtime.host.resume_worker.side_effect = self.pending_error({**self.PENDING, "handoff_stage": "submitted"})
-        with handoff_budget():
-            self.assertEqual(self.recover()["handoff_stage"], "submitted")
-        self.runtime.save_records.assert_called_once()
+    def test_an_unchanged_pending_pass_writes_nothing_at_any_stage(self) -> None:
+        self.opened("settle")
+        for stage, started in (("settle", "none"), ("typed", "started"), ("submitted", "started")):
+            self.runtime.host.worker_handoff_started.return_value = started
+            self.runtime.host.resume_worker.side_effect = self.pending_error(stage)
+            self.production(self.recover)  # the pass on which this stage is first seen
+            self.runtime.save_records.reset_mock()
+            before = self.record.to_json()
+            # Byte-identical: the same moment, the same cursor, the same stage.
+            self.assertEqual(self.production(self.recover)["handoff_stage"], stage)
+            self.assertEqual(self.runtime.save_records.call_count, 0, f"{stage}: byte-identical pass")
+            self.assertEqual(before, self.record.to_json())
+            # A few seconds on: only the time the cursor was read changed, which is not written.
+            self.now += 5
+            self.assertEqual(self.production(self.recover)["handoff_stage"], stage)
+            self.assertEqual(self.runtime.save_records.call_count, 0, f"{stage}: only a read stamp moved")
+        # A stage that moves is written, once.
+        self.runtime.host.resume_worker.side_effect = self.pending_error("typed")
+        self.production(self.recover)
+        self.assertEqual(self.runtime.save_records.call_count, 1)
 
-    def test_a_started_handoff_that_fails_goes_through_a_confirmed_stop(self) -> None:
-        self.test_the_floor_is_durable_before_the_wake_and_a_pending_stage_spends_nothing()
+    def test_the_reviews_settle_repro_writes_nothing(self) -> None:
+        # /tmp/ummanu-140-review-repro.py, UNCHANGED_SETTLE: three writes for one identical record.
+        self.retain()
+        self.runtime.host.resume_worker.side_effect = self.pending_error("settle")
+        self.production(self.deliver)
+        self.production(self.recover)
+        self.runtime.save_records.reset_mock()
+        before = self.record.to_json()
+        result = self.production(self.recover)
+        self.assertEqual(result["handoff_stage"], "settle")
+        self.assertEqual(before, self.record.to_json())
+        self.runtime.save_records.assert_not_called()
+
+    def test_a_started_handoff_whose_head_cannot_say_goes_through_a_confirmed_stop(self) -> None:
+        self.opened()
         self.runtime.host.worker_handoff_started.return_value = "unknown"
         failure = HostError("retained worker continuation was not delivered: prompt_handoff_unestablished")
         failure.evidence = {"subject": "worker-continuation", "readiness_state": "unknown"}
         self.runtime.host.resume_worker.side_effect = failure
-        self.runtime._stop_worker_confirmed.return_value = {"status": "degraded", "action": "head-stop-unconfirmed"}
-        with handoff_budget():
-            result = self.recover()
-        self.assertEqual(result["action"], "head-stop-unconfirmed")
+        self.runtime.host.confirm_worker_retained.reset_mock()
+        result = self.production(self.recover)
+        self.assertEqual(result["action"], "worker-launch-intent-unwritable")
         self.runtime._stop_worker_confirmed.assert_called_once()
-        self.runtime.host.confirm_worker_retained.assert_called_once()  # only the opening tick's
+        self.runtime.host.confirm_worker_retained.assert_not_called()
+        self.assertEqual(self.runtime.host.resume_worker.call_args.kwargs, {"handoff_started": "unknown"})
 
-    def test_outside_production_nothing_opens_a_handoff(self) -> None:
+    def test_outside_production_or_on_a_host_without_heads_nothing_opens_a_handoff(self) -> None:
         self.retain()
         self.assertEqual(self.deliver()["action"], "gate-red-reused-worker")
         self.runtime.host.worker_handoff_floor.assert_not_called()
         self.assertIsNone(self.record.worker_continuation.handoff)
-
-    def test_a_delivery_opened_before_handoffs_opens_one_on_its_next_attempt(self) -> None:
+        self.assertEqual(self.runtime.host.resume_worker.call_args.args, (self.task, self.record))
+        self.setUp()
+        self.runtime.host.worker_handoffs.return_value = False
         self.retain()
-        self.record.worker_continuation.begin_delivery("gate", 2.0)
+        self.assertEqual(self.production(self.deliver)["action"], "gate-red-reused-worker")
+        self.runtime.host.worker_handoff_floor.assert_not_called()
+
+    def test_a_released_pending_delivery_opens_its_handoff_on_its_next_pass(self) -> None:
+        self.retain()
+        self.record.worker_continuation.begin_delivery("gate", self.START - 60)
         self.record.worker_continuation_liveness = WorkerContinuationLiveness.begin(self.record.worker_head_run)
         self.record.worker_continuation_liveness.observe_provider(
-            self.provider_evidence(), 2.0, head_run=self.record.worker_head_run
+            self.provider_evidence(), self.START - 60, head_run=self.record.worker_head_run
         )
+        # Exactly what a released dispatcher wrote: no handoff on the continuation.
+        released = DispatcherRecord.from_json(self.record.to_json())
+        self.assertIsNone(released.worker_continuation.handoff)
+        self.record = self.records["sample-1"] = released
         self.runtime.host.worker_handoff_floor.return_value = 77
-        self.runtime.host.worker_handoff_started.return_value = "none"
-        self.runtime.host.resume_worker.side_effect = self.pending_error({**self.PENDING, "handoff_stage": "settle"})
-        with handoff_budget():
-            result = self.recover()
+        self.runtime.host.resume_worker.side_effect = self.pending_error("settle")
+        result = self.production(self.recover)
         self.assertEqual(result["handoff_stage"], "settle")
-        self.assertEqual(self.record.worker_continuation.handoff, PromptHandoff(77, self.record.worker_continuation.handoff.began_at))
-        # Round-trips with the record: the next process reads the same floor.
+        self.assertEqual(self.record.worker_continuation.handoff, PromptHandoff(77, self.START))
+        self.runtime.host.confirm_worker_retained.assert_called_once()
         again = DispatcherRecord.from_json(self.record.to_json())
         self.assertEqual(again.worker_continuation.handoff, self.record.worker_continuation.handoff)
+
+    def test_an_unavailable_floor_wakes_and_types_nothing_and_a_later_pass_opens_it(self) -> None:
+        self.retain()
+        self.runtime.host.worker_handoff_floor.return_value = None
+        result = self.production(self.deliver)
+        self.assertEqual(result["action"], "gate-red-worker-handoff-pending")
+        self.assertEqual(result["handoff_stage"], "settle")
+        self.runtime.host.resume_worker.assert_not_called()
+        self.assertTrue(self.record.worker_continuation.delivery_pending)
+        self.assertIsNone(self.record.worker_continuation.handoff)
+        self.runtime.save_records.assert_called_once()  # the boundary, before anything else
+        # Still unavailable: nothing woken. The first look at the unmoved cursor is new liveness
+        # evidence and is written; the next one is not.
+        self.now += 10
+        self.production(self.recover)
+        self.runtime.save_records.reset_mock()
+        self.now += 10
+        self.production(self.recover)
+        self.runtime.save_records.assert_not_called()
+        self.runtime.host.resume_worker.assert_not_called()
+        # The supervisor answers: the handoff opens, durably, and only then is the worker asked.
+        self.now += 10
+        self.runtime.host.worker_handoff_floor.return_value = 77
+        saved = []
+        self.runtime.save_records.side_effect = lambda *_: saved.append(self.record.to_json())
+        self.runtime.host.resume_worker.side_effect = lambda *_a, **_k: self.assertEqual(
+            saved[-1]["worker_continuation"]["handoff"]["floor"], 77
+        )
+        self.assertEqual(self.production(self.recover)["action"], "gate-red-reused-worker")
+
+    def test_a_stalled_provider_ends_a_pending_handoff_on_the_existing_ladder(self) -> None:
+        # The review's STARTED_PENDING repro: twelve passes a day later did nothing at all.
+        self.opened("submitted")
+        self.runtime.host.worker_handoff_started.return_value = "started"
+        self.runtime.host.resume_worker.side_effect = self.pending_error("submitted")
+        attempts = []
+        result = {}
+        for _ in range(12):
+            self.now += 60
+            result = self.production(self.recover)
+            attempts.append(self.record.worker_continuation_liveness.busy_attempts)
+            if result.get("action") != "gate-red-worker-handoff-pending":
+                break
+        # 30 s, 90 s and 210 s of an unmoved cursor: one attempt each, then the safe-recovery rung.
+        self.assertEqual(attempts[:4], [1, 2, 2, 3])
+        self.runtime.host.safe_recover_worker_continuation.assert_called_once()
+        self.runtime._stop_worker_confirmed.assert_called_once()
+        self.assertEqual(result["action"], "worker-launch-intent-unwritable", "the replacement path, after the stop")
+        self.assertEqual(self.record.worker_continuation_liveness.terminal_outcome, "replacement")
+
+    def test_provider_progress_resets_the_ladder_and_is_not_a_confirmation(self) -> None:
+        self.opened("submitted")
+        self.runtime.host.worker_handoff_started.return_value = "started"
+        self.runtime.host.resume_worker.side_effect = self.pending_error("submitted")
+        self.now += 40
+        self.production(self.recover)
+        self.assertEqual(self.record.worker_continuation_liveness.busy_attempts, 1)
+        self.cursor = "cursor-2"
+        self.now += 10
+        result = self.production(self.recover)
+        self.assertEqual(result["handoff_stage"], "submitted", "progress is liveness, not the handoff's receipt")
+        self.assertEqual(self.record.worker_continuation_liveness.busy_attempts, 0)
+        self.assertTrue(self.record.worker_continuation.delivery_pending)
+
+    def test_an_unavailable_or_foreign_source_takes_the_existing_terminal_outcome(self) -> None:
+        for evidence in (
+            {"state": "unavailable", "reason": "the rollout is gone"},
+            {"state": "identity_mismatch", "reason": "another HeadRun"},
+        ):
+            self.setUp()
+            self.opened("typed")
+            self.runtime.host.worker_handoff_started.return_value = "started"
+            self.runtime.host.provider_progress.side_effect = lambda *_, value=evidence: dict(value)
+            self.now += 10
+            result = self.production(self.recover)
+            self.assertEqual(result["action"], "gate-red-continuation-liveness-unavailable")
+            self.assertEqual(self.accounting.terminal_effect.call_args.kwargs["target"], "blocked")
+            self.assertEqual(self.runtime.host.resume_worker.call_count, 1, "nothing more is typed")
+
+    def test_a_new_report_wins_over_the_pending_obligation(self) -> None:
+        self.opened("submitted")
+        self.runtime.host.resume_worker.reset_mock()
+        result = self.production(self.recover, "report:done")
+        self.assertEqual(result["action"], "gate-red-reused-worker")
+        self.runtime.host.resume_worker.assert_not_called()
+        self.runtime.open_worker_round.assert_called_once_with(self.record, round_number=2)
+
+    def test_a_busy_refusal_waits_for_its_backoff_and_counts_nothing_twice(self) -> None:
+        self.opened("typed")
+        self.runtime.host.worker_handoff_started.return_value = "started"
+        busy = HostError("retained worker continuation was not delivered: prompt_typed_but_no_turn_started")
+        busy.evidence = {"subject": "worker-continuation", "readiness_state": "busy"}
+        self.runtime.host.resume_worker.side_effect = busy
+        self.now += 10
+        result = self.production(self.recover)
+        self.assertEqual(result["action"], "gate-red-worker-busy")
+        due = self.record.worker_continuation.busy_next_at
+        self.assertEqual(due, self.now + 30)
+        self.runtime.host.resume_worker.reset_mock()
+        self.now += 10
+        self.assertEqual(self.production(self.recover)["action"], "gate-red-worker-busy")
+        self.runtime.host.resume_worker.assert_not_called()
+        self.assertEqual(self.record.worker_continuation_liveness.busy_attempts, 0, "20 s stalled is no attempt")
+
+    def test_a_deferred_read_spends_and_writes_nothing(self) -> None:
+        self.opened("typed")
+        self.runtime.host.worker_handoff_started.return_value = "deferred"
+        self.now += 5
+        self.production(self.recover)  # the first look at the unmoved cursor
+        self.runtime.host.resume_worker.reset_mock()
+        self.runtime.save_records.reset_mock()
+        self.now += 5
+        result = self.production(self.recover)
+        self.assertEqual(result["action"], "gate-red-worker-handoff-pending")
+        self.runtime.host.resume_worker.assert_not_called()
+        self.runtime.save_records.assert_not_called()
 
 
 class ContinuationOwnershipTests(unittest.TestCase):
