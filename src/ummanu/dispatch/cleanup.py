@@ -2394,8 +2394,9 @@ class CleanupOwner:
                 successor = current.get("successor", "")
             self._scope_fence(intent, replaced=bool(successor))
             self._stop(intent, workspace_owned=not successor)
+            # Each stop receipt is already durable (`_stop`). The flag is published with the first
+            # checkpoint that follows: before any workspace or ref effect, or with the outcome.
             intent["progress"]["heads_stopped"] = True
-            self._save(value)
             if successor:
                 raise Preserved("observer " + str(intent["record"].get("attempt_id")) + " was replaced by "
                                 + successor + "; its own runs are settled and the workspace is handed "
@@ -2410,6 +2411,8 @@ class CleanupOwner:
             if not intent.get("identity"):
                 self._settle_without_identity(intent, current)
             else:
+                # Durable before the first Git read of the attempt and any removal it admits.
+                self._save(value)
                 repo, base = self._binding(intent)
                 if not intent["identity"].get("workspace"):
                     self._verify_commits(intent, repo)
