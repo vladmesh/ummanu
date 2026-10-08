@@ -24,6 +24,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from typing import Self
 from unittest import mock
 
 from ummanu.dispatch.watchdog import (
@@ -31,9 +32,7 @@ from ummanu.dispatch.watchdog import (
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from ummanu.runtime.head.local_pty import journal as journal_module
-from ummanu.runtime.head.local_pty import protocol
-from ummanu.runtime.head.local_pty import supervisor as supervisor_module
+from ummanu.runtime.head.local_pty import journal as journal_module, protocol, supervisor as supervisor_module
 from ummanu.runtime.head.local_pty.client import (
     HeadHandle,
     LocalPtySpawnError,
@@ -57,8 +56,8 @@ from ummanu.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
-from ummanu.runtime.head.memory import scope_unit
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.memory import scope_unit
 
 REPO = Path(__file__).resolve().parents[1]
 CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
@@ -1123,10 +1122,12 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 sys.executable,
                 "-P",
                 "-c",
-                "import sys;sys.path.insert(0, sys.argv[1]);"
-                "from ummanu.runtime.head.local_pty.journal import read_events;"
-                "import json;result=read_events(sys.argv[2]);"
-                "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))",
+                (
+                    "import sys;sys.path.insert(0, sys.argv[1]);"
+                    "from ummanu.runtime.head.local_pty.journal import read_events;"
+                    "import json;result=read_events(sys.argv[2]);"
+                    "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))"
+                ),
                 str(REPO / "src"),
                 str(handle.journal_path),
             ],
@@ -1281,7 +1282,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 read_bytes.append(len(data))
                 return data
 
-            def __enter__(self) -> _AppendingHandle:
+            def __enter__(self) -> Self:
                 return self
 
             def __exit__(self, *exc_info: object) -> None:

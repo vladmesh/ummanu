@@ -53,8 +53,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..command import with_pid_heartbeat
-from ..memory import MemoryScopeError, ScopeEvidence, OOM_STREAM_ENV, read_oom_victim
-from .scoped_lifecycle import ScopedHeadLifecycle
+from ..memory import OOM_STREAM_ENV, MemoryScopeError, ScopeEvidence, read_oom_victim
 from . import protocol
 from .journal import (
     DRAIN_REQUESTED,
@@ -68,6 +67,7 @@ from .journal import (
     TURN_STARTED,
     JournalWriter,
 )
+from .scoped_lifecycle import ScopedHeadLifecycle
 from .screen import ScreenModel
 
 #: A turn is over when the head has said nothing for this long. The substrate cannot see a

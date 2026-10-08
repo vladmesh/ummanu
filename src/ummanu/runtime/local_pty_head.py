@@ -1216,11 +1216,15 @@ class LocalPtyHeadRuntime:
         evidence = outcome.evidence
         if last is not None and last.status == HEAD_BUSY:
             evidence.readiness_state = READINESS_BUSY
-        failed = last is not None and not last.ok
-        reason = f"{DELIVER_NOT_SUBMITTED}: {last.reason or last.status}" if failed else DELIVER_NOT_SUBMITTED
+        refused = last if last is not None and not last.ok else None
+        reason = (
+            f"{DELIVER_NOT_SUBMITTED}: {refused.reason or refused.status}"
+            if refused is not None
+            else DELIVER_NOT_SUBMITTED
+        )
         evidence.reason = reason
         return DeliverReceipt(
-            status=last.status if failed else HEAD_ALIVE,
+            status=refused.status if refused is not None else HEAD_ALIVE,
             run=live,
             reason=reason,
             failure=HeadNudgeFailed(reason),
@@ -3003,19 +3007,24 @@ def _handoff_progress(read: Any, subject: str, floor: int) -> _HandoffProgress:
 
 def _journalled_report(event: Mapping[str, Any], floor: int) -> DeliveryReport:
     """The `DeliveryReport` a typed line's `input.accepted` stands for, when no live follow made one."""
-    written = event.get("bytes") if isinstance(event.get("bytes"), int) else 0
-    offered = event.get("offered_bytes") if isinstance(event.get("offered_bytes"), int) else written
+    written = _journal_int(event, "bytes", 0)
     return _delivery_report(
         state=str(event.get("state") or ""),
         written=written,
-        offered=offered,
+        offered=_journal_int(event, "offered_bytes", written),
         established=True,
-        delivery_id=event.get("delivery") if isinstance(event.get("delivery"), int) else 0,
+        delivery_id=_journal_int(event, "delivery", 0),
         journalled=True,
         floor=floor,
         detail=str(event.get("detail") or ""),
-        seq=event.get("seq") if isinstance(event.get("seq"), int) else 0,
+        seq=_journal_int(event, "seq", 0),
     )
+
+
+def _journal_int(event: Mapping[str, Any], key: str, default: int) -> int:
+    """An integer field of a journal record, or `default` when it is missing or not an integer."""
+    value = event.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
 
 
 def _spawn_status(exc: local_pty.LocalPtySpawnError) -> str:

@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ummanu.runtime.tui_delivery import DeliveryOutcome
+
 from .operations import HeadOperationError, NudgePointer
 from .run import HeadRun, StopInitiator
 from .spec import HeadSpec

@@ -16,17 +16,31 @@ from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from ummanu.dispatch.helpers import scrub_host_output
 from ummanu.dispatch.host import _record_worker_delivery_evidence
-from ummanu.dispatch.launch import STAGE_REWORK, WORKER_ROLE
-from ummanu.dispatch.launch import clear_launch_intent as _clear_launch_intent
-from ummanu.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
-from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt, now_rfc3339
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
-from ummanu.dispatch.tui import COMPOSER_EMPTY, COMPOSER_UNKNOWN, READINESS_BUSY
-from ummanu.dispatch.tui import delivery_readiness_state as _delivery_readiness_state
+from ummanu.dispatch.launch import (
+    STAGE_REWORK,
+    WORKER_ROLE,
+    clear_launch_intent as _clear_launch_intent,
+    launch_intent_unwritable as _launch_intent_unwritable,
+)
+from ummanu.dispatch.state import (
+    DispatcherRecord,
+    PersistedDeliveryEvidence,
+    PersistedGateReceipt,
+    attempt_request_id as _attempt_request_id,
+    now_rfc3339,
+)
+from ummanu.dispatch.tui import (
+    COMPOSER_EMPTY,
+    COMPOSER_UNKNOWN,
+    READINESS_BUSY,
+    delivery_readiness_state as _delivery_readiness_state,
+)
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.watchdog import reset_wait as _reset_wait
-from ummanu.dispatch.worker_launch import bring_up_worker_head as _bring_up_worker_head
-from ummanu.dispatch.worker_launch import write_worker_relaunch_intent as _write_worker_relaunch_intent
+from ummanu.dispatch.worker_launch import (
+    bring_up_worker_head as _bring_up_worker_head,
+    write_worker_relaunch_intent as _write_worker_relaunch_intent,
+)
 from ummanu.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
@@ -554,7 +568,7 @@ def _continuation_handoff_pending(
     stage = handoff_pending_stage(exc)
     evidence = getattr(exc, "evidence", None)
     if isinstance(evidence, dict) and evidence:
-        record.worker_delivery_evidence = dict(evidence)
+        record.worker_delivery_evidence = PersistedDeliveryEvidence(evidence)
     records[ref] = record
     if saved is None or record.to_json() != saved:
         runtime.save_records(payload, records)

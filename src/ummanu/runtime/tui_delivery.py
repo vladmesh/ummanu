@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Self
 
 from .agent_prompt_transport import AGENT_PROMPT_TRANSPORT_VERSION, TRANSPORT_POLICY
 
@@ -237,7 +237,7 @@ class DeliveryOutcome(str):
 
     evidence: DeliveryEvidence
 
-    def __new__(cls, value: str, evidence: DeliveryEvidence) -> DeliveryOutcome:
+    def __new__(cls, value: str, evidence: DeliveryEvidence) -> Self:
         outcome = super().__new__(cls, value)
         outcome.evidence = evidence
         return outcome
