@@ -9,31 +9,62 @@ The runtime is a collaborator, not an implementation facade, as in worker_report
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
+from ummanu.dispatch.handoff_liveness import (
+    PENDING_ATTEMPT,
+    PENDING_UNPROVABLE,
+    durable_view,
+    no_progress_exhausted,
+    observe_pending_handoff,
+    provider_evidence,
+)
 from ummanu.dispatch.helpers import scrub_host_output
 from ummanu.dispatch.host import _record_worker_delivery_evidence
-from ummanu.dispatch.launch import STAGE_REWORK, WORKER_ROLE
-from ummanu.dispatch.launch import clear_launch_intent as _clear_launch_intent
-from ummanu.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
-from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt, now_rfc3339
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
-from ummanu.dispatch.tui import COMPOSER_EMPTY, COMPOSER_UNKNOWN, READINESS_BUSY
-from ummanu.dispatch.tui import delivery_readiness_state as _delivery_readiness_state
+from ummanu.dispatch.launch import (
+    STAGE_REWORK,
+    WORKER_ROLE,
+    clear_launch_intent as _clear_launch_intent,
+    launch_intent_unwritable as _launch_intent_unwritable,
+)
+from ummanu.dispatch.state import (
+    DispatcherRecord,
+    PersistedDeliveryEvidence,
+    PersistedGateReceipt,
+    attempt_request_id as _attempt_request_id,
+    now_rfc3339,
+)
+from ummanu.dispatch.tui import (
+    COMPOSER_EMPTY,
+    COMPOSER_UNKNOWN,
+    READINESS_BUSY,
+    delivery_readiness_state as _delivery_readiness_state,
+)
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.watchdog import reset_wait as _reset_wait
-from ummanu.dispatch.worker_launch import bring_up_worker_head as _bring_up_worker_head
-from ummanu.dispatch.worker_launch import write_worker_relaunch_intent as _write_worker_relaunch_intent
+from ummanu.dispatch.worker_launch import (
+    bring_up_worker_head as _bring_up_worker_head,
+    write_worker_relaunch_intent as _write_worker_relaunch_intent,
+)
 from ummanu.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
+    BUSY_RETRY_MAX_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
     ContinuationProviderCondition,
     ContinuationRecoveryRung,
     WorkerContinuationLiveness,
+)
+from ummanu.runtime.head.handoff import (
+    HANDOFF_DEFERRED,
+    HANDOFF_NOT_STARTED,
+    HANDOFF_SETTLE,
+    active_budget,
+    handoff_pending_stage,
 )
 
 
@@ -69,6 +100,11 @@ def recover_worker_continuation(
                 payload,
                 attempt_id,
                 phase=continuation.phase or "gate",
+            )
+        if _production_authority(runtime, record) and continuation.retained:
+            # A production pass owns this delivery as a resumable handoff, whatever stage it is at.
+            return _production_continuation(
+                runtime, task, record, records, payload, attempt_id, phase=continuation.phase or "gate"
             )
         # Progress is sampled before the persisted readiness backoff is interpreted. A new
         # provider cursor beats a busy pane and resets only that ladder, never the HeadRun.
@@ -271,6 +307,8 @@ def _deliver_red_continuation(
     """
     ref = task["ref"]
     continuation = record.worker_continuation
+    if _production_authority(runtime, record) and continuation.retained:
+        return _production_continuation(runtime, task, record, records, payload, attempt_id, phase=phase)
     step = "review" if phase == "review" else "gate"
     opening_delivery = not continuation.delivery_pending
     fresh_provider_progress = False
@@ -482,6 +520,350 @@ def _deliver_red_continuation(
     )
 
 
+def _production_authority(runtime: Any, record: DispatcherRecord) -> bool:
+    """Whether this continuation is a production handoff: inside a production pass, to a worker
+    whose head takes handoffs (`CommandHostRuntime.worker_handoffs`). Nowhere else is the flow changed."""
+    if active_budget() is None:
+        return False
+    handoffs = getattr(runtime.host, "worker_handoffs", None)
+    return callable(handoffs) and handoffs(record) is True
+
+
+def _production_continuation(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    """The retained continuation inside a production pass: one resumable handoff (`runtime.head.handoff`).
+
+    The order, every pass, is the precedence the card set (ummanu-142):
+
+    1. Opening (no delivery yet): the suspension is confirmed, the delivery boundary and the liveness
+       episode are opened, the exact-source provider baseline is read and the handoff's floor is
+       taken from the worker's supervisor, inside the allowance. All of that is written before
+       anything is woken or typed. A floor the supervisor did not give leaves the delivery pending
+       with no handoff: nothing is woken, and no blocking flow runs in its place.
+    2. Pending (every later pass, whatever its stage): exact-source provider liveness first, with
+       the existing bounded ladder and its terminal outcomes (`_production_liveness_step`); then
+       whether the handoff has written to the worker. One that has not is preceded by the
+       suspension check, as before; one that has is continued from the worker's own status and
+       journal, and nothing it already did is done again.
+    3. The delivery itself runs inside the pass's allowance and may stop at any stage: that is
+       pending, not busy and not a failure, and it spends nothing.
+
+    The record is written only when something durable changed (`_durable_view`), and always before
+    the effect that change precedes; an unchanged pending pass writes nothing.
+    """
+    ref = task["ref"]
+    continuation = record.worker_continuation
+    written = [durable_view(record)]
+
+    def persist() -> None:
+        current = durable_view(record)
+        if current != written[0]:
+            records[ref] = record
+            runtime.save_records(payload, records)
+            written[0] = current
+
+    if not continuation.delivery_pending:
+        try:
+            # The suspension was confirmed on a past tick; a SIGCONT from terminal recovery or an
+            # operator since makes this a second writer. Ask the heartbeat again here.
+            runtime.host.confirm_worker_retained(record)
+        except HostError as exc:
+            return _stop_and_restart(runtime, task, record, records, payload, attempt_id, phase, exc)
+        # Persist the delivery boundary before waking the worker, or a tick that dies after delivery
+        # replays with the old done marker read as the new round's completion.
+        continuation.begin_delivery(phase, time.time())
+        record.worker_continuation_liveness = WorkerContinuationLiveness.begin(record.worker_head_run)
+        # Establish the provider cursor before SIGCONT: the first observation is a baseline.
+        observation = _observe_retained_continuation_progress(runtime, task, record, now=time.time())
+        blocked = _block_unadmitted_continuation_liveness(
+            runtime, task, record, records, payload, attempt_id, phase=phase, observation=observation
+        )
+        if blocked is not None:
+            return blocked
+        _open_continuation_handoff(runtime, record)
+        persist()
+        started = HANDOFF_NOT_STARTED
+    else:
+        outcome = _production_liveness_step(runtime, task, record, records, payload, attempt_id, phase=phase, persist=persist)
+        if outcome is not None:
+            return outcome
+        if not continuation.busy_retry_due(time.time()):
+            # A busy refusal's backoff: the pane said it was working, so nothing is tried before it
+            # is due. A pending handoff never sets it.
+            persist()
+            return _retained_worker_busy_deferred(ref, record, attempt_id, phase)
+        started = (
+            runtime.host.worker_handoff_started(record)
+            if continuation.handoff is not None
+            else HANDOFF_NOT_STARTED
+        )
+        if started == HANDOFF_DEFERRED:
+            persist()
+            return _production_pending(
+                record, ref, attempt_id, phase, HANDOFF_SETTLE,
+                "the worker's supervisor did not answer within this pass's allowance",
+            )
+        liveness = record.worker_continuation_liveness
+        if (
+            liveness.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE
+            and not liveness.recovery_resume_used
+        ):
+            # The recovery's one return to delivery is taken, durably (`persist` below, before the
+            # delivery), by the first pass that goes on to deliver. Once taken it stays taken: the
+            # handoff it allowed continues, and the next exhaustion ends the episode
+            # (`_advance_no_progress_continuation`) rather than minting another safe recovery.
+            liveness.allow_safe_recovery_resume_once()
+        if started == HANDOFF_NOT_STARTED:
+            try:
+                # Nothing of this delivery is on the worker: it must still be the suspended head the
+                # verdict left, or this would be a second writer.
+                runtime.host.confirm_worker_retained(record)
+            except HostError as exc:
+                persist()
+                return _stop_and_restart(runtime, task, record, records, payload, attempt_id, phase, exc)
+            # A delivery opened by a dispatcher before handoffs, or whose floor was not given on an
+            # earlier pass, opens its handoff here, still before anything is woken or typed.
+            _open_continuation_handoff(runtime, record)
+    if continuation.handoff is None:
+        persist()
+        return _production_pending(
+            record, ref, attempt_id, phase, HANDOFF_SETTLE,
+            "the worker's supervisor gave no journal floor this pass; nothing was woken or typed",
+        )
+    persist()
+    try:
+        # A restarted dispatcher has no process-local ingress. Install from the durable run with the
+        # runtime's usual persist/stop/block callbacks before this delivery.
+        runtime.bind_codex_provider_ingress(record, records, payload, role="worker", reference=ref)
+        runtime.host.resume_worker(task, record, handoff_started=started)
+    except HostError as exc:
+        stage = handoff_pending_stage(exc)
+        if stage:
+            evidence = getattr(exc, "evidence", None)
+            if isinstance(evidence, dict) and evidence:
+                record.worker_delivery_evidence = PersistedDeliveryEvidence(evidence)
+            persist()
+            return _production_pending(record, ref, attempt_id, phase, stage, scrub_host_output(str(exc)))
+        if _delivery_readiness_state(exc) == READINESS_BUSY:
+            return _production_busy(runtime, task, record, records, payload, attempt_id, phase=phase, exc=exc, persist=persist)
+        _record_worker_delivery_evidence(record, exc, failure=True)
+        persist()
+        return _restart_red_worker(
+            runtime, task, record, records, payload, attempt_id,
+            continuation_reason=scrub_host_output(str(exc)), phase=phase,
+        )
+    continuation.confirm_delivery()
+    records[ref] = record
+    runtime.save_records(payload, records)
+    return _finish_retained_worker_resume(runtime, task, record, records, payload, attempt_id, phase=phase)
+
+
+def _production_liveness_step(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    phase: str,
+    persist: Callable[[], None],
+) -> dict[str, Any] | None:
+    """The worker's pending-recovery boundary: every pending production pass is decided here first.
+
+    The next action is read off the persisted episode on every pass, not off this pass's events.
+    `recover_worker_continuation` reaches it after a new report (which wins); `_production_continuation`
+    reaches it before its busy backoff, its started/deferred/floor answers and any delivery.
+
+    1. Recovery debt already recorded is paid before anything is observed
+       (`_recorded_recovery_debt`): a provider observation could not clear it, and nothing else
+       runs behind it.
+    2. Only then the shared pending-handoff liveness rule (`handoff_liveness`): the exact-source
+       cursor and its no-progress schedule. An unavailable or mismatched source takes the existing
+       terminal outcome at once (the worker was baselined before it was woken). Legitimate progress
+       resets what is uncommitted: the schedule's count, or an exhaustion no rung was taken for yet.
+    3. The response window, from its persisted deadline, with the progress seen since it opened.
+    4. Exhaustion, whether this pass counted it or an earlier one did and died before acting on it,
+       enters the existing ladder (`_advance_no_progress_continuation`), which makes its safe-recovery
+       intent durable before it calls the capability.
+
+    None means the durable state permits the ordinary handoff to go on.
+    """
+    owed = _recorded_recovery_debt(runtime, task, record, records, payload, attempt_id, phase=phase, persist=persist)
+    if owed is not None:
+        return owed
+    now = time.time()
+    liveness = record.worker_continuation_liveness
+    seen = observe_pending_handoff(
+        liveness, _retained_provider_evidence(runtime, task, record), now=now, head_run=record.worker_head_run
+    )
+    if liveness.admitted:
+        record.worker_continuation.busy_attempts = liveness.busy_attempts
+    if seen.progressed:
+        record.worker_continuation.busy_next_at = 0.0
+    if seen.verdict == PENDING_UNPROVABLE:
+        return _block_unadmitted_continuation_liveness(
+            runtime, task, record, records, payload, attempt_id, phase=phase, observation=seen.observation
+        )
+    window = _continuation_recovery_window(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        phase=phase,
+        fresh_provider_progress=seen.progressed,
+        now=now,
+        persist=persist,
+    )
+    if window is not None:
+        return window
+    if seen.verdict == PENDING_ATTEMPT:
+        liveness.no_progress_evidence = _continuation_no_progress_evidence(record, liveness.state)
+        record.worker_continuation.busy_attempts = liveness.busy_attempts
+        persist()
+    if no_progress_exhausted(liveness) and liveness.recovery_rung in {
+        ContinuationRecoveryRung.NONE,
+        ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE,
+    }:
+        return _advance_no_progress_continuation(runtime, task, record, records, payload, attempt_id, phase=phase)
+    return None
+
+
+def _recorded_recovery_debt(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    phase: str,
+    persist: Callable[[], None],
+) -> dict[str, Any] | None:
+    """What a pending continuation already owes by its persisted episode, before any observation.
+
+    - A terminal outcome (`replacement`, `identity_fenced`), or a safe recovery found unavailable:
+      the identity-fenced replacement route, which stops the exact worker first and opens one
+      replacement only after a confirmed stop. An unconfirmed stop leaves the debt recorded, and the
+      next pass takes the same route again; neither moving progress nor a pending handoff resumes
+      ordinary delivery behind it.
+    - A safe-recovery intent with no answer recorded (`SAFE_RECOVERY_PENDING`): the capability may
+      have acted, so it is never called again; the conservative replacement, as above.
+
+    None for every other episode: what remains is decided with this pass's observation.
+    """
+    liveness = record.worker_continuation_liveness
+    rung = liveness.recovery_rung
+    if rung == ContinuationRecoveryRung.SAFE_RECOVERY_PENDING and not liveness.terminal:
+        liveness.terminalize("replacement", "safe recovery response was unconfirmed after dispatcher recovery")
+    elif rung == ContinuationRecoveryRung.SAFE_RECOVERY_UNAVAILABLE and not liveness.terminal:
+        liveness.terminalize("replacement", liveness.reason or "safe recovery was unavailable")
+    if not liveness.terminal:
+        return None
+    persist()
+    reason = (
+        "continuation liveness HeadRun identity is fenced"
+        if liveness.terminal_outcome == "identity_fenced"
+        else liveness.reason or "the continuation's recovery reached its terminal outcome"
+    )
+    return _restart_red_worker(
+        runtime, task, record, records, payload, attempt_id, continuation_reason=reason, phase=phase
+    )
+
+
+def _production_busy(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    phase: str,
+    exc: HostError,
+    persist: Callable[[], None],
+) -> dict[str, Any]:
+    """A pane the delivery found working: the busy schedule, with the ladder the liveness step owns.
+
+    Neither acknowledgement nor a dead-head vote. The retry waits for the busy backoff; the
+    no-progress attempts are spent by `_production_liveness_step` alone, so a refusal here never
+    counts one twice.
+    """
+    _record_worker_delivery_evidence(record, exc)
+    continuation = record.worker_continuation
+    continuation.busy_next_at = time.time() + min(
+        BUSY_RETRY_INITIAL_SECONDS * 2 ** min(max(record.worker_continuation_liveness.busy_attempts - 1, 0), 4),
+        BUSY_RETRY_MAX_SECONDS,
+    )
+    persist()
+    return _retained_worker_busy_deferred(
+        task["ref"], record, attempt_id, phase, delay=int(continuation.busy_next_at - time.time())
+    )
+
+
+def _stop_and_restart(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    phase: str,
+    exc: HostError,
+) -> dict[str, Any]:
+    """A retained worker that is not the suspended head it should be: confirmed stop, then one replacement."""
+    reason = scrub_host_output(str(exc))
+    unconfirmed = runtime._stop_worker_confirmed(
+        record, task["ref"], step="review" if phase == "review" else "gate", attempt_id=attempt_id
+    )
+    if unconfirmed is not None:
+        return unconfirmed
+    return _restart_red_worker(
+        runtime, task, record, records, payload, attempt_id,
+        continuation_reason=reason, phase=phase, worker_stopped=True,
+    )
+
+
+def _open_continuation_handoff(runtime: Any, record: DispatcherRecord) -> None:
+    """Fix this delivery's production handoff at the worker journal's current sequence.
+
+    Only once per delivery. A worker whose supervisor does not answer within the allowance gets
+    none this pass, and the caller acts on nothing until a later pass gives it one.
+    """
+    continuation = record.worker_continuation
+    if continuation.handoff is not None:
+        return
+    floor_of = getattr(runtime.host, "worker_handoff_floor", None)
+    floor = floor_of(record) if callable(floor_of) else None
+    if isinstance(floor, int) and not isinstance(floor, bool) and floor >= 0:
+        continuation.open_handoff(floor, time.time())
+
+
+def _production_pending(
+    record: DispatcherRecord, ref: str, attempt_id: str, phase: str, stage: str, reason: str
+) -> dict[str, Any]:
+    """A continuation handoff this pass did not finish: the same HeadRun keeps it, nothing is spent."""
+    return {
+        "status": "ok",
+        "step": "review" if phase == "review" else "gate",
+        "pilot_ref": ref,
+        "attempt_id": record.attempt_id or attempt_id,
+        "action": f"{phase}-red-worker-handoff-pending",
+        "handoff_stage": stage,
+        "reason": reason,
+    }
+
+
 def _observe_retained_continuation_progress(
     runtime: Any,
     task: dict[str, Any],
@@ -490,20 +872,7 @@ def _observe_retained_continuation_progress(
     now: float,
 ) -> str:
     """Persist provider progress before a continuation interprets `tui-idle`."""
-    try:
-        evidence = getattr(
-            runtime.host,
-            "provider_progress",
-            lambda _task, _record, _kind: {
-                "state": "unavailable",
-                "reason": "host has no provider-progress probe",
-            },
-        )(task, record, "worker")
-    except Exception as exc:  # noqa: BLE001 - evidence must retain any host refusal.
-        evidence = {
-            "state": "unavailable",
-            "reason": f"provider-progress probe failed: {scrub_host_output(str(exc))}",
-        }
+    evidence = _retained_provider_evidence(runtime, task, record)
     liveness = record.worker_continuation_liveness
     if not liveness.bound and record.worker_continuation.busy_attempts:
         # An old busy count is audit data, never an exact-source observation for the ladder.
@@ -517,6 +886,11 @@ def _observe_retained_continuation_progress(
     if observation == "progressed":
         record.worker_continuation.busy_next_at = 0.0
     return observation
+
+
+def _retained_provider_evidence(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> Any:
+    """The exact-source provider answer for the retained worker's HeadRun; a refusal is evidence too."""
+    return provider_evidence(runtime, task, record, "worker")
 
 
 def _block_unadmitted_continuation_liveness(
@@ -586,8 +960,12 @@ def _continuation_recovery_window(
     phase: str,
     fresh_provider_progress: bool,
     now: float,
+    persist: Callable[[], None] | None = None,
 ) -> dict[str, Any] | None:
-    """Honor the recorded safe-recovery response window before another pane interaction."""
+    """Honor the recorded safe-recovery response window before another pane interaction.
+
+    `persist` writes the record only when it changed (a production pass); without it, as always.
+    """
     liveness = record.worker_continuation_liveness
     ref = task["ref"]
     if liveness.terminal_outcome == "identity_fenced":
@@ -606,8 +984,11 @@ def _continuation_recovery_window(
     if liveness.recovery_rung != ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW:
         return None
     if now < liveness.recovery_response_deadline:
-        records[ref] = record
-        runtime.save_records(payload, records)
+        if persist is not None:
+            persist()
+        else:
+            records[ref] = record
+            runtime.save_records(payload, records)
         return _retained_worker_recovery_window(
             ref,
             record,

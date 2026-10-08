@@ -135,6 +135,8 @@ class TheColourRuleTests(unittest.TestCase):
             "checkpoint.blocked",
             "checkpoint.last_failed",
             "checkpoint.rpo_exceeded",
+            "checkpoint.cut_lag_exceeded",
+            "checkpoint.unit_unhealthy",
             # Reported by doctor only (ummanu-21): history on the snapshot branch nobody but the
             # exporter should have made.
             "snapshot.foreign_commit",
@@ -147,6 +149,8 @@ class TheColourRuleTests(unittest.TestCase):
             "dispatcher.divergences_open",
             "host.inventory_unreadable",
             "memory.index_missing",
+            # ummanu-108: one subscription is red; its roles run on the other family meanwhile.
+            "provider.red",
         }
         self.assertEqual({code for code, s in PROBLEM_SEVERITY.items() if s == "red"}, red)
         self.assertEqual({code for code, s in PROBLEM_SEVERITY.items() if s == "yellow"}, yellow)

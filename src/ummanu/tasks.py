@@ -15,9 +15,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ummanu.board import e2e_budget, e2e_record, owner_events, wait_card
-from ummanu.board import po_execution as execution_field
-from ummanu.board import po_origin as origin_field
+from ummanu.board import (
+    e2e_budget,
+    e2e_record,
+    owner_events,
+    po_execution as execution_field,
+    po_origin as origin_field,
+    wait_card,
+)
 from ummanu.board.audit_contract import card_transition_of, is_protocol_event
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from ummanu.board.card_transitions import CardTransitionForbidden, card_transition
@@ -37,29 +42,13 @@ from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.host import MarkerComment, MutationResult, TransitionRequest
 from ummanu.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
-)
-from ummanu.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
-)
-from ummanu.board.legacy_codec import (
     enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
-)
-from ummanu.board.legacy_codec import (
     enum_or_none as _enum_or_none,  # noqa: F401 - released private compatibility alias
-)
-from ummanu.board.legacy_codec import (
     nonnegative_int as _nonnegative_int,
-)
-from ummanu.board.legacy_codec import (
     null_if_empty as _null_if_empty,  # noqa: F401 - released private compatibility alias
-)
-from ummanu.board.legacy_codec import (
     positive_int as _positive_int,
-)
-from ummanu.board.legacy_codec import (
     split_heads as _split_heads,  # noqa: F401 - released private compatibility alias
-)
-from ummanu.board.legacy_codec import (
     text as _text,
 )
 from ummanu.board.models import (
@@ -93,11 +82,7 @@ from ummanu.board.production_rights import (
     ACTIVATION_OPERATION_REQUEST_PREFIX,
     NO_PRODUCTION,
     TOUCHES_PRODUCTION,
-)
-from ummanu.board.production_rights import (
     create_refusal as production_create_refusal,
-)
-from ummanu.board.production_rights import (
     touches_production as card_production,
 )
 from ummanu.board.protocol_artifacts import (
@@ -137,7 +122,13 @@ from ummanu.board.task_routing import (
     impact_bounds_refusal,
 )
 from ummanu.board.transitions import BoardProtocolError
-from ummanu.dispatch.cleanup import CleanupJournal, ownership_lock, serialized
+from ummanu.dispatch.cleanup import (
+    CleanupJournal,
+    bulk_lane,
+    capacity_serialized,
+    ownership_recovery,
+    reference_lock,
+)
 from ummanu.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -662,9 +653,15 @@ def project_card_by_reference(
     client: SqlCardClient, project_id: int, reference: str
 ) -> dict[str, Any] | None:
     """Return the live card for a reference when an archived duplicate exists."""
+    from ummanu.board.sql_cards import SqlCardClient
+
     card = client.call("getTaskByReference", project_id=project_id, reference=reference)
     if not isinstance(card, dict) or _task_is_active(card):
         return card if isinstance(card, dict) else None
+    # The store's `task_ref` is the primary key: an archived row has no active duplicate,
+    # so the full board read is only for a client without that guarantee.
+    if isinstance(client, SqlCardClient):
+        return card
     active_cards = client.call("getAllTasks", project_id=project_id, status_id=1)
     if not isinstance(active_cards, list):
         raise TaskError("backend_error", "board store returned an invalid task list", 1)
@@ -676,6 +673,11 @@ def project_card_by_reference(
 
 def project_card_by_id(client: SqlCardClient, project_id: int, task_id: int) -> dict[str, Any] | None:
     """Return the exact board row named by a recorded board task id."""
+    from ummanu.board.backend import card_transport_key
+    from ummanu.board.sql_cards import SqlCardClient
+
+    if isinstance(client, SqlCardClient) and card_transport_key(task_id) is not None:
+        return client.call("getTaskById", project_id=project_id, task_id=task_id)
     for card in all_project_cards(client, project_id):
         if _positive_int(card.get("id")) == task_id:
             return card
@@ -684,6 +686,13 @@ def project_card_by_id(client: SqlCardClient, project_id: int, task_id: int) -> 
 
 def next_project_reference(client: SqlCardClient, project_id: int, project: str) -> str:
     """Allocate the reference immediately after this project's board-wide high-water mark."""
+    from ummanu.board.sql_cards import SqlCardClient
+
+    if isinstance(client, SqlCardClient):
+        reference = client.call("getNextTaskReference", project=project)
+        if not isinstance(reference, str) or not re.fullmatch(re.escape(project) + r"-[1-9][0-9]*", reference):
+            raise TaskError("backend_error", "board store returned an invalid task reference", 1)
+        return reference
     return next_reference(all_project_cards(client, project_id), f"{project}-")
 
 
@@ -705,6 +714,14 @@ class TaskReader:
     def __init__(self, client: SqlCardClient, board_name: str = "Pipeline") -> None:
         self.client = client
         self.board_name = board_name
+
+    def capacity_peers(self) -> list[dict[str, Any]]:
+        """Live capacity keys, independent of a tick's selection snapshot."""
+        from ummanu.board.sql_cards import SqlCardClient
+
+        if isinstance(self.client, SqlCardClient):
+            return [{"ref": reference} for reference in self.client.call("getCapacityReferences")]
+        return self.list(states=set(ACTIVE_STATES))
 
     def list(
         self,
@@ -741,6 +758,15 @@ class TaskReader:
             result.append(normalized)
         self._attach_origin_returns(result)
         return sorted(result, key=lambda task: (task["state"], task["position"], task["ref"], task["id"]))
+
+    def archived_after_merge_cards(self) -> list[dict[str, Any]]:
+        """Archived e2e carriers/marks, without the archive's comments or unrelated rows."""
+        project_id, columns, swimlanes = self._board()
+        rows = self.client.call("getArchivedAfterMergeTasks", project_id=project_id)
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise TaskError("backend_error", "board store returned invalid archived carriers", 1)
+        metadata = self._metadata_of(rows)
+        return [self._normalize(row, columns, swimlanes, metadata[_task_number(row)], comments=None) for row in rows]
 
     def _attach_origin_returns(self, cards: list[dict[str, Any]]) -> None:
         """Fill each delegated card's `origin.returns` from its outbox rows, in one read (secretary-1792).
@@ -882,6 +908,7 @@ class TaskReader:
         """
         # The installed head registry remains the authority for legacy effective-head values;
         # this is deliberately not a dependency on pipeline board operations or its export CLI.
+        from ummanu.board.sql_cards import SqlCardClient
         from ummanu.runtime.heads import HeadRegistryError, default_head, reviewer_head
 
         def role_default_or_blank(lookup: Callable[[], str]) -> str:
@@ -893,7 +920,13 @@ class TaskReader:
                 return ""
 
         project_id, columns, swimlanes = self._board()
-        cards = all_project_cards(self.client, project_id)
+        cards = (
+            self.client.call("getBoardRows", project_id=project_id)
+            if isinstance(self.client, SqlCardClient)
+            else all_project_cards(self.client, project_id)
+        )
+        if not isinstance(cards, list):
+            raise TaskError("backend_error", "board store returned an invalid task list", 1)
         rows = [card for card in cards if isinstance(card, dict)]
         task_ids = [_task_number(card) for card in rows]
         answers = self.client.call_batch(
@@ -1825,105 +1858,106 @@ class TaskWriter:
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
         # read through createTask prevents two local task-create processes assigning one ref.
-        with reference_allocation_lock(self.data_dir), self._mutation():
+        with reference_allocation_lock(self.data_dir):
             board_id, columns, swimlanes = self.reader._board()
             created_ref = reference or next_project_reference(self.client, board_id, project)
-            # One question for both paths. A caller-supplied reference may name a card that
-            # already exists, and an allocated one is only as free as the enumeration it was
-            # counted from, so neither is written before the backend is asked about that exact
-            # reference. Archived rows answer too: they hold their reference for good.
-            if project_card_by_reference(self.client, board_id, created_ref):
-                raise TaskError("validation", f"task reference {created_ref} is already claimed", 2)
-            column_id = _target_column_id(columns, target)
-            if column_id is None:
-                raise TaskError("backend_error", "board schema is invalid", 1)
-            swimlane_id = _matching_swimlane(swimlanes, project)
-            # Persist the allocation before the atomic backend write. A process that dies
-            # after createTask still leaves a recoverable, already-reserved reference.
-            event["ref"] = created_ref
-            self.audit.stage(request_id, event)
-            task_id = _positive_int(
-                self.client.call(
-                    "createTask",
-                    project_id=board_id,
-                    title=title,
-                    description=description,
-                    column_id=column_id,
-                    swimlane_id=swimlane_id or 0,
-                    reference=created_ref,
-                )
-            )
-            if task_id is None:
-                raise TaskError("backend_error", "board store rejected the write", 1)
-            event["task_id"] = entity_id("task", task_id)
-            event["backend"]["task_id"] = task_id
-            try:
+            with reference_lock(self.data_dir, created_ref), self._mutation():
+                # One question for both paths. A caller-supplied reference may name a card that
+                # already exists, and an allocated one is only as free as the enumeration it was
+                # counted from, so neither is written before the backend is asked about that exact
+                # reference. Archived rows answer too: they hold their reference for good.
+                if project_card_by_reference(self.client, board_id, created_ref):
+                    raise TaskError("validation", f"task reference {created_ref} is already claimed", 2)
+                column_id = _target_column_id(columns, target)
+                if column_id is None:
+                    raise TaskError("backend_error", "board schema is invalid", 1)
+                swimlane_id = _matching_swimlane(swimlanes, project)
+                # Persist the allocation before the atomic backend write. A process that dies
+                # after createTask still leaves a recoverable, already-reserved reference.
+                event["ref"] = created_ref
                 self.audit.stage(request_id, event)
-            except OSError as exc:
-                raise _CommittedWriteError() from exc
-            try:
-                reference_persisted = self.reader.show_id(task_id)["ref"] == created_ref
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
-            if not reference_persisted:
-                raise _CommittedWriteError()
-            try:
-                values = {
-                    "record_type": "task",
-                    "task_type": task_type,
-                    "project": project,
-                    "complexity": complexity,
-                    "family_preference": family_preference,
-                    "review": review,
-                }
-                if live_impact:
-                    values["live_impact"] = "1"
-                if touches_production:
-                    # Not a column: a typed field of the extension bag (board/production_rights.py).
-                    values[TOUCHES_PRODUCTION] = touches_production
-                if wait_spec:
-                    # Not a column either: the wait card's spec (board/wait_card.py).
-                    values[wait_card.WAIT_SPEC] = wait_spec
-                if po_origin:
-                    # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
-                    values[origin_field.PO_ORIGIN] = po_origin
-                if po_execution:
-                    values[execution_field.PO_EXECUTION] = po_execution
-                if blocked_by:
-                    values["blocked_by"] = blocked_by
-                if head:
-                    values["head"] = head
-                if review_head:
-                    values["review_head"] = review_head
-                if slug:
-                    values["slug"] = slug
-                if base_branch:
-                    values["base_branch"] = base_branch
-                if seed_ref:
-                    values["seed_ref"] = seed_ref
-                if supersedes:
-                    values["supersedes"] = supersedes
-                if codex_launch_mode:
-                    values["codex_launch_mode"] = codex_launch_mode
-                if sprint:
-                    values["sprint_ref"] = sprint
-                if steward_report:
-                    values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
-                self.client.call("saveTaskMetadata", task_id=task_id, values=values)
-                if steward_report:
-                    created = self.reader.show_id(task_id)
-                    if not (
-                        created["state"] == "in_progress"
-                        and created["project"] == project
-                        and created["type"] == "research"
-                        and created.get("record_type") == "task"
-                        and created["claim"]["worker"] == slug
-                        and _is_steward_report(created)
-                    ):
-                        raise _CommittedWriteError()
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
-            return created_ref
+                task_id = _positive_int(
+                    self.client.call(
+                        "createTask",
+                        project_id=board_id,
+                        title=title,
+                        description=description,
+                        column_id=column_id,
+                        swimlane_id=swimlane_id or 0,
+                        reference=created_ref,
+                    )
+                )
+                if task_id is None:
+                    raise TaskError("backend_error", "board store rejected the write", 1)
+                event["task_id"] = entity_id("task", task_id)
+                event["backend"]["task_id"] = task_id
+                try:
+                    self.audit.stage(request_id, event)
+                except OSError as exc:
+                    raise _CommittedWriteError() from exc
+                try:
+                    reference_persisted = self.reader.show_id(task_id)["ref"] == created_ref
+                except Exception as exc:
+                    raise _CommittedWriteError() from exc
+                if not reference_persisted:
+                    raise _CommittedWriteError()
+                try:
+                    values = {
+                        "record_type": "task",
+                        "task_type": task_type,
+                        "project": project,
+                        "complexity": complexity,
+                        "family_preference": family_preference,
+                        "review": review,
+                    }
+                    if live_impact:
+                        values["live_impact"] = "1"
+                    if touches_production:
+                        # Not a column: a typed field of the extension bag (board/production_rights.py).
+                        values[TOUCHES_PRODUCTION] = touches_production
+                    if wait_spec:
+                        # Not a column either: the wait card's spec (board/wait_card.py).
+                        values[wait_card.WAIT_SPEC] = wait_spec
+                    if po_origin:
+                        # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
+                        values[origin_field.PO_ORIGIN] = po_origin
+                    if po_execution:
+                        values[execution_field.PO_EXECUTION] = po_execution
+                    if blocked_by:
+                        values["blocked_by"] = blocked_by
+                    if head:
+                        values["head"] = head
+                    if review_head:
+                        values["review_head"] = review_head
+                    if slug:
+                        values["slug"] = slug
+                    if base_branch:
+                        values["base_branch"] = base_branch
+                    if seed_ref:
+                        values["seed_ref"] = seed_ref
+                    if supersedes:
+                        values["supersedes"] = supersedes
+                    if codex_launch_mode:
+                        values["codex_launch_mode"] = codex_launch_mode
+                    if sprint:
+                        values["sprint_ref"] = sprint
+                    if steward_report:
+                        values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
+                    self.client.call("saveTaskMetadata", task_id=task_id, values=values)
+                    if steward_report:
+                        created = self.reader.show_id(task_id)
+                        if not (
+                            created["state"] == "in_progress"
+                            and created["project"] == project
+                            and created["type"] == "research"
+                            and created.get("record_type") == "task"
+                            and created["claim"]["worker"] == slug
+                            and _is_steward_report(created)
+                        ):
+                            raise _CommittedWriteError()
+                except Exception as exc:
+                    raise _CommittedWriteError() from exc
+                return created_ref
 
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
@@ -2623,7 +2657,7 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import source_obligation
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             task = self.reader.show(reference)
             current = e2e_record.e2e_state(task)
@@ -2671,7 +2705,7 @@ class TaskWriter:
         for reference, task in tasks.items():
             if str(task.get("type") or TaskType.CODE.value) != TaskType.CODE.value:
                 raise TaskError("validation", f"{reference} is not a code card; it carries no e2e runs", 2)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             for reference in sorted(states):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             tasks = {reference: self.reader.show(reference) for reference in states}
@@ -2728,7 +2762,7 @@ class TaskWriter:
                                run: e2e_record.E2eRun) -> e2e_record.E2eState:
         """Update this run under the carrier lock, retaining newer marks and other runs."""
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             task = self.reader.show(reference)
             current = e2e_record.e2e_state(task)
@@ -2759,7 +2793,7 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import owns_mark
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             refs = {reference, carrier} | ({run.hotfix} if run.hotfix else set()) | ({run.disposition} if run.disposition else set())
             for ref in sorted(refs):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (ref,))
@@ -2798,9 +2832,8 @@ class TaskWriter:
         from ummanu.board.e2e_disposition import owns_mark
 
         self._role(role, {Role.DISPATCHER}, actor=actor)
-        with ownership_lock(self.data_dir), self._mutation():
-            # All nested native creates use this same ownership lock first.
-            # Read only identity before locks; actual evidence is reread below.
+        with self._mutation():
+            # Read only identity before row locks; actual evidence is reread below.
             initial = e2e_record.e2e_state(self.reader.show(carrier)).after_merge_run(run.dispatch_id)
             refs = {carrier, *(item["ref"] for item in run.covered)}
             known = self.audit.committed_event(execution_field.DISPOSITION_PREFIX + run.dispatch_id)
@@ -2892,7 +2925,7 @@ class TaskWriter:
         except (ValueError, TaskError) as exc:
             if isinstance(exc, TaskError) and exc.code != "not_found":
                 raise
-        with ownership_lock(self.data_dir), self._mutation():
+        with self._mutation():
             for reference in sorted(refs):
                 self.client._query("SELECT task_ref FROM tasks WHERE task_ref=%s FOR UPDATE", (reference,))
             tasks, missing = {}, []
@@ -3546,7 +3579,7 @@ class TaskWriter:
             finished += 1
         return finished
 
-    @serialized
+    @capacity_serialized
     def claim(
         self,
         *,
@@ -3616,8 +3649,9 @@ class TaskWriter:
             # capacity, which is how many heads the installation runs at once.
             headed = [
                 active
-                for active in self.reader.list(states=set(ACTIVE_STATES))
-                if active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
+                for selected in self.reader.capacity_peers()
+                if (active := self.reader.show(selected["ref"]))["state"] in ACTIVE_STATES
+                and active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
             ]
             for active in headed:
                 if (
@@ -4014,7 +4048,6 @@ class TaskWriter:
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
             )
 
-    @serialized
     def _transition_card(
         self,
         *,
@@ -4045,7 +4078,10 @@ class TaskWriter:
         lists that class of state as one this backend does not have.
         """
         try:
-            with self._mutation():
+            with reference_lock(self.data_dir, reference), (
+                reference_lock(self.data_dir, "capacity", lane="admission")
+                if target.value in ACTIVE_STATES else contextlib.nullcontext()
+            ), self._mutation():
                 def finish_with_wait(entity: Any) -> None:
                     if finish is not None:
                         finish(entity)
@@ -4918,7 +4954,7 @@ class TaskWriter:
         # state §7.3 says this backend does not have: a closed card beside a staged request.  For a
         # client without transactions `_mutation()` is nothing at all, so the ambiguity below — and the pending
         # record `reconcile` settles from it — is untouched.
-        with self._mutation():
+        with reference_lock(self.data_dir, reference), self._mutation():
             self.audit.stage(request_id, event)
             try:
                 # This is the final guard immediately before the destructive call.
@@ -5077,7 +5113,6 @@ class TaskWriter:
             "replayed": result.replayed,
         }
 
-    @serialized
     def _write(
         self,
         kind: str,
@@ -5128,7 +5163,11 @@ class TaskWriter:
                 "event_id": event_id,
                 "replayed": True,
             }
-        with self._mutation():
+        ownership_change = kind in {"claimed", "moved", "archived", "completed", "restored", "retired"}
+        with (reference_lock(self.data_dir, reference) if ownership_change else contextlib.nullcontext()), (
+            reference_lock(self.data_dir, "capacity", lane="admission")
+            if kind in {"claimed", "moved", "restored"} else contextlib.nullcontext()
+        ), self._mutation():
             return self._write_effect(
                 kind, role, actor, reference, request_id, payload, mutation, identity=identity
             )
@@ -5153,7 +5192,9 @@ class TaskWriter:
         """
         scope = getattr(self.client, "transaction", None)
         try:
-            with scope() if scope is not None else contextlib.nullcontext():
+            # Creates and after-merge admission can open SQL before reaching a
+            # card fence. Order their transaction against bulk recovery first.
+            with bulk_lane(self.data_dir), scope() if scope is not None else contextlib.nullcontext():
                 yield
         except (owner_events.OwnerEventError, BoardEventPending) as exc:
             cause = exc.__cause__ if isinstance(exc, BoardEventPending) else exc
@@ -5363,6 +5404,7 @@ class TaskWriter:
                 unresolved += 1
         return repaired, unresolved
 
+    @ownership_recovery
     def _finish_pending_transition(self, event: dict[str, Any]) -> None:
         """Finish one typed pending Card transition: prove it, clean up, then commit it.
 
@@ -5392,6 +5434,7 @@ class TaskWriter:
                     raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
         self.board_host.recover_transition(str(event["request_id"]))
 
+    @ownership_recovery
     def _finish_pending_cleanup(
         self,
         event: dict[str, Any],
@@ -5451,7 +5494,13 @@ class TaskWriter:
         done_id = next((identifier for identifier, title in columns.items() if title == "Done"), None)
         if done_id is None:
             raise TaskError("backend_error", "board schema is invalid", 1)
-        rows = all_project_cards(self.client, board_id)
+        from ummanu.board.sql_cards import SqlCardClient
+
+        if isinstance(self.client, SqlCardClient):
+            row = project_card_by_reference(self.client, board_id, reference)
+            rows = [row] if row is not None else []
+        else:
+            rows = all_project_cards(self.client, board_id)
         matches = [
             row
             for row in rows
@@ -5495,6 +5544,7 @@ class TaskWriter:
             and metadata.get("record_type") not in _TYPED_RECORD_TYPES
         )
 
+    @ownership_recovery
     def _finish_pending_retired(self, event: dict[str, Any]) -> None:
         """Prove a retained close or repeat it only for its original Done episode."""
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
@@ -5768,10 +5818,9 @@ class TaskWriter:
         except HostError as exc:
             raise TaskError("live_work", str(exc), 3) from exc
 
-    @serialized
     def settle_cleanup_claim(self, expected: dict[str, Any], worker: str) -> None:
         """Called only by the cleanup owner after verified head and Git settlement."""
-        with self._mutation():
+        with reference_lock(self.data_dir, expected["ref"]), self._mutation():
             task = self.reader.show(expected["ref"])
             if (task["id"] != expected["id"] or task.get("claim") != expected.get("claim")
                     or task.get("claim", {}).get("worker") != worker

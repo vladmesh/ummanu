@@ -1,23 +1,27 @@
 """Classify provider refusals of a head turn or resource probe, without secrets.
 
-Shared by the resource probe (`ummanu.head_health`, `resource_probe`) and the dispatcher's
-first-turn check (`dispatch.provider_failure`). In scope: HTTP 401/403, 429, 5xx, and a connection
-the client gave up on after its own retries; anything else is not classified here. Readers are
-pure and return only bounded, secret-free summaries. See docs/PROTOCOLS.md "Provider failure on a
-head's first turn".
+Shared by the resource probe (`ummanu.head_health`, `resource_probe`), the dispatcher's turn check
+(`dispatch.provider_failure`) and the PO runner. In scope: a spent subscription (a usage/quota
+limit, with the reset time the provider names), HTTP 401/403, 429, 5xx, and a connection the client
+gave up on after its own retries; anything else is not classified here. Readers are pure and return
+only bounded, secret-free summaries. See docs/PROTOCOLS.md "Provider failure of a head's turn".
 """
 
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ummanu.runtime.redact import scrub_secrets
 
-#: `auth` = 401/403, `rate_limit` = 429, `server` = 5xx, `reconnect` = client gave up reconnecting.
+#: `quota` = the subscription's usage limit is spent until a reset (ummanu-108), `auth` = 401/403,
+#: `rate_limit` = 429, `server` = 5xx, `reconnect` = client gave up reconnecting.
+KIND_QUOTA = "quota"
 KIND_AUTH = "auth"
 KIND_RATE_LIMIT = "rate_limit"
 KIND_SERVER = "server"
@@ -44,6 +48,28 @@ _GAVE_UP_MARKERS = (
     "stream disconnected before completion",
     "error sending request for url",
 )
+# A spent subscription, in each provider's own words. Codex: "You've hit your usage limit. ... try
+# again at Oct 9th, 2026 9:11 PM." (and `codex_error_info: usage_limit_exceeded`); Claude Code:
+# "You've hit your weekly limit · resets 1am (UTC)", "5-hour limit reached ∙ resets 3pm", the older
+# "Claude AI usage limit reached|<epoch>". Read before the status: Claude sends these as a 429, and
+# a 429 that names a reset is a spent quota, not a burst to retry through.
+_QUOTA_MARKERS = (
+    "usage limit",
+    "usage_limit_exceeded",
+    "insufficient_quota",
+    "quota exceeded",
+    "hit your limit",
+    "weekly limit",
+    "out of credits",
+)
+# "hit your weekly limit", "5-hour limit reached", "session limit reached"; not a bare "rate limit
+# reached", which is a burst the client retries through.
+_QUOTA_HIT_RE = re.compile(
+    r"hit your [a-z0-9 -]{0,24}limit|(?:usage|weekly|daily|monthly|session|opus|\d+-hour) limit reached",
+    re.IGNORECASE,
+)
+#: Codex's typed `codex_error_info` values that mean the subscription is spent.
+CODEX_QUOTA_ERROR_INFOS = frozenset({"usage_limit_exceeded", "insufficient_quota", "quota_exceeded"})
 # Claude Code's own words for an account the API refused, on a line that carries no status code.
 _CLAUDE_AUTH_MARKERS = (
     "invalid api key",
@@ -70,13 +96,18 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
 @dataclass(frozen=True)
 class ProviderError:
-    """One classified provider refusal: its kind, its status when it had one, and a safe summary."""
+    """One classified provider refusal: its kind, its status when it had one, and a safe summary.
+
+    `reset_at` is the epoch the provider itself names for the end of the refusal ("try again at",
+    "resets"), 0.0 when it names none.
+    """
 
     kind: str
     status: int | None
     summary: str
     at: float = 0.0
     source: str = ""
+    reset_at: float = 0.0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -85,7 +116,118 @@ class ProviderError:
             "summary": self.summary,
             "at": self.at,
             "source": self.source,
+            "reset_at": self.reset_at,
         }
+
+    def stamped(self, at: float, source: str) -> ProviderError:
+        """The same error, dated and attributed; a relative reset ("in 3 days") counts from `at`."""
+        reset_at = self.reset_at
+        if at and self.summary:
+            reset_at = reset_time(self.summary, now=at) or reset_at
+        return ProviderError(self.kind, self.status, self.summary, at, source, reset_at)
+
+
+def is_quota_text(text: str) -> bool:
+    """Whether a provider message says the subscription's usage limit is spent."""
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in _QUOTA_MARKERS) or bool(_QUOTA_HIT_RE.search(text or ""))
+
+
+_MONTHS = {name: index for index, name in enumerate(
+    ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"), start=1
+)}
+# Codex: "try again at Oct 9th, 2026 9:11 PM", "try again at 9:11 PM".
+_CODEX_AT_RE = re.compile(
+    r"try again at\s+(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:(\d{4}),?\s+)?)?"
+    r"(\d{1,2}):(\d{2})\s*([AaPp][Mm])?",
+)
+# "try again in 3 days", "in 2 hours 5 minutes".
+_RELATIVE_RE = re.compile(r"try again in\s+((?:\d+\s*(?:day|hour|hr|minute|min|second|sec)s?[\s,and]*)+)", re.IGNORECASE)
+_RELATIVE_PART_RE = re.compile(r"(\d+)\s*(day|hour|hr|minute|min|second|sec)", re.IGNORECASE)
+# Claude Code: "resets 1am (UTC)", "resets 3:30pm (Europe/London)", "resets Oct 9, 1am (UTC)",
+# "resets Oct 9 at 1am".
+_CLAUDE_RESETS_RE = re.compile(
+    r"(?:resets|reset at|continuing automatically at)\s+(?:([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(?:at\s+)?)?"
+    r"(\d{1,2})(?::(\d{2}))?\s*([AaPp][Mm])\s*(?:\(([^)]+)\))?",
+)
+# Claude Code before 2.x: "Claude AI usage limit reached|1759712400".
+_EPOCH_RE = re.compile(r"limit reached\|(\d{10})\b", re.IGNORECASE)
+
+
+def _hour(hour: int, meridiem: str | None) -> int:
+    if not meridiem:
+        return hour
+    hour %= 12
+    return hour + 12 if meridiem.lower() == "pm" else hour
+
+
+def _zone(name: str | None) -> Any:
+    if not name:
+        return None
+    if name.strip().upper() in ("UTC", "GMT", "Z"):
+        return UTC
+    try:
+        return ZoneInfo(name.strip())
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def _next_at(now: float, zone: Any, month: int | None, day: int | None, year: int | None,
+             hour: int, minute: int) -> float:
+    """The first moment at or after `now` matching the named wall time, in `zone` (local when None)."""
+    current = datetime.fromtimestamp(now, zone) if zone is not None else datetime.fromtimestamp(now)
+    try:
+        candidate = current.replace(
+            year=year or current.year,
+            month=month or current.month,
+            day=day or current.day,
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0,
+        )
+    except ValueError:
+        return 0.0
+    if candidate.timestamp() < now - 60:
+        if month is None:
+            candidate += timedelta(days=1)
+        elif year is None:
+            try:
+                candidate = candidate.replace(year=candidate.year + 1)
+            except ValueError:
+                return 0.0
+    return candidate.timestamp()
+
+
+def reset_time(text: str, *, now: float | None = None) -> float:
+    """The epoch at which the provider says the refusal ends, or 0.0 when it names no time.
+
+    A wall time with no zone is read in this host's local zone, the zone the CLI printed it in.
+    """
+    reference = time.time() if now is None else now
+    text = str(text or "")
+    match = _EPOCH_RE.search(text)
+    if match:
+        return float(match.group(1))
+    match = _CODEX_AT_RE.search(text)
+    if match:
+        month = _MONTHS.get((match.group(1) or "").lower()[:3]) if match.group(1) else None
+        day = int(match.group(2)) if match.group(2) else None
+        year = int(match.group(3)) if match.group(3) else None
+        return _next_at(reference, None, month, day, year,
+                        _hour(int(match.group(4)), match.group(6)), int(match.group(5)))
+    match = _CLAUDE_RESETS_RE.search(text)
+    if match:
+        month = _MONTHS.get((match.group(1) or "").lower()[:3]) if match.group(1) else None
+        day = int(match.group(2)) if match.group(2) else None
+        return _next_at(reference, _zone(match.group(6)), month, day, None,
+                        _hour(int(match.group(3)), match.group(5)), int(match.group(4) or 0))
+    match = _RELATIVE_RE.search(text)
+    if match:
+        units = {"day": 86400, "hour": 3600, "hr": 3600, "minute": 60, "min": 60, "second": 1, "sec": 1}
+        seconds = sum(int(count) * units[unit.lower()] for count, unit in _RELATIVE_PART_RE.findall(match.group(1)))
+        return reference + seconds if seconds else 0.0
+    return 0.0
 
 
 def status_code(text: str) -> int | None:
@@ -120,6 +262,13 @@ def classify_provider_error(text: str, *, status: int | None = None) -> Provider
     wins over reconnect wording (reconnected five times, then 401, is a 401).
     """
     code = status if status is not None else status_code(text)
+    if is_quota_text(text):
+        # The line that says so, not the first line: a CLI's banner comes before its error.
+        line = next((line for line in str(text).splitlines() if is_quota_text(line)), text)
+        return ProviderError(
+            KIND_QUOTA, code if kind_of_status(code) else None, summarize_provider_error(line),
+            reset_at=reset_time(text),
+        )
     kind = kind_of_status(code)
     if not kind:
         lowered = (text or "").lower()
@@ -178,14 +327,23 @@ def _codex_error_text(value: Any) -> str:
     return str(value or "")
 
 
-def codex_first_turn_failure(events: Iterable[Any]) -> ProviderError | None:
-    """The provider error a Codex session's first turn ended on, or None.
+def _codex_turn_error(value: Any) -> ProviderError | None:
+    """The provider error one `task_complete.error` (or `error` event) carries, or None.
 
-    Read from the rollout journal: a refused turn ends with a `task_complete` carrying
-    `error.message`; older journals emit a separate `error` event and close the turn with no agent
-    message. Answers the last completed turn's error only while no earlier completed turn was clean;
-    an open turn answers nothing.
+    Codex's typed `codex_error_info` names a spent subscription even where its words change.
     """
+    text = _codex_error_text(value)
+    info = str(value.get("codex_error_info") or "") if isinstance(value, Mapping) else ""
+    found = classify_provider_error(text) if text else None
+    if info in CODEX_QUOTA_ERROR_INFOS and (found is None or found.kind != KIND_QUOTA):
+        return ProviderError(
+            KIND_QUOTA, None, summarize_provider_error(text or info), reset_at=reset_time(text)
+        )
+    return found
+
+
+def _codex_turns(events: Iterable[Any]) -> list[tuple[ProviderError | None, bool]]:
+    """Each completed turn of a Codex rollout, in order: the provider error it ended on, and clean."""
     turns: list[tuple[ProviderError | None, bool]] = []
     pending: ProviderError | None = None
     for event in events:
@@ -195,37 +353,63 @@ def codex_first_turn_failure(events: Iterable[Any]) -> ProviderError | None:
         if kind == "task_started":
             pending = None
         elif kind in ("error", "stream_error"):
-            found = classify_provider_error(_codex_error_text(view.get("message") or view.get("error")))
+            found = _codex_turn_error(view.get("error") or view.get("message"))
             if found is not None and kind == "error":
-                pending = ProviderError(found.kind, found.status, found.summary, stamp, "codex-rollout")
+                pending = found.stamped(stamp, "codex-rollout")
         elif kind == "task_complete":
-            error_text = _codex_error_text(view.get("error"))
-            if error_text:
-                found = classify_provider_error(error_text)
-                failure = (
-                    ProviderError(found.kind, found.status, found.summary, stamp, "codex-rollout")
-                    if found is not None
-                    else None
-                )
-                turns.append((failure, False))
+            raw_error = view.get("error")
+            if _codex_error_text(raw_error) or (
+                isinstance(raw_error, Mapping) and raw_error.get("codex_error_info")
+            ):
+                found = _codex_turn_error(raw_error)
+                turns.append((found.stamped(stamp, "codex-rollout") if found is not None else None, False))
             elif pending is not None and not view.get("last_agent_message"):
-                turns.append(
-                    (
-                        ProviderError(pending.kind, pending.status, pending.summary, stamp, pending.source),
-                        False,
-                    )
-                )
+                turns.append((pending.stamped(stamp, pending.source), False))
             else:
                 turns.append((None, True))
             pending = None
-    if not turns:
-        return None
-    last_failure, _ = turns[-1]
-    if last_failure is None:
+    return turns
+
+
+def codex_first_turn_failure(events: Iterable[Any]) -> ProviderError | None:
+    """The provider error a Codex session's first turn ended on, or None.
+
+    Read from the rollout journal: a refused turn ends with a `task_complete` carrying
+    `error.message`; older journals emit a separate `error` event and close the turn with no agent
+    message. Answers the last completed turn's error only while no earlier completed turn was clean;
+    an open turn answers nothing.
+    """
+    turns = _codex_turns(events)
+    if not turns or turns[-1][0] is None:
         return None
     if any(clean for _, clean in turns[:-1]):
         return None
-    return last_failure
+    return turns[-1][0]
+
+
+def codex_turn_failure(events: Iterable[Any]) -> ProviderError | None:
+    """The provider error a Codex session's last completed turn ended on, whichever turn it was.
+
+    The mid-run reading (ummanu-108): a head that worked for an hour and then ran into its usage
+    limit is as refused as one refused on its first turn. A later clean turn ends it; an open turn
+    after the failed one answers nothing.
+    """
+    items = list(events)
+    if _codex_turn_open(items):
+        return None
+    turns = _codex_turns(items)
+    return turns[-1][0] if turns else None
+
+
+def _codex_turn_open(events: list[Any]) -> bool:
+    """Whether the rollout's last turn started and has not completed."""
+    for event in reversed(events):
+        kind = str(_codex_view(event).get("type") or "")
+        if kind == "task_complete":
+            return False
+        if kind == "task_started":
+            return True
+    return False
 
 
 def _claude_text(record: Mapping[str, Any]) -> str:
@@ -259,9 +443,7 @@ def claude_api_error(record: Mapping[str, Any]) -> ProviderError | None:
         if kind is None:
             return None
         found = ProviderError(kind, None, summarize_provider_error(text or str(record.get("error"))))
-    return ProviderError(
-        found.kind, found.status, found.summary, _epoch(record.get("timestamp")), "claude-session"
-    )
+    return found.stamped(_epoch(record.get("timestamp")), "claude-session")
 
 
 def _claude_clean_turn_end(record: Mapping[str, Any]) -> bool:
@@ -293,23 +475,63 @@ def claude_first_turn_failure(records: Iterable[Any]) -> ProviderError | None:
     return claude_api_error(last)
 
 
+def claude_turn_failure(records: Iterable[Any]) -> ProviderError | None:
+    """The provider error a Claude Code session's last turn ended on, whichever turn it was.
+
+    The mid-run reading (ummanu-108): the last user/assistant record is an API error record. A new
+    prompt or a clean answer after it ends it.
+    """
+    last: Mapping[str, Any] | None = None
+    for record in records:
+        if isinstance(record, Mapping) and record.get("type") in ("user", "assistant"):
+            last = record
+    return claude_api_error(last) if last is not None else None
+
+
 #: How many bottom screen lines may hold the error line the turn ended on (error, blank, prompt box).
 SCREEN_ERROR_WINDOW = 12
 
+# What may stand before a refusal on its own line: whitespace and the glyph the CLI draws an error
+# under (Claude's `⎿`, Codex's `■`), nothing else. Agent prose is drawn under `●`/`•`, tool output and
+# a grep hit start with anything at all; none of them is the CLI refusing.
+_SCREEN_ERROR_LEAD_RE = re.compile(r"^[\s⎿■✗✘×⚠│]*")
+# The refusals themselves, anchored at the start of that line. A spent quota counts only in the
+# CLIs' refusal wording, with the reset they name: Codex's "You've hit your usage limit ... try again
+# at/in ...", Claude's "You've hit your <window> limit · resets ..." / "<window> limit reached ∙
+# resets ..." / "... limit reached|<epoch>". Their warnings ("Approaching your 5-hour usage limit",
+# "Heads up, you have less than 10% of your weekly limit left") never match (ummanu-108 review).
+_SCREEN_REFUSALS = (
+    re.compile(r"^api error\b", re.IGNORECASE),
+    re.compile(r"^(?:error:\s*)?you[’']ve hit your usage limit\b.*\btry again (?:at|in)\b", re.IGNORECASE),
+    re.compile(r"^you[’']ve hit your [a-z0-9 -]{0,24}limit\b.*\bresets?\b", re.IGNORECASE),
+    re.compile(
+        r"^(?:claude ai )?(?:usage|weekly|daily|monthly|session|opus|\d+-hour) limit reached\b"
+        r".*(?:\bresets?\b|\|\d{10})",
+        re.IGNORECASE,
+    ),
+    *(re.compile(rf"^{re.escape(marker)}", re.IGNORECASE) for marker in _CLAUDE_AUTH_MARKERS),
+)
+
+
+def screen_refusal_text(line: str) -> str:
+    """The refusal a screen line shows, with its glyph removed, or "" when it shows none."""
+    text = _SCREEN_ERROR_LEAD_RE.sub("", _ANSI_RE.sub("", line or "")).strip()
+    return text if any(pattern.search(text) for pattern in _SCREEN_REFUSALS) else ""
+
 
 def screen_turn_failure(lines: Iterable[str]) -> ProviderError | None:
-    """The provider error the bottom of a Claude head's screen shows, or None.
+    """The provider error the bottom of an idle head's screen shows, or None.
 
-    Last resort when no session record is readable. Only lines just above the prompt in Claude
-    Code's own error shape count, so earlier output is not mistaken for the turn's end.
+    Last resort when no session record is readable. Only a line in one of the CLIs' own refusal
+    shapes counts (`screen_refusal_text`), so a warning, the agent's prose or tool output that merely
+    mentions a limit is never read as a refusal, and earlier output is not mistaken for the turn's end.
     """
     visible = [line.strip() for line in lines if line.strip()]
     for line in reversed(visible[-SCREEN_ERROR_WINDOW:]):
-        lowered = line.lower()
-        if "api error" not in lowered and not any(marker in lowered for marker in _CLAUDE_AUTH_MARKERS):
+        text = screen_refusal_text(line)
+        if not text:
             continue
-        text = line[lowered.find("api error") :] if "api error" in lowered else line.lstrip("⎿ ").strip()
         found = classify_provider_error(text)
         if found is not None:
-            return ProviderError(found.kind, found.status, found.summary, 0.0, "pty-screen")
+            return found.stamped(time.time(), "pty-screen")
     return None

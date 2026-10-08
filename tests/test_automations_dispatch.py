@@ -11,8 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu.automations.runtime import dispatch
-from ummanu.runtime import codex_preflight
-from ummanu.runtime import state as runtime_state
+from ummanu.runtime import codex_preflight, state as runtime_state
 from ummanu.runtime.head import HeadSpec
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
@@ -78,6 +77,8 @@ class TriggeredDispatchTests(unittest.TestCase):
         self.assertIn("ummanu.memory.grant_env", command)
         self.assertIn(str(Path(run.pid_file)), command)
         self.assertNotIn("UMMANU_MEMORY_ACCESS_TOKEN=", command)
+        self.assertNotIn("env $(", command, "the bearer must not become an argv entry")
+        self.assertIn('export "$grant"', command)
 
     def test_unreadable_pause_state_blocks_dispatch_and_is_reported(self) -> None:
         output = io.StringIO()
@@ -117,7 +118,7 @@ class StandingHeadReadinessTests(unittest.TestCase):
     dispatcher leaves them, so no probe runs: a fresh cache entry answers within the TTL.
     """
 
-    REGISTRY = {
+    REGISTRY = {  # noqa: RUF012
         "resources": {
             "claude-sub": {"account": "claude", "probe": "false"},
             "openai-sub": {"account": "openai", "probe": "false"},
@@ -183,7 +184,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
     to the head across the supervisor's boundary after it is up.
     """
 
-    REGISTRY = {
+    REGISTRY = {  # noqa: RUF012
         "resources": {"openai-sub": {"account": "openai-subscription", "probe": "true"}},
         "profiles": {"codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []}},
         "role_defaults": {"retro": "codex"},
@@ -419,11 +420,11 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         with (
             mock.patch.object(dispatch, "_local_pty_runtime", return_value=runtime),
             mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation),
+            self.assertRaises(dispatch.CodexPreflightError),
         ):
-            with self.assertRaises(dispatch.CodexPreflightError):
-                dispatch._supervised_bring_up(
-                    "retro", self.workspace, self._state(), "dispatch", self.command
-                )
+            dispatch._supervised_bring_up(
+                "retro", self.workspace, self._state(), "dispatch", self.command
+            )
 
         self.assertEqual(runtime.starts, [])
         self.assertIn('trust_level = "untrusted"', config.read_text(encoding="utf-8"))

@@ -2,7 +2,77 @@
 
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
-## Статус на 2026-10-06 (main `72f7849478882ec160b1f305463a0e545ea0bd04`)
+## Статус на 2026-10-08 (main `488b2818704e4bc0d42910fab20f3829bb804dc5`)
+
+Сверка выполнена по исходникам и тестам текущего main, а не по названиям PR. Девять PR
+#684–#692 действительно влиты. Во время проверки main уже включал #693–#695; они тоже
+учтены, иначе план снова предлагал бы выполненную работу. База прежней актуализации —
+`72f78494` (#683), утренний срез после #692 — `8e66aef9`, текущий проверенный срез —
+`488b2818` (#695). Ветка #668 синхронизирована с этим main без мержа самого audit PR.
+
+**Правило статусов.** ✅ означает закрытое конкретное обязательство; ◐ — частичное закрытие
+ID, с явно названным остатком. Закрытие причины из профиля 5 октября не доказывает сегодняшние
+production p50/p95, RPO или полный acceptance спринта. §1–§9 сохраняют исходные наблюдения,
+размеры и ссылки; текущие исключения перечислены здесь. §12 сохранён побайтно как история.
+Прежняя сверка от 6 октября ниже также сохранена, но её список «что осталось» заменён §10.
+
+### Проверенные поставки после #683
+
+| PR / merge в main | Подтверждение в коде и тестах | Статус относительно аудита |
+|---|---|---|
+| [#684](https://github.com/vladmesh/ummanu/pull/684), `aba0b6bd` | `tests/source_trees.py` переиспользует AST; пять тяжёлых модулей перенесены из unit в component/runtime-component/packaging; `test_po_scoped_launch` передаёт короткий timeout явно. `ci-shards.txt` сохраняет каждый модуль ровно один раз | Поддерживающая CI-работа. TEST-01/02, TDUP/TORG и BUG-22 целиком **не** закрыты; опубликованные времена PR — измерения того кандидата |
+| [#685](https://github.com/vladmesh/ummanu/pull/685), `6ffa3d18` | `_recover_pending` фильтрует snapshot mark до `show`/supersession; архивный SQL reference не вызывает `getAllTasks`; `remember_into` обнаруживает действительную разницу; production replay limit = 5. Регрессии: `test_e2e_disposition`, `test_board_identity.ArchivedReferenceTests`, `test_owned_cleanup` | ✅ четыре hotfix-обязательства §12.17; ◐ INEF-01/07. Limit 5 сам по себе не ограничивает elapsed cost |
+| [#686](https://github.com/vladmesh/ummanu/pull/686), `8b23b07f` | Tick phases, bounded ring последних 100 ticks, nearest-rank p50/p95 в status, doctor finding при p95 > 300 s; `test_tick_telemetry` проверяет errors/freeze/readers. #690 добавляет reconcile подфазы и counters | ✅ инструмент измерения; не исправление всех slow paths и не доказательство production latency |
+| [#687](https://github.com/vladmesh/ummanu/pull/687), `93eb9018` | `board/tick_snapshot.py` живёт только в одном working tick; active/ready/observer/after-merge selections используют его. SQL archive query фильтрован, `show_id` — point lookup, next reference — SQL high-water query; checkpoint использует `getBoardRows`. `board_write` инвалидирует и неуспешные мутации. Live point reads и capacity admission сохранены. `test_tick_board_snapshot` проверяет freshness/rollback/create | ✅ повторные полные selection scans и after-merge `restore_snapshot`; ◐ INEF-06. Snapshot — selection view, не один SQL-запрос на весь тик и не cached authority для мутаций |
+| [#688](https://github.com/vladmesh/ummanu/pull/688), `591f76ea` | На `production_tick`/probe больше нет wide `@serialized`. `production-tick.lock` остаётся singleton; cleanup publication коротко держит ownership lock, эффекты защищены reference/lifecycle lanes и SQL ownership revalidation; bulk recovery имеет свой lane. `test_narrow_cleanup_lock`, `test_bulk_ownership_lane`, `test_cleanup_lock_sql` | ✅ wide cleanup-lock obligation. Не удалять локальные fences при будущей декомпозиции |
+| [#689](https://github.com/vladmesh/ummanu/pull/689), `6b592b22` | Coordinator вынесен в `infra/checkpoint_run.py`; `checkpoint-run`, собственные state/lock, packaged oneshot + timer. Working/frozen tick не вызывают checkpoint. Readers предпочитают новый state и fail closed при его повреждении; legacy fallback только при отсутствии файла. SQL cut — read-only REPEATABLE READ. `test_checkpoint_run` | ✅ checkpoint вне тика/cleanup lock. Cadence cut 300 s и remote push window 30 min различаются; реальный RPO не измерялся в этой сверке. Горячий `redact`, INEF-08/09 и большой `checkpoint.py` остаются |
+| [#690](https://github.com/vladmesh/ummanu/pull/690), `69af2b90` | `CodexProviderEventIngress.poll` пишет advisory cursor один раз за scan; meaningful events/binding сохраняют durable порядок. Journal v2: per-intent files, generated buckets, meta cursor, атомарная migration/archive legacy. Cleanup projection исключает provider source; `remember_record` проверяет digest/file state. `test_codex_provider_event_ingress`, `test_cleanup_journal_layout` | ✅ per-line write storm и монолитная перезапись cleanup; ◐ INEF-01/07. `remember_record` всё ещё вычисляет Git identity до cache hit |
+| [#691](https://github.com/vladmesh/ummanu/pull/691), `80a94d6f` | `_attempt_due`/`reserve_attempt`: общий retry cooldown 3600 s для всех replay entrypoints. Terminal preserved различает disappeared workspace, retained registration, unregistered project и settled followers; не подделывает removal/preservation proof. Done ignored caches идут через pinned no-follow cleanup. `test_owned_cleanup` проверяет restart/request/fences/terminal outcomes | ✅ бесконечные dead-end retries и известный Done-cache residue scope. Registered-disabled/нечитаемая identity остаются retryable; terminal — видимый retained outcome, а не «всё удалено» |
+| [#692](https://github.com/vladmesh/ummanu/pull/692), `8e66aef9` | `_disposable_leaf` разрешает leaf symlink строго внутри реальной ignored `.venv`; `_ConfinedDirectories` переиспользует descriptors только внутри одного pinned pass. Root/ancestor symlinks, author dirt, observer caches не disposable. Реальный venv и external/dangling targets проверены в `test_owned_cleanup` | ✅ уточнение cache policy и устранение повторного открытия parent на каждой cache entry. Это не общее разрешение удалять временные/ignored файлы |
+| [#693](https://github.com/vladmesh/ummanu/pull/693), `d7001824`, затем [#694](https://github.com/vladmesh/ummanu/pull/694), `6584ddc9` | В main присутствует итоговая #694: `runtime/head/handoff.py`, общий 4 s allowance с fair share; `LocalPtyHeadRuntime._handoff_prompt` ограничивает supervisor I/O и ожидания. Durable continuation/reviewer launch остаются pending между ticks; нет blocking production fallback при неизвестном floor. `test_production_head_handoff` и continuation/review regressions | ◐ INEF-13: production continuation/reviewer handoff исправлен; interactive waits, другие callers, journal/procfs/import cost и весь non-head reconcile не закрыты. #693 — промежуточная поставка, не второе независимо закрытое обязательство |
+| [#695](https://github.com/vladmesh/ummanu/pull/695), `488b2818` | Production `cleanup.replay(limit=5, allowance=4.0)` имеет общий monotonic budget: selection, locks, SQL driver waits, subprocess/head work, traversals и cursor publication. Cut-short progress остаётся durable pending; новый v1 journal не мигрирует внутри bounded replay. `test_bounded_cleanup_replay` проверяет deadline/crash/ambiguity/fairness | ✅ отсутствие elapsed bound у automatic cleanup replay в коде. Unlimited manual callers и ordinary writer migration намеренно остаются; hard wall-time гарантия для fsync/OS scheduling и production phase ≤5 s не заявляются |
+
+### Текущие статусы затронутых ID и остатки
+
+| ID | Статус | Что больше не делать | Реальный остаток / владелец §10 |
+|---|---|---|---|
+| INEF-01 | ◐ #685/#687/#690 | Не возвращать задачу «перестать переписывать 38–50 MB cleanup.json», фильтр `_recover_pending` или archive duplicate scan | `runtime.save_records:919` → `cleanup.remember_record:1475` → `_workspace_identity:1457` → `_identity:678`: Git root/common/admin/HEAD/ref и registration вычисляются **до** digest/cache hit. Cache убирает board/journal I/O, не Git. Измерить точные вызовы на неизменном и изменённом record; оптимизировать в slot 7 без ослабления identity admission. Лишний полный commit из observer progress проверить там же |
+| INEF-07 | ◐ #687/#690 | Не планировать provider cursor persist на каждую raw line и after-merge full-board restore | `save_records` всё ещё без change detection пишет production-state; wait/review paths могут сохранять несколько раз, `parks_for_decision` всё ещё читает sprint. Slot 5 сохраняет обязательные before-effect writes; slot 8 устраняет только доказанные no-op/дубли после счётчиков. Не сливать записи, защищающие crash recovery |
+| INEF-06 | ◐ #687 | `TaskReader.show_id:1025` / SQL `getTaskById:1049` уже не перечисляют всю доску; archived SQL lookup и allocator scan закрыты | Остаточные non-SQL fallback и retirement/recovery reads сверить в slot 10; bulk restore сокращает interactive confirmation, но `call_batch` на SQL не доказывает устранение всех N+1 writes (INEF-16) |
+| INEF-13 | ◐ #693/#694 | Не проектировать заново resumable production handoff / общий I/O budget | Blocking interactive path и прочие callers не исчезли. Оптимизации только по новому профилю в slot 12; историческое отсутствие этих waits в профиле 5 октября не опровергает поздние handoffs |
+| TEST-01/02, TDUP/TORG, BUG-22 | Без нового полного закрытия | Не повторять AST cache и пять suite transfers #684 | Большой `test_dispatcher`, Docker-gated pure classes, helpers/fixtures, root-only и timing остаются у subsystem owners; #684 не выполняет slot 16 |
+| BUG-15/17/18/19, CON-03/04/06/17/18, INEF-03 | Открыты | Не считать их закрытыми по новой telemetry/lock/cleanup policy | В current main прежние seams существуют: provider previous cursor без run guard (`wait_vitality:1069–1072`); observer reason не присваивается (`observer:2170`); gate возвращает stale episode (`gate_lifecycle:866`); reviewer stop exception пропускает worker (`pause_ops:451–454`); fence видит только `status == blocked` (`production:1106`), хотя gate/watchdog возвращают ok/to=blocked; claim ищет unsuffixed IDs (`claim:627`), healthy policy теряет intent (`wait_vitality:627`). Slot 5. Намеренность CON-03/18 и достижимость BUG-19 остаются проверяемыми гипотезами |
+| BUG-12 | Открыт | Новый create/restore batching #687 не равен pending-create parity | Normal create (`tasks:1906–1917`) пишет `record_type`/production marker; `_finish_pending_create` использует `_create_metadata_values:5936`, где этих полей для обычной operation нет. Сначала regression в slot 9 |
+| DEC-01/02/04/05/07; ARCH-01 | Открыты / прежний частичный статус ARCH-01 | Не брать исходные line ranges за нынешние границы; новые leaf modules не равны полной декомпозиции | Tasks/host/observer/local-pty/pages остаются большими; cleanup особенно вырос. Переснимать inventory перед extraction; HandoffOperation, TickSnapshot, CheckpointRun и journal API сохранять как существующие seams |
+| Backup/checkpoint decomposition, INEF-08/09 | Открыты, coordinator extraction уже выполнен #689 | Не выносить coordinator из production повторно и не «ускорять тик» переносом checkpoint ещё раз | Snapshot/audit/restore helpers и секретно-безопасный `redact` остаются в slot 14; стоимость проверять в checkpoint service отдельно от tick |
+
+**Следующий логичный PR — slot 5:** outcomes/fences, cursor identity, observer reason,
+freeze/stop и recovery-policy contracts с failure regressions. Slot 6 перестаёт быть отдельной
+поставкой: его основные acceptance obligations уже выполнены; остатки распределены между
+slot 7 (Git identity/host seam) и slot 8 (production-state writes/journal decomposition).
+Десять оставшихся связанных поставок и их исключения перечислены в §10.
+
+**Что эта сверка не подтверждает.** Production не менялся, live instance/board не читались.
+Исторические секунды/CPU/размеры §12 относятся к указанным там версиям. Нет заявления о закрытии
+всего performance acceptance или о безопасном удалении legacy API (DEAD-T/R/H1/22/25).
+
+### Проверки актуализации
+
+- Проверенный main `488b2818704e4bc0d42910fab20f3829bb804dc5`: [post-merge CI #695](https://github.com/vladmesh/ummanu/actions/runs/37817240563) — **success**. Это evidence исходного main, не будущего head #668.
+- Локальный focused-набор: 322 tests, 321 успешный, один error при создании AF_UNIX socket
+  (`test_bounded_cleanup_replay`): `PermissionError: Operation not permitted` в этой среде.
+- Отдельный `test_owned_cleanup`: 166 tests, 156 успешных, 10 errors на чтении `/proc/<child>/stat`
+  при публикации heartbeat; child PID недоступен в локальной среде. Terminal/cooldown/real-venv
+  сценарии прошли. Оба прогона **не** считаются зелёными полными наборами; tests не изменялись.
+- `test_old_name_guard` + `test_ci_shards`: 47 tests — **OK**; manifest `--check` и настоящий
+  guarded `--fast` (6 tests) — **OK**. `git diff --check` — чисто.
+- §12 из исходного audit head `96ebc7a6` совпадает побайтно, SHA-256:
+  `b6bc5010dd6411acc2cd584146f13e26a9b44da815654155d6937b215135b1f3`.
+- Весь source относительно проверенного main неизменен, кроме уже существовавшей exact-path
+  historical классификации `opus_review.md` в guard/docs. Эта актуализация меняет только отчёт;
+  runtime fixes/новые tests не добавляются. CI нового head проверяется отдельно в checks #668.
+
+## Историческая сверка на 2026-10-06 (main `72f7849478882ec160b1f305463a0e545ea0bd04`)
 
 После аудита в `main` влиты #669–#683. Слот 4 закрыт последовательностью #679/#681/#683: #679 поставил idle-retirement, #681 доставил standing-role skills в фактические Codex workspaces (DOC-06), #683 закрыл BUG-10/11/16, DOC-12 и остаточную передачу memory bearer через argv. CON-13/14 перенесены в слот 12 (Local-PTY), CON-15 — в слот 11 (CLI/role-env), поэтому они больше не держат слот 4 открытым. #682 — отдельная продуктовая работа по provider fallback; она учтена как изменение текущего main, но не как remediation-PR этого аудита. **✅** — закрыто, **◐** — закрыто частично. Исторические production-наблюдения ниже сохранены и помечаются как история, если дефект уже закрыт.
 
@@ -1153,13 +1223,34 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - #683: candidate `a64d5a053c06a73588940d44cee344a26d358afd`, exact-SHA CI run `37527062690` — **success**: lint, typecheck, unit, component/runtime-component, integration-dispatcher/board/heads/recovery/memory, packaging и агрегат `test`.
 - #683 merge/main: `72f7849478882ec160b1f305463a0e545ea0bd04`; post-merge CI run `37528487367` — **success**: lint, typecheck, все suites и агрегат `test` зелёные. Scope #683: 8 файлов, без CON-13/14/15 и без расширения в provider fallback #682.
 
-## 10. План следующих 15–17 PR (отсчёт с #677)
+## 10. Пересобранный план на 2026-10-08 (отсчёт с #677)
 
 **Бюджет уточнён владельцем 2026-10-06:** 15–17 реализационных PR **с текущего момента**,
 начиная с web-блока #677. Ранее влитые #669–#676 и открытый PR с этим отчётом #668 в этот бюджет
 не входят. Ни один частично закрытый пункт не считается завершённым по названию PR.
 
-Выполнены логические слоты **1–4**. В remediation-бюджет аудита вошли **6 реализационных PR: #677, #678, #679, #680, #681 и #683**; #682 — отдельная продуктовая работа и в этот счёт не входит. Остаются **11 продуктовых поставок**, по одной на слоты **5–15**. Слот 16 по-прежнему распределён внутрь владельцев, а slot 17 становится не отдельным продуктовым PR, а финальной документационной сверкой в #668 после инкрементальных doc-правок. При текущей нарезке это даёт **17 remediation-PR всего = 6 выполненных + 11 оставшихся**, то есть верхнюю границу согласованного бюджета 15–17. Если один из оставшихся разрезов потребует деления, бюджет пересчитывается явно; независимые подсистемы ради арифметики не смешиваются.
+Прежний прогноз **6 выполненных + 11 оставшихся = 17 PR** был планом от 6 октября,
+а не ограничением, которому соответствует нынешняя история. После #683 влиты #684–#695:
+12 дополнительных PR, из которых #684/#686 — CI/измерительная инфраструктура, #693/#694 —
+две стадии одного handoff increment, остальные — performance/cleanup deliveries.
+При строгом учёте всех этих связанных поставок уже **18 PR = 6 + 12**; без двух
+поддерживающих PR — 16. Нельзя скрывать отдельные PR в одном логическом слоте и продолжать
+обещать всего 17. #669–#676, audit #668 и независимый provider fallback #682 по-прежнему
+не входят в этот счёт.
+
+Слоты **1–4 завершены**. Основной performance scope слота **6 поставлен** последовательностью
+#685–#692 и дополнен #693–#695. INEF-01/06/07/13 остаются частичными ID с остатками,
+но отдельный общий slot-6 PR отменён: Git identity/host persistence уходит в 7,
+state publication и cleanup decomposition — в 8, safety-sensitive write ordering — в 5,
+SQL/retirement residue — в 10, прочие PTY callers — в 12. Существующие fixes не реализуются снова.
+
+Остаются **10 связанных продуктовых поставок: 5, 7–15**. Слот 16 распределён по владельцам,
+slot 17 — инкрементальные docs и финальная сверка в #668. Строгая рабочая оценка теперь
+**28 PR = 18 поставленных + 10 оставшихся** (26 без #684/#686); это явный пересчёт,
+а не новый согласованный владельцем лимит. Если требуется вернуться к меньшему числу,
+нужно отдельно выбрать отложенные структурные scopes; независимо нужные изменения не
+объединяются ради арифметики. Новая поставка performance work допускается только после
+нового профиля, показывающего остаток, который не покрывают нынешние owners.
 
 **Рабочая группировка остатка слота 16 (план, не выполненная работа):**
 
@@ -1183,16 +1274,16 @@ Docs и manifest обновляются при каждом переносе, с
 | 2 ✅ | CI и герметичность тестовой инфраструктуры, #678 | BUG-03/23 (тесты), CI-01 и DOC-14 закрыты. BUG-22 — env/catalogue/assertions; ARCH-06 — config и затронутые paths; небольшие support helpers переиспользованы. TDEAD-01–06, массовые TDUP/TORG, root-only и timing остаются в слоте 16; остальные импортные блоки ARCH-06 идут со своими подсистемами | Реальный guarded fast в CI; unit без memory-extra; lint/typecheck и все suites входят в агрегат; состав manifest сохранён с явным переносом SQL proof |
 | 3 ✅ | Свежая установка и конфигурация данных, #680 | BUG-02/06/08/09/13/21, CON-01/09/16 и DOC-02 закрыты. Явная editable `.venv`, единый memory config и metadata-aware retry, согласованные frontmatter/env, controlled malformed-input refusals. CON-01/16 закрепляют совместимость legacy-полей и descriptive manifest. В DOC-15 закрыты shipped examples; только ROADMAP остаётся Г в слоте 17. Decomposition installation/upgrade остаётся в слоте 15 | Native disposable editable packaging/provenance smoke; recovery retry без повторного board import; round-trip форматов и повреждённые входы; exact-SHA CI. Clean-host VPS drill не заявляется |
 | 4 ✅ #679/#681/#683 | Постоянные роли и identity повторного запуска | Idle-retirement (#679), фактическая доставка standing-role skills в Codex workspaces (DOC-06, #681), steward workspace discovery (BUG-10), incarnation-safe admission/stop acknowledgement (BUG-11/16), removal PO-only interactive authority (DOC-12) и отсутствие bearer в argv (#683). CON-13/14 перенесены в slot 12, CON-15 — в slot 11 | Регрессии двух инкарнаций одного run, current-layout orphan discovery, interactive-role authority и argv shape; exact-SHA CI #683 зелёный |
-| 5 | Контракты тика, vitality и остановки | BUG-15/17/18/19, CON-03/04/06/17/18; INEF-03, DUP-D14/15/16/19 в части уже разошедшихся правил, остаток комментариев DOC-09. Единые привязки курсоров, outcomes, blocked fence и reason; ошибка остановки reviewer не пропускает worker | Сценарии respawn, pause/freeze, gate/healthy tick и отказов; причины и request id фиксируются до упрощения |
-| 6 | Горячий путь диспетчера и cleanup-журнала | INEF-01/07 и дополнение §12.17: курсор provider-ingress не запускает полное чтение/сохранение cleanup на каждую строку rollout; `_recover_pending` не перечисляет всю доску ради одной ссылки. Разрез `cleanup_journal`/`cleanup_inventory` только внутри этой задачи | Счётчики I/O и запросов на production-shaped fixture; crash/replay и долговечность cursor/cleanup сохраняются; без обещания нового prod-тайминга до измерения |
-| 7 | Host, prompt-документы и GitHub CI API | DEC-02, ARCH-07/08/15, DUP-D4/5/6/11/13/18; DEAD-04/05/12 и относящиеся к host части DEAD-10/16. Листовой parser worktree, host catalogue, prompt/heads/git/workspace части. Сжатие ARCH-01 в этих файлах | Патчи через `self` работают; сообщения, request id, git-команды и CI-результаты те же; после поведенческих шагов 4/5 |
-| 8 | Observer, persisted records и чистая vitality-декомпозиция | DEC-04, DUP-D1/2/3/7/8/9/10/17 и остатки D14–19; DEAD-06/09/11 по доказанным потребителям. `_PersistedMapping`, сериализация и чистые ветви редуктора; остаток ARCH-01 в dispatch. Намеренный stdlib-only дубль не удалять в неверную сторону | Golden JSON round-trip с порядком ключей, все vitality verdicts; баги политики уже закрыты шагом 5 |
+| 5 — следующий | Контракты тика, vitality и остановки | BUG-15/17/18/19, CON-03/04/06/17/18; INEF-03, DUP-D14/15/16/19 в части разошедшихся правил, остаток DOC-09. Run-bound cursors, outcomes/blocked fence, observer reason, freeze stop и policy intents. Из INEF-07 — только корректность before-effect publication; ни lock redesign, ни новый handoff engine | Respawn, pause/freeze, gate/healthy tick и отказ reviewer stop; current request IDs/fences, exact-source provider liveness и #694 recovery сохраняются. Не упрощать policy до подтверждения намеренности CON-03/18 |
+| 6 — без отдельного PR | Поставленный performance/cleanup increment, ID частичны | Snapshot, archive prefilter/point lookup, narrow locks, checkpoint timer, per-intent journal/cursor batching, terminal/cooldown/cache cleanup, bounded production handoff и bounded automatic replay уже существуют. Остатки INEF-01/07 распределены в 5/7/8; INEF-06 в 10, INEF-13 в 12 | Сохранять tests #685–#695, journal migration/proofs, invalidation/live admission и deferred recovery. Новый профиль нужен для любого дополнительного latency claim |
+| 7 | Host, prompt-документы, GitHub CI API и остаточная Git identity cost | DEC-02, ARCH-07/08/15, DUP-D4/5/6/11/13/18; DEAD-04/05/12 и host-части DEAD-10/16. Из slot 6: измерить Git `_workspace_identity` до cache hit и observer commit; оптимизировать существующий seam, не создавать второй identity cache/cleanup engine. Prompt/heads/git/workspace части и ARCH-01 | Patch seams через `self`, golden request IDs/commands; counts до/после на неизменном record и изменённой HEAD/admin/ref. Не снимать admitted identity proofs; после 5 |
+| 8 | Observer, persisted records, journal/inventory и чистая vitality-декомпозиция | DEC-04, DUP-D1/2/3/7/8/9/10/17 и остатки D14–19; DEAD-06/09/11 по потребителям. Из slot 6: измерить no-op/дубли production-state writes и выделить существующие cleanup journal/inventory части. Не переделывать layout v2, cooldown, budget или no-follow disposal. `_PersistedMapping`, serialization, reducer и ARCH-01 | Golden JSON/key order, current/legacy round-trip, crash between required writes, concurrent producers, migration/resume и all vitality verdicts. Counters #690 показывают только доказанно лишние writes; после 5 |
 | 9 | Ядро карточек и TaskWriter | DEC-01, ARCH-02/03/04, BUG-12, DUP-C2/4/5/6/7, DEAD-15 и относящиеся к tasks части DEAD-16. `TaskError` и row/event helpers — листовые; dispatcher writes, sprint guard и recovery — отдельные части без нового API. ARCH-01 в tasks | Обычный create и repair дают одинаковую метаинформацию; replay/transaction/authority и прежние импортные пути сохранены |
-| 10 | SQL board и спринты | DEC-03 и разрезы `sprints.py`; ARCH-05/13, CON-05/08/11/12, DUP-B1–6/C8, INEF-02/06/10/16, SQL-часть BUG-24, остаток DEAD-19/20. Fake переходит в test-support, различия timestamp не стираются молча, живой `_sprint_data` сохраняется. Проверить живой импорт ключа в миграции 0004. ARCH-01 в board/sprints | Настоящий PostgreSQL, число запросов, семантика read без write, схема/свежая БД/upgrade; без переписывания замороженных миграций ради чистки |
+| 10 | SQL board и спринты | DEC-03 и разрезы `sprints.py`; ARCH-05/13, CON-05/08/11/12, DUP-B1–6/C8, INEF-02/10/16, **остаток** INEF-06, SQL-часть BUG-24, DEAD-19/20. SQL show_id/archive/high-water и filtered snapshot уже выполнены #685/#687. Проверить retirement/non-SQL paths и реальные N+1 (SQL call_batch не bulk SQL). Fake → test-support; timestamp различия и живой `_sprint_data` сохранить; проверить живой импорт в 0004; ARCH-01 | PostgreSQL counts, read без write, свежая БД/upgrade, deadline-aware driver #695, ownership row locks/bulk lane и snapshot invalidation; без переписывания замороженных миграций ради чистки |
 | 11 | CLI, role-env и границы PO-сервиса | BUG-04/05, CON-10/15, ARCH-12/14/17, DUP-C1/3, INEF-12/18; нормализовать/явно закрепить TA_* против UMMANU_* без скрытого разрыва совместимости. Doctor и регистрация CLI отделяются от тяжёлых импортов; PO session/server/output/launch части отделяются по §5.10. ARCH-01 в po/automations/projects; относящиеся сюда остатки DEAD-16/21 и INEF-14 | JSON/exit code ошибок, CLI importtime; PO queue/turn idempotency и блокировки при запуске; ускорение соединений — только после измерения |
-| 12 | Local-PTY как пакет и лёгкий supervisor | DEC-05, ARCH-10/11, DUP-R1–7, INEF-05/13, остаток CON-13/14 и DEAD-21. `head/procfs`, heartbeat leaf, lazy head exports, lifecycle/receipts/waits/socket части. DEAD-22 — отдельное решение внутри этого направления, не автоматическое удаление публичного глагола | Реальный PTY/socket/process lifecycle, identity инкарнации, импорт supervisor; отсутствие `_await_*` в профиле тика не означает отсутствие стоимости вне тика |
+| 12 | Local-PTY как пакет и лёгкий supervisor | DEC-05, ARCH-10/11, DUP-R1–7, INEF-05 и **остаток** INEF-13, CON-13/14, DEAD-21. `head/procfs`, heartbeat leaf, lazy exports, lifecycle/receipts/socket части; переиспользовать `HandoffOperation` #694. Production continuation/reviewer waits заново не проектировать. Остальные waits трогать только по профилю; DEAD-22 — решение о публичном глаголе | Native PTY/socket/incarnation, importtime, fairness/unknown admission/exact-once pending recovery и old supervisor без output_idle_seconds. Interactive blocking semantics сохраняются без явного изменения контракта |
 | 13 | Web pages и sprint read contracts | DEC-06/07, CON-02/07, DUP-W1/3/4/5 и остаток W2 (installation read), DEAD-23, INEF-04/11/15/17. Сначала static и листовые значения, затем части страниц/снимков; схемы отражают текущие документы, компрессия не ослабляет CSP | Пакетные assets входят в wheel, page/transport/schema/source-isolation tests; ошибки и readonly/read-write границы явно сохранены |
-| 14 | Backup, checkpoint и restore | Разрезы checkpoint/restore из §5.10, DUP-I2/3/4/5, INEF-08/09, backup/checkpoint часть BUG-24, относящийся сюда DEAD-16. Проверить горячий `redact` из §12.17; не добавлять cache без доказательства сохранения редактирования секретов. ARCH-01 в backup/recovery | Snapshot/restore round-trip, оборванный git payload, разные файловые системы, секреты, archive validation и byte-stable formats |
+| 14 | Backup, checkpoint и restore | Остаточные разрезы §5.10, DUP-I2/3/4/5, INEF-08/09, backup/checkpoint BUG-24, DEAD-16. Coordinator уже в `infra/checkpoint_run`; timer/state/lock и read_snapshot #689 не переносить повторно. Профилировать `redact` в самостоятельном checkpoint, не в tick; существующий restore batching #687 сохранить. ARCH-01 | Snapshot/restore round-trip, torn Git payload, разные FS, secrets/archive validation, byte-stable formats; coherent board cut, legacy state fallback и независимые checkpoint/production writers |
 | 15 | Installation и upgrade как пакеты | Разрезы installation/bootstrap/upgrade из §5.10, DUP-I1 и остаток I2–5, ARCH-09 и DEAD-T в части решения о поддержке старых хостов; остаток ARCH-01 в установке. Process receipts сохраняют формат, проверки размера и no-follow | Disposable install/upgrade/recover, golden receipts, runtime provenance; совместимость старого live-root/remote имеет явное решение |
 | 16 | Разбиение крупных тестов и оставшиеся повторы, внутри связанных поставок | TEST-01, остаток TEST-02, BUG-22 (root-only coverage и timing/flakiness), TDUP-01/02/05 и остаток TDEAD/TORG, массовые TDUP-03/04 из слота 2. Scope распределён по 7/8/10/12/14/15 согласно группировке выше, но не считается выполненным. Выделить классы dispatcher без Postgres из Docker-гейта; дробить крупные тесты по жизненному циклу; helpers — support/fakes, не ещё одна продуктовая реализация | Множество тестов и их сценарии не меняются, кроме доказанных дублей; каждый модуль ровно раз в `ci-shards.txt`; docs сопровождают каждый перенос. Отдельный PR потребует явного пересчёта группировки |
 | 17 (без отдельного implementation PR) | Документация и окончательная сверка аудита | DOC-01/08, остаток DOC-10 и только ROADMAP из DOC-15 (непроверенная Г); сжатие PROTOCOLS/OPERATIONS и prompt-skills, оставшаяся ARCH-01 вне предыдущих кластеров. DEAD-24: разовые scripts разобрать по живым вызовам, shim `role_skills.py` используется steward и не удаляется по одному basename. Сверить все DEAD-T/R/H1/22/25 и неподтверждённые гипотезы. Инкрементальные doc-правки идут с владельцами; финальная сверка остаётся в #668 | Живые заголовки рантайма и ссылки сохраняются; closed/not-taken/open различаются; отсутствие staged-строк сегодня само по себе не доказывает недостижимость всех будущих recovery-путей |
@@ -1213,8 +1304,9 @@ Docs и manifest обновляются при каждом переносе, с
 6. После каждого мержа актуализировать этот отчёт в отдельной ветке #668; сам отчёт не мержить.
 
 Снижение общего объёма и размера контекста из исходного §5 остаётся **оценкой**, не результатом #677.
-INEF-13 опровергнут как причина горячего тика (§12.17), но остаётся гипотезой оптимизации других
-контуров; INEF-04/16 на текущих малых объёмах не оправдывают самостоятельный performance framework.
+INEF-13 не был причиной **измеренного тика 5 октября** (§12.17); это не обобщение на
+позднейшие production handoffs. Их wait/I/O scope частично закрыт #693/#694, прочие callers
+остаются в slot 12. INEF-04/16 требуют новых измерений до самостоятельного performance framework.
 
 ## 11. Неопределённости, ограничения и отвергнутые абстракции
 
@@ -1243,12 +1335,20 @@ INEF-13 опровергнут как причина горячего тика (
 
 ### 11.3 Главные гипотезы, требующие проверки (по убыванию ценности)
 
-1. **BUG-11.** Повторный тик роли с prompt после старта над мёртвой головой: нужен тест с профилем Codex TUI.
-2. **DOC-06.** Видят ли Codex-головы свои role-skills: `ls <data_dir>/codex-home/skills` на хосте и тик Codex-steward.
-3. **DEAD-H1.** Остаются ли протокольные `requests` в статусе staged в production: `settle_stale_staged`, `oldest_pending`.
-4. **INEF-01 и INEF-04.** Профилирование тика и рендера карточки на реальном числе активных карточек и runs.
-5. **CON-03 и CON-18.** Намеренны ли `status:"ok"` при блокировке и потеря ESCALATE на healthy-тиках: вопрос к владельцу контракта.
-6. **BUG-19 и BUG-24 (Г-часть).** Проверка тестами отказов.
+Текущий список (2026-10-08); прежние свидетельства остаются в §12.
+
+1. **CON-03/18, BUG-15/17/18/19.** Policy intent/outcome/freeze failure semantics в slot 5;
+   BUG-11 и DOC-06 уже закрыты #681/#683 и больше не входят в список незавершённых гипотез.
+2. **INEF-01/07.** Git identity на cache hit, observer commit, no-op/дубли state writes и
+   non-head reconcile: counters и профиль текущего main, не повтор §12.17 fixes. Slot 7/8.
+3. **INEF-13/ARCH-11/12.** Остальные PTY/CLI import и journal costs; production handoff
+   имеет budget #694, automatic cleanup — #695. Секунды старого профиля не текущий baseline.
+4. **DEAD-H1/R/T/22/25.** Отсутствие staged rows в старом окне не доказывает недостижимость
+   recovery/API на всех поддерживаемых хостах. Удаление остаётся решением о поддержке.
+5. **BUG-12/24 и INEF-08/09.** Pending-create parity и повреждённые archive/checkpoint paths;
+   batching и timer сами по себе их не закрывают. Performance `redact` проверять отдельно.
+6. **DOC-15 (ROADMAP), root-only/timing BUG-22.** Нет нового полного acceptance/coverage
+   доказательства; обновлять с владельцем подсистемы и в финальной сверке.
 
 ## 12. Проверка на production-хосте (2026-10-05, прод на 6b0d85c7)
 

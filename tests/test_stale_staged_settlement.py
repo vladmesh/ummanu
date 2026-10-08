@@ -36,7 +36,7 @@ from ummanu.board.sql_audit import (
 )
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.checkpoint import CheckpointWriter, checkpoint_snapshot
-from ummanu.dispatch.production import _write_checkpoint
+from ummanu.infra.checkpoint_run import _write_checkpoint
 from ummanu.sprints import SprintWriter
 from ummanu.tasks import TaskError
 

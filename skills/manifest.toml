@@ -83,6 +83,24 @@ shell = "codex"
 root = "~/.config/orca/codex-runtime-home/home/skills"
 roles = ["curator", "retro", "steward", "observer"]
 
+# A Codex head runs with CODEX_HOME=<data_dir>/codex-home, so the Orca home above is not on its skill
+# path. What it does read is `.agents/skills` in its cwd, so each fixed-workspace role gets its skill
+# there, the way its claude head gets `.claude/skills`.
+[targets.codex-ummanu-curator]
+shell = "codex"
+root = "~/orca/workspaces/ummanu/curator/.agents/skills"
+roles = ["curator"]
+
+[targets.codex-ummanu-retro]
+shell = "codex"
+root = "~/orca/workspaces/ummanu/retro/.agents/skills"
+roles = ["retro"]
+
+[targets.codex-ummanu-steward]
+shell = "codex"
+root = "~/orca/workspaces/ummanu/steward/.agents/skills"
+roles = ["steward"]
+
 [targets.hermes-secretary-roles]
 shell = "hermes"
 root = "~/.hermes/skills/secretary-roles"

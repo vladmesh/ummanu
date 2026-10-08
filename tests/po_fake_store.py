@@ -19,6 +19,7 @@ from unittest import mock
 from ummanu.po.sprints import SprintRecord, WhyDocument
 from ummanu.po.store import (
     AGENT,
+    CLIS,
     COMPLETED,
     DEFAULT_EFFORT,
     FAILED,
@@ -113,7 +114,7 @@ class FakePoStore:
             )
 
     def bind_sprint_session_request(self, request_id: str, sprint_ref: str, session_id: str) -> None:
-        from ummanu.po.store import sprint_session_fingerprint, SPRINT_SESSION
+        from ummanu.po.store import SPRINT_SESSION, sprint_session_fingerprint
         board = self._open()
         fingerprint = sprint_session_fingerprint(sprint_ref)
         with board.lock:
@@ -247,6 +248,19 @@ class FakePoStore:
                 return False
             board.sessions[session_id] = replace(session, cli_session_id=cli_session_id)
             return True
+
+    def switch_cli(
+        self, session_id: str, *, cli: str, model: str, effort: str, cli_session_id: str | None
+    ) -> Session:
+        if cli not in CLIS:
+            raise PoStoreError(f"a PO session runs {' or '.join(CLIS)}, not {cli!r}")
+        board = self._open()
+        with board.lock:
+            session = replace(
+                self.session(session_id), cli=cli, model=model, effort=effort, cli_session_id=cli_session_id
+            )
+            board.sessions[session_id] = session
+            return session
 
     # --- turns ------------------------------------------------------------------------------
 

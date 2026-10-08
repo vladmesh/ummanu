@@ -34,7 +34,7 @@ import re
 import select
 import threading
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -295,6 +295,9 @@ class _ThreadState(threading.local):
     staged: dict[str, dict[int, dict[str, Any]]] | None = None
     #: Lanes this thread's open transaction added, merged into the shared table on commit.
     lanes_added: list[str] | None = None
+    #: A caller's deadline (`within`): seconds left of it, and the refusal raised once none is left.
+    remaining: Callable[[], float] | None = None
+    refuse: Callable[[str], BaseException] | None = None
 
 
 class SqlCardClient:
@@ -410,7 +413,8 @@ class SqlCardClient:
         handed out.  A caller that finds every connection in use waits `pool_wait_seconds`, then
         fails as `backend_unavailable`.
         """
-        deadline = time.monotonic() + self.pool_wait_seconds
+        left = self._left("borrowing a board store connection")
+        deadline = time.monotonic() + (self.pool_wait_seconds if left is None else min(self.pool_wait_seconds, left))
         with self._pool:
             while True:
                 while self._idle:
@@ -425,6 +429,7 @@ class SqlCardClient:
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    self._left("borrowing a board store connection")
                     raise TaskError(
                         "backend_unavailable",
                         f"all {self.pool_size} board store connections of this process stayed in use "
@@ -433,18 +438,92 @@ class SqlCardClient:
                     )
                 self._pool.wait(remaining)
         try:
-            with _translated("open a connection"):
-                import psycopg
-
-                connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
+            connection = self._open_connection()
             self._admit(connection)
             return connection
         except BaseException:
             self._give_back(None)
             raise
 
-    @staticmethod
-    def _admit(connection: Any) -> None:
+    def _open_connection(self) -> Any:
+        """A new driver connection whose every exchange waits only within this thread's deadline.
+
+        Without a deadline it is the driver's own connect, as ever. With one, each connection attempt
+        the driver would make (one per resolved host and address, `conninfo_attempts`) is made in
+        turn with what is left as its `connect_timeout`, whole seconds and at least 2 as libpq counts
+        them: no attempt is granted a fresh wait, and none is started without 2 s left.
+        """
+        import psycopg
+
+        if self._local.remaining is None:
+            with _translated("open a connection"):
+                connection = psycopg.connect(self.credentials.conninfo(), autocommit=False)
+        else:
+            from psycopg.conninfo import conninfo_attempts, conninfo_to_dict, make_conninfo
+
+            with _translated("resolve the board store address"):
+                attempts = conninfo_attempts(conninfo_to_dict(self.credentials.conninfo()))
+            failures: list[BaseException] = []
+            connection = None
+            for attempt in attempts:
+                left = self._left("opening a board store connection")
+                if left is None or left < 2:
+                    self._left_refuse("opening a board store connection")
+                try:
+                    connection = psycopg.connect(make_conninfo("", **attempt), autocommit=False,
+                                                 connect_timeout=int(left))
+                    break
+                except psycopg.Error as exc:
+                    failures.append(exc)
+            if connection is None:
+                with _translated("open a connection"):
+                    raise failures[-1] if failures else psycopg.OperationalError("no board store address")
+        self._bound_waits(connection)
+        return connection
+
+    def _bound_waits(self, connection: Any) -> None:
+        """Make the driver's own wait (`Connection.wait`, behind every query, commit, rollback and
+        setting) honour the deadline of the thread using the connection. Without one it is the
+        driver's wait unchanged. When the deadline is spent before an exchange, or passes during
+        one, the exchange's outcome is unknown: the connection is closed (never reused) and the
+        caller's refusal raised. A COMMIT cut this way may or may not have committed."""
+        native = getattr(connection, "wait", None)
+        if not callable(native):
+            return
+        local = self._local
+        refusal = self._refusal
+
+        def wait(gen: Any, interval: float = 0.1, timeout: float | None = None) -> Any:
+            remaining = local.remaining
+            if remaining is None:
+                return native(gen, interval, timeout)
+            left = remaining()
+            if left > 0:
+                try:
+                    return native(gen, interval, left if timeout is None else min(timeout, left))
+                except Exception as exc:
+                    import psycopg
+
+                    if not isinstance(exc, getattr(psycopg.errors, "_WaitTimeout", ())):
+                        raise
+            with contextlib.suppress(Exception):
+                connection.pgconn.finish()
+            raise refusal("a board store exchange (its connection was closed; its outcome is unknown)")
+
+        connection.wait = wait
+
+    def _refusal(self, what: str) -> BaseException:
+        """The refusal raised once this thread's deadline is spent, marked as such."""
+        refuse = self._local.refuse
+        error = (refuse(what) if refuse is not None else
+                 TaskError("backend_unavailable", f"the caller's deadline passed before {what}", 1))
+        error.deadline_refusal = True  # type: ignore[attr-defined]
+        return error
+
+    def _left_refuse(self, what: str) -> None:
+        raise self._refusal(what)
+
+    def _admit(self, connection: Any) -> None:
         """The schema gate, once per new connection: pooled ones were admitted when they opened.
 
         A refused connection is closed rather than pooled, so nothing remembers the refusal: the
@@ -453,6 +532,9 @@ class SqlCardClient:
         """
         try:
             with _translated("read its schema revision"):
+                if self._local.remaining is not None:
+                    with connection.cursor() as cursor:
+                        self._bound(cursor, "reading the board store schema revision")
                 schema_gate.require(connection, CardSchemaOwed)
                 if _transaction_state(connection) not in (None, "IDLE"):
                     connection.rollback()
@@ -478,6 +560,44 @@ class SqlCardClient:
             with contextlib.suppress(Exception):
                 connection.close()
             self._give_back(None)
+
+    @contextlib.contextmanager
+    def within(self, remaining: Callable[[], float],
+               refuse: Callable[[str], BaseException] | None = None) -> Iterator[None]:
+        """Bound every wait this thread's calls make by what is left of one caller's deadline.
+
+        The pool wait, a new connection and its schema gate, the turn of `transaction()`, and every
+        statement (its `statement_timeout` and `lock_timeout`, set `LOCAL` again before each one,
+        so a later statement never gets more than what is left) read `remaining()`; nothing renews
+        it. Once none is left nothing more is attempted: `refuse(what)` is raised, a
+        `backend_unavailable` refusal without one. The settings end with their transaction and the
+        bound with the block, so pooled connections and other callers keep their own policy.
+        """
+        local = self._local
+        outer = local.remaining, local.refuse
+        local.remaining, local.refuse = remaining, refuse
+        try:
+            yield
+        finally:
+            local.remaining, local.refuse = outer
+
+    def _left(self, what: str) -> float | None:
+        """What is left of this thread's deadline (None without one); a refusal once none is."""
+        remaining = self._local.remaining
+        if remaining is None:
+            return None
+        left = remaining()
+        if left <= 0:
+            raise self._refusal(what)
+        return left
+
+    def _bound(self, cursor: Any, what: str) -> None:
+        """Cut the next statement's own and lock waits to what is left (inside its transaction)."""
+        left = self._left(what)
+        if left is not None:
+            bound = f"{max(1, int(left * 1000))}ms"
+            cursor.execute("SELECT set_config('statement_timeout', %s, true), set_config('lock_timeout', %s, true)",
+                           (bound, bound))
 
     @contextlib.contextmanager
     def _session(self) -> Iterator[None]:
@@ -518,10 +638,12 @@ class SqlCardClient:
             elif state == "INTRANS":
                 committing = True
                 connection.commit()
-        except Exception as exc:  # noqa: BLE001 - a connection that cannot end its work is not reused.
+        except Exception as exc:  # a connection that cannot end its work is not reused
             self._local.connection = connection
             self._discard()
             if committing:
+                if getattr(exc, "deadline_refusal", False):
+                    raise  # the deadline ended the COMMIT: its outcome is unknown, not refused
                 raise _driver_error("commit", exc) from None
             return
         if _unusable(connection):
@@ -544,6 +666,16 @@ class SqlCardClient:
             raise
 
     @contextlib.contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Pin all checkpoint rows, metadata, comments and audit to one read-only cut."""
+        if self._depth:
+            raise SqlCardError("a read snapshot must start outside a mutation transaction")
+        with self.transaction():
+            # The first statement of its transaction: nothing, not even a bound, may precede it.
+            self._execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", bounded=False)
+            yield
+
+    @contextlib.contextmanager
     def transaction(self) -> Iterator[None]:
         """One transaction on this thread's pinned connection; other threads' ones wait their turn.
 
@@ -553,8 +685,17 @@ class SqlCardClient:
         with self._session():
             if not self._depth:
                 self.connection  # noqa: B018 - borrowed here, before the lock.
-            with self._transaction_lock, self._transaction():
-                yield
+            left = self._left("the board store transaction's turn")
+            if left is None:
+                self._transaction_lock.acquire()
+            elif not self._transaction_lock.acquire(timeout=left):
+                self._left("the board store transaction's turn")
+                self._left_refuse("the board store transaction's turn")
+            try:
+                with self._transaction():
+                    yield
+            finally:
+                self._transaction_lock.release()
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[None]:
@@ -582,11 +723,15 @@ class SqlCardClient:
             yield
         except BaseException as failure:
             # A rollback that itself fails must not hide what it was rolling back, so the
-            # original failure stays the cause of the refusal the caller sees.
+            # original failure stays the cause of the refusal the caller sees. A connection a
+            # deadline closed is not rolled back here: the server ends its transaction.
             try:
-                self.connection.rollback()
+                if not _unusable(self.connection):
+                    self.connection.rollback()
             except Exception as exc:  # noqa: BLE001 - every driver failure becomes one refusal.
                 suspect = True
+                if getattr(exc, "deadline_refusal", False) or getattr(failure, "deadline_refusal", False):
+                    raise failure from None
                 raise _driver_error("roll back", exc) from failure
             finally:
                 # Two pieces of state are derived from rows this transaction wrote and are wrong
@@ -629,11 +774,14 @@ class SqlCardClient:
 
     def _query(self, sql: str, params: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
         with self._session(), self._statement("answer a read"), self.connection.cursor() as cursor:
+            self._bound(cursor, "a board store read")
             cursor.execute(sql, params)
             return cursor.fetchall()
 
-    def _execute(self, sql: str, params: tuple[Any, ...] = ()) -> int:
+    def _execute(self, sql: str, params: tuple[Any, ...] = (), *, bounded: bool = True) -> int:
         with self._session(), self._statement("apply a write"), self.connection.cursor() as cursor:
+            if bounded:
+                self._bound(cursor, "a board store write")
             cursor.execute(sql, params)
             return cursor.rowcount
 
@@ -644,8 +792,14 @@ class SqlCardClient:
         if handler is None:
             raise SqlCardError(f"the board store does not serve {method}")
         # One call is one session: its statements and its commit share a connection.
-        with self._session():
-            return handler(**params)
+        try:
+            with self._session():
+                return handler(**params)
+        finally:
+            if not method.startswith("get"):
+                from ummanu.board.tick_snapshot import board_write
+
+                board_write(self, params)
 
     def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
         """Run the calls and answer in call order.
@@ -885,6 +1039,66 @@ class SqlCardClient:
             return self.records.row_by_reference(reference)
         rows = self._rows("task_ref = %s", (reference,))
         return rows[0] if rows else None
+
+    def _rpc_getBoardRows(self, *, project_id: int) -> list[dict[str, Any]]:
+        """One complete enumeration for checkpoint exports, including archived records."""
+        if int(project_id) == SPRINT_BOARD_ID:
+            return self.sprints.rows()
+        return self._rows() + self.records.rows()
+
+    def _rpc_getTaskById(self, *, project_id: int, task_id: int) -> dict[str, Any] | None:
+        """An exact Card transport key, including an archived Card during recovery."""
+        if int(project_id) != BOARD_ID or card_transport_key(task_id) is None:
+            return None
+        rows = self._rows("board_key = %s", (task_id,))
+        return rows[0] if rows else None
+
+    def _rpc_getArchivedAfterMergeTasks(self, *, project_id: int) -> list[dict[str, Any]]:
+        if int(project_id) != BOARD_ID:
+            return []
+        # e2e is JSON text in the extension bag. Match its after_merge keys without
+        # casting: a malformed record must reach the normal per-carrier error path.
+        return self._rows(
+            f"archived AND extensions->'{EXTENSION_BAG}'->>'e2e' LIKE %s",
+            ('%"after_merge%',),
+        )
+
+    def _rpc_getCapacityReferences(self) -> list[str]:
+        """Admission needs fresh keys, including cards activated by another process.
+
+        This filtered primary-key query is not a full board/metadata hydration.
+        TaskWriter revalidates each peer while its capacity admission lock is held.
+        """
+        from ummanu.tasks import ACTIVE_STATES
+
+        return [row[0] for row in self._query(
+            "SELECT task_ref FROM tasks WHERE NOT archived AND state = ANY(%s) ORDER BY task_ref",
+            (list(ACTIVE_STATES),),
+        )]
+
+    def _rpc_lockOwnershipReference(self, *, reference: str, observer: bool = False) -> bool:
+        """Fence state/claim updates in the caller's cleanup/launch transaction.
+
+        NO KEY UPDATE still permits a head's comment foreign-key check. Acquire
+        this before cleanup.lock, so a contended SQL row never holds the flock.
+        """
+        table, key = ("sprints", "ref") if observer else ("tasks", "task_ref")
+        return bool(self._query(f"SELECT {key} FROM {table} WHERE {key}=%s FOR NO KEY UPDATE",
+                                (reference,)))
+
+    def _rpc_getNextTaskReference(self, *, project: str) -> str:
+        # Products and issues have product:/issue: references, never project-N.
+        # Read the numeric high-water mark, including archives, without returning
+        # rows. A punctuation range is unsafe under locale-dependent collations;
+        # the literal prefix is the membership test. The caller holds the allocation
+        # lock and checks the live key.
+        prefix = project + "-"
+        rows = self._query(
+            "SELECT coalesce(max(substring(task_ref FROM %s)::numeric), 0) FROM tasks "
+            "WHERE starts_with(task_ref, %s) AND substring(task_ref FROM %s) ~ '^[0-9]+$'",
+            (len(prefix) + 1, prefix, len(prefix) + 1),
+        )
+        return prefix + str(int(rows[0][0]) + 1)
 
     def _ref_of(self, task_id: Any) -> str:
         key = card_transport_key(task_id)

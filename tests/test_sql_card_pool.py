@@ -272,6 +272,33 @@ class ExhaustionTests(PoolCase):
 
 
 class TransactionPinningTests(PoolCase):
+    def test_checkpoint_read_snapshot_sets_isolation_before_every_projection_read(self) -> None:
+        with self.client.read_snapshot():
+            connection = self.client._connection
+            self.read("SELECT cards")
+            self.read("SELECT metadata")
+            self.read("SELECT comments")
+            self.read("SELECT audit")
+            self.read("SELECT sprints")
+            self.assertIs(self.client._connection, connection)
+            self.assertEqual(connection.commits, 0)
+        self.assertEqual(connection.statements, [
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", "SELECT cards",
+            "SELECT metadata", "SELECT comments", "SELECT audit", "SELECT sprints",
+        ])
+        self.assertEqual(connection.commits, 1)
+        self.assertIsNone(self.client._connection)
+
+    def test_checkpoint_read_snapshot_refuses_a_mutation_transaction_and_rolls_back_errors(self) -> None:
+        with self.client.transaction(), self.assertRaisesRegex(TaskError, "outside a mutation"), self.client.read_snapshot():
+            self.fail("snapshot entered a mutation")
+        with self.assertRaisesRegex(ValueError, "cut failed"), self.client.read_snapshot():
+            connection = self.client._connection
+            self.read()
+            raise ValueError("cut failed")
+        self.assertEqual(connection.rollbacks, 1)
+        self.assertIsNone(self.client._connection)
+
     def test_a_transaction_holds_one_connection_across_nested_calls(self) -> None:
         self.read()
         with self.client.transaction():

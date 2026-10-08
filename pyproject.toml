@@ -163,8 +163,10 @@ dependencies = [
     # cannot reach its board is not degraded, it is non-functional (docs/BOARD_STORE.md §5.8).
     # The `binary` extra ships manylinux wheels that bundle libpq, so no libpq-dev, no compiler
     # and no apt step. A floor, not an equality pin, like the three above; ruff is equality-pinned
-    # because a linter's version is part of a gate's meaning and a driver's is not.
-    "psycopg[binary]>=3.2",
+    # because a linter's version is part of a gate's meaning and a driver's is not. 3.3.6 is the
+    # first release whose `Connection.wait` takes a `timeout`: the board client passes it on every
+    # exchange, so one caller deadline bounds the driver's own waits (ummanu/board/sql_cards.py).
+    "psycopg[binary]>=3.3.6",
     # The board store's schema is SQLAlchemy models and its migrations are Alembic's, by the
     # owner's decision of 2026-09-07 (docs/BOARD_STORE.md §7.4). Both are core for the same
     # reason the driver is: an installation that cannot build or verify its own

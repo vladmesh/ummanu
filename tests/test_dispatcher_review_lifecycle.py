@@ -30,8 +30,26 @@ from ummanu.dispatch.types import (
     DispatcherError,
     HostError,
 )
+from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
+from tests.dispatcher_fixtures import (
+    PromptAfterStartCatalog,
+    RecordingReviewHost,
+    SupervisedBackend,
+    clear_env as _clear_env,
+    supervised_run,
+    write_heartbeat,
+)
+from tests.fakes.dispatcher import (
+    FakeCatalog,
+    FakeCheckpoint,
+    FakeHost,
+    FakePusher,
+    dispatcher_seed,
+)
+from tests.integration_setup import require_disposable_board_fixture
+from tests.sql_backend_fixtures import PostgresBoard, card_store
 from ummanu.dispatch.types import (
     HeadLaunchAborted,
     review_pane_label,
@@ -47,35 +65,17 @@ from ummanu.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )
+from ummanu.runtime.head import (
+    HEAD_BUSY,
+    DeliverReceipt,
+    operations as head_ops,
+    with_pid_heartbeat,
+)
 from ummanu.runtime.prompt_document import (
     NUDGE_MAX_BYTES,
     PromptDocumentError,
 )
 from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
-from tests.dispatcher_fixtures import (
-    PromptAfterStartCatalog,
-    RecordingReviewHost,
-    SupervisedBackend,
-    supervised_run,
-    write_heartbeat,
-)
-from tests.dispatcher_fixtures import (
-    clear_env as _clear_env,
-)
-from tests.fakes.dispatcher import (
-    FakeCatalog,
-    FakeCheckpoint,
-    FakeHost,
-    FakePusher,
-    dispatcher_seed,
-)
-from tests.integration_setup import require_disposable_board_fixture
-from tests.sql_backend_fixtures import PostgresBoard, card_store
-from ummanu.runtime.head import HEAD_BUSY, DeliverReceipt
-from ummanu.runtime.head import operations as head_ops
-from ummanu.runtime.head import (
-    with_pid_heartbeat,
-)
 
 
 def setUpModule() -> None:
@@ -1712,7 +1712,7 @@ class ProductionPauseTests(unittest.TestCase):
         retry = self.runtime.production_tick()
         self.assertEqual(retry["auto_resume"]["parked"], [f"{self.ref}:worker"])
 
-    def test_a_frozen_tick_still_writes_and_pushes_the_checkpoint(self) -> None:
+    def test_independent_checkpoint_still_writes_and_pushes_while_frozen(self) -> None:
         """Freeze stops cards moving, not durability: a long freeze must not be a snapshot hole."""
         self.runtime.checkpoint = FakeCheckpoint(
             CheckpointResult(status="committed", commit="abc123", board_cards=2)
@@ -1723,15 +1723,18 @@ class ProductionPauseTests(unittest.TestCase):
         result = self.runtime.production_tick()
 
         self.assertEqual(result["status"], "skipped")
+        self.assertNotIn("checkpoint", result)
+        self.assertNotIn("checkpoint_push", result)
+        result = run_checkpoint(self.runtime)
         self.assertEqual(result["checkpoint"]["commit"], "abc123")
         self.assertEqual(result["checkpoint_push"]["status"], "pushed")
-        payload = self.runtime.production_state.load()
+        payload = load_checkpoint_state(self.runtime.data_dir)
         self.assertEqual(payload["checkpoint"]["commit"], "abc123")
         self.assertEqual(payload["checkpoint_push"]["last_push_commit"], "abc123")
         # ...and the frozen tick still moved nothing.
         self.assertEqual(self.reader.show(self.ref)["state"], "ready")
 
-    def test_a_failing_push_on_a_frozen_tick_is_reported_not_raised(self) -> None:
+    def test_a_failing_independent_push_while_frozen_is_reported_not_raised(self) -> None:
         self.runtime.checkpoint = FakeCheckpoint(CheckpointResult(status="unchanged", board_cards=2))
         self.runtime.checkpoint_push = FakePusher(RuntimeError("ssh agent is gone"))
         self.pause("freeze")
@@ -1739,6 +1742,9 @@ class ProductionPauseTests(unittest.TestCase):
         result = self.runtime.production_tick()
 
         self.assertEqual(result["status"], "skipped")
+        self.assertNotIn("checkpoint", result)
+        self.assertNotIn("checkpoint_push", result)
+        result = run_checkpoint(self.runtime)
         self.assertEqual(result["checkpoint_push"]["status"], "failed")
         self.assertIn("ssh agent is gone", result["checkpoint_push"]["reason"])
 

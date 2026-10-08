@@ -21,7 +21,7 @@ class RegisteredProductionRuntime:
     product_root: str
     import_origin: str
 
-    def probe(self) -> RuntimeProvenance:
+    def probe(self, within=None) -> RuntimeProvenance:
         return RuntimeProvenance(
             classification="valid",
             interpreter=self.interpreter,

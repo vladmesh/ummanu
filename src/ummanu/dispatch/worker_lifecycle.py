@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from ummanu.runtime.head.handoff import PromptHandoff
 from ummanu.runtime.head_run_binding import head_run_binding
 
 BUSY_RETRY_INITIAL_SECONDS = 30
@@ -703,6 +704,14 @@ class WorkerContinuation:
     # becomes evidence that the head died or that the prompt was acknowledged.
     busy_attempts: int = 0
     busy_next_at: float = 0.0
+    handoff: PromptHandoff | None = None
+    """The production prompt handoff this delivery opened, made durable before the worker is woken.
+
+    Its floor is the worker journal's sequence before anything of this continuation was written, so
+    every later tick reads from that journal how far the handoff got (typed, submitted, taken)
+    instead of typing it again. None outside the production dispatcher and for a delivery opened by
+    a dispatcher that predates it, which opens one on its next attempt.
+    """
 
     @property
     def retained(self) -> bool:
@@ -832,6 +841,13 @@ class WorkerContinuation:
         self.stage = WorkerContinuationStage.DELIVERY_PENDING
         self.phase = phase
 
+    def open_handoff(self, floor: int, now: float) -> None:
+        """Fix where this delivery's handoff starts; a handoff already open is never moved."""
+        if self.stage != WorkerContinuationStage.DELIVERY_PENDING:
+            raise ValueError(f"cannot open a continuation handoff from {self.stage}")
+        if self.handoff is None:
+            self.handoff = PromptHandoff(floor=int(floor), began_at=float(now))
+
     def confirm_delivery(self) -> None:
         if self.stage not in {
             WorkerContinuationStage.DELIVERY_PENDING,
@@ -884,6 +900,7 @@ class WorkerContinuation:
         self.session_held = False
         self.busy_attempts = 0
         self.busy_next_at = 0.0
+        self.handoff = None
 
     def to_json(self) -> dict[str, Any]:
         if self.stage == WorkerContinuationStage.NONE:
@@ -903,6 +920,7 @@ class WorkerContinuation:
             "session_held": self.session_held,
             "busy_attempts": self.busy_attempts,
             "busy_next_at": self.busy_next_at,
+            **({"handoff": self.handoff.to_json()} if self.handoff is not None else {}),
         }
 
     @classmethod
@@ -935,4 +953,5 @@ class WorkerContinuation:
             session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),
             busy_attempts=int(value.get("busy_attempts") or 0),
             busy_next_at=float(value.get("busy_next_at") or 0.0),
+            handoff=PromptHandoff.from_json(value.get("handoff")),
         )

@@ -32,8 +32,7 @@ from ummanu.dispatch.types import (
     HostError,
     ReviewLaunch,
 )
-from ummanu.dispatch.watchdog import head_run_process_status as _head_run_process_status
-from ummanu.dispatch.watchdog import pid_file_path
+from ummanu.dispatch.watchdog import head_run_process_status as _head_run_process_status, pid_file_path
 from ummanu.dispatch.worker_comments import worker_comments_note
 from ummanu.dispatch.worker_lifecycle import head_run_binding
 from ummanu.projects.availability import ProjectAvailability
@@ -1617,7 +1616,11 @@ class FakeHost:
             ).text
         )
 
-    def resume_worker(self, task: dict, record) -> None:
+    def worker_handoff_started(self, record) -> str:
+        """No production handoff runs on this double (it has no `worker_handoffs`): nothing started."""
+        return "none"
+
+    def resume_worker(self, task: dict, record, *, handoff_started: str = "") -> None:
         self.calls.append("resume_worker")
         if self.fail_resume_worker_reason:
             raise HostError(self.fail_resume_worker_reason)

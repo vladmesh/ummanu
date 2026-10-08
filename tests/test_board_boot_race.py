@@ -440,6 +440,9 @@ class UnitSpecTests(unittest.TestCase):
     # A shipped oneshot service that starts no head, and why. Everything else of Type=oneshot is
     # treated as a head launcher and must carry KillMode=process.
     ONESHOT_UNITS_THAT_LAUNCH_NO_HEAD: ClassVar[dict[str, str]] = {
+        "ummanu-checkpoint.service": (
+            "exports and pushes recovery state without launching heads; its Git children belong to the unit"
+        ),
         "ummanu-instance-maintenance.service": (
             "runs `git gc` on the instance repository outside any tick; it dispatches no role and "
             "its bounded pack is exactly what the control-group kill should clean up"

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import shlex
 import signal
 import subprocess
@@ -17,6 +17,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.po_cli_fakes import FAKE_CLAUDE, eventually
+from tests.po_fake_store import FakeBoard, FakePoStore
+from tests.scoped_environment_fixtures import deployed_scope_argv
+from ummanu.dispatch.watchdog import head_process_status
+from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV, store as po_store
+from ummanu.po.runner import PoRunner, turn_environment
+from ummanu.po.service import PoService
 from ummanu.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
 from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, SCOPE_BOUND
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle, launch_identity
@@ -25,14 +32,6 @@ from ummanu.runtime.head.run import HeadRun, StopInitiator
 from ummanu.runtime.head.spec import HeadSpec
 from ummanu.runtime.head.task_ref import TaskRef
 from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
-from ummanu.dispatch.watchdog import head_process_status
-from ummanu.po import store as po_store
-from ummanu.po.runner import PoRunner, turn_environment
-from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
-from ummanu.po.service import PoService
-from tests.po_cli_fakes import FAKE_CLAUDE, eventually
-from tests.po_fake_store import FakeBoard, FakePoStore
-from tests.scoped_environment_fixtures import deployed_scope_argv
 
 
 def await_fact(predicate, message: str, seconds: float = 15) -> None:
@@ -117,11 +116,11 @@ class ScopeBackendTests(unittest.TestCase):
         self.assertEqual(settled.disappeared, {unit})
 
     def test_attestation_survives_head_and_launcher_exit_with_detached_descendants(self) -> None:
-        from ummanu.runtime.local_pty_head import runtime_scope_inventory
-        from ummanu.host import FixtureHostSource, build_doctor_expectations
-        from ummanu.host_apply import ApplyInputs, apply_host
         from tests.fakes.upgrade import FakeUnitInstaller
         from tests.runtime_scope_fixtures import host_fixture
+        from ummanu.host import FixtureHostSource, build_doctor_expectations
+        from ummanu.host_apply import ApplyInputs, apply_host
+        from ummanu.runtime.local_pty_head import runtime_scope_inventory
 
         data = self.root / "data"
         data.mkdir()
@@ -143,8 +142,8 @@ class ScopeBackendTests(unittest.TestCase):
                             cwd=self.root, memory_limit_mib=96)
         await_fact(lambda: bool(handle.events().of_kind(RUN_EXITED)), "head did not journal its exit")
         owner = ScopedHeadLifecycle.from_run_dir(directory)
-        record = owner.read_owner(directory)
-        await_fact(lambda: launch_identity(record["launch_pid"]) is None, "original launcher did not exit")
+        launch_record = owner.read_owner(directory)
+        await_fact(lambda: launch_identity(launch_record["launch_pid"]) is None, "original launcher did not exit")
         self.assertTrue(child_file.exists())
         unit = scope_unit(run_id)
         projected = runtime_scope_inventory(data, {unit})
@@ -349,7 +348,12 @@ class PoScopeBackendTests(unittest.TestCase):
         return self.service.create_session(cli="claude", model="opus", effort="high", request_id=request_id)["session_id"]
 
     def settled(self, session_id: str, seq: int):
-        await_fact(lambda: self.store.turn(session_id, seq).state != po_store.RUNNING, "scoped turn did not settle")
+        # Recovery settles the orphan before the service pump creates the queued turn.
+        await_fact(
+            lambda: any(turn.seq == seq and turn.state != po_store.RUNNING
+                        for turn in self.store.turns(session_id)),
+            "scoped turn did not settle",
+        )
         return self.store.turn(session_id, seq)
 
     def test_new_orphan_retries_real_scope_cleanup_and_releases_session_without_restart(self) -> None:

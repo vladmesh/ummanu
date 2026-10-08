@@ -96,6 +96,13 @@ REVIEW_BUSY_RETRY_MAX_SECONDS = 5 * 60
 
 # The delivery state of a launch whose pointer the composer took.
 LAUNCH_DELIVERY_CONFIRMED = "confirmed"
+# The delivery state of a launch whose production handoff is still in progress (`runtime.head.handoff`):
+# not a refusal and not busy, so it spends no attempt and waits for no backoff. Its own bounds are the
+# handoff's (`prompt_settle`, `SUBMIT_ATTEMPTS`), which end it in a refusal this ladder counts.
+LAUNCH_DELIVERY_HANDOFF_PENDING = "handoff_pending"
+# Set on a launch's delivery once the worker was shut down, confirmed, before its reviewer was given
+# anything (`CommandHostRuntime._fence_worker_for_reviewer`); a retained worker is confirmed anew.
+LAUNCH_DELIVERY_WORKER_FENCED = "worker_fenced"
 # How many ticks a launch may hold its card while its pointer is still unaccepted. Past this the
 # head is stopped and relaunched: a head that cannot be made sendable is replaced, and it never
 # sits indefinitely while the card reports progress.
@@ -212,6 +219,36 @@ def defer_launch_delivery(
     }
     record.launch_intent = intent
     return delay
+
+
+def defer_pending_launch_delivery(
+    record: DispatcherRecord | None, evidence: dict[str, Any], *, worker_fenced: bool = False
+) -> bool:
+    """Keep a launch whose production handoff is pending for the next tick; True if that changed it.
+
+    The attempt count stays as it was: a handoff in progress is neither a refused pointer nor a busy
+    pane, so it does not bring the launch closer to its replacement. `worker_fenced` records that the
+    host made the writer fence before the reviewer was given anything; once set it stays set.
+    """
+    intent = dict(launch_intent(record))
+    if not intent:
+        return False
+    previous = launch_delivery(intent)
+    delivery = {
+        **previous,
+        "state": LAUNCH_DELIVERY_HANDOFF_PENDING,
+        "attempts": int(previous.get("attempts") or 0),
+        "next_at": 0.0,
+        "evidence": dict(evidence),
+        # Kept through the confirmation, so adoption can tell this launch is `start_review` continued.
+        "handoff": True,
+        **({LAUNCH_DELIVERY_WORKER_FENCED: True} if worker_fenced or previous.get(LAUNCH_DELIVERY_WORKER_FENCED) else {}),
+    }
+    if delivery == previous:
+        return False
+    intent["delivery"] = delivery
+    record.launch_intent = intent
+    return True
 
 
 def defer_busy_launch_delivery(
@@ -866,6 +903,16 @@ def resolve_launch_intent(
             "head": str(intent.get("head") or ""),
             "reason": "launch heartbeat names a live process with a mismatching launch identity",
         }
+    if role == REVIEW_ROLE and liveness["alive"]:
+        # A reviewer whose production handoff is pending answers to the shared liveness rule before
+        # anything below (the heartbeat grace, the retry's backoff, a pending receipt, adoption) can
+        # return in its place. Delayed import avoids the dispatcher_review launch-intent cycle.
+        from ummanu.dispatch.review import reviewer_pending_liveness
+
+        settled = reviewer_pending_liveness(runtime, task, records, payload, record, intent, step)
+        if settled is not None:
+            return settled
+        intent = launch_intent(record)
     if liveness["alive"] and not liveness["pid_known"]:
         # Leave a starting head alone until its heartbeat grace resolves.
         return {
@@ -900,6 +947,23 @@ def resolve_launch_intent(
             return deferred
         intent = launch_intent(record)
     return _adopt_launch_intent(runtime, task, records, payload, record, intent, role, step)
+
+
+def _retained_worker_kept_for_review(runtime: Any, record: DispatcherRecord, intent: dict[str, Any]) -> bool:
+    """Whether a reviewer adopted from a finished production handoff keeps the retained worker.
+
+    Only for a launch whose delivery a handoff carried (`defer_pending_launch_delivery`), and only
+    while the worker is provably gone or confirmably still suspended, the two cases `start_review`
+    itself accepts. A confirmation that fails is not a refusal here: the caller stops the worker.
+    """
+    if not launch_delivery(intent).get("handoff") or not record.worker_continuation.retained:
+        return False
+    try:
+        if not runtime.host.worker_retained_vanished(record):
+            runtime.host.confirm_worker_retained(record)
+    except HostError:
+        return False
+    return True
 
 
 def keep_reserved_round(runtime: Any, record: DispatcherRecord, intent: dict[str, Any]) -> None:
@@ -1043,18 +1107,23 @@ def _adopt_launch_intent(
         record.review_handle = handle
         record.review_leaf = leaf
         record.review_pid_file = str(intent.get("pid_file") or "")
-        try:
-            runtime.host.freeze_worker(record)
-        except HostError as exc:
-            _persist_quietly(runtime, payload, records)
-            return head_stop_unconfirmed(
-                step=step,
-                ref=ref,
-                attempt_id=record.attempt_id,
-                role=WORKER_ROLE,
-                reason=f"{type(exc).__name__}: {exc}",
-            )
-        forget_role_head(record, WORKER_ROLE)
+        # A launch a production handoff finished over several ticks is `start_review` continued,
+        # and it ends the way `start_review` ends: a retained worker whose suspension is confirmed
+        # stays suspended for the red verdict to continue. Anything less certain is stopped.
+        kept = _retained_worker_kept_for_review(runtime, record, intent)
+        if not kept:
+            try:
+                runtime.host.freeze_worker(record)
+            except HostError as exc:
+                _persist_quietly(runtime, payload, records)
+                return head_stop_unconfirmed(
+                    step=step,
+                    ref=ref,
+                    attempt_id=record.attempt_id,
+                    role=WORKER_ROLE,
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+            forget_role_head(record, WORKER_ROLE)
         record.state = "reviewing"
         record.review_started_at = record.review_progress_at = launched_at
         if not record.review_commit:
@@ -1100,6 +1169,46 @@ def _adopt_launch_intent(
     }
 
 
+def stop_undeliverable_launch(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    ref: str,
+    record: DispatcherRecord,
+    intent: dict[str, Any],
+    role: str,
+    step: str,
+    *,
+    readiness: str,
+    attempts: int,
+    reason: str,
+) -> dict[str, Any]:
+    """The bounded end of a launch that will not be given its pointer: stopped, then made again.
+
+    The head is stopped through its own intent first, and only a confirmed stop takes the intent
+    back for the ordinary path to relaunch; an unconfirmed stop keeps it, so no second head opens
+    beside the first.
+    """
+    failure = stop_launch_intent(runtime, record, intent, role)
+    if failure is None:
+        keep_reserved_round(runtime, record, intent)
+    records[ref] = record
+    _persist_quietly(runtime, payload, records)
+    if failure is not None:
+        return head_stop_unconfirmed(step=step, ref=ref, attempt_id=record.attempt_id, role=role, reason=failure)
+    return {
+        "status": "degraded",
+        "step": step,
+        "pilot_ref": ref,
+        "attempt_id": record.attempt_id,
+        "action": f"{role}-launch-undeliverable",
+        "head": str(intent.get("head") or ""),
+        "readiness": readiness,
+        "attempts": attempts,
+        "reason": reason,
+    }
+
+
 def refuse_undelivered_launch(
     runtime: Any,
     payload: dict[str, Any],
@@ -1128,29 +1237,22 @@ def refuse_undelivered_launch(
     head = str(intent.get("head") or "")
     now = time.time()
     if attempts >= LAUNCH_DELIVERY_MAX_ATTEMPTS:
-        failure = stop_launch_intent(runtime, record, intent, role)
-        if failure is None:
-            keep_reserved_round(runtime, record, intent)
-        records[ref] = record
-        _persist_quietly(runtime, payload, records)
-        if failure is not None:
-            return head_stop_unconfirmed(
-                step=step, ref=ref, attempt_id=record.attempt_id, role=role, reason=failure
-            )
-        return {
-            "status": "degraded",
-            "step": step,
-            "pilot_ref": ref,
-            "attempt_id": record.attempt_id,
-            "action": f"{role}-launch-undeliverable",
-            "head": head,
-            "readiness": state,
-            "attempts": attempts,
-            "reason": (
+        return stop_undeliverable_launch(
+            runtime,
+            payload,
+            records,
+            ref,
+            record,
+            intent,
+            role,
+            step,
+            readiness=state,
+            attempts=attempts,
+            reason=(
                 f"the {role_label(role)} head never accepted its pointer in {attempts} attempts "
                 f"({pane_state_label(state)}); it has been stopped and the launch is made again"
             ),
-        }
+        )
     next_at = float(undelivered.get("next_at") or 0.0)
     if next_at and now < next_at:
         return {

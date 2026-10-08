@@ -53,6 +53,7 @@ from enum import Enum
 from typing import Any
 
 from ummanu.board import owner_events
+from ummanu.board.tick_snapshot import select_sprints
 from ummanu.codex_provider_events import CodexProviderSourceError
 from ummanu.dispatch.heartbeat import sprint_task
 from ummanu.dispatch.launch import merge_launch_head_run
@@ -354,8 +355,17 @@ class ObserverRecord:
     # The terminal episode of the immediately retired HeadRun.  This is audit-only: all decisions
     # use ``wake_liveness``, which is always bound to the current HeadRun after a replacement.
     retired_wake_liveness: dict[str, Any] = field(default_factory=dict)
+    # The profile actually running when a provider fallback put the observer on another head of the
+    # declared profile's chain (ummanu-108); empty when it runs on the declared `head` itself.
+    fallback_head: str = ""
 
     def to_json(self) -> dict[str, Any]:
+        value = self._json()
+        if self.fallback_head:
+            value["fallback_head"] = self.fallback_head
+        return value
+
+    def _json(self) -> dict[str, Any]:
         return {
             "sprint": self.sprint,
             "generation": self.generation,
@@ -434,6 +444,7 @@ class ObserverRecord:
                 if isinstance(payload.get("retired_wake_liveness"), dict)
                 else {}
             ),
+            fallback_head=str(payload.get("fallback_head") or ""),
         )
 
 
@@ -586,7 +597,7 @@ def reconcile_observers(
     try:
         open_sprints = {
             str(sprint.get("ref") or ""): sprint
-            for sprint in runtime.sprints.list(statuses={"open"})
+            for sprint in select_sprints(runtime.sprints, statuses={"open"})
             if str(sprint.get("ref") or "")
         }
     except (TaskError, HostError) as exc:
@@ -1134,7 +1145,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
 
 def _timestamp(value: str) -> datetime | None:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None and parsed.utcoffset() is not None else None
@@ -1643,7 +1654,7 @@ def _observe_observer_wake_progress(record: ObserverRecord, runtime: Any, *, now
             if callable(probe)
             else {"state": "unavailable", "reason": "host has no observer provider-progress probe"}
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
         evidence = {"state": "unavailable", "reason": f"provider-progress probe failed: {exc}"}
     return liveness.observe_provider(evidence, now, head_run=record.head_run)
 
@@ -1708,6 +1719,80 @@ def _replace_observer_for_no_progress(
     )
     original = str(replaced.get("reason") or "")
     replaced["reason"] = reason + (f"; {original}" if original else "")
+    return replaced
+
+
+def _observer_provider_failure(runtime: Any, record: ObserverRecord) -> dict[str, Any] | None:
+    """The host's reading of this observer's own provider refusal, or None when it shows none."""
+    probe = getattr(runtime.host, "observer_provider_failure", None)
+    if not callable(probe) or not record.head_run.get("run_id"):
+        return None
+    try:
+        reading = probe(record)
+    except Exception:  # noqa: BLE001 - an unreadable source is no verdict; the wake decides
+        return None
+    if not isinstance(reading, dict) or reading.get("state") != "failed":
+        return None
+    if str(reading.get("run_id") or record.head_run.get("run_id")) != str(record.head_run.get("run_id")):
+        return None
+    return reading
+
+
+def _replace_observer_for_provider_failure(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+    reading: dict[str, Any],
+) -> dict[str, Any]:
+    """Record the refusing resource red, then replace the observer through the emergency path.
+
+    The replacement walks the declared profile's chain (`_launch_observer`), so it lands on the
+    other family while this resource is red, and it carries the same pending batch.
+    """
+    from ummanu.head_health import failure_status, failure_until, until_text
+
+    error = reading.get("error") if isinstance(reading.get("error"), dict) else {}
+    kind = str(error.get("kind") or "")
+    summary = " ".join(str(error.get("summary") or kind or "provider error").split())[:200]
+    resource = str(reading.get("resource") or "")
+    now = time.time()
+    until = failure_until(kind, float(error.get("reset_at") or 0.0), now)
+    if resource:
+        try:
+            runtime.head_health.record(
+                resource,
+                failure_status(kind),
+                f"provider error in a turn of observer head {reading.get('head') or record.head}: {summary}",
+                now=now,
+                until=until,
+            )
+        except Exception as exc:  # noqa: BLE001 - the cache writer has no narrower contract
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-provider-failure-unrecorded",
+                "head": record.head,
+                "reason": f"resource health could not be written ({type(exc).__name__}); retried next tick",
+            }
+    replaced = _replace_observer_for_no_progress(
+        runtime,
+        payload,
+        observers,
+        ref,
+        record,
+        event,
+        reason=(
+            f"provider failure: observer head {reading.get('head') or record.head} was refused by "
+            f"{resource or '(unnamed resource)'} ({summary}); the resource is red until {until_text(until)}"
+        ),
+    )
+    replaced["provider_failure"] = {"resource": resource, "error": summary, "until": until}
+    if record.fallback_head:
+        replaced["switched_to"] = record.fallback_head
     return replaced
 
 
@@ -1843,6 +1928,12 @@ def _wake_for_event(
         # source — carries on to the pane read.  An observation which cannot prove progress is
         # not a verdict about the head: it decides which of the two bounded no-progress ladders
         # below ends the wait, never whether the wait ends at all.
+    # A last turn that ended on a provider refusal is not a busy or quiet head (ummanu-108): the
+    # resource goes red until its reset and the observer is replaced on the next head of its chain,
+    # with the same pending batch, before any nudge or ceiling reads the silence.
+    refused = _observer_provider_failure(runtime, record)
+    if refused is not None:
+        return _replace_observer_for_provider_failure(runtime, payload, observers, ref, record, event, refused)
     if delivery.stage == DeliveryStage.RETRY_DEFERRED and now < delivery.next_at:
         return {
             "status": "degraded",
@@ -2138,7 +2229,7 @@ def _abandon_launch_intent(runtime: Any, ref: str, record: ObserverRecord) -> No
         return
     try:
         committed = audit.committed_event(request_id) is not None
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         committed = False
     if committed:
         record.launches = max(record.launches, attempt)
@@ -2346,8 +2437,12 @@ def _launch_observer(
             return _defer(runtime, payload, observers, ref, record, head="", reason=exc.message)
         except HostError as exc:
             return _defer(runtime, payload, observers, ref, record, head="", reason=str(exc))
-    readiness = runtime.head_readiness(head)
-    if not readiness.launch_allowed:
+    # The declared profile is only the first one to try (ummanu-108): a red resource walks the
+    # profile's fallback chain to the other family. `head` stays the declared profile on the record
+    # (the fence and the declaration compare against it); `launch_head` is what actually runs.
+    choice = runtime.resolve_head(head)
+    readiness = choice.readiness
+    if not choice.resolved:
         return _defer(
             runtime,
             payload,
@@ -2355,13 +2450,18 @@ def _launch_observer(
             ref,
             record,
             head=head,
-            reason=f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}",
+            reason=(
+                f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}"
+                if len(choice.rejected) < 2
+                else choice.reason
+            ),
             readiness=readiness.to_json(),
         )
+    launch_head = choice.head
     # A head whose shell has no observer skill would come up with a prompt pointing at a file it
     # cannot open, and would improvise a sprint from the entity alone. The launch waits instead,
     # and the record says exactly which file is missing.
-    delivery = observer_skill_delivery(runtime, head)
+    delivery = observer_skill_delivery(runtime, launch_head)
     if not delivery["delivered"]:
         return _defer(
             runtime,
@@ -2389,7 +2489,7 @@ def _launch_observer(
                 "head": record.head,
                 "reason": "retiring observer wake-liveness outcome could not be persisted",
             }
-    if _head_may_be_running(record):
+    if _head_may_be_running(record):  # noqa: SIM102 - the inner stop is commented on its own
         # The pid is dead but the pane it ran in can still be there, the shell left behind that
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
         # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
@@ -2453,6 +2553,7 @@ def _launch_observer(
             request_id,
             {
                 "head": head,
+                **({"launched_head": launch_head} if launch_head != head else {}),
                 "launches": attempt,
                 **(
                     {
@@ -2477,7 +2578,9 @@ def _launch_observer(
             head=head,
             reason=f"observer lifecycle event could not be staged: {exc}",
         )
-    intent = _write_launch_intent(runtime, payload, observers, ref, record, head, attempt)
+    intent = _write_launch_intent(
+        runtime, payload, observers, ref, record, head, attempt, launch_head=launch_head
+    )
     if intent is not None:
         # State that cannot be written means no head: a launch nobody can record is exactly how a
         # sprint ends up with two of them.
@@ -2497,7 +2600,7 @@ def _launch_observer(
     try:
         launched = runtime.host.prepare_observer(
             sprint,
-            head,
+            launch_head,
             prompt=render_observer_prompt(
                 sprint,
                 skill_path=_first_path(delivery),
@@ -2576,6 +2679,7 @@ def _launch_observer(
         )
     now = time.time()
     record.head = head
+    record.fallback_head = launch_head if launch_head != head else ""
     record.workspace = str(launched.get("workspace") or "")
     record.handle = str(launched.get("handle") or "")
     record.leaf = str(launched.get("leaf") or "")
@@ -2756,8 +2860,15 @@ def _write_launch_intent(
     record: ObserverRecord,
     head: str,
     attempt: int,
+    *,
+    launch_head: str = "",
 ) -> str | None:
     """Fix this launch on disk before the host is called. Returns the failure, or None on success.
+
+    `head` is the declared profile the record keeps; `launch_head` is the profile actually raised
+    when a provider fallback substituted one (ummanu-108). The preflight run, and so the wake
+    liveness episode bound to it, are the launched profile's: an episode bound to a head that is
+    not running would reject every provider observation of the one that is.
 
     The workspace and pid file are asked of the host rather than taken from its answer: they are
     path arithmetic over the sprint reference, and the answer is exactly what a tick that dies
@@ -2769,7 +2880,7 @@ def _write_launch_intent(
     try:
         workspace = record.workspace or str(runtime.host.observer_workspace(ref))
         pid_file = record.pid_file or str(runtime.host.observer_pid_file(ref))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
         # Without the workspace the head could not be found again, and without the pid file its
         # liveness could not be read: an intent that names neither is not worth launching against.
         return f"{type(exc).__name__}: {exc}"
@@ -2779,17 +2890,18 @@ def _write_launch_intent(
     if callable(attest):
         try:
             candidate = attest(
-                head,
+                launch_head or head,
                 role=OBSERVER_ROLE,
                 workspace=workspace,
                 task_ref=head_ops.TaskRef.sprint(ref),
                 pid_file=pid_file,
                 run_id=run_id,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
             return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
         preflight_run = candidate.to_json()
     record.head = head
+    record.fallback_head = launch_head if launch_head and launch_head != head else ""
     record.workspace = workspace
     record.pid_file = pid_file
     record.head_run = preflight_run or {"run_id": run_id}
@@ -2816,7 +2928,7 @@ def _write_launch_intent(
     try:
         put_observers(payload, observers)
         runtime.production_state.save(payload)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - observer bookkeeping never fails the tick
         for name, value in previous.items():
             if name == "delivery":
                 record.delivery = ObserverDelivery.from_json(value)
@@ -2824,6 +2936,8 @@ def _write_launch_intent(
                 record.wake_liveness = ObserverWakeLiveness.from_json(value)
             else:
                 setattr(record, name, value)
+        # Written only when set, so a previous record without it had none.
+        record.fallback_head = str(previous.get("fallback_head") or "")
         return f"{type(exc).__name__}: {exc}"
     return None
 
@@ -3258,7 +3372,7 @@ def _persist_quietly(runtime: Any, payload: dict[str, Any], observers: dict[str,
     put_observers(payload, observers)
     try:
         runtime.production_state.save(payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         return False
     return True
 
@@ -3279,7 +3393,7 @@ def commit_staged_event(runtime: Any, request_id: str) -> bool:
         if event is None:
             return False
         audit.append(request_id, event)
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         return False
     return True
 
@@ -3300,7 +3414,7 @@ def commit_event(runtime: Any, event: dict[str, Any] | None) -> bool:
         # pass writes the same line this commit would have.
         audit.stage(request_id, event)
         audit.append(request_id, event)
-    except Exception:
+    except Exception:  # noqa: BLE001 - observer bookkeeping never fails the tick
         return False
     return True
 

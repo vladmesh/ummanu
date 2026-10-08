@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from ummanu.dispatch.cleanup import serialized
-
 import contextlib
-import copy
 import contextvars
+import copy
 import json
 import time
 import uuid
@@ -22,11 +20,13 @@ from ummanu.board.terminal_taxonomy import (
     budget_event_type,
     read_terminal_taxonomy,
 )
+from ummanu.board.tick_snapshot import current_snapshot, select_cards, tick_snapshot
 from ummanu.checkpoint import checkpoint_snapshot
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.claim import claim_ready_task
+from ummanu.dispatch.cleanup import REPLAY_ALLOWANCE as CLEANUP_REPLAY_ALLOWANCE, ownership_lock
+from ummanu.dispatch.e2e_after_merge import after_merge_snapshot, reconcile_after_merge
 from ummanu.dispatch.host import CommandHostRuntime
-from ummanu.dispatch.provider_failure import is_provider_unavailable_return
 from ummanu.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
@@ -42,14 +42,14 @@ from ummanu.dispatch.observer import (
     retry_pending_observer_stops,
 )
 from ummanu.dispatch.observer_fence import fenced_task, observer_fence
-from ummanu.dispatch.pause_ops import auto_resume_expired_freeze
 from ummanu.dispatch.origin_returns import reconcile_origin_returns
+from ummanu.dispatch.pause_ops import auto_resume_expired_freeze
 from ummanu.dispatch.po_cards import completion_state
-from ummanu.dispatch.wait_cards import pending_wait_blockers
-from ummanu.dispatch.e2e_after_merge import after_merge_snapshot, reconcile_after_merge
 from ummanu.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
+from ummanu.dispatch.provider_failure import is_provider_unavailable_return
 from ummanu.dispatch.state import (
     DispatcherRecord,
+    attempt_request_id as _attempt_request_id,
     close_divergence,
     divergence_is_open,
     is_claim_skip,
@@ -58,10 +58,24 @@ from ummanu.dispatch.state import (
     record_divergence,
     request_token,
 )
-from ummanu.dispatch.state import (
-    attempt_request_id as _attempt_request_id,
+from ummanu.dispatch.tick_telemetry import (
+    TICK_CARDS_KEPT,
+    TICK_TELEMETRY_RECENT_KEPT,
+    cleanup_summary,
+    tick_count,
+    tick_counter_values,
+    tick_counting,
 )
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
+from ummanu.dispatch.wait_cards import pending_wait_blockers
+from ummanu.infra.checkpoint_run import load_checkpoint_state
+from ummanu.runtime.head.handoff import (
+    active_budget,
+    handoff_budget,
+    handoff_card,
+    handoff_stage_mark,
+    handoff_stages_since,
+)
 from ummanu.sprints import SprintWriter, budget_thresholds
 from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY, TaskError
 
@@ -74,10 +88,6 @@ HEALTHY_TICK_STATUSES = frozenset({"ok", "skipped"})
 # Unfinished actions and observer fences degrade telemetry; ordinary blocked cards do not.
 DEGRADED_ACTION_STATUSES = frozenset({"degraded", "failed", "critical"})
 
-# The timer fires every minute, while the normalized board/run projection is a
-# recovery artifact rather than the dispatcher's live source of truth.  Its
-# cadence deliberately lives here, at the production-state durability boundary.
-CHECKPOINT_INTERVAL_SECONDS = 5 * 60
 
 
 #: Where the clock of the tick currently being served lives. Every terminal record a tick makes is
@@ -87,16 +97,114 @@ CHECKPOINT_INTERVAL_SECONDS = 5 * 60
 #: reason to know the time. A context variable is set once, at the top of `production_tick`, and read
 #: back by `record_tick_telemetry`, which is the one place every one of those records is built.
 _TICK_STARTED: contextvars.ContextVar[float | None] = contextvars.ContextVar("tick_started", default=None)
+_TICK_PHASES: contextvars.ContextVar[dict[str, float] | None] = contextvars.ContextVar("tick_phases", default=None)
+_TICK_PHASE_STACK: contextvars.ContextVar[list[list[float]] | None] = contextvars.ContextVar(
+    "tick_phase_stack", default=None
+)
+_TICK_CARDS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar("tick_cards", default=None)
+#: What the advance pass's head handoffs were allowed and really spent, for the tick entry.
+_TICK_HANDOFF: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("tick_handoff", default=None)
+#: What the cleanup phase's automatic replay was allowed, spent, attempted, skipped and wrote.
+_TICK_CLEANUP: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("tick_cleanup", default=None)
 
 
 @contextlib.contextmanager
 def tick_clock() -> Iterator[None]:
     """Run the wall clock of one tick, for the duration every terminal record carries."""
     token = _TICK_STARTED.set(time.perf_counter())
+    phases_token = _TICK_PHASES.set({})
+    stack_token = _TICK_PHASE_STACK.set([])
+    cards_token = _TICK_CARDS.set([])
+    handoff_token = _TICK_HANDOFF.set({})
+    cleanup_token = _TICK_CLEANUP.set({})
+    try:
+        with tick_counting():
+            yield
+    finally:
+        _TICK_CLEANUP.reset(cleanup_token)
+        _TICK_HANDOFF.reset(handoff_token)
+        _TICK_CARDS.reset(cards_token)
+        _TICK_PHASE_STACK.reset(stack_token)
+        _TICK_PHASES.reset(phases_token)
+        _TICK_STARTED.reset(token)
+
+
+@contextlib.contextmanager
+def tick_phase(name: str) -> Iterator[None]:
+    """Accumulate exclusive elapsed milliseconds, including a phase interrupted by an exception.
+
+    Board snapshots can occur inside launches. Subtract nested spans from their parent so each
+    millisecond belongs to one phase. Outside a tick this helper has no clock or side effects.
+    """
+    phases = _TICK_PHASES.get()
+    stack = _TICK_PHASE_STACK.get()
+    if phases is None or stack is None:
+        yield
+        return
+    frame = [time.perf_counter(), 0.0]
+    stack.append(frame)
     try:
         yield
     finally:
-        _TICK_STARTED.reset(token)
+        elapsed = (time.perf_counter() - frame[0]) * 1000.0
+        stack.pop()
+        phases[name] = phases.get(name, 0.0) + max(0.0, elapsed - frame[1])
+        if stack:
+            stack[-1][1] += elapsed
+
+
+@contextlib.contextmanager
+def tick_card(ref: str, records: int) -> Iterator[None]:
+    """Attribute one card's advance time (inclusive) and the writes it made, inside its phase.
+
+    `records` is how many dispatcher records the advance was handed, apart from how many times it
+    flushed them (the `save_records` delta). A breakdown of `advance_active`, not a phase of its
+    own: it adds nothing to the phase sum.
+    """
+    cards = _TICK_CARDS.get()
+    before = tick_counter_values()
+    if cards is None or before is None:
+        yield
+        return
+    started = time.perf_counter()
+    mark = handoff_stage_mark()
+    budget = active_budget()
+    spent = budget.spent if budget is not None else 0.0
+    try:
+        yield
+    finally:
+        after = tick_counter_values() or before
+        handoffs = handoff_stages_since(mark)
+        handoff_ms = round((budget.spent - spent) * 1000.0, 3) if budget is not None else 0.0
+        cards.append({"ref": ref, "ms": round((time.perf_counter() - started) * 1000.0, 3), "records": records,
+                      **{name: after[name] - before[name] for name in after},
+                      # What this card's head handoffs really cost (waits and supervisor requests
+                      # alike), and each stage with its own cost; `ms` less this is the rest.
+                      **({"handoff_ms": handoff_ms} if handoffs or handoff_ms else {}),
+                      **({"handoffs": handoffs} if handoffs else {})})
+
+
+def note_tick_handoff(budget: Any) -> None:
+    """Keep what the pass's head handoffs were allowed and really spent, for this tick's entry."""
+    held = _TICK_HANDOFF.get()
+    if held is None:
+        return
+    held.update(
+        {
+            "allowance_ms": round(budget.seconds * 1000.0, 3),
+            "spent_ms": round(budget.spent * 1000.0, 3),
+            "cards": budget.cards,
+            "stages_dropped": budget.dropped,
+        }
+    )
+
+
+def note_tick_cleanup(report: Any) -> None:
+    """Keep the cleanup replay's allowance, spent time, counts and journal writes for this tick's entry."""
+    held = _TICK_CLEANUP.get()
+    if held is None or not isinstance(report, dict):
+        return
+    held.update(cleanup_summary(report))
 
 
 def tick_duration_ms() -> float | None:
@@ -145,6 +253,23 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     errors = [error for error in (result.get("errors") or []) if isinstance(error, dict)]
     # Health includes action outcomes, not only top-level status.
     degradations = degraded_actions(result.get("actions"))
+    duration = tick_duration_ms()
+    phases = {name: round(elapsed, 3) for name, elapsed in (_TICK_PHASES.get() or {}).items()}
+    if duration is not None:
+        # Independent rounding can overshoot a very short tick by a few microseconds.
+        excess = round(sum(phases.values()) - duration, 3)
+        if excess > 0 and phases:
+            largest = max(phases, key=lambda name: phases[name])
+            phases[largest] = round(max(0.0, phases[largest] - excess), 3)
+        phases["other"] = round(max(0.0, duration - sum(phases.values())), 3)
+    counters = tick_counter_values()
+    if counters is not None:
+        # Every caller saves this payload right after folding the entry in, and the entry is only
+        # ever read from that save, so a readable entry was carried by exactly one more successful
+        # state save than the seam had counted when it was built: its own. A failed terminal save
+        # leaves no entry, and the recovery record that replaces it counts its own save instead.
+        counters["production_state_saves"] += 1
+    cards = sorted(_TICK_CARDS.get() or [], key=lambda card: -card["ms"])[:TICK_CARDS_KEPT]
     entry = {
         "seq": seq,
         "at": now_rfc3339(),
@@ -153,7 +278,14 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         "healthy": status in HEALTHY_TICK_STATUSES and not degradations,
         # How long this tick ran, beside the outcome it ran to. The record is made right before the
         # save, so it covers everything the tick did up to the moment it became durable.
-        "duration_ms": tick_duration_ms(),
+        "duration_ms": duration,
+        "phases": phases,
+        "counters": counters,
+        "cards": cards,
+        # The head handoff allowance of the advance pass, and what it really cost.
+        **({"handoff": dict(handoff)} if (handoff := _TICK_HANDOFF.get()) else {}),
+        # The cleanup phase's allowance, what it spent, and what it attempted, skipped and wrote.
+        **({"cleanup": dict(cleanup)} if (cleanup := _TICK_CLEANUP.get()) else {}),
         "reason": str(result.get("reason") or ""),
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
@@ -179,6 +311,13 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
     }
     telemetry["tick_seq"] = seq
     telemetry["last"] = entry
+    recent = telemetry.get("recent")
+    recent = recent[-(TICK_TELEMETRY_RECENT_KEPT - 1):] if isinstance(recent, list) else []
+    telemetry["recent"] = [
+        *recent,
+        # Counters and per-card details stay on `last` and the unhealthy entries: the ring is bounded.
+        {key: entry[key] for key in ("seq", "at", "status", "healthy", "duration_ms", "phases")},
+    ]
     unhealthy = [item for item in (telemetry.get("unhealthy") or []) if isinstance(item, dict)]
     if entry["healthy"]:
         telemetry["last_healthy_at"] = entry["at"]
@@ -268,7 +407,7 @@ def _record_failed_tick(runtime: Any, exc: BaseException) -> None:
             },
         )
         runtime.production_state.save(payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         return
 
 
@@ -294,7 +433,9 @@ class ProductionState:
         return payload
 
     def save(self, payload: dict[str, Any]) -> None:
-        write_json(self.path, payload)
+        with ownership_lock(self.root.parent):
+            write_json(self.path, payload)
+        tick_count("production_state_saves")
 
     def records(self, payload: dict[str, Any]) -> dict[str, DispatcherRecord]:
         raw = payload.get("records") or {}
@@ -312,6 +453,7 @@ class ProductionState:
 
 def production_observe(runtime: Any) -> dict[str, Any]:
     payload = runtime.production_state.load()
+    checkpoint_state = load_checkpoint_state(runtime.data_dir)
     return {
         "status": "ok",
         "step": "production-observe",
@@ -333,14 +475,13 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         ],
         "checkpoint": checkpoint_snapshot(
             runtime.catalog.instance_dir,
-            write_state=payload.get("checkpoint"),
-            push_state=payload.get("checkpoint_push"),
+            write_state=checkpoint_state.get("checkpoint"),
+            push_state=checkpoint_state.get("checkpoint_push"),
             data_dir=runtime.data_dir,
         ),
     }
 
 
-@serialized
 def production_tick(runtime: Any) -> dict[str, Any]:
     with tick_clock(), try_file_lock(runtime.production_state.tick_lock) as acquired:
         if not acquired:
@@ -398,6 +539,18 @@ def _production_tick_work(
     pause: dict[str, Any],
     auto_resume: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """Own and discard the board view even when a phase raises or returns early."""
+    with tick_snapshot(runtime.reader):
+        return _production_tick_with_snapshot(runtime, payload, records, pause, auto_resume)
+
+
+def _production_tick_with_snapshot(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    pause: dict[str, Any],
+    auto_resume: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Everything the tick does with the records it has loaded."""
     payload.update(
         {
@@ -422,15 +575,28 @@ def _production_tick_work(
     outcome_outcomes = attempt_accounting.publish_pending_attempt_outcomes(runtime)
     cleanup_outcomes = []
     if isinstance(runtime.host, CommandHostRuntime) and runtime.host.mode == "real":
-        cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
-                             "status": item["status"], "reason": item["reason"]}
-                            for item in runtime.cleanup.replay(limit=20)]
+        with tick_phase("cleanup"):
+            # A few intents per tick, within one elapsed allowance under the phase bound: each replay
+            # reads and replaces only its own intent file, and `replay_cursor` carries the rest, the
+            # due intents the allowance did not admit included, to later ticks.
+            cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
+                                 "status": item["status"], "reason": item["reason"]}
+                                for item in runtime.cleanup.replay(limit=5, allowance=CLEANUP_REPLAY_ALLOWANCE)]
+        note_tick_cleanup(getattr(runtime.cleanup, "last_replay", None))
 
     observer_errors: list[dict[str, str]] = []
+    try:
+        with tick_phase("snapshot"):
+            snapshot = current_snapshot(runtime.reader)
+            assert snapshot is not None
+            snapshot.load()
+    except Exception as exc:  # noqa: BLE001 - an unreadable snapshot authorizes no work
+        return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)
     # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
-        fence = observer_fence(runtime, payload, pause_mode=str(pause.get("mode") or ""))
-    except Exception as exc:
+        with tick_phase("fence"):
+            fence = observer_fence(runtime, payload, pause_mode=str(pause.get("mode") or ""))
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         # An unfinished fence authorizes no downstream work.
         return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)
     fence_outcomes = list(fence.get("outcomes") or [])
@@ -442,48 +608,58 @@ def _production_tick_work(
     fenced_refs = set(fence.get("refs") or ()) | {
         str(task.get("ref") or "") for task in cycle if fenced_task(fence, task)
     }
-    reconcile_outcomes = _reconcile_production(
-        runtime, records, payload, active_refs, fenced_refs=fenced_refs, fence=fence
-    )
-    # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
-    # reconciliation did: those are stamped by every tick regardless of code version, so a
-    # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
-    # on the strength of a field that predates the reconciliation pass itself.
-    payload["last_reconciled_at"] = now_rfc3339()
-    outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
+    with tick_phase("reconcile_production"):
+        reconcile_outcomes = _reconcile_production(
+            runtime, records, payload, active_refs, fenced_refs=fenced_refs, fence=fence
+        )
+        # Distinct from `last_tick_started_at`/`last_tick_finished_at`, which existed before
+        # reconciliation did: those are stamped by every tick regardless of code version, so a
+        # pre-deployment host with an old dispatcher would otherwise read as "reconciliation ran"
+        # on the strength of a field that predates the reconciliation pass itself.
+        payload["last_reconciled_at"] = now_rfc3339()
+    # Every head handoff this pass makes shares one allowance, each card its fair share of what is
+    # left: a handoff that needs more stays pending at its stage and the next tick continues it
+    # (`runtime.head.handoff`).
+    with tick_phase("advance_active"), handoff_budget(
+        cards=sum(1 for task in active_tasks if not is_steward_report(task))
+    ) as handoff:
+        outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
+    note_tick_handoff(handoff)
     outcomes = cleanup_outcomes + usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     # After the releases of this tick, before the observers: a merge whose base has no CI resolves
     # `absent` in the tick that merged it, and a result written here is delivered below.
-    try:
-        outcomes += reconcile_post_merge_watches(runtime, payload, records)
-    except Exception as exc:  # noqa: BLE001 - a watch that cannot be read must not stop the tick
-        errors.append(_unexpected_error("", exc))
-    # Right after the watches that queue them: each project's after-merge e2e run (secretary-1807).
-    try:
-        outcomes += reconcile_after_merge(runtime, payload, records)
-    except Exception as exc:  # noqa: BLE001 - an after-merge queue that cannot advance must not stop the tick
-        errors.append(_unexpected_error("", exc))
+    with tick_phase("after-merge"):
+        try:
+            outcomes += reconcile_post_merge_watches(runtime, payload, records)
+        except Exception as exc:  # noqa: BLE001 - a watch that cannot be read must not stop the tick
+            errors.append(_unexpected_error("", exc))
+        # Right after the watches that queue them: each project's after-merge e2e run (secretary-1807).
+        try:
+            outcomes += reconcile_after_merge(runtime, payload, records)
+        except Exception as exc:  # noqa: BLE001 - an after-merge queue that cannot advance must not stop the tick
+            errors.append(_unexpected_error("", exc))
     try:
         outcomes += _reconcile_sprint_budget(runtime)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         errors.append(_unexpected_error("", exc))
     # Reconcile after budget accounting so hard stops prevent replacement launches.
-    try:
-        outcomes += reconcile_observers(runtime, payload, pause_mode=str(pause.get("mode") or ""))
-    except Exception as exc:
-        observer_errors.append(_unexpected_error("", exc))
-    errors = observer_errors + errors
-    claims_allowed = pause.get("mode") != "drain"
-    if claims_allowed:
+    with tick_phase("launches"):
         try:
-            ready_outcome = _production_claim_ready(
-                runtime, records, payload, fence=fence, blocked_scopes=blocked_scopes
-            )
-        except Exception as exc:
-            errors.append(_unexpected_error("", exc))
-        else:
-            if ready_outcome is not None:
-                outcomes.append(ready_outcome)
+            outcomes += reconcile_observers(runtime, payload, pause_mode=str(pause.get("mode") or ""))
+        except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
+            observer_errors.append(_unexpected_error("", exc))
+        errors = observer_errors + errors
+        claims_allowed = pause.get("mode") != "drain"
+        if claims_allowed:
+            try:
+                ready_outcome = _production_claim_ready(
+                    runtime, records, payload, fence=fence, blocked_scopes=blocked_scopes
+                )
+            except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
+                errors.append(_unexpected_error("", exc))
+            else:
+                if ready_outcome is not None:
+                    outcomes.append(ready_outcome)
     # Last, after every move this tick made (a claim can Block a decision/operation card): every
     # return the origin-return outbox holds undelivered goes to the PO session that cut its card.
     try:
@@ -492,15 +668,11 @@ def _production_tick_work(
         errors.append(_unexpected_error("", exc))
 
     runtime.production_state.put_records(payload, records)
-    checkpoint, push = _coordinate_checkpoint(runtime, payload)
     payload["last_tick_finished_at"] = now_rfc3339()
-    # Caught degraded actions and checkpoint failures degrade the terminal tick.
-    checkpoint_blocked = bool(checkpoint and checkpoint.get("status") == "blocked")
-    if checkpoint_blocked:
-        outcomes.append(_checkpoint_degradation(checkpoint))
+    # Only the tick's own unfinished actions degrade its terminal health.
     result = {
         "status": "ok"
-        if not errors and not degraded_actions(outcomes) and not checkpoint_blocked
+        if not errors and not degraded_actions(outcomes)
         else "degraded",
         "step": "production-tick",
         "owner": runtime.owner,
@@ -511,10 +683,6 @@ def _production_tick_work(
         result["pause"] = pause
     if auto_resume is not None:
         result["auto_resume"] = auto_resume
-    if checkpoint is not None:
-        result["checkpoint"] = checkpoint
-    if push is not None:
-        result["checkpoint_push"] = push
     # Persist telemetry from the result returned to the caller.
     record_tick_telemetry(payload, result)
     runtime.production_state.save(payload)
@@ -522,7 +690,7 @@ def _production_tick_work(
 
 
 def _frozen_tick(runtime: Any, pause: dict[str, Any], auto_resume: dict[str, Any] | None) -> dict[str, Any]:
-    """A frozen tick moves no card and retains the normal checkpoint cadence."""
+    """A frozen tick moves no card; the independent checkpoint keeps its cadence."""
     result: dict[str, Any] = {
         "status": "skipped",
         "step": "production-tick",
@@ -534,8 +702,7 @@ def _frozen_tick(runtime: Any, pause: dict[str, Any], auto_resume: dict[str, Any
     payload = runtime.production_state.load()
     guard = _production_mutation_guard(runtime, payload)
     if guard is not None:
-        # No state to write the snapshot's own bookkeeping into, so the checkpoint is not attempted:
-        # the freeze is reported with the guard's reason instead of a snapshot that cannot be recorded.
+        # The freeze is reported with the state guard's durability refusal.
         result["durability"] = {
             "status": "skipped",
             "reason": str(guard.get("reason") or "production state is not writable"),
@@ -545,7 +712,7 @@ def _frozen_tick(runtime: Any, pause: dict[str, Any], auto_resume: dict[str, Any
         return _frozen_tick_body(runtime, payload, result)
     except Exception as exc:
         # Same rule as the working tick: past the guard, a raise still leaves a durable record,
-        # or a freeze whose checkpoint machinery is broken would read as a healthy pipeline.
+        # or broken frozen-tick work would read as a healthy pipeline.
         _record_failed_tick(runtime, exc)
         raise
 
@@ -555,7 +722,7 @@ def _frozen_tick_body(runtime: Any, payload: dict[str, Any], result: dict[str, A
     # during the freeze is retried. Nothing else about an observer is touched here.
     try:
         observer_stops = retry_pending_observer_stops(runtime, payload)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         observer_stops = []
         # A freeze itself is healthy; a retry that raised inside it is not, and telemetry keys
         # health off the status. Say so in both places rather than reporting the frozen tick as a
@@ -573,16 +740,6 @@ def _frozen_tick_body(runtime: Any, payload: dict[str, Any], result: dict[str, A
         result["actions"] = observer_stops
         if degraded_actions(observer_stops):
             result["status"] = "degraded"
-    checkpoint, push = _coordinate_checkpoint(runtime, payload)
-    if checkpoint is not None:
-        result["checkpoint"] = checkpoint
-        if checkpoint.get("status") == "blocked":
-            result["status"] = "degraded"
-            actions = list(result.get("actions") or ())
-            actions.append(_checkpoint_degradation(checkpoint))
-            result["actions"] = actions
-    if push is not None:
-        result["checkpoint_push"] = push
     payload["last_frozen_tick_at"] = now_rfc3339()
     # A freeze is a deliberate stop, so this tick is recorded as a healthy terminal one — and it
     # is saved even when nothing else about this tick changed the state, or a long freeze would
@@ -592,283 +749,6 @@ def _frozen_tick_body(runtime: Any, payload: dict[str, Any], result: dict[str, A
     return result
 
 
-def _checkpoint_degradation(checkpoint: dict[str, Any]) -> dict[str, str]:
-    """Expose a durability gate failure as an ordinary degraded action."""
-    return {
-        "status": "degraded",
-        "step": "checkpoint",
-        "action": "blocked",
-        "reason": str(checkpoint.get("reason") or "checkpoint gate blocked"),
-    }
-
-
-def _coordinate_checkpoint(runtime: Any, payload: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Prepare one current recovery snapshot when its local or remote window is due.
-
-    This is the only periodic caller of ``CheckpointWriter``.  It uses the
-    pusher's clock and due semantics so the five-minute preparation and the
-    thirty-minute remote window do not stack.  A due push receives a snapshot
-    prepared in this invocation or is explicitly withheld.
-    """
-    writer = getattr(runtime, "checkpoint", None)
-    pusher = getattr(runtime, "checkpoint_push", None)
-    previous = payload.get("checkpoint")
-    write_state = dict(previous) if isinstance(previous, dict) else {}
-    previous_push = payload.get("checkpoint_push")
-    push_state = dict(previous_push) if isinstance(previous_push, dict) else {}
-    now = _checkpoint_now(pusher)
-    push_due = _checkpoint_push_due(pusher, push_state, now)
-    checkpoint_due = _checkpoint_due(write_state, now)
-
-    # A few constrained runtime tests deliberately have no checkpoint writer.
-    # Preserve their former benign push-only behavior rather than fabricating a
-    # blocked periodic checkpoint. Production constructs both dependencies.
-    if writer is None:
-        if pusher is None or not push_due:
-            return None, None
-        push = _push_checkpoint(runtime, push_state, now)
-        payload["checkpoint_push"] = push
-        return None, push
-    if pusher is None and not checkpoint_due:
-        checkpoint = _checkpoint_skipped(write_state, now)
-        payload["checkpoint"] = checkpoint
-        return checkpoint, None
-
-    # A regular remote deadline needs a current preparation before delivery.
-    # A remote already known to have diverged is deliberately rechecked by its
-    # pusher on every tick, but cannot make the expensive board/run projection
-    # run more often than its own five-minute deadline.
-    preparation_due = checkpoint_due or _push_forces_preparation(push_due, push_state)
-    if not preparation_due:
-        checkpoint = _checkpoint_skipped(write_state, now)
-        payload["checkpoint"] = checkpoint
-        if not push_due or pusher is None:
-            return checkpoint, None
-        push = _push_checkpoint(runtime, push_state, now)
-        payload["checkpoint_push"] = push
-        return checkpoint, push
-
-    checkpoint = _write_checkpoint(runtime, write_state, now)
-    payload["checkpoint"] = checkpoint
-    prepared = checkpoint.get("status") in {"committed", "unchanged"}
-    if not push_due:
-        return checkpoint, None
-    if not prepared:
-        push = _push_withheld_for_checkpoint(push_state, checkpoint, now)
-        payload["checkpoint_push"] = push
-        return checkpoint, push
-    if pusher is None:
-        return checkpoint, None
-    push = _push_checkpoint(runtime, push_state, now)
-    # This one-shot pusher retry means only "the next delivery needs a fresh
-    # preparation". The preparation above satisfied that condition even when
-    # the remote still fails or remains diverged, so it cannot pin the pusher
-    # and this coordinator into a per-minute retry loop.
-    if push_state.get("retry_pending"):
-        push.pop("retry_pending", None)
-    payload["checkpoint_push"] = push
-    return checkpoint, push
-
-
-def _checkpoint_now(pusher: Any) -> float:
-    """Use the pusher's established controllable clock for both windows."""
-    clock = getattr(pusher, "_clock", None)
-    if callable(clock):
-        try:
-            return float(clock())
-        except (TypeError, ValueError):
-            pass
-    return time.time()
-
-
-def _checkpoint_due(state: dict[str, Any], now: float) -> bool:
-    """Whether a fresh board/run preparation is due, fail-closed on old state."""
-    if state.get("retry_pending"):
-        return True
-    successful = _checkpoint_success_epoch(state)
-    # Existing payloads did not carry cadence metadata.  Their first upgraded
-    # tick must make one fresh cut, rather than treating an old result as one.
-    if successful is None:
-        return True
-    # A rollback is due now.  Otherwise clamp is not enough: a future marker
-    # would park recovery forever.
-    return now < successful or now - successful >= CHECKPOINT_INTERVAL_SECONDS
-
-
-def _checkpoint_push_due(pusher: Any, state: dict[str, Any], now: float) -> bool:
-    if pusher is None:
-        return False
-    due = getattr(pusher, "due", None)
-    if not callable(due):
-        return False
-    try:
-        return bool(due(state, now=now))
-    except Exception:
-        # A pusher that cannot answer its own public window contract gets a
-        # fresh preparation and then records its own delivery failure. It must
-        # not turn a failed preflight into permission to send an old snapshot.
-        return True
-
-
-def _push_forces_preparation(push_due: bool, state: dict[str, Any]) -> bool:
-    """Whether this due push is an ordinary deadline, not a sticky recheck."""
-    return push_due and not bool(state.get("remote_diverged"))
-
-
-def _checkpoint_skipped(state: dict[str, Any], now: float) -> dict[str, Any]:
-    """Record an inexpensive not-yet-due decision without reclassifying success."""
-    started = time.perf_counter()
-    result = dict(state)
-    successful = _checkpoint_success_epoch(result)
-    result.update(
-        {
-            "status": "skipped",
-            "reason": "not due",
-            # This outcome inherits the previous run's fields, so its duration is restated rather
-            # than left behind: a skip that reported the last committed run's milliseconds would
-            # read as an expensive checkpoint nobody ran.
-            "duration_ms": round((time.perf_counter() - started) * 1000.0, 3),
-            "at": _checkpoint_rfc3339(now),
-            "skip_epoch": now,
-            "skip_at": _checkpoint_rfc3339(now),
-            "next_due_epoch": successful + CHECKPOINT_INTERVAL_SECONDS if successful is not None else now,
-            "next_due_at": _checkpoint_rfc3339(
-                successful + CHECKPOINT_INTERVAL_SECONDS if successful is not None else now
-            ),
-        }
-    )
-    return result
-
-
-def _write_checkpoint(runtime: Any, state: dict[str, Any], now: float) -> dict[str, Any]:
-    """Prepare a fresh checkpoint and retain success/failure history separately."""
-    started = time.perf_counter()
-    writer = getattr(runtime, "checkpoint", None)
-    if writer is None:
-        raw = {"status": "blocked", "reason": "checkpoint writer is unavailable"}
-    else:
-        try:
-            raw = writer.write().to_json()
-        except Exception as exc:
-            raw = {"status": "blocked", "reason": f"{type(exc).__name__}: {exc}"}
-    result = dict(state)
-    status = str(raw.get("status") or "blocked")
-    reason = str(raw.get("reason") or "")
-    result.update(raw)
-    result.update(
-        {
-            "status": status,
-            "reason": reason,
-            # The writer times its own run and reports it in `raw`; a run that never reached the
-            # writer, or one that died before it could return a result, is timed from out here so
-            # that every outcome this coordinator records carries a duration of its own.
-            "duration_ms": _number(raw.get("duration_ms"))
-            or round((time.perf_counter() - started) * 1000.0, 3),
-            "at": _checkpoint_rfc3339(now),
-            "attempted_epoch": now,
-            "attempted_at": _checkpoint_rfc3339(now),
-        }
-    )
-    if status in {"committed", "unchanged"}:
-        result.update(
-            {
-                "last_success_epoch": now,
-                "last_success_at": _checkpoint_rfc3339(now),
-                "last_success_status": status,
-                "last_success_commit": str(raw.get("commit") or ""),
-                "next_due_epoch": now + CHECKPOINT_INTERVAL_SECONDS,
-                "next_due_at": _checkpoint_rfc3339(now + CHECKPOINT_INTERVAL_SECONDS),
-                "retry_pending": False,
-            }
-        )
-        result.pop("last_failure_epoch", None)
-        result.pop("last_failure_at", None)
-        result.pop("last_failure_reason", None)
-        result.pop("failing_since_epoch", None)
-        result.pop("failing_since_at", None)
-    else:
-        # `last_failure_*` moves with every failed run; `failing_since_*` keeps the first failure
-        # after the last success, so doctor can say since when the checkpoint has not published.
-        since = _number(state.get("failing_since_epoch")) if state.get("last_failure_reason") else 0.0
-        since = since or now
-        result.update(
-            {
-                "last_failure_epoch": now,
-                "last_failure_at": _checkpoint_rfc3339(now),
-                "last_failure_reason": reason or "checkpoint preparation failed",
-                "failing_since_epoch": since,
-                "failing_since_at": _checkpoint_rfc3339(since),
-                "retry_pending": True,
-            }
-        )
-    return result
-
-
-def _push_withheld_for_checkpoint(
-    state: dict[str, Any], checkpoint: dict[str, Any], now: float
-) -> dict[str, Any]:
-    reason = str(checkpoint.get("last_failure_reason") or checkpoint.get("reason") or "preparation failed")
-    result = dict(state)
-    result.update(
-        {
-            "status": "skipped",
-            "reason": f"fresh checkpoint preparation failed; remote push withheld: {reason}",
-            "attempted_epoch": now,
-            "attempted_at": _checkpoint_rfc3339(now),
-            "retry_pending": True,
-        }
-    )
-    return result
-
-
-def _checkpoint_rfc3339(epoch: float) -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
-
-
-def _number(value: Any) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return 0.0
-    return float(value)
-
-
-def _checkpoint_success_epoch(state: dict[str, Any]) -> float | None:
-    """A valid zero timestamp is a real successful preparation, not old state."""
-    value = state.get("last_success_epoch")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    return float(value)
-
-
-def _push_checkpoint(runtime: Any, state: dict[str, Any], now: float) -> dict[str, Any]:
-    """Run a due remote window only after this tick's preparation succeeded."""
-    pusher = getattr(runtime, "checkpoint_push", None)
-    assert pusher is not None
-    try:
-        result = pusher.push(state, now=now)
-    except Exception as exc:
-        return _failed_push(state, exc, now)
-    result = dict(result)
-    # ``CheckpointPusher`` records this itself. Keep a pre-cadence compatible
-    # pusher from being retried every minute merely because it omitted the
-    # durable window marker from an otherwise successful result.
-    if _number(result.get("attempted_epoch")) <= 0:
-        result["attempted_epoch"] = now
-        result["attempted_at"] = _checkpoint_rfc3339(now)
-    return result
-
-
-def _failed_push(state: dict[str, Any], exc: Exception, now: float) -> dict[str, Any]:
-    result = dict(state)
-    result.update(
-        {
-            "status": "failed",
-            "reason": f"{type(exc).__name__}: {exc}",
-            "attempted_epoch": now,
-            "attempted_at": _checkpoint_rfc3339(now),
-            "failures": int(result.get("failures") or 0) + 1,
-        }
-    )
-    return result
 
 
 class ProbeAbort(Exception):
@@ -996,7 +876,8 @@ class _ProbeCleanup:
         self._inner = inner
 
     def __getattr__(self, name: str) -> Any:
-        if name in {"cleanup", "cleanup_observer", "remember", "replay", "replay_one", "replay_targets"}:
+        if name in {"cleanup", "cleanup_observer", "remember", "remember_record", "replay", "replay_one",
+                    "replay_targets"}:
             def effect(*args: Any, **kwargs: Any) -> Any:
                 raise ProbeAbort("owned-cleanup", {})
             return effect
@@ -1020,7 +901,6 @@ def _probe_runtime(runtime: Any) -> Any:
     return probe
 
 
-@serialized
 def production_probe(runtime: Any) -> dict[str, Any]:
     """Run a real tick with every write replaced by an abort.
 
@@ -1173,7 +1053,7 @@ def production_run(
             try:
                 last = runtime.production_tick()
                 failures = 0 if last.get("status") == "ok" else failures + 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
                 failures += 1
                 last = {
                     "status": "degraded",
@@ -1215,11 +1095,12 @@ def _advance_active(
         if is_steward_report(task):
             continue
         try:
-            outcome = _production_tick_active(runtime, task, records, payload)
+            with tick_card(str(task.get("ref") or ""), len(records)), handoff_card():
+                outcome = _production_tick_active(runtime, task, records, payload)
         except TaskError as exc:
             errors.append({"ref": str(task.get("ref") or ""), "code": exc.code, "message": exc.message})
             continue
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
             errors.append(_unexpected_error(str(task.get("ref") or ""), exc))
             continue
         if outcome.get("status") == "blocked":
@@ -1262,7 +1143,7 @@ def _fence_failed_tick(
     record_tick_telemetry(payload, result)
     try:
         runtime.production_state.save(payload)
-    except Exception:
+    except Exception:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         # Reporting the refusal matters more than recording it: the cards are already untouched.
         result["state_save"] = "failed"
     return result
@@ -1499,7 +1380,7 @@ def _current_card(runtime: Any, ref: str) -> dict[str, Any] | None:
         return runtime.reader.show(ref)
     except TaskError as exc:
         return {"ref": ref, "state": "not_found"} if exc.code == "not_found" else None
-    except Exception:
+    except Exception:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
         return None
 
 
@@ -1530,7 +1411,7 @@ def _production_mutation_guard(runtime: Any, payload: dict[str, Any]) -> dict[st
 
 
 def _production_tasks(runtime: Any, states: set[str]) -> list[dict[str, Any]]:
-    return sorted(runtime.reader.list(states=states), key=_task_sort_key)
+    return sorted(select_cards(runtime.reader, states=states), key=_task_sort_key)
 
 
 def _production_tick_active(

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from ummanu.dispatch.cleanup import serialized
-
+import functools
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -20,13 +19,10 @@ from ummanu.dispatch.claim import (
     SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
     SPRINT_RESERVATION_RESERVED,  # noqa: F401  # Compatibility re-export.
     SPRINT_RESERVATION_UNVERIFIABLE,  # noqa: F401  # Compatibility re-export.
-)
-from ummanu.dispatch.claim import (
     claim_ready_task as _claim_ready_task,
-)
-from ummanu.dispatch.claim import (
     resolve_head as _resolve_claim_head,
 )
+from ummanu.dispatch.cleanup import ownership_lock
 from ummanu.dispatch.gate_lifecycle import run_gate as _run_gate
 from ummanu.dispatch.helpers import (
     _report_adoption_baseline,
@@ -47,6 +43,7 @@ from ummanu.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     CommandHostRuntime,
     DispatcherHeadTransport,
     InstanceCatalog,
+    LaunchedHead as LaunchedHead,  # Compatibility re-export.
     _body_file_instructions,
     _body_file_path,
     _continuation_note,
@@ -59,80 +56,40 @@ from ummanu.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
     _same_repo,
     _watchdog_kind,
 )
-from ummanu.dispatch.host import (
-    LaunchedHead as LaunchedHead,  # Compatibility re-export.
-)
 from ummanu.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
-)
-from ummanu.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
-)
-from ummanu.dispatch.launch import (
     bring_up_blocked_reason as _bring_up_blocked_reason,
-)
-from ummanu.dispatch.launch import (
     bring_up_terminal_reason as _bring_up_terminal_reason,
-)
-from ummanu.dispatch.launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
-)
-from ummanu.dispatch.launch import (
     forget_role_head as _forget_role_head,
-)
-from ummanu.dispatch.launch import (
     head_stop_unconfirmed as _head_stop_unconfirmed,
-)
-from ummanu.dispatch.launch import (
     launch_pid_file as _launch_pid_file,
-)
-from ummanu.dispatch.launch import (
     merge_launch_head_run as _merge_launch_head_run,
-)
-from ummanu.dispatch.launch import (
     resolve_launch_intent as _resolve_launch_intent,
 )
 from ummanu.dispatch.pause import ProductionPause
 from ummanu.dispatch.pause_ops import (
     pause as _pause_pipeline,
-)
-from ummanu.dispatch.pause_ops import (
     pause_status as _pause_status,
-)
-from ummanu.dispatch.pause_ops import (
     resume as _resume_pipeline,
 )
-from ummanu.dispatch.po_cards import ServicePoChannel
-from ummanu.dispatch.po_cards import advance_po_card as _advance_po_card
+from ummanu.dispatch.po_cards import ServicePoChannel, advance_po_card as _advance_po_card
 from ummanu.dispatch.production import (
     ProductionState,
-)
-from ummanu.dispatch.production import (
     production_observe as _production_observe,
-)
-from ummanu.dispatch.production import (
     production_probe as _production_probe,
-)
-from ummanu.dispatch.production import (
     production_run as _production_run,
-)
-from ummanu.dispatch.production import (
     production_tick as _production_tick,
 )
 from ummanu.dispatch.review import (
     end_review_pane as _end_review_pane,
-)
-from ummanu.dispatch.review import (
     recover_review_launch as _recover_review_launch,
-)
-from ummanu.dispatch.review import (
     start_review as _start_review,
 )
 from ummanu.dispatch.review_verdict import (
     advance_review_verdict as _advance_review_verdict,
-)
-from ummanu.dispatch.review_verdict import (
     park_green_verdict as _park_green_verdict,
 )
 from ummanu.dispatch.state import (
@@ -141,17 +98,12 @@ from ummanu.dispatch.state import (
     PersistedHeadRun,
     PersistedLaunchIntent,
     PersistedRoutingHeadSnapshot,
-    now_rfc3339,
-)
-from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
-)
-from ummanu.dispatch.state import (
     claim_mismatch as _claim_mismatch,
-)
-from ummanu.dispatch.state import (
+    now_rfc3339,
     outcome_terminal_path as _outcome_terminal_path,
 )
+from ummanu.dispatch.tick_telemetry import tick_count
 from ummanu.dispatch.types import (
     STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
@@ -160,39 +112,27 @@ from ummanu.dispatch.types import (
     STOPPED_BY_REVIEW_FREEZE,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REVIEW_VERDICT,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_WATCHDOG,  # noqa: F401  # Public compatibility re-export.
+    DispatcherError as DispatcherError,
     HostError,
 )
-from ummanu.dispatch.types import DispatcherError as DispatcherError
 from ummanu.dispatch.wait_cards import advance_wait_card as _advance_wait_card
 from ummanu.dispatch.wait_vitality import wait_watchdog as _wait_watchdog
 from ummanu.dispatch.watchdog import (
     head_process_status as _head_process_status,
-)
-from ummanu.dispatch.watchdog import (
     head_run_process_status as _head_run_process_status,
-)
-from ummanu.dispatch.watchdog import (
     heartbeat_is_live_match as _heartbeat_is_live_match,
 )
 from ummanu.dispatch.worker_continuation import (
     complete_red_transition as _complete_red_transition,
-)
-from ummanu.dispatch.worker_continuation import (
     recover_worker_continuation as _recover_worker_continuation,
 )
 from ummanu.dispatch.worker_launch import (
     launch_worker_after_claim as _launch_worker_after_claim,
-)
-from ummanu.dispatch.worker_launch import (
     resolve_headless_worker as _resolve_headless_worker,
 )
 from ummanu.dispatch.worker_report import (
     deliver_worker_comments as _deliver_worker_comments,
-)
-from ummanu.dispatch.worker_report import (
     handle_worker_report as _handle_worker_report,
-)
-from ummanu.dispatch.worker_report import (
     worker_report_marker as _worker_report_marker,
 )
 from ummanu.head_health import (
@@ -205,17 +145,9 @@ from ummanu.routing_journal import (
     REVIEWER,
     WORKER,
     HeadRun,
-)
-from ummanu.routing_journal import (
     attempts as _routing_attempts,
-)
-from ummanu.routing_journal import (
     routing_head_snapshot_from_launch as _routing_head_snapshot_from_launch,
-)
-from ummanu.routing_journal import (
     routing_payload as _routing_payload,
-)
-from ummanu.routing_journal import (
     run_key as _run_key,
 )
 from ummanu.runtime import head as head_ops
@@ -984,16 +916,19 @@ class DispatcherRuntime:
             outcome=outcome,
         )
 
-    @serialized
     def save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         """Flush the dispatcher records into the production state."""
+        tick_count("save_records")
         if isinstance(self.host, CommandHostRuntime) and self.host.mode == "real":
             for ref, record in records.items():
                 if record.workspace:
-                    self.cleanup.remember(self.reader.show(ref), record)
-        self.production_state.put_records(payload, records)
-        payload["last_tick_at"] = now_rfc3339()
-        self.production_state.save(payload)
+                    # The card is read only when the journal is: an unchanged cleanup projection
+                    # needs neither the board nor the journal.
+                    self.cleanup.remember_record(ref, record, functools.partial(self.reader.show, ref))
+        with ownership_lock(self.data_dir):
+            self.production_state.put_records(payload, records)
+            payload["last_tick_at"] = now_rfc3339()
+            self.production_state.save(payload)
 
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)

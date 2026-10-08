@@ -5,20 +5,20 @@ Contract: docs/RECOVERY.md, sections "Layout", "Cadence and RPO", "Writers", "Va
 exports, validates the snapshot, and commits `state/board` and `state/runs` into the private
 repo. The board is validated flat in staging and published in the split layout of
 `ummanu.board.checkpoint_layout`, so a commit carries only the records and log segments that
-changed. The dispatcher invokes it at most once in a five-minute cadence window, or once for a due
-remote recovery window, under `tick_lock`; it also takes the instance repo writer lock so
+changed. The independent checkpoint service invokes it at most once in a five-minute cadence window,
+or once for a due remote recovery window; it takes the instance repo writer lock so
 checkpoint writes cannot overlap a green-card publish against the same checkout.
 
 Memory (`state/memory`), knowledge (`state/knowledge`) and the secret store's exported files
 (`secrets/catalog.yaml`, `secrets/installation-key.json`, `secrets/values/*.enc.json`) are written
-by their writers without Git, so in this legacy mode the tick stages and commits them with board and
+by their writers without Git, so in this legacy mode the checkpoint stages and commits them with board and
 runs (`LEGACY_LIVE_PATHS`), after the same secret scan; `state_repo_lock` keeps every writer's files
 from being half-written while it does.
 
 `SnapshotExporter` grows the same staging and validation into the writer for a live root that is
 not a Git work tree: one cut per changed window (the export, `SNAPSHOT_ALLOWLIST` copied from the
 live root, `snapshot-manifest.json`) committed into a bare snapshot repository with Git plumbing.
-`tick_checkpoint_writer` picks one of the two for the tick.
+`tick_checkpoint_writer` picks one of the two for the checkpoint service.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import errno
 import fnmatch
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -42,18 +43,10 @@ from typing import Any
 from ummanu import state_repo
 from ummanu._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
-)
-from ummanu._fsutil import (
     ensure_dir as _ensure_dir,
-)
-from ummanu._fsutil import ndjson_lines
-from ummanu._fsutil import (
+    ndjson_lines,
     publish_component_entries as _publish_component_entries,
-)
-from ummanu._fsutil import (
     remove_path as _remove_path,
-)
-from ummanu._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
 from ummanu.board.backend import CARD, board_client
@@ -74,8 +67,7 @@ from ummanu.data import (
     export_board,
     export_runs,
 )
-from ummanu.infra.export_allowlist import SNAPSHOT_ALLOWLIST, matches
-from ummanu.infra.export_allowlist import is_exported as is_exported
+from ummanu.infra.export_allowlist import SNAPSHOT_ALLOWLIST, is_exported as is_exported, matches
 from ummanu.infra.github_credential import (
     CredentialError,
     RemoteExecution,
@@ -146,9 +138,8 @@ LEGACY_LIVE_PATHS = (
 # RPO the contract promises.
 PUSH_INTERVAL_SECONDS = 30 * 60
 DEFAULT_REMOTE = "origin"
-# The push runs inside the tick, so a stalled remote must not hold the dispatcher.
-# A normalized state repo pushes in seconds; past a minute the window is better
-# spent moving cards, and the next window retries.
+# A normalized state repo pushes in seconds; bound a stalled remote at a minute
+# and retry in the next independent checkpoint window.
 PUSH_TIMEOUT_SECONDS = 60
 
 
@@ -1885,8 +1876,8 @@ def checkpoint_snapshot(
     work tree, else the snapshot repository (`data_dir` roots a relative or default location; it
     is read from `instance.yaml` when omitted).
     """
-    write = dict(write_state or {})
-    push = dict(push_state or {})
+    write = dict(write_state) if isinstance(write_state, dict) else {}
+    push = dict(push_state) if isinstance(push_state, dict) else {}
     stamp = time.time() if now is None else float(now)
     write_status = str(write.get("status") or "pending")
     # A pre-cadence payload had one outcome only.  It is deliberately not
@@ -2425,7 +2416,11 @@ def _float_field(payload: dict[str, Any], key: str) -> float:
     value = payload.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
-    return float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return 0.0
+    return number if math.isfinite(number) else 0.0
 
 
 def _publish_board(staging: Path, destination: Path) -> None:

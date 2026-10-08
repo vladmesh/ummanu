@@ -475,7 +475,6 @@ class DrainedTickFenceTests(unittest.TestCase):
             mock.patch.object(production, "reconcile_observers", return_value=[skipped]),
             mock.patch.object(production, "_production_claim_ready") as claim,
             mock.patch.object(production, "reconcile_origin_returns", return_value=[]),
-            mock.patch.object(production, "_coordinate_checkpoint", return_value=(None, None)),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             code = commands._run_production(args, tick)

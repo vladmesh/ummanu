@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -11,32 +12,18 @@ from typing import Any
 
 from ummanu._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
-)
-from ummanu._fsutil import (
     copy_tree as _copy_tree,
-)
-from ummanu._fsutil import (
     display_relative as _display_relative,
-)
-from ummanu._fsutil import (
     ensure_dir as _ensure_dir,
-)
-from ummanu._fsutil import ndjson_lines
-from ummanu._fsutil import (
+    ndjson_lines,
     publish_component_entries as _publish_component_entries,
-)
-from ummanu._fsutil import (
     regular_files_under as _regular_files_under,
-)
-from ummanu._fsutil import (
     write_json as _write_json,
-)
-from ummanu._fsutil import (
     write_ndjson as _write_ndjson,
 )
 from ummanu.board.backend import CARD, SPRINT, board_client
-from ummanu.board.owner_decisions import stored_decisions
 from ummanu.board.local_run import parse_local_run_exceptions
+from ummanu.board.owner_decisions import stored_decisions
 from ummanu.config import validate
 from ummanu.memory_journal import export_memory_snapshot
 from ummanu.tasks import TaskError, TaskReader, task_audit_for
@@ -116,45 +103,14 @@ def export_board(
     data_dir = data_dir.expanduser().resolve()
     board_dir = data_dir / "board"
     _ensure_dir(board_dir, "board data dir")
-    try:
-        task_reader = (
-            reader if reader is not None else TaskReader(board_client(instance_dir, serves=(CARD,)))
-        )
-        task_client = getattr(task_reader, "client", None)
-        audit_owner = task_audit_for(task_client, data_dir)
-        audit = audit_owner.status()
-        if not audit["ok"]:
-            raise RuntimeError(
-                f"board export blocked by {audit['pending']} unresolved pending audit record(s)"
-            )
-        cards = task_reader.export()
-        history = audit_owner.events()
-    except TaskError as exc:
-        raise RuntimeError(f"ummanu task export failed: {exc.message}") from None
-    if not isinstance(cards, list):
-        raise RuntimeError("ummanu task export did not return a card list")
-
+    cards, history, sprints = _read_board_cut(data_dir, instance_dir, reader, sprint_client)
     normalized = []
     for card in sorted(cards, key=lambda item: str(item.get("reference", ""))):
         if not isinstance(card, dict):
-            raise RuntimeError("ummanu task export returned an invalid card")
+            raise RuntimeError("ummanu task export returned an invalid card")  # noqa: TRY004 - export refusals share RuntimeError
         if not str(card.get("reference") or ""):
             continue
         normalized.append(normalize_board_card(card, card))
-
-    # Sprint entities live on their own board and never reach the task board export, so the
-    # checkpoint reads them separately instead of inferring them from linked cards.
-    owned_sprint_client = None
-    if sprint_client is None:
-        from ummanu.sprints import sprint_client as resolve_sprint_client
-
-        owned_sprint_client = resolve_sprint_client(instance_dir)
-        sprint_client = owned_sprint_client
-    try:
-        sprints = export_sprint_entities(instance_dir, sprint_client)
-    finally:
-        if owned_sprint_client is not None:
-            owned_sprint_client.connection.close()
 
     summary = {
         "version": 1,
@@ -193,8 +149,6 @@ def export_board(
     except RuntimeError:
         _cleanup_staging_dir(staging)
         raise
-    if reader is None:
-        task_client.connection.close()
     return DataExport(path=board_dir / "cards.json", count=len(normalized), source=summary["source"])
 
 
@@ -240,6 +194,54 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
             if isinstance(comment, dict)
         ],
     }
+
+
+def _read_board_cut(
+    data_dir: Path, instance_dir: Path, reader: TaskReader | None, sprint_client: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Hold the shared bulk lane only while reading, never while publishing or committing.
+
+    Production uses one SQL client for the card, sprint and audit projection. Its enumeration
+    and batched satellites contain several statements, all under one REPEATABLE READ snapshot.
+    Non-SQL clients are retained for offline test/export compatibility.
+    """
+    from ummanu.board.sql_cards import SqlCardClient
+    from ummanu.dispatch.cleanup import bulk_lane
+
+    owned = reader is None
+    client = None
+    try:
+        task_reader = reader if reader is not None else TaskReader(board_client(instance_dir, serves=(CARD, SPRINT)))
+        client = getattr(task_reader, "client", None)
+        with bulk_lane(data_dir), (
+            client.read_snapshot() if isinstance(client, SqlCardClient) else contextlib.nullcontext()
+        ):
+            audit_owner = task_audit_for(client, data_dir)
+            audit = audit_owner.status()
+            if not audit["ok"]:
+                raise RuntimeError(f"board export blocked by {audit['pending']} unresolved pending audit record(s)")
+            cards = task_reader.export()
+            history = audit_owner.events()
+            if not isinstance(cards, list):
+                raise RuntimeError("ummanu task export did not return a card list")  # noqa: TRY004 - export refusals share RuntimeError
+            if sprint_client is None and isinstance(client, SqlCardClient):
+                sprints = export_sprint_entities(instance_dir, client)
+            elif sprint_client is not None:
+                sprints = export_sprint_entities(instance_dir, sprint_client)
+            else:
+                from ummanu.sprints import sprint_client as resolve_sprint_client
+
+                sprint_board = resolve_sprint_client(instance_dir)
+                try:
+                    sprints = export_sprint_entities(instance_dir, sprint_board)
+                finally:
+                    sprint_board.connection.close()
+            return cards, history, sprints
+    except TaskError as exc:
+        raise RuntimeError(f"ummanu task export failed: {exc.message}") from None
+    finally:
+        if owned and isinstance(client, SqlCardClient):
+            client.close()
 
 
 def export_sprint_entities(instance_dir: Path, client: Any = None) -> list[dict[str, Any]]:
@@ -449,11 +451,11 @@ def export_runs(
         cards_path = snapshot / "pipeline" / "cards.json"
         cards = _read_json_file_strict(cards_path) if cards_path.is_file() else {}
         if not isinstance(cards, dict):
-            raise RuntimeError(f"state card mapping must be an object: {cards_path}")
+            raise RuntimeError(f"state card mapping must be an object: {cards_path}")  # noqa: TRY004 - export refusal
         claims_path = snapshot / "pipeline" / "claims.json"
         claims = _read_json_file_strict(claims_path) if claims_path.is_file() else {}
         if not isinstance(claims, dict):
-            raise RuntimeError(f"state claims must be an object: {claims_path}")
+            raise RuntimeError(f"state claims must be an object: {claims_path}")  # noqa: TRY004 - export refusal
     finally:
         _cleanup_staging_dir(snapshot)
 
@@ -748,7 +750,7 @@ def _skip_artifact_relative(relative: Path) -> bool:
         or ".git" in relative.parts
         or any(part.startswith(".") for part in relative.parts)
         or any(part.startswith(".env") for part in relative.parts)
-        or any(part.endswith(".service") or part.endswith(".timer") for part in relative.parts)
+        or any(part.endswith((".service", ".timer")) for part in relative.parts)
         or "index.sqlite" in relative.parts
         or "backups" in relative.parts
     )

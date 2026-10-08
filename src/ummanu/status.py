@@ -17,6 +17,14 @@ from ummanu.dispatch.observer import observer_snapshot
 from ummanu.dispatch.pause import ProductionPause
 from ummanu.dispatch.review import command_terminal_status
 from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.tick_telemetry import (
+    card_details,
+    counter_values,
+    duration_ms,
+    phase_ms,
+    reconcile_ms,
+    tick_statistics,
+)
 from ummanu.dispatch.types import HostError
 from ummanu.host import (
     CollectResult,
@@ -25,6 +33,7 @@ from ummanu.host import (
     build_doctor_expectations,
 )
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
+from ummanu.infra.checkpoint_run import load_checkpoint_state
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
 from ummanu.runtime import interactive_workspace
 from ummanu.secret_store import store_health
@@ -79,10 +88,11 @@ def collect_status(
             else LiveHostSource(resolve_runtime_owner(instance_dir)[0])
         )
         collected = source.collect(expected)
+    checkpoint_state = load_checkpoint_state(data_dir)
     checkpoint = checkpoint_snapshot(
         report.instance_path.parent,
-        write_state=_object(production.get("checkpoint")),
-        push_state=_object(production.get("checkpoint_push")),
+        write_state=_object(checkpoint_state.get("checkpoint")),
+        push_state=_object(checkpoint_state.get("checkpoint_push")),
         data_dir=report.data_dir,
     )
     # Status is a pollable metadata snapshot. Provider-backed readiness is therefore cache-only;
@@ -125,6 +135,7 @@ def collect_status(
             "divergences": _divergences(production),
             "reconciliation": _reconciliation(production),
             "last_tick": _last_tick(production),
+            "tick_statistics": tick_statistics(production),
         },
         "checkpoint": checkpoint,
         "memory": _memory_status(data_dir),
@@ -393,9 +404,14 @@ def _last_tick(production: dict[str, Any]) -> dict[str, Any] | None:
         "degraded_count": int(_float(entry.get("degraded_count"))),
         # Null, not zero, for a tick recorded before this field existed: a state file written by
         # the previous release has no duration, and 0 ms would be a measurement nobody made.
-        "duration_ms": (
-            float(duration) if isinstance(duration, (int, float)) and not isinstance(duration, bool) else None
-        ),
+        "duration_ms": duration_ms(duration),
+        "phases": (phases := phase_ms(entry.get("phases"))),
+        # The aggregate the reconcile budget is judged by: its exclusive sub-phases summed.
+        "reconcile_ms": reconcile_ms(phases),
+        # The tick's successful writes, its own terminal save included, and the slowest cards' advance
+        # (records handed in, flushes and writes); null before 131.
+        "counters": counter_values(entry.get("counters")),
+        "cards": card_details(entry.get("cards")),
     }
 
 

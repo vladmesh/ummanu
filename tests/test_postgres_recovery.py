@@ -22,7 +22,7 @@ from ummanu.board.postgres_recovery import (
 )
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig, BoardStoreError
-from ummanu.data import DataExport, export_board, init_layout
+from ummanu.data import DataExport, export_board, export_sprint_entities, init_layout
 from ummanu.restore import restore_postgres_backup
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SprintWriter, sprint_client
@@ -391,9 +391,15 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             mock.patch("ummanu.backup._pipeline_action", return_value=None),
             mock.patch("ummanu.backup.export_all", side_effect=self._exports),
             mock.patch("ummanu.sprints.sprint_client", wraps=sprint_client) as sprint_factory,
+            mock.patch.object(SqlCardClient, "read_snapshot", autospec=True,
+                              side_effect=SqlCardClient.read_snapshot) as snapshot,
+            mock.patch("ummanu.data.export_sprint_entities", wraps=export_sprint_entities) as sprint_export,
         ):
             results = create_backups(self.source_instance, backup_kinds=("full", "core"))
-        sprint_factory.assert_called_once_with(self.source_instance)
+        # Sprints must share the board cut's connection; a second factory would split the snapshot.
+        sprint_factory.assert_not_called()
+        snapshot.assert_called_once()
+        sprint_export.assert_called_once_with(self.source_instance, snapshot.call_args.args[0])
         by_kind = {result.manifest["backup_kind"]: result for result in results}
         result = by_kind["full"]
         core = by_kind["core"]

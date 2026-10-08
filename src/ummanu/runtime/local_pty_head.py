@@ -23,7 +23,15 @@ Invariants:
   - `DELIVERY_UNESTABLISHED`: the fate cannot be established (the supervisor stopped answering
     after or while the payload was offered, or the substrate overran its own bound, and the
     journal has no record): `delivery_state` `unknown`. Fatal.
-  An outcome is never inferred from a byte-count predicate or from which exception arrived.
+  An outcome is never inferred from a byte-count predicate or from which exception arrived. A
+  production handoff's operation (`runtime.head.handoff`) adds one non-ending: `DELIVERY_PENDING`,
+  a payload whose admission answer or end did not come back within the caller's allowance. It is
+  not fatal and not retried: the substrate goes on writing it, and the next pass reads its end from
+  `status` and the journal.
+- Inside a production handoff every supervisor request is cut to the operation's deadline: the
+  client is given it (`_connect`) and recomputes what is left before every `sendall` and `recv` of
+  the framed exchange, so `_probe`, `_put`, `_follow_within` and a fatal close cannot outlast it, and
+  nothing is attempted once it has passed. Everywhere else the bounds are what they always were.
 - A fatal outcome closes admission here and on the substrate, and every later `deliver` is
   `HEAD_DRAINING` naming the reason: a prefix cannot be taken back (`TCIFLUSH` drops only unread
   input) and the next payload would be read as one line with it. An unknown fate may hide one.
@@ -53,18 +61,34 @@ Invariants:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ummanu.runtime.head import local_pty
+from ummanu.runtime.head.handoff import (
+    HANDOFF_DEFERRED,
+    HANDOFF_EFFECT_RESERVE_SECONDS,
+    HANDOFF_NOT_STARTED,
+    HANDOFF_SETTLE,
+    HANDOFF_STARTED,
+    HANDOFF_SUBMITTED,
+    HANDOFF_TYPED,
+    HANDOFF_UNKNOWN,
+    HANDOFF_WAIT_BUDGET_SECONDS,
+    HandoffBudget,
+    HandoffOperation,
+    PromptHandoff,
+    active_budget,
+)
 from ummanu.runtime.head.identity import task_binding
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.scope_inventory import RuntimeScopeInventory
@@ -104,7 +128,9 @@ from ummanu.runtime.tui_delivery import (
     DELIVERY_CONFIRMED,
     READINESS_BUSY,
     READINESS_READY,
+    READINESS_UNKNOWN,
     STAGE_ENTER_ACCEPTED,
+    STAGE_NONE,
     STAGE_PAYLOAD_WRITTEN,
     STAGE_TURN_OBSERVED,
     DeliveryEvidence,
@@ -140,6 +166,11 @@ DELIVERY_LANDED_NOTHING = "landed_nothing"
 DELIVERY_UNESTABLISHED = "unestablished"
 #: The outcomes after which this runtime hands the head no more work.
 FATAL_DELIVERY_OUTCOMES = frozenset({DELIVERY_LEFT_A_PREFIX, DELIVERY_UNESTABLISHED})
+#: Not an ending, and only inside a production handoff's operation: offered or admitted, and its
+#: answer or its end had not come back when the caller's allowance ran out. The substrate keeps
+#: writing it; nothing is closed, and nothing is offered again until `status` and the journal say
+#: what became of it.
+DELIVERY_PENDING = "pending"
 
 #: This state means no delivery fate could be established.
 DELIVERY_STATE_UNKNOWN = "unknown"
@@ -201,6 +232,15 @@ SUBMIT_CONFIRM_SECONDS = 20.0
 SUBMIT_ATTEMPTS = 2
 #: Why an agent prompt did not start a turn: it is in the composer, and no submit made it go.
 DELIVER_NOT_SUBMITTED = "prompt_typed_but_no_turn_started"
+#: Why a production handoff was refused rather than continued: its journal cannot say how far it got.
+DELIVER_HANDOFF_UNESTABLISHED = "prompt_handoff_unestablished"
+#: A delivery inside a handoff operation that offered nothing: the allowance was spent, or the
+#: supervisor did not answer within it. `HEAD_BUSY`, not a refusal of the head.
+DELIVER_DEFERRED = "handoff_allowance_spent"
+#: A delivery inside a handoff operation that was offered and had not ended within its allowance.
+DELIVER_PENDING = "delivery_pending"
+#: What a probe that was not made, for want of allowance, says.
+HANDOFF_ALLOWANCE_SPENT = "this pass's head handoff allowance is spent"
 
 #: Stop-if-quiescent refusal tokens, the same as the legacy backend's.
 STOP_TURN_IN_FLIGHT = "turn_in_flight"
@@ -385,6 +425,9 @@ class LocalPtyHeadRuntime:
         prompt_poll: float | None = None,
         prompt_first_output: float | None = None,
         submit_confirm: float | None = None,
+        monotonic: Callable[[], float] | None = None,
+        wall: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
     ) -> None:
         if not callable(head_process_status):
             raise LocalPtyRuntimeError(
@@ -413,12 +456,20 @@ class LocalPtyHeadRuntime:
             PROMPT_FIRST_OUTPUT_SECONDS if prompt_first_output is None else prompt_first_output
         )
         self._submit_confirm = float(SUBMIT_CONFIRM_SECONDS if submit_confirm is None else submit_confirm)
+        # The clocks a production handoff reads (`_handoff_prompt`), injectable so its stages can be
+        # driven by a fake clock. The blocking flow keeps reading `time` directly.
+        self._monotonic = monotonic or time.monotonic
+        self._wall = wall or time.time
+        self._sleep = sleep or time.sleep
         # Reentrant, so `stop_if_quiescent` can perform `stop`.
         self._lock = threading.RLock()
         # This backend alone tracks terminals left with an unfinished payload prefix.
         self._fatal: dict[str, str] = {}
         # A terminal prefix takes precedence over a rehydrated closure reason.
         self._admission_notes: dict[str, str] = {}
+        # What this runtime saw of each head's output before, for supervisors that predate
+        # `output_idle_seconds` (`_quiet_since`): the incarnation-and-count key and since when.
+        self._quiet_marks: dict[str, tuple[tuple[Any, ...], float]] = {}
 
     def delivery_wait_for(self, substrate_bound: float) -> float:
         """How long this runtime watches a delivery the substrate bounded at `substrate_bound`.
@@ -451,6 +502,8 @@ class LocalPtyHeadRuntime:
         pid_file: str = "",
         scope_generation: str = "",
         transport: Any = None,
+        launch_admission: Callable[[], AbstractContextManager[Any]] | None = None,
+        handoff: PromptHandoff | None = None,
         **ignored: Any,
     ) -> StartReceipt:
         """Bring one head up under its own supervisor and point it at its task.
@@ -465,7 +518,9 @@ class LocalPtyHeadRuntime:
         proving the previous owner empty.
 
         A `pointer` with a `transport` is an agent's prompt, delivered as `deliver` does, after the
-        spawn and outside the lock.
+        spawn and outside the lock. With a `handoff` that delivery is the resumable production one,
+        and none of it happens here: the head is kept up and answers `HEAD_BUSY` at
+        `HANDOFF_SETTLE`, and `deliver` with the same `handoff` hands the prompt off on a later pass.
         """
         del title, ignored
         receipt = self._start_locked(
@@ -485,10 +540,38 @@ class LocalPtyHeadRuntime:
             env=env,
             pid_file=pid_file,
             scope_generation=scope_generation,
+            launch_admission=launch_admission,
         )
         live = receipt.run
         if pointer is None or transport is None or live is None or not receipt.ok:
             return receipt
+        if handoff is not None:
+            # A head this call raised has not been quiet for anything yet, and its caller still has a
+            # writer fence to make before anything is typed (`CommandHostRuntime.start_review`): the
+            # prompt is handed off by `deliver` on a later pass, and the head is kept up for it.
+            payload_bytes, payload_hash = payload_fingerprint(pointer.text)
+            why = "the head is up and its prompt is handed off on a later pass"
+            return StartReceipt(
+                status=HEAD_BUSY,
+                run=live,
+                reason=f"production handoff pending at {HANDOFF_SETTLE}: {why}",
+                evidence=DeliveryEvidence(
+                    handle=live.handle,
+                    subject=subject or "head-launch",
+                    stage=STAGE_NONE,
+                    payload_bytes=payload_bytes,
+                    payload_sha256=payload_hash,
+                    delivery_mode=NUDGE_FILE_MODE if pointer.document else "",
+                    document_path=pointer.document,
+                    adapter=live.spec.adapter,
+                    reason=why,
+                    handoff_stage=HANDOFF_SETTLE,
+                ),
+                epoch=receipt.epoch,
+                lease=receipt.lease,
+                rotation_ready=receipt.rotation_ready,
+                handoff_stage=HANDOFF_SETTLE,
+            )
         delivered = self._deliver_prompt(live, pointer, subject or "head-launch", _wake_hook(transport))
         if delivered.ok:
             return StartReceipt(
@@ -532,6 +615,7 @@ class LocalPtyHeadRuntime:
         env: Mapping[str, str] | None,
         pid_file: str,
         scope_generation: str,
+        launch_admission: Callable[[], AbstractContextManager[Any]] | None = None,
     ) -> StartReceipt:
         """`start` under the lock: the refusals, the spawn and a bare pointer's one delivery."""
         with self._lock:
@@ -582,6 +666,7 @@ class LocalPtyHeadRuntime:
                     **({"memory_limit_mib": spec.memory_limit_mib} if spec.memory_limit_mib is not None else {}),
                     **({"scope_generation": scope_generation} if scope_generation else {}),
                     **designated,
+                    **({"launch_admission": launch_admission} if launch_admission is not None else {}),
                 )
             except local_pty.LocalPtySpawnError as exc:
                 retained = candidate if not exc.cleanup_complete else run
@@ -649,6 +734,7 @@ class LocalPtyHeadRuntime:
         *,
         subject: str = "",
         transport: Any = None,
+        handoff: PromptHandoff | None = None,
         **ignored: Any,
     ) -> DeliverReceipt:
         """Put one prompt in front of a running head and say what became of the bytes.
@@ -657,10 +743,15 @@ class LocalPtyHeadRuntime:
         neither queues. After admission the payload is followed to its end and the receipt carries
         its outcome; `ok` is only `DELIVERY_ARRIVED`. A `transport` marks the pointer as an agent's
         composer prompt, typed and then submitted separately (`_deliver_prompt`); only its
-        `before_send` hook is used (`_before_send`).
+        `before_send` hook is used (`_before_send`). A `handoff` makes that prompt the resumable
+        production handoff (`_handoff_prompt`).
         """
         del ignored
         if transport is not None:
+            if handoff is not None:
+                return self._handoff_prompt(
+                    run, pointer, subject or "head-nudge", _wake_hook(transport), handoff
+                )
             return self._deliver_prompt(run, pointer, subject or "head-nudge", _wake_hook(transport))
         return self._deliver_payload(run, pointer, subject or "head-nudge")
 
@@ -671,11 +762,24 @@ class LocalPtyHeadRuntime:
         subject: str,
         payload: bytes | None = None,
         wake: Callable[[], Any] | None = None,
+        operation: HandoffOperation | None = None,
+        probe: _Probe | None = None,
     ) -> DeliverReceipt:
-        """`deliver` for the pointer's line, or `payload`; `wake` runs after admission (`_before_send`)."""
+        """`deliver` for the pointer's line, or `payload`; `wake` runs after admission (`_before_send`).
+
+        Inside a handoff `operation` (`_handoff_prompt`) the caller passes the status frame it has
+        just read as the section's `probe`, every request is cut to the operation's deadline, `wake`
+        runs only once the supervisor has answered (right before the offer), and an offer still
+        unanswered or in flight when the deadline passes is `HEAD_BUSY` with `DELIVERY_PENDING`
+        evidence: the lease is kept, nothing is closed, nothing is offered again.
+        """
         with self._lock:
             # Rehydrate under the decision lock from the section's single status frame.
-            _, probe = self._section_probe(run)
+            if probe is None:
+                _, probe = self._section_probe(run, operation)
+            if operation is not None and probe is not None and probe.timed_out:
+                # Not an answer about the head: nothing is concluded from it, nothing is offered.
+                return _allowance_receipt(run, self.activity)
             self._rehydrate(run, probe)
             if not self.activity.admits(run.run_id):
                 # Closed admission takes precedence over a busy turn.
@@ -708,13 +812,29 @@ class LocalPtyHeadRuntime:
                     )
                 self.activity.release(run.run_id)
             lease = self.activity.grant(run.run_id, subject)
-            try:
+            woken = [run]
+
+            def before_offer() -> None:
                 if wake is not None:
-                    run = self._before_send(run, wake)
-                report, refusal = self._put(run, pointer, subject, probe, payload)
+                    woken[0] = self._before_send(woken[0], wake)
+
+            try:
+                if operation is None:
+                    before_offer()
+                    run = woken[0]
+                report, refusal = self._put(
+                    run,
+                    pointer,
+                    subject,
+                    probe,
+                    payload,
+                    operation=operation,
+                    before_offer=before_offer if operation is not None else None,
+                )
             except BaseException:
                 self.activity.release(run.run_id)
                 raise
+            run = woken[0]
             if refusal is not None:
                 # Refused at admission: nothing reached the terminal, so the turn is handed back.
                 self.activity.release(run.run_id)
@@ -732,6 +852,21 @@ class LocalPtyHeadRuntime:
             # Only the head's journal sequence advances the epoch.
             self.activity.noted(run.run_id)
             epoch = self.activity.advance_to(run.run_id, report.seq)
+            if report.outcome == DELIVERY_PENDING:
+                # Admitted, or perhaps admitted, and not ended within the allowance: the lease stays
+                # with the write the substrate is still making, and the caller's next pass reads its end.
+                return DeliverReceipt(
+                    status=HEAD_BUSY,
+                    run=run,
+                    reason=f"{DELIVER_PENDING}: {report.detail}",
+                    evidence=report,
+                    delivery_state=report.state,
+                    delivered_bytes=report.written,
+                    offered_bytes=report.offered,
+                    epoch=epoch,
+                    lease=lease,
+                    rotation_ready=self.activity.rotatable(run.run_id),
+                )
             if report.outcome == DELIVERY_ARRIVED:
                 return DeliverReceipt(
                     status=HEAD_OK,
@@ -744,7 +879,7 @@ class LocalPtyHeadRuntime:
                     epoch=epoch,
                     lease=lease,
                 )
-            return self._delivery_that_did_not_arrive(run, report, lease, epoch)
+            return self._delivery_that_did_not_arrive(run, report, lease, epoch, operation)
 
     def _deliver_prompt(
         self,
@@ -824,6 +959,444 @@ class LocalPtyHeadRuntime:
             rotation_ready=last.rotation_ready,
         )
 
+    def _handoff_prompt(
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        wake: Callable[[], Any] | None,
+        handoff: PromptHandoff,
+    ) -> DeliverReceipt:
+        """`_deliver_prompt` for the production dispatcher: resumable, inside one bounded operation.
+
+        The authoritative boundary of a production handoff. Every supervisor request it makes, and
+        every wait, runs inside one `HandoffOperation` cut from the card's share of the tick's
+        `HandoffBudget` (a handoff called outside a production pass gets a private budget of the same
+        size). Where the handoff stands is read, never remembered: first the supervisor's `status` (a
+        line or an Enter of this handoff still being written), then the journal above
+        `handoff.floor` (`_handoff_progress`). A typed line is not typed again, an accepted or
+        in-flight Enter is not sent again, and a turn that took the prompt confirms it. Whatever this
+        pass cannot finish answers `HEAD_BUSY` with `handoff_stage` and leaves the rest to the next.
+        The outcomes this flow shares with `_deliver_prompt` are reached on the same evidence, and
+        its bounds (`prompt_settle` before typing and before a submit, `SUBMIT_ATTEMPTS`, and the
+        blocking flow's `submit_confirm` + `prompt_settle` for one submit's turn) are measured from
+        the durable times in the journal and in `handoff`, so they survive a dispatcher restart.
+        """
+        budget = active_budget() or HandoffBudget(HANDOFF_WAIT_BUDGET_SECONDS, clock=self._monotonic)
+        with budget.operation(subject) as operation:
+            began = operation.clock()
+            receipt = self._handoff_within(run, pointer, subject, wake, handoff, operation)
+            operation.note(
+                "handoff",
+                began,
+                receipt.handoff_stage and f"pending:{receipt.handoff_stage}" or receipt.status,
+            )
+            return receipt
+
+    def _handoff_within(
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        wake: Callable[[], Any] | None,
+        handoff: PromptHandoff,
+        operation: HandoffOperation,
+    ) -> DeliverReceipt:
+        live = run
+        # The furthest stage this call has seen established, so a look the allowance cut short does
+        # not report less than an earlier look in the same call saw.
+        reached = HANDOFF_SETTLE
+        while True:
+            seen = self._handoff_look(live, subject, handoff.floor, operation)
+            progress = seen.progress
+            if progress.unknown:
+                return self._handoff_unestablished(live, pointer, subject, progress.unknown)
+            if progress.typed_prefix is not None:
+                # A write that left part of the line on the terminal: the same fatal outcome a live
+                # delivery reaches (`_delivery_that_did_not_arrive`), never a second line over it.
+                report = _journalled_report(progress.typed_prefix, handoff.floor)
+                return self._delivery_that_did_not_arrive(
+                    live, report, None, seen.epoch(self.activity, live), operation
+                )
+            stage = _later_stage(_stage_of(progress), reached)
+            if seen.deferred:
+                return self._handoff_pending(live, pointer, subject, stage, seen.deferred, seen, progress)
+            if seen.writing:
+                # This handoff's own write is admitted and the substrate is still making it: wait for
+                # its end within the allowance, and never offer it again.
+                stage = reached = _later_stage(
+                    stage, HANDOFF_SUBMITTED if seen.writing == "submit" else HANDOFF_TYPED
+                )
+                if self._handoff_pause(operation):
+                    continue
+                return self._handoff_pending(
+                    live, pointer, subject, stage, "this handoff's write is still being made", seen, progress
+                )
+            if progress.typed is None:
+                settle = self._handoff_settle(live, handoff, seen, operation)
+                if settle == "again":
+                    continue
+                if settle == "pending":
+                    return self._handoff_pending(
+                        live, pointer, subject, HANDOFF_SETTLE, "the head has not been seen quiet yet", seen, progress
+                    )
+                if operation.remaining() < HANDOFF_EFFECT_RESERVE_SECONDS:
+                    return self._handoff_pending(
+                        live, pointer, subject, HANDOFF_SETTLE, HANDOFF_ALLOWANCE_SPENT, seen, progress
+                    )
+                began = operation.clock()
+                typed = self._deliver_payload(
+                    live, pointer, subject, wake=wake, operation=operation, probe=seen.probe
+                )
+                operation.note("type", began, typed.status if typed.ok else typed.reason.split(":")[0])
+                live = typed.run or live
+                if typed.reason.startswith(DELIVER_DEFERRED):
+                    return self._handoff_pending(
+                        live, pointer, subject, HANDOFF_SETTLE, HANDOFF_ALLOWANCE_SPENT, seen, progress
+                    )
+                if typed.reason.startswith(DELIVER_PENDING):
+                    # Admitted and still being written, or offered and its answer lost: either way the
+                    # next look reads what became of it, and nothing is offered again before that.
+                    admitted = isinstance(typed.evidence, DeliveryReport) and typed.evidence.delivery_id > 0
+                    return self._handoff_pending(
+                        live,
+                        pointer,
+                        subject,
+                        HANDOFF_TYPED if admitted else HANDOFF_SETTLE,
+                        typed.reason.split(": ", 1)[-1],
+                        seen,
+                        progress,
+                    )
+                if not typed.ok:
+                    return typed
+                seen_line = self._handoff_read(live, subject, handoff.floor)
+                if not seen_line.unknown and seen_line.typed is None and seen_line.typed_prefix is None:
+                    # The supervisor journals `input.accepted` before it reports a delivery ended, so
+                    # this is a journal the reader could not follow: say so rather than guess the stage.
+                    return self._handoff_unestablished(
+                        live, pointer, subject, "the typed line is missing from the head's journal"
+                    )
+                continue
+            report = _journalled_report(progress.typed, handoff.floor)
+            if progress.confirmed:
+                return self._handoff_done(live, pointer, subject, report, progress, seen)
+            now = self._wall()
+            # Past what the blocking flow gives one submit (`_await_turn`, then `_await_idle`) the
+            # next attempt decides instead, and a turn still open refuses it, as it refuses there.
+            if (
+                progress.submits
+                and not progress.submit_finished
+                and now - progress.submit_at < self._submit_confirm + self._prompt_settle
+            ):
+                # The latest submit's turn has not printed enough yet to say it took the prompt.
+                if self._handoff_pause(operation):
+                    continue
+                return self._handoff_pending(
+                    live,
+                    pointer,
+                    subject,
+                    HANDOFF_SUBMITTED,
+                    "the submitted prompt's turn has not shown that it took the prompt yet",
+                    seen,
+                    progress,
+                )
+            if progress.submits >= SUBMIT_ATTEMPTS:
+                return self._handoff_not_submitted(live, pointer, subject, report, progress, None, seen)
+            echo_open = bool(seen.status and (seen.status.get("turn_open") or _in_flight(seen.status)))
+            if echo_open and now - progress.typed_at < self._prompt_settle:
+                # The typed line's echo turn has not closed; an Enter now would be refused by it.
+                if self._handoff_pause(operation):
+                    continue
+                return self._handoff_pending(
+                    live, pointer, subject, stage, "the typed line's echo turn has not closed yet", seen, progress
+                )
+            if operation.remaining() < HANDOFF_EFFECT_RESERVE_SECONDS:
+                return self._handoff_pending(live, pointer, subject, stage, HANDOFF_ALLOWANCE_SPENT, seen, progress)
+            began = operation.clock()
+            last = self._deliver_payload(
+                live, pointer, f"{subject}:submit", SUBMIT_KEY, operation=operation, probe=seen.probe
+            )
+            operation.note("submit", began, last.status if last.ok else last.reason.split(":")[0])
+            if last.reason.startswith(DELIVER_DEFERRED):
+                return self._handoff_pending(live, pointer, subject, stage, HANDOFF_ALLOWANCE_SPENT, seen, progress)
+            if last.reason.startswith(DELIVER_PENDING):
+                admitted = isinstance(last.evidence, DeliveryReport) and last.evidence.delivery_id > 0
+                return self._handoff_pending(
+                    live,
+                    pointer,
+                    subject,
+                    HANDOFF_SUBMITTED if admitted else stage,
+                    last.reason.split(": ", 1)[-1],
+                    seen,
+                    progress,
+                )
+            if not last.ok:
+                return self._handoff_not_submitted(live, pointer, subject, report, progress, last, seen)
+            after = self._handoff_read(live, subject, handoff.floor)
+            if not after.unknown and after.submits <= progress.submits:
+                return self._handoff_unestablished(
+                    live, pointer, subject, "the accepted submit is missing from the head's journal"
+                )
+
+    def _handoff_look(
+        self, run: HeadRun, subject: str, floor: int, operation: HandoffOperation
+    ) -> _HandoffLook:
+        """One status (cut to the operation's deadline), then the journal above `floor`.
+
+        In that order: the supervisor journals `input.accepted` before its `status` says a write
+        ended, so a status that shows no write of this handoff in flight followed by a journal that
+        shows no line means none was taken. And because it reads a request before it answers any
+        connection made after it, an offer whose answer was lost is visible to this status.
+        """
+        address = self._address(run)
+        probe = (
+            self._probe(address, operation)
+            if address is not None and address.socket_path.exists()
+            else None
+        )
+        progress = self._handoff_read(run, subject, floor)
+        status = probe.status if probe is not None else None
+        deferred = ""
+        if probe is not None and probe.timed_out:
+            deferred = (
+                HANDOFF_ALLOWANCE_SPENT
+                if str(probe.error) == HANDOFF_ALLOWANCE_SPENT
+                else "the head's supervisor did not answer within this pass's allowance"
+            )
+        elif probe is not None and probe.transient:
+            deferred = "the head's supervisor is at a self-clearing bound"
+        writing = ""
+        if status is not None and _in_flight(status):
+            delivery = status.get("delivery")
+            written_for = str(delivery.get("subject") or "") if isinstance(delivery, Mapping) else ""
+            writing = "line" if written_for == subject else "submit" if written_for == f"{subject}:submit" else ""
+        return _HandoffLook(probe=probe, status=status, progress=progress, deferred=deferred, writing=writing)
+
+    def _handoff_settle(
+        self, run: HeadRun, handoff: PromptHandoff, seen: _HandoffLook, operation: HandoffOperation
+    ) -> str:
+        """Whether the head may be typed into now (`type`), after a short wait (`again`), or not yet.
+
+        Quiet as `_await_settled` means it: `prompt_quiet` with no output (after `prompt_first_output`
+        for a head that has printed nothing), or past `prompt_settle` from the handoff's opening. A
+        supervisor that reports `output_idle_seconds` says how long in one frame; one started before it
+        did is answered from what this runtime saw of it before (`_quiet_since`). The wait is taken
+        only when the quiet is due within what is left of the allowance, never to watch a noisy head.
+        A head that cannot be observed or is in a turn is not waited on: `_deliver_payload` refuses it
+        by name, as the blocking flow's delivery does.
+        """
+        status = seen.status
+        if status is None or not status.get("alive") or status.get("turn_open") or _in_flight(status):
+            self._quiet_marks.pop(run.run_id, None)
+            return "type"
+        wall = self._wall()
+        if wall - handoff.began_at >= self._prompt_settle:
+            return "type"
+        now = self._monotonic()
+        since = self._quiet_since(run, status, now)
+        quiet_at = since + self._prompt_quiet
+        if _output_of_status(status) <= 0:
+            quiet_at = max(quiet_at, now + (handoff.began_at + self._prompt_first_output - wall))
+        if now >= quiet_at:
+            return "type"
+        if quiet_at - now <= operation.remaining() - HANDOFF_EFFECT_RESERVE_SECONDS:
+            self._sleep(quiet_at - now)
+            return "again"
+        return "pending"
+
+    def _quiet_since(self, run: HeadRun, status: Mapping[str, Any], now: float) -> float:
+        """Since when (this runtime's monotonic clock) the head has printed nothing, as far as known.
+
+        `output_idle_seconds` answers it directly. Without it, the supervisor's incarnation (its and
+        the head's pids), its journal sequence and its output count are kept from the first frame
+        that showed them: while a later frame shows all four unchanged the head printed nothing in
+        between, since the count only grows within an incarnation and a new one writes `run.started`.
+        Anything else starts the watch again from now; nothing is concluded from what is missing.
+        """
+        idle = status.get("output_idle_seconds")
+        if isinstance(idle, (int, float)) and not isinstance(idle, bool) and math.isfinite(idle) and idle >= 0:
+            return now - float(idle)
+        key = (
+            status.get("supervisor_pid"),
+            status.get("head_pid"),
+            status.get("journal_seq"),
+            status.get("output_bytes"),
+        )
+        held = self._quiet_marks.get(run.run_id)
+        if held is not None and held[0] == key:
+            return held[1]
+        self._quiet_marks[run.run_id] = (key, now)
+        return now
+
+    def _handoff_pause(self, operation: HandoffOperation) -> bool:
+        """Wait one poll and look again; False, without waiting, when the allowance has no room for both."""
+        if operation.remaining() <= self._prompt_poll:
+            return False
+        self._sleep(self._prompt_poll)
+        return True
+
+    def _handoff_read(self, run: HeadRun, subject: str, floor: int) -> _HandoffProgress:
+        address = self._address(run)
+        if address is None:
+            return _HandoffProgress(unknown="the head has no address to read its journal from")
+        try:
+            read = local_pty.read_tail(address.journal_path)
+        except (local_pty.JournalError, OSError) as exc:
+            return _HandoffProgress(unknown=f"the head's journal could not be read: {exc}")
+        return _handoff_progress(read, subject, floor)
+
+    def _handoff_pending(
+        self,
+        run: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        stage: str,
+        why: str,
+        seen: _HandoffLook,
+        progress: _HandoffProgress,
+    ) -> DeliverReceipt:
+        """A handoff this pass leaves for the next: `HEAD_BUSY` naming its stage, no failure.
+
+        The evidence says what is established (a line typed, how many Enters accepted), never what
+        is still being written: that is the next pass's to read.
+        """
+        payload_bytes, payload_hash = payload_fingerprint(pointer.text)
+        report = _journalled_report(progress.typed, 0) if progress.typed is not None else None
+        submits = progress.submits
+        evidence = DeliveryEvidence(
+            handle=run.handle,
+            subject=subject,
+            stage=(
+                STAGE_ENTER_ACCEPTED if submits else STAGE_PAYLOAD_WRITTEN if report is not None else STAGE_NONE
+            ),
+            payload_bytes=payload_bytes,
+            payload_sha256=payload_hash,
+            delivery_mode=NUDGE_FILE_MODE if pointer.document else "",
+            document_path=pointer.document,
+            adapter=run.spec.adapter,
+            body_write_accepted=report is not None,
+            body_bytes_written=report.written if report is not None else 0,
+            body_write_count=1 if report is not None else 0,
+            submit_write_accepted=submits > 0,
+            submit_bytes_written=submits,
+            submit_count=submits,
+            payload_left_in_composer=report is not None,
+            reason=why,
+            handoff_stage=stage,
+        )
+        return DeliverReceipt(
+            status=HEAD_BUSY,
+            run=run,
+            reason=f"production handoff pending at {stage}: {why}",
+            evidence=evidence,
+            delivery_state=report.state if report is not None else "",
+            delivered_bytes=report.written if report is not None else 0,
+            offered_bytes=report.offered if report is not None else 0,
+            epoch=seen.epoch(self.activity, run),
+            lease=self.activity.lease(run.run_id),
+            rotation_ready=self.activity.rotatable(run.run_id),
+            handoff_stage=stage,
+        )
+
+    def _handoff_done(
+        self,
+        live: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        report: DeliveryReport,
+        progress: _HandoffProgress,
+        seen: _HandoffLook,
+    ) -> DeliverReceipt:
+        submits = max(progress.submits, 1)
+        return DeliverReceipt(
+            status=HEAD_OK,
+            run=live,
+            delivery=_outcome_of(
+                live, pointer, report, subject, submits=submits, submitted=submits, confirmed=True
+            ),
+            delivery_state=report.state,
+            delivered_bytes=report.written,
+            offered_bytes=report.offered,
+            evidence=report,
+            epoch=seen.epoch(self.activity, live),
+            lease=self.activity.lease(live.run_id),
+        )
+
+    def _handoff_not_submitted(
+        self,
+        live: HeadRun,
+        pointer: NudgePointer,
+        subject: str,
+        report: DeliveryReport,
+        progress: _HandoffProgress,
+        last: DeliverReceipt | None,
+        seen: _HandoffLook,
+    ) -> DeliverReceipt:
+        """`_deliver_prompt`'s typed-and-not-taken outcome, from the journal's count of submits."""
+        outcome = _outcome_of(
+            live,
+            pointer,
+            report,
+            subject,
+            submits=progress.submits,
+            submitted=progress.submits,
+            confirmed=False,
+        )
+        evidence = outcome.evidence
+        if last is not None and last.status == HEAD_BUSY:
+            evidence.readiness_state = READINESS_BUSY
+        refused = last if last is not None and not last.ok else None
+        reason = (
+            f"{DELIVER_NOT_SUBMITTED}: {refused.reason or refused.status}"
+            if refused is not None
+            else DELIVER_NOT_SUBMITTED
+        )
+        evidence.reason = reason
+        return DeliverReceipt(
+            status=refused.status if refused is not None else HEAD_ALIVE,
+            run=live,
+            reason=reason,
+            failure=HeadNudgeFailed(reason),
+            evidence=evidence,
+            delivery_state=report.state,
+            delivered_bytes=report.written,
+            offered_bytes=report.offered,
+            epoch=seen.epoch(self.activity, live),
+            lease=self.activity.lease(live.run_id),
+            rotation_ready=self.activity.rotatable(live.run_id),
+        )
+
+    def _handoff_unestablished(
+        self, run: HeadRun, pointer: NudgePointer, subject: str, why: str
+    ) -> DeliverReceipt:
+        """A handoff whose state the journal cannot establish: neither pending nor retried blind.
+
+        Typing again could put a second line over the first, and calling it delivered would be a
+        guess, so it is a typed refusal the caller's recovery owns (`HEAD_ALIVE`).
+        """
+        payload_bytes, payload_hash = payload_fingerprint(pointer.text)
+        reason = f"{DELIVER_HANDOFF_UNESTABLISHED}: {why}"
+        return DeliverReceipt(
+            status=HEAD_ALIVE,
+            run=run,
+            reason=reason,
+            failure=HeadNudgeFailed(reason),
+            evidence=DeliveryEvidence(
+                handle=run.handle,
+                subject=subject,
+                payload_bytes=payload_bytes,
+                payload_sha256=payload_hash,
+                document_path=pointer.document,
+                adapter=run.spec.adapter,
+                readiness_state=READINESS_UNKNOWN,
+                reason=reason,
+            ),
+            delivery_state=DELIVERY_STATE_UNKNOWN,
+            epoch=self.activity.epoch(run.run_id),
+            lease=self.activity.lease(run.run_id),
+            rotation_ready=self.activity.rotatable(run.run_id),
+        )
+
     def _before_send(self, run: HeadRun, hook: Callable[[], Any]) -> HeadRun:
         """Run the caller's pre-send hook after admission and before `_put`, whatever the stop state.
 
@@ -889,6 +1462,57 @@ class LocalPtyHeadRuntime:
         """How much the head has printed in this supervisor's life, or 0 when it cannot be read."""
         seen = self.observe(run)
         return _output_of(seen) if seen.ok else 0
+
+    def handoff_floor(self, run: HeadRun) -> int | None:
+        """The journal sequence a production handoff opened now starts above, or None if unknowable.
+
+        Read from the supervisor's own `status` (one request, inside the handoff operation's bound),
+        so it is the sequence of a live head. A head that does not answer within the allowance, or
+        does not answer at all, has no floor a handoff could safely start from: the caller opens none
+        this pass and acts on nothing.
+        """
+        address = self._address(run)
+        if address is None or not address.socket_path.exists():
+            return None
+        budget = active_budget() or HandoffBudget(HANDOFF_WAIT_BUDGET_SECONDS, clock=self._monotonic)
+        with budget.operation("handoff-floor") as operation:
+            began = operation.clock()
+            probe = self._probe(address, operation)
+            status = probe.status if probe.error is None else None
+            operation.note("floor", began, "read" if status is not None else "deferred" if probe.timed_out else "none")
+        if not isinstance(status, Mapping) or not status.get("alive"):
+            return None
+        seq = status.get("journal_seq")
+        return seq if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0 else None
+
+    def handoff_started(self, run: HeadRun, subject: str, handoff: PromptHandoff) -> str:
+        """Whether this handoff has written to the head: `none`, `started`, `unknown` or `deferred`.
+
+        `started` once any of its line is on the terminal (whole or not) by the journal above the
+        floor, or once the supervisor's `status` shows its line or its Enter still being written.
+        Asked in that order's reverse, status first (`_handoff_look`). `unknown` when the journal
+        cannot say, never read as `none`; `deferred` when the supervisor did not answer within the
+        allowance, so nothing may be concluded this pass. A supervisor that is gone has nothing in
+        flight, so the journal alone answers for it.
+        """
+        budget = active_budget() or HandoffBudget(HANDOFF_WAIT_BUDGET_SECONDS, clock=self._monotonic)
+        with budget.operation(subject) as operation:
+            began = operation.clock()
+            seen = self._handoff_look(run, subject, handoff.floor, operation)
+            progress = seen.progress
+            if progress.unknown:
+                answer = HANDOFF_UNKNOWN
+            elif progress.typed is not None or progress.typed_prefix is not None or seen.writing:
+                answer = HANDOFF_STARTED
+            elif seen.deferred:
+                answer = HANDOFF_DEFERRED
+            elif seen.probe is not None and seen.status is None and seen.probe.error is None:
+                # It answered something that is not a status: whether a write is in flight is unknown.
+                answer = HANDOFF_UNKNOWN
+            else:
+                answer = HANDOFF_NOT_STARTED
+            operation.note("started", began, answer)
+        return answer
 
     def observe(self, run: HeadRun) -> ObserveReceipt:
         """What the substrate can say about this head now: its status, its journal, its process.
@@ -1002,8 +1626,21 @@ class LocalPtyHeadRuntime:
         `stop_if_quiescent` is the conditional form. The initiator is recorded on the run before the
         signal, so a stop that outlives this process names who began it. A scoped head also needs
         the durable owner's recursive empty proof; the identity going dead only confirms the exit.
+
+        A caller's `remaining` (seconds left of its deadline, as a callable) cuts every wait of the
+        stop: this runtime's lock, the supervisor exchange, the scope's termination and the exit
+        confirmation. What is unconfirmed when it runs out is an unsettled receipt, never a stop.
         """
-        with self._lock:
+        remaining: Callable[[], float] | None = ignored.get("remaining")
+        with self._locked_within(remaining) as locked:
+            if not locked:
+                finishing = run.finishing(initiator)
+                reason = "the caller's deadline passed while another operation of this runtime ran"
+                return StopReceipt(
+                    status=HEAD_ALIVE, run=finishing, reason=reason,
+                    failure=HeadStopFailed(reason, run=finishing),
+                    epoch=self.activity.epoch(run.run_id), lease=self.activity.lease(run.run_id),
+                )
             preflight = ignored.get("preflight")
             if callable(preflight):
                 preflight(run)
@@ -1036,18 +1673,21 @@ class LocalPtyHeadRuntime:
                                 raise MemoryScopeError("head identity does not match the scoped stop")
                         record["stop_initiator"] = initiator.to_json()
                         owner.update_owner(address.run_dir, record)
-                        asked = self._ask_to_stop(address, initiator, signal_name)
-                        owner.stop_owned(record)
+                        asked = self._ask(address, initiator, signal_name, remaining)
+                        if remaining is None:
+                            owner.stop_owned(record)
+                        else:
+                            owner.stop_owned(record, remaining=remaining)
                         # A launch can fail before any head identity or journal exists.
                         # Only this generation's durable recursive proof settles that case.
                         gone = record["cleanup_complete"] and (
-                            not address.pid_file.exists() or self._await_head_gone(address, run)
+                            not address.pid_file.exists() or self._await_gone(address, run, remaining)
                         )
                 else:
                     if run.scope_generation:
                         raise MemoryScopeError("the scoped run has lost its owner")
-                    asked = self._ask_to_stop(address, initiator, signal_name)
-                    gone = self._await_head_gone(address, run)
+                    asked = self._ask(address, initiator, signal_name, remaining)
+                    gone = self._await_gone(address, run, remaining)
             except (MemoryScopeError, OSError, ValueError) as exc:
                 return StopReceipt(
                     status=HEAD_ALIVE, run=finishing, reason=str(exc),
@@ -1062,6 +1702,9 @@ class LocalPtyHeadRuntime:
                     reason=(
                         f"this head was asked to stop and its process was still there "
                         f"{self._stop_timeout:g}s later"
+                        if remaining is None else
+                        "this head was asked to stop and its process was still there when the "
+                        "caller's deadline passed"
                     ),
                     failure=HeadStopFailed("the head's process outlived the stop it was sent", run=finishing),
                     evidence=asked,
@@ -1278,9 +1921,14 @@ class LocalPtyHeadRuntime:
             self.activity.close_admission(run_id)
             self._admission_notes.setdefault(run_id, DELIVER_STATE_UNKNOWN)
             return
-        if state.exited or self._identity_says_dead(address):
-            # Positively ended: adopt no lease (a supervisor killed mid-turn leaves `turn.started`
-            # last, a lease nothing could release) and close admission.
+        identity_ended = (
+            state.source != REHYDRATED_FROM_SUPERVISOR and self._identity_says_dead(address)
+        )
+        if state.exited or identity_ended:
+            # A live supervisor is the authoritative witness for its incarnation. A reused run
+            # directory can still hold the previous incarnation's dead launch identity until the
+            # new head writes its own; that stale record must not end the head that just answered.
+            # Without a supervisor answer, the launch identity remains the positive liveness proof.
             self.activity.close_admission(run_id)
             self._admission_notes.setdefault(run_id, DELIVER_HEAD_ENDED)
             return
@@ -1309,27 +1957,33 @@ class LocalPtyHeadRuntime:
             return self.activity.epoch(run.run_id)
         return self.activity.advance_to(run.run_id, self._durable_state(address, run.run_id, probe).seq)
 
-    def _section_probe(self, run: HeadRun) -> tuple[_Address | None, _Probe | None]:
+    def _section_probe(
+        self, run: HeadRun, operation: HandoffOperation | None = None
+    ) -> tuple[_Address | None, _Probe | None]:
         """The section's one status request, taken at its top; `None` when there is no socket.
 
         A failed attempt carries one consumable recovery request into `_put` (`_Probe.spend_retry`),
-        so no section makes a third.
+        so no section makes a third. Inside a handoff `operation` the request is cut to its deadline.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
             return address, None
-        return address, self._probe(address)
+        return address, self._probe(address, operation)
 
-    def _probe(self, address: _Address) -> _Probe:
+    def _probe(self, address: _Address, operation: HandoffOperation | None = None) -> _Probe:
         """Ask the supervisor once for `status`: an `ok` frame, another frame, or the transport error.
 
-        A transport error grants the section one recovery attempt (`_Probe.spend_retry`).
+        A transport error grants the section one recovery attempt (`_Probe.spend_retry`). Inside a
+        handoff `operation` the request gets only what is left of its deadline and no recovery
+        attempt; with nothing left it is not made at all, and the probe says so (`timed_out`).
         """
+        if operation is not None and operation.remaining() <= 0:
+            return _Probe(error=TimeoutError(HANDOFF_ALLOWANCE_SPENT))
         try:
-            with self._connect(address) as client:
+            with self._connect(address, operation) as client:
                 answer = client.status()
         except _UNREACHABLE as exc:
-            return _Probe(error=exc, retry_available=True)
+            return _Probe(error=exc, retry_available=operation is None)
         if isinstance(answer, dict) and answer.get("ok"):
             return _Probe(status=answer)
         return _Probe(answer=answer)
@@ -1429,8 +2083,23 @@ class LocalPtyHeadRuntime:
             pid_file=Path(run.pid_file) if run.pid_file else run_dir / protocol.PID_FILE_NAME,
         )
 
-    def _connect(self, address: _Address) -> local_pty.SupervisorClient:
-        return local_pty.SupervisorClient.connect(address.socket_path, timeout=self._connect_timeout)
+    def _connect(
+        self, address: _Address, operation: HandoffOperation | None = None
+    ) -> local_pty.SupervisorClient:
+        """A connection bounded by `connect_timeout`, and inside a handoff `operation` by its deadline.
+
+        The operation's deadline goes to the client itself (`SupervisorClient(remaining=...)`), so it
+        bounds the connect and then every `sendall` and every `recv` of every framed exchange on the
+        connection by what is left of it at that moment; with nothing left nothing is attempted.
+        """
+        if operation is None:
+            return local_pty.SupervisorClient.connect(address.socket_path, timeout=self._connect_timeout)
+        client = local_pty.SupervisorClient.connect(
+            address.socket_path, timeout=self._connect_timeout, remaining=operation.remaining
+        )
+        # Whatever handed the connection over, the operation's deadline is the one that bounds it.
+        client.bound_by(operation.remaining)
+        return client
 
     def _process_alive(self, address: _Address, run: HeadRun) -> bool:
         """Whether the head's process is alive, by the launch identity alone.
@@ -1465,6 +2134,8 @@ class LocalPtyHeadRuntime:
         subject: str,
         probe: _Probe | None = None,
         payload: bytes | None = None,
+        operation: HandoffOperation | None = None,
+        before_offer: Callable[[], None] | None = None,
     ) -> tuple[DeliveryReport | None, _Refusal | None]:
         """Offer one payload and follow it until this backend can say what became of it.
 
@@ -1473,6 +2144,12 @@ class LocalPtyHeadRuntime:
         every ending is a `DeliveryReport`. `probe` is the section's status request: an `ok` frame
         is reused, a failed one permits one recovery request. That frame supplies either a stated
         refusal or the journal `floor` for matching this delivery's `input.accepted`.
+
+        Inside a handoff `operation` every request is cut to its deadline. A connection that does not
+        answer in time is a `HEAD_BUSY` refusal naming the allowance (nothing was offered); an offer
+        whose answer, or an admitted payload whose end, does not come back in time is
+        `DELIVERY_PENDING` (`_follow`), never the fatal unestablished outcome. `before_offer` runs
+        once the supervisor has answered, right before the offer.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -1487,9 +2164,13 @@ class LocalPtyHeadRuntime:
             return None, _stated_refusal(probe.answer)
         if payload is None:
             payload = _payload_of(pointer)
+        if operation is not None and operation.remaining() <= 0:
+            return None, _allowance_refusal()
         try:
-            client = self._connect(address)
+            client = self._connect(address, operation)
         except _UNREACHABLE as exc:
+            if operation is not None and _timed_out(exc):
+                return None, _allowance_refusal()
             return None, self._unreachable_refusal(address, run, exc)
         with client:
             # The pre-offer journal sequence floors `input.accepted` matching, since delivery ids
@@ -1503,15 +2184,26 @@ class LocalPtyHeadRuntime:
                 try:
                     status = client.status()
                 except _UNREACHABLE as exc:
+                    if operation is not None and _timed_out(exc):
+                        return None, _allowance_refusal()
                     return None, self._unreachable_refusal(address, run, exc)
             if not status.get("ok"):
                 # A stated refusal (at the connection bound the supervisor reads no request): the
                 # payload was never offered. `ok` is tested before any contents are believed.
                 return None, _stated_refusal(status)
             floor = int(status.get("journal_seq") or 0)
+            if before_offer is not None:
+                before_offer()
             try:
                 answer = client.send_input(payload, subject=subject)
             except _UNREACHABLE as exc:
+                if operation is not None and _timed_out(exc):
+                    # The offer is on the socket and its answer did not come back in time: it may be
+                    # admitted. Not fatal and never offered again on this alone: the supervisor reads
+                    # a request before it answers any connection made after it, so the next `status`
+                    # and the journal say whether it was taken.
+                    return _pending_report(len(payload), floor, "the admission answer did not come back "
+                                           "within this pass's allowance"), None
                 # The request is on the socket and no answer came back: whether it was admitted
                 # cannot be established, so this is unestablished, not a refusal. The journal is not
                 # asked, since no delivery id came back to match a record on.
@@ -1526,6 +2218,8 @@ class LocalPtyHeadRuntime:
             if not answer.get("ok"):
                 return None, _admission_refusal(answer)
             admitted = dict(answer.get("delivery") or {})
+            if operation is not None:
+                return self._follow(address, client, admitted, len(payload), floor, operation), None
             # From here the answer bound is the derived delivery wait, not `connect_timeout`: a
             # slow supervisor inside its declared bound must not read as silent, which is fatal.
             client.set_timeout(self.delivery_wait_for(_declared_bound(admitted)))
@@ -1538,13 +2232,20 @@ class LocalPtyHeadRuntime:
         admitted: Mapping[str, Any],
         offered: int,
         floor: int,
+        operation: HandoffOperation | None = None,
     ) -> DeliveryReport:
         """Watch an admitted delivery to its end; the only place that asks what a delivery did.
 
         The deadline is `delivery_wait_for` the bound the supervisor declared on this delivery,
         measured after admission, so it always outlasts the substrate. Polled here rather than via
         `wait_for_delivery` so that every ending is a value, never a state read off an exception.
+
+        Inside a handoff `operation` the watch stops at the operation's deadline instead, and each
+        request is cut to it: a delivery still in flight then, or a status answer that did not come
+        back in time, is `DELIVERY_PENDING`. The substrate's own bound still ends the delivery.
         """
+        if operation is not None:
+            return self._follow_within(address, client, admitted, offered, floor, operation)
         delivery_id = int(admitted.get("id") or 0)
         last: Mapping[str, Any] = admitted
         # The highest journal sequence seen, from the pre-offer one; the delivery's epoch.
@@ -1596,6 +2297,56 @@ class LocalPtyHeadRuntime:
                     ),
                 )
             time.sleep(self._delivery_poll)
+
+    def _follow_within(
+        self,
+        address: _Address,
+        client: local_pty.SupervisorClient,
+        admitted: Mapping[str, Any],
+        offered: int,
+        floor: int,
+        operation: HandoffOperation,
+    ) -> DeliveryReport:
+        """`_follow` inside a handoff operation: the same endings, or pending when its time is up."""
+        delivery_id = int(admitted.get("id") or 0)
+        last: Mapping[str, Any] = admitted
+        seq = floor
+        while True:
+            left = operation.remaining()
+            if left <= 0:
+                return _pending_report(offered, floor, "admitted, and still being written when this "
+                                       "pass's allowance ran out", last, seq)
+            try:
+                status = client.status()
+            except _UNREACHABLE as exc:
+                if _timed_out(exc):
+                    return _pending_report(offered, floor, "admitted, and the supervisor's answer did "
+                                           "not come back within this pass's allowance", last, seq)
+                # Admitted, then nobody left to ask: the journal decides, else unestablished.
+                return self._report_of(
+                    address, last, offered, floor, established=False, detail=str(exc), seq=seq
+                )
+            if not status.get("ok"):
+                if _is_transient_bound(status):
+                    # A self-clearing bound is not an ending: ask again while the allowance lasts.
+                    self._sleep(min(self._delivery_poll, operation.remaining()))
+                    continue
+                return self._report_of(
+                    address,
+                    last,
+                    offered,
+                    floor,
+                    established=False,
+                    detail=_refusal_detail(status),
+                    seq=seq,
+                )
+            seq = max(seq, int(status.get("journal_seq") or 0))
+            delivery = status.get("delivery")
+            if isinstance(delivery, dict) and int(delivery.get("id") or 0) == delivery_id:
+                last = delivery
+                if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
+                    return self._report_of(address, last, offered, floor, established=True, seq=seq)
+            self._sleep(min(self._delivery_poll, operation.remaining()))
 
     def _report_of(
         self,
@@ -1657,7 +2408,12 @@ class LocalPtyHeadRuntime:
         )
 
     def _delivery_that_did_not_arrive(
-        self, run: HeadRun, report: DeliveryReport, lease: Any, epoch: int
+        self,
+        run: HeadRun,
+        report: DeliveryReport,
+        lease: Any,
+        epoch: int,
+        operation: HandoffOperation | None = None,
     ) -> DeliverReceipt:
         """A delivery that ended without arriving whole, keyed on `report.outcome` alone.
 
@@ -1666,7 +2422,7 @@ class LocalPtyHeadRuntime:
         hands back the lease only.
         """
         if report.fatal:
-            self._close_head(run, report)
+            self._close_head(run, report, operation)
         elif report.outcome == DELIVERY_LANDED_NOTHING:
             self.activity.release(run.run_id)
             lease = None
@@ -1684,10 +2440,17 @@ class LocalPtyHeadRuntime:
             rotation_ready=self.activity.rotatable(run.run_id),
         )
 
-    def _close_head(self, run: HeadRun, report: DeliveryReport) -> None:
+    def _close_head(
+        self, run: HeadRun, report: DeliveryReport, operation: HandoffOperation | None = None
+    ) -> None:
         """Hand this head no more work, here and at its supervisor, remembering the reason.
 
         The single place for every fatal outcome, from `deliver` and `_abandon_bring_up` alike.
+        Inside a handoff `operation` the supervisor is told only within what is left of it, and not
+        at all once nothing is: the head is closed here at once either way, and what the supervisor
+        was not told is owed by the durable evidence that made the outcome fatal (a partial line in
+        the journal, which every later pass of the handoff refuses again and tells the supervisor
+        again from its own allowance) and by the caller's confirmed stop before any replacement.
         """
         self._fatal[run.run_id] = (
             DRAIN_AFTER_PARTIAL_DELIVERY
@@ -1705,6 +2468,7 @@ class LocalPtyHeadRuntime:
                     else DELIVER_UNKNOWN_IS_FATAL
                 ),
             ),
+            **({} if operation is None else {"operation": operation}),
         )
 
     def _status_of(self, run: HeadRun, report: DeliveryReport) -> str:
@@ -1775,7 +2539,7 @@ class LocalPtyHeadRuntime:
         )
 
     def _close_substrate_admission(
-        self, run: HeadRun, initiator: StopInitiator
+        self, run: HeadRun, initiator: StopInitiator, *, operation: HandoffOperation | None = None
     ) -> tuple[bool, Any, int, _Probe | None]:
         """Tell the supervisor to take no more input, and read the answer back.
 
@@ -1786,8 +2550,11 @@ class LocalPtyHeadRuntime:
         address = self._address(run)
         if address is None or not address.socket_path.exists():
             return False, OBSERVE_NO_RUN_DIRECTORY, 0, None
+        if operation is not None and operation.remaining() <= 0:
+            # Nothing is left of the handoff's allowance: no request is made, and nothing is claimed.
+            return False, HANDOFF_ALLOWANCE_SPENT, 0, None
         try:
-            with self._connect(address) as client:
+            with self._connect(address, operation) as client:
                 answer = client.drain(initiator.actor or "dispatcher")
                 if not answer.get("ok"):
                     return False, answer, 0, None
@@ -1805,24 +2572,58 @@ class LocalPtyHeadRuntime:
         except _UNREACHABLE as exc:
             return False, str(exc), 0, None
 
-    def _ask_to_stop(self, address: _Address, initiator: StopInitiator, signal_name: str) -> Any:
+    @contextlib.contextmanager
+    def _locked_within(self, remaining: Callable[[], float] | None) -> Iterator[bool]:
+        """This runtime's lock: awaited as ever, or for at most a caller's `remaining`."""
+        if remaining is None:
+            with self._lock:
+                yield True
+            return
+        locked = self._lock.acquire(timeout=max(0.0, remaining()))
+        try:
+            yield locked
+        finally:
+            if locked:
+                self._lock.release()
+
+    def _ask(self, address: _Address, initiator: StopInitiator, signal_name: str,
+             remaining: Callable[[], float] | None) -> Any:
+        """`_ask_to_stop`, handed a caller's deadline only when there is one."""
+        if remaining is None:
+            return self._ask_to_stop(address, initiator, signal_name)
+        return self._ask_to_stop(address, initiator, signal_name, remaining)
+
+    def _await_gone(self, address: _Address, run: HeadRun, remaining: Callable[[], float] | None) -> bool:
+        """`_await_head_gone`, handed a caller's deadline only when there is one."""
+        if remaining is None:
+            return self._await_head_gone(address, run)
+        return self._await_head_gone(address, run, remaining)
+
+    def _ask_to_stop(self, address: _Address, initiator: StopInitiator, signal_name: str,
+                     remaining: Callable[[], float] | None = None) -> Any:
         """Ask the supervisor to end its head; a supervisor that is gone is not a failure here.
 
         The one reader that does not test `ok`: the answer is evidence only, and `_await_head_gone`
-        decides the outcome from the launch identity.
+        decides the outcome from the launch identity. A caller's `remaining` bounds the connect and
+        every framed exchange (`SupervisorClient`), so a fragmented answer cannot outlive it.
         """
         try:
-            with self._connect(address) as client:
+            with (self._connect(address) if remaining is None else local_pty.SupervisorClient.connect(
+                address.socket_path, timeout=self._connect_timeout, remaining=remaining
+            )) as client:
                 return client.stop(initiator.actor or "dispatcher", signal_name)
         except _UNREACHABLE as exc:
             return {"ok": False, "error": OBSERVE_SUPERVISOR_UNREACHABLE, "detail": str(exc)}
 
-    def _await_head_gone(self, address: _Address, run: HeadRun) -> bool:
+    def _await_head_gone(self, address: _Address, run: HeadRun,
+                         remaining: Callable[[], float] | None = None) -> bool:
         """Wait for the head's process to be gone, by its launch identity rather than the socket.
 
         A head whose identity record was never written is answered by the journal's `run.exited`.
+        The wait is `stop_timeout`, cut to a caller's `remaining`.
         """
-        deadline = time.monotonic() + self._stop_timeout
+        deadline = time.monotonic() + (self._stop_timeout if remaining is None
+                                       else min(self._stop_timeout, remaining()))
         while True:
             if self._identity_says_dead(address):
                 return True
@@ -2234,6 +3035,11 @@ class _Probe:
     #: The one recovery request a failed initial attempt may still spend.
     retry_available: bool = False
 
+    @property
+    def timed_out(self) -> bool:
+        """Whether nothing came back because the time it was given ran out (no answer, no refusal)."""
+        return _timed_out(self.error)
+
     def spend_retry(self) -> bool:
         """Consume the failed attempt's sole retry before anybody can make the request."""
         if not self.retry_available:
@@ -2269,6 +3075,52 @@ class _Refusal:
     reason: str
     failure: HeadOperationError | None = None
     evidence: Any = None
+
+
+def _timed_out(exc: BaseException | None) -> bool:
+    """Whether a transport error is a request that ran out of time, not a supervisor that is gone."""
+    while exc is not None:
+        if isinstance(exc, TimeoutError):
+            return True
+        exc = exc.__cause__
+    return False
+
+
+def _allowance_refusal() -> _Refusal:
+    """Nothing was offered: the handoff operation's time ran out before the supervisor answered."""
+    return _Refusal(status=HEAD_BUSY, reason=f"{DELIVER_DEFERRED}: {HANDOFF_ALLOWANCE_SPENT}")
+
+
+def _allowance_receipt(run: HeadRun, activity: HeadActivity) -> DeliverReceipt:
+    return DeliverReceipt(
+        status=HEAD_BUSY,
+        run=run,
+        reason=f"{DELIVER_DEFERRED}: {HANDOFF_ALLOWANCE_SPENT}",
+        epoch=activity.epoch(run.run_id),
+        lease=activity.lease(run.run_id),
+        rotation_ready=activity.rotatable(run.run_id),
+    )
+
+
+def _pending_report(
+    offered: int,
+    floor: int,
+    detail: str,
+    delivery: Mapping[str, Any] | None = None,
+    seq: int = 0,
+) -> DeliveryReport:
+    """A delivery offered inside a handoff operation whose answer or end did not come back in time."""
+    delivery = delivery or {}
+    return DeliveryReport(
+        outcome=DELIVERY_PENDING,
+        state=protocol.DELIVERY_IN_FLIGHT,
+        written=int(delivery.get("written_bytes") or 0),
+        offered=int(delivery.get("size_bytes") or offered),
+        delivery_id=int(delivery.get("id") or 0),
+        floor=floor,
+        detail=detail,
+        seq=max(seq, floor),
+    )
 
 
 def _refusal_status(error: str) -> str:
@@ -2427,6 +3279,171 @@ def _outcome_of(
     return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
 
 
+@dataclass(frozen=True)
+class _HandoffLook:
+    """One look at a handoff's head: a status cut to the operation's deadline, then the journal.
+
+    `deferred` says why nothing may be concluded from the supervisor this pass (its answer did not
+    come back in time, or it is at a self-clearing bound). `writing` is `line` or `submit` while the
+    supervisor shows that write of this handoff still in flight.
+    """
+
+    probe: _Probe | None
+    status: Mapping[str, Any] | None
+    progress: _HandoffProgress
+    deferred: str = ""
+    writing: str = ""
+
+    def epoch(self, activity: HeadActivity, run: HeadRun) -> int:
+        """The head's epoch, raised to the sequence this look's status stated (no further request)."""
+        seq = self.status.get("journal_seq") if self.status is not None else None
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            return activity.advance_to(run.run_id, seq)
+        return activity.epoch(run.run_id)
+
+
+def _stage_of(progress: _HandoffProgress) -> str:
+    """The stage the journal puts a handoff at: nothing typed, typed, or submitted."""
+    if progress.typed is None:
+        return HANDOFF_SETTLE
+    return HANDOFF_SUBMITTED if progress.submits else HANDOFF_TYPED
+
+
+def _later_stage(one: str, other: str) -> str:
+    """The further of two handoff stages."""
+    order = (HANDOFF_SETTLE, HANDOFF_TYPED, HANDOFF_SUBMITTED)
+    return max(one, other, key=order.index)
+
+
+def _output_of_status(status: Mapping[str, Any]) -> int:
+    value = status.get("output_bytes")
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+@dataclass(frozen=True)
+class _HandoffProgress:
+    """How far one production handoff got, as the head's journal records it above the floor.
+
+    `typed` is the `input.accepted` that put the line on the terminal whole; `typed_prefix` one that
+    left only part of it. `submits` counts accepted submit keystrokes after it. `submit_bytes` is
+    the output the latest submit's turn has printed as far as the journal says (progress records,
+    then the turn's own total when it finishes). `unknown` says why none of this can be established.
+    """
+
+    unknown: str = ""
+    typed: Mapping[str, Any] | None = None
+    typed_prefix: Mapping[str, Any] | None = None
+    typed_at: float = 0.0
+    submits: int = 0
+    submit_at: float = 0.0
+    submit_turn: int = 0
+    submit_bytes: int = 0
+    submit_finished: bool = False
+
+    @property
+    def confirmed(self) -> bool:
+        """A submit's turn printed what a taken prompt prints (`SUBMIT_CONFIRM_BYTES`)."""
+        return self.submits > 0 and self.submit_bytes >= SUBMIT_CONFIRM_BYTES
+
+
+def _handoff_progress(read: Any, subject: str, floor: int) -> _HandoffProgress:
+    """Read one handoff's stage off a journal tail: the only place a production handoff is recalled.
+
+    Records at or below `floor` predate the handoff. A window that no longer reaches the floor, a
+    torn or out-of-order tail, a line typed twice, or a new supervisor incarnation after the line
+    are all unknown: absence of a record proves nothing there.
+    """
+    if read.malformed or not read.ordered:
+        return _HandoffProgress(unknown="the head's journal tail is not readable in order")
+    events = [event for event in read.events if isinstance(event.get("seq"), int)]
+    if read.partial_head and (not events or events[0]["seq"] > floor + 1):
+        return _HandoffProgress(unknown="the head's journal window no longer reaches this handoff's floor")
+    submit = f"{subject}:submit"
+    typed: Mapping[str, Any] | None = None
+    typed_at = 0.0
+    submits = 0
+    submit_at = 0.0
+    submit_turn = 0
+    submit_own_turn = False
+    submit_bytes = 0
+    submit_finished = False
+    open_turn = 0
+    for event in events:
+        seq = event["seq"]
+        kind = event.get("kind")
+        turn = event.get("turn") if isinstance(event.get("turn"), int) else 0
+        if kind == local_pty.TURN_STARTED:
+            open_turn = turn
+            if submits and not submit_turn and seq > floor:
+                submit_turn, submit_own_turn = turn, True
+        elif kind == local_pty.TURN_FINISHED:
+            if submits and turn == submit_turn and not submit_finished:
+                submit_finished = True
+                total = event.get("output_bytes")
+                if submit_own_turn and isinstance(total, int):
+                    # The turn's own count includes what was folded out of its progress records.
+                    submit_bytes = max(submit_bytes, total)
+            if turn == open_turn:
+                open_turn = 0
+        elif kind == local_pty.PROVIDER_PROGRESSED:
+            amount = event.get("output_bytes")
+            if submits and turn == submit_turn and not submit_finished and isinstance(amount, int):
+                submit_bytes += amount
+        elif seq <= floor:
+            continue
+        elif kind == local_pty.RUN_STARTED and typed is not None:
+            return _HandoffProgress(unknown="the head's supervisor started again after the line was typed")
+        elif kind == local_pty.INPUT_ACCEPTED and event.get("subject") == subject:
+            written = event.get("bytes") if isinstance(event.get("bytes"), int) else 0
+            if written <= 0:
+                continue  # it landed nothing: the terminal is as it was
+            if typed is not None:
+                return _HandoffProgress(unknown="this handoff's line was typed more than once")
+            if not event.get("complete"):
+                return _HandoffProgress(typed_prefix=event)
+            typed, typed_at = event, float(event.get("at") or 0.0)
+        elif kind == local_pty.INPUT_ACCEPTED and event.get("subject") == submit and typed is not None:
+            written = event.get("bytes") if isinstance(event.get("bytes"), int) else 0
+            if written <= 0:
+                continue
+            submits += 1
+            submit_at = float(event.get("at") or 0.0)
+            # An Enter into an open turn joins it; otherwise the supervisor opens one right after.
+            submit_turn, submit_own_turn = open_turn, False
+            submit_bytes, submit_finished = 0, False
+    return _HandoffProgress(
+        typed=typed,
+        typed_at=typed_at,
+        submits=submits,
+        submit_at=submit_at,
+        submit_turn=submit_turn,
+        submit_bytes=submit_bytes,
+        submit_finished=submit_finished,
+    )
+
+
+def _journalled_report(event: Mapping[str, Any], floor: int) -> DeliveryReport:
+    """The `DeliveryReport` a typed line's `input.accepted` stands for, when no live follow made one."""
+    written = _journal_int(event, "bytes", 0)
+    return _delivery_report(
+        state=str(event.get("state") or ""),
+        written=written,
+        offered=_journal_int(event, "offered_bytes", written),
+        established=True,
+        delivery_id=_journal_int(event, "delivery", 0),
+        journalled=True,
+        floor=floor,
+        detail=str(event.get("detail") or ""),
+        seq=_journal_int(event, "seq", 0),
+    )
+
+
+def _journal_int(event: Mapping[str, Any], key: str, default: int) -> int:
+    """An integer field of a journal record, or `default` when it is missing or not an integer."""
+    value = event.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
 def _spawn_status(exc: local_pty.LocalPtySpawnError) -> str:
     """Which status a refused bring-up left behind.
 
@@ -2468,11 +3485,27 @@ def _in_flight(status: Mapping[str, Any]) -> bool:
 
 
 def _has_exited(address: _Address) -> bool:
-    """Whether the journal's bounded tail holds a `run.exited`.
+    """Whether the current journal incarnation has a complete `run.exited`.
 
-    Only used to confirm a head is gone, so a window past an older exit answering `False` is safe.
+    Run directories and journals are reused. An exit from an earlier incarnation cannot confirm
+    that the head started after it is gone, and a damaged tail cannot prove which incarnation its
+    final records belong to. The launch identity remains the primary stop witness.
     """
-    return bool(local_pty.read_tail(address.journal_path).of_kind(local_pty.RUN_EXITED))
+    try:
+        reading = local_pty.read_tail(address.journal_path)
+    except OSError:
+        return False
+    if reading.truncated_tail or reading.malformed or not reading.ordered:
+        return False
+    started = max(
+        (int(event.get("seq") or 0) for event in reading.of_kind(local_pty.RUN_STARTED)),
+        default=0,
+    )
+    exited = max(
+        (int(event.get("seq") or 0) for event in reading.of_kind(local_pty.RUN_EXITED)),
+        default=0,
+    )
+    return bool(started and exited > started)
 
 
 def head_run_journal(run_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], ...]:
@@ -2579,7 +3612,8 @@ def head_run_pid_file(root: str | os.PathLike[str], run_id: str) -> Path:
 
 
 def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
-                         runs: Sequence[HeadRun], *, recorded_only: bool = False) -> None:
+                         runs: Sequence[HeadRun], *, recorded_only: bool = False,
+                         remaining: Callable[[], float] | None = None) -> None:
     """Refuse Git settlement while an unrecorded generation owns its target.
 
     This read uses the same canonical owner as stop. The dispatcher serializes
@@ -2587,7 +3621,8 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
     for native identity and recursive empty-scope proof, including on replay.
 
     `recorded_only` reads nothing but the recorded runs' own canonical directories:
-    a replaced owner's workspace and task now belong to its successor.
+    a replaced owner's workspace and task now belong to its successor. A caller's
+    `remaining` cuts each native observation of a terminal scope's disappearance.
     """
     if root.absolute() != root.resolve():
         raise ValueError("cleanup scope root is substituted")
@@ -2595,9 +3630,17 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
         return
     known = {(run.run_id, run.scope_generation): run for run in runs}
     task_identity = _binding_of(task)
+    def entries() -> Iterator[Path]:
+        # Entry by entry from the native iterator, so a caller's deadline is checked between them.
+        with os.scandir(root) as scan:
+            for entry in scan:
+                yield root / entry.name
+
     directories = ([protocol.run_dir_for(root, run.run_id) for run in runs] if recorded_only
-                   else list(root.iterdir()))
+                   else entries())
     for directory in directories:
+        if remaining is not None and remaining() <= 0:
+            raise ValueError("the caller's deadline passed while cleanup scope ownership was read")
         if directory.is_symlink():
             raise ValueError("cleanup scope directory is substituted")
         if not directory.is_dir():
@@ -2618,26 +3661,29 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
             raise ValueError("cleanup scope owner binding differs from its recorded head")
         if recorded_only:
             continue
-        if record.get("workspace") == workspace or record.get("task") == task_identity:
+        if record.get("workspace") == workspace or record.get("task") == task_identity:  # noqa: SIM102
             if (owner.run_id, owner.generation) not in known:
                 if record.get("cleanup_complete") and not record.get("launch_allowed"):
                     # A retained terminal flag cannot bless a reused live unit.
-                    inventory = runtime_scope_inventory(root.parent, {record["unit"]})
+                    inventory = (runtime_scope_inventory(root.parent, {record["unit"]}) if remaining is None
+                                 else runtime_scope_inventory(root.parent, {record["unit"]}, remaining=remaining))
                     if inventory.errors or record["unit"] not in inventory.disappeared:
                         raise ValueError("cleanup terminal scope lacks current disappearance proof")
                     continue
                 raise ValueError("cleanup workspace has an unrecorded or newer scope owner")
 
 
-def runtime_scope_inventory(data_dir: Path, units: set[str]) -> RuntimeScopeInventory:
+def runtime_scope_inventory(data_dir: Path, units: set[str], *,
+                            remaining: Callable[[], float] | None = None) -> RuntimeScopeInventory:
     """Read canonical lifecycle ownership for host preservation and diagnostics.
 
     Consumers use this runtime boundary, never the private PTY owner format.
-    The projection grants no launch, adoption or cleanup authority.
+    The projection grants no launch, adoption or cleanup authority. A caller's
+    `remaining` cuts each native scope observation to what is left of its deadline.
     """
     from ummanu.runtime.head.local_pty.scope_inventory import read_runtime_scopes
 
-    return read_runtime_scopes(data_dir, units)
+    return read_runtime_scopes(data_dir, units, remaining=remaining)
 
 
 def head_scope_owner_lock(run_dir: str | os.PathLike[str]) -> AbstractContextManager[None]:

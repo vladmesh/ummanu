@@ -28,8 +28,7 @@ from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
 from tests.retired_board import legacy_runtime_lines
 from tests.sql_backend_fixtures import card_store
 from ummanu import host
-from ummanu.automations.agents.steward import cli as steward_cli
-from ummanu.automations.agents.steward import signals as steward_signals
+from ummanu.automations.agents.steward import cli as steward_cli, signals as steward_signals
 from ummanu.automations.runtime import health, production_telemetry
 from ummanu.board.backend import CARD, SPRINT
 from ummanu.cli import build_parser
@@ -317,7 +316,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
                 mock.patch.object(steward_signals, "resolve_reader", return_value=EMPTY_STEWARD_READER)
             )
             stack.enter_context(
-                mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
+                mock.patch.object(steward_signals, "_workspaces_root", return_value=self.data_dir / "no-workspaces")
             )
             stack.enter_context(
                 mock.patch.dict(
@@ -494,7 +493,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
                 mock.patch.object(steward_signals, "resolve_reader", return_value=EMPTY_STEWARD_READER)
             )
             stack.enter_context(
-                mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
+                mock.patch.object(steward_signals, "_workspaces_root", return_value=self.data_dir / "no-workspaces")
             )
             stack.enter_context(
                 mock.patch.dict(
@@ -1052,7 +1051,7 @@ class StewardResourceSignalTests(unittest.TestCase):
             "TA_PIPELINE_STATE_DIR",
         ):
             os.environ.pop(name, None)
-        workspaces = mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.root / "workspaces")
+        workspaces = mock.patch.object(steward_signals, "_workspaces_root", return_value=self.root / "workspaces")
         workspaces.start()
         self.addCleanup(workspaces.stop)
 
@@ -1526,7 +1525,9 @@ class StewardPipelineSignalTests(unittest.TestCase):
             )
             stack.enter_context(
                 mock.patch.object(
-                    steward_signals, "WORKSPACES_ROOT", Path(self.tmpdir.name) / "no-workspaces"
+                    steward_signals,
+                    "_workspaces_root",
+                    return_value=Path(self.tmpdir.name) / "no-workspaces",
                 )
             )
             stack.enter_context(
@@ -1990,14 +1991,19 @@ class StewardSignalPortTests(unittest.TestCase):
         reader = self.Reader()
         with tempfile.TemporaryDirectory() as tmp:
             state = AgentState("steward", state_dir=Path(tmp) / "state")
-            workspace = Path(tmp) / "workspaces" / "other-project"
-            (workspace / "999-orphan").mkdir(parents=True)
+            root = Path(tmp) / "workspaces"
+            workspace = root / "ummanu"
+            active_worker = workspace / "ummanu-2-live"
+            active_reviewer = workspace / "review-ummanu-1-live"
+            orphan = workspace / "ummanu-999-orphan"
+            active_worker.mkdir(parents=True)
+            active_reviewer.mkdir()
+            orphan.mkdir()
+            (root / "observers" / "sprint-1").mkdir(parents=True)
             with contextlib.ExitStack() as stack:
                 stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
                 stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
-                stack.enter_context(
-                    mock.patch.object(steward_signals, "WORKSPACES_ROOT", Path(tmp) / "workspaces")
-                )
+                stack.enter_context(mock.patch.object(steward_signals, "_workspaces_root", return_value=root))
                 stack.enter_context(
                     mock.patch.object(
                         steward_signals,
@@ -2014,12 +2020,12 @@ class StewardSignalPortTests(unittest.TestCase):
                     {"reference": "ummanu-2", "column": "Ready", "since": _LONG_AGO},
                     batch["signals"]["stale"],
                 )
-                self.assertEqual(batch["signals"]["new_orphan_workspaces"], [str(workspace / "999-orphan")])
+                self.assertEqual(batch["signals"]["new_orphan_workspaces"], [str(orphan)])
                 state.ensure_dir()
                 state.pending_file.write_text(json.dumps({"notified_blocked": []}), encoding="utf-8")
                 self.assertEqual(steward_cli.cmd_advance(reader), 0)
             self.assertEqual(state.load_watermark()["notified_blocked"], ["ummanu-1"])
-        self.assertIn((None, "other-project"), reader.calls)
+        self.assertIn((None, "ummanu"), reader.calls)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,9 @@
 It replaces the instance repository's test suite (docs/OPERATIONS.md, "Changing installation
 config"). Two checks run over the live root:
 
-- schema validation, `config.validate_instance`, the same read the dispatcher makes every tick;
+- schema validation, `config.validate_instance`, the same read the dispatcher makes every tick,
+  and the cross-family fallback rule (`config.fallback_errors`, ummanu-108): every head profile
+  and PO session can fall over to the other subscription family;
 - the old-name guard (`infra.old_name_guard`, docs/RENAME.md §T5) over the files the next exporter
   cut copies. A file outside the export allowlist (`runtime.env`, `board-store.env`,
   `secrets/installation.key`, generated or local state) is never opened.
@@ -19,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ummanu.checkpoint import CheckpointBlocked, exported_files
-from ummanu.config import validate_instance
+from ummanu.config import fallback_errors, validate_instance
 from ummanu.infra.old_name_guard import live_root_violations, text_of
 
 
@@ -39,6 +41,9 @@ def check_live_root(instance: Path) -> ConfigCheck:
     report = validate_instance(instance)
     result = ConfigCheck(report.instance_path.parent)
     result.findings += [_one_line(f"schema: {error}") for error in report.errors]
+    result.findings += [
+        _one_line(f"fallback: {error}") for error in fallback_errors(result.live_root, report.instance)
+    ]
     try:
         names = exported_files(result.live_root)
     except CheckpointBlocked as exc:

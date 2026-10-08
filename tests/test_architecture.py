@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
+from tests import source_trees
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -63,10 +65,10 @@ RETIRED_AGENTS_PACKAGE = "triggered_agents"
 
 def _absolute_imports(relative: str, source: str) -> list[tuple[ast.stmt, str, bool]]:
     """Every absolute import in one module: (node, imported module, whether at module level)."""
-    tree = ast.parse(source, filename=relative)
+    tree = source_trees.parse(source, filename=relative)
     top_level = {id(node) for node in tree.body}
     found: list[tuple[ast.stmt, str, bool]] = []
-    for node in ast.walk(tree):
+    for node in source_trees.walk(tree):
         if isinstance(node, ast.Import):
             found.extend((node, alias.name, id(node) in top_level) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
@@ -105,8 +107,8 @@ def _imports_automations(relative: str, source: str) -> list[str]:
             continue
         offenders.add(f"{relative}:{node.lineno}: {AUTOMATIONS_PACKAGE}")
     if relative.startswith("src/ummanu/"):
-        tree = ast.parse(source, filename=relative)
-        for node in ast.walk(tree):
+        tree = source_trees.parse(source, filename=relative)
+        for node in source_trees.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level and (
                 (node.module or "").split(".")[0] == "automations"
                 or any(alias.name == "automations" for alias in node.names)
@@ -177,11 +179,11 @@ def _module_of(relative: str) -> str:
 
 def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
     """Every module an import statement names, relative ones resolved against the file's package."""
-    tree = ast.parse(source, filename=relative)
+    tree = source_trees.parse(source, filename=relative)
     module = _module_of(relative)
     package = module if relative.endswith("__init__.py") else module.rpartition(".")[0]
     found: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
+    for node in source_trees.walk(tree):
         if isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -248,13 +250,13 @@ def _names_banned_module(module: str) -> bool:
 
 def _orca_references(relative: str, source: str) -> list[OrcaFinding]:
     """Every Orca import and every string constant naming the Orca program, one finding per node."""
-    tree = ast.parse(source, filename=relative)
+    tree = source_trees.parse(source, filename=relative)
     found: set[OrcaFinding] = set()
     for lineno, module in _imported_modules(relative, source):
         if _names_banned_module(module):
             found.add(OrcaFinding(lineno, -1, f"imports {module}", module))
-    parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
-    for node in ast.walk(tree):
+    parents = source_trees.parents(tree)
+    for node in source_trees.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             text = node.value
             # `importlib.import_module("…")` and friends name a module by string.
@@ -444,8 +446,8 @@ class SourceLayoutTests(unittest.TestCase):
         """Shared fakes are a one-way dependency, not bridges between test modules."""
         offenders: list[str] = []
         for path in (ROOT / "tests").rglob("*.py"):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in source_trees.walk(tree):
                 module = node.module if isinstance(node, ast.ImportFrom) else None
                 if module and (module == "tests.test" or module.startswith("tests.test_")):
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
@@ -462,8 +464,8 @@ class SourceLayoutTests(unittest.TestCase):
         offenders: list[str] = []
         for tree_root in ("src", "tests", "scripts"):
             for path in (ROOT / tree_root).rglob("*.py"):
-                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                for node in ast.walk(tree):
+                tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in source_trees.walk(tree):
                     modules: list[str] = []
                     if isinstance(node, ast.Import):
                         modules = [alias.name for alias in node.names]
@@ -526,8 +528,8 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
             self.assertNotIn(f"self.{helper}(", dispatcher_source)
             self.assertNotIn(f"runtime.{helper}(", report_source)
-        runtime_tree = ast.parse(dispatcher_source)
-        advance = next(node for node in ast.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker")
+        runtime_tree = source_trees.parse(dispatcher_source)
+        advance = next(node for node in source_trees.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker")
         advance_source = ast.get_source_segment(dispatcher_source, advance)
         self.assertIn("_worker_report_marker(", advance_source)
         self.assertIn("_handle_worker_report(", advance_source)
@@ -886,8 +888,8 @@ class FileAuditOwnershipTests(unittest.TestCase):
         """Every call of a `TaskAudit` name in `src/ummanu`, by module and line."""
         found: dict[str, list[int]] = {}
         for path in sorted((ROOT / "src" / "ummanu").rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in source_trees.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
                 target = node.func
@@ -950,10 +952,10 @@ class FileAuditOwnershipTests(unittest.TestCase):
         """Cards, Sprints and Products/Issues have one implementation, so nothing asks which one it holds."""
         for path in _source_modules():
             module = str(path.relative_to(ROOT / "src"))
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             reads = [
                 node.lineno
-                for node in ast.walk(tree)
+                for node in source_trees.walk(tree)
                 if (isinstance(node, ast.Attribute) and node.attr == "backend_kind")
                 or (
                     isinstance(node, ast.Call)
@@ -984,9 +986,9 @@ class FileAuditOwnershipTests(unittest.TestCase):
         non_store_kinds = {"dispatcher"}
         for path in _source_modules():
             module = str(path.relative_to(ROOT / "src")).removeprefix("ummanu/")
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             backends: list[ast.AST] = []
-            for node in ast.walk(tree):
+            for node in source_trees.walk(tree):
                 if isinstance(node, ast.Dict):
                     backends.extend(
                         value
@@ -1083,10 +1085,10 @@ class OneBoardClientTests(unittest.TestCase):
 
         parameters = inspect.signature(backend.board_client).parameters
         self.assertEqual([name for name in parameters], ["instance_dir", "serves", "role"])
-        tree = ast.parse((ROOT / "src" / "ummanu" / "board" / "backend.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse((ROOT / "src" / "ummanu" / "board" / "backend.py").read_text(encoding="utf-8"))
         environment = [
             node.lineno
-            for node in ast.walk(tree)
+            for node in source_trees.walk(tree)
             if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}
         ]
         self.assertEqual(environment, [], "board/backend.py reads the process environment")
@@ -1103,7 +1105,7 @@ class OneBoardClientTests(unittest.TestCase):
         for path in sorted(board.glob("*.py")):
             if path.name in {"sql_host.py", "__init__.py"}:
                 continue
-            body = ast.parse(path.read_text(encoding="utf-8")).body
+            body = source_trees.parse(path.read_text(encoding="utf-8")).body
             imports_host = any(
                 isinstance(node, ast.ImportFrom) and node.module == "ummanu.board.sql_host" for node in body
             )
@@ -1119,6 +1121,7 @@ class OneBoardClientTests(unittest.TestCase):
             if imports_host and only_imports:
                 aliases.append(path.name)
         self.assertEqual(aliases, [])
+
 
 
 if __name__ == "__main__":
@@ -1182,8 +1185,8 @@ def _second_copies(sources: dict[str, str]) -> list[str]:
     for path, text in sorted(sources.items()):
         if Path(path).name == "role_env.py" and path != ROLE_ENV_HOME:
             offenders.append(f"{path}: role_env module")
-        tree = ast.parse(text, filename=path)
-        for node in ast.walk(tree):
+        tree = source_trees.parse(text, filename=path)
+        for node in source_trees.walk(tree):
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:
@@ -1305,3 +1308,7 @@ class SingleHomeTests(unittest.TestCase):
             ),
             [],
         )
+
+
+def tearDownModule() -> None:
+    source_trees.clear()

@@ -1125,58 +1125,81 @@ delivery, recovery does not freeze or signal the worker, write reviewer routing 
 attribution, clear the intent, or replace the head. Confirmation crosses the ordinary launch adoption
 boundary once; `unavailable`, malformed and stale-handle evidence keep their own conservative paths.
 
-### Provider failure on a head's first turn
+### Provider failure of a head's turn
 
-A worker or reviewer head whose first turn ends on a provider error, with no report or verdict, has
-failed on its provider. That is a provider verdict, not a stall (secretary-1799,
-`src/ummanu/dispatch/provider_failure.py`). The provider errors in scope are an HTTP 401/403, a 429,
-any 5xx (529 included), and a connection the client gave up on after its own retries ("Reconnecting...
-5/5", "exceeded retry limit", "stream disconnected before completion"). A turn that ends on anything else
-(a context window, a tool failure, a refusal) keeps its old path.
+Every role keeps working when one subscription is down (ummanu-108): a role's default profile is
+only the first one to try. A worker, reviewer, observer, standing automation or PO turn that ends on a
+provider error has failed on its provider. That is a provider verdict, not a stall
+(`src/ummanu/dispatch/provider_failure.py`, first written for secretary-1799). The provider errors in
+scope are a spent subscription (Codex `codex_error_info: usage_limit_exceeded`, "You've hit your usage
+limit ... try again at Oct 9th, 2026 9:11 PM"; Claude "You've hit your weekly limit · resets 1am
+(UTC)", "5-hour limit reached"), an HTTP 401/403, a 429, any 5xx (529 included), and a connection the
+client gave up on after its own retries ("Reconnecting... 5/5", "exceeded retry limit", "stream
+disconnected before completion"). A turn that ends on anything else (a context window, a tool failure,
+a refusal) keeps its old path. Classification is `ummanu.runtime.provider_errors`; a spent quota is kind
+`quota` and carries the reset time the provider named (`reset_time`), in the zone it named or this
+host's.
 
-Sources, read by `CommandHostRuntime.provider_failure` from the role's exact HeadRun, never from the
-workspace at large:
+Sources, read from the role's exact HeadRun, never from the workspace at large:
 
 - Codex: the run's bound rollout journal. A turn runs from `task_started` to `task_complete`; the
-  failure is a `task_complete` whose `error.message` is a provider error (or an in-turn `error` event
-  closed by a `task_complete` with no agent message).
+  failure is a `task_complete` whose `error.message` (or typed `codex_error_info`) is a provider error,
+  or an in-turn `error` event closed by a `task_complete` with no agent message. A head with no bound
+  rollout (a standing automation) is read from its screen, as below.
 - Claude: the run's bound session transcript. The failure is an `isApiErrorMessage` record
   (`apiErrorStatus`, typed `error`) that is the transcript's last user/assistant record. When no
-  transcript can be bound, the bottom of the head's PTY screen is read instead (the supervisor's output
-  buffer rendered to a screen), and only when the supervisor journal says the head is idle after turn 1.
+  transcript can be bound, the bottom of the head's PTY screen is read instead, only while the
+  supervisor journal says the head is idle, and only a line in the CLI's own refusal shape counts:
+  anchored at the line start after the CLI's error glyph, an `API Error`, an auth marker, or a spent
+  quota in the refusal wording with its reset ("try again at/in", "resets"). A warning ("Approaching
+  your 5-hour usage limit", "Heads up, you have less than 10% of your weekly limit left"), agent prose or
+  tool output that mentions a limit is never a refusal.
+- PO turns: the CLI's own output (`po.runner.po_provider_error`): Claude's `is_error` result object,
+  Codex's `error`/`turn.failed` events, then the stderr tail.
 
-First turn means the head never completed a clean turn: every completed turn so far ended on an error
-and the last one on a provider error. A head that has completed a clean turn, reported or given a verdict
-is out of scope and behaves as before.
+Any turn, not only the first: the last completed turn ended on a provider error. A later clean turn, a
+report or a verdict ends it.
 
 **Precedence.** `wait_vitality.wait_watchdog` asks this before the vitality verdict, on every wait tick:
 the tick that first observes the turn's end acts on it, without waiting for any stall timer, and no
 `{kind}-stall-suspected`, `{kind}-respawned`, report nudge or stall escalation is produced for that head.
-From the error to the relaunch takes one tick.
+From the error to the relaunch takes one tick. An observer is asked in its wake path, before any nudge
+or ceiling; a standing automation at the start of its next tick.
 
 **On detection, in this order:**
 
-1. The head's resource is recorded `unavailable` in `<data>/dispatcher/resource_health.json`
-   (`HeadHealth.record`), with the reason, replacing its cached probe verdict. It holds for the probe
-   TTL; the probe runs again after that.
+1. The head's resource is recorded red in `<data>/dispatcher/resource_health.json`
+   (`HeadHealth.record`): `exhausted` for a spent quota, `unavailable` otherwise, with `until` = the
+   reset the provider named, else a bounded backoff (`QUOTA_BACKOFF_SECONDS`, 1 h;
+   `PROVIDER_FAILURE_BACKOFF_SECONDS`, 15 min). Until then no probe runs over it: a cheap `ping` is no
+   proof there is quota for real work. Past it, a fresh probe decides. The `openai-sub` and `claude-sub`
+   probes read a spent quota as `status=exhausted` with its reset, too.
 2. The head is stopped (reviewer: initiator `provider-failure`; worker: the confirmed replacement stop).
-3. The same role is relaunched on the next launchable head of the card's chain: `resolve_head_chain`
-   from the card's head override (`head_override` / `review_head_override`), else the role default. The
-   report generation, TASK.md and the green candidate stay as they are.
+3. The same role is relaunched at once on the next launchable head of its chain: `resolve_head_chain`
+   from the card's head override (`head_override` / `review_head_override`), else the role default, with
+   the same inputs. A reviewer reviews the same candidate; a worker continues the same card in the same
+   workspace with the same TASK.md and report generation; an observer gets the same pending batch
+   (`fallback_head` on its record names the profile running in place of the declared one); a standing
+   automation resumes from its watermark; a PO session moves to the other CLI's first model in
+   `po.models` (same effort when offered) and the same turn is given again with the session's recent feed.
 4. One card comment and the tick outcome (`worker-provider-fallback` / `review-provider-fallback`) name
-   the head, the resource, the error summary (secrets and request identifiers removed) and the head
-   switched to (`switched_to`).
+   the head, the resource, the error summary (secrets and request identifiers removed), when the resource
+   comes back and the head switched to (`switched_to`). A fallback that puts the reviewer in the worker's
+   own family says so on the card: allowed, recorded, not a defect.
 
-None of this charges a round, a respawn, the red-review counter or the sprint budget, and none of it
-moves a card to Blocked.
+None of this charges a round, a respawn, the red-review counter or the sprint budget. New launches walk
+from the preferred head, so they return to the primary once its resource is green again
+(`review.start_review` re-walks a substituted or red reviewer at every launch); a running head is not
+switched back.
 
-**Empty chain.** Worker phase: the card moves to Ready with the reason `provider unavailable: <resource>`
-(action token `provider-unavailable-ready`, which the sprint budget does not count as a preempt); the
-claim-time walk claims it again once a head of its chain is launchable. Reviewer phase: the card stays in
-Validate with no reviewer (`review-provider-unavailable`, the record's `review_provider_hold` carries the
-reason); `start_review` walks the chain again on every tick, spends no infrastructure retry, and launches
-the reviewer on the first head that can run, with one comment. The worker's candidate, gate receipt and
-report are not discarded.
+**Empty chain** means every provider of the chain is down. The card is Blocked once, for the operator
+(`worker-provider-blocked` / `review-provider-blocked`, blocked reason `operator`), with every resource,
+its status and its reset time in the reason; the candidate, gate receipt and workspace are kept. A PO
+turn with no launchable other CLI settles `failed` with both resources red.
+
+**Configuration.** `ummanu config check` and `ummanu doctor` fail, naming the profile, when a `claude` or
+`codex` profile's chain reaches no profile of the other family on another resource at the same effort
+(`runtime.heads.cross_family_gaps`), or when `po.models` offers a model on one CLI only.
 
 ### Resource probe statuses
 
@@ -1188,9 +1211,9 @@ walk launch only on `ready` or `unknown`; every other status walks the fallback 
 | `ready` | the probe succeeded | yes |
 | `unknown` | the probe answered with something nobody could classify, or has no probe command | yes |
 | `timed_out` | the provider gave the probe no answer in time (outer command killed, or the inner probe's own `status=timeout`) | no |
-| `unavailable` | the provider failed: 5xx, reconnect exhaustion, a 429 rate limit, or a head's first-turn provider error recorded by the dispatcher | no |
+| `unavailable` | the provider failed: 5xx, reconnect exhaustion, a 429 rate limit, or a head's provider error recorded by the dispatcher (held to its `until`) | no |
 | `unauthenticated` | the account was refused: a missing login, an expired key, a 401/403 for the account | no |
-| `exhausted` | the quota is spent | no |
+| `exhausted` | the quota is spent; held to the reset the provider named (`until`) | no |
 | `probe_broken` | the probe command could not be launched | no |
 | `missing` | a chain entry the registry does not describe | no |
 
@@ -1738,7 +1761,7 @@ has a run in flight its pending cards wait. When it has none and the set is not 
   under `after_merge_runs`, with `covered` (`{ref, merge_sha}` each), the branch, and what paid for it;
   every covered card's mark says `covered` with that dispatch id. All of it is one write,
   `TaskWriter.record_after_merge_intent`, in the transaction that charges the run. It rereads the
-  actual pending marks and supersession under the ownership lock then sorted source locks, preserves
+  actual pending marks and supersession under sorted SQL source row locks, preserves
   existing run/charge records, and refuses stale snapshots without a charge. The production state
   names the run in flight after that write. If its projection save is lost, recovery discovers the
   carrier's committed intent without another charge or POST; an unconfirmed prior effect uses the
@@ -2753,7 +2776,7 @@ bounce closes the attempt with its own value (`gate_red`, `merge-gate_red`, `rev
 the reviewer returned green and the merge gate then bounced, both events stay.
 
 Head choice is made at claim time, with no substitution at launch, except when a head's first turn
-ends on a provider error ([provider failure](#provider-failure-on-a-heads-first-turn)): the role is then
+ends on a provider error ([provider failure](#provider-failure-of-a-heads-turn)): the role is then
 relaunched on its chain and the new head is journalled as that attempt's active head. It reads the card
 override or `role_defaults`, then resource health. A preferred head whose resource is red or spent is replaced
 by the first launchable head along the registry's fallback chain for it (breadth-first, cycles read
@@ -4985,8 +5008,8 @@ Ready/In progress again restores the operation as the live holder; corrected com
 then reaches the same consumer. Old charges, run evidence and both completion events
 remain historical. Nothing spends again until current ordinary admission succeeds.
 
-Reconciliation takes the existing ownership lock before sorted operation/carrier/
-source/hotfix/follow-up row locks, then rereads run identity, committed create,
+Reconciliation takes sorted operation/carrier/source/hotfix/follow-up row locks
+in its SQL transaction, then rereads run identity, committed create,
 completion, supersession and current covered marks, preserving newer merge/run/holder state. Receipt and marks commit in
 one transaction before queue projection saves and publication. `disposition_result`
 on the existing e2e run holds the receipt; `after_merge.holder` distinguishes a live

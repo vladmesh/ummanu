@@ -211,6 +211,58 @@ def validate_role_defaults(role_defaults: dict, profiles: dict) -> None:
             )
 
 
+#: The two subscription families a role runs on; each must be able to fall over to the other.
+SUBSCRIPTION_FAMILIES = ("claude", "codex")
+
+
+def cross_family_gaps(profiles: Mapping[str, Any]) -> list[str]:
+    """One line per profile that cannot fall over to the other subscription family (ummanu-108).
+
+    Any `claude` or `codex` profile can be reached (a role default, a card's or sprint's explicit
+    head, a chain), so each needs a chain that reaches a profile of the other family on another
+    resource, and the first such profile has to be at the same effort: a fallback is the closest
+    tier, not whatever is left. Profiles of other adapters (the hermes last resort) are not a
+    subscription family and are not required to have one. Assumes `validate_registry` passed.
+    """
+    gaps: list[str] = []
+    for pid, prof in profiles.items():
+        family = str(prof.get("adapter") or "")
+        if family not in SUBSCRIPTION_FAMILIES:
+            continue
+        resource = str(prof.get("resource") or "")
+        seen = {pid}
+        queue = list(prof.get("fallback") or [])
+        found = ""
+        while queue and not found:
+            candidate = str(queue.pop(0))
+            if candidate in seen or candidate not in profiles:
+                continue
+            seen.add(candidate)
+            other = profiles[candidate]
+            other_family = str(other.get("adapter") or "")
+            if (
+                other_family in SUBSCRIPTION_FAMILIES
+                and other_family != family
+                and str(other.get("resource") or "") != resource
+            ):
+                found = candidate
+                break
+            queue.extend(other.get("fallback") or [])
+        if not found:
+            gaps.append(
+                f"profile {pid!r} ({family} on {resource}) has no cross-family fallback: its chain reaches "
+                f"no {' or '.join(f for f in SUBSCRIPTION_FAMILIES if f != family)} profile on another resource"
+            )
+            continue
+        effort, other_effort = prof.get("effort"), profiles[found].get("effort")
+        if effort and other_effort and str(effort) != str(other_effort):
+            gaps.append(
+                f"profile {pid!r} falls over to {found!r} at effort {other_effort}, not {effort}: the "
+                "cross-family fallback must be the closest tier"
+            )
+    return gaps
+
+
 def _parse_registry(path: Path) -> dict:
     """The registry document, whichever of its two shapes is on disk."""
     try:

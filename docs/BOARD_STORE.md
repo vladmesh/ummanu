@@ -961,8 +961,13 @@ procedure: [RECOVERY.md](RECOVERY.md#backend-aware-cold-archives).
 
 ### 5.8 Python dependencies
 
-Core dependencies in `pyproject.toml`: `psycopg[binary]>=3.2` (driver; wheels bundle libpq),
-`SQLAlchemy>=2.0`, `alembic>=1.13`. `sqlalchemy`, `alembic` and `psycopg` are imported inside the
+Core dependencies in `pyproject.toml`: `psycopg[binary]>=3.3.6` (driver; wheels bundle libpq),
+`SQLAlchemy>=2.0`, `alembic>=1.13`. 3.3.6 is the driver floor because `SqlCardClient` passes a
+`timeout` to the driver's own `Connection.wait` on every exchange, which bounds a caller's SQL
+waits by its deadline; 3.3.5 and earlier take no `timeout` and fail the first exchange. A venv
+holding an older driver is brought up by `step_dependencies`: the manifest moved, so it reinstalls
+the product with `pip install -e`, which replaces a driver below the floor, before any board access.
+`sqlalchemy`, `alembic` and `psycopg` are imported inside the
 functions that need them, so an upgrade can start on a venv that lacks them. Upgrade order:
 `step_dependencies` → `step_board_store_provision` → `step_board_store` (migrations) →
 `step_board_store_roles` → later steps and service restarts.
@@ -1242,7 +1247,7 @@ means no active holder. Both use the same e2e extension text and normalized meta
 The actual hotfix's optional `e2e.hotfix_route` is the typed `{carrier, run, result}`
 copy of that receipt, with native `blocked_by` holding its live operation/follow-up.
 Its public schema and normalized metadata preserve this same text. Reconciliation
-takes the ownership lock then sorted operation/carrier/source/hotfix/follow-up rows
+locks sorted operation/carrier/source/hotfix/follow-up rows in its SQL transaction
 and commits receipt, marks, hotfix dependency and audit/comment together, then
 reconstructs queue projections. Retention is not terminal disposition evidence;
 complete supported board reads retain unresolved sources and carrier records. No new table, authority grant,

@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ummanu import state_repo
 from ummanu.backup import create_backups, verify_backup
@@ -20,7 +21,14 @@ from ummanu.checkpoint import (
     rpo_problem,
     snapshot_foreign_commits,
 )
-from ummanu.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
+from ummanu.config import (
+    DataDirError,
+    fallback_errors,
+    instance_data_dir,
+    load_config,
+    validate,
+    validate_instance,
+)
 from ummanu.data import (
     PIPELINE_STATE_DIR,
     export_all,
@@ -38,6 +46,7 @@ from ummanu.dispatch.commands import (
 )
 from ummanu.dispatch.pause import ProductionPause
 from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
+from ummanu.dispatch.tick_telemetry import tick_p95_finding, tick_statistics
 from ummanu.gate import run_gate
 from ummanu.head_health import (
     PROBE_BROKEN,
@@ -62,6 +71,7 @@ from ummanu.host import (
 )
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from ummanu.host_commands import add_reconcile_subcommands
+from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 from ummanu.infra.doctor_findings import accepted, active_findings, apply_acceptance
 from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
@@ -383,6 +393,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_restore_subcommands(subparsers)
 
+    checkpoint = subparsers.add_parser("checkpoint-run", help="prepare and push the instance checkpoint")
+    _add_instance(checkpoint, help="path to an instance dir or instance.yaml")
+    checkpoint.set_defaults(handler=run_checkpoint_command)
+
     maintenance = subparsers.add_parser(
         "instance-maintenance",
         help="pack the instance repository outside any tick (run by its timer)",
@@ -632,6 +646,10 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"root filesystem: {finding['message']}")
         elif finding["code"] == "automation_busy_without_advance":
             print(f"{finding['agent']}: {finding['message']}")
+        elif finding["code"] == "head_fallback":
+            print(f"error: head fallback: {finding['message']}")
+        elif finding["code"] == "dispatcher_tick_p95_slow":
+            print(f"red: {finding['code']}: {finding['message']}")
         elif str(finding["code"]).startswith("live_root."):
             print(f"{finding['code']}: {finding['message']}")
         if accepted(finding):
@@ -784,6 +802,7 @@ def run_status(args: argparse.Namespace) -> int:
             f"last tick: #{last_tick['seq']} {last_tick['status']} at {last_tick['at']} "
             f"in {_duration_text(last_tick['duration_ms'])}"
         )
+    _print_tick_measurements(snapshot["dispatcher"])
     checkpoint = snapshot["checkpoint"]
     print(
         f"checkpoint: {checkpoint.get('checkpoint_status') or 'pending'} "
@@ -791,6 +810,34 @@ def run_status(args: argparse.Namespace) -> int:
     )
     print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
     return 0
+
+
+def _print_tick_measurements(dispatcher: dict[str, Any]) -> None:
+    statistics = dispatcher.get("tick_statistics") or tick_statistics({})
+    count = statistics["sample_count"]
+    if count:
+        print(
+            f"tick durations: {count} samples, p50 {_duration_text(statistics['p50_duration_ms'])}, "
+            f"p95 {_duration_text(statistics['p95_duration_ms'])}"
+        )
+    else:
+        print("tick durations: unavailable (0 samples)")
+    last = dispatcher["last_tick"]
+    phases = last.get("phases") if last else None
+    if phases:
+        print("last tick phases: " + ", ".join(f"{name} {_duration_text(ms)}" for name, ms in phases.items()))
+        if last.get("reconcile_ms") is not None:
+            print(f"last tick reconcile: {_duration_text(last['reconcile_ms'])}")
+    else:
+        print("last tick phases: unavailable")
+    counters = last.get("counters") if last else None
+    if counters:
+        print("last tick writes: " + ", ".join(f"{name} {value}" for name, value in counters.items()))
+    for card in (last.get("cards") or []) if last else []:
+        records = "unknown" if card.get("records") is None else card["records"]
+        print(f"last tick card {card['ref']}: {_duration_text(card.get('ms'))}, records {records}, "
+              f"flushes {card.get('save_records', 0)}, cleanup intents {card.get('cleanup_intent_writes', 0)} "
+              f"({card.get('cleanup_bytes_written', 0)} bytes), state saves {card.get('production_state_saves', 0)}")
 
 
 def _duration_text(value: float | None) -> str:
@@ -873,19 +920,24 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
             {"code": "unit_runtime", "message": finding}
             for finding in _unit_runtime_findings(expected, collected)
         )
+        findings.extend(checkpoint_unit_findings(expected, collected))
     provenance = production_runtime_provenance_finding(report, inspect_runtime=not args.offline)
     dispatcher = dispatcher_findings(
         report, collected, inspect_live=not args.offline, provenance=provenance
     )
-    checkpoint_rpo = checkpoint_rpo_findings(report) + snapshot_foreign_commit_findings(report)
+    checkpoint_rpo = (
+        checkpoint_rpo_findings(report) + checkpoint_cut_lag_findings(report)
+        + snapshot_foreign_commit_findings(report)
+    )
     checkpoint_plain = checkpoint_findings(report)
     checkpoint = [f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo] + checkpoint_plain
     secret_store = secret_store_findings(report)
     production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    checkpoint_state = load_checkpoint_state(report.data_dir)
     checkpoint_snapshot_value = checkpoint_snapshot(
         report.instance_path.parent,
-        write_state=production.get("checkpoint"),
-        push_state=production.get("checkpoint_push"),
+        write_state=checkpoint_state.get("checkpoint"),
+        push_state=checkpoint_state.get("checkpoint_push"),
         data_dir=report.data_dir,
     )
     recovery = collect_recovery_inventory(
@@ -904,11 +956,19 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         for row in recovery["resources"]
     ]
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
+    tick_finding = tick_p95_finding(production)
+    if tick_finding is not None:
+        findings.append(tick_finding)
     if provenance is not None:
         findings.append(provenance)
     findings.extend(checkpoint_rpo)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint_plain)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
+    # A head profile or PO session that cannot fall over to the other subscription family (ummanu-108).
+    findings.extend(
+        {"code": "head_fallback", "message": f"{error.path}: {error.message}"}
+        for error in fallback_errors(report.instance_path.parent, getattr(report, "instance", None))
+    )
     codex_home_status = _codex_home_status(report)
     if codex_home_status["login_missing"] and codex_home_status["codex_required"]:
         # No Codex head of this installation can start: red, with the resolver's own fix text.
@@ -1373,6 +1433,8 @@ def print_recovery_inventory(recovery: dict[str, object]) -> None:
             age = f", age={row['age_seconds']}s" if row.get("age_seconds") is not None else ""
             prior = f", observed_state={row['observed_state']}" if row.get("observed_state") else ""
             recorded = " (recorded)" if row.get("source") == "dispatcher-cache" else ""
+            if row.get("until"):
+                recorded += f" until {row['until']}"
             print(
                 f"  {row['resource']}: {row['state']}{recorded} - {row['reason']} "
                 f"[source={row['source']}, freshness={row['freshness']}, "
@@ -1437,10 +1499,11 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     if report.data_dir is None:
         return []
     data_dir = report.data_dir
-    production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
+    production = load_checkpoint_state(data_dir)
     if findings is None:
         findings = [
-            f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo_findings(report)
+            f"{finding['severity']}: {finding['message']}"
+            for finding in checkpoint_rpo_findings(report) + checkpoint_cut_lag_findings(report)
         ] + checkpoint_findings(report)
     if "checkpoint" not in production and "checkpoint_push" not in production:
         if findings:
@@ -1468,6 +1531,41 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     return findings
 
 
+def checkpoint_unit_findings(expected, collected: CollectResult) -> list[dict[str, object]]:
+    """One-shot services may be inactive, but a missing or failed checkpoint owner is red."""
+    if "units" in collected.errors:
+        return []
+    findings = []
+    for name in sorted(expected.units):
+        if not name.endswith(("checkpoint.service", "checkpoint.timer")):
+            continue
+        state = collected.inventory.unit_states.get(name)
+        reason = "missing" if name not in collected.inventory.units else (
+            "failed" if state and state[1] == "failed" else ""
+        )
+        if reason:
+            findings.append({"code": "checkpoint.unit_unhealthy", "severity": "red",
+                             "message": f"checkpoint unit {name} is {reason}"})
+    return findings
+
+
+def checkpoint_cut_lag_findings(report) -> list[dict[str, object]]:
+    if report.data_dir is None:
+        return []
+    state = load_checkpoint_state(report.data_dir)
+    snapshot = checkpoint_snapshot(
+        report.instance_path.parent, write_state=state.get("checkpoint"),
+        push_state=state.get("checkpoint_push"), data_dir=report.data_dir,
+    )
+    epoch = snapshot.get("last_checkpoint_prepared_epoch") or 0.0
+    age = snapshot.get("last_checkpoint_prepared_age_minutes")
+    stale = time.time() - epoch > 15 * 60 if epoch > 0 else age is not None and age > 15
+    if not stale:
+        return []
+    return [{"code": "checkpoint.cut_lag_exceeded", "severity": "red",
+             "message": f"last successful checkpoint cut is {age} min old (limit 15 min)"}]
+
+
 def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
     """A checkpoint that has not published for longer than the RPO, as a classified finding.
 
@@ -1477,7 +1575,7 @@ def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
     """
     if report.data_dir is None:
         return []
-    production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    production = load_checkpoint_state(report.data_dir)
     if "checkpoint" not in production and "checkpoint_push" not in production:
         return []
     snapshot = checkpoint_snapshot(
@@ -1525,7 +1623,7 @@ def snapshot_foreign_commit_findings(report) -> list[dict[str, object]]:
 def checkpoint_findings(report) -> list[str]:
     if report.data_dir is None:
         return []
-    production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
+    production = load_checkpoint_state(report.data_dir)
     findings: list[str] = []
     if "checkpoint" in production or "checkpoint_push" in production:
         snapshot = checkpoint_snapshot(
@@ -1734,7 +1832,7 @@ def run_memory_propose(args: argparse.Namespace) -> int:
             pinned=args.pinned,
             supersedes=_split_csv(args.supersedes),
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("propose", exc)
     _print_json(
         {
@@ -1762,7 +1860,7 @@ def run_memory_commit(args: argparse.Namespace) -> int:
             actor=args.actor,
             propose_id=args.propose_id,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("commit", exc)
     _print_memory_write_result(result)
     return 0
@@ -1785,7 +1883,7 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
             tags=_split_csv(args.tags),
             pinned=args.pinned,
         )
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("supersede", exc)
     _print_memory_write_result(result)
     return 0
@@ -1990,6 +2088,20 @@ def run_backup_create(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_checkpoint_command(args: argparse.Namespace) -> int:
+    from ummanu.dispatch.bootstrap import runtime_from_args
+    from ummanu.dispatch.types import DispatcherError, HostError
+
+    try:
+        runtime = runtime_from_args(args.instance, None, host_mode="real", owner="checkpoint")
+        result = run_checkpoint(runtime)
+    except (DispatcherError, HostError, OSError, RuntimeError) as exc:
+        print(json.dumps({"status": "failed", "step": "checkpoint-run", "reason": str(exc)}, sort_keys=True))
+        return 1
+    print(json.dumps(result, sort_keys=True))
+    return 1 if result["status"] == "failed" else 0
+
+
 def run_instance_maintenance(args: argparse.Namespace) -> int:
     if getattr(args, "residue_inventory", False) or getattr(args, "residue_replay", False):
         return run_residue_maintenance(args)
@@ -2013,7 +2125,7 @@ def run_instance_maintenance(args: argparse.Namespace) -> int:
 
 def run_residue_maintenance(args: argparse.Namespace) -> int:
     from ummanu.dispatch.bootstrap import runtime_from_args
-    from ummanu.dispatch.cleanup import UnknownProject, ownership_lock
+    from ummanu.dispatch.cleanup import UnknownProject
     from ummanu.dispatch.types import DispatcherError, HostError
     project = getattr(args, "project", None)
     targets = list(getattr(args, "target", None) or [])
@@ -2031,11 +2143,10 @@ def run_residue_maintenance(args: argparse.Namespace) -> int:
         return 2
     try:
         runtime = runtime_from_args(args.instance, None, host_mode="real", owner="instance-maintenance")
-        with ownership_lock(runtime.data_dir):
-            result: dict = {}
-            if args.residue_replay:
-                result["replay"] = runtime.cleanup.replay_targets(project, list(zip(targets, digests)))
-            result.update(runtime.cleanup.inventory(project=project))
+        result: dict = {}
+        if args.residue_replay:
+            result["replay"] = runtime.cleanup.replay_targets(project, list(zip(targets, digests)))
+        result.update(runtime.cleanup.inventory(project=project))
         failed = (any(row["status"] == "pending" for row in result["intents"] + result["residue"])
                   or any(item["status"] in {"pending", "refused"} for item in result.get("replay", [])))
         print(json.dumps({"status": "pending" if failed else "ok", **result}, sort_keys=True))

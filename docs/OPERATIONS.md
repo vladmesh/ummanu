@@ -866,6 +866,8 @@ against the thresholds a sprint is judged on.
 | one dispatcher tick | the dispatcher journal, and `ummanu status` | `dispatcher.last_tick` carries `duration_ms` beside the outcome already recorded for that tick (`seq`, `at`, `status`, `healthy`, `actions`). The human `ummanu status` prints it as `last tick: #12 ok at ... in 4322 ms`. |
 | one checkpoint run | `ummanu status` | `checkpoint.checkpoint_duration_ms`, printed by `ummanu status` and by `ummanu doctor` as `checkpoint: committed in 2100 ms`. Every outcome carries its own number, including an unchanged run and a blocked one — a no-change checkpoint still regenerated the whole projection. |
 
+`dispatcher.tick_statistics` reports `sample_count`, `p50_duration_ms` and `p95_duration_ms` from the durable last-100-tick ring using nearest-rank percentiles; `dispatcher.last_tick.phases` gives exclusive phase milliseconds, including `other`, and unavailable measurements appear as null in JSON or unavailable in text. Doctor emits the red `dispatcher_tick_p95_slow` finding when at least 20 valid samples have p95 above 300 000 ms.
+
 The web duration is the application's part of the answer — reading the body, handling the request,
 and writing the headers and body back — not the whole socket lifetime. The tick duration is the
 wall clock of `production_tick` up to the moment its outcome became durable.
@@ -1658,7 +1660,7 @@ adapter-owned `.venv`. Before creating it the dispatcher appends any missing lin
 entries; linked worktrees share the file, and the entries stay after cleanup.
 
 Everything else the pipeline generates in a card workspace is owned too, so a settled Done workspace is
-removable under the unchanged cleanup dirtiness rule. Worker and reviewer heads run with
+removable under the cleanup dirtiness rule. Worker and reviewer heads run with
 `PYTHONPYCACHEPREFIX`, `RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` pointing into `.ummanu-task-env/`; the
 broad receipt lands there; and files the editable install creates in the source tree (for example
 `src/*.egg-info/`) are recorded with their exact digests in the cleanup journal's `generated` map right
@@ -1752,7 +1754,9 @@ usage error, and nothing is written.
    The ref transaction verifies the reviewed tip and base tip, so a later advance leaves the target
    `pending` and deletes nothing. Every save writes back only the target's own intent, so other
    intents and the replay cursor stay byte for byte as they were. `replay` reports each target's `status`, `reason` and `progress`. If a target is
-   refused, read the manifest again before you retry.
+   refused, read the manifest again before you retry. A target replay obeys the same hourly retry
+   policy as the tick ([Owned cleanup](OWNED_CLEANUP.md)): an intent that is not due, or that ended
+   terminally, reports `replayed: false` with its `next_attempt_at` or terminal kind, and nothing runs.
 
 Code never chooses the targets. Protected candidates and audit branches stay until an operator
 names them.

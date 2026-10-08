@@ -1066,7 +1066,7 @@ class SnapshotPushTests(SnapshotPublishCase):
         self.assertEqual(legacy.instance_dir, self.live.resolve())
 
     def test_one_exporter_tick_commits_pushes_and_feeds_the_unchanged_rpo_rows(self):
-        from ummanu.dispatch.production import _coordinate_checkpoint
+        from ummanu.infra.checkpoint_run import _coordinate_checkpoint
 
         writer = tick_checkpoint_writer(self.data_dir, self.live)
         runtime = mock.Mock(

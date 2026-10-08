@@ -9,21 +9,22 @@ socket answers, the journal has `run.started`, and the head wrote its launch ide
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import socket
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from ..memory import MemoryScopeError
-from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
+from .scoped_lifecycle import ScopedHeadLifecycle
 
 SUPERVISOR_MODULE = "ummanu.runtime.head.local_pty.supervisor"
 SCOPE_LAUNCHER_MODULE = "ummanu.runtime.head.local_pty.scope_launcher"
@@ -110,6 +111,7 @@ def spawn_head(
     memory_limit_mib: int | None = None,
     owner_unit: str = "",
     scope_generation: str = "",
+    launch_admission: Callable[[], contextlib.AbstractContextManager[Any]] | None = None,
 ) -> HeadHandle:
     """Bring one head up under a supervisor that outlives this process; wait until it answers.
 
@@ -191,8 +193,13 @@ def spawn_head(
             argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
             pythonpath=launch_env["PYTHONPATH"],
         )
+    intermediate = None
     try:
-        with open(log_path, "ab", buffering=0) as log:
+        # Board ownership is checked at the launch syscall, after scope/setup work.
+        # Release its per-card fence before waiting for readiness or delivering a prompt.
+        with (
+            launch_admission() if launch_admission is not None else contextlib.nullcontext()
+        ), open(log_path, "ab", buffering=0) as log:
             intermediate = subprocess.Popen(
                 argv,
                 cwd=str(cwd) if cwd else None,
@@ -208,6 +215,19 @@ def spawn_head(
     except (OSError, subprocess.SubprocessError) as exc:
         error = LocalPtySpawnError("scope_failed", f"head scope launcher failed: {exc}")
         raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already) from exc
+    except Exception as exc:  # admission can fail before or after the launch syscall
+        if intermediate is not None:
+            intermediate.wait()
+            # A failed SQL commit after Popen cannot attest absence, even if the
+            # supervisor has not yet written its heartbeat. Retain exact intent.
+            raise LocalPtySpawnError("admission_failed", str(exc), cleanup_complete=False,
+                                     scope_generation=scope_generation) from exc
+        if lifecycle is not None:
+            error = _after_failed_launch(LocalPtySpawnError("admission_refused", str(exc)),
+                                        lifecycle, journal_path, socket_path, already)
+            if not error.cleanup_complete:
+                raise error from exc
+        raise
     if memory_limit_mib is not None and status != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
         error = LocalPtySpawnError("scope_failed", f"head scope did not start (exit {status}): {tail}")
@@ -322,8 +342,15 @@ class SupervisorClient:
     The `HeadRuntime` backend turns these answers into receipts.
     """
 
-    def __init__(self, conn: socket.socket) -> None:
+    def __init__(self, conn: socket.socket, *, remaining: Callable[[], float] | None = None) -> None:
         self._conn = conn
+        # A caller's absolute deadline, as the seconds left before it (`remaining()`): when given,
+        # every blocking call this connection makes (`sendall`, each `recv`) is bounded by what is
+        # left of it at that moment, never by a timeout set once and reused across calls, and none is
+        # made once nothing is left. The connection's own timeout still bounds each call too.
+        self._remaining = remaining
+        gettimeout = getattr(conn, "gettimeout", None)
+        self._timeout = gettimeout() if callable(gettimeout) else None
         self._inbox = bytearray()
         self._request_seq = 0
         #: Answers to questions this client stopped waiting for, discarded rather than returned.
@@ -331,7 +358,25 @@ class SupervisorClient:
         self.attached = False
 
     @classmethod
-    def connect(cls, socket_path: str | os.PathLike[str], *, timeout: float = 5.0) -> SupervisorClient:
+    def connect(
+        cls,
+        socket_path: str | os.PathLike[str],
+        *,
+        timeout: float = 5.0,
+        remaining: Callable[[], float] | None = None,
+    ) -> SupervisorClient:
+        """Connect within `timeout`; with `remaining`, within what is left of the caller's deadline too.
+
+        Nothing is attempted once that deadline has passed: the refusal is a `TimeoutError` cause,
+        as a connection that ran out of time would be.
+        """
+        if remaining is not None:
+            left = remaining()
+            if left <= 0:
+                raise LocalPtyError(f"no time is left to reach the supervisor at {socket_path}") from TimeoutError(
+                    "the caller's deadline has passed"
+                )
+            timeout = min(timeout, left)
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         conn.settimeout(timeout)
         try:
@@ -339,7 +384,20 @@ class SupervisorClient:
         except OSError as exc:
             conn.close()
             raise LocalPtyError(f"no supervisor answers at {socket_path}: {exc}") from exc
-        return cls(conn)
+        return cls(conn, remaining=remaining)
+
+    def bound_by(self, remaining: Callable[[], float]) -> None:
+        """Bound every later blocking call of this connection by what is left of a caller's deadline."""
+        self._remaining = remaining
+
+    def _bounded(self) -> None:
+        """Bound the next blocking call by what is left of the caller's deadline, if it set one."""
+        if self._remaining is None:
+            return
+        left = self._remaining()
+        if left <= 0:
+            raise TimeoutError("the caller's deadline has passed")
+        self._conn.settimeout(left if self._timeout is None else min(left, self._timeout))
 
     def close(self) -> None:
         try:
@@ -347,7 +405,7 @@ class SupervisorClient:
         except OSError:
             pass
 
-    def __enter__(self) -> SupervisorClient:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
@@ -362,6 +420,7 @@ class SupervisorClient:
                 line = bytes(self._inbox[:index])
                 del self._inbox[: index + 1]
                 return protocol.decode_frame(line)
+            self._bounded()
             chunk = self._conn.recv(65536)
             if not chunk:
                 raise LocalPtyError("the supervisor closed the connection")
@@ -396,6 +455,7 @@ class SupervisorClient:
         self._request_seq += 1
         request_id = self._request_seq
         try:
+            self._bounded()
             self._conn.sendall(protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id}))
         except OSError:
             # At the connection bound the supervisor writes a refusal and closes before any request,
@@ -423,8 +483,10 @@ class SupervisorClient:
         """Set the per-request answer timeout for this connection.
 
         The connect bound suits reaching a silent supervisor, not watching a slow operation; a
-        caller that knows the substrate's bound for what it watches sets it from that.
+        caller that knows the substrate's bound for what it watches sets it from that. A deadline
+        given at `connect` still bounds every call below this timeout.
         """
+        self._timeout = timeout
         self._conn.settimeout(timeout)
 
     def status(self) -> dict[str, Any]:
@@ -458,9 +520,9 @@ class SupervisorClient:
         deadline = time.monotonic() + timeout
         while True:
             delivery = self.status().get("delivery")
-            if isinstance(delivery, dict) and (delivery_id is None or delivery.get("id") == delivery_id):
-                if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
-                    return delivery
+            if (isinstance(delivery, dict) and (delivery_id is None or delivery.get("id") == delivery_id)
+                    and delivery.get("state") != protocol.DELIVERY_IN_FLIGHT):
+                return delivery
             if time.monotonic() >= deadline:
                 raise LocalPtyError(
                     f"delivery {delivery_id} was still in flight after {timeout:g}s: {delivery}"
