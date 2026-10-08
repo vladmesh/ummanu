@@ -1307,6 +1307,7 @@ flag, candidate SHA), and the sprint summary lists it under `degraded_cards`.
 
 Workers use focused checks while developing and run at most one local broad suite per report
 generation/unchanged SHA unless they state why it was rerun. The broad run goes through
+`ummanu check` for an adapter with `broad_check.local`, or the compatible full-profile
 `ummanu check broad`, which streams output, returns the check's exit status and writes a
 worker-local broad receipt under the ignored `state/checks/` path (in a dispatcher workspace, under the
 dispatcher-owned `.ummanu-task-env/checks/`): command and check-set digest, cwd
@@ -1318,8 +1319,14 @@ unchanged keeps it usable. While a usable receipt exists, rerunning the broad su
 output scrolled away is prohibited; an edited worktree or a concrete red result being fixed justifies
 a new run, named in the report.
 
+A local module or node-id selector is checked against declared CI membership before runner startup.
+It always executes, leaves the full-profile receipt untouched and claims no full round. The legacy
+`--module` must match the registered profile; a single `--module-arg` selector needs `broad_check.local`.
+Without that setting, only the declared legacy full argv remains usable. Details and installable
+adapter examples are in [Testing](TESTING.md#control-host-local-profile).
+
 A receipt only claims an import it observed from the process that ran the check. The `--module` shape
-runs the suite itself and records what that process imported. An arbitrary `--command` shell may
+runs the suite itself and records what that process imported. An unregistered manual checkout's `--command` shell may
 change directory or import environment before any interpreter starts, so it attests no import and is
 never reused in place of a run. Reuse also requires the import to have
 resolved inside the candidate workspace; an import resolving to another checkout is recorded and

@@ -102,28 +102,90 @@ use and Docker, VM, Ansible or provisioning commands fail loudly.
 Start with focused checks and `--fast`. When a task or repository contract requires the local broad
 suite, run the broad profile once through the receipt wrapper.
 
-## Control-host broad profile
+## Control-host local profile
 
-    python3 -m tests.broad
+Use the registered project's explicit local declaration:
 
-The Ummanu project's local broad suite: the manifest's `unit` and `component` modules only. Use it,
-not bare `python3 -m unittest` (repository-wide discovery of all nine suites). The other seven suites
-run only in exact-SHA GitHub CI. A green local broad receipt is a worker's evidence for its round, never
-a substitute for that gate.
+```bash
+ummanu check
+ummanu check tests/test_local_check.py
+ummanu check tests/test_local_check.py::LocalSelectorTests::test_known_ci_only_and_unknown_selectors_refuse_before_runner_or_import
+```
 
-The module list is read from `tests/ci-shards.txt` at run time through the parser in
-`scripts/ci_test_shards.py`; an invalid or unreadable manifest fails instead of running fewer modules.
-Because `tests/broad.py` is in the `tests` package, `tests/__init__.py` and its hermetic defaults load
-before any test module (`tests/test_health_suite_command.py` pins this).
+The first command runs the entire declared local profile, or reuses its intact content-bound
+worker-local broad receipt. The second runs one permitted module. The third runs one permitted test.
+A module or node-id always executes and returns the runner's status, streams test output, and leaves
+any full-round receipt untouched. Its JSON output identifies the selector and observed import; it
+contains no full-round receipt or claim of full-profile validation. `check show` reads the full receipt.
 
-A registered project names its broad suite in its adapter's `broad_check` block (`module`, optional
-`args`, `import_package`, optional `interpreter`), so the receipt wrapper needs no flag:
+Unittest accepts both the path/`::` form above and its native dotted node-id, for example
+`tests.test_local_check.LocalSelectorTests.test_known_ci_only_and_unknown_selectors_refuse_before_runner_or_import`.
+Pytest node-ids retain their parameter text as one argv argument, including spaces and punctuation:
 
-    python3 -m ummanu check broad --reuse
-    python3 -m ummanu check show
+```bash
+ummanu check 'checks/test_model.py::test_value[param with spaces]'
+```
 
-`--module` overrides the declared suite. With no declared or given module the command refuses with
-`no_broad_check_module`.
+Selectors are checked for module membership before the runner starts or imports a test. Ummanu's
+`tests/test_board.py` and its node-ids fail with `tests/test_board.py: shard integration-board;
+execution only in CI`. An unknown module fails without an invented shard or test discovery.
+
+Ummanu's installable example is [adapters/ummanu.yaml](../examples/check-adapters/ummanu.yaml):
+
+```yaml
+broad_check:
+  module: tests.broad
+  import_package: ummanu
+  local:
+    runner: unittest
+    ci_manifest: tests/ci-shards.txt
+    shards: [unit, component]
+```
+
+The module set is exactly `unit` + `component` from `scripts/ci_test_shards.py::load_manifest`.
+The existing validator checks all CI ownership for duplicate, stale, missing or unclaimed modules and
+empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
+CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
+
+For other pytest projects, [adapters/pytest-project.yaml](../examples/check-adapters/pytest-project.yaml)
+shows explicit project-relative paths with their CI shard owners:
+
+```yaml
+broad_check:
+  module: pytest
+  interpreter: .venv/bin/python
+  import_package: shared
+  local:
+    runner: pytest
+    shards: [unit, component]
+    modules:
+      checks/test_model.py: unit
+      checks/test_service.py: component
+      checks/test_database.py: integration-database
+```
+
+The directory and shard names belong to that project; Ummanu infers no membership from filenames.
+Every local shard must have modules, and every declared module must be readable inside the candidate.
+The map includes CI-only modules so a refusal can name their owner. A map may also use `runner: unittest`
+with `module: unittest`. The two membership sources (`ci_manifest` and `modules`) are mutually exclusive.
+With `local`, the runner module must match this shape and `broad_check.args` must be empty: the wrapper
+supplies the complete module list or one validated selector. Runner filters and arbitrary shell commands
+cannot stand in for the declared full profile.
+
+Legacy full-profile `ummanu check broad --reuse --module <adapter.module>` and `ummanu check show`
+remain supported. For a registered profile, `--module` must match its declaration; an old contract with
+no module field still needs the full suite's `--module`. With `local`, a single legacy `--module-arg`
+selector is validated and runs without a receipt; `show` refuses a subset. Without `local`, only the
+old full-profile argv is supported. The new bare command and selectors fail as `local_check_not_declared`,
+naming the missing `broad_check.local` setting. There is no automatic adoption of all pytest tests,
+files named unit, or codegen's `shared` shell launcher. Operators must install a project-specific
+declaration separately; these examples change no live adapter or other repository.
+
+Candidate interpreter and import provenance use the same adapter resolution and bootstrap as broad
+checks. `--default-interpreter` supplies the dispatcher-owned candidate interpreter when the adapter
+omits its own interpreter. A green local receipt is round evidence, never an exact-SHA CI gate receipt.
+The unit shard covers selector/refusal behavior on temporary repositories; `integration-dispatcher`
+adds real pytest full/module/parameterized-node execution, failure statuses and receipt preservation.
 
 ## Runtime deadline boundary
 

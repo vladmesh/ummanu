@@ -3388,7 +3388,10 @@ python3 -m ummanu check show --module tests.broad
 ```
 
 When the registered project's adapter declares a `broad_check` module, `ummanu check broad --reuse` and
-`ummanu check show` run it with no flag; `--module` overrides. A project that declares none and passes
+`ummanu check show` select it with no flag; `--module` must match the declared module.
+With `broad_check.local`, use `ummanu check`, `ummanu check <module path>` or
+`ummanu check <node-id>`; the selector forms execute without creating or reusing a full receipt.
+See [the local contract and adapter examples](TESTING.md#control-host-local-profile). A project that declares none and passes
 none is refused as `no_broad_check_module`. Task-packet commands use the registered production source and
 interpreter with `-P`; when a contract omits `broad_check.interpreter`, the inner suite uses
 `.ummanu-task-env/venv/bin/python3`.
@@ -3402,7 +3405,7 @@ code that disagrees with the runner's result is refused as `receipt_status_misma
 
 Two shapes:
 
-- `--module unittest` (with `--module-arg`) records working directory, interpreter and project package
+- The adapter's `--module` records working directory, interpreter and project package
   import. An adapter sets `broad_check.interpreter` (relative to the workspace unless absolute) and
   `broad_check.import_package`. Every registered project that gets cards must declare `broad_check`;
   otherwise `broad_check_not_declared`, here and at the dispatcher preflight. A checkout matching no
@@ -3410,7 +3413,8 @@ Two shapes:
   `no_project_binding` or `project_binding_disabled`). Adding `broad_check` changes the adapter digest, so
   run `project gate` again. An interpreter that cannot start gives `interpreter_start_failed`, exit 2, no
   receipt.
-- `--command '<shell>'` records `origin: unobservable`, claims no import and is never reused.
+- In an unregistered manual checkout, `--command '<shell>'` records `origin: unobservable`, claims no
+  import and is never reused. Registered profiles refuse shell replacement and undeclared subsets.
 
 The dispatcher's preflight refuses an unavailable or invalid adapter, a missing or incomplete `broad_check`,
 and an absolute interpreter that cannot start, before any workspace or head, with the infrastructure class

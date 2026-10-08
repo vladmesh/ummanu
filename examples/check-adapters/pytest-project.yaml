@@ -1,0 +1,21 @@
+# Replace these project-specific paths and shard names before installing the adapter.
+# List CI-only modules as well, so refusal can name their owner without discovery.
+setup:
+  commands: ["true"]
+smoke:
+  command: test -s pyproject.toml
+validation:
+  ci: github
+artifact_policy:
+  write_project_files: false
+broad_check:
+  module: pytest
+  interpreter: .venv/bin/python
+  import_package: shared
+  local:
+    runner: pytest
+    shards: [unit, component]
+    modules:
+      checks/test_model.py: unit
+      checks/test_service.py: component
+      checks/test_database.py: integration-database

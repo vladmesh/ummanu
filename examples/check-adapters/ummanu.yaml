@@ -1,0 +1,16 @@
+# Candidate settings for a later operator installation; this file does not update live state.
+setup:
+  commands: ["true"]
+smoke:
+  command: test -s README.md
+validation:
+  ci: github
+artifact_policy:
+  write_project_files: false
+broad_check:
+  module: tests.broad
+  import_package: ummanu
+  local:
+    runner: unittest
+    ci_manifest: tests/ci-shards.txt
+    shards: [unit, component]

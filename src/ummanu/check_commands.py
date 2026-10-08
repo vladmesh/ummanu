@@ -1,26 +1,7 @@
-"""The documented worker command for a broad check and its receipt.
+"""The declared local profile and selectors share broad-check runtime and import provenance.
 
-``ummanu check broad`` is the one form a worker is asked to use, so that a broad run always
-leaves evidence behind; ``ummanu check show`` answers, without running anything, whether that
-evidence still describes the code in the checkout.
-
-Two check shapes are accepted, and they differ in exactly one promise. ``--module`` is the
-documented standard shape: this command builds the argv itself, so the suite runs in a process that
-records its own import provenance and the receipt can be reused while the checkout is unchanged.
-``--command`` accepts any shell a project needs and attests nothing about imports, because the
-shell may change directory or import environment before an interpreter starts; its receipt is a
-summary to read, never a substitute for running the check again.
-
-Neither flag is required. Since issue:8b39e60e4df361c6138e a registered project's adapter names its
-own broad suite, so ``check broad --reuse`` and ``check show`` with no shape flag run exactly the
-suite that project declared. That is what makes the worker task packet able to print a real command
-rather than the placeholder it used to. An explicit ``--module`` still wins, and a project that
-declares no module and is given none is refused by name (``no_broad_check_module``) instead of
-falling back to repository-wide discovery.
-
-Reuse is authorized in exactly one place — ``usable_receipt``, read through
-``ReceiptLookup.authorized()``. Both commands here ask that one question, so ``check show`` cannot
-report "not usable" while ``--reuse`` quietly skips the run.
+Only a complete profile writes or reuses a workspace-local broad receipt. Legacy broad/show
+commands retain the adapter's full-profile argv; a selector runs without a broad receipt.
 """
 
 from __future__ import annotations
@@ -34,6 +15,7 @@ from pathlib import Path
 from ummanu.broad_check import (
     BroadCheckError,
     CheckSpec,
+    candidate_import_refusal,
     receipt_path,
     recorded_result,
     run_broad_check,
@@ -46,6 +28,7 @@ from ummanu.projects.contract import (
     ModuleContract,
     module_contract,
 )
+from ummanu.projects.local_check import LocalProfile
 from ummanu.runtime.paths import add_instance_argument
 
 _GIT_TIMEOUT = 60
@@ -68,39 +51,41 @@ CLI_DEFAULT_IMPORT_PACKAGE = "ummanu"
 class ResolvedCheck:
     """The executable check and the contract selection the caller should be able to see."""
 
-    def __init__(self, spec: CheckSpec, module_contract: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, spec: CheckSpec, module_contract: dict[str, str] | None = None, selector: str = ""
+    ) -> None:
         self.spec = spec
         self.module_contract = module_contract
+        self.selector = selector
 
 
 def add_check_subcommands(subparsers) -> None:
     check = subparsers.add_parser(
-        "check", help="run a broad check with a workspace-local receipt, or read that receipt"
+        "check", help="run the declared local profile, a module or a test; show its broad receipt"
     )
-    check_sub = check.add_subparsers(dest="check_command")
+    _common(check)
+    check.add_argument("check_command", nargs="?", default="", metavar="SELECTOR|broad|show")
+    check.add_argument("--timeout-seconds", type=float, default=0.0)
+    check.add_argument("--reuse", action="store_true", help="reuse a usable full-profile receipt")
+    check.set_defaults(handler=run_check)
 
-    broad = check_sub.add_parser(
-        "broad", help="run one broad check, streaming its combined output and writing a receipt"
-    )
-    _common(broad)
-    broad.add_argument(
-        "--timeout-seconds",
-        type=float,
-        default=0.0,
-        help="kill the check after this long; the receipt then records an incomplete run",
-    )
-    broad.add_argument(
-        "--reuse",
-        action="store_true",
-        help="skip the run when an intact receipt already describes this exact content",
-    )
-    broad.set_defaults(handler=run_check_broad)
 
-    show = check_sub.add_parser("show", help="report whether a receipt covers the current content")
-    _common(show)
-    show.set_defaults(handler=run_check_show)
-
-    check.set_defaults(handler=_missing("check subcommand required"))
+def run_check(args: argparse.Namespace) -> int:
+    if args.check_command == "show":
+        return run_check_show(args)
+    if args.check_command == "broad":
+        return run_check_broad(args)
+    # The new entrypoint always uses the adapter declaration. Legacy shape flags belong only
+    # to broad/show and cannot be used to replace this profile or smuggle runner arguments.
+    if args.module or args.command or args.module_arg:
+        return _fail(
+            BroadCheckError(
+                "local_check_override",
+                "use a selector with ummanu check; shape flags belong to the legacy broad/show commands",
+            )
+        )
+    args.reuse = True
+    return run_check_broad(args)
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
@@ -137,63 +122,82 @@ def _common(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _missing(message: str):
-    def handler(_args: argparse.Namespace) -> int:
-        print(json.dumps({"error": {"code": "usage", "message": message}}))
-        return 2
-
-    return handler
-
-
 def _fail(exc: BroadCheckError) -> int:
     print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=sys.stderr)
     return 2
 
 
 def _spec(args: argparse.Namespace) -> ResolvedCheck:
-    """The check this invocation names, from the flags and the registered project's contract.
+    """Resolve runtime once and validate the complete profile or one declared selector.
 
-    Three shapes reach here, and the order matters. `--command` is asked first because it resolves
-    no contract at all: it attests nothing about imports, so there is nothing for an adapter to say
-    about it. Otherwise the registered project's contract is resolved once, and an explicit
-    `--module` overrides the suite it names while still taking its interpreter and import package —
-    a worker debugging one module must not thereby run on a different runtime than the broad check
-    does. With no `--module`, the suite comes from the adapter (issue:8b39e60e4df361c6138e), which
-    is what lets the worker prompt print a real command instead of a placeholder.
-
-    There is no fourth, silent shape. A project whose adapter names no module and an invocation
-    that names none either is a usage error with a name on it, not a fallback to whatever
-    repository-wide discovery happens to find.
+    Registered profiles accept their declared full argv or a validated selector. Legacy manual
+    checks in unregistered clones keep the existing CLI default and shell provenance rules.
     """
-    if args.command:
-        if args.module_arg:
-            raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
-        return ResolvedCheck(CheckSpec.for_shell(args.command))
+    if args.module_arg and not args.module:
+        raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
     contract = _module_contract(
         Path(args.root),
         Path(args.instance),
         default_interpreter=args.default_interpreter,
     )
-    if args.module:
-        module, module_args = args.module, list(args.module_arg)
-    elif contract.module:
+    new_form = args.check_command not in {"broad", "show"}
+    selector = args.check_command if new_form else ""
+    profile = LocalProfile.load(Path(args.root), contract.local) if contract.local is not None else None
+    if new_form and profile is None:
+        raise BroadCheckError(
+            "local_check_not_declared",
+            "adapter is missing broad_check.local; declare local modules and their CI shards "
+            "before using ummanu check or a selector",
+        )
+    if not contract.reason:
+        if args.command:
+            raise BroadCheckError(
+                "local_check_override", "a registered profile cannot be replaced by --command"
+            )
+        if args.module and contract.module and args.module != contract.module:
+            raise BroadCheckError(
+                "local_check_override", "--module must equal the adapter's broad_check.module"
+            )
+        if args.module_arg:
+            if tuple(args.module_arg) == contract.args:
+                pass  # Dispatcher-produced argv for the declared full profile.
+            elif profile is not None and len(args.module_arg) == 1:
+                selector = args.module_arg[0]
+            else:
+                raise BroadCheckError(
+                    "local_check_not_declared" if profile is None else "local_check_override",
+                    "subset arguments require broad_check.local and exactly one permitted selector",
+                )
+    elif args.command:
         if args.module_arg:
             raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
-        module, module_args = contract.module, list(contract.args)
-    else:
+        return ResolvedCheck(CheckSpec.for_shell(args.command))
+
+    module = args.module or contract.module
+    if not module:
         raise BroadCheckError(
-            "no_broad_check_module",
-            "no --module or --command was given and this project's adapter declares no broad-check "
-            "module; name the suite with --module, or declare `broad_check.module` in the adapter",
+            "no_broad_check_module", "pass --module or declare broad_check.module in the adapter"
         )
+    if profile is not None:
+        if selector:
+            _path, target = profile.select(selector)
+            if args.check_command == "show":
+                raise BroadCheckError("subset_has_no_receipt", "a subset has no full-round receipt to show")
+            module_args = [target]
+        else:
+            module_args = profile.full_args()
+    elif args.module:
+        module_args = list(args.module_arg) if args.module_arg else list(contract.args)
+    else:
+        if args.module_arg:
+            raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
+        module_args = list(contract.args)
     return ResolvedCheck(
         CheckSpec.for_module(
-            module,
-            module_args,
-            interpreter=contract.interpreter,
-            import_package=contract.import_package,
+            module, module_args, interpreter=contract.interpreter, import_package=contract.import_package
         ),
         contract.as_dict(),
+        selector,
     )
 
 
@@ -315,6 +319,8 @@ def run_check_broad(args: argparse.Namespace) -> int:
     try:
         resolved = _spec(args)
         spec = resolved.spec
+        if resolved.selector:
+            return _run_subset(args, resolved)
         if args.reuse:
             # The one authorization question, asked the one way `check show` asks it.
             lookup = usable_receipt(root, spec)
@@ -364,6 +370,37 @@ def run_check_broad(args: argparse.Namespace) -> int:
     if resolved.module_contract is not None:
         payload["module_contract"] = resolved.module_contract
     print(json.dumps(payload, sort_keys=True, indent=2))
+    return result.shell_status
+
+
+def _run_subset(args: argparse.Namespace, resolved: ResolvedCheck) -> int:
+    _code, observation = run_broad_check(
+        resolved.spec,
+        root=Path(args.root),
+        stream=sys.stderr,
+        timeout_seconds=args.timeout_seconds or None,
+        record_receipt=False,
+    )
+    refusal = candidate_import_refusal(
+        observation, Path(args.root), expected_package=resolved.spec.import_package
+    )
+    if refusal:
+        raise BroadCheckError("candidate_import_refused", refusal)
+    result = recorded_result(observation)
+    if result is None:
+        raise BroadCheckError("unrepresentable_result", "the subset returned an unrepresentable result")
+    print(
+        json.dumps(
+            {
+                "selector": resolved.selector,
+                "argv": resolved.spec.displayed_argv(),
+                **result.as_fields(),
+                "project_provenance": observation["project_provenance"],
+            },
+            sort_keys=True,
+            indent=2,
+        )
+    )
     return result.shell_status
 
 
