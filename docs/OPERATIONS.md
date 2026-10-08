@@ -1660,7 +1660,7 @@ adapter-owned `.venv`. Before creating it the dispatcher appends any missing lin
 entries; linked worktrees share the file, and the entries stay after cleanup.
 
 Everything else the pipeline generates in a card workspace is owned too, so a settled Done workspace is
-removable under the unchanged cleanup dirtiness rule. Worker and reviewer heads run with
+removable under the cleanup dirtiness rule. Worker and reviewer heads run with
 `PYTHONPYCACHEPREFIX`, `RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` pointing into `.ummanu-task-env/`; the
 broad receipt lands there; and files the editable install creates in the source tree (for example
 `src/*.egg-info/`) are recorded with their exact digests in the cleanup journal's `generated` map right
@@ -1754,7 +1754,9 @@ usage error, and nothing is written.
    The ref transaction verifies the reviewed tip and base tip, so a later advance leaves the target
    `pending` and deletes nothing. Every save writes back only the target's own intent, so other
    intents and the replay cursor stay byte for byte as they were. `replay` reports each target's `status`, `reason` and `progress`. If a target is
-   refused, read the manifest again before you retry.
+   refused, read the manifest again before you retry. A target replay obeys the same hourly retry
+   policy as the tick ([Owned cleanup](OWNED_CLEANUP.md)): an intent that is not due, or that ended
+   terminally, reports `replayed: false` with its `next_attempt_at` or terminal kind, and nothing runs.
 
 Code never chooses the targets. Protected candidates and audit branches stay until an operator
 names them.

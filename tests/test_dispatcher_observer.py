@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.dispatcher_fixtures import SupervisedBackend, supervised_run
+from tests.fakes.cleanup import HourlyClock
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -38,7 +39,7 @@ from tests.sql_backend_fixtures import card_store
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import BOARD_ID
 from ummanu.dispatch import observer_fence as dispatcher_observer_fence
-from ummanu.dispatch.cleanup import CleanupOwner
+from ummanu.dispatch.cleanup import RETRY_COOLDOWN, CleanupOwner
 from ummanu.dispatch.heartbeat import heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
 from ummanu.dispatch.launch import infrastructure_action
@@ -5568,6 +5569,8 @@ class RealHostStopObserverTests(unittest.TestCase):
             data_dir=self.host.data_dir, host=self.host,
             sprints=SimpleNamespace(show=lambda *a, **k: {
                 "id": "sprint-1", "ref": "sprint:1", "status": "open"}),
+            # ummanu-132: each retried stop below is one hourly retry cooldown after the last.
+            cleanup_clock=HourlyClock(),
         )
         self.host.cleanup_owner = CleanupOwner(runtime)
         self.record = ObserverRecord(
@@ -5860,6 +5863,8 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.assertFalse(intent["progress"].get("workspace_removed", False))
 
         self.removal_refused = False
+        # ummanu-132: a refused cleanup attempt is retried no sooner than one cooldown later.
+        self.runtime.cleanup.clock = lambda: time.time() + RETRY_COOLDOWN
         retried = self.runtime.production_tick()
 
         self.assertEqual(self.actions(retried), ["observer-stopped"])

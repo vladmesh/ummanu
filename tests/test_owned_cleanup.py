@@ -17,13 +17,22 @@ from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
+from tests.fakes.cleanup import HourlyClock, ManualClock
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu.broad_check import run_broad_check
 from ummanu.cli import build_parser, run_residue_maintenance
-from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner, UnknownProject, ownership_lock
+from ummanu.dispatch import cleanup as cleanup_module
+from ummanu.dispatch.cleanup import (
+    RETRY_COOLDOWN,
+    CleanupJournal,
+    CleanupOwner,
+    UnknownProject,
+    ownership_lock,
+)
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.observer import ObserverRecord
 from ummanu.dispatch.production import ProductionState, _reconcile_production
@@ -43,6 +52,22 @@ def journal_bytes(journal: CleanupJournal) -> dict[str, bytes]:
     stored = {str(file.relative_to(journal.path)): file.read_bytes() for file in files if file.is_file()}
     if journal.legacy.exists():
         stored["<v1>"] = journal.legacy.read_bytes()
+    return stored
+
+
+def obligations(journal: CleanupJournal) -> dict[str, Any]:
+    """Every stored file, each intent without its own retry schedule (ummanu-132).
+
+    A later attempt records when it ran; everything the obligation proves must stay byte-identical.
+    """
+    stored: dict[str, Any] = {}
+    for name, body in journal_bytes(journal).items():
+        if name.startswith("intents/"):
+            intent = json.loads(body)
+            intent.pop("retry", None)
+            stored[name] = intent
+        else:
+            stored[name] = body
     return stored
 
 
@@ -88,7 +113,8 @@ class OwnedCleanupTests(unittest.TestCase):
         self.runtime = SimpleNamespace(data_dir=self.data, catalog=self.catalog, host=self.host,
                                        reader=SimpleNamespace(show=lambda ref: copy.deepcopy(self.tasks[ref])),
                                        writer=SimpleNamespace(settle_cleanup_claim=self.settle_claim),
-                                       audit=SimpleNamespace(events=lambda ref: [{"kind": "claimed"}]))
+                                       audit=SimpleNamespace(events=lambda ref: [{"kind": "claimed"}]),
+                                       cleanup_clock=HourlyClock())
         self.owner = CleanupOwner(self.runtime)
 
     def stop(self, run, initiator):
@@ -262,9 +288,14 @@ class OwnedCleanupTests(unittest.TestCase):
         tip = git(self.repo, "rev-parse", "HEAD")
         git(self.repo, "update-ref", "refs/remotes/origin/main", tip)
         git(self.repo, "update-ref", "refs/heads/pipeline/sample-1", tip)
-        result = self.maintenance(expected_exit=1)
+        # ummanu-132: a workspace gone without removal evidence ends as terminal retention instead
+        # of a perpetual pending refusal; the replacement ref and the recorded owner stay as they were.
+        result = self.maintenance()
         self.assertIn("recorded ownership conflicts", result["residue"][0]["reason"])
-        self.assertEqual([r["status"] for r in result["replay"]], ["pending"])
+        self.assertEqual([r["status"] for r in result["replay"]], ["preserved"])
+        self.assertEqual(result["intents"][0]["terminal"], "workspace-disappeared")
+        self.assertFalse(result["intents"][0]["progress"]["preservation_verified"])
+        self.assertNotIn("workspace_removed", result["intents"][0]["progress"])
         self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), tip)
         self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
 
@@ -381,14 +412,23 @@ class OwnedCleanupTests(unittest.TestCase):
         self.task["claim"]["worker"] = self.record.worker
         key = self.request()
         shutil.rmtree(self.workspace)
+        # ummanu-132: this was a pending refusal on every replay; it is now a terminal retention of
+        # the exact registration. Still never adopted: no removal, no prune, no ref deletion.
         for _ in range(2):
             result = self.owner.replay_one(key)
-            self.assertEqual(result["status"], "pending", result["reason"])
+            self.assertEqual(result["status"], "preserved", result["reason"])
+            self.assertEqual(result["progress"]["terminal"]["kind"], "registration-without-directory")
             self.assertIn("no admitted removal proof", result["reason"])
             self.assertFalse(result["progress"].get("removal_started"))
+            self.assertFalse(result["progress"]["preservation_verified"])
+            self.assertNotIn("workspace_removed", result["progress"])
+            self.assertNotIn("ref_removed", result["progress"])
         self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
         self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
-        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        # The heads were stopped by the exact proof path first, so the Done card's claim is settled.
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertTrue(result["progress"]["claim_settled"])
+        self.assertIsNone(self.task["claim"]["worker"])
 
     def test_partial_removal_rejects_substituted_admin_identity(self):
         key = self.interrupt_git_directory_removal()
@@ -685,7 +725,7 @@ class OwnedCleanupTests(unittest.TestCase):
         with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
             exclude.write("__pycache__/\n")
         key = self.request()
-        pycache = self.workspace / "__pycache__" / "x.pyc"
+        ignored = self.workspace / "ignored"
         untracked = self.workspace / "notes.txt"
         egg = metadata / "SOURCES.txt"
         original = egg.read_text()
@@ -694,9 +734,10 @@ class OwnedCleanupTests(unittest.TestCase):
         ownership = self.host._decide_workspace_environment_ownership
 
         def outside_cache():
-            pycache.parent.mkdir()
-            pycache.write_bytes(b"bytecode")
-            return lambda: shutil.rmtree(pycache.parent)
+            # ummanu-132: an ignored `__pycache__` of a Done card is a disposable cache now; any
+            # other ignored file outside the owned namespace is still author work.
+            ignored.write_text("author data\n")
+            return ignored.unlink
 
         def untracked_file():
             untracked.write_text("author notes\n")
@@ -711,7 +752,7 @@ class OwnedCleanupTests(unittest.TestCase):
             self.host._decide_workspace_environment_ownership = lambda path: "absent"
             return lambda: setattr(self.host, "_decide_workspace_environment_ownership", ownership)
 
-        cases = (("!! __pycache__/x.pyc", outside_cache), ("?? notes.txt", untracked_file),
+        cases = (("!! ignored", outside_cache), ("?? notes.txt", untracked_file),
                  ("src/sample.egg-info/SOURCES.txt", modified_install_output),
                  ("!! .ummanu-task-env/", unowned_namespace))
         for named, introduce in cases:
@@ -1427,9 +1468,9 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.is_dir())
         self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
         self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
-        before = journal_bytes(self.owner.journal)
+        before = obligations(self.owner.journal)
         self.owner.replay_one(key)
-        self.assertEqual(journal_bytes(self.owner.journal), before)
+        self.assertEqual(obligations(self.owner.journal), before)
         _, _path, observer = self.observer()
         self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
 
@@ -1669,9 +1710,9 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_replaying_a_preserved_intent_twice_keeps_the_journal_identical(self):
         key = self.preserved_done_intent()
         self.owner.replay_one(key)
-        before = journal_bytes(self.owner.journal)
+        before = obligations(self.owner.journal)
         self.owner.replay_one(key)
-        self.assertEqual(journal_bytes(self.owner.journal), before)
+        self.assertEqual(obligations(self.owner.journal), before)
 
     def scoped_predecessor(self, *, role="observer", task="sprint:1", workspace=None, completed=True):
         """Launch 1 as a scoped run under a real local-PTY runtime root, replaced by launch 2."""
@@ -2312,6 +2353,830 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.replay_targets("sample", [(key, entry["digest"])])
         self.assertEqual(result[0]["status"], "completed", result[0]["reason"])
         self.assertEqual(self.owner.journal.read()["intents"][key]["disposition"], "archive")
+
+    # -- ummanu-132: terminal dead ends, the hourly retry policy and disposable Done caches ---------
+
+    def manual_clock(self):
+        """Pin the clock of this owner and of every owner built later from the same runtime."""
+        clock = ManualClock()
+        self.runtime.cleanup_clock = clock
+        self.owner.clock = clock
+        self.tolerant_stop()
+        return clock
+
+    def tolerant_stop(self):
+        """A stop that, like the runtime's, settles an already exited run again without minting one."""
+        def stop(run, initiator):
+            self.stops.append((run.run_id, run.scope_generation))
+            return SimpleNamespace(ok=not self.stop_failure, reason="simulated stop failure",
+                                   run=run if run.settled else run.finishing(initiator).exited())
+        self.backend.stop = stop
+
+    def intent_files(self):
+        return {name: body for name, body in journal_bytes(self.owner.journal).items()
+                if name.startswith("intents/")}
+
+    def card(self, ref, *, project="sample", repo=None, head=True):
+        """Another Done card of `project` with its own exact workspace, branch, head and request."""
+        task = {**copy.deepcopy(self.task), "id": "task-" + ref, "ref": ref, "project": project}
+        self.tasks[ref] = task
+        workspace = self.data / "workspaces" / project / (ref + "-worker")
+        workspace.parent.mkdir(parents=True, exist_ok=True)
+        git(repo or self.repo, "worktree", "add", "--quiet", "-b", "pipeline/" + ref, str(workspace), "main")
+        record = DispatcherRecord(worker=ref + "-worker", workspace=str(workspace), handle="", head="test",
+                                  review_head="test", attempt_id="attempt-" + ref, comment_baseline=0,
+                                  review_baseline=0, state="assessment", claimed_at=1)
+        if head:
+            record.worker_head_run = HeadRun(
+                run_id="run-" + ref, spec=HeadSpec(profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+                workspace=str(workspace), task_ref=TaskRef.card(ref), role="worker",
+                scope_generation="generation-1").to_json()
+        task["claim"] = {"worker": record.worker, "claimed_at": None}
+        self.owner.remember(task, record)
+        key = self.owner.journal.request(task, "done", record.to_json())
+        return key, workspace, record
+
+    def assert_terminal(self, result, kind):
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertEqual(result["progress"]["terminal"]["kind"], kind)
+        self.assertEqual(result["progress"]["terminal"]["reason"], result["reason"])
+        # A dead end is neither a verified retention nor a removal: no such flag is set for it.
+        self.assertFalse(result["progress"]["preservation_verified"])
+        for flag in ("workspace_removed", "ref_started", "ref_removed", "removal_started", "ref_delete_admitted"):
+            self.assertNotIn(flag, result["progress"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertTrue(result["progress"]["claim_settled"])
+
+    def test_disappeared_workspace_ends_terminal_and_no_later_replay_touches_it(self):
+        clock = self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        git(self.repo, "worktree", "remove", str(self.workspace))  # Gone outside the owner: no proof.
+        result = self.owner.replay_one(key)
+        self.assert_terminal(result, "workspace-disappeared")
+        self.assertIn("without removal evidence", result["reason"])
+        self.assertEqual(self.stops, [("run-worker", "generation-1")])
+        self.assertIsNone(self.task["claim"]["worker"])
+        # The ref, the recorded identity and the heads are retained exactly.
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+        stored = self.owner.journal.intent(key)
+        self.assertEqual(stored["identity"]["workspace"], str(self.workspace))
+        self.assertEqual([head["run_id"] for head in stored["heads"]], ["run-worker"])
+        # Readers see the honest outcome: summary, manifest, residue, launch admission.
+        row = self.owner.journal.summary()[0]
+        self.assertEqual((row["status"], row["terminal"], row["next_attempt_at"]),
+                         ("preserved", "workspace-disappeared", None))
+        before = self.intent_files()
+        inventory = self.owner.inventory(project="sample")
+        entry = self.entry(inventory, key)
+        self.assertEqual((entry["outcome"], entry["effects"]), ("preserved", []))
+        self.assertIn("without removal evidence", entry["reason"])
+        self.assertEqual(inventory["residue"][0]["recorded_owners"][0]["status"], "preserved")
+        self.assertEqual(self.owner.journal.admission_refusal("sample-1"), "")
+        # Neither automatic replay, a restart, a targeted replay nor a close acts on it again.
+        calls, _refs, reads = self.recorded_reads()
+        clock.advance(10 * RETRY_COOLDOWN)
+        with reads:
+            self.assertEqual(self.owner.replay(), [])
+            self.assertEqual(CleanupOwner(self.runtime).replay_one(key)["status"], "preserved")
+            self.assertEqual(self.owner.cleanup(self.task, self.record, "done")["status"], "preserved")
+        self.assertEqual(calls, [])
+        self.assertEqual(self.stops, [("run-worker", "generation-1")])
+        self.assertEqual(self.intent_files(), before)
+        replayed = self.maintenance()["replay"]
+        self.assertEqual([(r["replayed"], r["status"]) for r in replayed], [(False, "preserved")])
+        self.assertIn("terminal workspace-disappeared", replayed[0]["reason"])
+        self.assertEqual(self.intent_files(), before)
+        # The observer's closeout no longer waits forever on this dead end.
+        _, path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
+        self.assertFalse(path.exists())
+
+    def test_unregistered_project_ends_terminal_without_reading_any_repository(self):
+        self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        # The follower: a duplicate empty-attempt obligation of the same card.
+        follower = self.owner.journal.remember(self.task, {}, disposition="close")
+        del self.catalog.bindings["sample"]
+        calls, _refs, reads = self.recorded_reads()
+        with reads:
+            result = self.owner.replay_one(key)
+        self.assert_terminal(result, "project-unregistered")
+        self.assertEqual(calls, [], "no repository is searched for or read")
+        self.assertTrue(self.workspace.is_dir())
+        self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+        followed = self.owner.replay_one(follower)
+        self.assertEqual(followed["status"], "preserved", followed["reason"])
+        self.assertEqual(followed["progress"]["terminal"], {"kind": "follows", "owners": [key],
+                                                            "reason": followed["reason"]})
+        self.assertFalse(followed["progress"]["preservation_verified"])
+        self.owner.clock.advance(5 * RETRY_COOLDOWN)
+        before = journal_bytes(self.owner.journal)
+        self.assertEqual(self.owner.replay(), [])
+        self.assertEqual(journal_bytes(self.owner.journal), before)
+
+    def test_registered_but_disabled_or_unreadable_catalog_stays_retryable(self):
+        self.manual_clock()
+        self.head()
+        key = self.request()
+        binding = self.catalog.bindings.pop("sample")
+        self.catalog.registered_bindings = {"sample": binding}  # registered, not enabled
+        def disabled(project):
+            raise HostError(f"project {project!r} is registered but not enabled for workloads")
+        self.catalog.binding = disabled
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertNotIn("terminal", result["progress"])
+        self.assertTrue(self.workspace.is_dir())
+        # A catalog without a readable registration table is the binding's own refusal too.
+        self.owner.clock.advance(RETRY_COOLDOWN)
+        self.catalog.registered_bindings = None
+        self.catalog.bindings = None
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertNotIn("terminal", result["progress"])
+        self.assertEqual(self.owner.journal.summary()[0]["next_attempt_at"], self.owner.clock.now + RETRY_COOLDOWN)
+
+    def test_terminal_classification_never_overrides_a_fence(self):
+        """Each refusal keeps the disappeared workspace's obligation pending, its claim and ref intact."""
+        clock = self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "data").write_text("foreign bytes\n")
+
+        def live_head():
+            self.stop_failure = True
+            return lambda: setattr(self, "stop_failure", False)
+
+        def foreign_claim():
+            self.tasks["sample-1"]["claim"] = {"worker": "other-worker", "claimed_at": 7}
+            return lambda: self.tasks["sample-1"].update(claim={"worker": self.record.worker, "claimed_at": None})
+
+        def active_owner():
+            self.state({"sample-1": {"attempt_id": "attempt-2", "worker": "sample-1-worker",
+                                     "workspace": str(self.workspace)}})
+            return lambda: (self.data / "dispatcher" / "production-state.json").unlink()
+
+        def active_card():
+            self.tasks["sample-1"]["state"] = "in_progress"
+            return lambda: self.tasks["sample-1"].update(state="done")
+
+        def symlinked_workspace():
+            self.workspace.symlink_to(outside)
+            return self.workspace.unlink
+
+        def unreadable_registry():
+            patch = mock.patch("ummanu.dispatch.cleanup._registered",
+                               side_effect=HostError("cleanup worktree registrations are unreadable"))
+            patch.start()
+            return patch.stop
+
+        def retained_admin():
+            admin = Path(self.owner.journal.intent(key)["identity"]["admin"])
+            admin.mkdir(parents=True)
+            return lambda: shutil.rmtree(admin)
+
+        cases = (("live or unknown head", live_head), ("foreign claim", foreign_claim),
+                 ("another active owner", active_owner), ("card still admitted", active_card),
+                 ("substituted workspace", symlinked_workspace), ("unreadable registry", unreadable_registry),
+                 ("admin entry reappeared", retained_admin))
+        for named, introduce in cases:
+            with self.subTest(named=named):
+                restore = introduce()
+                try:
+                    result = self.owner.replay_one(key)
+                finally:
+                    restore()
+                self.assertEqual(result["status"], "pending", result["reason"])
+                self.assertNotIn("terminal", result["progress"])
+                self.assertFalse(result["progress"].get("claim_settled"))
+                self.assertEqual(self.tasks["sample-1"]["claim"]["worker"], self.record.worker)
+                self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+                self.assertEqual((outside / "data").read_text(), "foreign bytes\n")
+                # A retryable refusal is never lost: it is due again after one cooldown.
+                self.assertEqual(self.owner.journal.summary()[0]["next_attempt_at"], clock.now + RETRY_COOLDOWN)
+                clock.advance(RETRY_COOLDOWN)
+        result = self.owner.replay_one(key)
+        self.assert_terminal(result, "workspace-disappeared")
+
+    def test_missing_directory_with_a_substituted_admin_stays_a_refusal(self):
+        self.manual_clock()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        shutil.rmtree(self.workspace)
+        admin = Path(self.owner.journal.intent(key)["identity"]["admin"])
+        old = admin.with_name(admin.name + "-original")
+        admin.rename(old)
+        shutil.copytree(old, admin)
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("admin identity changed", result["reason"])
+        self.assertNotIn("terminal", result["progress"])
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        self.assertTrue(admin.exists() and old.exists())
+
+    def test_retry_waits_one_cooldown_across_restart_request_and_crash(self):
+        clock = self.manual_clock()
+        self.head()
+        self.stop_failure = True
+        key = self.request()
+        first = self.owner.replay_one(key)
+        self.assertEqual(first["status"], "pending")
+        self.assertEqual(first["retry"], {"last_attempt_at": clock.now, "next_attempt_at": clock.now + RETRY_COOLDOWN})
+        self.assertEqual(len(self.stops), 1)
+        stored = journal_bytes(self.owner.journal)
+        # 3599 s later: no effect, no write, no slot; nor through a restart, a repeated request or a
+        # teardown/close caller, all of which only reach replay_one.
+        clock.advance(RETRY_COOLDOWN - 1)
+        writes = dict(self.owner.journal.writes)
+        self.assertEqual(self.owner.replay(), [])
+        self.assertEqual(CleanupOwner(self.runtime).replay_one(key)["status"], "pending")
+        self.assertEqual(self.owner.journal.request(self.task, "done", self.record.to_json()), key)
+        self.assertEqual(self.owner.cleanup(self.task, self.record, "done")["retry"], first["retry"])
+        self.assertEqual(self.owner.journal.request(self.task, "close"), key)
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(self.owner.journal.writes, writes)
+        self.assertEqual({k: v for k, v in journal_bytes(self.owner.journal).items() if k != "meta.json"},
+                         {k: v for k, v in stored.items() if k != "meta.json"})
+        # 3600 s: due, through a fresh owner (a restart reads the stored due time).
+        clock.advance(1)
+        self.assertEqual(len(CleanupOwner(self.runtime).replay()), 1)
+        self.assertEqual(len(self.stops), 2)
+        # A crash after the reservation keeps the reservation: the next attempt is a cooldown later.
+        clock.advance(RETRY_COOLDOWN)
+        with mock.patch.object(self.owner, "_stop", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.owner.replay_one(key)
+        reserved = self.owner.journal.intent(key)["retry"]
+        self.assertEqual(reserved["last_attempt_at"], clock.now)
+        clock.advance(10)
+        restarted = CleanupOwner(self.runtime)
+        self.assertEqual(restarted.replay(), [])
+        self.assertEqual(len(self.stops), 2)
+        clock.advance(RETRY_COOLDOWN - 10)
+        self.stop_failure = False
+        self.assertEqual(restarted.replay()[0]["status"], "completed")
+        self.assertEqual(len(self.stops), 3)
+        # A completed intent is never due again.
+        clock.advance(RETRY_COOLDOWN)
+        self.assertEqual(restarted.replay(), [])
+
+    def test_a_new_attempt_is_its_own_key_with_its_own_first_attempt(self):
+        clock = self.manual_clock()
+        self.head()
+        self.stop_failure = True
+        old = self.request()
+        self.owner.replay_one(old)
+        record = replace(self.record, attempt_id="attempt-2")
+        self.owner.remember(self.task, record)
+        new = self.owner.journal.request(self.task, "done", record.to_json())
+        self.assertNotEqual(new, old)
+        clock.advance(60)
+        self.assertEqual([item["record"]["attempt_id"] for item in self.owner.replay()], ["attempt-2"])
+        self.assertEqual(len(self.stops), 2)
+        self.assertEqual(self.owner.journal.intent(old)["retry"]["last_attempt_at"], clock.now - 60)
+
+    def test_concurrent_owners_reserve_one_attempt(self):
+        self.manual_clock()
+        self.head()
+        key = self.request()
+        barrier = threading.Barrier(4)
+        reserved = []
+        def reserve():
+            journal = CleanupJournal(self.data)
+            barrier.wait()
+            reserved.append(journal.reserve_attempt(key, self.owner.clock.now))
+        threads = [threading.Thread(target=reserve) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        self.assertEqual(sum(item is not None for item in reserved), 1)
+        # An owner racing a running attempt finds it reserved and acts on nothing.
+        self.owner.clock.advance(RETRY_COOLDOWN)
+        entered, release = threading.Event(), threading.Event()
+        stop = self.backend.stop
+        def slow(run, initiator):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return stop(run, initiator)
+        self.backend.stop = slow
+        first = threading.Thread(target=self.owner.replay_one, args=(key,))
+        first.start()
+        self.assertTrue(entered.wait(5))
+        results = []
+        second = threading.Thread(target=lambda: results.append(CleanupOwner(self.runtime).replay_one(key)))
+        second.start()
+        release.set()
+        first.join(10)
+        second.join(10)
+        self.assertEqual(self.stops, [("run-worker", "generation-1")])
+        self.assertEqual(results[0]["status"], "completed")
+
+    def test_hostile_or_backwards_due_times_are_attempted_once_and_reanchored(self):
+        clock = self.manual_clock()
+        self.head()
+        self.stop_failure = True
+        key = self.request()
+        for hostile in ({"next_attempt_at": 1e300}, {"next_attempt_at": "soon"}, {"next_attempt_at": True},
+                        {"next_attempt_at": float("nan")}, "garbage", {"last_attempt_at": clock.now}):
+            with self.subTest(hostile=hostile):
+                intent = self.owner.journal.intent(key)
+                intent["retry"] = hostile
+                self.owner.journal.commit_intent(key, intent)
+                stops = len(self.stops)
+                self.owner.replay(limit=1)
+                self.assertEqual(len(self.stops), stops + 1)
+                self.assertEqual(self.owner.journal.intent(key)["retry"],
+                                 {"last_attempt_at": clock.now, "next_attempt_at": clock.now + RETRY_COOLDOWN})
+                # Re-anchored: no write storm at the same clock.
+                writes = dict(self.owner.journal.writes)
+                self.assertEqual(self.owner.replay(), [])
+                self.assertEqual(self.owner.journal.writes, writes)
+                clock.advance(1)
+        # The clock moves back two hours: a due time more than one cooldown ahead is distrusted.
+        clock.advance(-2 * RETRY_COOLDOWN)
+        stops = len(self.stops)
+        self.owner.replay()
+        self.assertEqual(len(self.stops), stops + 1)
+        clock.advance(10)
+        self.assertEqual(self.owner.replay(), [])
+        self.assertEqual(len(self.stops), stops + 1)
+
+    def test_cooling_intents_take_no_replay_slot(self):
+        clock = self.manual_clock()
+        keys = []
+        for n in range(101):
+            ref = f"legacy-{n:03d}"
+            task = {**copy.deepcopy(self.task), "id": "task-" + ref, "ref": ref, "closed": True}
+            self.tasks[ref] = task
+            keys.append(self.owner.journal.remember(task, {}, disposition="close"))
+        due = set(sorted(keys)[40:42])
+        for key in keys:
+            if key not in due:
+                intent = self.owner.journal.intent(key)
+                intent["retry"] = {"last_attempt_at": clock.now - 60, "next_attempt_at": clock.now + RETRY_COOLDOWN - 60}
+                self.owner.journal.commit_intent(key, intent)
+        before = self.intent_files()
+        replayed = []
+        replay = self.owner._replay
+        def spy(value, key):
+            replayed.append(key)
+            return replay(value, key)
+        writes = dict(self.owner.journal.writes)
+        with mock.patch.object(self.owner, "_replay", side_effect=spy):
+            results = self.owner.replay(limit=5)
+            self.assertEqual(self.owner.replay(limit=5), [])
+        self.assertEqual(set(replayed), due)
+        self.assertEqual([item["status"] for item in results], ["preserved", "preserved"])
+        changed = {name for name, body in self.intent_files().items() if before[name] != body}
+        self.assertEqual(changed, {f"intents/{key}.json" for key in due})
+        # Each due intent: its reservation, its heads-stopped checkpoint and its outcome; the cursor once.
+        self.assertEqual(self.owner.journal.writes["intent"] - writes["intent"], 6)
+        self.assertEqual(self.owner.journal.writes["meta"] - writes["meta"], 1)
+
+    def ignored_caches(self, workspace=None):
+        """Git-ignored Python caches in the exact workspace; returns their paths and an outside target."""
+        workspace = workspace or self.workspace
+        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write(".pytest_cache/\n.venv/\nsrc/**/__pycache__/\n")
+        outside = self.root / "outside-python"
+        outside.write_bytes(b"interpreter bytes\n")
+        files = [workspace / ".pytest_cache" / "v" / "cache" / "lastfailed",
+                 workspace / "src" / "pkg" / "__pycache__" / "mod.cpython-312.pyc",
+                 workspace / "src" / "pkg" / "deep" / "__pycache__" / "x.pyc",
+                 workspace / ".venv" / "lib" / "site.py"]
+        for file in files:
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(b"cache")
+        return files, outside
+
+    def test_done_workspace_with_ignored_python_caches_is_removed_without_force(self):
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        files, outside = self.ignored_caches()
+        status = git(self.workspace, "status", "--porcelain", "--ignored", "--untracked-files=all")
+        self.assertTrue(all(line.startswith("!! ") for line in status.splitlines()), status)
+        # Planning reads the same predicate and writes nothing, in the journal or the workspace.
+        before = journal_bytes(self.owner.journal)
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        self.assertEqual(entry["outcome"], "eligible", entry["reason"])
+        removal = next(effect for effect in entry["effects"] if effect["effect"] == "remove-worktree")
+        self.assertEqual((removal["dirty"], removal["ignored_caches"]), ("clean", 4))
+        self.assertEqual(journal_bytes(self.owner.journal), before)
+        self.assertTrue(all(file.exists() for file in files))
+        git_calls = []
+        native = git_worktree.remove
+        def remove(run, repo, path, **kwargs):
+            git_calls.append(path)
+            return native(run, repo, path, **kwargs)
+        with mock.patch("ummanu.dispatch.cleanup.git_worktree.remove", side_effect=remove), \
+                mock.patch("ummanu.dispatch.cleanup.shutil.rmtree") as rmtree:
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        rmtree.assert_not_called()
+        self.assertEqual(git_calls, [self.workspace])
+        self.assertFalse(self.workspace.exists())
+        self.assertNotIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(result["commit_proof"]["publication"], "remote-tracking")
+        self.assertEqual(outside.read_bytes(), b"interpreter bytes\n")
+
+    def test_only_done_ignored_caches_are_disposable(self):
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        files, outside = self.ignored_caches()
+        foreign = self.root / "foreign"
+        (foreign / "__pycache__").mkdir(parents=True)
+        (foreign / "__pycache__" / "x.pyc").write_bytes(b"foreign")
+        (foreign / "data").write_bytes(b"foreign data")
+        tracked = self.workspace / "src" / "tracked" / "__pycache__" / "kept.pyc"
+
+        def tracked_cache():
+            tracked.parent.mkdir(parents=True)
+            tracked.write_bytes(b"tracked")
+            git(self.workspace, "add", "-f", str(tracked))
+            git(self.workspace, "commit", "--quiet", "-m", "tracked cache")
+            git(self.repo, "update-ref", "refs/remotes/origin/main", git(self.workspace, "rev-parse", "HEAD"))
+            tip = git(self.workspace, "rev-parse", "HEAD")
+            intent = self.owner.journal.intent(key)
+            intent["identity"]["tip"] = tip
+            self.owner.journal.save({"intents": {key: intent}})
+            tracked.write_bytes(b"changed tracked cache")
+            return lambda: None
+
+        def unignored_cache():
+            (self.workspace / "other" / "__pycache__").mkdir(parents=True)
+            (self.workspace / "other" / "__pycache__" / "x.pyc").write_bytes(b"x")
+            return lambda: shutil.rmtree(self.workspace / "other")
+
+        def arbitrary_ignored():
+            (self.workspace / "ignored").write_text("secret\n")
+            return (self.workspace / "ignored").unlink
+
+        def author_work():
+            (self.workspace / "notes.txt").write_text("author\n")
+            return (self.workspace / "notes.txt").unlink
+
+        def symlinked_cache():
+            shutil.rmtree(self.workspace / ".pytest_cache")
+            (self.workspace / ".pytest_cache").symlink_to(foreign, target_is_directory=True)
+            def restore():
+                (self.workspace / ".pytest_cache").unlink()
+                files[0].parent.mkdir(parents=True)
+                files[0].write_bytes(b"cache")
+            return restore
+
+        def symlinked_parent():
+            (self.workspace / "src" / "link").symlink_to(foreign, target_is_directory=True)
+            return (self.workspace / "src" / "link").unlink
+
+        def symlink_leaf():
+            # ummanu-132 review: route 4 excludes symlink paths, a leaf included, even in a venv.
+            (self.workspace / ".venv" / "bin").mkdir()
+            (self.workspace / ".venv" / "bin" / "python").symlink_to(outside)
+            return lambda: shutil.rmtree(self.workspace / ".venv" / "bin")
+
+        def closed_not_done():
+            self.tasks["sample-1"].update(state="blocked", closed=True)
+            return lambda: self.tasks["sample-1"].update(state="done", closed=False)
+
+        cases = (("unignored cache name", unignored_cache, "?? other/__pycache__/x.pyc"),
+                 ("arbitrary ignored file", arbitrary_ignored, "!! ignored"),
+                 ("author work", author_work, "?? notes.txt"),
+                 ("symlinked cache", symlinked_cache, ".pytest_cache"),
+                 ("symlinked parent", symlinked_parent, "src/link"),
+                 ("symlink leaf", symlink_leaf, "!! .venv/bin/python"),
+                 ("closed but not Done", closed_not_done, "!! .venv/lib/site.py"),
+                 ("tracked cache name", tracked_cache, "src/tracked/__pycache__/kept.pyc"))
+        for named, introduce, row in cases:
+            with self.subTest(named=named):
+                restore = introduce()
+                try:
+                    result = self.owner.replay_one(key)
+                finally:
+                    restore()
+                self.assertEqual(result["status"], "preserved", result["reason"])
+                self.assertIn("dirty tracked, untracked or ignored work", result["reason"])
+                self.assertIn(row, result["reason"])
+                self.assertTrue(all(file.exists() for file in files), "no cache entry is deleted while dirty")
+                self.assertEqual((foreign / "__pycache__" / "x.pyc").read_bytes(), b"foreign")
+                self.assertEqual((foreign / "data").read_bytes(), b"foreign data")
+                self.assertEqual(outside.read_bytes(), b"interpreter bytes\n")
+        # An active card is refused before any proof: nothing at all is read as disposable.
+        self.tasks["sample-1"]["state"] = "in_progress"
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertTrue(all(file.exists() for file in files))
+
+    def test_observer_ignored_caches_remain_work(self):
+        repo, path, observer = self.observer()
+        with (repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("__pycache__/\n")
+        (path / "__pycache__").mkdir()
+        (path / "__pycache__" / "x.pyc").write_bytes(b"x")
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertIn("!! __pycache__/x.pyc", result["reason"])
+        self.assertTrue((path / "__pycache__" / "x.pyc").exists())
+
+    # -- ummanu-132 review round: the six reproduced gaps --------------------------------------------
+
+    def test_oversized_integer_due_times_are_malformed_not_fatal(self):
+        clock = self.manual_clock()
+        self.head()
+        self.stop_failure = True
+        key = self.request()
+        for huge in (10 ** 400, -(10 ** 400)):
+            with self.subTest(huge="+" if huge > 0 else "-"):
+                intent = self.owner.journal.intent(key)
+                intent["retry"] = {"last_attempt_at": huge, "next_attempt_at": huge}
+                self.owner.journal.commit_intent(key, intent)
+                self.assertIsNone(self.owner.journal.summary()[0]["next_attempt_at"])
+                result = self.owner.replay(limit=1)
+                self.assertEqual(result[0]["retry"], {"last_attempt_at": clock.now,
+                                                      "next_attempt_at": clock.now + RETRY_COOLDOWN})
+                self.assertEqual(self.owner.journal.summary()[0]["next_attempt_at"], clock.now + RETRY_COOLDOWN)
+                writes = dict(self.owner.journal.writes)
+                self.assertEqual(self.owner.replay(), [])
+                self.assertIsNone(self.owner.journal.reserve_attempt(key, clock.now))
+                self.assertEqual(self.owner.journal.writes, writes)
+                clock.advance(1)
+
+    def test_unregistered_project_is_terminal_without_a_captured_identity(self):
+        self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        key = self.request()
+        self.assertIsNone(self.owner.journal.intent(key)["identity"])
+        follower = self.owner.journal.remember(self.task, {}, disposition="close")
+        del self.catalog.bindings["sample"]
+        calls, _refs, reads = self.recorded_reads()
+        with reads:
+            result = self.owner.replay_one(key)
+        self.assertEqual(calls, [], "no repository is searched for or read")
+        self.assert_terminal(result, "project-unregistered")
+        self.assertNotIn("commit_proof", result)
+        self.assertEqual(self.stops, [("run-worker", "generation-1")])
+        self.assertEqual(self.owner.journal.summary()[0]["terminal"], "project-unregistered")
+        self.assertEqual(self.owner.replay_one(follower)["progress"]["terminal"]["kind"], "follows")
+        self.owner.clock.advance(5 * RETRY_COOLDOWN)
+        self.assertEqual(self.owner.replay(), [])
+        _, _path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
+
+    def test_unregistered_check_without_identity_keeps_owner_fences(self):
+        """A readable registered-but-disabled project or a foreign claim stays a refusal."""
+        self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        key = self.request()
+        self.tasks["sample-1"]["claim"] = {"worker": "other-worker", "claimed_at": 7}
+        del self.catalog.bindings["sample"]
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("claim is foreign", result["reason"])
+        self.assertNotIn("terminal", result["progress"])
+
+    def substitute_parent(self):
+        """Move the project directory aside and put a symlink to a foreign copy in its place."""
+        external = self.root / "external"
+        external.mkdir()
+        foreign = external / self.workspace.name
+        shutil.copytree(self.workspace, foreign, symlinks=True)
+        (foreign / ".venv" / "lib" / "site.py").write_bytes(b"foreign bytes must survive")
+        parent = self.workspace.parent
+        original = parent.with_name("sample-original")
+        parent.rename(original)
+        parent.symlink_to(external, target_is_directory=True)
+        return foreign, original / self.workspace.name
+
+    def snapshot(self, root):
+        return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*"))
+                if path.is_file() and not path.is_symlink()}
+
+    def test_parent_substituted_after_the_first_proof_gets_no_cache_effect(self):
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        self.ignored_caches()
+        swapped = {}
+        native = self.owner._verify_commits
+        def pivot(intent, repo, **kwargs):
+            native(intent, repo, **kwargs)
+            if not swapped:
+                swapped["foreign"], swapped["real"] = self.substitute_parent()
+                swapped["before"] = (self.snapshot(swapped["foreign"]), self.snapshot(swapped["real"]))
+        with mock.patch.object(self.owner, "_verify_commits", side_effect=pivot):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("substituted", result["reason"])
+        self.assertEqual((self.snapshot(swapped["foreign"]), self.snapshot(swapped["real"])), swapped["before"])
+        self.assertFalse(result["progress"].get("removal_started"))
+        self.assertFalse(result["progress"].get("claim_settled"))
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_parent_substituted_after_the_pin_only_reaches_the_pinned_workspace(self):
+        """A swap after the descriptor is pinned changes nothing the effect reads or unlinks."""
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        files, _ = self.ignored_caches()
+        swapped = {}
+        calls = []
+        native = cleanup_module._read_pinned_git
+        def pivot(root, *args):
+            calls.append(args)
+            if len(calls) == 2:
+                # The effect's own pinned read: the admission's identity revalidation has passed.
+                swapped["foreign"], swapped["real"] = self.substitute_parent()
+                swapped["before"] = self.snapshot(swapped["foreign"])
+            return native(root, *args)
+        with mock.patch.object(cleanup_module, "_read_pinned_git", side_effect=pivot):
+            result = self.owner.replay_one(key)
+        self.assertEqual(self.snapshot(swapped["foreign"]), swapped["before"], "no foreign byte is touched")
+        real = swapped["real"]
+        # The pinned workspace's own ignored cache files were the only ones unlinked.
+        self.assertFalse(any((real / file.relative_to(self.workspace)).exists() for file in files))
+        self.assertTrue((real / "file").exists())
+        # Native Git then refuses the noncanonical path: nothing is settled.
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertFalse(result["progress"].get("workspace_removed"))
+        self.assertFalse(result["progress"].get("claim_settled"))
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_lost_reservations_take_no_replay_slot_and_write_no_cursor(self):
+        clock = self.manual_clock()
+        keys = []
+        for n in range(2):
+            ref = f"legacy-{n}"
+            task = {**copy.deepcopy(self.task), "id": "task-" + ref, "ref": ref, "closed": True}
+            self.tasks[ref] = task
+            keys.append(self.owner.journal.remember(task, {}, disposition="close"))
+        keys.sort()
+        rival = CleanupJournal(self.data)
+        native = self.owner.journal.reserve_attempt
+        lost = {keys[0]}
+        def race(key, now):
+            if key in lost:
+                self.assertIsNotNone(rival.reserve_attempt(key, now))
+            return native(key, now)
+        writes = dict(self.owner.journal.writes)
+        with mock.patch.object(self.owner.journal, "reserve_attempt", side_effect=race):
+            result = self.owner.replay(limit=1)
+        self.assertEqual([item["task"]["ref"] for item in result], [self.owner.journal.intent(keys[1])["task"]["ref"]])
+        self.assertEqual(self.owner.journal.writes["meta"] - writes["meta"], 1)
+        self.assertEqual(self.owner.journal.read()["replay_cursor"], keys[1])
+        # Every reservation lost: no result, no cursor write.
+        clock.advance(RETRY_COOLDOWN)
+        lost = set(keys)
+        writes = dict(self.owner.journal.writes)
+        with mock.patch.object(self.owner.journal, "reserve_attempt", side_effect=race):
+            self.assertEqual(self.owner.replay(limit=1), [])
+        self.assertEqual(self.owner.journal.writes["meta"], writes["meta"])
+        self.assertEqual(self.owner.journal.read()["replay_cursor"], keys[1])
+
+    def unique_commit_then_disappear(self, *, delete_ref):
+        self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        (self.workspace / "file").write_text("unpublished unique work\n")
+        git(self.workspace, "commit", "--quiet", "-am", "unique unpublished work")
+        tip = git(self.workspace, "rev-parse", "HEAD")
+        key = self.request()
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        if delete_ref:
+            git(self.repo, "update-ref", "-d", "refs/heads/pipeline/sample-1")
+            self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "--contains=" + tip), "")
+        return key, tip
+
+    def test_disappeared_unretained_commit_stays_a_refusal_with_its_claim(self):
+        key, tip = self.unique_commit_then_disappear(delete_ref=True)
+        for _ in range(2):
+            result = self.owner.replay_one(key)
+            self.assertEqual(result["status"], "pending", result["reason"])
+            self.assertIn("no remote-tracking or candidate ref retaining recorded tip " + tip, result["reason"])
+            self.assertNotIn("terminal", result["progress"])
+            self.assertNotIn("commit_proof", result)
+            self.assertFalse(result["progress"].get("claim_settled"))
+            self.assertTrue(result["progress"]["heads_stopped"])
+            self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+            self.owner.clock.advance(RETRY_COOLDOWN)
+        self.assertEqual(self.owner.journal.summary()[0]["terminal"], "")
+        _, _path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["progress"]["awaits_cards"], [key])
+
+    def test_disappeared_commit_retained_by_its_candidate_ref_ends_terminal(self):
+        key, tip = self.unique_commit_then_disappear(delete_ref=False)
+        result = self.owner.replay_one(key)
+        self.assert_terminal(result, "workspace-disappeared")
+        self.assertEqual(result["commit_proof"], {"tip": tip, "publication": "candidate ref",
+                                                  "refs": ["refs/heads/pipeline/sample-1"]})
+        self.assertIn("retained by refs/heads/pipeline/sample-1", result["reason"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), tip)
+        self.assertIsNone(self.task["claim"]["worker"])
+
+    def test_missing_directory_terminal_names_its_retention_witness(self):
+        self.manual_clock()
+        key = self.request()
+        shutil.rmtree(self.workspace)
+        result = self.owner.replay_one(key)
+        self.assert_terminal(result, "registration-without-directory")
+        self.assertEqual(result["commit_proof"]["publication"], "remote-tracking")
+        self.assertIn("is retained by refs/remotes/origin/main", result["reason"])
+
+    def test_live_shaped_backlog_settles_dead_ends_and_retries_only_real_refusals(self):
+        """72 disappeared, 12 unregistered, 7 missing-proof and 8 retryable obligations (fixture only)."""
+        clock = self.manual_clock()
+        gone = self.root / "gone-repo"
+        git(self.root, "clone", "--quiet", str(self.repo), str(gone))
+        git(gone, "update-ref", "refs/remotes/origin/main", self.base)
+        self.catalog.bindings["gone"] = {"repo": str(gone), "default_branch": "main"}
+        live = set()
+        stop = self.backend.stop
+        def backend_stop(run, initiator):
+            self.stops.append((run.run_id, run.scope_generation))
+            if run.run_id in live:
+                return SimpleNamespace(ok=False, reason="head still running", run=run)
+            return SimpleNamespace(ok=True, reason="", run=run.finishing(initiator).exited())
+        self.backend.stop = backend_stop
+        self.addCleanup(setattr, self.backend, "stop", stop)
+        kinds = {}
+        for n in range(72):
+            key, workspace, _ = self.card(f"gone-{n:02d}")
+            git(self.repo, "worktree", "remove", str(workspace))
+            kinds[key] = "workspace-disappeared"
+        for n in range(12):
+            key, _, _ = self.card(f"unreg-{n:02d}", project="gone", repo=gone)
+            kinds[key] = "project-unregistered"
+        for n in range(7):
+            key, workspace, _ = self.card(f"missing-{n:02d}")
+            shutil.rmtree(workspace)
+            kinds[key] = "registration-without-directory"
+        for n in range(8):
+            key, _, record = self.card(f"live-{n:02d}")
+            live.add(HeadRun.from_json(record.worker_head_run).run_id)
+            kinds[key] = ""
+        del self.catalog.bindings["gone"]
+        writes = dict(self.owner.journal.writes)
+        ticks = 0
+        while True:
+            clock.advance(15)
+            if not self.owner.replay(limit=5):
+                break
+            ticks += 1
+        first_pass = {name: self.owner.journal.writes[name] - writes[name] for name in writes}
+        summary = {row["id"]: row for row in self.owner.journal.summary()}
+        self.assertEqual({key: summary[key]["terminal"] for key in kinds}, kinds)
+        statuses = {}
+        for row in summary.values():
+            statuses[(row["status"], row["terminal"])] = statuses.get((row["status"], row["terminal"]), 0) + 1
+        self.assertEqual(statuses, {("preserved", "workspace-disappeared"): 72,
+                                    ("preserved", "project-unregistered"): 12,
+                                    ("preserved", "registration-without-directory"): 7,
+                                    ("pending", ""): 8})
+        self.assertLessEqual(sum(row["status"] == "pending" for row in summary.values()), 10)
+        self.assertEqual(ticks, 20)
+        self.assertEqual(len(self.stops), 99)
+        # A dead end: reservation, stop receipt, heads-stopped checkpoint, outcome (91 x 4); a refused
+        # stop: reservation and outcome (8 x 2). The cursor once per tick, the generated map never.
+        self.assertEqual((first_pass["intent"], first_pass["meta"], first_pass["generated"]),
+                         (91 * 4 + 8 * 2, ticks, 0))
+        # Later ticks within the hour: no effect, no Git read, no write.
+        writes = dict(self.owner.journal.writes)
+        calls, _refs, reads = self.recorded_reads()
+        with reads:
+            for _ in range(20):
+                clock.advance(15)
+                self.assertEqual(self.owner.replay(limit=5), [])
+        self.assertEqual(calls, [])
+        self.assertEqual(self.owner.journal.writes, writes)
+        self.assertEqual(len(self.stops), 99)
+        # An hour on, only the real refusals are attempted again.
+        clock.advance(RETRY_COOLDOWN)
+        retried = [item["task"]["ref"] for _ in range(3) for item in self.owner.replay(limit=5)]
+        self.assertEqual(sorted(retried), sorted(f"live-{n:02d}" for n in range(8)))
+        self.assertEqual(len(self.stops), 107)
+        for path in self.owner.journal.path.rglob("*.json"):
+            self.assertLessEqual(path.stat().st_size, 1_000_000)
+        print(f"backlog fixture: {statuses}; first pass {ticks} ticks, writes {first_pass}")
+
 
 class SettledHeadStopTests(unittest.TestCase):
     """secretary-1918: stopping an already-settled head keeps its receipt and mints nothing."""
