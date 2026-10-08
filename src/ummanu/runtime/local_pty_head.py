@@ -61,12 +61,13 @@ Invariants:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -1625,8 +1626,21 @@ class LocalPtyHeadRuntime:
         `stop_if_quiescent` is the conditional form. The initiator is recorded on the run before the
         signal, so a stop that outlives this process names who began it. A scoped head also needs
         the durable owner's recursive empty proof; the identity going dead only confirms the exit.
+
+        A caller's `remaining` (seconds left of its deadline, as a callable) cuts every wait of the
+        stop: this runtime's lock, the supervisor exchange, the scope's termination and the exit
+        confirmation. What is unconfirmed when it runs out is an unsettled receipt, never a stop.
         """
-        with self._lock:
+        remaining: Callable[[], float] | None = ignored.get("remaining")
+        with self._locked_within(remaining) as locked:
+            if not locked:
+                finishing = run.finishing(initiator)
+                reason = "the caller's deadline passed while another operation of this runtime ran"
+                return StopReceipt(
+                    status=HEAD_ALIVE, run=finishing, reason=reason,
+                    failure=HeadStopFailed(reason, run=finishing),
+                    epoch=self.activity.epoch(run.run_id), lease=self.activity.lease(run.run_id),
+                )
             preflight = ignored.get("preflight")
             if callable(preflight):
                 preflight(run)
@@ -1659,18 +1673,21 @@ class LocalPtyHeadRuntime:
                                 raise MemoryScopeError("head identity does not match the scoped stop")
                         record["stop_initiator"] = initiator.to_json()
                         owner.update_owner(address.run_dir, record)
-                        asked = self._ask_to_stop(address, initiator, signal_name)
-                        owner.stop_owned(record)
+                        asked = self._ask(address, initiator, signal_name, remaining)
+                        if remaining is None:
+                            owner.stop_owned(record)
+                        else:
+                            owner.stop_owned(record, remaining=remaining)
                         # A launch can fail before any head identity or journal exists.
                         # Only this generation's durable recursive proof settles that case.
                         gone = record["cleanup_complete"] and (
-                            not address.pid_file.exists() or self._await_head_gone(address, run)
+                            not address.pid_file.exists() or self._await_gone(address, run, remaining)
                         )
                 else:
                     if run.scope_generation:
                         raise MemoryScopeError("the scoped run has lost its owner")
-                    asked = self._ask_to_stop(address, initiator, signal_name)
-                    gone = self._await_head_gone(address, run)
+                    asked = self._ask(address, initiator, signal_name, remaining)
+                    gone = self._await_gone(address, run, remaining)
             except (MemoryScopeError, OSError, ValueError) as exc:
                 return StopReceipt(
                     status=HEAD_ALIVE, run=finishing, reason=str(exc),
@@ -1685,6 +1702,9 @@ class LocalPtyHeadRuntime:
                     reason=(
                         f"this head was asked to stop and its process was still there "
                         f"{self._stop_timeout:g}s later"
+                        if remaining is None else
+                        "this head was asked to stop and its process was still there when the "
+                        "caller's deadline passed"
                     ),
                     failure=HeadStopFailed("the head's process outlived the stop it was sent", run=finishing),
                     evidence=asked,
@@ -2552,24 +2572,58 @@ class LocalPtyHeadRuntime:
         except _UNREACHABLE as exc:
             return False, str(exc), 0, None
 
-    def _ask_to_stop(self, address: _Address, initiator: StopInitiator, signal_name: str) -> Any:
+    @contextlib.contextmanager
+    def _locked_within(self, remaining: Callable[[], float] | None) -> Iterator[bool]:
+        """This runtime's lock: awaited as ever, or for at most a caller's `remaining`."""
+        if remaining is None:
+            with self._lock:
+                yield True
+            return
+        locked = self._lock.acquire(timeout=max(0.0, remaining()))
+        try:
+            yield locked
+        finally:
+            if locked:
+                self._lock.release()
+
+    def _ask(self, address: _Address, initiator: StopInitiator, signal_name: str,
+             remaining: Callable[[], float] | None) -> Any:
+        """`_ask_to_stop`, handed a caller's deadline only when there is one."""
+        if remaining is None:
+            return self._ask_to_stop(address, initiator, signal_name)
+        return self._ask_to_stop(address, initiator, signal_name, remaining)
+
+    def _await_gone(self, address: _Address, run: HeadRun, remaining: Callable[[], float] | None) -> bool:
+        """`_await_head_gone`, handed a caller's deadline only when there is one."""
+        if remaining is None:
+            return self._await_head_gone(address, run)
+        return self._await_head_gone(address, run, remaining)
+
+    def _ask_to_stop(self, address: _Address, initiator: StopInitiator, signal_name: str,
+                     remaining: Callable[[], float] | None = None) -> Any:
         """Ask the supervisor to end its head; a supervisor that is gone is not a failure here.
 
         The one reader that does not test `ok`: the answer is evidence only, and `_await_head_gone`
-        decides the outcome from the launch identity.
+        decides the outcome from the launch identity. A caller's `remaining` bounds the connect and
+        every framed exchange (`SupervisorClient`), so a fragmented answer cannot outlive it.
         """
         try:
-            with self._connect(address) as client:
+            with (self._connect(address) if remaining is None else local_pty.SupervisorClient.connect(
+                address.socket_path, timeout=self._connect_timeout, remaining=remaining
+            )) as client:
                 return client.stop(initiator.actor or "dispatcher", signal_name)
         except _UNREACHABLE as exc:
             return {"ok": False, "error": OBSERVE_SUPERVISOR_UNREACHABLE, "detail": str(exc)}
 
-    def _await_head_gone(self, address: _Address, run: HeadRun) -> bool:
+    def _await_head_gone(self, address: _Address, run: HeadRun,
+                         remaining: Callable[[], float] | None = None) -> bool:
         """Wait for the head's process to be gone, by its launch identity rather than the socket.
 
         A head whose identity record was never written is answered by the journal's `run.exited`.
+        The wait is `stop_timeout`, cut to a caller's `remaining`.
         """
-        deadline = time.monotonic() + self._stop_timeout
+        deadline = time.monotonic() + (self._stop_timeout if remaining is None
+                                       else min(self._stop_timeout, remaining()))
         while True:
             if self._identity_says_dead(address):
                 return True
@@ -3558,7 +3612,8 @@ def head_run_pid_file(root: str | os.PathLike[str], run_id: str) -> Path:
 
 
 def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
-                         runs: Sequence[HeadRun], *, recorded_only: bool = False) -> None:
+                         runs: Sequence[HeadRun], *, recorded_only: bool = False,
+                         remaining: Callable[[], float] | None = None) -> None:
     """Refuse Git settlement while an unrecorded generation owns its target.
 
     This read uses the same canonical owner as stop. The dispatcher serializes
@@ -3566,7 +3621,8 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
     for native identity and recursive empty-scope proof, including on replay.
 
     `recorded_only` reads nothing but the recorded runs' own canonical directories:
-    a replaced owner's workspace and task now belong to its successor.
+    a replaced owner's workspace and task now belong to its successor. A caller's
+    `remaining` cuts each native observation of a terminal scope's disappearance.
     """
     if root.absolute() != root.resolve():
         raise ValueError("cleanup scope root is substituted")
@@ -3601,22 +3657,25 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
             if (owner.run_id, owner.generation) not in known:
                 if record.get("cleanup_complete") and not record.get("launch_allowed"):
                     # A retained terminal flag cannot bless a reused live unit.
-                    inventory = runtime_scope_inventory(root.parent, {record["unit"]})
+                    inventory = (runtime_scope_inventory(root.parent, {record["unit"]}) if remaining is None
+                                 else runtime_scope_inventory(root.parent, {record["unit"]}, remaining=remaining))
                     if inventory.errors or record["unit"] not in inventory.disappeared:
                         raise ValueError("cleanup terminal scope lacks current disappearance proof")
                     continue
                 raise ValueError("cleanup workspace has an unrecorded or newer scope owner")
 
 
-def runtime_scope_inventory(data_dir: Path, units: set[str]) -> RuntimeScopeInventory:
+def runtime_scope_inventory(data_dir: Path, units: set[str], *,
+                            remaining: Callable[[], float] | None = None) -> RuntimeScopeInventory:
     """Read canonical lifecycle ownership for host preservation and diagnostics.
 
     Consumers use this runtime boundary, never the private PTY owner format.
-    The projection grants no launch, adoption or cleanup authority.
+    The projection grants no launch, adoption or cleanup authority. A caller's
+    `remaining` cuts each native scope observation to what is left of its deadline.
     """
     from ummanu.runtime.head.local_pty.scope_inventory import read_runtime_scopes
 
-    return read_runtime_scopes(data_dir, units)
+    return read_runtime_scopes(data_dir, units, remaining=remaining)
 
 
 def head_scope_owner_lock(run_dir: str | os.PathLike[str]) -> AbstractContextManager[None]:

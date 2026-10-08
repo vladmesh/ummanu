@@ -369,8 +369,8 @@ class _GateHost(CommandHostRuntime):
             return done("[]")
         return done()
 
-    def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
-        return self._gh(args) if args[:1] == ["gh"] else super().run_capture(args, label, cwd=cwd)
+    def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
+        return self._gh(args) if args[:1] == ["gh"] else super().run_capture(args, label, cwd=cwd, timeout=timeout)
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         return self._gh(args) if args[:1] == ["gh"] else super()._run(args, label, cwd=cwd)

@@ -937,12 +937,19 @@ class SqlCardClient:
             (list(ACTIVE_STATES),),
         )]
 
-    def _rpc_lockOwnershipReference(self, *, reference: str, observer: bool = False) -> bool:
+    def _rpc_lockOwnershipReference(self, *, reference: str, observer: bool = False,
+                                    wait_ms: int | None = None) -> bool:
         """Fence state/claim updates in the caller's cleanup/launch transaction.
 
         NO KEY UPDATE still permits a head's comment foreign-key check. Acquire
         this before cleanup.lock, so a contended SQL row never holds the flock.
+        `wait_ms` bounds this and every later lock wait and statement of the
+        caller's transaction (`SET LOCAL`); the transaction's end restores both.
         """
+        if wait_ms is not None:
+            bound = f"{max(1, int(wait_ms))}ms"
+            self._query("SELECT set_config('lock_timeout', %s, true), set_config('statement_timeout', %s, true)",
+                        (bound, bound))
         table, key = ("sprints", "ref") if observer else ("tasks", "task_ref")
         return bool(self._query(f"SELECT {key} FROM {table} WHERE {key}=%s FOR NO KEY UPDATE",
                                 (reference,)))

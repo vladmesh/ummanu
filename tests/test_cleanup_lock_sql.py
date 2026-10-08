@@ -126,3 +126,37 @@ class CleanupLockSqlTests(CardStoreCase):
         self.assertTrue(finished.is_set())
         self.assertEqual(failures, [])
         self.assertEqual(self.writer.reader.show("alpha-1")["state"], "in_progress")
+
+    def test_automatic_replay_row_lock_waits_only_its_allowance(self):
+        """ummanu-145: a contended ownership row costs the automatic replay at most its allowance, and
+        the bound ends with the caller's transaction."""
+        from ummanu.dispatch import cleanup
+        holding, release = threading.Event(), threading.Event()
+
+        def hold():
+            with self.external_client.transaction():
+                self.external_client.call("lockOwnershipReference", reference="alpha-1")
+                holding.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=hold)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(holding.wait(5))
+        with self.client.transaction():
+            unbounded = self.client._query("SHOW lock_timeout"), self.client._query("SHOW statement_timeout")
+        token = cleanup._ALLOWANCE.set(cleanup.Allowance(0.5))
+        try:
+            started = time.monotonic()
+            with self.assertRaises(Exception), self.client.transaction():  # noqa: B017 - the driver's lock timeout
+                cleanup._lock_row(self.client, {"ref": "alpha-1"})
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            cleanup._ALLOWANCE.reset(token)
+        release.set()
+        thread.join(10)
+        with self.client.transaction():
+            self.assertEqual((self.client._query("SHOW lock_timeout"), self.client._query("SHOW statement_timeout")),
+                             unbounded)
+            self.assertTrue(self.client.call("lockOwnershipReference", reference="alpha-1"))

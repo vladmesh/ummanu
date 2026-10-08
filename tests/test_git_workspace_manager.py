@@ -93,9 +93,9 @@ class _RecordingHost(CommandHostRuntime):
         self._record(args)
         return super()._run(args, label, cwd=cwd)
 
-    def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+    def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
         self._record(args)
-        return super().run_capture(args, label, cwd=cwd)
+        return super().run_capture(args, label, cwd=cwd, timeout=timeout)
 
     # What a bring-up does besides the workspace is not what these tests are about.
     def _prepare_workspace_environment(self, workspace: str, *, project: str = "") -> None:

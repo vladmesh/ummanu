@@ -12652,10 +12652,10 @@ class GithubGateHost(CommandHostRuntime):
                 return done(json.dumps(self._statuses))
         return done("[]")
 
-    def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+    def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
         if args[:1] == ["gh"]:
             return self._fake_gh(args)
-        return super().run_capture(args, label, cwd=cwd)
+        return super().run_capture(args, label, cwd=cwd, timeout=timeout)
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         if args[:1] == ["gh"]:
@@ -14245,10 +14245,10 @@ class DispatcherGateTests(unittest.TestCase):
                 super().__init__(root, adapter)
                 self.text = text
 
-            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+            def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
                 if args[:1] == ["git"] and "fetch" in args:
                     return subprocess.CompletedProcess(args, 128, "", self.text)
-                return super().run_capture(args, label, cwd=cwd)
+                return super().run_capture(args, label, cwd=cwd, timeout=timeout)
 
         for text in (self.GNUTLS_DROP, self.HTTP2_DROP):
             with self.subTest(text=text[:40]):
@@ -14281,7 +14281,7 @@ class DispatcherGateTests(unittest.TestCase):
             def _run(self, args, label, *, cwd=None):  # type: ignore[override]
                 return super()._run(args, label, cwd=cwd)
 
-            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+            def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
                 if args[:1] == ["git"] and "push" in args:
                     return subprocess.CompletedProcess(
                         args,
@@ -14292,7 +14292,7 @@ class DispatcherGateTests(unittest.TestCase):
                         "(protected branch hook declined)\n"
                         "error: failed to push some refs",
                     )
-                return super().run_capture(args, label, cwd=cwd)
+                return super().run_capture(args, label, cwd=cwd, timeout=timeout)
 
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")
@@ -14454,13 +14454,13 @@ class DispatcherGateTests(unittest.TestCase):
         card blocks at once with the accurate reason instead of re-running the hung suite."""
 
         class HangingLocalGate(GateHost):
-            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+            def run_capture(self, args, label, *, cwd=None, timeout=None):  # type: ignore[override]
                 if args[:2] == ["bash", "-lc"]:
                     raise HostError(
                         "local gate failed: Command '['bash', '-lc', 'python3 -m unittest']' "
                         "timed out after 900 seconds"
                     )
-                return super().run_capture(args, label, cwd=cwd)
+                return super().run_capture(args, label, cwd=cwd, timeout=timeout)
 
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")

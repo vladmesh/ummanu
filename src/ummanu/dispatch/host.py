@@ -2428,12 +2428,14 @@ class CommandHostRuntime:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
 
     def fence_cleanup_scopes(self, workspace: str, task: head_ops.TaskRef,
-                             runs: Sequence[head_ops.HeadRun], *, recorded_only: bool = False) -> None:
-        """Read scope ownership through the runtime's supported boundary."""
+                             runs: Sequence[head_ops.HeadRun], *, recorded_only: bool = False,
+                             remaining: Callable[[], float] | None = None) -> None:
+        """Read scope ownership through the runtime's supported boundary, its native observations cut
+        to a caller's `remaining`."""
         from ummanu.runtime.local_pty_head import fence_cleanup_scopes
         try:
             fence_cleanup_scopes(Path(self._local_pty_root()), workspace, task, runs,
-                                 recorded_only=recorded_only)
+                                 recorded_only=recorded_only, remaining=remaining)
         except (OSError, ValueError, RuntimeError) as exc:
             raise HostError(f"cleanup scope evidence unavailable: {exc}") from exc
 
@@ -5003,13 +5005,13 @@ class CommandHostRuntime:
         return completed
 
     def run_capture(
-        self, args: list[str], label: str, *, cwd: Path | None = None
+        self, args: list[str], label: str, *, cwd: Path | None = None, timeout: float | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Like _run but returns the CompletedProcess regardless of exit status (the gate reads a
         non-zero code as a red verdict, not a host failure). Still raises HostError when the process
-        can't run at all."""
+        can't run at all. A caller's `timeout` replaces `HOST_COMMAND_TIMEOUT_SECONDS`."""
         try:
-            return _run_bounded(args, cwd)
+            return _run_bounded(args, cwd, timeout)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError(f"{label} failed: {exc}") from None
 
@@ -5018,7 +5020,8 @@ class CommandHostRuntime:
 HOST_COMMAND_TIMEOUT_SECONDS = 900
 
 
-def _run_bounded(args: list[str], cwd: Path | None) -> subprocess.CompletedProcess[str]:
+def _run_bounded(args: list[str], cwd: Path | None,
+                 timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     """Run one host child to completion, and on a timeout take its descendants down with it.
 
     A plain ``subprocess.run`` timeout kills only the direct child: the test processes under a
@@ -5027,7 +5030,7 @@ def _run_bounded(args: list[str], cwd: Path | None) -> subprocess.CompletedProce
     the unit's control-group kill no longer sweeps them either. The child's own process group is
     what bounds them now.
     """
-    return _proc.run_isolated(args, cwd=cwd, timeout=HOST_COMMAND_TIMEOUT_SECONDS)
+    return _proc.run_isolated(args, cwd=cwd, timeout=HOST_COMMAND_TIMEOUT_SECONDS if timeout is None else timeout)
 
 
 def _gate_attestation_for_prompt(

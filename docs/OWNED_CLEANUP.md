@@ -153,6 +153,34 @@ concurrent owner takes no slot, the next due intent is tried, and the cursor mov
 only to an attempt this owner reserved. A due time that is not a finite number in
 float range (`10**400` included) is malformed and due at once.
 
+The production tick's cleanup phase is the one automatic replay, and it runs on one
+elapsed allowance (`REPLAY_ALLOWANCE`, 3.5 s on the stdlib monotonic clock, under the
+sprint's 5 s phase bound) that covers selection, admission, every wait and effect and
+the final cursor publication. Nothing nested restarts it: lock waits (`cleanup.lock`,
+the bulk and effect lanes, the board writer's fences) poll for what is left; each Git
+child is bounded by `GIT_TIMEOUT` (30 s) cut to it and killed and reaped at that bound,
+the host's removal child with its process group; the head stop receives `remaining`,
+which cuts the runtime's own lock, supervisor exchange, scope termination and exit
+confirmation; the ownership row lock sets `lock_timeout` and `statement_timeout` for
+the rest of its short transaction; the status classification, cache unlinks and the
+environment namespace walk check it between entries. A card whose lifecycle lane is
+held by another owner is skipped at once. A due intent is reserved only while
+`ATTEMPT_FLOOR` (1 s) is left, and no workspace, Git removal or ref stage starts with
+less than `EFFECT_FLOOR` (0.5 s). Only journal publications that record the outcome may
+use `PUBLICATION_GRACE` (0.5 s) more. An exhausted allowance raises `Deferred`, an
+ordinary refusal: the attempt ends `pending` with its durable progress and its reserved
+cooldown, never as completed, verified or terminal. A skipped intent was never reserved,
+keeps its due time and lies ahead of the cursor for the next tick. A Git or stop effect
+cut at its bound is ambiguous, and the next attempt re-proves identity first exactly as
+after a crash (`removal_started`, `environment_removal_started`, `ref_delete_admitted`,
+retained stop receipts). Indivisible calls (one `fsync`, one `stat`/`unlink`, a killed
+child's reap) can overrun the allowance by their own duration. Selection reads only the
+intent files replaced since the owner last read them. The tick records the invocation
+under `cleanup` in its telemetry entry: allowance and spent milliseconds, due,
+attempted, deferred, skipped, busy and lost counts, where it was cut, and its intent,
+meta and generated publications and bytes. Teardown, inactive reconciliation, observer
+stop/close and the targeted maintenance replay pass no allowance and keep their waits.
+
 Supported maintenance surfaces:
 
 ```

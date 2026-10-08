@@ -86,6 +86,37 @@ def card_details(value: Any) -> list[dict[str, Any]] | None:
     return cards
 
 
+#: The counts of a cleanup replay's tick summary: due at selection, reserved attempts, attempts the
+#: allowance cut short, due intents it did not admit, intents whose lifecycle lane was busy, and
+#: reservations lost to another owner.
+CLEANUP_COUNTS = ("due", "attempted", "deferred", "skipped", "busy", "lost")
+#: The journal publications of the invocation, by file class, and their bytes.
+CLEANUP_WRITES = ("intent", "meta", "generated", "bytes")
+
+
+def cleanup_summary(value: Any) -> dict[str, Any]:
+    """A cleanup replay's tick summary (`CleanupOwner.last_replay`): named counts, bounded strings."""
+    if not isinstance(value, dict):
+        return {}
+    summary: dict[str, Any] = {}
+    for name in CLEANUP_COUNTS:
+        raw = value.get(name)
+        if not isinstance(raw, bool) and isinstance(raw, int) and 0 <= raw <= MAX_COUNTER:
+            summary[name] = raw
+    for name in ("allowance_ms", "spent_ms"):
+        measured = duration_ms(value.get(name))
+        if measured is not None:
+            summary[name] = measured
+    if isinstance(value.get("deferred_at"), str) and value["deferred_at"]:
+        summary["deferred_at"] = value["deferred_at"][:200]
+    writes = value.get("writes")
+    if isinstance(writes, dict):
+        summary["writes"] = {name: raw for name in CLEANUP_WRITES
+                             if not isinstance(raw := writes.get(name), bool) and isinstance(raw, int)
+                             and 0 <= raw <= MAX_COUNTER}
+    return summary
+
+
 def handoff_stages(value: Any) -> list[dict[str, Any]]:
     """A card's head handoff stages: stage, subject, outcome and a valid duration, bounded."""
     if not isinstance(value, list):
