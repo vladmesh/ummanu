@@ -1601,6 +1601,7 @@ class DoctorHostCliTests(unittest.TestCase):
             "  components:\n"
             "    curator: {enabled: false}\n"
             "    instance-maintenance: {enabled: false}\n"
+            "    checkpoint: {enabled: false}\n"
             "    doctor: {enabled: false}\n"
             "    memory: {enabled: false}\n"
             "    retro: {enabled: false}\n"
@@ -1761,7 +1762,9 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertIn("unmanaged-on-host: /srv/projects/stray-project", output)
         # units: one of each outcome, full unit file names
         self.assertIn("units:\n  matched: (none)", output)
-        self.assertIn("missing-on-host: ummanu-curator.service", output)
+        missing_units = next(line for line in output.splitlines() if line.startswith("  missing-on-host: ummanu-"))
+        self.assertTrue({"ummanu-curator.service", "ummanu-checkpoint.service", "ummanu-checkpoint.timer"}
+                        <= set(missing_units.split(": ", 1)[1].split(", ")))
         self.assertIn("ummanu-retro.timer", output)
         # Orca repo registrations are Orca's own state: no section, no comparison.
         self.assertNotIn("orca repos", output)

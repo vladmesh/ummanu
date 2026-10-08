@@ -4,6 +4,7 @@
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
 unit tests/test_tick_telemetry.py
+unit tests/test_checkpoint_run.py
 unit tests/test_tick_board_snapshot.py
 component tests/test_narrow_cleanup_lock.py
 component tests/test_bulk_ownership_lane.py

@@ -20,6 +20,7 @@ from ummanu.dispatch.tick_telemetry import (
     tick_p95_finding,
     tick_statistics,
 )
+from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 
 
 class Clock:
@@ -74,7 +75,6 @@ class TickMeasurementTests(unittest.TestCase):
             "_reconcile_sprint_budget": (100, []),
             "reconcile_observers": (110, []),
             "reconcile_origin_returns": (130, []),
-            "_coordinate_checkpoint": (120, (None, None)),
             "retry_pending_observer_stops": (140, []),
             "auto_resume_expired_freeze": (0, None),
         }
@@ -106,13 +106,29 @@ class TickMeasurementTests(unittest.TestCase):
                 "cleanup": 30.0,
                 "after-merge": 170.0,
                 "launches": 110.0,
-                "checkpoint": 120.0,
                 "other": 260.0,
             },
         )
         self.assertEqual(self.runtime.reader.list.call_count, 1)
         self.save.assert_called_once()
         self.runtime.cleanup.replay.assert_called_once_with(limit=5)
+
+    def test_checkpoint_failure_does_not_degrade_the_tick_or_enter_its_phases(self):
+        self.runtime.checkpoint = mock.Mock()
+        self.runtime.checkpoint.write.return_value.to_json.return_value = {
+            "status": "blocked", "reason": "audit pending",
+        }
+        result = run_checkpoint(self.runtime)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["checkpoint"]["reason"], "audit pending")
+        self.runtime.checkpoint.write.assert_called_once_with()
+        tick = production.production_tick(self.runtime)
+        self.assertEqual(tick["status"], "ok")
+        self.assertNotIn("checkpoint", tick)
+        self.assertNotIn("checkpoint", self.last()["phases"])
+        self.assertTrue(self.last()["healthy"])
+        self.assertEqual(load_checkpoint_state(self.root)["checkpoint"]["reason"], "audit pending")
+        self.runtime.checkpoint.write.assert_called_once_with()
 
     def test_failed_tick_keeps_interrupted_and_completed_phases(self):
         with (
@@ -147,10 +163,10 @@ class TickMeasurementTests(unittest.TestCase):
         self.runtime.reader.list.assert_called_once()
         self.save.assert_called_once()
 
-    def test_frozen_tick_records_checkpoint_without_board_reads(self):
+    def test_frozen_tick_records_its_work_without_board_reads(self):
         self.runtime.pause.summary.return_value = {"mode": "freeze"}
         production.production_tick(self.runtime)
-        self.assertEqual(self.last()["phases"], {"checkpoint": 120.0, "other": 140.0})
+        self.assertEqual(self.last()["phases"], {"other": 140.0})
         self.assertEqual(self.last()["status"], "skipped")
         self.runtime.reader.list.assert_not_called()
         self.save.assert_called_once()

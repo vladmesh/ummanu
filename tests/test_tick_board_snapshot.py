@@ -18,6 +18,7 @@ from ummanu.board.sql_cards import BOARD_COLUMNS, BOARD_ID, SPRINT_BOARD_ID, Sql
 from ummanu.board.tick_snapshot import current_snapshot, select_cards, select_sprints, tick_snapshot
 from ummanu.board.wait_card import build_wait_spec
 from ummanu.dispatch import e2e_after_merge, observer, observer_fence, production, wait_cards
+from ummanu.infra.checkpoint_run import run_checkpoint
 from ummanu.sprints import SprintReader
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
@@ -307,7 +308,7 @@ class TickBoardSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "budget exceeded; callers:[\\s\\S]*regression"):
             self.assert_budget()
 
-    def test_due_checkpoint_stays_within_three_reads(self):
+    def test_independent_checkpoint_is_outside_the_tick_read_budget(self):
         exported = []
 
         def write():
@@ -318,6 +319,12 @@ class TickBoardSnapshotTests(unittest.TestCase):
         self.runtime.checkpoint = SimpleNamespace(write=write)
         result = self.run_tick()
         self.assertEqual(result["errors"], [])
+        self.assertNotIn("checkpoint", result)
+        self.assertEqual(exported, [])
+        self.assert_budget()
+        self.assertEqual(len(self.store.full_reads) + len(self.store.archive_reads), 2)
+        self.assertEqual(len(self.store.sprint_reads), 1)
+        result = run_checkpoint(self.runtime)
         self.assertEqual(result["checkpoint"]["status"], "unchanged")
         self.assertEqual(len(exported), 6)
         self.assertTrue(next(card for card in exported if card["reference"] == "demo-5")["closed"])

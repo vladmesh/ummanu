@@ -1,0 +1,22 @@
+[Unit]
+Description=Ummanu independent instance checkpoint
+After=network-online.target
+
+[Service]
+Type=oneshot
+User={{UMMANU_RUNTIME_USER}}
+Group={{UMMANU_RUNTIME_USER}}
+WorkingDirectory={{UMMANU_PRODUCT_ROOT}}
+EnvironmentFile=-{{UMMANU_INSTANCE_PATH}}/runtime.env
+Environment=HOME={{UMMANU_RUNTIME_HOME}}
+Environment=UMMANU_INSTANCE={{UMMANU_INSTANCE_PATH}}
+Environment=UMMANU_REPO={{UMMANU_PRODUCT_ROOT}}
+Environment=TA_RUNTIME_ENV_FILE={{UMMANU_INSTANCE_PATH}}/runtime.env
+Environment=PATH={{UMMANU_RUNTIME_HOME}}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Nice=10
+CPUSchedulingPolicy=batch
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Leave room above the writer's Git command bounds and the remote push timeout.
+TimeoutStartSec=3600
+ExecStart={{UMMANU_PRODUCT_ROOT}}/.venv/bin/ummanu checkpoint-run --instance {{UMMANU_INSTANCE_PATH}}
