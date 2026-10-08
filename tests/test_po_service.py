@@ -1327,6 +1327,10 @@ class RecoveryProgressTests(ServiceFixture):
                     expected = po_store.COMPLETED if action == "completion" else po_store.INTERRUPTED
                     self.assertEqual(self.settled(session_id, 1).state, expected)
                     self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
+                # The next subtest's service shares this board and queue: this one must not claim its
+                # input with a launcher patched for this subtest's session.
+                service.stop()
+                service.thread.join(10)  # type: ignore[attr-defined]
     def interrupted(self, *, queued: str = "waiting") -> str:
         first = self.service(run=False)
         session_id = self.session(first)

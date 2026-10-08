@@ -11,9 +11,11 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ummanu import _proc
 from ummanu.dispatch.runtime_preflight import PACKAGE, RuntimeProvenance
 
 
@@ -70,37 +72,37 @@ class ProductionRuntime:
             git_workspaces_root=str(git_workspaces_root),
         )
 
-    def probe(self) -> RuntimeProvenance:
-        """Observe the configured interpreter through the executable pre-import boundary."""
+    def probe(self, within: Callable[[], float] | None = None) -> RuntimeProvenance:
+        """Observe the configured interpreter through the executable pre-import boundary.
+
+        With a caller's `within` (seconds left of its deadline) the preflight child runs in its own
+        process group inside that deadline (`_proc.run_isolated`); one cut short is unavailable."""
         expected_python = Path(self.interpreter).expanduser().absolute()
         root = Path(self.product_root).expanduser().resolve(strict=False)
         if not expected_python.is_file() or not os.access(expected_python, os.X_OK):
             return RuntimeProvenance("interpreter_unavailable", str(expected_python), str(root), "", ())
         env = dict(os.environ)
         env.pop("PYTHONPATH", None)
+        argv = [
+            str(expected_python),
+            "-I",
+            str(_preflight_source()),
+            "--product-root",
+            str(root),
+            "--interpreter",
+            str(expected_python),
+            "--package",
+            self.package,
+            "--workspaces-root",
+            self.workspaces_root,
+            *(["--git-workspaces-root", self.git_workspaces_root] if self.git_workspaces_root else []),
+            "--json",
+        ]
         try:
-            completed = subprocess.run(
-                [
-                    str(expected_python),
-                    "-I",
-                    str(_preflight_source()),
-                    "--product-root",
-                    str(root),
-                    "--interpreter",
-                    str(expected_python),
-                    "--package",
-                    self.package,
-                    "--workspaces-root",
-                    self.workspaces_root,
-                    *(["--git-workspaces-root", self.git_workspaces_root] if self.git_workspaces_root else []),
-                    "--json",
-                ],
-                text=True,
-                capture_output=True,
-                timeout=30,
-                check=False,
-                env=env,
-            )
+            if within is None:
+                completed = subprocess.run(argv, text=True, capture_output=True, timeout=30, check=False, env=env)
+            else:
+                completed = _proc.run_isolated(argv, env=env, timeout=30, within=within)
         except (OSError, subprocess.SubprocessError):
             return RuntimeProvenance("interpreter_unavailable", str(expected_python), str(root), "", ())
         try:

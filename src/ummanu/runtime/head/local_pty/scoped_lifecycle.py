@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,12 +47,12 @@ def launch_binding(record: dict[str, Any], directory: Path) -> dict[str, Any]:
             **{key: record[key] for key in LAUNCH_FIELDS}}
 
 
-def native_scope_state(unit: str) -> dict[str, str]:
+def native_scope_state(unit: str, *, timeout: float = 10.0) -> dict[str, str]:
     properties = ("Id", "LoadState", "ActiveState", "SubState", "ControlGroup",
                   "InvocationID", "ActiveEnterTimestampMonotonic", "Transient", "BindsTo", "Description")
     result = subprocess.run(
         ["systemctl", "--system", "show", unit, "--property=" + ",".join(properties)],
-        capture_output=True, text=True, timeout=10, check=False,
+        capture_output=True, text=True, timeout=timeout, check=False,
     )
     if result.returncode or result.stderr.strip():
         raise MemoryScopeError("native runtime scope observation failed; retry systemctl show")
@@ -389,8 +389,20 @@ class ScopedHeadLifecycle:
         with self.ownership() as record:
             self.stop_owned(record)
 
-    def stop_owned(self, record: dict[str, Any]) -> None:
-        """Terminate and durably prove empty while ownership() remains held."""
+    def stop_owned(self, record: dict[str, Any], *, remaining: Callable[[], float] | None = None) -> None:
+        """Terminate and durably prove empty while ownership() remains held.
+
+        A caller's `remaining` cuts each of its waits (launch group, `systemctl stop`, membership)
+        to what is left; one it outlives is the same retryable refusal as its own bound.
+        """
+        def bound(seconds: float, what: str) -> float:
+            if remaining is None:
+                return seconds
+            left = remaining()
+            if left <= 0:
+                raise MemoryScopeError(f"the caller's deadline passed before {what}")
+            return min(seconds, left)
+
         if self.directory is not None:
             record["launch_allowed"] = False
             record["cleanup_complete"] = False
@@ -407,11 +419,11 @@ class ScopedHeadLifecycle:
                 except PermissionError:
                     result = subprocess.run(
                         ["sudo", "-n", "kill", "-KILL", "--", f"-{pid}"],
-                        capture_output=True, timeout=5, check=False,
+                        capture_output=True, timeout=bound(5, "the launch group kill"), check=False,
                     )
                     if result.returncode:
                         raise MemoryScopeError("could not terminate the scope launch group")
-                deadline = time.monotonic() + 5
+                deadline = time.monotonic() + bound(5, "the launch group exit")
                 while launch_group_present(pid, record["launch_identity"]):
                     if time.monotonic() >= deadline:
                         raise MemoryScopeError("scope launch process has not exited")
@@ -428,7 +440,7 @@ class ScopedHeadLifecycle:
             stopped = subprocess.run(
                 ["sudo", "-n", "systemctl", "stop", scope_unit(self.run_id)],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                check=False, timeout=15.0,
+                check=False, timeout=bound(15.0, "the scope stop"),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {exc}") from exc
@@ -441,7 +453,7 @@ class ScopedHeadLifecycle:
             # unpopulated cgroup is empty; a populated one still refuses).
             if not _unit_not_loaded(stopped.returncode, detail):
                 raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {detail}")
-        deadline = time.monotonic() + 10.0
+        deadline = time.monotonic() + bound(10.0, "the scope membership proof")
         while True:
             try:
                 fields = (cgroup / "cgroup.events").read_text(encoding="ascii").splitlines()

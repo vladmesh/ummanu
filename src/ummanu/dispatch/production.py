@@ -24,7 +24,7 @@ from ummanu.board.tick_snapshot import current_snapshot, select_cards, tick_snap
 from ummanu.checkpoint import checkpoint_snapshot
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.claim import claim_ready_task
-from ummanu.dispatch.cleanup import ownership_lock
+from ummanu.dispatch.cleanup import REPLAY_ALLOWANCE as CLEANUP_REPLAY_ALLOWANCE, ownership_lock
 from ummanu.dispatch.e2e_after_merge import after_merge_snapshot, reconcile_after_merge
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.launch import (
@@ -61,6 +61,7 @@ from ummanu.dispatch.state import (
 from ummanu.dispatch.tick_telemetry import (
     TICK_CARDS_KEPT,
     TICK_TELEMETRY_RECENT_KEPT,
+    cleanup_summary,
     tick_count,
     tick_counter_values,
     tick_counting,
@@ -103,6 +104,8 @@ _TICK_PHASE_STACK: contextvars.ContextVar[list[list[float]] | None] = contextvar
 _TICK_CARDS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar("tick_cards", default=None)
 #: What the advance pass's head handoffs were allowed and really spent, for the tick entry.
 _TICK_HANDOFF: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("tick_handoff", default=None)
+#: What the cleanup phase's automatic replay was allowed, spent, attempted, skipped and wrote.
+_TICK_CLEANUP: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("tick_cleanup", default=None)
 
 
 @contextlib.contextmanager
@@ -113,10 +116,12 @@ def tick_clock() -> Iterator[None]:
     stack_token = _TICK_PHASE_STACK.set([])
     cards_token = _TICK_CARDS.set([])
     handoff_token = _TICK_HANDOFF.set({})
+    cleanup_token = _TICK_CLEANUP.set({})
     try:
         with tick_counting():
             yield
     finally:
+        _TICK_CLEANUP.reset(cleanup_token)
         _TICK_HANDOFF.reset(handoff_token)
         _TICK_CARDS.reset(cards_token)
         _TICK_PHASE_STACK.reset(stack_token)
@@ -192,6 +197,14 @@ def note_tick_handoff(budget: Any) -> None:
             "stages_dropped": budget.dropped,
         }
     )
+
+
+def note_tick_cleanup(report: Any) -> None:
+    """Keep the cleanup replay's allowance, spent time, counts and journal writes for this tick's entry."""
+    held = _TICK_CLEANUP.get()
+    if held is None or not isinstance(report, dict):
+        return
+    held.update(cleanup_summary(report))
 
 
 def tick_duration_ms() -> float | None:
@@ -271,6 +284,8 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         "cards": cards,
         # The head handoff allowance of the advance pass, and what it really cost.
         **({"handoff": dict(handoff)} if (handoff := _TICK_HANDOFF.get()) else {}),
+        # The cleanup phase's allowance, what it spent, and what it attempted, skipped and wrote.
+        **({"cleanup": dict(cleanup)} if (cleanup := _TICK_CLEANUP.get()) else {}),
         "reason": str(result.get("reason") or ""),
         "actions": len(result.get("actions") or []),
         "error_count": len(errors),
@@ -561,11 +576,13 @@ def _production_tick_with_snapshot(
     cleanup_outcomes = []
     if isinstance(runtime.host, CommandHostRuntime) and runtime.host.mode == "real":
         with tick_phase("cleanup"):
-            # A few intents per tick: each replay reads and replaces only its own intent file, and
-            # `replay_cursor` carries the rest to later ticks.
+            # A few intents per tick, within one elapsed allowance under the phase bound: each replay
+            # reads and replaces only its own intent file, and `replay_cursor` carries the rest, the
+            # due intents the allowance did not admit included, to later ticks.
             cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
                                  "status": item["status"], "reason": item["reason"]}
-                                for item in runtime.cleanup.replay(limit=5)]
+                                for item in runtime.cleanup.replay(limit=5, allowance=CLEANUP_REPLAY_ALLOWANCE)]
+        note_tick_cleanup(getattr(runtime.cleanup, "last_replay", None))
 
     observer_errors: list[dict[str, str]] = []
     try:

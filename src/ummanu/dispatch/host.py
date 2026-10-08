@@ -2428,12 +2428,14 @@ class CommandHostRuntime:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
 
     def fence_cleanup_scopes(self, workspace: str, task: head_ops.TaskRef,
-                             runs: Sequence[head_ops.HeadRun], *, recorded_only: bool = False) -> None:
-        """Read scope ownership through the runtime's supported boundary."""
+                             runs: Sequence[head_ops.HeadRun], *, recorded_only: bool = False,
+                             remaining: Callable[[], float] | None = None) -> None:
+        """Read scope ownership through the runtime's supported boundary, its native observations cut
+        to a caller's `remaining`."""
         from ummanu.runtime.local_pty_head import fence_cleanup_scopes
         try:
             fence_cleanup_scopes(Path(self._local_pty_root()), workspace, task, runs,
-                                 recorded_only=recorded_only)
+                                 recorded_only=recorded_only, remaining=remaining)
         except (OSError, ValueError, RuntimeError) as exc:
             raise HostError(f"cleanup scope evidence unavailable: {exc}") from exc
 
@@ -3094,11 +3096,13 @@ class CommandHostRuntime:
         prefix = f"PATH={shlex.quote(safe_path)}; unset VIRTUAL_ENV; export PATH; "
         self._run_shell(prefix + command, cwd, label)
 
-    def production_runtime_provenance(self) -> RuntimeProvenance:
-        """Structured, secret-free observation used by every production runtime fence."""
-        return self.production_runtime.probe()
+    def production_runtime_provenance(self, within: Callable[[], float] | None = None) -> RuntimeProvenance:
+        """Structured, secret-free observation used by every production runtime fence; its probe
+        child waits only within a caller's deadline, when one is given."""
+        return self.production_runtime.probe() if within is None else self.production_runtime.probe(within)
 
-    def _require_production_runtime(self, boundary: str) -> RuntimeProvenance:
+    def _require_production_runtime(self, boundary: str,
+                                    within: Callable[[], float] | None = None) -> RuntimeProvenance:
         if self.mode == "noop":
             return RuntimeProvenance(
                 "valid",
@@ -3107,7 +3111,7 @@ class CommandHostRuntime:
                 "noop",
                 (),
             )
-        result = self.production_runtime_provenance()
+        result = self.production_runtime_provenance() if within is None else self.production_runtime_provenance(within)
         if not result.valid:
             error = HostError(result.refusal(boundary))
             error.evidence = result.as_dict()

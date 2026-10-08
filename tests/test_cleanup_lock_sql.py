@@ -126,3 +126,71 @@ class CleanupLockSqlTests(CardStoreCase):
         self.assertTrue(finished.is_set())
         self.assertEqual(failures, [])
         self.assertEqual(self.writer.reader.show("alpha-1")["state"], "in_progress")
+
+    def deadline(self, seconds):
+        end = time.monotonic() + seconds
+        return lambda: end - time.monotonic()
+
+    def settings(self):
+        with self.client.transaction():
+            return self.client._query("SHOW lock_timeout"), self.client._query("SHOW statement_timeout")
+
+    def test_cleanup_deadline_bounds_a_held_row_slow_statements_and_a_cold_connection(self):
+        """ummanu-145: one caller deadline over the real driver; nothing renews it, nothing outlives it."""
+        unbounded = self.settings()
+        holding, release = threading.Event(), threading.Event()
+
+        def hold():
+            with self.external_client.transaction():
+                self.external_client.call("lockOwnershipReference", reference="alpha-1")
+                holding.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=hold)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(release.set)
+        self.assertTrue(holding.wait(5))
+        # A held row: the lock wait is the deadline's, and the refusal rolls the transaction back.
+        started = time.monotonic()
+        with self.client.within(self.deadline(0.5)), self.assertRaises(TaskError), self.client.transaction():
+            self.client.call("lockOwnershipReference", reference="alpha-1")
+        self.assertLess(time.monotonic() - started, 1.5)
+        release.set()
+        thread.join(10)
+        # Successive slow statements in one transaction: the second gets only what is left.
+        started = time.monotonic()
+        with self.client.within(self.deadline(1.0)), self.assertRaises(TaskError), self.client.transaction():
+            self.client._query("SELECT pg_sleep(0.6)")
+            self.client._query("SELECT pg_sleep(0.6)")
+        self.assertLess(time.monotonic() - started, 1.5)
+        # Standalone reads too, each a transaction of its own.
+        started = time.monotonic()
+        with self.client.within(self.deadline(1.0)), self.assertRaises(TaskError):
+            self.client._query("SELECT pg_sleep(0.6)")
+            self.client._query("SELECT pg_sleep(0.6)")
+        self.assertLess(time.monotonic() - started, 1.5)
+        # A cold client opens a connection only with the two seconds libpq can count, then works.
+        cold = SqlCardClient(self.client.credentials, self.root)
+        self.addCleanup(cold.close)
+        with cold.within(self.deadline(1.5)), self.assertRaises(TaskError):
+            cold._query("SELECT 1")
+        with cold.within(self.deadline(5.0)), cold.transaction():
+            self.assertTrue(cold.call("lockOwnershipReference", reference="alpha-1"))
+        # The bound ended with each transaction and each block: the client's own policy is back.
+        self.assertEqual(self.settings(), unbounded)
+        with cold.transaction():
+            self.assertEqual((cold._query("SHOW lock_timeout"), cold._query("SHOW statement_timeout")), unbounded)
+
+    def test_cleanup_deadline_cuts_the_driver_wait_itself_and_discards_the_connection(self):
+        """ummanu-145: a raw statement with no server-side bound is cut by the driver wait seam."""
+        stalled = SqlCardClient(self.client.credentials, self.root)
+        self.addCleanup(stalled.close)
+        stalled._query("SELECT 1")  # pooled before the deadline, as the dispatcher's connection is
+        started = time.monotonic()
+        with stalled.within(self.deadline(1.0)), self.assertRaises(TaskError), stalled._session(), \
+                stalled.connection.cursor() as cursor:
+            cursor.execute("SELECT pg_sleep(3)")
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertEqual(stalled._open, 0)  # the cut connection was closed, never pooled again
+        self.assertEqual(stalled._query("SELECT 1"), [(1,)])

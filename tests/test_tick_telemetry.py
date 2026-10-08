@@ -122,7 +122,8 @@ class TickMeasurementTests(unittest.TestCase):
         self.assertEqual(reconcile_ms(last["phases"]), 170.0)
         self.assertEqual(self.runtime.reader.list.call_count, 1)
         self.save.assert_called_once()
-        self.runtime.cleanup.replay.assert_called_once_with(limit=5)
+        # ummanu-145: the cleanup phase's one automatic replay runs on its elapsed allowance.
+        self.runtime.cleanup.replay.assert_called_once_with(limit=5, allowance=production.CLEANUP_REPLAY_ALLOWANCE)
 
     def test_checkpoint_failure_does_not_degrade_the_tick_or_enter_its_phases(self):
         self.runtime.checkpoint = mock.Mock()

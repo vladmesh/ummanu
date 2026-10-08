@@ -231,6 +231,7 @@ component tests/test_onboarding_snapshot.py
 integration-recovery tests/test_snapshot_recovery_postgres.py
 unit tests/test_instance_maintenance.py
 component tests/test_owned_cleanup.py
+component tests/test_bounded_cleanup_replay.py
 integration-board tests/test_status.py
 component tests/test_measurement_script.py
 integration-board tests/test_web_command_protocol.py

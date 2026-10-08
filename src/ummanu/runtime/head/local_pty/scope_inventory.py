@@ -12,6 +12,7 @@ import json
 import os
 import stat
 import subprocess
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -92,6 +93,29 @@ def _json(fd: int) -> Any:
 
 def _unit_state(unit: str) -> dict[str, str]:
     return native_scope_state(unit)
+
+
+def _names(root: int, remaining: Callable[[], float] | None) -> Iterator[str]:
+    """`os.listdir(root)` as the native iterator yields it, a caller's deadline checked between
+    entries: a scan it cuts short raises, so absence is never read from a partial listing."""
+    if remaining is None:
+        yield from os.listdir(root)
+        return
+    with os.scandir(root) as scan:
+        for entry in scan:
+            if remaining() <= 0:
+                raise MemoryScopeError("the caller's deadline passed while runtime scope owners were read")
+            yield entry.name
+
+
+def _unit_state_within(remaining: Callable[[], float]) -> Callable[[str], dict[str, str]]:
+    """`_unit_state` with each `systemctl show` cut to what is left of a caller's deadline."""
+    def state(unit: str) -> dict[str, str]:
+        left = remaining()
+        if left <= 0:
+            raise MemoryScopeError("the caller's deadline passed before native scope observation")
+        return native_scope_state(unit, timeout=min(10.0, left))
+    return state
 
 
 def _absent(state: dict[str, str]) -> bool:
@@ -184,8 +208,10 @@ def _journal_proof(stack: ExitStack, fd: int, uid: int, record: dict[str, Any],
         raise MemoryScopeError("native scope incarnation is outside the recorded launch; possible unit reuse")
 
 
-def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInventory:
+def read_runtime_scopes(data_dir: Path, observed: set[str], *,
+                        remaining: Callable[[], float] | None = None) -> RuntimeScopeInventory:
     """Project all runtime roots for this installation, without following PO pointers."""
+    unit_state = _unit_state if remaining is None else _unit_state_within(remaining)
     original = frozenset(observed)
     wanted = frozenset(name for name in original if name.endswith(".scope"))
     scopes: dict[str, dict[str, Any]] = {}
@@ -208,7 +234,7 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
                 root_info = os.fstat(root)
                 if root_info.st_uid != uid or root_info.st_mode & 0o022:
                     raise MemoryScopeError("canonical runtime root is not private to this installation owner")
-                for name in os.listdir(root):
+                for name in _names(root, remaining):
                     info = os.stat(name, dir_fd=root, follow_symlinks=False)
                     if stat.S_ISLNK(info.st_mode):
                         raise MemoryScopeError("canonical runtime directory is a symlink")
@@ -237,9 +263,9 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
                         locked_record = ScopedHeadLifecycle.read_owner(Path(f"/proc/self/fd/{fd}"))
                         if locked_record != record:
                             raise MemoryScopeError("runtime owner changed before its observation lock")
-                        state = _unit_state(unit)
+                        state = unit_state(unit)
                         if _absent(state):
-                            if _unit_state(unit) != state or ScopedHeadLifecycle.read_owner(directory) != record:
+                            if unit_state(unit) != state or ScopedHeadLifecycle.read_owner(directory) != record:
                                 raise MemoryScopeError("runtime scope changed during disappearance observation; retry inspection")
                             disappeared.add(unit)
                             continue
@@ -257,7 +283,7 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
                         if record["cleanup_complete"] and populated:
                             raise MemoryScopeError("a populated runtime scope falsely claims completed cleanup")
                         _journal_proof(owner_stack, fd, uid, record, state, directory, native)
-                        after = _unit_state(unit)
+                        after = unit_state(unit)
                         if _absent(after):
                             disappeared.add(unit)
                             continue
@@ -285,8 +311,8 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
             # Missing ownership cannot establish absence. Refresh every observed
             # ownerless name too, including a name omitted by an earlier snapshot.
             for unit in wanted - owners.keys():
-                state = _unit_state(unit)
-                after = _unit_state(unit)
+                state = unit_state(unit)
+                after = unit_state(unit)
                 if after != state:
                     raise MemoryScopeError("ownerless runtime unit changed during inspection; retry observation")
                 if _absent(after):

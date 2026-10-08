@@ -153,6 +153,68 @@ concurrent owner takes no slot, the next due intent is tried, and the cursor mov
 only to an attempt this owner reserved. A due time that is not a finite number in
 float range (`10**400` included) is malformed and due at once.
 
+The production tick's cleanup phase is the one automatic replay, and it runs on one
+monotonic deadline (`REPLAY_ALLOWANCE`, 4 s, under the sprint's 5 s phase bound) from
+before its selection until it returns. Its last `PUBLICATION_RESERVE` (0.5 s) is kept
+for the journal publications that record outcomes and the cursor; no work, wait or
+effect is admitted into it and nothing extends the deadline. Nested paths read what is
+left and never restart it:
+
+- lock waits (`cleanup.lock`, the bulk and effect lanes, the board writer's fences, and
+  the owner's own operation mutex that an inventory or targeted replay may hold) poll for
+  what is left; a card whose lifecycle lane another owner holds is skipped at once;
+- the board store client (`SqlCardClient.within`) cuts its pool wait, the turn of
+  `transaction()`, and every exchange with the server: each connection's own driver wait
+  (`psycopg` `Connection.wait`, behind every query, setting, schema read, commit, rollback
+  and unpin) gets what is left as its `timeout`, an argument the driver takes from 3.3.6,
+  the declared floor (BOARD_STORE.md §5.8). An exchange cut short closes its connection
+  (never reused) and is outcome-unknown: a COMMIT so cut may have committed, and the next
+  attempt reads the board again before any effect; nothing is disposed from it. A new
+  connection is made attempt by attempt (`conninfo_attempts`, one per resolved address),
+  each with what is left as its `connect_timeout` (whole seconds, at least 2). The server
+  also gets `statement_timeout` and `lock_timeout` `LOCAL` before each statement, so it
+  cancels a long statement itself; the settings end with their transaction;
+- every cleanup Git child runs in its own process group (`_proc.run_isolated`) within
+  what is left: one still running when only `_TERMINATE_SECONDS` remain gets `SIGTERM`
+  to its whole group, so Git removes the lock files of an unfinished ref transaction
+  itself and a hook or helper it ran ends with it, then the group is killed, and the
+  drain and reap get only what is left. Nothing it started can act after the call;
+- the head stop receives `remaining` (runtime lock, supervisor exchange, scope
+  termination, exit confirmation), and so does the scope fence (each run directory read
+  and each native disappearance proof);
+- every directory enumeration (intent selection, the whole-journal reads behind owner,
+  shared-removal, observer and empty-attempt proofs, generated digests, the scope fence and
+  runtime scope inventory) reads its native iterator entry by entry with the allowance
+  checked before each; a scan cut short raises, so no partial listing ever stands for the
+  whole directory or proves an absence. Loads, status classification, cache and
+  generated-file unlinks and the environment namespace walk (removing entries as it reads
+  them) check it before each entry too;
+- the runtime provenance probe before stop, removal and ref deletion is a child process
+  run in its own group within what is left.
+
+A due intent is reserved only while `ATTEMPT_FLOOR` (1 s) of work allowance is left, and
+no workspace, Git removal or ref stage starts with less than `EFFECT_FLOOR` (0.5 s). An
+exhausted allowance raises `Deferred`, an ordinary refusal: the attempt ends `pending`
+with its durable progress and reserved cooldown, never completed, verified or terminal.
+A skipped intent was never reserved and keeps its due time. Selection reads intents in
+rotation order from the cursor, one at a time and only as far as the attempts go, so
+slow reads never starve the attempts; the cursor then advances past everything it observed,
+attempted, lost, skipped at the floor, refused by a busy lane or owner, or not due, so a
+persistently slow first read never holds later intents back; a due intent passed this way
+was never reserved and is reached again on the next rotation. After a selection of the
+whole journal it rests on the last attempt. It is written once, only with due work or a
+selection stopped short, and the telemetry says whether it advanced, stayed or could not
+be written. A Git or stop effect ended at
+its bound is re-proved by the next attempt as after a crash (`removal_started`,
+`environment_removal_started`, `ref_delete_admitted`, retained stop receipts). A Git
+leader that outlives `SIGTERM` (an uninterruptible call) may leave a lock file; cleanup
+never removes one, and the ref transaction's refusal names it. Teardown, inactive
+reconciliation, observer stop/close and the targeted maintenance replay pass no
+allowance and keep their waits. The tick records the invocation under `cleanup` in its
+telemetry entry: allowance and spent milliseconds, the due, attempted, deferred,
+skipped, busy, lost and unread counts, where it was cut, the cursor's fate, and its
+intent, meta and generated publications and bytes.
+
 Supported maintenance surfaces:
 
 ```

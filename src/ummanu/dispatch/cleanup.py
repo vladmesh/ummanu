@@ -28,6 +28,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Self
 
+from ummanu import _proc
 from ummanu.dispatch.tick_telemetry import tick_count
 from ummanu.dispatch.types import HostError, OwnershipChanged
 from ummanu.infra import git_worktree
@@ -36,34 +37,143 @@ _locks: dict[str, threading.RLock] = {}
 _guard = threading.Lock()
 _held = threading.local()
 
+#: The automatic replay's one deadline (ummanu-145), from before its selection until it returns:
+#: admission, every wait and effect, and the outcome and cursor publications, below the sprint's 5 s
+#: phase bound with room to return and report.
+REPLAY_ALLOWANCE = 4.0
+#: The last part of that deadline, kept for the journal publications that record what happened;
+#: no work, wait or effect is admitted into it, and nothing extends the deadline itself.
+PUBLICATION_RESERVE = 0.5
+#: A due intent is reserved only while this much of the work allowance is left.
+ATTEMPT_FLOOR = 1.0
+#: A destructive workspace stage (cache, environment, Git removal, ref deletion) starts only with this
+#: much left, so a stage cut short is the rare case its durable progress recovers, not the routine one.
+EFFECT_FLOOR = 0.5
+_LOCK_POLL = 0.01
+
+
+class Deferred(HostError):
+    """The automatic replay's allowance ran out: nothing past this point was attempted or proved."""
+
+
+class Allowance:
+    """One automatic replay's deadline on the stdlib monotonic clock.
+
+    `remaining()` is what is left for work (selection, admission, waits, effects): the deadline less
+    `reserve`. Journal publications read `remaining(publication=True)`, up to the deadline itself.
+    Nothing nested restarts or extends either.
+    """
+
+    def __init__(self, seconds: float, *, reserve: float = PUBLICATION_RESERVE,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self.seconds, self.reserve, self.clock = seconds, reserve, clock
+        self.started = clock()
+        self.deadline = self.started + seconds
+        # Where the allowance first refused work, and how many times it did.
+        self.deferred_at = ""
+        self.deferrals = 0
+
+    def remaining(self, *, publication: bool = False) -> float:
+        return max(0.0, self.deadline - (0.0 if publication else self.reserve) - self.clock())
+
+    def spent(self) -> float:
+        return self.clock() - self.started
+
+    def defer(self, what: str) -> Deferred:
+        self.deferrals += 1
+        self.deferred_at = self.deferred_at or what
+        return Deferred("cleanup allowance exhausted at " + what + "; the intent stays pending and "
+                        "its durable progress is replayed by a later attempt")
+
+    def require(self, seconds: float, what: str) -> None:
+        if self.remaining() < seconds:
+            raise self.defer(what)
+
+    def timeout(self, default: float, what: str) -> float:
+        """The bound of one wait: the caller's own default, cut to what is left."""
+        left = self.remaining()
+        if left <= 0:
+            raise self.defer(what)
+        return min(default, left)
+
+
+_ALLOWANCE: contextvars.ContextVar[Allowance | None] = contextvars.ContextVar("cleanup_allowance", default=None)
+
+
+def _allowance() -> Allowance | None:
+    """The allowance of the automatic replay this thread is serving; None for every other caller."""
+    return _ALLOWANCE.get()
+
+
+def _check(what: str) -> None:
+    """Refuse to go on once the current allowance is spent; nothing outside an automatic replay."""
+    allowance = _ALLOWANCE.get()
+    if allowance is not None and allowance.remaining() <= 0:
+        raise allowance.defer(what)
+
+
+def _wait(what: str, acquire: Callable[[bool], bool], *, blocking: bool = True,
+          publication: bool = False) -> None:
+    """Acquire through `acquire(block)`: unbounded outside an automatic replay, and inside one polled
+    for at most what is left of its allowance (none at all when not `blocking`)."""
+    allowance = _ALLOWANCE.get()
+    if allowance is None and blocking:
+        acquire(True)
+        return
+    while not acquire(False):
+        if not blocking:
+            # Another owner's turn, not a spent allowance: nothing is marked deferred.
+            raise Deferred("cleanup " + what + " is busy")
+        assert allowance is not None
+        left = allowance.remaining(publication=publication)
+        if left <= 0:
+            raise allowance.defer(what)
+        time.sleep(min(_LOCK_POLL, left))
+
+
+def _flocker(handle: Any, mode: int) -> Callable[[bool], bool]:
+    def acquire(block: bool) -> bool:
+        try:
+            fcntl.flock(handle, mode if block else mode | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        return True
+    return acquire
+
 
 @contextlib.contextmanager
 def ownership_lock(data_dir: Path) -> Iterator[None]:
     """Short journal/ownership mutations; never host work or a dispatcher tick."""
-    with _path_lock(Path(data_dir).resolve() / "dispatcher" / "cleanup.lock"):
+    with _path_lock(Path(data_dir).resolve() / "dispatcher" / "cleanup.lock", publication=True):
         yield
 
 
 @contextlib.contextmanager
-def _path_lock(target: Path) -> Iterator[None]:
-    """Reentrant in one thread, exclusive across threads and installed processes."""
+def _path_lock(target: Path, *, blocking: bool = True, publication: bool = False) -> Iterator[None]:
+    """Reentrant in one thread, exclusive across threads and installed processes.
+
+    Inside an automatic replay the wait is bounded by its allowance (see `_wait`).
+    """
     path = str(target)
     with _guard:
         lock = _locks.setdefault(path, threading.RLock())
-    with lock:
+    _wait(path, lambda block: lock.acquire(blocking=block), blocking=blocking, publication=publication)
+    try:
         held = getattr(_held, "paths", set())
         if path in held:
             yield
             return
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a+") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+            _wait(path, _flocker(handle, fcntl.LOCK_EX), blocking=blocking, publication=publication)
             _held.paths = held | {path}
             try:
                 yield
             finally:
                 _held.paths = held
                 fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        lock.release()
 
 
 @contextlib.contextmanager
@@ -83,7 +193,7 @@ def bulk_lane(data_dir: Path, *, exclusive: bool = False) -> Iterator[None]:
         return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a+") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        _wait(path, _flocker(handle, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH))
         _held.bulk_lanes = {**held, path: exclusive}
         try:
             yield
@@ -93,11 +203,13 @@ def bulk_lane(data_dir: Path, *, exclusive: bool = False) -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def reference_lock(data_dir: Path, reference: str, *, lane: str = "effects") -> Iterator[None]:
+def reference_lock(data_dir: Path, reference: str, *, lane: str = "effects",
+                   blocking: bool = True) -> Iterator[None]:
     """Separate long lifecycle work from the short board/cleanup effect fence.
 
     Board writers never take the lifecycle lane. The effects lane orders state or
-    claim changes against actual workspace disposal and the launch syscall.
+    claim changes against actual workspace disposal and the launch syscall. A caller
+    that is not `blocking` takes the lane only if no one else holds it (`Deferred`).
     """
     root = Path(data_dir).resolve()
     with bulk_lane(root) if lane == "effects" else contextlib.nullcontext():
@@ -108,7 +220,7 @@ def reference_lock(data_dir: Path, reference: str, *, lane: str = "effects") -> 
             yield
             return
         token = hashlib.sha256(reference.encode()).hexdigest()
-        with _path_lock(root / "dispatcher" / lane / (token + ".lock")):
+        with _path_lock(root / "dispatcher" / lane / (token + ".lock"), blocking=blocking):
             yield
 
 
@@ -137,11 +249,19 @@ def capacity_serialized(method):
 
 
 def owner_operation(method):
-    """Protect an owner's transient manifest context, without blocking board writers."""
+    """Protect an owner's transient manifest context, without blocking board writers.
+
+    Inside an automatic replay the wait for another operation of the same owner (an inventory or a
+    targeted replay under its own policy) is bounded by the allowance (`_wait`); a refusal is
+    `Deferred` before anything is read, reserved or written. Nested use is reentrant as before.
+    """
     @functools.wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self._operations:
+        _wait("cleanup owner operation", lambda block: self._operations.acquire(blocking=block))
+        try:
             return method(self, *args, **kwargs)
+        finally:
+            self._operations.release()
     return wrapped
 
 
@@ -177,11 +297,40 @@ def journal_mutation(method):
     return wrapped
 
 
+#: The bound of one cleanup Git child outside an automatic replay, and its ceiling inside one.
+GIT_TIMEOUT = 30.0
+
+
+def _run_git(argv: list[str], *, input: str | None = None, env: dict[str, str] | None = None,
+             pass_fds: tuple[int, ...] = ()) -> subprocess.CompletedProcess[str]:
+    """One cleanup Git child, bounded by `GIT_TIMEOUT`.
+
+    Inside an automatic replay it runs in its own process group (`_proc.run_isolated`) within what
+    is left of the allowance: a child still running then gets `SIGTERM` to its whole group, so Git
+    removes the lock files of an unfinished ref transaction itself and a hook it runs ends with it,
+    then the group is killed and reaped. Nothing it started is left to act after the call, which
+    is that replay's deferral. Every other caller keeps the direct child's bound as it was.
+    """
+    allowance = _ALLOWANCE.get()
+    what = "Git " + (argv[3] if len(argv) > 3 else "")
+    if allowance is None:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=GIT_TIMEOUT, check=False,
+                              input=input, env=env, pass_fds=pass_fds)
+    allowance.timeout(GIT_TIMEOUT, what)
+    try:
+        return _proc.run_isolated(argv, input=input, env=env, pass_fds=pass_fds, timeout=GIT_TIMEOUT,
+                                  within=allowance.remaining)
+    except subprocess.TimeoutExpired as exc:
+        if getattr(exc, "killed", False):
+            raise allowance.defer(what + " (it outlived SIGTERM and was killed: any lock file it held "
+                                  "is left for Git's own recovery, none is removed by cleanup)") from exc
+        raise allowance.defer(what + " (its process group was ended at the bound)") from exc
+
+
 def _read_git(repo: Path | str, *args: str) -> subprocess.CompletedProcess[str]:
     """Every Git read of the cleanup owner: with no optional locks, `status` never refreshes the
     index, so inventory and manifest planning write nothing into a repository or worktree."""
-    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30,
-                          env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}, check=False)
+    return _run_git(["git", "-C", str(repo), *args], env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
 
 
 def _git(repo: Path, *args: str, allow: bool = False) -> str:
@@ -431,6 +580,67 @@ def _unlink_confined(directories: _ConfinedDirectories, name: str) -> None:
     os.unlink(parts[-1], dir_fd=directory)
 
 
+def _json_names(directory: Path, what: str) -> list[str]:
+    """The stems of `directory`'s `*.json` files, sorted, read entry by entry from the native
+    iterator with the current allowance checked before each. A scan cut short raises `Deferred`:
+    no caller ever takes a partial listing for the whole directory. A missing directory has none."""
+    names: list[str] = []
+    try:
+        scan = os.scandir(directory)
+    except FileNotFoundError:
+        return names
+    with scan:
+        for entry in scan:
+            _check(what)
+            if entry.name.endswith(".json"):
+                names.append(entry.name[:-len(".json")])
+    return sorted(names)
+
+
+def _remove_namespace(namespace: Path) -> None:
+    """Remove the exactly owned environment namespace like `shutil.rmtree`: every directory opened
+    without following a link, every entry unlinked relative to its parent's descriptor, and the
+    current allowance checked between entries. A cut leaves a smaller namespace whose retained
+    identity (`generated_environment`) the next attempt resumes from. Every other caller keeps
+    `shutil.rmtree` itself."""
+    if _allowance() is None:
+        shutil.rmtree(namespace)
+        return
+    parent = os.open(namespace.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        directory = os.open(namespace.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+        try:
+            _clear_directory(directory)
+        finally:
+            os.close(directory)
+        os.rmdir(namespace.name, dir_fd=parent)
+    finally:
+        os.close(parent)
+
+
+def _clear_directory(directory: int) -> None:
+    """Empty one directory, the allowance checked before each entry is read and removed. Entries are
+    removed as the scan yields them, never collected first; a scan that removed anything is
+    repeated, since removing while reading may leave entries the scan did not return."""
+    while True:
+        removed = False
+        with os.scandir(directory) as scan:
+            for entry in scan:
+                _check("environment namespace removal")
+                if entry.is_dir(follow_symlinks=False):
+                    child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                    try:
+                        _clear_directory(child)
+                    finally:
+                        os.close(child)
+                    os.rmdir(entry.name, dir_fd=directory)
+                else:
+                    os.unlink(entry.name, dir_fd=directory)
+                removed = True
+        if not removed:
+            return
+
+
 @contextlib.contextmanager
 def _pinned_root(identity: dict[str, Any]) -> Iterator[int]:
     """The recorded workspace directory itself, opened from `/` without following any component.
@@ -461,9 +671,8 @@ def _pinned_root(identity: dict[str, Any]) -> Iterator[int]:
 
 def _read_pinned_git(root: int, *args: str) -> subprocess.CompletedProcess[str]:
     """`_read_git` inside the pinned directory: Git runs in the descriptor's own inode."""
-    return subprocess.run(["git", "-C", f"/proc/self/fd/{root}", *args], capture_output=True, text=True,
-                          timeout=30, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}, check=False,
-                          pass_fds=(root,))
+    return _run_git(["git", "-C", f"/proc/self/fd/{root}", *args],
+                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}, pass_fds=(root,))
 
 
 def _identity(repo: Path, workspace: str, branch: str) -> dict[str, Any]:
@@ -657,6 +866,10 @@ class CleanupJournal:
             "cleanup_targets", default=None)
         # Successful replacements made through this instance, by file class, and the bytes they wrote.
         self.writes: dict[str, int] = {"intent": 0, "meta": 0, "generated": 0, "bytes": 0}
+        # What `due_keys` last read of each intent file, by the file's stat identity, and how many
+        # intent files its last scan found.
+        self._due: dict[str, tuple[tuple[int, ...], dict[str, Any]]] = {}
+        self.selection_size = 0
 
     # Layout ------------------------------------------------------------------------------------
 
@@ -717,7 +930,9 @@ class CleanupJournal:
                 return {"version": _LAYOUT_VERSION, "intents": {}, "generated": {}, "replay_cursor": ""}
         meta = self._meta()
         intents = {}
-        for file in sorted((self.path / "intents").glob("*.json")):
+        for name in _json_names(self.path / "intents", "cleanup journal read"):
+            _check("cleanup journal read")
+            file = self.path / "intents" / (name + ".json")
             intent = self._load(file)
             if not _valid_intent(intent):
                 raise HostError("cleanup evidence has an unsupported shape: " + file.name)
@@ -745,6 +960,53 @@ class CleanupJournal:
             raise KeyError(key)
         return intent
 
+    def due_keys(self, now: float, cursor: str = "", read: list[str] | None = None) -> Iterator[str]:
+        """The automatic replay's selection: the keys `_attempt_due` admits at `now`, in rotation
+        order from `cursor`, yielded as they are read, every key read appended to `read`.
+
+        The caller pulls only as many as it can attempt, and the allowance is checked before each
+        read: what was read is always a prefix of the full rotation, and the next invocation goes on
+        from where this one got (`replay`), so slow reads never starve the attempts. Only a file
+        replaced since this instance last read it (any producer's replacement changes its stat
+        identity, as `intent_state`) is read again, and only its eligibility fields are kept.
+        """
+        read = [] if read is None else read
+        if not self._published():
+            keys = sorted(key for key, intent in self.read()["intents"].items() if _attempt_due(intent, now))
+            for key in [key for key in keys if key > cursor] + [key for key in keys if key <= cursor]:
+                read.append(key)
+                yield key
+            return
+        names = _json_names(self.path / "intents", "intent selection")
+        self.selection_size = len(names)
+        for key in [key for key in names if key > cursor] + [key for key in names if key <= cursor]:
+            try:
+                _check("intent selection")
+            except Deferred:
+                return
+            try:
+                stat = (self.path / "intents" / (key + ".json")).stat()
+            except FileNotFoundError:
+                read.append(key)
+                continue  # never published, or replaced by a rename while this scan read the directory
+            state = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+            cached = self._due.get(key)
+            if cached is None or cached[0] != state:
+                intent = self._load(self.path / "intents" / (key + ".json"))
+                if not _valid_intent(intent):
+                    raise HostError("cleanup evidence has an unsupported shape: " + key + ".json")
+                cached = (state, {"status": intent["status"], "retry": intent.get("retry"),
+                                  "progress": {"terminal": intent["progress"].get("terminal")}})
+                self._due[key] = cached
+            read.append(key)
+            if _attempt_due(cached[1], now):
+                yield key
+
+    def replay_cursor(self) -> str:
+        if not self._published():
+            return str((self._read_legacy() or {}).get("replay_cursor") or "")
+        return str(self._meta().get("replay_cursor") or "")
+
     def intent_state(self, key: str) -> tuple[int, ...] | None:
         """The stored file's identity: any replacement by any producer changes it. No bytes are read."""
         try:
@@ -764,7 +1026,10 @@ class CleanupJournal:
             depth = self._generated_depth()
             generated: dict[str, str] = {}
             try:
-                for file in sorted(_generated_directory(self.path, depth).glob("*.json")):
+                directory = _generated_directory(self.path, depth)
+                for name in _json_names(directory, "generated digest read"):
+                    _check("generated digest read")
+                    file = directory / (name + ".json")
                     bucket = self._load(file)
                     if not isinstance(bucket, dict):
                         raise HostError("cleanup evidence has an unsupported shape: generated/" + file.name)
@@ -885,6 +1150,11 @@ class CleanupJournal:
         """
         if not os.path.lexists(self.legacy):
             return False
+        allowance = _allowance()
+        if allowance is not None:
+            # A one-time whole-document migration is no automatic replay's work: the dispatcher's
+            # ordinary journal writers migrate it, and the replay waits for them.
+            raise allowance.defer("v1 cleanup journal migration")
         pending = not self._published()
         self._ensure()
         return pending
@@ -1080,6 +1350,8 @@ class CleanupJournal:
         intent = self.load_intent(key)
         if intent is None or not _attempt_due(intent, now):
             return None
+        # A spent allowance reserves nothing: the intent keeps its due time (`Deferred`).
+        _check("attempt reservation")
         intent["retry"] = {"last_attempt_at": now, "next_attempt_at": now + RETRY_COOLDOWN}
         _begin_attempt(intent)
         self._write_intent(key, intent)
@@ -1175,8 +1447,12 @@ class CleanupOwner:
         self._remembered: dict[str, dict[str, Any]] = {}
         # The wall clock every attempt reservation and due check reads (stdlib unless injected).
         self.clock: Callable[[], float] = getattr(runtime, "cleanup_clock", None) or time.time
+        # The elapsed clock of an automatic replay's allowance (stdlib monotonic unless injected).
+        self.monotonic: Callable[[], float] = getattr(runtime, "cleanup_monotonic", None) or time.monotonic
         # Whether this thread's last replay_one reserved and ran an attempt.
         self._local = threading.local()
+        # What the last `replay` invocation selected, attempted, skipped and deferred (see `replay`).
+        self.last_replay: dict[str, Any] = {}
 
     def _workspace_identity(self, project: str, reference: str, record: Any) -> dict[str, Any] | None:
         binding = self.runtime.catalog.binding(project)
@@ -1413,14 +1689,15 @@ class CleanupOwner:
                                 and other["progress"].get("heads_stopped")
                                 and other["progress"].get("claim_settled"))))
 
-    def _attempt_owners(self, intent: dict[str, Any]) -> list[str]:
-        return sorted(key for key, other in self.journal.read()["intents"].items()
-                      if other["task"]["id"] == intent["task"]["id"] and other["task"].get("kind") != "observer"
-                      and other["record"].get("attempt_id"))
+    def _attempt_owners(self, intent: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        """The card's attempt owners as one journal read found them, by key in order."""
+        return {key: other for key, other in sorted(self.journal.read()["intents"].items())
+                if other["task"]["id"] == intent["task"]["id"] and other["task"].get("kind") != "observer"
+                and other["record"].get("attempt_id")}
 
-    def _follow(self, intent: dict[str, Any], owners: list[str]) -> None:
+    def _follow(self, intent: dict[str, Any], intents: dict[str, dict[str, Any]]) -> None:
         """A duplicate empty-attempt obligation takes its attempt owner's settlement; no effects."""
-        intents = self.journal.read()["intents"]
+        owners = list(intents)
         states = [intents[key] for key in owners]
         intent["progress"]["settled_by"] = owners
         for flag in ("heads_stopped", "claim_settled", "preservation_verified"):
@@ -1499,12 +1776,15 @@ class CleanupOwner:
             reference = (TaskRef.sprint(task["ref"]) if task.get("kind") == "observer"
                          else TaskRef.card(task["ref"]))
             runs = [HeadRun.from_json(raw) for raw in intent["heads"]]
+            allowance = _allowance()
+            # Inside an automatic replay a terminal scope's native disappearance proof is cut to it.
+            bound = {} if allowance is None else {"remaining": allowance.remaining}
             if replaced:
                 # Only the recorded runs' own scope owners and bindings; the
                 # workspace-wide inspection would reach the successor's scopes.
-                fence(intent["record"].get("workspace", ""), reference, runs, recorded_only=True)
+                fence(intent["record"].get("workspace", ""), reference, runs, recorded_only=True, **bound)
             else:
-                fence(intent["record"].get("workspace", ""), reference, runs)
+                fence(intent["record"].get("workspace", ""), reference, runs, **bound)
 
     def _project_binding(self, project: str) -> dict[str, Any]:
         """The card project's binding; a project this installation does not register is terminal."""
@@ -1598,8 +1878,16 @@ class CleanupOwner:
                 self._planned.append({"effect": "stop-head", "run_id": run.run_id, "role": run.role,
                                       "scope_generation": run.scope_generation})
                 continue
+            allowance = _allowance()
+            # Inside an automatic replay the runtime's own waits (supervisor exchange, scope stop,
+            # exit confirmation) are cut to what is left; an unconfirmed stop is a pending receipt.
+            bound = {} if allowance is None else {"remaining": allowance.remaining}
+            if allowance is not None:
+                allowance.timeout(GIT_TIMEOUT, "head stop")
             receipt = self.runtime.host.head_runtime_for(target).stop(
-                target, StopInitiator(actor="ummanu-dispatcher", reason="owned residue cleanup"))
+                target, StopInitiator(actor="ummanu-dispatcher", reason="owned residue cleanup"), **bound)
+            if not receipt.ok and allowance is not None and allowance.remaining() <= 0:
+                raise allowance.defer("head stop (" + str(receipt.reason)[:200] + ")")
             if not receipt.ok:
                 raise HostError("cleanup head stop pending: " + receipt.reason)
             settled = getattr(receipt, "run", None)
@@ -1653,8 +1941,21 @@ class CleanupOwner:
 
     def _provenance(self, boundary: str) -> None:
         require = getattr(self.runtime.host, "_require_production_runtime", None)
-        if callable(require):
+        if not callable(require):
+            return
+        allowance = _allowance()
+        if allowance is None:
             require(boundary)
+            return
+        # The provenance probe is a child process: inside an automatic replay it runs within the
+        # allowance, and one cut short is the allowance's refusal, not a provenance verdict.
+        allowance.timeout(GIT_TIMEOUT, "runtime provenance " + boundary)
+        try:
+            require(boundary, allowance.remaining)
+        except HostError as exc:
+            if allowance.remaining() <= 0:
+                raise allowance.defer("runtime provenance " + boundary) from exc
+            raise
 
     def _settle_claim(self, intent: dict[str, Any]) -> None:
         with self.admission(intent["task"], intent=intent):
@@ -1702,6 +2003,7 @@ class CleanupOwner:
             for row in status.split("\0"):
                 if not row:
                     continue
+                _check("workspace status classification")
                 name = row[3:]
                 if row[:2] in {"??", "!!"}:
                     if name.startswith(".ummanu-task-env/") and environment == "dispatcher":
@@ -1901,6 +2203,10 @@ class CleanupOwner:
                 "environment": "absent" if missing else self._environment_owner(intent, path)})
             self._plan_removed.add(workspace)
             return
+        allowance = _allowance()
+        if allowance is not None:
+            # No new destructive stage starts in the allowance's last moments.
+            allowance.require(EFFECT_FLOOR, "workspace removal admission")
         with self.admission(intent["task"], intent=intent):
             if not missing:
                 # Board and journal admission does not cover the filesystem: the exact recorded
@@ -1916,11 +2222,15 @@ class CleanupOwner:
                         raise HostError("cleanup workspace changed since its dirty check; workspace retained")
                     with _ConfinedDirectories(root) as directories:
                         for name in caches:
+                            # Each entry is disposable by itself: a cut leaves the rest for the next
+                            # attempt's full proof, never a partial unproven state.
+                            _check("ignored cache removal")
                             _unlink_confined(directories, name)
             # No forced removal: first delete only exact generated bytes whose
             # ownership was validated above. Git independently refuses dirty work.
             generated = self.journal.generated_digests()
             for name, digest in generated.items():
+                _check("generated file removal")
                 file = Path(name)
                 # Nested generated files, such as an editable install's metadata, qualify only through
                 # real directories of this workspace: a symlinked parent never leads the unlink outside.
@@ -1936,16 +2246,19 @@ class CleanupOwner:
                                                    "schema_version": 1}
                 intent["progress"]["environment_removal_started"] = True
                 self._checkpoint_intent(intent)
-                shutil.rmtree(namespace)
+                _remove_namespace(namespace)
+            if allowance is not None:
+                allowance.require(EFFECT_FLOOR, "Git worktree removal admission")
             # Admit Git only after exact identity, author-work and retention proof.
             intent["progress"]["removal_started"] = True
             self._checkpoint_intent(intent)
             def run_git(args, cwd):
+                argv = ["git", "-C", str(cwd), *args]
                 capture = getattr(self.runtime.host, "run_capture", None)
-                if callable(capture):
-                    return capture(["git", "-C", str(cwd), *args], "owned cleanup Git")
-                return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30,
-                                      check=False)
+                if allowance is not None or not callable(capture):
+                    # An automatic replay's removal runs within its allowance (`_run_git`).
+                    return _run_git(argv)
+                return capture(argv, "owned cleanup Git")
             if missing:
                 removed = git_worktree.remove(run_git, repo, path,
                                              admitted_missing=lambda: self._admitted_registration(intent, repo))
@@ -2000,16 +2313,20 @@ class CleanupOwner:
                                   "base": "refs/heads/" + base, "base_tip": main,
                                   "merged": True, "published": True})
             return
+        allowance = _allowance()
+        if allowance is not None:
+            allowance.require(EFFECT_FLOOR, "ref deletion admission")
         with self.admission(intent["task"], intent=intent):
             # The integration witness and candidate tip are locked and verified in
             # one native Git ref transaction. Never use branch -D after a stale probe.
             command = f"start\nverify refs/heads/{base} {main}\ndelete {ref} {tip}\nprepare\ncommit\n"
             intent["progress"]["ref_delete_admitted"] = {"ref": ref, "tip": tip, "integration_tip": main}
             self._checkpoint_intent(intent)
-            result = subprocess.run(["git", "-C", str(repo), "update-ref", "--stdin"], input=command,
-                                    capture_output=True, text=True, timeout=30, check=False)
+            result = _run_git(["git", "-C", str(repo), "update-ref", "--stdin"], input=command)
             if result.returncode:
-                raise HostError("cleanup ref transaction refused a changed or locked tip")
+                # Git names a lock it found held; cleanup never removes one, whoever left it.
+                raise HostError("cleanup ref transaction refused a changed or locked tip: "
+                                + result.stderr.strip()[:400])
 
     def _save(self, value: dict[str, Any]) -> None:
         if self._planned is None:
@@ -2034,7 +2351,10 @@ class CleanupOwner:
         # Replay plans against the stored (migrated) form, which its checkpoints compare with.
         self.journal.migrate()
         task = self.journal.intent(key)["task"]
-        with reference_lock(self.data_dir, task["ref"], lane="lifecycle"), self.journal.targeted({key}):
+        # An automatic replay never queues behind another owner's lifecycle operation on the card:
+        # a busy lane is that card's turn elsewhere, skipped before any reservation (`Deferred`).
+        with reference_lock(self.data_dir, task["ref"], lane="lifecycle", blocking=_allowance() is None), \
+                self.journal.targeted({key}):
             self._admitted = None
             # Reserved before any Git, host or board effect; not due means nothing is read or written.
             reserved = self.journal.reserve_attempt(key, self.clock())
@@ -2061,8 +2381,8 @@ class CleanupOwner:
         intent = value["intents"][key]
         if intent["status"] in {"owned", "completed"} or _terminal(intent) is not None:
             return intent
+        # The reservation already published this begun state; planning saves nothing.
         _begin_attempt(intent)
-        self._save(value)
         if _empty_attempt(intent):
             owners = self._attempt_owners(intent)
             if owners:
@@ -2122,30 +2442,113 @@ class CleanupOwner:
         self._save(value)
         return intent
 
-    def replay(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def replay(self, *, limit: int = 20, allowance: float | None = None) -> list[dict[str, Any]]:
+        """Attempt up to `limit` due intents, rotating from the stored cursor.
+
+        With `allowance` (the production tick's automatic replay) the whole invocation, selection
+        and final cursor publication included, runs on one monotonic allowance: every lock wait, Git
+        child, head stop, board row lock and traversal it admits is cut to what is left, a due intent
+        is reserved only while `ATTEMPT_FLOOR` remains, and one cut short stays pending with its
+        durable progress. Every other caller passes none and keeps its waits as they were.
+        `last_replay` describes the invocation for the tick's telemetry.
+        """
         if not 1 <= limit <= 100:
             raise HostError("cleanup replay limit must be between 1 and 100")
-        self.journal.migrate()
-        value = self.journal.read()
-        now = self.clock()
-        # Only due intents take a slot: cooling and terminal ones are neither replayed nor written.
-        keys = [key for key, intent in sorted(value["intents"].items()) if _attempt_due(intent, now)]
-        cursor = value.get("replay_cursor", "")
-        keys = [key for key in keys if key > cursor] + [key for key in keys if key <= cursor]
-        # A due snapshot is not a reservation: only an attempt this owner reserved takes a slot and
-        # moves the cursor. One lost to a concurrent owner is skipped, and the next due one is tried.
-        result: list[dict[str, Any]] = []
-        attempted: list[str] = []
-        for key in keys:
-            if len(attempted) == limit:
-                break
-            self._local.attempted = False
-            intent = self.replay_one(key)
-            if getattr(self._local, "attempted", False):
+        budget = None if allowance is None else Allowance(allowance, clock=self.monotonic)
+        writes = dict(self.journal.writes)
+        report: dict[str, Any] = {"due": 0, "attempted": 0, "deferred": 0, "skipped": 0, "busy": 0, "lost": 0,
+                                  "unread": 0, "cursor": "unchanged"}
+        token = _ALLOWANCE.set(budget)
+        try:
+            with contextlib.ExitStack() as bounded:
+                if budget is not None:
+                    # Every board read and write of this invocation, standalone or in a transaction,
+                    # waits only for what is left of the same work allowance.
+                    for client in self._board_clients():
+                        bounded.enter_context(client.within(
+                            budget.remaining, lambda what, budget=budget: budget.defer(what)))
+                return self._replay_batch(limit, budget, report)
+        finally:
+            _ALLOWANCE.reset(token)
+            if budget is not None:
+                report.update(allowance_ms=round(budget.seconds * 1000.0, 3),
+                              spent_ms=round(budget.spent() * 1000.0, 3),
+                              deferred_at=budget.deferred_at[:200])
+            report["writes"] = {name: self.journal.writes[name] - writes[name] for name in writes}
+            self.last_replay = report
+
+    def _board_clients(self) -> list[Any]:
+        """The distinct board store clients the owner's readers and writer use, that take a deadline."""
+        clients: dict[int, Any] = {}
+        for name in ("reader", "writer", "sprints"):
+            client = getattr(getattr(self.runtime, name, None), "client", None)
+            if callable(getattr(client, "within", None)):
+                clients[id(client)] = client
+        return list(clients.values())
+
+    def _replay_batch(self, limit: int, budget: Allowance | None,
+                      report: dict[str, Any]) -> list[dict[str, Any]]:
+        read: list[str] = []
+        try:
+            self.journal.migrate()
+            cursor = self.journal.replay_cursor()
+            self.journal.selection_size = 0
+            # Only due intents are yielded: cooling and terminal ones are neither replayed nor written.
+            selection = self.journal.due_keys(self.clock(), cursor, read)
+            due: list[str] = []
+            result: list[dict[str, Any]] = []
+            attempted: list[str] = []
+            lost: set[str] = set()
+            # A due key is not a reservation: only an attempt this owner reserved takes a slot. One
+            # lost to a concurrent owner is skipped, and the next due one is tried. One skipped before
+            # its reservation (no allowance left, or its card's lifecycle lane busy) consumes no
+            # cooldown and stays ahead of the cursor for the next invocation.
+            for key in selection:
+                due.append(key)
+                if budget is not None and budget.remaining() < ATTEMPT_FLOOR:
+                    budget.defer("admission of the next due intent")
+                    report["skipped"] += 1
+                    break
+                self._local.attempted = False
+                deferrals = budget.deferrals if budget is not None else 0
+                try:
+                    intent = self.replay_one(key)
+                except Deferred:
+                    report["busy" if budget is not None and budget.remaining() > 0 else "skipped"] += 1
+                    continue
+                if not getattr(self._local, "attempted", False):
+                    report["lost"] += 1
+                    lost.add(key)
+                    continue
                 result.append(intent)
                 attempted.append(key)
-        if attempted:
-            self.journal.set_replay_cursor(attempted[-1])
+                if (budget is not None and intent["status"] == "pending"
+                        and (budget.deferrals > deferrals or budget.remaining() <= 0)):
+                    report["deferred"] += 1
+                if len(attempted) == limit:
+                    break
+        except Deferred:
+            return []
+        report.update(due=len(due), attempted=len(attempted),
+                      unread=max(0, self.journal.selection_size - len(read)))
+        # The cursor moves past everything this invocation observed: attempted, lost, skipped at
+        # the floor, refused by a busy lane or owner, or read as not due. A due intent left this way
+        # was never reserved (its due time is untouched) and is reached again on the next rotation;
+        # a slow first read can therefore never hold every later intent back. When the selection
+        # read the whole journal every due intent was observed, and the cursor rests on the last
+        # attempt as before. Written once, and only when there was due work or the selection
+        # stopped short, so an idle invocation writes nothing. `cursor` says whether it advanced.
+        frontier = read[-1] if read else cursor
+        if attempted and not report["unread"]:
+            frontier = attempted[-1]
+        if not (due or report["unread"]) or frontier == cursor:
+            report["cursor"] = "unchanged"
+        else:
+            try:
+                self.journal.set_replay_cursor(frontier)
+                report["cursor"] = "advanced"
+            except Deferred:
+                report["cursor"] = "unwritten"
         return result
 
     def _bindings(self, project: str | None = None) -> dict[str, dict[str, Any]]:
