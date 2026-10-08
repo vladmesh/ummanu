@@ -2742,8 +2742,9 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in results], ["preserved", "preserved"])
         changed = {name for name, body in self.intent_files().items() if before[name] != body}
         self.assertEqual(changed, {f"intents/{key}.json" for key in due})
-        # Each due intent: its reservation, its heads-stopped checkpoint and its outcome; the cursor once.
-        self.assertEqual(self.owner.journal.writes["intent"] - writes["intent"], 6)
+        # Each due intent: its reservation and its outcome, which carries the heads-stopped flag of
+        # an attempt without a workspace or ref effect (ummanu-150); the cursor once.
+        self.assertEqual(self.owner.journal.writes["intent"] - writes["intent"], 4)
         self.assertEqual(self.owner.journal.writes["meta"] - writes["meta"], 1)
 
     def ignored_caches(self, workspace=None):
