@@ -290,9 +290,14 @@ def _next_attempt(intent: dict[str, Any]) -> float | None:
     """The stored due time, or None when there is none this clock could have written."""
     retry = intent.get("retry")
     due = retry.get("next_attempt_at") if isinstance(retry, dict) else None
-    if isinstance(due, bool) or not isinstance(due, (int, float)) or not math.isfinite(due):
+    if isinstance(due, bool) or not isinstance(due, (int, float)):
         return None
-    return float(due)
+    try:
+        # Total on any JSON number: an integer beyond float range is malformed, not a crash.
+        value = float(due)
+    except OverflowError:
+        return None
+    return value if math.isfinite(value) else None
 
 
 def _attempt_due(intent: dict[str, Any], now: float) -> bool:
@@ -326,42 +331,95 @@ def _begin_attempt(intent: dict[str, Any]) -> None:
 _CACHE_DIRECTORIES = frozenset({".pytest_cache", "__pycache__", ".venv"})
 
 
-def _cache_entry(path: Path, name: str) -> bool:
-    """An ignored entry strictly inside a cache directory reached through real directories only.
-
-    Every component from the workspace down to the entry's parent is a real directory (lstat), the
-    entry itself a regular file or a symlink (unlinked, never followed); a symlinked cache or parent,
-    a nested repository Git reports as a directory, or an entry naming the cache itself is not one.
-    """
+def _cache_name(name: str) -> bool:
+    """A relative Git path strictly inside a cache directory: never the cache itself or a directory."""
     parts = PurePosixPath(name).parts
-    if (not parts or name.endswith("/") or PurePosixPath(name).is_absolute()
-            or any(part in {"", ".", ".."} for part in parts)
-            or not any(part in _CACHE_DIRECTORIES for part in parts[:-1])):
-        return False
-    current = path
-    try:
-        for part in parts[:-1]:
-            current = current / part
-            if not stat_mode.S_ISDIR(os.lstat(current).st_mode):
-                return False
-        mode = os.lstat(path / name).st_mode
-    except OSError:
-        return False
-    return stat_mode.S_ISREG(mode) or stat_mode.S_ISLNK(mode)
+    return bool(parts) and not (name.endswith("/") or PurePosixPath(name).is_absolute()
+                                or any(part in {"", ".", ".."} for part in parts)
+                                or not any(part in _CACHE_DIRECTORIES for part in parts[:-1]))
 
 
-def _unlink_confined(path: Path, name: str) -> None:
-    """Unlink one entry below `path`, opening each parent without following a symlink."""
-    parts = PurePosixPath(name).parts
-    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def _open_below(root: int, parts: tuple[str, ...]) -> int:
+    """A descriptor of root/parts..., each component a real directory opened without following."""
+    directory = os.dup(root)
     try:
-        for part in parts[:-1]:
+        for part in parts:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
             os.close(directory)
             directory = child
+    except BaseException:
+        os.close(directory)
+        raise
+    return directory
+
+
+def _cache_entry(root: int, name: str) -> bool:
+    """A regular file strictly inside a cache directory, reached from the pinned root through real
+    directories only. A symlinked cache, parent or leaf, or a nested repository Git reports as a
+    directory, is not one: route 4 excludes every symlink path."""
+    if not _cache_name(name):
+        return False
+    parts = PurePosixPath(name).parts
+    try:
+        directory = _open_below(root, parts[:-1])
+    except OSError:
+        return False
+    try:
+        mode = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode
+    except OSError:
+        return False
+    finally:
+        os.close(directory)
+    return stat_mode.S_ISREG(mode)
+
+
+def _unlink_confined(root: int, name: str) -> None:
+    """Unlink one regular cache file below the pinned root; nothing on the way is followed."""
+    if not _cache_name(name):
+        raise HostError("cleanup cache entry is not inside a cache directory: " + name)
+    parts = PurePosixPath(name).parts
+    directory = _open_below(root, parts[:-1])
+    try:
+        if not stat_mode.S_ISREG(os.stat(parts[-1], dir_fd=directory, follow_symlinks=False).st_mode):
+            raise HostError("cleanup cache entry is no longer a regular file: " + name)
         os.unlink(parts[-1], dir_fd=directory)
     finally:
         os.close(directory)
+
+
+@contextlib.contextmanager
+def _pinned_root(identity: dict[str, Any]) -> Iterator[int]:
+    """The recorded workspace directory itself, opened from `/` without following any component.
+
+    A substituted ancestor or workspace (a symlink anywhere on the path) fails to open, and a
+    replaced directory fails the recorded device/inode check. Everything read or unlinked through
+    the descriptor is that exact directory, whatever later happens to the path.
+    """
+    path = Path(identity["workspace"])
+    if not path.is_absolute():
+        raise HostError("cleanup workspace path is not absolute")
+    try:
+        root = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            directory = _open_below(root, path.parts[1:])
+        finally:
+            os.close(root)
+    except OSError as exc:
+        raise HostError("cleanup workspace root is substituted or unreadable: " + str(path)) from exc
+    try:
+        stat = os.fstat(directory)
+        if (stat.st_dev, stat.st_ino) != (identity.get("device"), identity.get("inode")):
+            raise HostError("cleanup workspace root is not the recorded directory: " + str(path))
+        yield directory
+    finally:
+        os.close(directory)
+
+
+def _read_pinned_git(root: int, *args: str) -> subprocess.CompletedProcess[str]:
+    """`_read_git` inside the pinned directory: Git runs in the descriptor's own inode."""
+    return subprocess.run(["git", "-C", f"/proc/self/fd/{root}", *args], capture_output=True, text=True,
+                          timeout=30, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}, check=False,
+                          pass_fds=(root,))
 
 
 def _identity(repo: Path, workspace: str, branch: str) -> dict[str, Any]:
@@ -1073,8 +1131,8 @@ class CleanupOwner:
         self._remembered: dict[str, dict[str, Any]] = {}
         # The wall clock every attempt reservation and due check reads (stdlib unless injected).
         self.clock: Callable[[], float] = getattr(runtime, "cleanup_clock", None) or time.time
-        # Whether this owner's last replay_one reserved and ran an attempt (under _operations).
-        self._attempted = False
+        # Whether this thread's last replay_one reserved and ran an attempt.
+        self._local = threading.local()
 
     def _workspace_identity(self, project: str, reference: str, record: Any) -> dict[str, Any] | None:
         binding = self.runtime.catalog.binding(project)
@@ -1365,6 +1423,10 @@ class CleanupOwner:
             self._no_current_record(intent)
             raise Preserved(_LEGACY_REASON, verified=True)
         if not _no_workspace_attempt(intent):
+            # An attempt whose identity was never captured: the identity-specific refusal must not
+            # hide a project that is no longer registered (after the owner and head fences above).
+            if intent["task"].get("kind") != "observer":
+                self._registration(str(intent["task"]["project"]))
             raise Preserved("missing exact workspace/attempt ownership proof")
         self._terminal_card(current)
         self._no_current_record(intent)
@@ -1401,11 +1463,16 @@ class CleanupOwner:
                 fence(intent["record"].get("workspace", ""), reference, runs)
 
     def _project_binding(self, project: str) -> dict[str, Any]:
-        """The card project's binding; a project this installation does not register is terminal.
+        """The card project's binding; a project this installation does not register is terminal."""
+        self._registration(project)
+        return self.runtime.catalog.binding(project)
 
-        Decided from the catalog's registration table, never from a refusal's text: a registered
-        but disabled project, or a catalog with no readable table, is still the binding's own
-        (retryable) refusal. No repository is searched for, read or changed for an unregistered one.
+    def _registration(self, project: str) -> None:
+        """Raise Terminal when the catalog's readable registration table does not name the project.
+
+        Decided from the table, never from a refusal's text: a registered but disabled project, or a
+        catalog with no readable table, is still the binding's own (retryable) refusal. No
+        repository is searched for, read or changed for an unregistered one.
         """
         catalog = self.runtime.catalog
         registered = getattr(catalog, "registered_bindings", None)
@@ -1415,8 +1482,7 @@ class CleanupOwner:
                 name in registered for name in (project, project.replace("_", "-"))):
             raise Terminal("project-unregistered", "project " + project + " is not registered on this "
                            "installation; no repository was read or changed, and any Git residue of the "
-                           "attempt is retained with its recorded identity")
-        return catalog.binding(project)
+                           "attempt is left as it is with its recorded identity")
 
     def _binding(self, intent: dict[str, Any]) -> tuple[Path, str]:
         if intent["task"].get("kind") == "observer":
@@ -1563,15 +1629,21 @@ class CleanupOwner:
                                   "board_write": bool(claim.get("worker"))})
         intent["progress"]["claim_settled"] = True
 
-    def _dirty(self, intent: dict[str, Any], path: Path) -> tuple[list[str], list[str]]:
+    def _dirty(self, intent: dict[str, Any], path: Path,
+               root: int | None = None) -> tuple[list[str], list[str]]:
         """The one dirty predicate of planning, inventory and execution: dirty rows, disposable caches.
 
         Include ignored files. Only bytes written by the prompt producer, the existing exact
         environment namespace contract and, for the exact workspace of a card this replay's
-        admission saw Done, Git-ignored entries inside its Python caches (see `_cache_entry`) can
-        be disposable. Every later admission must see that same state. It reads only.
+        admission saw Done, Git-ignored regular files inside its Python caches (see `_cache_entry`)
+        can be disposable. Every later admission must see that same state. Status and cache
+        classification read the recorded directory through its pinned descriptor (`root`, or one
+        pinned here), never through a path that could be substituted. It reads only.
         """
-        result = _read_git(path, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "-z")
+        if root is None:
+            with _pinned_root(intent["identity"]) as pinned:
+                return self._dirty(intent, path, pinned)
+        result = _read_pinned_git(root, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "-z")
         if result.returncode:
             raise HostError("cleanup workspace status is unreadable")
         status = result.stdout
@@ -1592,7 +1664,7 @@ class CleanupOwner:
                 expected = generated.get(str(file))
                 if expected and not file.is_symlink() and file.is_file() and hashlib.sha256(file.read_bytes()).hexdigest() == expected:
                     continue
-                if row[:2] == "!!" and done and _cache_entry(path, name):
+                if row[:2] == "!!" and done and _cache_entry(root, name):
                     caches.append(name)
                     continue
             dirty.append(row)
@@ -1674,19 +1746,56 @@ class CleanupOwner:
                 raise HostError("cleanup commit retention witness disappeared")
             intent["commit_proof"] = {"tip": tip, "publication": "remote-tracking", "refs": refs.splitlines()}
             return
-        if intent["task"].get("kind") == "observer":
-            # The existing observer producer cuts detached worktrees from this
-            # empty, parentless root commit. Its named branch already retains
-            # it. No user commit or arbitrary local ref gains this authority.
-            from ummanu.dispatch.host import OBSERVER_REPO_BRANCH
-            ref = "refs/heads/" + OBSERVER_REPO_BRANCH
-            if (_ref_tip(repo, ref) == tip and _git(repo, "rev-list", "--parents", "-n", "1", tip) == tip
-                    and not _git(repo, "ls-tree", "-r", tip)):
-                intent["commit_proof"] = {"tip": tip, "publication": "owned observer root", "refs": [ref]}
-                return
+        if self._observer_root(intent, repo, tip):
+            return
         if not preservation_verified:
             raise HostError("cleanup interrupted removal awaits commit retention proof")
         raise Preserved("unpublished commits; workspace and candidate ref retained", verified=True)
+
+    def _observer_root(self, intent: dict[str, Any], repo: Path, tip: str) -> bool:
+        """Record the owned observer root as the tip's retention witness, when it is one."""
+        if intent["task"].get("kind") != "observer":
+            return False
+        # The existing observer producer cuts detached worktrees from this
+        # empty, parentless root commit. Its named branch already retains
+        # it. No user commit or arbitrary local ref gains this authority.
+        from ummanu.dispatch.host import OBSERVER_REPO_BRANCH
+        ref = "refs/heads/" + OBSERVER_REPO_BRANCH
+        if (_ref_tip(repo, ref) == tip and _git(repo, "rev-list", "--parents", "-n", "1", tip) == tip
+                and not _git(repo, "ls-tree", "-r", tip)):
+            intent["commit_proof"] = {"tip": tip, "publication": "owned observer root", "refs": [ref]}
+            return True
+        return False
+
+    def _retention_witness(self, intent: dict[str, Any], repo: Path) -> str:
+        """A ref that retains the recorded tip, before a registered Git attempt may end terminally.
+
+        A remote-tracking ref containing the tip, the owned observer root, or the attempt's own
+        candidate ref still containing it. Recorded in `commit_proof` and returned for the reason.
+        Without one the work behind the tip may be lost: that stays a retryable refusal, with the
+        obligation and the claim kept. A head stop receipt is no such witness.
+        """
+        identity = intent["identity"]
+        tip = str(identity.get("tip") or "")
+        if not tip:
+            raise HostError("cleanup terminal outcome needs a recorded tip; obligation and claim retained")
+        remote = _git(repo, "for-each-ref", "--format=%(refname)", "--contains=" + tip, "refs/remotes/")
+        if remote:
+            intent["commit_proof"] = {"tip": tip, "publication": "remote-tracking", "refs": remote.splitlines()}
+            return ", ".join(remote.splitlines())
+        if self._observer_root(intent, repo, tip):
+            return intent["commit_proof"]["refs"][0]
+        branch = str(identity.get("branch") or "")
+        current = _ref_tip(repo, branch) if branch else ""
+        if current:
+            contained = _read_git(repo, "merge-base", "--is-ancestor", tip, current)
+            if contained.returncode == 0:
+                intent["commit_proof"] = {"tip": tip, "publication": "candidate ref", "refs": [branch]}
+                return branch
+            if contained.returncode != 1:
+                raise HostError("cleanup commit retention evidence is unreadable")
+        raise HostError("cleanup found no remote-tracking or candidate ref retaining recorded tip " + tip
+                        + "; the obligation and the claim are retained")
 
     def _remove_workspace(self, intent: dict[str, Any], repo: Path) -> None:
         self._provenance("cleanup-before-worktree-remove")
@@ -1705,10 +1814,12 @@ class CleanupOwner:
             if not intent["progress"].get("removal_started"):
                 shared = self._shared_removal_proof(intent)
                 if not shared:
-                    # Current facts, just read: no directory, no registration, no admin entry.
+                    # Current facts, just read: no directory, no registration, no admin entry, and a
+                    # ref that still retains the recorded tip.
+                    witness = self._retention_witness(intent, repo)
                     raise Terminal("workspace-disappeared", "workspace directory, Git registration and "
                                    "admin entry are gone without removal evidence; nothing was removed by "
-                                   "cleanup, and the candidate ref and recorded identity are retained")
+                                   "cleanup; recorded tip " + identity["tip"] + " is retained by " + witness)
                 intent["progress"]["workspace_disposed_by"] = shared
             self._verify_commits(intent, repo)
             return
@@ -1718,9 +1829,11 @@ class CleanupOwner:
             if not intent["progress"].get("removal_started"):
                 # Only the exact recorded registration may end this way; a changed one is a refusal.
                 self._retained_registration(intent, repo)
+                witness = self._retention_witness(intent, repo)
                 raise Terminal("registration-without-directory", "workspace directory is missing while its "
                                "exact Git registration remains, with no admitted removal proof; the "
-                               "registration, admin entry and candidate ref are retained untouched")
+                               "registration and admin entry are retained untouched; recorded tip "
+                               + identity["tip"] + " is retained by " + witness)
             self._admitted_registration(intent, repo)
             self._verify_commits(intent, repo, preservation_verified=False)
         else:
@@ -1742,13 +1855,19 @@ class CleanupOwner:
             return
         with self.admission(intent["task"], intent=intent):
             if not missing:
-                # The same predicate again, under this admission (which saw the card unchanged):
-                # only Git-ignored cache entries go, each unlinked without following a symlink.
-                dirty, caches = self._dirty(intent, path)
-                if dirty:
-                    raise HostError("cleanup workspace changed since its dirty check; workspace retained")
-                for name in caches:
-                    _unlink_confined(path, name)
+                # Board and journal admission does not cover the filesystem: the exact recorded
+                # workspace is revalidated and pinned, and the same predicate runs again inside it.
+                # Only its Git-ignored regular cache files go, unlinked through that descriptor.
+                if _identity(repo, workspace, identity["branch"].removeprefix("refs/heads/")
+                             if identity["branch"] else "") != identity:
+                    raise HostError("cleanup workspace, registration or HEAD changed before its cache "
+                                    "effects; nothing was removed")
+                with _pinned_root(identity) as root:
+                    dirty, caches = self._dirty(intent, path, root)
+                    if dirty:
+                        raise HostError("cleanup workspace changed since its dirty check; workspace retained")
+                    for name in caches:
+                        _unlink_confined(root, name)
             # No forced removal: first delete only exact generated bytes whose
             # ownership was validated above. Git independently refuses dirty work.
             generated = self.journal.generated_digests()
@@ -1858,7 +1977,7 @@ class CleanupOwner:
         Every entrypoint (automatic replay, targeted replay, close, archive and teardown) reaches its
         effects only through here, so none can bypass the cooldown.
         """
-        intent, self._attempted = self._attempt(key)
+        intent, self._local.attempted = self._attempt(key)
         return intent
 
     def _attempt(self, key: str) -> tuple[dict[str, Any], bool]:
@@ -1964,10 +2083,20 @@ class CleanupOwner:
         keys = [key for key, intent in sorted(value["intents"].items()) if _attempt_due(intent, now)]
         cursor = value.get("replay_cursor", "")
         keys = [key for key in keys if key > cursor] + [key for key in keys if key <= cursor]
-        selected = keys[:limit]
-        result = [self.replay_one(key) for key in selected]
-        if selected:
-            self.journal.set_replay_cursor(selected[-1])
+        # A due snapshot is not a reservation: only an attempt this owner reserved takes a slot and
+        # moves the cursor. One lost to a concurrent owner is skipped, and the next due one is tried.
+        result: list[dict[str, Any]] = []
+        attempted: list[str] = []
+        for key in keys:
+            if len(attempted) == limit:
+                break
+            self._local.attempted = False
+            intent = self.replay_one(key)
+            if getattr(self._local, "attempted", False):
+                result.append(intent)
+                attempted.append(key)
+        if attempted:
+            self.journal.set_replay_cursor(attempted[-1])
         return result
 
     def _bindings(self, project: str | None = None) -> dict[str, dict[str, Any]]:
@@ -2238,12 +2367,12 @@ class CleanupOwner:
                     results.append({**outcome, "status": "pending", "reason": str(exc)[:500]})
                     continue
                 self._reviewed = entry
-                self._attempted = False
+                self._local.attempted = False
                 try:
                     intent = self.replay_one(key)
                 finally:
                     self._reviewed = None
-            if not self._attempted:
+            if not getattr(self._local, "attempted", False):
                 terminal = _terminal(intent)
                 results.append({**outcome, "cleanup_id": key, "status": intent["status"],
                                 "reason": ("terminal " + terminal["kind"] + ": " + intent["reason"] if terminal

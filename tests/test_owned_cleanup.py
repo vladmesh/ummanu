@@ -25,6 +25,7 @@ from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu.broad_check import run_broad_check
 from ummanu.cli import build_parser, run_residue_maintenance
+from ummanu.dispatch import cleanup as cleanup_module
 from ummanu.dispatch.cleanup import (
     RETRY_COOLDOWN,
     CleanupJournal,
@@ -2756,8 +2757,6 @@ class OwnedCleanupTests(unittest.TestCase):
         for file in files:
             file.parent.mkdir(parents=True, exist_ok=True)
             file.write_bytes(b"cache")
-        (workspace / ".venv" / "bin").mkdir()
-        (workspace / ".venv" / "bin" / "python").symlink_to(outside)
         return files, outside
 
     def test_done_workspace_with_ignored_python_caches_is_removed_without_force(self):
@@ -2772,7 +2771,7 @@ class OwnedCleanupTests(unittest.TestCase):
         entry = self.entry(self.owner.inventory(project="sample"), key)
         self.assertEqual(entry["outcome"], "eligible", entry["reason"])
         removal = next(effect for effect in entry["effects"] if effect["effect"] == "remove-worktree")
-        self.assertEqual((removal["dirty"], removal["ignored_caches"]), ("clean", 5))
+        self.assertEqual((removal["dirty"], removal["ignored_caches"]), ("clean", 4))
         self.assertEqual(journal_bytes(self.owner.journal), before)
         self.assertTrue(all(file.exists() for file in files))
         git_calls = []
@@ -2842,6 +2841,12 @@ class OwnedCleanupTests(unittest.TestCase):
             (self.workspace / "src" / "link").symlink_to(foreign, target_is_directory=True)
             return (self.workspace / "src" / "link").unlink
 
+        def symlink_leaf():
+            # ummanu-132 review: route 4 excludes symlink paths, a leaf included, even in a venv.
+            (self.workspace / ".venv" / "bin").mkdir()
+            (self.workspace / ".venv" / "bin" / "python").symlink_to(outside)
+            return lambda: shutil.rmtree(self.workspace / ".venv" / "bin")
+
         def closed_not_done():
             self.tasks["sample-1"].update(state="blocked", closed=True)
             return lambda: self.tasks["sample-1"].update(state="done", closed=False)
@@ -2851,7 +2856,8 @@ class OwnedCleanupTests(unittest.TestCase):
                  ("author work", author_work, "?? notes.txt"),
                  ("symlinked cache", symlinked_cache, ".pytest_cache"),
                  ("symlinked parent", symlinked_parent, "src/link"),
-                 ("closed but not Done", closed_not_done, "!! .venv/bin/python"),
+                 ("symlink leaf", symlink_leaf, "!! .venv/bin/python"),
+                 ("closed but not Done", closed_not_done, "!! .venv/lib/site.py"),
                  ("tracked cache name", tracked_cache, "src/tracked/__pycache__/kept.pyc"))
         for named, introduce, row in cases:
             with self.subTest(named=named):
@@ -2883,6 +2889,217 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(result["status"], "preserved", result["reason"])
         self.assertIn("!! __pycache__/x.pyc", result["reason"])
         self.assertTrue((path / "__pycache__" / "x.pyc").exists())
+
+    # -- ummanu-132 review round: the six reproduced gaps --------------------------------------------
+
+    def test_oversized_integer_due_times_are_malformed_not_fatal(self):
+        clock = self.manual_clock()
+        self.head()
+        self.stop_failure = True
+        key = self.request()
+        for huge in (10 ** 400, -(10 ** 400)):
+            with self.subTest(huge="+" if huge > 0 else "-"):
+                intent = self.owner.journal.intent(key)
+                intent["retry"] = {"last_attempt_at": huge, "next_attempt_at": huge}
+                self.owner.journal.commit_intent(key, intent)
+                self.assertIsNone(self.owner.journal.summary()[0]["next_attempt_at"])
+                result = self.owner.replay(limit=1)
+                self.assertEqual(result[0]["retry"], {"last_attempt_at": clock.now,
+                                                      "next_attempt_at": clock.now + RETRY_COOLDOWN})
+                self.assertEqual(self.owner.journal.summary()[0]["next_attempt_at"], clock.now + RETRY_COOLDOWN)
+                writes = dict(self.owner.journal.writes)
+                self.assertEqual(self.owner.replay(), [])
+                self.assertIsNone(self.owner.journal.reserve_attempt(key, clock.now))
+                self.assertEqual(self.owner.journal.writes, writes)
+                clock.advance(1)
+
+    def test_unregistered_project_is_terminal_without_a_captured_identity(self):
+        self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        key = self.request()
+        self.assertIsNone(self.owner.journal.intent(key)["identity"])
+        follower = self.owner.journal.remember(self.task, {}, disposition="close")
+        del self.catalog.bindings["sample"]
+        calls, _refs, reads = self.recorded_reads()
+        with reads:
+            result = self.owner.replay_one(key)
+        self.assertEqual(calls, [], "no repository is searched for or read")
+        self.assert_terminal(result, "project-unregistered")
+        self.assertNotIn("commit_proof", result)
+        self.assertEqual(self.stops, [("run-worker", "generation-1")])
+        self.assertEqual(self.owner.journal.summary()[0]["terminal"], "project-unregistered")
+        self.assertEqual(self.owner.replay_one(follower)["progress"]["terminal"]["kind"], "follows")
+        self.owner.clock.advance(5 * RETRY_COOLDOWN)
+        self.assertEqual(self.owner.replay(), [])
+        _, _path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
+
+    def test_unregistered_check_without_identity_keeps_owner_fences(self):
+        """A readable registered-but-disabled project or a foreign claim stays a refusal."""
+        self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        key = self.request()
+        self.tasks["sample-1"]["claim"] = {"worker": "other-worker", "claimed_at": 7}
+        del self.catalog.bindings["sample"]
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("claim is foreign", result["reason"])
+        self.assertNotIn("terminal", result["progress"])
+
+    def substitute_parent(self):
+        """Move the project directory aside and put a symlink to a foreign copy in its place."""
+        external = self.root / "external"
+        external.mkdir()
+        foreign = external / self.workspace.name
+        shutil.copytree(self.workspace, foreign, symlinks=True)
+        (foreign / ".venv" / "lib" / "site.py").write_bytes(b"foreign bytes must survive")
+        parent = self.workspace.parent
+        original = parent.with_name("sample-original")
+        parent.rename(original)
+        parent.symlink_to(external, target_is_directory=True)
+        return foreign, original / self.workspace.name
+
+    def snapshot(self, root):
+        return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*"))
+                if path.is_file() and not path.is_symlink()}
+
+    def test_parent_substituted_after_the_first_proof_gets_no_cache_effect(self):
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        self.ignored_caches()
+        swapped = {}
+        native = self.owner._verify_commits
+        def pivot(intent, repo, **kwargs):
+            native(intent, repo, **kwargs)
+            if not swapped:
+                swapped["foreign"], swapped["real"] = self.substitute_parent()
+                swapped["before"] = (self.snapshot(swapped["foreign"]), self.snapshot(swapped["real"]))
+        with mock.patch.object(self.owner, "_verify_commits", side_effect=pivot):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("substituted", result["reason"])
+        self.assertEqual((self.snapshot(swapped["foreign"]), self.snapshot(swapped["real"])), swapped["before"])
+        self.assertFalse(result["progress"].get("removal_started"))
+        self.assertFalse(result["progress"].get("claim_settled"))
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_parent_substituted_after_the_pin_only_reaches_the_pinned_workspace(self):
+        """A swap after the descriptor is pinned changes nothing the effect reads or unlinks."""
+        self.tolerant_stop()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        files, _ = self.ignored_caches()
+        swapped = {}
+        calls = []
+        native = cleanup_module._read_pinned_git
+        def pivot(root, *args):
+            calls.append(args)
+            if len(calls) == 2:
+                # The effect's own pinned read: the admission's identity revalidation has passed.
+                swapped["foreign"], swapped["real"] = self.substitute_parent()
+                swapped["before"] = self.snapshot(swapped["foreign"])
+            return native(root, *args)
+        with mock.patch.object(cleanup_module, "_read_pinned_git", side_effect=pivot):
+            result = self.owner.replay_one(key)
+        self.assertEqual(self.snapshot(swapped["foreign"]), swapped["before"], "no foreign byte is touched")
+        real = swapped["real"]
+        # The pinned workspace's own ignored cache files were the only ones unlinked.
+        self.assertFalse(any((real / file.relative_to(self.workspace)).exists() for file in files))
+        self.assertTrue((real / "file").exists())
+        # Native Git then refuses the noncanonical path: nothing is settled.
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertFalse(result["progress"].get("workspace_removed"))
+        self.assertFalse(result["progress"].get("claim_settled"))
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_lost_reservations_take_no_replay_slot_and_write_no_cursor(self):
+        clock = self.manual_clock()
+        keys = []
+        for n in range(2):
+            ref = f"legacy-{n}"
+            task = {**copy.deepcopy(self.task), "id": "task-" + ref, "ref": ref, "closed": True}
+            self.tasks[ref] = task
+            keys.append(self.owner.journal.remember(task, {}, disposition="close"))
+        keys.sort()
+        rival = CleanupJournal(self.data)
+        native = self.owner.journal.reserve_attempt
+        lost = {keys[0]}
+        def race(key, now):
+            if key in lost:
+                self.assertIsNotNone(rival.reserve_attempt(key, now))
+            return native(key, now)
+        writes = dict(self.owner.journal.writes)
+        with mock.patch.object(self.owner.journal, "reserve_attempt", side_effect=race):
+            result = self.owner.replay(limit=1)
+        self.assertEqual([item["task"]["ref"] for item in result], [self.owner.journal.intent(keys[1])["task"]["ref"]])
+        self.assertEqual(self.owner.journal.writes["meta"] - writes["meta"], 1)
+        self.assertEqual(self.owner.journal.read()["replay_cursor"], keys[1])
+        # Every reservation lost: no result, no cursor write.
+        clock.advance(RETRY_COOLDOWN)
+        lost = set(keys)
+        writes = dict(self.owner.journal.writes)
+        with mock.patch.object(self.owner.journal, "reserve_attempt", side_effect=race):
+            self.assertEqual(self.owner.replay(limit=1), [])
+        self.assertEqual(self.owner.journal.writes["meta"], writes["meta"])
+        self.assertEqual(self.owner.journal.read()["replay_cursor"], keys[1])
+
+    def unique_commit_then_disappear(self, *, delete_ref):
+        self.manual_clock()
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        (self.workspace / "file").write_text("unpublished unique work\n")
+        git(self.workspace, "commit", "--quiet", "-am", "unique unpublished work")
+        tip = git(self.workspace, "rev-parse", "HEAD")
+        key = self.request()
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        if delete_ref:
+            git(self.repo, "update-ref", "-d", "refs/heads/pipeline/sample-1")
+            self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "--contains=" + tip), "")
+        return key, tip
+
+    def test_disappeared_unretained_commit_stays_a_refusal_with_its_claim(self):
+        key, tip = self.unique_commit_then_disappear(delete_ref=True)
+        for _ in range(2):
+            result = self.owner.replay_one(key)
+            self.assertEqual(result["status"], "pending", result["reason"])
+            self.assertIn("no remote-tracking or candidate ref retaining recorded tip " + tip, result["reason"])
+            self.assertNotIn("terminal", result["progress"])
+            self.assertNotIn("commit_proof", result)
+            self.assertFalse(result["progress"].get("claim_settled"))
+            self.assertTrue(result["progress"]["heads_stopped"])
+            self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+            self.owner.clock.advance(RETRY_COOLDOWN)
+        self.assertEqual(self.owner.journal.summary()[0]["terminal"], "")
+        _, _path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["progress"]["awaits_cards"], [key])
+
+    def test_disappeared_commit_retained_by_its_candidate_ref_ends_terminal(self):
+        key, tip = self.unique_commit_then_disappear(delete_ref=False)
+        result = self.owner.replay_one(key)
+        self.assert_terminal(result, "workspace-disappeared")
+        self.assertEqual(result["commit_proof"], {"tip": tip, "publication": "candidate ref",
+                                                  "refs": ["refs/heads/pipeline/sample-1"]})
+        self.assertIn("retained by refs/heads/pipeline/sample-1", result["reason"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), tip)
+        self.assertIsNone(self.task["claim"]["worker"])
+
+    def test_missing_directory_terminal_names_its_retention_witness(self):
+        self.manual_clock()
+        key = self.request()
+        shutil.rmtree(self.workspace)
+        result = self.owner.replay_one(key)
+        self.assert_terminal(result, "registration-without-directory")
+        self.assertEqual(result["commit_proof"]["publication"], "remote-tracking")
+        self.assertIn("is retained by refs/remotes/origin/main", result["reason"])
 
     def test_live_shaped_backlog_settles_dead_ends_and_retries_only_real_refusals(self):
         """72 disappeared, 12 unregistered, 7 missing-proof and 8 retryable obligations (fixture only)."""

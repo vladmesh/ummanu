@@ -62,14 +62,20 @@ registration, Git admin path/file, inode, branch and exact HEAD. It preserves
 tracked, untracked and ignored author work and unpublished commits. Only prompt
 bytes recorded by the prompt producer, the existing exactly owned
 `.ummanu-task-env` namespace and, for the exact workspace of a card the replay's
-admissions see Done, Git-ignored (`!!`) entries strictly inside a `.pytest_cache`,
+admissions see Done, Git-ignored (`!!`) regular files strictly inside a `.pytest_cache`,
 `__pycache__` or `.venv` directory (nested ones included) may be discarded. Every
-component down to such an entry is a real directory; a symlinked cache or parent,
-a tracked or untracked (`??`) cache name, any other ignored file, an observer
-workspace and a closed card that is not Done keep the workspace. The planner, the
-inventory and execution read one predicate; under the removal admission it is
-read again and each entry is unlinked through no-follow directory descriptors
-before the ordinary no-force `git worktree remove`. Author-modified prompts,
+component down to such a file is a real directory and the file itself is regular:
+any symlink path (a symlinked cache, parent or leaf such as `.venv/bin/python`), a
+tracked or untracked (`??`) cache name, any other ignored file, an observer workspace
+and a closed card that is not Done keep the workspace. A real `.venv` therefore still
+keeps a Done workspace through its interpreter symlinks. The planner, the inventory
+and execution read one predicate, always through the recorded workspace directory
+pinned by a descriptor opened from `/` without following any component and matched
+to the recorded device/inode; Git status runs inside that descriptor. Under the
+removal admission the exact identity is revalidated, the root pinned again, the
+predicate read again, and each file is unlinked relative to the pinned root before
+the ordinary no-force `git worktree remove`. A substituted ancestor or workspace is
+refused before the first unlink. Author-modified prompts,
 check receipts, reports and other ignored files remain work unless their existing
 consumer has already settled them. Git removal uses no force, recursive directory
 fallback or broad metadata pruning, and confirms both directory and registration
@@ -118,6 +124,12 @@ is gone, its exact recorded registration, admin entry and ref remain and stay
 untouched; never disposed or pruned), `project-unregistered` (the catalog's
 registration table does not name the project; no repository is read) and `follows`
 (an empty-attempt duplicate whose attempt owners all completed or ended terminally).
+Both Git kinds also need a retention witness for the recorded tip, recorded as
+`commit_proof`: a remote-tracking ref containing it, the owned observer root, or the
+attempt's candidate ref still containing it. Without one (a unique unpublished commit
+whose last ref is gone) the obligation stays pending with its claim. The registration
+check also covers an attempt whose workspace identity was never captured, after the
+owner and head fences.
 A registered but disabled project, an unreadable catalog, a changed or substituted
 admin, unreadable Git or board evidence, a live or unknown head, another active
 owner or a changed claim stay pending. The claim of a terminal outcome is settled
@@ -136,7 +148,10 @@ crash after the reservation waits out the cooldown. An intent with no stored due
 than a cooldown ahead of the clock (it moved back, or the value is hostile), is
 distrusted and due at once, and the attempt re-anchors it. A repeated request keeps
 the schedule. A not-due intent is neither read for effects nor written, and takes no
-slot of the batch; the cursor rotates over due intents only.
+slot of the batch. A due snapshot is not a reservation: a reservation lost to a
+concurrent owner takes no slot, the next due intent is tried, and the cursor moves
+only to an attempt this owner reserved. A due time that is not a finite number in
+float range (`10**400` included) is malformed and due at once.
 
 Supported maintenance surfaces:
 
