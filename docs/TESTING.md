@@ -167,7 +167,7 @@ broad_check:
 
 `ummanu check 'tests/test_x.py::test_name[param with spaces]'` then invokes the candidate interpreter
 with `-m shared -- <selector>`, through the common import-provenance bootstrap. Declared broad args
-remain before `--`. The `shared` runner owns the host profile, environment whitelist, empty PYTHONPATH,
+remain before `--`. The `shared` runner owns the host profile, environment whitelist, per-suite import paths,
 ci_only marker family (docker, ansible, privileged, slow), deselection, budgets and refusal status.
 The wrapper does not replace that launcher with pytest or impose an Ummanu module list.
 
