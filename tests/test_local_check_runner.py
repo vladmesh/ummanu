@@ -181,9 +181,15 @@ class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
             },
         }
         selector = "tests/test_local.py::test_one[param with spaces;$(touch injected)]"
-        with mock.patch.object(check_commands, "run_broad_check", return_value=(5, observation)) as run:
-            status, subset, _ = self.invoke(selector)
+
+        def deselected(spec, **kwargs):
+            kwargs["stream"].write("collected 1 item / 1 deselected / 0 selected\n")
+            return 5, observation
+
+        with mock.patch.object(check_commands, "run_broad_check", side_effect=deselected) as run:
+            status, subset, output = self.invoke(selector)
             self.assertEqual(status, 2)
+            self.assertTrue(output.startswith("collected 1 item / 1 deselected / 0 selected\n"))
             self.assertIn("not slow", subset["error"]["message"])
             self.assertIn("deselected", subset["error"]["message"])
             self.assertEqual(run.call_args.args[0].module_args, (selector, *declared[1:]))

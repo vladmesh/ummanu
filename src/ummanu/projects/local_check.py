@@ -11,7 +11,6 @@ from typing import Any
 
 from ummanu.broad_check import BroadCheckError
 
-
 # Built-in pytest options with a separate value. Unknown plugin options require explicit roots;
 # equals-form options are self-contained and never consume a following collection argument.
 _PYTEST_VALUES = frozenset({

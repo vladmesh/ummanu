@@ -131,5 +131,7 @@ class LocalCheckFixture:
                     *argv,
                 ]
             )
-        text = stdout.getvalue() or stderr.getvalue()
+        # Runner diagnostics stream to stderr before a refusal's final one-line JSON.
+        # Successful/native-status responses are the complete JSON document on stdout.
+        text = stdout.getvalue() or stderr.getvalue().splitlines()[-1]
         return status, json.loads(text), stderr.getvalue()
