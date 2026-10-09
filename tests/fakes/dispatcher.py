@@ -742,6 +742,11 @@ class FakeHost:
     _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
     _control_plane_command = CommandHostRuntime._control_plane_command
+    _packet_check_contract = CommandHostRuntime._packet_check_contract
+    _check_header = CommandHostRuntime._check_header
+    _render_check_header = CommandHostRuntime._render_check_header
+    _broad_check_commands = CommandHostRuntime._broad_check_commands
+    _prior_review_evidence = CommandHostRuntime._prior_review_evidence
     _local_run_policy = CommandHostRuntime._local_run_policy
     _local_run_section = CommandHostRuntime._local_run_section
     # The document's comment selector, borrowed like the rest of the builder (secretary-1768).

@@ -28,7 +28,6 @@ from unittest import mock
 
 from ummanu.cli import build_parser
 from ummanu.dispatch.host import CommandHostRuntime
-
 from ummanu.projects.contract import (
     ADAPTER_INVALID,
     ADAPTER_UNAVAILABLE,
@@ -695,15 +694,14 @@ class CatalogContractTests(unittest.TestCase):
         host = self.packet_host(catalog)
         task = {"ref": "example-1", "project": "example", "type": "code", "description": ""}
         packet = host._worker_task_doc(task, "main", "attempt")
-        self.assertNotIn("Configuration gap", packet)
+        self.assertIn("Configuration gap: broad_check.local is missing", packet)
+        self.assertNotIn("Subset form (placeholder", packet)
         broad, show = host._broad_check_invocation("example")
         self.assertIn(f"    {broad}\n", packet)
         self.assertIn(f"`{show}`", packet)
         for command, verb in ((broad, "broad"), (show, "show")):
             vector = shlex.split(command)
-            self.assertEqual(
-                vector[1:5], [str(host.production_runtime.interpreter), "-P", "-m", "ummanu"]
-            )
+            self.assertEqual(vector[1:5], [str(host.production_runtime.interpreter), "-P", "-m", "ummanu"])
             self.assertTrue(vector[0].startswith("PYTHONPATH="))
             expected = ["check", verb]
             if verb == "broad":

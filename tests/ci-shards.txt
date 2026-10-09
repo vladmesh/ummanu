@@ -163,6 +163,7 @@ integration-board tests/test_product_issues.py
 unit tests/test_protocol_artifacts.py
 unit tests/test_project_contract.py
 unit tests/test_prompt_document.py
+unit tests/test_review_packet.py
 packaging tests/test_provision.py
 unit tests/test_redact.py
 component tests/test_recovery_inventory.py

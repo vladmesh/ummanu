@@ -9,47 +9,28 @@ from ummanu.dispatch import attempt_accounting, e2e_stage, release_lifecycle
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.gate_lifecycle import (
     accept_green_gate as _accept_green_gate,
-)
-from ummanu.dispatch.gate_lifecycle import (
     block_gate_transport as _block_gate_transport,
-)
-from ummanu.dispatch.gate_lifecycle import (
     gate_answered as _gate_answered,
-)
-from ummanu.dispatch.gate_lifecycle import (
     gate_pending as _gate_pending,
-)
-from ummanu.dispatch.gate_lifecycle import (
     gate_red_to_worker as _gate_red_to_worker,
-)
-from ummanu.dispatch.gate_lifecycle import (
     gate_transport_retry as _gate_transport_retry,
 )
 from ummanu.dispatch.helpers import (
     RED_REVIEW_CEILING,
     _last_marker,
     _last_review_red_body,
-)
-from ummanu.dispatch.helpers import (
     red_review_count as _red_review_count,
-)
-from ummanu.dispatch.helpers import (
-    safe_one_line as _safe_one_line,
 )
 from ummanu.dispatch.launch import REVIEW_ROLE
 from ummanu.dispatch.state import (
     REVIEW_REJECTION_REASON,
     DispatcherRecord,
-)
-from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
 )
 from ummanu.dispatch.types import STOPPED_BY_REVIEW_VERDICT, GateTransportError, HostError
 from ummanu.dispatch.watchdog import reset_wait as _reset_wait
 from ummanu.dispatch.worker_continuation import (
     begin_red_transition as _begin_red_transition,
-)
-from ummanu.dispatch.worker_continuation import (
     complete_red_transition as _complete_red_transition,
 )
 from ummanu.tasks import TaskError
@@ -110,7 +91,9 @@ def advance_review_verdict(
     # The only point where both the last review body and the SHA it judged are available.
     # Keep them for the next review packet instead of reconstructing the card from base.
     record.previous_reviewed_sha = reviewed
-    record.previous_blockers = _safe_one_line(_last_review_red_body(task) or "", limit=2000)
+    # Preserve the verdict as evidence. The packet renderer supplies its data boundary;
+    # flattening/truncating here loses stable IDs and their relationships permanently.
+    record.previous_blockers = _last_review_red_body(task) or ""
     if not parks_for_decision(runtime, task):
         # No observer to release it: the verdict acts on its own tick, and the worker that
         # wrote the code is still suspended, so the verdict goes to that conversation.
