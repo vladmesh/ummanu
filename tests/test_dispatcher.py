@@ -10235,6 +10235,7 @@ class HeadPromptTests(unittest.TestCase):
             {
                 "event_id": request_id,
                 "kind": "card.decided",
+                "record_type": "board.protocol_event",
                 "ref": task["ref"],
                 "request_id": request_id,
                 "data": {

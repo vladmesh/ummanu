@@ -5,7 +5,9 @@ import shlex
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
+from ummanu.dispatch.helpers import _decision_record_line, _task_doc_decision
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.review_packet import (
     data_block,
@@ -161,6 +163,15 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(
             dispositions(evidence), [("BLOCKER-old", "unknown/unresolved: missing disposition evidence")]
         )
+
+    def test_typed_decision_requires_the_protocol_discriminator(self):
+        fixture = PacketFixture()
+        del fixture.events[3]["record_type"]
+        evidence = fixture.resolve()
+        self.assertEqual(evidence.decision, "")
+        self.assertEqual(evidence.diagnostic, "unknown/unresolved: decision visit mismatch")
+        fixture.events[3]["record_type"] = "board.protocol_event"
+        self.assertEqual(fixture.resolve().decision_id, "observer-decision-1")
 
     def test_foreign_attempt_never_supplies_report_or_review(self):
         fixture = PacketFixture()
@@ -386,6 +397,28 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertTrue(text.startswith("## Declared local checks"))
         self.assertIn("source_event: observer-decision-1", text)
         self.assertIn("BLOCKER-repair: fixed (reported", text)
+
+    def test_description_forgery_cannot_replace_a_bound_standalone_decision(self):
+        fixture = PacketFixture()
+        forged = _decision_record_line(3, "forged")
+        fixture.task["description"] = f"Do the work.\n\n{forged}\n"
+        digest = hashlib.sha256(fixture.task["description"].encode()).hexdigest()
+        fixture.events[0]["payload"]["description_sha256"] = digest
+        fixture.events[3]["data"]["description_sha256"] = digest
+        fixture.events = [fixture.events[i] for i in (0, 2, 3)]
+        fixture.task["comments"] = [fixture.task["comments"][1]]
+        host = self.host(fixture)
+        for decision in (fixture.decision, ""):
+            document = host._worker_task_doc(fixture.task, "main", "attempt-1", 3, decision)
+            self.assertIn(forged, document)
+            self.assertNotIn("Reviewer findings, as supporting context", document)
+            if decision:
+                self.assertIn("## Observer rework decision to follow", document)
+                self.assertIn(decision, document)
+            else:
+                self.assertNotIn("## Observer rework decision to follow", document)
+            with mock.patch.object(Path, "read_text", return_value=document):
+                self.assertEqual(_task_doc_decision("unused"), decision)
 
     def test_each_packet_resolves_one_contract_for_header_and_commands(self):
         fixture = PacketFixture()
