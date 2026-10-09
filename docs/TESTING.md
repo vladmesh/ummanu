@@ -170,6 +170,33 @@ with `-m shared -- <selector>`, through the common import-provenance bootstrap. 
 remain before `--`. The `shared` runner owns the host profile, environment whitelist, empty PYTHONPATH,
 ci_only marker family (docker, ansible, privileged, slow), deselection, budgets and refusal status.
 The wrapper does not replace that launcher with pytest or impose an Ummanu module list.
+
+Worker/reviewer bring-up installs a startup audit hook in the dispatcher-owned workspace venv
+and the declared candidate-local venv after setup. Resuming a materialized workspace repairs these
+files without rebuilding dependencies. Direct `pytest`, `python -m pytest` and `python -m unittest`
+refuse before runner/test import, with status 125 and one line naming `ummanu check <selector>`.
+This includes `python`, `python3` and absolute workspace/declared interpreter paths. Ordinary Python,
+library imports of pytest/unittest and the Ummanu CLI continue to work. Native Ansible commands and
+sudo in the head PATH refuse with one line directing execution to CI. The Docker guard's order,
+backend bindings and exact policy are unchanged. Standing roles receive no head guard PATH.
+
+Authorization belongs to the live module runner process launched by the receipt wrapper, and its
+descendants, in that workspace. The hook checks Linux `/proc` ancestry for the exact provenance
+bootstrap digest and candidate import roots. Wrapper169's existing bootstrap is compatible; there
+is no ambient environment marker, permission file or cached PID. Native `shared` children retain
+authorization through a fresh environment whitelist and `PYTHONPATH=""`. Sibling head commands,
+later commands and reparented children have no such ancestor. The hook does not replace the native
+runner's membership checks, fixture environment, marker families or budgets. Refusal is command
+feedback; it introduces no review/CI classification, retry or restart-budget handling.
+
+This is an accidental-command guard, like the Docker guard, not an isolation boundary against the
+interpreter's owner deliberately using `-S`, forging the bootstrap argv, or replacing startup files.
+Installation refuses shared/live venvs and site directories outside the candidate. Upgrade/live
+delivery is a separate observer step; these changes do not update production. Fast policy and fake
+backend regressions are local unit/component tests. Real interpreter, role launch and native
+whitelist/absolute-child-pytest proof belongs to `integration-dispatcher` CI. That bounded fixture
+is not live codegen evidence: live main `ec96fa79` still needs its next acting head's declared
+`uv sync --locked` setup with pytest_timeout before granular node/count/marker validation.
 The PO confirmed delivery of shared's agreed `python -m shared -- <pytest selector>...` interface
 in codegen-orchestrator-1586, main `ec96fa79`, PR #761. Live granular validation still requires a
 subsequent operator installation of this declaration and the wrapper. A declaration promises runner

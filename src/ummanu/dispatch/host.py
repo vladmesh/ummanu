@@ -1019,6 +1019,7 @@ class CommandHostRuntime:
             self._prepare_workspace_environment(workspace, project=project)
             self._run_setup(project, workspace)
         self._require_workspace_environment(workspace)
+        self._install_workspace_test_guards(Path(workspace), project=project)
         self._clear_report_bodies(task["ref"])
         snapshot = local_run_snapshot or self.local_run_snapshot_for_round(
             task, WORKER_ROLE, generation, {}
@@ -2982,6 +2983,7 @@ class CommandHostRuntime:
             # A venv made ready before the startup file existed stays acceptable; it gains the file
             # here when its layout allows, and keeps working without it otherwise.
             self._install_workspace_pycache_prefix(root, environment, required=False)
+            self._install_workspace_test_guards(root, project=project)
             return
         self._run(
             [self.production_runtime.interpreter, "-m", "venv", str(environment)],
@@ -3002,6 +3004,32 @@ class CommandHostRuntime:
         except RuntimeError as exc:
             raise HostError(f"workspace Python environment readiness could not be written: {exc}") from None
         self._require_workspace_environment(workspace)
+        self._install_workspace_test_guards(root, project=project)
+
+    def _install_workspace_test_guards(self, root: Path, *, project: str = "") -> None:
+        if self.mode == "noop":
+            return
+        from ummanu.runtime.test_guard import install_environment
+
+        environments = [self._workspace_environment(root)]
+        if project:
+            declaration = self.catalog.adapter(project).get("broad_check", {})
+            interpreter = declaration.get("interpreter") if isinstance(declaration, dict) else None
+            if interpreter:
+                path = Path(interpreter)
+                path = path if path.is_absolute() else root / path
+                # Setup may not have created the adapter-owned venv yet. Worker
+                # preparation repeats this step after setup; retained environments
+                # take this same path without rebuilding their dependencies.
+                if path.is_file():
+                    if path.parent.name != "bin":
+                        raise HostError(f"declared interpreter needs a candidate-local venv: {path}")
+                    environments.append(path.parent.parent)
+        try:
+            for environment in dict.fromkeys(environments):
+                install_environment(root, environment)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HostError(f"workspace test guard unavailable: {exc}") from None
 
     def _install_workspace_pycache_prefix(self, root: Path, environment: Path, *, required: bool) -> None:
         """Point every interpreter of the owned venv at the owned bytecode cache.
