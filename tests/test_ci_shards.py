@@ -96,11 +96,19 @@ class TimingBudgetTests(unittest.TestCase):
                 now[0] += 1
 
         First.__module__ = IntegrationNamed.__module__ = __name__
-        with patch("ummanu.test_timing.time.monotonic", side_effect=lambda: now[0]):
+        def setup_module():
+            now[0] += 3
+
+        def teardown_module():
+            now[0] += 4
+
+        with (patch("ummanu.test_timing.time.monotonic", side_effect=lambda: now[0]),
+              patch.object(sys.modules[__name__], "setUpModule", setup_module, create=True),
+              patch.object(sys.modules[__name__], "tearDownModule", teardown_module, create=True)):
             runner = unittest.TextTestRunner(stream=StringIO(), resultclass=TimingResult)
             result = runner.run(TimingSuite([First("test_a"), IntegrationNamed("test_b")]))
         observation = result.observation()
-        self.assertEqual(observation["modules"], {__name__: 92.0})
+        self.assertEqual(observation["modules"], {__name__: 99.0})
         self.assertEqual([r["duration_seconds"] for r in observation["tests"]], [1, 1])
         self.assertEqual([r["module"] for r in observation["tests"]], [__name__, __name__])
         self.assertEqual(violations(observation, modules=True)[0]["kind"], "module")
