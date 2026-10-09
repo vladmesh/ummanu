@@ -6,10 +6,13 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from ummanu.broad_check import _PROVENANCE_BOOTSTRAP, CheckSpec
-from ummanu.runtime import test_guard
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.types import HostError
+from ummanu.runtime import role_env, test_guard
 
 
 class TestGuardTests(unittest.TestCase):
@@ -96,3 +99,72 @@ class TestGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 test_guard.install_environment(root, local)
             self.assertEqual(list(site.iterdir()), [])
+
+
+class HostGuardOwnershipTests(unittest.TestCase):
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        self.root = self.scratch / "candidate"
+        self.root.mkdir()
+        self.default = self.venv(self.root / role_env.WORKSPACE_ENV_DIR)
+        self.external = self.venv(self.scratch / "shared")
+        (self.external / "sentinel").write_text("untouched")
+        self.adapter = {"broad_check": {}}
+        self.host = CommandHostRuntime(SimpleNamespace(adapter=lambda _: self.adapter), self.scratch / "data",
+                                       mode="real", production_runtime=SimpleNamespace(interpreter="/unused"))
+
+    def venv(self, prefix: Path) -> Path:
+        site = prefix / "lib/python3.12/site-packages"
+        site.mkdir(parents=True)
+        (prefix / "pyvenv.cfg").touch()
+        (prefix / "bin").mkdir()
+        (prefix / "bin/python").symlink_to("/usr/bin/python3")  # Never execute an interpreter here.
+        return prefix
+
+    def snapshot(self, prefix: Path) -> dict[str, bytes]:
+        return {str(path.relative_to(prefix)): path.read_bytes() for path in prefix.rglob("*")
+                if path.is_file() and not path.is_symlink()}
+
+    def test_external_system_shared_and_escaped_optional_prefixes_are_skipped(self) -> None:
+        (self.root / ".shared").symlink_to(self.external)
+        bin_alias = self.root / "alias"
+        bin_alias.mkdir()
+        (bin_alias / "bin").symlink_to(self.external / "bin")
+        before = self.snapshot(self.external)
+        for interpreter in ("/usr/bin/python3", str(self.external / "bin/python"),
+                            ".shared/bin/python", "alias/bin/python", "missing/bin/python"):
+            with self.subTest(interpreter=interpreter):
+                self.adapter["broad_check"]["interpreter"] = interpreter
+                self.host._install_workspace_test_guards(self.root, project="fixture")
+                site = next(self.default.glob("lib/python3*/site-packages"))
+                self.assertTrue((site / test_guard.STARTUP_FILE).is_file())
+                self.assertTrue((site / test_guard.MODULE_FILE).is_file())
+                self.assertEqual(self.snapshot(self.external), before)
+
+    def test_relative_and_absolute_local_venvs_guard_the_prefix_despite_executable_symlink(self) -> None:
+        local = self.venv(self.root / ".venv")
+        for interpreter in (".venv/bin/python", str(local / "bin/python")):
+            with self.subTest(interpreter=interpreter):
+                self.adapter["broad_check"]["interpreter"] = interpreter
+                self.host._install_workspace_test_guards(self.root, project="fixture")
+                site = next(local.glob("lib/python3*/site-packages"))
+                self.assertTrue((site / test_guard.STARTUP_FILE).is_file())
+                (site / test_guard.STARTUP_FILE).unlink()
+
+    def test_escaped_optional_site_is_skipped_but_required_failure_is_closed(self) -> None:
+        local = self.root / "escaped"
+        local.mkdir()
+        (local / "pyvenv.cfg").touch()
+        (local / "bin").mkdir()
+        (local / "bin/python").symlink_to("/usr/bin/python3")
+        (local / "lib").symlink_to(self.external / "lib")
+        before = self.snapshot(self.external)
+        self.adapter["broad_check"]["interpreter"] = str(local / "bin/python")
+        self.host._install_workspace_test_guards(self.root, project="fixture")
+        self.assertEqual(self.snapshot(self.external), before)
+        (self.default / "pyvenv.cfg").unlink()
+        with self.assertRaises(HostError):
+            self.host._install_workspace_test_guards(self.root, project="fixture")
+        self.assertEqual(self.snapshot(self.external), before)

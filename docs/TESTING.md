@@ -175,7 +175,7 @@ Worker/reviewer bring-up installs a startup audit hook in the dispatcher-owned w
 and the declared candidate-local venv after setup. Resuming a materialized workspace repairs these
 files without rebuilding dependencies. Direct `pytest`, `python -m pytest` and `python -m unittest`
 refuse before runner/test import, with status 125 and one line naming `ummanu check <selector>`.
-This includes `python`, `python3` and absolute workspace/declared interpreter paths. Ordinary Python,
+This includes `python`, `python3` and absolute candidate-local declared interpreter paths. Ordinary Python,
 library imports of pytest/unittest and the Ummanu CLI continue to work. Native Ansible commands and
 sudo in the head PATH refuse with one line directing execution to CI. The Docker guard's order,
 backend bindings and exact policy are unchanged. Standing roles receive no head guard PATH.
@@ -191,10 +191,20 @@ feedback; it introduces no review/CI classification, retry or restart-budget han
 
 This is an accidental-command guard, like the Docker guard, not an isolation boundary against the
 interpreter's owner deliberately using `-S`, forging the bootstrap argv, or replacing startup files.
-Installation refuses shared/live venvs and site directories outside the candidate. Upgrade/live
+Every preparation path uses the same host ownership decision: the dispatcher-owned workspace venv
+is required; an additional declared venv is instrumented only if its prefix and site directory
+resolve inside the candidate. A normal venv executable symlink to system Python does not change
+ownership of its local prefix. External system/shared/live declarations are preserved and skipped
+as optional destinations. An intentional absolute command using such an external interpreter stays
+uninstrumented and is outside this candidate-local guard. This does not authorize direct tests:
+head checks must still use `ummanu check`. The installer independently refuses writes to external
+prefixes or escaped site directories, and failures installing the required workspace guard still
+fail preparation. Upgrade/live
 delivery is a separate observer step; these changes do not update production. Fast policy and fake
 backend regressions are local unit/component tests. Real interpreter, role launch and native
-whitelist/absolute-child-pytest proof belongs to `integration-dispatcher` CI. That bounded fixture
+whitelist/absolute-child-pytest and bash/subshell/PATH-child proof belongs to `integration-dispatcher` CI.
+The bounded runner model covers an empty PYTHONPATH and a per-suite PYTHONPATH override; it simplifies
+codegen's suite scheduling and is not an exact copy of its native host argv. That fixture
 is not live codegen evidence: live main `ec96fa79` still needs its next acting head's declared
 `uv sync --locked` setup with pytest_timeout before granular node/count/marker validation.
 The PO confirmed delivery of shared's agreed `python -m shared -- <pytest selector>...` interface

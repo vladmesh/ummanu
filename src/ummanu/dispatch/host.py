@@ -3021,10 +3021,24 @@ class CommandHostRuntime:
                 # Setup may not have created the adapter-owned venv yet. Worker
                 # preparation repeats this step after setup; retained environments
                 # take this same path without rebuilding their dependencies.
-                if path.is_file():
-                    if path.parent.name != "bin":
-                        raise HostError(f"declared interpreter needs a candidate-local venv: {path}")
-                    environments.append(path.parent.parent)
+                if path.is_file() and path.parent.name == "bin":
+                    # Resolve the bin directory, not the executable symlink: a
+                    # local venv normally links Python to its system binary.
+                    # External declarations remain supported, but are never
+                    # optional destinations for candidate guard writes.
+                    try:
+                        prefix = path.parent.resolve(strict=True).parent
+                        sites = [site for site in prefix.glob("lib/python3*/site-packages") if site.is_dir()]
+                        eligible = (
+                            prefix.is_relative_to(root.resolve(strict=True))
+                            and (prefix / "pyvenv.cfg").is_file()
+                            and len(sites) == 1
+                            and sites[0].resolve(strict=True).is_relative_to(prefix)
+                        )
+                    except (OSError, RuntimeError, ValueError):
+                        eligible = False
+                    if eligible:
+                        environments.append(prefix)
         try:
             for environment in dict.fromkeys(environments):
                 install_environment(root, environment)

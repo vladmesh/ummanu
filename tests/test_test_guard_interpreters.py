@@ -10,6 +10,7 @@ import sysconfig
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from tests.support.local_check_fixture import LocalCheckFixture, role_git_env
 from tests.support.managed_venv import guarded_product_env
@@ -53,11 +54,12 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         local = self.root / "tests/test_local.py"
         local.write_text(f"from pathlib import Path\nPath({str(self.imported)!r}).touch()\n" + local.read_text())
 
-    def launch(self, role: str, argv: list[str]) -> subprocess.CompletedProcess[str]:
+    def launch(self, role: str, argv: list[str], *, workspace: Path | None = None) -> subprocess.CompletedProcess[str]:
+        root = self.root if workspace is None else workspace
         return subprocess.run(
             [sys.executable, "-P", "-m", "ummanu.runtime.role_env", "exec", "--role", role,
-             "--workspace", str(self.root), "--env-file", str(self.scratch / "absent.env"), "--", *argv],
-            cwd=self.root, env=self.env, capture_output=True, text=True, timeout=30, check=False,
+             "--workspace", str(root), "--env-file", str(self.scratch / "absent.env"), "--", *argv],
+            cwd=root, env=self.env, capture_output=True, text=True, timeout=30, check=False,
         )
 
     def refused(self, result: subprocess.CompletedProcess[str]) -> None:
@@ -98,6 +100,46 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         self.assertEqual([python.stat().st_ino for python in (self.default, self.declared)], inodes)
         self.refused(self.launch("worker", [str(self.default), "-m", "unittest", "tests.test_local"]))
         self.refused(self.launch("reviewer", [str(self.declared), "-m", "pytest", "tests/test_local.py"]))
+
+    def test_external_declarations_prepare_fresh_and_retained_without_external_writes(self) -> None:
+        shared = self.scratch / "shared-venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(shared)], check=True)
+        (shared / "sentinel").write_text("untouched")
+        shared_before = {str(path.relative_to(shared)): path.read_bytes() for path in shared.rglob("*")
+                         if path.is_file() and not path.is_symlink()}
+        # A product-managed prefix is represented by this suite's running prefix,
+        # read only. No production installation or system directory is provisioned.
+        external_sites = [*Path("/usr").glob("lib/python3*/site-packages"),
+                          *Path(sys.prefix).glob("lib/python3*/site-packages")]
+        def external_hooks() -> dict[str, bytes | None]:
+            return {str(site / name): (site / name).read_bytes() if (site / name).is_file() else None
+                    for site in external_sites for name in (test_guard.STARTUP_FILE, test_guard.MODULE_FILE)}
+        before_hooks = external_hooks()
+        for index, declaration in enumerate(("/usr/bin/python3", str(Path(sys.prefix) / "bin/python3"),
+                                              str(shared / "bin/python"), ".shared/bin/python")):
+            with self.subTest(declaration=declaration):
+                root = self.scratch / f"fresh-{index}"
+                root.mkdir()
+                (root / ".shared").symlink_to(shared)
+                subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, capture_output=True)
+                self.adapter["broad_check"]["interpreter"] = declaration
+                self.host._prepare_workspace_environment(str(root), project="fixture")
+                python = root / role_env.WORKSPACE_ENV_DIR / "bin/python3"
+                inode = python.stat().st_ino
+                site = next(python.parent.parent.glob("lib/python3*/site-packages"))
+                for retained in (False, True):
+                    if retained:
+                        (site / test_guard.STARTUP_FILE).unlink()
+                        (site / test_guard.MODULE_FILE).unlink()
+                        self.host._prepare_workspace_environment(str(root), project="fixture")
+                    self.assertEqual(python.stat().st_ino, inode)
+                    self.assertTrue((site / test_guard.STARTUP_FILE).is_file())
+                    for role in ("worker", "reviewer"):
+                        self.refused(self.launch(role, [str(python), "-m", "unittest", "tests.test_local"], workspace=root))
+                    self.assertEqual(external_hooks(), before_hooks)
+                    self.assertEqual({str(path.relative_to(shared)): path.read_bytes() for path in shared.rglob("*")
+                                      if path.is_file() and not path.is_symlink()}, shared_before)
+                    print(f"ownership declaration={declaration} retained={retained} external_unchanged=true workspace_guarded=true")
 
     def test_installed_cli_wrapper_full_reuse_node_and_following_direct_refusal(self) -> None:
         # The restricted launch fixture exposes only named native tools. The
@@ -161,6 +203,15 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
             f"    Path({str(self.log)!r}).open('a').write('one\\n')\n"
             "def test_two():\n    pass\n"
         )
+        (local.parent / "test_shell.py").write_text(
+            "import os, sys\nfrom pathlib import Path\n"
+            "def test_one():\n"
+            "    assert os.environ['FIXTURE_ENV'] == 'host'\n"
+            f"    assert os.environ['PYTHONPATH'] == {str(local.parent) + os.pathsep + str(self.root)!r}\n"
+            f"    assert sys.executable == {str(self.declared)!r}\n"
+            "    assert 'UMMANU_WRAPPER_MARKER' not in os.environ\n"
+            f"    Path({str(self.log)!r}).open('a').write('shell-one\\n')\n"
+        )
         # Model the native runner's whitelist, absolute interpreter, fixture env and
         # budgets. This is compatibility evidence, never a live codegen head proof.
         shutil.copy(Path(__file__).parent / "support/native_shared_guard_fixture.py", shared / "__main__.py")
@@ -208,4 +259,11 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(len(result.stderr.splitlines()), 1)
         self.assertEqual(self.log.read_text().splitlines(), ["one", "one"])
+        self.assertEqual(receipt.read_bytes(), before)
+        with mock.patch.dict(os.environ, {"FIXTURE_SHELL_RUNNER": "1"}):
+            status, subset, output = self.invoke("checks/test_shell.py::test_one", "--reuse")
+        self.assertEqual(status, 0, output)
+        self.assertIn("1 passed", output)
+        self.assertNotIn("receipt", subset)
+        self.assertEqual(self.log.read_text().splitlines(), ["one", "one", "shell-one"])
         self.assertEqual(receipt.read_bytes(), before)
