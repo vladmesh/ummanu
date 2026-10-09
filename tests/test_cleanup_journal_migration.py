@@ -7,12 +7,11 @@ import shutil
 import unittest
 from unittest import mock
 
+from tests.support import cleanup_journal as layout
+from tests.support.cleanup_journal import STATUSES, LegacyFixture, stored_files
 from ummanu.dispatch import cleanup
 from ummanu.dispatch.cleanup import INTENT_FILE_LIMIT, CleanupJournal
 from ummanu.dispatch.types import HostError
-
-from tests import test_cleanup_journal_layout as layout
-from tests.test_cleanup_journal_layout import STATUSES, LegacyFixture, stored_files
 
 
 class MigrationTests(layout.JournalTestCase):
