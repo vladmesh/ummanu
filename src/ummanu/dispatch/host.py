@@ -4280,7 +4280,7 @@ class CommandHostRuntime:
         return lines + [
             "Every AC needs declared local-profile evidence or its corresponding CI shard and report.",
             "Respect native runner budgets, including codegen's 0.5s/test and 240s CPU limits.",
-            "The proposed Ummanu 5s/test and 90s/module limits are not implemented by this policy.",
+            "Ummanu local tests warn at >5s; CI unit/component fails at >5s/test or >90s/module.",
             "Real integration/packaging/runtime/backend/network/container evidence is CI-only here.",
             "Never run direct pytest/unittest or expand the local profile to satisfy an AC.",
             "A valid executed dispatcher-owned exact-SHA gate suppresses routine broad reruns;",

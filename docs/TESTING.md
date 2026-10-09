@@ -369,3 +369,28 @@ Notes:
   [Auditing what is exposed](OPERATIONS.md#auditing-what-is-exposed).
 - Never point a test or rehearsal at `/home/dev/ummanu-data`, `/home/dev/secretary-instance`,
   production systemd or a live observer.
+
+## Test timing budgets
+
+The declared Ummanu local unit/component profile records every test's stable identifier,
+actual Python module, outcome and elapsed time in the full receipt's `parsed.timing` field.
+`check show` and receipt reuse retain these observations. Local output lists the ten slowest
+tests and warns for every test strictly over 5 seconds; warnings preserve the suite exit status.
+Subsets print observations without writing or changing the full receipt. Legacy receipts remain
+valid under their original schema and digest; their timing is unavailable. Missing, interrupted
+or invalid native timing is explicitly unavailable/incomplete, without manufactured durations.
+
+CI applies strict >5 seconds/test and >90 seconds/module budgets only to unit and component.
+A violation is a product failure reported by exact identifier, observed duration and limit in
+JSON, JUnit, logs and the job summary. Existing test failures and infrastructure/cancellation
+classification remain intact. Integration, runtime-component and packaging retain their own
+budgets, and workflow timeouts are unchanged. Codegen retains its native 0.5s/test and 240s CPU
+budgets; these Ummanu thresholds do not apply to its runner.
+
+Test clocks span unittest `startTest` through `stopTest`, including instance setup, teardown
+and cleanups. Module clocks span all classes of the actual test module, including module/class
+setup, teardown and cleanups; each module completes its stdlib suite before the next begins.
+Imports and collection are outside module clocks. Fixture errors without a started test have
+unavailable per-test duration and incomplete timing; ordinary fixture errors still fail the suite.
+Permanent regressions use deterministic clocks. The intentional slow specimen belongs only to
+a separate CI proof PR and must never enter the candidate or main.

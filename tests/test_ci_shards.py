@@ -52,6 +52,109 @@ from tests.support.git import git
 CANDIDATE_SHA = "a" * 40
 
 
+class TimingBudgetTests(unittest.TestCase):
+    def test_strict_thresholds_and_actual_module_membership(self):
+        from ummanu.test_timing import violations
+
+        observation = {"tests": [
+            {"identifier": "tests.real.IntegrationNamed.test_a", "duration_seconds": 5.0},
+            {"identifier": "tests.real.Other.test_b", "duration_seconds": 5.0001},
+        ], "modules": {"tests.real": 90.0, "tests.other": 90.0001}}
+        self.assertEqual([item["identifier"] for item in violations(observation, modules=True)],
+                         ["tests.real.Other.test_b", "tests.other"])
+
+    def test_module_clock_includes_fixtures_across_classes(self):
+        from ummanu.test_timing import TimingResult, TimingSuite, violations
+
+        now = [0.0]
+
+        class First(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                now[0] += 44
+
+            @classmethod
+            def tearDownClass(cls):
+                now[0] += 2
+
+            def test_a(self):
+                now[0] += 1
+
+        class IntegrationNamed(unittest.TestCase):
+            @classmethod
+            def setUpClass(cls):
+                now[0] += 44
+
+            def test_b(self):
+                now[0] += 1
+
+        First.__module__ = IntegrationNamed.__module__ = __name__
+        with patch("ummanu.test_timing.time.monotonic", side_effect=lambda: now[0]):
+            runner = unittest.TextTestRunner(stream=StringIO(), resultclass=TimingResult)
+            result = runner.run(TimingSuite([First("test_a"), IntegrationNamed("test_b")]))
+        observation = result.observation()
+        self.assertEqual(observation["modules"], {__name__: 92.0})
+        self.assertEqual([r["duration_seconds"] for r in observation["tests"]], [1, 1])
+        self.assertEqual([r["module"] for r in observation["tests"]], [__name__, __name__])
+        self.assertEqual(violations(observation, modules=True)[0]["kind"], "module")
+
+    def test_ci_budget_failure_report_junit_summary_and_nonlocal_exemption(self):
+        from ummanu.test_timing import TimingSuite
+
+        now = [0.0]
+
+        class Specimen(unittest.TestCase):
+            def test_slow_fake_clock(self):
+                now[0] += 6
+
+        for suite in ("unit", "component", "runtime-component", "integration-heads", "packaging"):
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                log = BoundedTee(StringIO(), root / "test-output.log")
+                with (patch("ummanu.test_timing.time.monotonic", side_effect=lambda: now[0]),
+                      patch.object(unittest.defaultTestLoader, "loadTestsFromName",
+                                   return_value=TimingSuite([Specimen("test_slow_fake_clock")]))):
+                    evidence = run_reported_suite(suite, ["tests/test_fake.py"], CANDIDATE_SHA, log)
+                limited = suite in {"unit", "component"}
+                self.assertEqual(evidence.outcome, "product_failure" if limited else "success")
+                self.assertEqual(evidence.counts["passed"], 1)
+                _write_evidence(root, evidence, log)
+                restored = _read_evidence(root)
+                self.assertEqual(restored.timing, evidence.timing)
+                self.assertEqual(restored.timing_violations, evidence.timing_violations)
+                if limited:
+                    self.assertIn("test_slow_fake_clock", _summary(restored))
+                    self.assertIn("6.000000s > 5s", ElementTree.parse(root / "junit.xml").find("testcase/failure").text)
+                    self.assertIn("timing budget test", (root / "test-output.log").read_text())
+
+    def test_outcomes_and_interrupted_timing_have_no_invented_zero(self):
+        from ummanu.test_timing import TimingRunner, TimingResult
+
+        class Cases(unittest.TestCase):
+            def test_pass(self):
+                pass
+
+            def test_fail(self):
+                self.fail("original failure")
+
+            def test_error(self):
+                raise ValueError("original error")
+
+            @unittest.skip("explicit skip")
+            def test_skip(self):
+                pass
+
+        result = TimingRunner(stream=StringIO()).run(unittest.defaultTestLoader.loadTestsFromTestCase(Cases))
+        self.assertFalse(result.wasSuccessful())
+        self.assertEqual({r.outcome for r in result.records.values()}, {"passed", "failed", "error", "skipped"})
+        self.assertEqual(result.observation()["status"], "complete")
+        stream = unittest.runner._WritelnDecorator(StringIO())
+        interrupted = TimingResult(stream, True, 1)
+        interrupted.startTest(Cases("test_pass"))
+        self.assertIsNone(interrupted.observation()["tests"][0]["duration_seconds"])
+        self.assertEqual(interrupted.observation()["status"], "incomplete")
+
+
 class CiTestSuiteManifestTests(unittest.TestCase):
     def _commit_checkout(self, root: Path) -> None:
         git(root, "init", "--quiet")

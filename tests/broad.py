@@ -7,6 +7,8 @@ The other seven suites stay in exact-SHA CI. See docs/TESTING.md for the profile
 from __future__ import annotations
 
 import importlib.util
+import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -95,6 +97,7 @@ def _names_tests(arguments: list[str]) -> bool:
 def main(argv: list[str] | None = None) -> int:
     from ummanu.broad_check import BroadCheckError
     from ummanu.projects.local_check import LocalProfile
+    from ummanu.test_timing import TimingRunner, summary
 
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -118,7 +121,12 @@ def main(argv: list[str] | None = None) -> int:
         module=None,
         argv=["python -m tests.broad", *arguments, *selected],
         exit=False,
+        testRunner=TimingRunner,
     )
+    observation = program.result.observation()
+    if timing_path := os.environ.get("UMMANU_TEST_TIMING_RECORD"):
+        Path(timing_path).write_text(json.dumps(observation), encoding="utf-8")
+    print(summary(observation), file=sys.stderr)
     return 0 if program.result.wasSuccessful() else 1
 
 

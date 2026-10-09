@@ -247,6 +247,62 @@ class RunAndCaptureTests(BroadCheckTestCase):
         self.assertEqual(receipt["content_identity"]["tree_sha"], content_identity(self.root).tree_sha)
 
 
+class TimingReceiptTests(BroadCheckTestCase):
+    def test_timings_survive_truncation_reuse_original_status_and_digest(self):
+        observation = {"status": "complete", "tests": [
+            {"identifier": "tests.fixture.Case.test_a", "module": "tests.fixture",
+             "duration_seconds": 6.0, "outcome": "passed"},
+            {"identifier": "tests.fixture.Case.test_b", "module": "tests.fixture",
+             "duration_seconds": 7.0, "outcome": "failed"},
+        ], "modules": {"tests.fixture": 13.0}}
+        for code in (0, 1):
+            suite = self._suite(f"timed{code}",
+                "import json, os, sys\nfrom pathlib import Path\n"
+                f"Path(os.environ['UMMANU_TEST_TIMING_RECORD']).write_text(json.dumps({observation!r}))\n"
+                "print('x' * 20000)\n" + f"sys.exit({code})\n")
+            actual, receipt = self._run(suite)
+            self.assertEqual(actual, code)
+            self.assertEqual(receipt["verdict"], "passed" if code == 0 else "failed")
+            self.assertTrue(receipt["tail_truncated"])
+            self.assertEqual(receipt["parsed"]["timing"], observation)
+            lookup = usable_receipt(self.root, suite)
+            self.assertTrue(lookup.usable)
+            rendered = broad_check.summarize(lookup.receipt)
+            self.assertIn("WARNING: timing budget test tests.fixture.Case.test_a: 6.000000s > 5s", rendered)
+            self.assertIn("WARNING: timing budget test tests.fixture.Case.test_b: 7.000000s > 5s", rendered)
+            receipt["parsed"]["timing"]["tests"][0]["duration_seconds"] = 0
+            receipt_path(self.root, suite).write_text(json.dumps(receipt))
+            self.assertFalse(usable_receipt(self.root, suite).usable)
+
+    def test_old_receipt_and_missing_or_interrupted_timing(self):
+        suite = self._suite("oldtiming", "print('no timing')\n")
+        _, receipt = self._run(suite)
+        self.assertEqual(receipt["parsed"]["timing"]["status"], "unavailable")
+        del receipt["parsed"]["timing"]
+        receipt["receipt_digest"] = broad_check._receipt_digest(receipt)
+        path = receipt_path(self.root, suite)
+        path.write_text(json.dumps(receipt))
+        before = path.read_bytes()
+        self.assertTrue(usable_receipt(self.root, suite).usable)
+        self.assertIn("timing: unavailable", broad_check.summarize(receipt))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(broad_check._with_timing({}, None, incomplete=True)["timing"],
+                         {"status": "incomplete", "tests": [], "modules": {}})
+        record = self.root / "provenance.json"
+        record.with_name("timing.json").write_text('{"status":')
+        self.assertEqual(broad_check._with_timing({}, record, incomplete=False)["timing"]["status"], "unavailable")
+
+    def test_subset_observation_does_not_write_or_change_full_receipt(self):
+        suite = self._suite("subsettiming", "print('subset')\n")
+        _, receipt = self._run(suite)
+        path = receipt_path(self.root, suite)
+        before = path.read_bytes()
+        code, observed = run_broad_check(suite, root=self.root, stream=self.stream, record_receipt=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(observed["parsed"]["timing"]["status"], "unavailable")
+        self.assertEqual(path.read_bytes(), before)
+
+
 class ParsedVerdictTests(unittest.TestCase):
     def test_a_green_unittest_summary_yields_counts_and_skips(self) -> None:
         parsed = parse_unittest_summary("....s\nRan 1421 tests in 94.512s\n\nOK (skipped=3)\n")
@@ -1493,7 +1549,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self._suite_file("project_suite")
         instance = self._register("broad_check:\n  import_package: ummanu\n  module: project_suite\n")
         candidate = self.root / ".ummanu-task-env" / "venv"
-        subprocess.run([sys.executable, "-m", "venv", str(candidate)], check=True)
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(candidate)], check=True)
 
         payload = _run_main(
             [
@@ -1838,7 +1894,8 @@ class StreamingSummaryTests(BroadCheckTestCase):
         self.assertNotIn("OK (skipped=2)", receipt["tail"])
         self.assertEqual(
             receipt["parsed"],
-            {"tests": 5, "runner_duration_seconds": 0.1, "summary": "OK", "skipped": 2},
+            {"tests": 5, "runner_duration_seconds": 0.1, "summary": "OK", "skipped": 2,
+             "timing": {"status": "unavailable", "tests": [], "modules": {}}},
         )
         # Parsing kept the verdict without keeping the logs.
         self.assertLessEqual(len(receipt["tail"].encode("utf-8")), broad_check.TAIL_BYTES)

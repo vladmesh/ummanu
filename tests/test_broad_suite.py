@@ -88,6 +88,7 @@ class BroadSuiteInvocationTests(unittest.TestCase):
     def _argv_for(self, arguments: list[str]) -> list[str]:
         with mock.patch.object(broad.unittest, "main") as fake:
             fake.return_value.result.wasSuccessful.return_value = True
+            fake.return_value.result.observation.return_value = {"status": "complete", "tests": [], "modules": {}}
             broad.main(arguments)
         return fake.call_args.kwargs["argv"]
 

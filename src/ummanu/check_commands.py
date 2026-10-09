@@ -437,6 +437,7 @@ def _run_subset(args: argparse.Namespace, resolved: ResolvedCheck) -> int:
                 "argv": resolved.spec.displayed_argv(),
                 **result.as_fields(),
                 "project_provenance": observation["project_provenance"],
+                "timing": observation["parsed"].get("timing"),
             },
             sort_keys=True,
             indent=2,
