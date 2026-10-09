@@ -100,6 +100,12 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         self.refused(self.launch("reviewer", [str(self.declared), "-m", "pytest", "tests/test_local.py"]))
 
     def test_installed_cli_wrapper_full_reuse_node_and_following_direct_refusal(self) -> None:
+        # The restricted launch fixture exposes only named native tools. The
+        # receipt wrapper needs Git to resolve candidate content before reuse.
+        git = shutil.which("git", path=os.defpath)
+        if git is None:
+            raise RuntimeError("the installed CLI receipt fixture requires git")
+        (self.scratch / "native-bin/git").symlink_to(git)
         # Exercise the installed CLI as a separate role command, not an ambient marker
         # and not direct unittest. The same bootstrap is used by wrapper169.
         wrapper = [sys.executable, "-P", "-m", "ummanu", "check", "--root", str(self.root),
@@ -111,13 +117,20 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         import json
         full = json.loads(result.stdout)
         self.assertEqual(full["receipt"]["parsed"]["tests"], 2)
+        self.assertRegex(full["receipt"]["content_identity"]["tree_sha"], r"^[0-9a-f]{40}$")
         self.assertEqual(full["receipt"]["project_provenance"]["python"], str(self.declared))
         self.assertTrue(full["receipt"]["project_provenance"]["inside_workspace"])
         receipt = Path(full["path"])
         before = receipt.read_bytes()
+        result = self.launch("reviewer", [*wrapper, "show"])
+        lookup = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, lookup)
+        self.assertTrue(lookup["usable"], lookup["reason"])
+        self.assertEqual(receipt.read_bytes(), before)
         result = self.launch("reviewer", wrapper)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["reused"])
+        self.assertEqual(self.log.read_text().splitlines(), ["one", "two"])
         result = self.launch("reviewer", [*wrapper, "tests/test_local.py::Cases::test_one", "--reuse"])
         self.assertEqual(result.returncode, 0, result.stderr)
         subset = json.loads(result.stdout)
