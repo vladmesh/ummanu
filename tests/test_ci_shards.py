@@ -128,7 +128,7 @@ class TimingBudgetTests(unittest.TestCase):
                     self.assertIn("timing budget test", (root / "test-output.log").read_text())
 
     def test_outcomes_and_interrupted_timing_have_no_invented_zero(self):
-        from ummanu.test_timing import TimingRunner, TimingResult
+        from ummanu.test_timing import TimingResult, TimingRunner
 
         class Cases(unittest.TestCase):
             def test_pass(self):
