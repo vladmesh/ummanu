@@ -183,6 +183,8 @@ dev = [
 ]
 ci = [
     "coverage>=7.6",
+    # The real pytest selector fixture runs only in CI; the product adds no runner dependency.
+    "pytest>=9,<10",
 ]
 typecheck = [
     "mypy==1.18.2",

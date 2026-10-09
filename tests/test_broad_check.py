@@ -804,9 +804,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
 
     def test_a_shell_check_that_changes_directory_cannot_claim_the_candidate_checkout(self) -> None:
         outside = self._outside_project()
-        command = (
-            f'cd {outside}; {sys.executable} -c "import ummanu, sys; sys.stdout.write(ummanu.__file__)"'
-        )
+        command = f'cd {outside}; {sys.executable} -c "import ummanu, sys; sys.stdout.write(ummanu.__file__)"'
 
         exit_code, receipt = self._run(command)
 
@@ -1082,9 +1080,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
         candidate_root = str(candidate.resolve())
         candidate_src = str((candidate / "src").resolve())
         production_src = str((production / "src").resolve())
-        inherited_pythonpath = os.pathsep.join(
-            [production_src, candidate_src, candidate_src, candidate_root]
-        )
+        inherited_pythonpath = os.pathsep.join([production_src, candidate_src, candidate_src, candidate_root])
 
         exit_code, receipt = run_broad_check(
             suite,
@@ -1561,7 +1557,9 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         reused = _run_main(["check", "broad", "--reuse", *common])
         self.assertTrue(reused["reused"])
 
-    def test_an_explicit_module_overrides_the_declared_one(self) -> None:
+    def test_an_explicit_module_cannot_replace_the_declared_profile(self) -> None:
+        # ummanu-161 changes this contract: an arbitrary module must no longer earn a receipt
+        # for a registered profile. Subsets need an explicit local membership declaration.
         self._suite_file("project_suite")
         self._suite_file("other_suite")
         instance = self._register(
@@ -1570,23 +1568,29 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
             "  module: project_suite\n"
             "  args: ['--only', 'fast lane']\n"
         )
-
-        payload = _run_main(
-            [
-                "check",
-                "broad",
-                "--root",
-                str(self.root),
-                "--instance",
-                str(instance),
-                "--module",
-                "other_suite",
-            ]
-        )
-
-        self.assertEqual(payload["receipt"]["check_set"]["module"], "other_suite")
-        # The declared args belong to the declared suite; they are not smuggled onto another one.
-        self.assertEqual(payload["receipt"]["check_set"]["args"], [])
+        stdout, stderr = StringIO(), StringIO()
+        with (
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", stderr),
+            mock.patch("ummanu.check_commands.run_broad_check") as run,
+        ):
+            status = main(
+                [
+                    "check",
+                    "broad",
+                    "--root",
+                    str(self.root),
+                    "--instance",
+                    str(instance),
+                    "--module",
+                    "other_suite",
+                ]
+            )
+        self.assertEqual(status, 2)
+        self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "local_check_override")
+        self.assertEqual(stdout.getvalue(), "")
+        run.assert_not_called()
+        self.assertFalse(broad_check.receipt_dir(self.root).exists())
 
     def test_a_project_that_declares_no_module_and_is_given_none_is_refused_by_name(self) -> None:
         # A declared contract that names no suite - the shape every adapter was written in before

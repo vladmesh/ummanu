@@ -333,8 +333,8 @@ def _git(
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
+            check=False,
             text=True,
             timeout=_GIT_TIMEOUT,
             env=None if env is None else {**os.environ, **env},
@@ -561,10 +561,14 @@ def run_broad_check(
     stream: IO[str] | None = None,
     env: Mapping[str, str] | None = None,
     timeout_seconds: float | None = None,
+    record_receipt: bool = True,
 ) -> tuple[int, dict[str, object]]:
     """Run one broad check, keep its combined output visible, and write its receipt.
 
-    Returns the process's own exit status alongside the receipt, so the receipt never becomes a
+    A selector uses record_receipt=False: the same process observation stays in memory, and
+    neither the receipt namespace nor a full-round artifact is touched.
+
+    Returns the process's own exit status alongside the observation, so the receipt never becomes a
     second, softer answer to what the check decided.
     """
     spec = as_spec(check)
@@ -573,8 +577,9 @@ def run_broad_check(
     root = Path(root)
     if not root.is_dir():
         raise BroadCheckError("missing_root", f"{root} is not a directory")
-    target = receipt_path(root, spec)
-    _assert_ignored(root, target)
+    target = receipt_path(root, spec) if record_receipt else None
+    if target is not None:
+        _assert_ignored(root, target)
     environment = dict(os.environ if env is None else env)
     if spec.attests_provenance:
         environment = _normalize_pythonpath_for_child(environment)
@@ -622,7 +627,7 @@ def _run_and_record(
     spec: CheckSpec,
     *,
     root: Path,
-    target: Path,
+    target: Path | None,
     record: Path | None,
     environment: dict[str, str],
     sink: IO[str],
@@ -677,21 +682,22 @@ def _run_and_record(
         process.kill()
         exit_code = process.wait()
         incomplete_reason = incomplete_reason or f"runner interrupted: {type(exc).__name__}"
-        _write_receipt(
-            target,
-            _build_payload(
-                spec=spec,
-                root=root,
-                identity=identity,
-                provenance=_read_provenance(record, root),
-                started_at=started_at,
-                duration=time.monotonic() - started,
-                exit_code=exit_code,
-                tail=tail,
-                parsed=scanner.finish(),
-                incomplete_reason=incomplete_reason,
-            ),
-        )
+        if target is not None:
+            _write_receipt(
+                target,
+                _build_payload(
+                    spec=spec,
+                    root=root,
+                    identity=identity,
+                    provenance=_read_provenance(record, root),
+                    started_at=started_at,
+                    duration=time.monotonic() - started,
+                    exit_code=exit_code,
+                    tail=tail,
+                    parsed=scanner.finish(),
+                    incomplete_reason=incomplete_reason,
+                ),
+            )
         raise
     finally:
         if process.stdout is not None:
@@ -711,7 +717,8 @@ def _run_and_record(
         parsed=scanner.finish(),
         incomplete_reason=incomplete_reason,
     )
-    _write_receipt(target, payload)
+    if target is not None:
+        _write_receipt(target, payload)
     return exit_code, payload
 
 
@@ -1083,8 +1090,10 @@ def summarize(receipt: Mapping[str, Any]) -> str:
         f"- imported project: {imported or '(unresolved)'}",
         f"- tree_sha: {tree or '(unresolved)'}",
         f"- started_at: {receipt.get('started_at', '')} ({receipt.get('duration_seconds', 0)}s)",
-        f"- exit_code: {receipt.get('exit_code', '')} ({receipt.get('status', '')}"
-        f"/{receipt.get('verdict', '')})",
+        (
+            f"- exit_code: {receipt.get('exit_code', '')} ({receipt.get('status', '')}"
+            f"/{receipt.get('verdict', '')})"
+        ),
     ]
     if counts:
         lines.append(f"- parsed: {counts}")

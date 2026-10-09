@@ -102,28 +102,147 @@ use and Docker, VM, Ansible or provisioning commands fail loudly.
 Start with focused checks and `--fast`. When a task or repository contract requires the local broad
 suite, run the broad profile once through the receipt wrapper.
 
-## Control-host broad profile
+## Control-host local profile
 
-    python3 -m tests.broad
+Use the registered project's explicit local declaration:
 
-The Ummanu project's local broad suite: the manifest's `unit` and `component` modules only. Use it,
-not bare `python3 -m unittest` (repository-wide discovery of all nine suites). The other seven suites
-run only in exact-SHA GitHub CI. A green local broad receipt is a worker's evidence for its round, never
-a substitute for that gate.
+```bash
+ummanu check
+ummanu check tests/test_local_check.py
+ummanu check tests/test_local_check.py::LocalSelectorTests::test_known_ci_only_and_unknown_selectors_refuse_before_runner_or_import
+```
 
-The module list is read from `tests/ci-shards.txt` at run time through the parser in
-`scripts/ci_test_shards.py`; an invalid or unreadable manifest fails instead of running fewer modules.
-Because `tests/broad.py` is in the `tests` package, `tests/__init__.py` and its hermetic defaults load
-before any test module (`tests/test_health_suite_command.py` pins this).
+The first command runs the entire declared local profile, or reuses its intact content-bound
+worker-local broad receipt. The second runs one permitted module. The third runs one permitted test.
+A module or node-id always executes and returns the runner's status, streams test output, and leaves
+any full-round receipt untouched. Its JSON output identifies the selector and observed import; it
+contains no full-round receipt or claim of full-profile validation. `check show` reads the full receipt.
 
-A registered project names its broad suite in its adapter's `broad_check` block (`module`, optional
-`args`, `import_package`, optional `interpreter`), so the receipt wrapper needs no flag:
+Unittest accepts both the path/`::` form above and its native dotted node-id, for example
+`tests.test_local_check.LocalSelectorTests.test_known_ci_only_and_unknown_selectors_refuse_before_runner_or_import`.
+Pytest node-ids retain their parameter text as one argv argument, including spaces and punctuation:
 
-    python3 -m ummanu check broad --reuse
-    python3 -m ummanu check show
+```bash
+ummanu check 'checks/test_model.py::test_value[param with spaces]'
+```
 
-`--module` overrides the declared suite. With no declared or given module the command refuses with
-`no_broad_check_module`.
+In manifest profiles, selectors are checked for module membership before the runner starts or imports a test. Ummanu's
+`tests/test_board.py` and its node-ids fail with `tests/test_board.py: shard integration-board;
+execution only in CI`. An unknown module fails without an invented shard or test discovery.
+
+Ummanu's installable example is [adapters/ummanu.yaml](../examples/check-adapters/ummanu.yaml):
+
+```yaml
+broad_check:
+  module: tests.broad
+  import_package: ummanu
+  local:
+    runner: unittest
+    ci_manifest: tests/ci-shards.txt
+    shards: [unit, component]
+```
+
+The module set is exactly `unit` + `component` from `scripts/ci_test_shards.py::load_manifest`.
+The existing validator checks all CI ownership for duplicate, stale, missing or unclaimed modules and
+empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
+CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
+
+Runner-owned profiles delegate membership and node validation to the declared broad runner. They
+need no module map. Except for pytest below, a selector appends to `broad_check.args`; `selector_args` supplies either an empty
+list for native positional arguments or `["--"]` for a launcher with a selector separator. The complete
+profile always uses exactly the declared broad argv, without the selector separator.
+
+For codegen-orchestrator, the prepared [declaration](../examples/check-adapters/codegen-orchestrator.yaml)
+is an adapter fragment for a later operator installation:
+
+```yaml
+broad_check:
+  module: shared
+  interpreter: .venv/bin/python
+  import_package: shared
+  local:
+    membership: runner
+    selector_args: ["--"]
+```
+
+`ummanu check 'tests/test_x.py::test_name[param with spaces]'` then invokes the candidate interpreter
+with `-m shared -- <selector>`, through the common import-provenance bootstrap. Declared broad args
+remain before `--`. The `shared` runner owns the host profile, environment whitelist, empty PYTHONPATH,
+ci_only marker family (docker, ansible, privileged, slow), deselection, budgets and refusal status.
+The wrapper does not replace that launcher with pytest or impose an Ummanu module list.
+The PO confirmed delivery of shared's agreed `python -m shared -- <pytest selector>...` interface
+in codegen-orchestrator-1586, main `ec96fa79`, PR #761. Live granular validation still requires a
+subsequent operator installation of this declaration and the wrapper. A declaration promises runner
+support and cannot detect a runner that silently ignores all arguments. These fixtures prove the
+wrapper interface; they do not attest the live installation. No other repository or live adapter is
+changed here.
+
+For a declared pytest runner, keep its paths, configuration, markers and plugin options:
+
+```yaml
+broad_check:
+  module: pytest
+  interpreter: .venv/bin/python
+  import_package: framework
+  args: [tests/unit, tests/tooling, tests/copier, -m, "not slow"]
+  local:
+    membership: runner
+    selector_args: []
+```
+
+Declared collection roots define the allowed set. Full `check` / `check broad` passes the exact
+original argv. A granular module, node-id or parameter replaces only positional collection roots
+with the selected tokens, keeping every option, marker, configuration argument and the same
+interpreter, environment and import provenance. Multiple pytest selectors are allowed; each is one
+argv token and all must pass membership before execution. For the example above, selecting
+`tests/unit/test_x.py::test_name[param with spaces]` produces
+`["tests/unit/test_x.py::test_name[param with spaces]", "-m", "not slow"]`.
+
+Membership compares the selector path before `::`, normalized relative to the checkout, with the
+roots and their descendants. Absolute paths, any `..` component, leading `-` and paths outside roots
+refuse before execution, naming the roots and CI. No file-existence discovery determines membership;
+a missing file under a directory root reaches pytest. Pytest missing-file/node status 4 and native
+errors propagate. Exit 5 becomes a one-line refusal naming deselection, the declared marker expression
+if present, and CI. It never becomes a successful check or a full-round receipt.
+
+The parser excludes values of known pytest options such as `-m`, `-k`, `-p`, `-c`, `-o`, `-W`,
+`--rootdir`, `--confcutdir`, `--basetemp`, `--junitxml`, `--durations`, `--ignore`, `--ignore-glob`,
+`--deselect`, `--cache-show`, `--debug`, `-r` and logging options. Equals-form options occupy one token. Unknown separate-value plugin
+options and missing option values make granular resolution fail closed, with a hint to declare
+`broad_check.collection_roots`; full argv remains unchanged. No implicit checkout-wide root is used.
+
+Optional explicit `broad_check.collection_roots: [tests/unit, tests/tooling, tests/copier]` identifies
+the complete set of exact positional argv tokens without inferring plugin option arity. The schema requires a nonempty
+unique list of strings. Granular validation requires each root to occur exactly once in `args`, be a
+relative path without `..`, a leading `-` or `::`, and not occupy a known option's value position.
+All other tokens remain in their original order. A root repeated as an option value must be spelled
+differently there (for example `--ignore=tests/unit`) to make its positional role explicit. Invalid
+root roles refuse granular execution; a schema-valid full argv still runs unchanged.
+
+This implements decision ummanu-168 variant 1, clarifying the
+prior ummanu-161 append wording: an addressed node must execute only the selection.
+[Prepared fragments](../examples/check-adapters/instance-local.yaml) retain the exact existing argv for
+codegen-product-kit, codegen-platform-services, personal-site and dnd-simulator. They are additions to
+existing adapters, not replacements for setup, smoke or validation configuration.
+
+Manifest declarations use exactly unit + component and `module: tests.broad`. Declared reporting and
+control arguments such as `-v` remain supported; test names and filters cannot narrow the declared
+complete manifest profile. Malformed declarations or unreadable manifests fail without discovery.
+The unshipped intermediate `modules` map is not a supported contract.
+
+Legacy full-profile `ummanu check broad --reuse --module <adapter.module>` and `ummanu check show`
+remain supported with the declared module arguments. With a local declaration, legacy
+`--module-arg` selectors are validated or delegated and run without a receipt. A full declared argv
+followed by the declared separator and selectors also runs as a subset; `show` refuses both subset forms.
+Pytest legacy append inputs reach the same membership/replacement resolver. Other shape overrides fail. Without `local`, only the old full-profile argv remains supported; the
+new bare command and selectors fail as `local_check_not_declared`. The wrapper never guesses membership.
+
+Candidate interpreter and import provenance use the same adapter resolution and bootstrap as broad
+checks. `--default-interpreter` supplies the dispatcher-owned candidate interpreter when the adapter
+omits its own interpreter. A local receipt is worker evidence, never a dispatcher-owned exact-SHA CI
+receipt. The unit shard covers manifest and injected runner-owned behavior on temporary repositories;
+`integration-dispatcher` adds actual temporary shared-runner execution and pytest with declared paths
+and markers, parameterized selectors, failure statuses and receipt preservation.
 
 ## Runtime deadline boundary
 

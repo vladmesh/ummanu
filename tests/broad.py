@@ -93,11 +93,27 @@ def _names_tests(arguments: list[str]) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from ummanu.broad_check import BroadCheckError
+    from ummanu.projects.local_check import LocalProfile
+
     arguments = list(sys.argv[1:] if argv is None else argv)
-    # `unittest.main` gives this the same `-v`, `-f` and explicit-test-name handling every other
-    # invocation in this repository has; `python -m tests.broad tests.test_broad_check` therefore
-    # still runs just that module, and only a vector that names nothing gets the manifest's set.
-    selected = [] if _names_tests(arguments) else broad_modules()
+    try:
+        grouped = _shard_runner().load_manifest(REPO_ROOT, MANIFEST)
+        profile = LocalProfile(
+            "unittest", {path: shard for shard, paths in grouped.items() for path in paths}, BROAD_SUITES
+        )
+        expecting_value = False
+        for index, argument in enumerate(arguments):
+            if expecting_value:
+                expecting_value = False
+            elif argument.startswith("-"):
+                expecting_value = argument in _OPTIONS_TAKING_A_VALUE
+            else:
+                _path, arguments[index] = profile.select(argument)
+        selected = [] if _names_tests(arguments) else profile.full_args()
+    except (BroadCheckError, OSError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     program = unittest.main(
         module=None,
         argv=["python -m tests.broad", *arguments, *selected],
