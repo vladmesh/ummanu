@@ -294,7 +294,7 @@ class TimingReceiptTests(BroadCheckTestCase):
 
     def test_subset_observation_does_not_write_or_change_full_receipt(self):
         suite = self._suite("subsettiming", "print('subset')\n")
-        _, receipt = self._run(suite)
+        self._run(suite)
         path = receipt_path(self.root, suite)
         before = path.read_bytes()
         code, observed = run_broad_check(suite, root=self.root, stream=self.stream, record_receipt=False)
