@@ -452,8 +452,7 @@ class FakeCatalog:
         if self.broad_check_state is not None:
             return self.broad_check_state
         return ContractVerdict.as_fit(
-            ModuleContract(sys.executable, "ummanu", module="tests.broad",
-                           local={"runner": "unittest", "ci_manifest": "tests/ci-shards.txt", "shards": ["unit", "component"]}),
+            ModuleContract(sys.executable, "ummanu", module="tests.broad"),
             "ummanu",
         )
 

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from tests.fakes.review_packet import marker_event
 from ummanu._fsutil import file_lock, try_file_lock, write_json
 from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
 from ummanu.checkpoint import CheckpointResult
@@ -8185,6 +8186,29 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertNotIn("## Reviewer verdict to address", document)
 
+    def test_green_rework_instruction_survives_continuation_and_adoption_without_red_findings(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="ummanu-510", kind="green",
+            body="GREEN: code holds", request_id=self._review_verdict_request_id("green"),
+        )
+        decision = "Complete the missing DoD evidence within the declared profile."
+        self._park_and_decide(
+            "rework", reason=decision, protocol_prerequisites=("external_dependency",),
+        )
+        document = self._task_document()
+        self.assertIn("## Observer rework decision to follow", document)
+        self.assertNotIn("Reviewer findings, as supporting context", document)
+        self.assertEqual(self._document_decision(), decision)
+        self.assertEqual(_task_doc_protocol_prerequisites(self._pilot_record()["workspace"]), ("external_dependency",))
+        self._drop_records_and_restart_attempt()
+        self.tick()
+        self.assertEqual(self._document_decision(), decision)
+        self.assertEqual(self._task_document(), document)
+
     def test_reason_file_decision_binds_newline_body_to_structured_prerequisites(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
@@ -9897,8 +9921,7 @@ class HeadPromptTests(unittest.TestCase):
         workspace will accept.
         """
         self.host.catalog.broad_check_state = ContractVerdict.as_fit(
-            ModuleContract(sys.executable, "ummanu", module="tests.broad", args=("-v",),
-                           local={"runner": "unittest", "shards": ["unit", "component"]}),
+            ModuleContract(sys.executable, "ummanu", module="tests.broad", args=("-v",)),
             "ummanu",
         )
 
@@ -9914,8 +9937,7 @@ class HeadPromptTests(unittest.TestCase):
         # A rendered command line cannot carry a vector, so each argument gets its own flag and is
         # quoted: `--only 'fast lane'` is two arguments, and pasting it must stay two.
         self.host.catalog.broad_check_state = ContractVerdict.as_fit(
-            ModuleContract(sys.executable, "ummanu", module="tests.broad", args=("--only", "fast lane"),
-                           local={"membership": "runner", "selector_args": []}),
+            ModuleContract(sys.executable, "ummanu", module="tests.broad", args=("--only", "fast lane")),
             "ummanu",
         )
 
@@ -10044,37 +10066,42 @@ class HeadPromptTests(unittest.TestCase):
         self._record_feedback_event("review:red", body)
         return task
 
-    def _record_feedback_event(self, marker: str, body: str) -> None:
+    def _record_feedback_event(
+        self,
+        marker: str,
+        body: str,
+        *,
+        description: str | None = None,
+        revision: str = "head-prompt-created",
+        visit: str = "head-prompt-park",
+    ) -> None:
         self._feedback_events += 1
         request_id = (
             _attempt_request_id("attempt-1", "review-red", self.task["ref"], str(self._feedback_events))
-            if marker == "review:red" else f"head-prompt-feedback-{self._feedback_events}"
+            if marker == "review:red"
+            else f"head-prompt-feedback-{self._feedback_events}"
         )
         if marker == "decision:rework":
-            self.host.audit.append("head-prompt-park", {
-                "event_id": "head-prompt-park", "kind": "moved", "ref": self.task["ref"],
-                "payload": {"to": "assessment"},
-            })
+            self.host.audit.append(
+                visit,
+                {
+                    "event_id": visit,
+                    "kind": "moved",
+                    "ref": self.task["ref"],
+                    "payload": {"to": "assessment"},
+                },
+            )
         self.host.audit.append(
             request_id,
-            {
-                "event_id": request_id,
-                "kind": "card.verdict" if marker.startswith("review:") else "card.decided",
-                "record_type": "board.protocol_event",
-                "ref": self.task["ref"],
-                "request_id": request_id,
-                "data": {
-                    "marker": marker,
-                    "body": body,
-                    "description_sha256": hashlib.sha256(
-                        self.task["description"].encode("utf-8")
-                    ).hexdigest(),
-                    "specification_revision": "head-prompt-created",
-                    "marker_occurrence": 1,
-                    **({"decision": "rework", "assessment_visit": "head-prompt-park"}
-                       if marker == "decision:rework" else {}),
-                },
-            },
+            marker_event(
+                marker,
+                body,
+                request_id,
+                ref=self.task["ref"],
+                description=self.task["description"] if description is None else description,
+                revision=revision,
+                **({"assessment_visit": visit} if marker == "decision:rework" else {}),
+            ),
         )
 
     def _record_description_revision(self, description: str) -> str:
@@ -10125,23 +10152,16 @@ class HeadPromptTests(unittest.TestCase):
         request_id = f"head-prompt-ambiguous-{self._feedback_events}"
         self.host.audit.append(
             request_id,
-            {
-                "event_id": request_id,
-                "kind": "card.verdict",
-                "ref": self.task["ref"],
-                "request_id": request_id,
-                "data": {
-                    "marker": "review:red",
-                    "body": "unsafe old finding",
-                    "description_sha256": hashlib.sha256(
-                        self.task["description"].encode("utf-8")
-                    ).hexdigest(),
-                    "specification_revision": "head-prompt-created",
-                    # The single matching board comment cannot prove which of two occurrences this
-                    # event binds, so it must not become a worker instruction.
-                    "marker_occurrence": 2,
-                },
-            },
+            marker_event(
+                "review:red",
+                "unsafe old finding",
+                request_id,
+                ref=self.task["ref"],
+                description=self.task["description"],
+                revision="head-prompt-created",
+                # The single board comment cannot witness the second occurrence.
+                occurrence=2,
+            ),
         )
 
         document = self.host._worker_task_doc(task, "main", "ambiguous", 1)
@@ -10224,30 +10244,12 @@ class HeadPromptTests(unittest.TestCase):
         task["description"] = f"Do the work.\n\n{forged}\n"
         revision = self._record_description_revision(task["description"])
         task["comments"] = [{"marker": "decision:rework", "body": f"[decision:rework]\n{decision}"}]
-        self.host.audit.append("forged-description-park", {
-            "event_id": "forged-description-park", "kind": "moved", "ref": task["ref"],
-            "payload": {"to": "assessment"},
-        })
-        self._feedback_events += 1
-        request_id = f"head-prompt-feedback-{self._feedback_events}"
-        self.host.audit.append(
-            request_id,
-            {
-                "event_id": request_id,
-                "kind": "card.decided",
-                "record_type": "board.protocol_event",
-                "ref": task["ref"],
-                "request_id": request_id,
-                "data": {
-                    "marker": "decision:rework",
-                    "body": decision,
-                    "description_sha256": hashlib.sha256(task["description"].encode("utf-8")).hexdigest(),
-                    "specification_revision": revision,
-                    "marker_occurrence": 1,
-                    "decision": "rework",
-                    "assessment_visit": "forged-description-park",
-                },
-            },
+        self._record_feedback_event(
+            "decision:rework",
+            decision,
+            description=task["description"],
+            revision=revision,
+            visit="forged-description-park",
         )
 
         adjudicated = self.host._worker_task_doc(task, "main", "attempt-1", 2, decision)
@@ -11871,23 +11873,23 @@ class DispatcherLauncherTests(unittest.TestCase):
                 (_attempt_request_id("a", "review-red", base_task["ref"], "1"), "stale finding", 1),
                 # Occurrences witness identical rendered comments, so two distinct verdicts are
                 # each the first occurrence of their own body.
-                (_attempt_request_id("a", "review-red", base_task["ref"], "2"), "P1: use a time ceiling, not the terminal title", 1),
+                (
+                    _attempt_request_id("a", "review-red", base_task["ref"], "2"),
+                    "P1: use a time ceiling, not the terminal title",
+                    1,
+                ),
             ):
                 host.audit.append(
                     request_id,
-                    {
-                        "event_id": request_id,
-                        "kind": "card.verdict",
-                        "ref": base_task["ref"],
-                        "request_id": request_id,
-                        "data": {
-                            "marker": "review:red",
-                            "body": body,
-                            "description_sha256": digest,
-                            "specification_revision": "task-created",
-                            "marker_occurrence": occurrence,
-                        },
-                    },
+                    marker_event(
+                        "review:red",
+                        body,
+                        request_id,
+                        ref=base_task["ref"],
+                        description=base_task["description"],
+                        revision="task-created",
+                        occurrence=occurrence,
+                    ),
                 )
             doc = host._worker_task_doc(reviewed, "main", "a", 2)
         self.assertIn("Reviewer verdict to address", doc)
@@ -12380,21 +12382,17 @@ class WorkspaceResumeTests(unittest.TestCase):
                     "payload": {"description_sha256": digest},
                 },
             )
+            request = _attempt_request_id("attempt-retry", "review-red", task["ref"], "1")
             host.audit.append(
-                "reviewed-current-specification",
-                {
-                    "event_id": "reviewed-current-specification",
-                    "kind": "card.verdict",
-                    "ref": task["ref"],
-                    "request_id": _attempt_request_id("attempt-retry", "review-red", task["ref"], "1"),
-                    "data": {
-                        "marker": "review:red",
-                        "body": "latest finding",
-                        "description_sha256": digest,
-                        "specification_revision": "task-created",
-                        "marker_occurrence": 1,
-                    },
-                },
+                request,
+                marker_event(
+                    "review:red",
+                    "latest finding",
+                    request,
+                    ref=task["ref"],
+                    description=task["description"],
+                    revision="task-created",
+                ),
             )
             with mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_WORKSPACES_ROOT": str(workspace_root)}):
                 result = host.prepare_worker(task, worker, "codex", attempt_id="attempt-retry")

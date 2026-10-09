@@ -174,7 +174,6 @@ class LocalRunPacketTests(unittest.TestCase):
             "ummanu",
             module="tests.broad",
             args=("--only", "fast lane", "", "owner's test"),
-            local={"membership": "runner", "selector_args": []},
         )
         self.catalog = SimpleNamespace(
             broad_check_verdict=lambda project: ContractVerdict.as_fit(self.contract, project)
@@ -291,7 +290,6 @@ class LocalRunPacketTests(unittest.TestCase):
                         self.assertEqual('"argv": [' in successor_packet, not first_fails)
                         self.assertEqual(self.reader.show.call_count, 1)
                     self.reader.show.side_effect = None
-
 
     def test_worker_packet_names_the_receipt_in_the_owned_namespace(self) -> None:
         """secretary-1920: the packet points where `check broad` writes in a dispatcher workspace."""

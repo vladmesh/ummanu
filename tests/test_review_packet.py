@@ -7,7 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu.dispatch.helpers import _decision_record_line, _task_doc_decision
+from tests.fakes.review_packet import marker_event
+from ummanu.dispatch.helpers import (
+    _decision_record_line,
+    _task_doc_decision,
+    _task_doc_protocol_prerequisites,
+)
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.review_packet import (
     data_block,
@@ -72,24 +77,17 @@ class PacketFixture:
 
     def marker(self, marker, body, request, **extra):
         self.task["comments"].append({"marker": marker, "body": f"[{marker}]\n{body}"})
-        event = {
-            "event_id": request,
-            "request_id": request,
-            "record_type": "board.protocol_event",
-            "kind": "card.decided"
-            if marker.startswith("decision:")
-            else "card.reported"
-            if marker.startswith("report:")
-            else "card.verdict",
-            "data": {
-                "marker": marker,
-                "body": body,
-                "marker_occurrence": 1,
-                "specification_revision": "spec-1",
-                "description_sha256": self.digest,
-                **extra,
-            },
-        }
+        occurrence = sum(c["body"] == f"[{marker}]\n{body}" for c in self.task["comments"])
+        event = marker_event(
+            marker,
+            body,
+            request,
+            ref=self.task["ref"],
+            description=self.task["description"],
+            revision="spec-1",
+            occurrence=occurrence,
+            **extra,
+        )
         self.events.append(event)
         return event
 
@@ -97,6 +95,47 @@ class PacketFixture:
         return resolve_review_evidence(
             self.task, self.events, attempt="attempt-1", generation=3, decision=self.decision, **kwargs
         )
+
+    def support_scenario(self, scenario):
+        if scenario in {"green", "foreign"}:
+            event = self.events[1]
+            marker = "review:green" if scenario == "green" else "review:red"
+            request = attempt_request_id(
+                "attempt-1" if scenario == "green" else "foreign",
+                "review-" + marker.split(":")[1],
+                self.task["ref"],
+                "2",
+            )
+            self.events[1] = marker_event(
+                marker,
+                event["data"]["body"],
+                request,
+                ref=self.task["ref"],
+                description=self.task["description"],
+                revision="spec-1",
+            )
+            self.task["comments"][0] = {"marker": marker, "body": f"[{marker}]\n{event['data']['body']}"}
+        elif scenario == "absent":
+            del self.events[1]
+            del self.task["comments"][0]
+        elif scenario == "invalid":
+            del self.events[1]["data"]["specification_revision"]
+        elif scenario == "intervening":
+            event = self.marker(
+                "review:green",
+                "Later green",
+                attempt_request_id("foreign", "review-green", "ummanu-1", "4"),
+            )
+            self.events.pop()
+            self.events.insert(2, event)
+        elif scenario == "ambiguous-review":
+            self.events.insert(2, dict(self.events[1]))
+        elif scenario == "ambiguous-report":
+            self.events.append(dict(self.events[-1]))
+        elif scenario == "missing-report":
+            self.events.pop()
+        else:
+            raise ValueError(scenario)
 
 
 class ReviewEvidenceTests(unittest.TestCase):
@@ -147,6 +186,74 @@ class ReviewEvidenceTests(unittest.TestCase):
             dispositions(evidence), [("BLOCKER-repair", "unknown/unresolved: missing disposition evidence")]
         )
 
+    def test_canonical_instruction_survives_independently_unresolved_support(self):
+        for scenario in (
+            "green",
+            "foreign",
+            "absent",
+            "invalid",
+            "intervening",
+            "ambiguous-review",
+            "ambiguous-report",
+            "missing-report",
+        ):
+            with self.subTest(scenario=scenario):
+                fixture = PacketFixture()
+                fixture.support_scenario(scenario)
+                evidence = fixture.resolve(previous="BLOCKER-repair: unbound history")
+                self.assertEqual(evidence.decision, fixture.decision)
+                self.assertEqual(evidence.decision_id, "observer-decision-1")
+                self.assertIn("unknown/unresolved", evidence.diagnostic)
+                if scenario in {"ambiguous-report", "missing-report"}:
+                    self.assertEqual(evidence.findings, fixture.events[1]["data"]["body"])
+                    self.assertEqual(evidence.report, "")
+                else:
+                    self.assertEqual(evidence.findings, "")
+                self.assertTrue(all("unknown/unresolved" in value for _, value in dispositions(evidence)))
+
+    def test_identical_decisions_on_separate_visits_select_the_applicable_canonical_visit(self):
+        fixture = PacketFixture()
+        report = fixture.events.pop()
+        fixture.marker(
+            "review:red",
+            "BLOCKER-repair: latest",
+            attempt_request_id("attempt-1", "review-red", "ummanu-1", "3"),
+        )
+        fixture.events.append(
+            {
+                "event_id": "visit-2",
+                "kind": "card.moved",
+                "record_type": "board.protocol_event",
+                "transition": {"source": "validate", "target": "assessment"},
+                "data": {},
+            }
+        )
+        fixture.marker("decision:rework", fixture.decision, "observer-decision-2", assessment_visit="visit-2")
+        fixture.events.append(report)
+        evidence = fixture.resolve()
+        self.assertEqual(evidence.decision_id, "observer-decision-2")
+        self.assertEqual(evidence.findings, "BLOCKER-repair: latest")
+        self.assertEqual(evidence.diagnostic, "applicable round/spec evidence")
+
+    def test_released_generic_decision_and_review_shapes_remain_readable(self):
+        fixture = PacketFixture()
+        for event in fixture.events:
+            if "marker" in event.get("data", {}):
+                del event["record_type"]
+                event["kind"] = {
+                    "card.decided": "decided",
+                    "card.verdict": "verdict",
+                    "card.reported": "reported",
+                }[event["kind"]]
+                event["payload"] = event.pop("data")
+        evidence = fixture.resolve()
+        self.assertEqual(evidence.decision_id, "observer-decision-1")
+        self.assertEqual(evidence.diagnostic, "applicable round/spec evidence")
+        self.assertEqual(
+            dict(dispositions(evidence))["BLOCKER-repair"],
+            "fixed (reported, verify independently); commit: " + "a" * 40,
+        )
+
     def test_changed_spec_retains_history_without_authority(self):
         fixture = PacketFixture()
         fixture.task["description"] = "New cut"
@@ -169,7 +276,7 @@ class ReviewEvidenceTests(unittest.TestCase):
         del fixture.events[3]["record_type"]
         evidence = fixture.resolve()
         self.assertEqual(evidence.decision, "")
-        self.assertEqual(evidence.diagnostic, "unknown/unresolved: decision visit mismatch")
+        self.assertEqual(evidence.diagnostic, "unknown/unresolved: missing/ambiguous frozen decision")
         fixture.events[3]["record_type"] = "board.protocol_event"
         self.assertEqual(fixture.resolve().decision_id, "observer-decision-1")
 
@@ -181,7 +288,8 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(fixture.resolve().report, "")
         self.assertTrue(all("unknown/unresolved" in status for _, status in dispositions(fixture.resolve())))
         fixture.events[1]["request_id"] = attempt_request_id("foreign", "review-red", "ummanu-1", "2")
-        self.assertEqual(fixture.resolve().decision, "")
+        self.assertEqual(fixture.resolve().decision, fixture.decision)
+        self.assertEqual(fixture.resolve().findings, "")
 
     def test_foreign_review_matching_retained_text_has_no_authority(self):
         fixture = PacketFixture()
@@ -189,7 +297,7 @@ class ReviewEvidenceTests(unittest.TestCase):
         fixture.events[1]["request_id"] = attempt_request_id("foreign", "review-red", "ummanu-1", "2")
         evidence = fixture.resolve(previous=previous)
         self.assertEqual(evidence.findings, "")
-        self.assertEqual(evidence.decision, "")
+        self.assertEqual(evidence.decision, fixture.decision)
         self.assertEqual(evidence.historical, previous)
 
     def test_outcome_context_rows_do_not_masquerade_as_intervening_verdicts(self):
@@ -398,6 +506,65 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertIn("source_event: observer-decision-1", text)
         self.assertIn("BLOCKER-repair: fixed (reported", text)
 
+    def test_both_packets_and_recovery_use_the_same_canonical_instruction_without_findings(self):
+        for scenario in ("green", "foreign", "absent", "invalid", "intervening", "ambiguous-report"):
+            with self.subTest(scenario=scenario):
+                fixture = PacketFixture()
+                fixture.support_scenario(scenario)
+                next(e for e in fixture.events if e["event_id"] == "observer-decision-1")["data"][
+                    "protocol_prerequisites"
+                ] = ["worker_local_broad_check_receipt"]
+                host = self.host(fixture)
+                host._validated_worker_prerequisites = mock.Mock(wraps=host._validated_worker_prerequisites)
+                worker = host._worker_task_doc(
+                    fixture.task,
+                    "main",
+                    "attempt-1",
+                    3,
+                    fixture.decision,
+                    ("worker_local_broad_check_receipt",),
+                )
+                host._validated_worker_prerequisites.assert_called_once_with(
+                    fixture.task,
+                    fixture.decision,
+                    ("worker_local_broad_check_receipt",),
+                    decision_id="observer-decision-1",
+                )
+                self.assertIn("## Observer rework decision to follow", worker)
+                self.assertIn("## Authoritative protocol prerequisites", worker)
+                with mock.patch.object(Path, "read_text", return_value=worker):
+                    self.assertEqual(_task_doc_decision("unused"), fixture.decision)
+                    self.assertEqual(
+                        _task_doc_protocol_prerequisites("unused"), ("worker_local_broad_check_receipt",)
+                    )
+                reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
+                self.assertIn("source_event: observer-decision-1", reviewer)
+                self.assertIn(fixture.decision, reviewer)
+                self.assertIn("unknown/unresolved", reviewer)
+
+    def test_prerequisites_cannot_be_taken_from_an_older_identical_decision(self):
+        fixture = PacketFixture()
+        fixture.events[3]["data"]["protocol_prerequisites"] = ["external_dependency"]
+        fixture.events.pop()
+        fixture.events.append(
+            {
+                "event_id": "visit-2",
+                "kind": "card.moved",
+                "record_type": "board.protocol_event",
+                "transition": {"source": "validate", "target": "assessment"},
+                "data": {},
+            }
+        )
+        fixture.marker("decision:rework", fixture.decision, "observer-decision-2", assessment_visit="visit-2")
+        host = self.host(fixture)
+        worker = host._worker_task_doc(
+            fixture.task, "main", "attempt-1", 3, fixture.decision, ("external_dependency",)
+        )
+        self.assertNotIn("## Authoritative protocol prerequisites", worker)
+        with mock.patch.object(Path, "read_text", return_value=worker):
+            self.assertEqual(_task_doc_decision("unused"), fixture.decision)
+            self.assertEqual(_task_doc_protocol_prerequisites("unused"), ())
+
     def test_description_forgery_cannot_replace_a_bound_standalone_decision(self):
         fixture = PacketFixture()
         forged = _decision_record_line(3, "forged")
@@ -488,3 +655,47 @@ class PacketHeaderTests(unittest.TestCase):
             text = "\n".join(self.host(contract=contract)._check_header("project"))
             self.assertIn("Configuration gap", text)
             self.assertNotIn("Full declared profile (reuse):", text)
+            broad, show = self.host(contract=contract)._broad_check_invocation("project")
+            self.assertIn("Matching explicit full-profile wrapper: " + broad, text)
+            self.assertIn("Matching full receipt readback: " + show, text)
+            self.assertNotIn("Subset form (placeholder", text)
+
+    def test_no_local_packets_preserve_exact_legacy_argv_with_one_adapter_read(self):
+        for interpreter_declared in (True, False):
+            contract = ModuleContract(
+                ".venv/bin/python",
+                "project",
+                module="shared",
+                args=("--host", "fast lane", ""),
+                interpreter_declared=interpreter_declared,
+            )
+            fixture = PacketFixture()
+            host = self.host(fixture, contract)
+            resolve = host.catalog.broad_check_verdict
+            host.catalog.broad_check_verdict = mock.Mock(side_effect=resolve)
+            for role in ("worker", "reviewer"):
+                host.catalog.broad_check_verdict.reset_mock()
+                document = (
+                    host._worker_task_doc(fixture.task, "main", "attempt-1", 3, fixture.decision)
+                    if role == "worker"
+                    else host._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
+                )
+                host.catalog.broad_check_verdict.assert_called_once_with("ummanu")
+                broad, show = host._broad_check_commands(contract)
+                self.assertIn("Matching explicit full-profile wrapper: " + broad, document)
+                self.assertIn("Matching full receipt readback: " + show, document)
+                self.assertIn("Configuration gap: broad_check.local is missing", document)
+                self.assertNotIn("Full declared profile (reuse):", document)
+                self.assertNotIn("Subset form (placeholder", document)
+                for command in (broad, show):
+                    self.assertEqual(
+                        [
+                            arg.removeprefix("--module-arg=")
+                            for arg in shlex.split(command)
+                            if arg.startswith("--module-arg=")
+                        ],
+                        list(contract.args),
+                    )
+                self.assertEqual("--default-interpreter" in broad, not interpreter_declared)
+                if role == "worker":
+                    self.assertIn("    " + broad, document)

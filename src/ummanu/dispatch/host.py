@@ -4173,16 +4173,8 @@ class CommandHostRuntime:
 
     def _broad_check_commands(self, contract: Any) -> tuple[str, str]:
         """Render commands from the same resolved declaration as the packet header."""
-        if contract is None or not contract.module or contract.local is None:
+        if contract is None or not contract.module:
             return "", ""
-        if contract.module == "pytest":
-            from ummanu.broad_check import BroadCheckError
-            from ummanu.projects.local_check import PytestSelection
-
-            try:
-                PytestSelection.resolve(contract.args, contract.collection_roots)
-            except BroadCheckError:
-                return "", ""
         broad_arguments = ["check", "broad", "--reuse", "--module", contract.module]
         show_arguments = ["check", "show", "--module", contract.module]
         for argument in contract.args:
@@ -4223,41 +4215,68 @@ class CommandHostRuntime:
         from ummanu.projects.local_check import PytestSelection
 
         lines = ["## Declared local checks and CI evidence boundary", ""]
-        if contract is None or not contract.module or contract.local is None:
+        if contract is None or not contract.module:
             return lines + [
                 "Configuration gap: no usable adapter-declared local profile. Obtain CI evidence",
-                "and report the gap; do not use repository discovery or direct pytest/unittest.", "",
+                "and report the gap; do not use repository discovery or direct pytest/unittest.",
+                "",
             ]
-        if contract.module == "pytest":
-            try:
-                roots = PytestSelection.resolve(contract.args, contract.collection_roots).roots
-            except BroadCheckError as exc:
-                return lines + [f"Configuration gap: {exc.message}", ""]
-        else:
-            roots = ()
-        default = [] if contract.interpreter_declared else [
-            "--default-interpreter", str(Path(WORKSPACE_ENV_DIR) / "bin" / "python3")
-        ]
+        default = (
+            []
+            if contract.interpreter_declared
+            else ["--default-interpreter", str(Path(WORKSPACE_ENV_DIR) / "bin" / "python3")]
+        )
         broad, show = self._broad_check_commands(contract)
         lines += [
-            f"Full declared profile (reuse): {self._control_plane_command('check', '--reuse', *default)}",
             f"Matching explicit full-profile wrapper: {broad}",
             f"Matching full receipt readback: {show}",
             f"Candidate check interpreter: {contract.interpreter if contract.interpreter_declared else default[-1]}",
         ]
-        selectors = ("<declared-collection-path>", "<declared-collection-path>::<test-node>") if roots else (
-            ("<runner-owned-module-selector>", "<runner-owned-node-selector>")
-            if contract.local.get("membership") == "runner" else
-            ("<declared-unit-or-component-module>", "<declared-unit-or-component-file.py>::<class>::<test>")
-        )
-        lines += [f"Subset form (placeholder, replace with an allowed selector): {self._control_plane_command('check', *default, '--', selector)}"
-                  for selector in selectors]
-        if roots:
-            lines += [f"Declared pytest collection roots: {list(roots)!r}; wrapper preserves declared options/markers."]
-        elif contract.local.get("membership") == "runner":
-            lines += ["Runner owns selector forwarding through -- and its declared selector_args; do not bypass it."]
+        roots = ()
+        gap = ""
+        if contract.local is None:
+            gap = "broad_check.local is missing"
+        elif contract.module == "pytest":
+            try:
+                roots = PytestSelection.resolve(contract.args, contract.collection_roots).roots
+            except BroadCheckError as exc:
+                gap = exc.message
+        if gap:
+            lines += [
+                f"Configuration gap: {gap}; bare check and module/node selector forms are unavailable.",
+                "Use the declared legacy broad/show commands above; do not guess collection roots",
+                "or use repository discovery or direct pytest/unittest.",
+            ]
         else:
-            lines += ["Manifest membership is unit + component; other shards are CI-only."]
+            lines += [
+                f"Full declared profile (reuse): {self._control_plane_command('check', '--reuse', *default)}"
+            ]
+            selectors = (
+                ("<declared-collection-path>", "<declared-collection-path>::<test-node>")
+                if roots
+                else (
+                    ("<runner-owned-module-selector>", "<runner-owned-node-selector>")
+                    if contract.local.get("membership") == "runner"
+                    else (
+                        "<declared-unit-or-component-module>",
+                        "<declared-unit-or-component-file.py>::<class>::<test>",
+                    )
+                )
+            )
+            lines += [
+                f"Subset form (placeholder, replace with an allowed selector): {self._control_plane_command('check', *default, '--', selector)}"
+                for selector in selectors
+            ]
+            if roots:
+                lines += [
+                    f"Declared pytest collection roots: {list(roots)!r}; wrapper preserves declared options/markers."
+                ]
+            elif contract.local.get("membership") == "runner":
+                lines += [
+                    "Runner owns selector forwarding through -- and its declared selector_args; do not bypass it."
+                ]
+            else:
+                lines += ["Manifest membership is unit + component; other shards are CI-only."]
         return lines + [
             "Every AC needs declared local-profile evidence or its corresponding CI shard and report.",
             "Respect native runner budgets, including codegen's 0.5s/test and 240s CPU limits.",
@@ -4265,7 +4284,8 @@ class CommandHostRuntime:
             "Real integration/packaging/runtime/backend/network/container evidence is CI-only here.",
             "Never run direct pytest/unittest or expand the local profile to satisfy an AC.",
             "A valid executed dispatcher-owned exact-SHA gate suppresses routine broad reruns;",
-            "none/noop/missing receipts attest no suite. Subsets and refusal125 do not alter full receipts.", "",
+            "none/noop/missing receipts attest no suite. Subsets and refusal125 do not alter full receipts.",
+            "",
         ]
 
     def _control_plane_command(self, *arguments: str) -> str:
@@ -4503,12 +4523,19 @@ class CommandHostRuntime:
             *_interrupted_command_section(record),
         ]
         feedback = self._select_revision_bound_worker_feedback(
-            task, decision, attempt=attempt_id,
+            task,
+            decision,
+            attempt=attempt_id,
             generation=generation,
             previous=record.previous_blockers if record else "",
         )
         decision, review_red = feedback.decision, feedback.findings
-        prerequisites = self._validated_worker_prerequisites(task, decision, protocol_prerequisites)
+        prerequisites = self._validated_worker_prerequisites(
+            task,
+            decision,
+            protocol_prerequisites,
+            decision_id=feedback.decision_id,
+        )
         if decision:
             # Rendered above the findings it was made on, and named as the thing to follow.
             sections += [
@@ -4583,7 +4610,8 @@ class CommandHostRuntime:
         broad_command, show_command = self._broad_check_commands(check_contract)
         sections += self._local_run_section(task, local_run_policy=local_run_policy)
         sections += [
-            "## Prior blocker dispositions in the worker report", "",
+            "## Prior blocker dispositions in the worker report",
+            "",
             "List every applicable prior stable ID on its own line using these report forms:",
             "BLOCKER-<id>: fixed; commit: <repair SHA>",
             "BLOCKER-<id>: observer-rejected; observer quote: <exact applicable decision quotation>",
@@ -4594,7 +4622,8 @@ class CommandHostRuntime:
             "claim requiring independent review. Missing, conflicting or unbound evidence stays",
             "unknown/unresolved; preserve all IDs and explain that gap. Give exact candidate SHA,",
             "actual role environment/hook, artifact paths, command/status/count/import provenance,",
-            "full receipt hashes and relevant CI links; distinguish fixtures, projections and delivered packets.", "",
+            "full receipt hashes and relevant CI links; distinguish fixtures, projections and delivered packets.",
+            "",
             *(render_review_evidence(feedback) if feedback.findings or feedback.historical else []),
         ]
         if broad_command:
@@ -4778,7 +4807,12 @@ class CommandHostRuntime:
         )
 
     def _validated_worker_prerequisites(
-        self, task: dict[str, Any], decision: str, expected: tuple[str, ...]
+        self,
+        task: dict[str, Any],
+        decision: str,
+        expected: tuple[str, ...],
+        *,
+        decision_id: str,
     ) -> tuple[ProtocolArtifact, ...]:
         """Read only the structured declaration bound to the decision rendered for this round."""
         if not decision:
@@ -4788,6 +4822,8 @@ class CommandHostRuntime:
         revision = specification_revision(events, description)
         digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
         for event in reversed(events):
+            if event.get("event_id") != decision_id:
+                continue
             data = event.get("data") if isinstance(event.get("data"), dict) else event.get("payload")
             if not isinstance(data, dict) or data.get("marker") != "decision:rework":
                 continue
