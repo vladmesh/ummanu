@@ -4528,6 +4528,8 @@ class CommandHostRuntime:
             attempt=attempt_id,
             generation=generation,
             previous=record.previous_blockers if record else "",
+            decision_id=record.report_decision_id if record else "",
+            review_id=(record.previous_review_id or ("" if record.report_decision_id else None)) if record else None,
         )
         decision, review_red = feedback.decision, feedback.findings
         prerequisites = self._validated_worker_prerequisites(
@@ -4563,7 +4565,7 @@ class CommandHostRuntime:
             ]
         if review_red and decision:
             sections += [
-                "## Reviewer findings, as supporting context (previous submission was RED)",
+                f"## Reviewer findings, as supporting context (previous submission was {feedback.verdict.upper()})",
                 "",
                 "These are the findings the decision above was made on. They are context for it,",
                 "not the instruction: a finding the decision rejects or narrows is settled by the",
@@ -4572,7 +4574,7 @@ class CommandHostRuntime:
                 *data_block(review_red),
                 "",
             ]
-        elif review_red:
+        elif review_red and feedback.verdict == "red":
             sections += [
                 "## Reviewer verdict to address (previous submission was RED)",
                 "",
@@ -4624,7 +4626,7 @@ class CommandHostRuntime:
             "actual role environment/hook, artifact paths, command/status/count/import provenance,",
             "full receipt hashes and relevant CI links; distinguish fixtures, projections and delivered packets.",
             "",
-            *(render_review_evidence(feedback) if feedback.findings or feedback.historical else []),
+            *(render_review_evidence(feedback) if feedback.findings or feedback.historical or feedback.decision else []),
         ]
         if broad_command:
             broad_invocation = [f"    {broad_command}", ""]
@@ -4799,11 +4801,13 @@ class CommandHostRuntime:
     def _select_revision_bound_worker_feedback(
         self, task: dict[str, Any], decision: str, *, attempt: str,
         generation: int, previous: str = "",
+        decision_id: str = "", review_id: str | None = None,
     ) -> ReviewEvidence:
         """One round/spec resolution for both worker instructions and reviewer evidence."""
         return resolve_review_evidence(
             task, self._card_audit().events(task["ref"]), attempt=attempt,
             generation=generation, decision=decision, previous=previous,
+            decision_id=decision_id, review_id=review_id,
         )
 
     def _validated_worker_prerequisites(
@@ -5000,7 +5004,7 @@ class CommandHostRuntime:
         ]
         if not has_candidate(task):
             # No candidate: no branch, diff or gate to point at. A re-review keeps only the blockers.
-            if record and record.previous_blockers:
+            if record and (record.previous_blockers or record.report_decision):
                 sections[4:4] = [
                     "## Re-review packet",
                     "",
@@ -5046,11 +5050,11 @@ class CommandHostRuntime:
                 "entitled to have, not an invitation to grade the head.",
                 "",
             ]
-        if record and record.previous_reviewed_sha:
+        if record and (record.previous_reviewed_sha or record.report_decision or record.previous_blockers):
             sections[4:4] = [
                 "## Re-review packet",
                 "",
-                f"previous_reviewed_sha: {_safe_one_line(record.previous_reviewed_sha)}",
+                f"previous_reviewed_sha: {_safe_one_line(record.previous_reviewed_sha) or 'unknown/unresolved'}",
                 f"current_sha: {_safe_one_line(current_sha) or '(unavailable)'}",
                 "Changed paths / delta from the prior review:",
                 self._review_delta(record, record.previous_reviewed_sha, current_sha),
@@ -5067,6 +5071,8 @@ class CommandHostRuntime:
             task, record.report_decision, attempt=record.attempt_id,
             generation=record.report_generation,
             previous=record.previous_blockers,
+            decision_id=record.report_decision_id,
+            review_id=record.previous_review_id or ("" if record.report_decision_id else None),
         )
         return render_review_evidence(evidence)
 

@@ -19,6 +19,7 @@ from ummanu.dispatch.review_packet import (
     dispositions,
     render_review_evidence,
     resolve_review_evidence,
+    retain_rework_review,
 )
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
 from ummanu.projects.contract import ContractVerdict, ModuleContract
@@ -168,10 +169,12 @@ class ReviewEvidenceTests(unittest.TestCase):
         fixture.events[1]["data"]["body"] = body
         fixture.task["comments"][0]["body"] = "[review:red]\n" + body
         evidence = fixture.resolve()
-        self.assertEqual(len(dispositions(evidence)), 80)
+        statuses = dict(dispositions(evidence))
+        self.assertEqual(len(statuses), 82)  # 80 review IDs plus two observer-only IDs.
+        self.assertTrue(all(f"BLOCKER-n{i}" in statuses for i in range(80)))
         self.assertIn(body, "\n".join(render_review_evidence(evidence)))
         self.assertEqual(
-            dispositions(evidence)[-1], ("BLOCKER-n79", "unknown/unresolved: missing disposition evidence")
+            statuses["BLOCKER-n79"], "unknown/unresolved: missing disposition evidence"
         )
 
     def test_bound_standalone_decision_survives_without_inventing_prior_dispositions(self):
@@ -182,13 +185,13 @@ class ReviewEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.decision, fixture.decision)
         self.assertEqual(evidence.decision_id, "observer-decision-1")
         self.assertEqual(evidence.findings, "")
-        self.assertEqual(
-            dispositions(evidence), [("BLOCKER-repair", "unknown/unresolved: missing disposition evidence")]
-        )
+        statuses = dict(dispositions(evidence))
+        self.assertEqual(statuses["BLOCKER-repair"], "unknown/unresolved: missing disposition evidence")
+        self.assertEqual(statuses["BLOCKER-rejected"], "observer-rejected; observer quote: Reject BLOCKER-rejected: invariant already holds.")
+        self.assertEqual(statuses["BLOCKER-later"], "deferred; issue: issue:abc123; observer quote: Defer BLOCKER-later to issue:abc123.")
 
     def test_canonical_instruction_survives_independently_unresolved_support(self):
         for scenario in (
-            "green",
             "foreign",
             "absent",
             "invalid",
@@ -209,7 +212,13 @@ class ReviewEvidenceTests(unittest.TestCase):
                     self.assertEqual(evidence.report, "")
                 else:
                     self.assertEqual(evidence.findings, "")
-                self.assertTrue(all("unknown/unresolved" in value for _, value in dispositions(evidence)))
+                statuses = dict(dispositions(evidence))
+                self.assertIn("unknown/unresolved", statuses["BLOCKER-repair"])
+                if scenario in {"ambiguous-report", "missing-report"}:
+                    self.assertTrue(all("unknown/unresolved" in value for value in statuses.values()))
+                else:
+                    self.assertTrue(statuses["BLOCKER-rejected"].startswith("observer-rejected;"))
+                    self.assertTrue(statuses["BLOCKER-later"].startswith("deferred;"))
 
     def test_identical_decisions_on_separate_visits_select_the_applicable_canonical_visit(self):
         fixture = PacketFixture()
@@ -471,6 +480,175 @@ class PacketHeaderTests(unittest.TestCase):
             previous_blockers="BLOCKER-repair: broken",
         )
 
+    def green_round(self):
+        fixture = PacketFixture()
+        fixture.support_scenario("green")
+        fixture.events[1]["data"]["body"] = "GREEN: reviewed invariants hold."
+        fixture.task["comments"][0]["body"] = "[review:green]\nGREEN: reviewed invariants hold."
+        fixture.decision = "Accept BLOCKER-observer-only: preserve the GREEN predecessor packet."
+        fixture.events[3]["data"]["body"] = fixture.decision
+        fixture.task["comments"][1]["body"] = "[decision:rework]\n" + fixture.decision
+        body = "BLOCKER-observer-only: fixed; commit: " + "a" * 40
+        fixture.events[-1]["data"]["body"] = body
+        fixture.task["comments"][-1]["body"] = "[report:done]\n" + body
+        record = self.record()
+        record.previous_reviewed_sha = ""
+        record.previous_blockers = ""
+        record.review_commit = "b" * 40
+        record.review_baseline = 2
+        record.report_generation = 2
+        record.worker_continuation.begin_park("review", 2, "review:green", "green")
+        record.worker_continuation.confirm_park()
+        return fixture, record
+
+    def test_green_observer_only_findings_reach_both_actual_packet_builders(self):
+        fixture, record = self.green_round()
+        retain_rework_review(fixture.task, fixture.events[:-1], record, fixture.decision)
+        self.assertEqual(record.previous_reviewed_sha, "b" * 40)
+        self.assertEqual(record.previous_review_id, fixture.events[1]["event_id"])
+        self.assertEqual(record.report_decision_id, "observer-decision-1")
+        # This is the round after the existing transition has assigned its generation
+        # and cleared the review pin, with the retained/replacement transition finished.
+        record.report_generation = 3
+        record.report_decision = fixture.decision
+        record.review_commit = ""
+        record.worker_continuation.clear()
+        recovered = DispatcherRecord.from_json(record.to_json())
+        host = self.host(fixture)
+        host.mode = "real"
+        recovered.workspace = "/candidate"
+        host.head_commit = lambda _: "a" * 40
+        host.run_capture = mock.Mock(side_effect=[
+            SimpleNamespace(returncode=0, stdout="src/ummanu/dispatch/review_packet.py\n"),
+            SimpleNamespace(returncode=0, stdout="1 file changed\n"),
+        ])
+        worker = host._worker_task_doc(fixture.task, "main", "attempt-1", 3, fixture.decision, record=recovered)
+        reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=recovered)
+        self.assertIn("previous submission was GREEN", worker)
+        self.assertNotIn("previous submission was RED", worker)
+        self.assertIn("## Re-review packet", reviewer)
+        self.assertIn("previous_reviewed_sha: " + "b" * 40, reviewer)
+        self.assertIn("current_sha: " + "a" * 40, reviewer)
+        self.assertIn("src/ummanu/dispatch/review_packet.py", reviewer)
+        self.assertEqual(host.run_capture.call_args_list[0].args[0][-1], "b" * 40 + ".." + "a" * 40)
+        for packet in (worker, reviewer):
+            self.assertTrue(packet.startswith("## Declared local checks"))
+            self.assertIn("source_event: " + fixture.events[1]["event_id"], packet)
+            self.assertIn("source_event: observer-decision-1", packet)
+            self.assertIn("source_event: " + fixture.events[-1]["event_id"], packet)
+            self.assertIn(fixture.decision, packet)
+            self.assertIn("BLOCKER-observer-only: fixed (reported, verify independently); commit: " + "a" * 40, packet)
+
+    def test_frozen_sources_survive_a_later_identical_decision_without_a_report(self):
+        fixture, record = self.green_round()
+        fixture.events.pop()
+        fixture.task["comments"].pop()
+        retain_rework_review(fixture.task, fixture.events, record, fixture.decision)
+        fixture.events.append({
+            "event_id": "visit-2", "kind": "card.moved", "record_type": "board.protocol_event",
+            "transition": {"source": "validate", "target": "assessment"}, "data": {},
+        })
+        fixture.marker("decision:rework", fixture.decision, "observer-decision-2", assessment_visit="visit-2")
+        evidence = fixture.resolve(decision_id=record.report_decision_id, review_id=record.previous_review_id)
+        self.assertEqual(evidence.decision_id, "observer-decision-1")
+        self.assertEqual(evidence.review_id, record.previous_review_id)
+        self.assertIn("current report missing", evidence.diagnostic)
+        self.assertIn("unknown/unresolved", dict(dispositions(evidence))["BLOCKER-observer-only"])
+
+    def test_released_empty_fields_and_red_predecessor_remain_supported(self):
+        for verdict in ("green", "red"):
+            with self.subTest(verdict=verdict):
+                fixture, record = self.green_round()
+                if verdict == "red":
+                    fixture = PacketFixture()
+                    record.worker_continuation.verdict_outcome = "red"
+                released = record.to_json()
+                for key in ("report_decision_id", "previous_review_id", "previous_reviewed_sha", "previous_blockers"):
+                    released.pop(key)
+                recovered = DispatcherRecord.from_json(released)
+                retain_rework_review(fixture.task, fixture.events[:-1], recovered, fixture.decision)
+                self.assertEqual(recovered.previous_reviewed_sha, "b" * 40)
+                self.assertEqual(recovered.previous_review_id, fixture.events[1]["event_id"])
+                self.assertEqual(recovered.previous_blockers, fixture.events[1]["data"]["body"])
+                self.assertEqual(recovered.report_decision_id, "observer-decision-1")
+                recovered.review_commit = ""
+                retain_rework_review(fixture.task, fixture.events[:-1], recovered, fixture.decision)
+                self.assertEqual(recovered.previous_reviewed_sha, "b" * 40)
+
+    def test_unknown_predecessor_packet_keeps_observer_instruction_and_exact_report(self):
+        fixture, record = self.green_round()
+        fixture.support_scenario("absent")
+        retain_rework_review(fixture.task, fixture.events[:-1], record, fixture.decision)
+        record.report_generation = 3
+        record.report_decision = fixture.decision
+        text = self.host(fixture)._review_prompt(fixture.task, "attempt-1", 4, record=record)
+        self.assertIn("## Re-review packet", text)
+        self.assertIn("previous_reviewed_sha: unknown/unresolved", text)
+        self.assertIn("source_event: observer-decision-1", text)
+        self.assertIn(fixture.decision, text)
+        self.assertIn("BLOCKER-observer-only: fixed (reported, verify independently)", text)
+        self.assertIn("finding_sources: observer decision; source_event: observer-decision-1", text)
+        fixture.events[-1]["request_id"] = attempt_request_id("foreign", "worker-report-done", "ummanu-1", "3")
+        text = self.host(fixture)._review_prompt(fixture.task, "attempt-1", 4, record=record)
+        self.assertIn("source_event: observer-decision-1", text)
+        self.assertIn("BLOCKER-observer-only: unknown/unresolved: missing disposition evidence", text)
+
+    def test_missing_skipped_conflicting_or_foreign_review_never_invents_a_pin(self):
+        for scenario in ("absent", "invalid", "ambiguous-review", "foreign", "skipped", "conflicting", "stale"):
+            with self.subTest(scenario=scenario):
+                fixture, record = self.green_round()
+                if scenario == "skipped":
+                    record.worker_continuation.verdict_outcome = "missing"
+                elif scenario == "conflicting":
+                    event = fixture.marker("review:red", "Conflicting verdict", attempt_request_id("attempt-1", "review-red", "ummanu-1", "2"))
+                    fixture.events.pop()
+                    fixture.events.insert(2, event)
+                elif scenario == "stale":
+                    record.review_baseline = 9
+                else:
+                    fixture.support_scenario(scenario)
+                retain_rework_review(fixture.task, fixture.events[:-1], record, fixture.decision)
+                self.assertEqual(record.previous_reviewed_sha, "")
+                self.assertEqual(record.previous_review_id, "")
+                self.assertEqual(record.report_decision_id, "observer-decision-1")
+
+    def test_capture_is_saved_with_generation_before_move_and_recovers_once(self):
+        from ummanu.dispatch import assessment_decision, worker_continuation
+
+        fixture, record = self.green_round()
+        fixture.events.pop()
+        records = {fixture.task["ref"]: record}
+        saved = []
+        runtime = SimpleNamespace(
+            audit=SimpleNamespace(events=lambda _: fixture.events),
+            save_records=lambda *_: saved.append(record.to_json()),
+        )
+        with mock.patch.object(worker_continuation, "complete_red_transition", side_effect=RuntimeError("crash before move")):
+            with self.assertRaisesRegex(RuntimeError, "crash before move"):
+                assessment_decision.rework_parked(runtime, fixture.task, record, records, {}, "attempt-1", reason=fixture.decision, protocol_prerequisites=())
+        recovered = DispatcherRecord.from_json(saved[0])
+        self.assertEqual(recovered.previous_reviewed_sha, "b" * 40)
+        self.assertEqual(recovered.worker_continuation.reserved_generation, 3)
+        self.assertEqual(recovered.worker_continuation.decision_body, fixture.decision)
+        self.assertEqual(recovered.worker_continuation.verdict_outcome, "green")
+        self.assertEqual(recovered.report_decision_id, "observer-decision-1")
+        # Recovery consumes only the persisted transition, even with an unavailable audit.
+        runtime.audit.events = mock.Mock(side_effect=AssertionError("new evidence substituted"))
+        runtime.reader = SimpleNamespace(show=lambda _: fixture.task)
+        records[fixture.task["ref"]] = recovered
+        with (
+            mock.patch.object(worker_continuation.attempt_accounting, "terminal_effect") as move,
+            mock.patch.object(worker_continuation, "_deliver_red_continuation", return_value={}),
+        ):
+            for _ in range(2):
+                worker_continuation.complete_red_transition(runtime, fixture.task, recovered, records, {}, "attempt-1", ref=fixture.task["ref"])
+                self.assertEqual(recovered.report_generation, 3)
+                self.assertEqual(recovered.previous_reviewed_sha, "b" * 40)
+                self.assertEqual(recovered.report_decision, fixture.decision)
+                self.assertEqual(recovered.report_decision_id, "observer-decision-1")
+            self.assertEqual(move.call_args_list[0].kwargs["request_id"], move.call_args_list[1].kwargs["request_id"])
+            self.assertEqual(move.call_args.kwargs["verdict"], "green")
+
     def test_actual_builders_put_header_before_task_text_and_keep_round_markers(self):
         fixture = PacketFixture()
         host = self.host(fixture)
@@ -507,7 +685,7 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertIn("BLOCKER-repair: fixed (reported", text)
 
     def test_both_packets_and_recovery_use_the_same_canonical_instruction_without_findings(self):
-        for scenario in ("green", "foreign", "absent", "invalid", "intervening", "ambiguous-report"):
+        for scenario in ("foreign", "absent", "invalid", "intervening", "ambiguous-report"):
             with self.subTest(scenario=scenario):
                 fixture = PacketFixture()
                 fixture.support_scenario(scenario)

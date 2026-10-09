@@ -529,6 +529,7 @@ def _reject_stale_done(
     # Nobody adjudicated this round: it was opened by the bounce, not an observer. The decision
     # that opened the previous one goes with it, or the document names a review this is not about.
     record.report_decision = ""
+    record.report_decision_id = ""
     record.report_protocol_prerequisites = ()
     _reset_wait(record, "worker")
     _reset_wait(record, "review")

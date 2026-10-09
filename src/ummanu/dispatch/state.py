@@ -816,6 +816,8 @@ class DispatcherRecord:
     # generation, whenever a red transition opens a round, so a gate-red round carries no stale
     # decision from the review round before it.
     report_decision: str = ""
+    # Canonical source frozen with the rework generation; empty in released records.
+    report_decision_id: str = ""
     # The revision-bound protocol prerequisite names that opened this worker round. The dispatcher
     # writes them only after resolving the observer declaration through the ownership registry.
     report_protocol_prerequisites: tuple[str, ...] = ()
@@ -884,11 +886,11 @@ class DispatcherRecord:
     review_commit: str = ""
     # Set by the release identity check for the gate audit in this tick only.
     review_reconciliation: dict[str, str | int] | None = field(default=None, compare=False)
-    # Re-review packet: the last rejected checkout and the reviewer's prior blocker text.  These
-    # survive the red transition so the next independent reviewer can inspect the delta rather
-    # than rediscovering the full historical diff.
+    # Re-review packet: the accepted predecessor checkout and full verdict body.
+    # These survive rework so the next independent reviewer can inspect the delta.
     previous_reviewed_sha: str = ""
     previous_blockers: str = ""
+    previous_review_id: str = ""
     # The worker pane has the same handle-alias problem as the reviewer pane.  Keep its leafId
     # too, so an inventory alias cannot turn a live worker into a missing-terminal respawn.
     worker_leaf: str = ""
@@ -1087,12 +1089,14 @@ class DispatcherRecord:
             "worker_local_run_snapshot": dict(self.worker_local_run_snapshot),
             "review_local_run_snapshot": dict(self.review_local_run_snapshot),
             "report_decision": self.report_decision,
+            "report_decision_id": self.report_decision_id,
             "report_protocol_prerequisites": list(self.report_protocol_prerequisites),
             "outcome_terminal_path": self.outcome_terminal_path.value,
             "review_baseline": self.review_baseline,
             "review_commit": self.review_commit,
             "previous_reviewed_sha": self.previous_reviewed_sha,
             "previous_blockers": self.previous_blockers,
+            "previous_review_id": self.previous_review_id,
             "review_handle": self.review_handle,
             "review_head": self.review_head,
             "review_leaf": self.review_leaf,
@@ -1204,6 +1208,7 @@ class DispatcherRecord:
                 else {}
             ),
             report_decision=str(payload.get("report_decision") or ""),
+            report_decision_id=str(payload.get("report_decision_id") or ""),
             report_protocol_prerequisites=tuple(
                 item
                 for item in payload.get("report_protocol_prerequisites", ())
@@ -1238,6 +1243,7 @@ class DispatcherRecord:
             review_commit=str(payload.get("review_commit") or ""),
             previous_reviewed_sha=str(payload.get("previous_reviewed_sha") or ""),
             previous_blockers=str(payload.get("previous_blockers") or ""),
+            previous_review_id=str(payload.get("previous_review_id") or ""),
             worker_leaf=str(payload.get("worker_leaf") or ""),
             worker_pid_file=str(payload.get("worker_pid_file") or ""),
             review_pid_file=str(payload.get("review_pid_file") or ""),
