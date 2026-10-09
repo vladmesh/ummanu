@@ -45,6 +45,7 @@ finally:
 TestRecord, TimingResult, TimingSuite = _timing.TestRecord, _timing.TimingResult, _timing.TimingSuite
 diagnostic, violations = _timing.diagnostic, _timing.violations
 native_diagnostic = _timing.native_diagnostic
+junit_tag = _timing.junit_tag
 
 SUITES = (
     "unit",
@@ -392,7 +393,7 @@ def run_reported_suite(
         print(diagnostic(violation), file=log)
     records = list(result.records.values())
     failures = [record for record in [*records, *result.native_outcomes]
-                if record.outcome in {"failed", "error", "unexpected_success"}]
+                if junit_tag(record.outcome) in {"failure", "error"}]
     counts = _counts(result)
     setup_reasons = result.required_integration_setup_reasons
     if setup_reasons:
@@ -419,6 +420,14 @@ def run_reported_suite(
     )
 
 
+def _write_junit_outcome(case, outcome, detail):
+    tag = junit_tag(outcome)
+    if tag == "skipped":
+        ET.SubElement(case, tag, {"message": detail or "skipped"})
+    elif tag is not None:
+        ET.SubElement(case, tag).text = detail or outcome
+
+
 def _write_junit(path: Path, evidence: SuiteEvidence) -> None:
     testsuite = ET.Element(
         "testsuite",
@@ -440,17 +449,12 @@ def _write_junit(path: Path, evidence: SuiteEvidence) -> None:
             {"classname": record.classname, "name": record.name,
              **({"time": f"{record.duration_seconds:.6f}"} if record.duration_seconds is not None else {})},
         )
-        if record.outcome in {"skipped", "expected_failure"}:
-            ET.SubElement(case, "skipped", {"message": record.detail or "skipped"})
-        elif record.outcome in {"failed", "error", "unexpected_success"}:
-            node = ET.SubElement(case, "error" if record.outcome == "error" else "failure")
-            node.text = record.detail or record.outcome
+        _write_junit_outcome(case, record.outcome, record.detail)
     for event in evidence.timing.get("native_outcomes", []):
         case = ET.SubElement(testsuite, "testcase", {
             "classname": event["module"], "name": event["identifier"], "phase": event["phase"],
         })
-        node = ET.SubElement(case, "skipped" if event["outcome"] == "skipped" else "error")
-        node.text = event.get("detail") or event["outcome"]
+        _write_junit_outcome(case, event["outcome"], event.get("detail"))
     for item in evidence.timing_violations:
         case = ET.SubElement(testsuite, "testcase", {
             "classname": "timing_budget", "name": item["identifier"],

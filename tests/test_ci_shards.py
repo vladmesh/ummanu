@@ -166,6 +166,121 @@ class TimingBudgetTests(unittest.TestCase):
 
 
 class NativeTimingOutcomeTests(unittest.TestCase):
+    def test_native_callback_domain_retains_measurements_and_junit_semantics(self):
+        from tests.support.native_timing import native_outcome_modules
+        from ummanu.projects.test_timing import TimingRunner, valid_observation
+
+        cases = {
+            "load_failure": ("failed", "failure", "load"),
+            "load_error": ("error", "error", "load"),
+            "fixture_skip": ("skipped", "skipped", "setUpClass"),
+            "fixture_error": ("error", "error", "setUpClass"),
+            "subtest_skip": ("skipped", "skipped", "subTest"),
+        }
+        for kind, (outcome, tag, phase) in cases.items():
+            with self.subTest(kind=kind):
+                now = [0.0]
+                selected = native_outcome_modules(now, kind)
+                sources = [module.__name__ for module in selected]
+                with (patch.dict(sys.modules, {m.__name__: m for m in selected}),
+                      patch("time.monotonic", side_effect=lambda clock=now: clock[0])):
+                    loader = unittest.TestLoader()
+                    suites = [loader.loadTestsFromModule(module) for module in selected]
+                    if kind.startswith("load_"):
+                        self.assertIsInstance(next(iter(suites[1])), unittest.loader._FailedTest)
+                        self.assertEqual(len(loader.errors), 1)
+                    local = TimingRunner(stream=StringIO(), source_modules=sources).run(unittest.TestSuite(suites))
+                observation = json.loads(json.dumps(local.observation()))
+                self.assertTrue(valid_observation(observation))
+                self.assertEqual(observation["status"], "complete")
+                self.assertEqual(observation["native_outcomes"][0]["outcome"], outcome)
+                self.assertEqual(observation["native_outcomes"][0]["phase"], phase)
+                self.assertEqual(observation["native_outcomes"][0]["module"], sources[1])
+                self.assertNotIn("duration_seconds", observation["native_outcomes"][0])
+                durations = {r["module"]: r["duration_seconds"] for r in observation["tests"]}
+                self.assertEqual(durations[sources[0]], 1)
+                self.assertEqual(durations[sources[2]], 2)
+                self.assertEqual(local.wasSuccessful(), outcome == "skipped")
+                expected_counts = {
+                    "collected": 2 if kind.startswith("fixture_") else 3,
+                    "passed": 2,
+                    "failed": int(outcome == "failed"), "error": int(outcome == "error"),
+                    "skipped": int(outcome == "skipped"),
+                }
+                for shard in ("unit", "component", "integration-board"):
+                    with (patch.dict(sys.modules, {m.__name__: m for m in selected}),
+                          patch.multiple(sys.modules["tests"], create=True,
+                                         **{m.__name__.rpartition(".")[2]: m for m in selected}),
+                          patch("time.monotonic", side_effect=lambda clock=now: clock[0]),
+                          tempfile.TemporaryDirectory() as directory):
+                        root = Path(directory)
+                        log = BoundedTee(StringIO(), root / "test-output.log")
+                        # The CI consumer still uses its normal native loader by name.
+                        evidence = run_reported_suite(shard, [name.replace(".", "/") + ".py" for name in sources], CANDIDATE_SHA, log)
+                        _write_evidence(root, evidence, log)
+                        self.assertEqual(evidence.outcome, "success" if outcome == "skipped" else "product_failure")
+                        self.assertEqual(evidence.counts, expected_counts)
+                        self.assertEqual(evidence.timing, observation)
+                        restored = _read_evidence(root)
+                        self.assertTrue(valid_observation(restored.timing))
+                        self.assertEqual(restored.timing, observation)
+                        native = ElementTree.parse(root / "junit.xml").find(f"testcase[@phase='{phase}']")
+                        self.assertNotIn("time", native.attrib)
+                        self.assertEqual([node.tag for node in native], [tag])
+                        self.assertIn(outcome, _summary(restored))
+                        self.assertIn(sources[1], _summary(restored))
+                        self.assertIn(sources[1], (root / "test-output.log").read_text())
+
+    def test_supported_callback_outcomes_share_validation_and_junit_domain(self):
+        from scripts.ci_test_shards import _write_junit_outcome
+        from ummanu.projects.test_timing import TimingRunner, valid_observation
+
+        class Cases(unittest.TestCase):
+            def test_pass(self):
+                pass
+
+            def test_failure(self):
+                self.fail("native failure")
+
+            def test_error(self):
+                raise ValueError("native error")
+
+            @unittest.skip("native skip")
+            def test_skip(self):
+                pass
+
+            @unittest.expectedFailure
+            def test_expected_failure(self):
+                self.fail("expected failure")
+
+            @unittest.expectedFailure
+            def test_unexpected_success(self):
+                pass
+
+        result = TimingRunner(stream=StringIO()).run(unittest.TestLoader().loadTestsFromTestCase(Cases))
+        observation = json.loads(json.dumps(result.observation()))
+        expected = {"passed": None, "failed": "failure", "error": "error", "skipped": "skipped",
+                    "expected_failure": "skipped", "unexpected_success": "failure"}
+        self.assertEqual({r["outcome"] for r in observation["tests"]}, set(expected))
+        self.assertTrue(valid_observation(observation))
+        for record in observation["tests"]:
+            # The same supported callback value is valid and rendered identically
+            # in either representation; only a real test receives a clock.
+            event = {key: record[key] for key in ("identifier", "module", "outcome", "detail")}
+            event["phase"] = "load"
+            native = {"status": "complete", "tests": [], "modules": {}, "native_outcomes": [event]}
+            self.assertTrue(valid_observation(native))
+            case = ElementTree.Element("testcase")
+            _write_junit_outcome(case, event["outcome"], event["detail"])
+            self.assertEqual([node.tag for node in case], [] if expected[record["outcome"]] is None
+                             else [expected[record["outcome"]]])
+            event["duration_seconds"] = 0
+            self.assertFalse(valid_observation(native))
+        for unsupported in ("unknown", None, [], {}):
+            native = {"status": "complete", "tests": [], "modules": {}, "native_outcomes": [
+                {"identifier": "native", "module": __name__, "phase": "load", "outcome": unsupported}]}
+            self.assertFalse(valid_observation(native))
+
     def test_skipped_subtest_is_native_outcome_without_a_missing_test_clock(self):
         from ummanu.projects.test_timing import TimingRunner, valid_observation
 

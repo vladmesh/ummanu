@@ -393,6 +393,10 @@ setup, teardown and cleanups; each module completes its stdlib suite before the 
 Imports and collection are outside module clocks. Fixture, loader and skipped subtest outcomes are separate
 `native_outcomes` with source module, phase and native identifier, without per-test durations.
 Completed fixture skips leave timing complete; fixture/loader errors retain native failures.
+The shared callback outcome domain drives collection, validation and JUnit rendering for
+both timed tests and native events. A loader `load_tests` AssertionError is a native failure;
+a fixture AssertionError is a native error, as reported by unittest. Complete observations
+are validated before serialization, retaining other tests' measurements for either outcome.
 Missing test stops and interrupted execution leave timing incomplete. Empty selected modules
 run an empty stdlib suite and have no test measurements or fixture execution.
 The manifest importer loads its collector from candidate source under a private identity,

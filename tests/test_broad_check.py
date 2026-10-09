@@ -248,6 +248,65 @@ class RunAndCaptureTests(BroadCheckTestCase):
 
 
 class TimingReceiptTests(BroadCheckTestCase):
+    def test_native_load_tests_failure_or_error_retains_before_after_timings_in_receipt_and_show(self):
+        from types import SimpleNamespace
+
+        from tests.support.native_timing import native_outcome_modules
+        from ummanu.check_commands import run_check_show
+        from ummanu.projects.test_timing import TimingRunner, valid_observation
+
+        for kind, outcome in (("load_failure", "failed"), ("load_error", "error")):
+            with self.subTest(kind=kind):
+                now = [0.0]
+                selected = native_outcome_modules(now, kind)
+                sources = [module.__name__ for module in selected]
+                output = StringIO()
+                with (mock.patch.dict(sys.modules, {m.__name__: m for m in selected}),
+                      mock.patch("time.monotonic", side_effect=lambda clock=now: clock[0])):
+                    loader = unittest.TestLoader()
+                    suites = [loader.loadTestsFromModule(module) for module in selected]
+                    self.assertIsInstance(next(iter(suites[1])), unittest.loader._FailedTest)
+                    result = TimingRunner(stream=output, source_modules=sources).run(unittest.TestSuite(suites))
+                observation = json.loads(json.dumps(result.observation()))
+                self.assertTrue(valid_observation(observation))
+                self.assertFalse(result.wasSuccessful())
+                self.assertEqual(observation["native_outcomes"][0]["outcome"], outcome)
+                self.assertEqual([r["duration_seconds"] for r in observation["tests"]], [1, 2])
+                # Project the real producer's sidecar and native output through the
+                # existing pure receipt fixture, keeping its original rc1.
+                suite = self._suite(kind,
+                    "import json, os, sys\nfrom pathlib import Path\n"
+                    f"Path(os.environ['UMMANU_TEST_TIMING_RECORD']).write_text(json.dumps({observation!r}))\n"
+                    f"print({output.getvalue()!r})\nsys.exit(1)\n")
+                code, receipt = self._run(suite)
+                self.assertEqual(code, 1)
+                self.assertEqual(receipt["verdict"], "failed")
+                self.assertEqual(receipt["parsed"]["timing"], observation)
+                self.assertEqual(receipt["parsed"]["tests"], 3)
+                self.assertEqual(receipt["parsed"]["failures" if outcome == "failed" else "errors"], 1)
+                path = receipt_path(self.root, suite)
+                original_bytes = path.read_bytes()
+                shown = load_receipt(path)
+                self.assertEqual(shown["parsed"]["timing"], observation)
+                self.assertTrue(usable_receipt(self.root, suite).usable)
+                # check show uses the same validated receipt and summary; the CLI
+                # dispatch and reuse predicate have existing independent regressions.
+                rendered = broad_check.summarize(shown)
+                for record in observation["tests"]:
+                    self.assertIn(record["identifier"], rendered)
+                    self.assertIn(f"{record['duration_seconds']:.6f}s", rendered)
+                self.assertIn(f"native {outcome} {sources[1]} load", rendered)
+                shown_output = StringIO()
+                with (mock.patch("ummanu.check_commands._spec",
+                                 return_value=SimpleNamespace(spec=suite, module_contract=None)),
+                      mock.patch("sys.stdout", shown_output)):
+                    self.assertEqual(run_check_show(SimpleNamespace(root=str(self.root))), 0)
+                shown_payload = json.loads(shown_output.getvalue())
+                self.assertEqual(shown_payload["receipt"]["exit_code"], 1)
+                self.assertEqual(shown_payload["receipt"]["parsed"]["timing"], observation)
+                self.assertEqual(shown_payload["summary"], rendered)
+                self.assertEqual(path.read_bytes(), original_bytes)
+
     def test_native_fixture_and_loader_observations_retain_receipt_verdict_and_measurements(self):
         from types import ModuleType
 

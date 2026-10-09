@@ -16,6 +16,26 @@ from collections import OrderedDict
 TEST_LIMIT = 5.0
 MODULE_LIMIT = 90.0
 
+# One callback outcome domain for timed tests and untimed native events. The
+# associated JUnit tag preserves unittest's callback semantics, independently
+# of the exception type (fixture AssertionError still calls addError).
+OUTCOME_JUNIT_TAGS = {
+    "passed": None,
+    "failed": "failure",
+    "error": "error",
+    "skipped": "skipped",
+    "expected_failure": "skipped",
+    "unexpected_success": "failure",
+}
+
+
+def supported_outcome(value):
+    return isinstance(value, str) and value in OUTCOME_JUNIT_TAGS
+
+
+def junit_tag(outcome):
+    return OUTCOME_JUNIT_TAGS[outcome]
+
 
 @dataclasses.dataclass
 class TestRecord:
@@ -77,6 +97,8 @@ class TimingResult(unittest.TextTestResult):
         super().stopTest(test)
 
     def _mark(self, test, outcome, detail=None):
+        if not supported_outcome(outcome):
+            raise ValueError(f"unsupported unittest outcome: {outcome!r}")
         if self._synthetic(test):
             phase = ("load" if _loader_outcome(test) else "subTest"
                      if isinstance(test, unittest.case._SubTest) else test.id().split(" (", 1)[0])
@@ -118,13 +140,16 @@ class TimingResult(unittest.TextTestResult):
         super().addSubTest(test, subtest, err)
 
     def observation(self):
-        return {
+        observation = {
             "status": "complete" if self.timing_complete and not self._started
                       and all(r.duration_seconds is not None for r in self.records.values()) else "incomplete",
             "tests": [dataclasses.asdict(record) for record in self.records.values()],
             "modules": self.module_durations,
             "native_outcomes": [dataclasses.asdict(event) for event in self.native_outcomes],
         }
+        if not valid_observation(observation):
+            raise ValueError("invalid unittest timing observation")
+        return observation
 
 
 def _loader_outcome(test):
@@ -204,7 +229,7 @@ def valid_observation(value):
     for record in value["tests"]:
         if (not isinstance(record, dict)
                 or not all(isinstance(record.get(key), str) and record[key] for key in ("identifier", "module"))
-                or record.get("outcome") not in {"passed", "failed", "error", "skipped", "expected_failure", "unexpected_success"}
+                or not supported_outcome(record.get("outcome"))
                 or (record.get("duration_seconds") is None and value["status"] == "complete")
                 or (record.get("duration_seconds") is not None and not duration(record["duration_seconds"]))):
             return False
@@ -214,7 +239,7 @@ def valid_observation(value):
         if (not isinstance(event, dict)
                 or not all(isinstance(event.get(key), str) and event[key]
                            for key in ("identifier", "module", "phase"))
-                or event.get("outcome") not in {"error", "skipped"}
+                or not supported_outcome(event.get("outcome"))
                 or "duration_seconds" in event):
             return False
     return all(isinstance(module, str) and module and duration(seconds)
