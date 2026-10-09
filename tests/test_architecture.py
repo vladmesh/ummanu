@@ -6,6 +6,7 @@ import ast
 import inspect
 import re
 import shlex
+import unicodedata
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -464,7 +465,12 @@ class SourceLayoutTests(unittest.TestCase):
         offenders: list[str] = []
         for tree_root in ("src", "tests", "scripts"):
             for path in (ROOT / tree_root).rglob("*.py"):
-                tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                source = path.read_text(encoding="utf-8")
+                tree = source_trees.parse(source, filename=str(path))
+                # Python normalizes identifiers to NFKC. Keep parsing every source, but
+                # avoid walking millions of unrelated nodes when this identifier is absent.
+                if RETIRED_DISPATCHER_MODULE[-1] not in unicodedata.normalize("NFKC", source):
+                    continue
                 for node in source_trees.walk(tree):
                     if isinstance(node, ast.Import):
                         modules = [alias.name for alias in node.names]
