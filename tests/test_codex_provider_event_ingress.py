@@ -1618,6 +1618,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         )
         self.host.preflight_codex_run = self._real_preflight  # type: ignore[method-assign]
         self.host._run = self._run  # type: ignore[method-assign]
+        # This handoff fixture supplies only an interpreter symlink and stubs
+        # provisioning; it has no candidate site-packages to install guards into.
+        self.host._install_workspace_test_guards = lambda *args, **kwargs: None  # type: ignore[method-assign]
         self.host._head_runtimes[LOCAL_PTY_RUNTIME] = self.session
         # The observer's git worktree is not what this contract is about.
         self.host._create_git_observer_workspace = lambda workspace: (  # type: ignore[method-assign]

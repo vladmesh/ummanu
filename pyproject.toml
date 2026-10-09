@@ -218,7 +218,7 @@ include = ["ummanu*"]
 # Alembic reads its environment, template and revisions from the installed tree by path, so
 # they ship with the package rather than only existing in the checkout.
 "ummanu.board.migrations" = ["script.py.mako", "versions/*.py"]
-"ummanu.runtime" = ["heads.toml", "docker-bin/docker"]
+"ummanu.runtime" = ["heads.toml", "docker-bin/*"]
 "ummanu.automations.agents.curator" = ["*.toml"]
 "ummanu.automations.agents.pipeline" = ["*.toml"]
 "ummanu.automations.agents.retro" = ["*.toml"]

@@ -167,9 +167,46 @@ broad_check:
 
 `ummanu check 'tests/test_x.py::test_name[param with spaces]'` then invokes the candidate interpreter
 with `-m shared -- <selector>`, through the common import-provenance bootstrap. Declared broad args
-remain before `--`. The `shared` runner owns the host profile, environment whitelist, empty PYTHONPATH,
+remain before `--`. The `shared` runner owns the host profile, environment whitelist, per-suite import paths,
 ci_only marker family (docker, ansible, privileged, slow), deselection, budgets and refusal status.
 The wrapper does not replace that launcher with pytest or impose an Ummanu module list.
+
+Worker/reviewer bring-up installs a startup audit hook in the dispatcher-owned workspace venv
+and the declared candidate-local venv after setup. Resuming a materialized workspace repairs these
+files without rebuilding dependencies. Direct `pytest`, `python -m pytest` and `python -m unittest`
+refuse before runner/test import, with status 125 and one line naming `ummanu check <selector>`.
+This includes `python`, `python3` and absolute candidate-local declared interpreter paths. Ordinary Python,
+library imports of pytest/unittest and the Ummanu CLI continue to work. Native Ansible commands and
+sudo in the head PATH refuse with one line directing execution to CI. The Docker guard's order,
+backend bindings and exact policy are unchanged. Standing roles receive no head guard PATH.
+
+Authorization belongs to the live module runner process launched by the receipt wrapper, and its
+descendants, in that workspace. The hook checks Linux `/proc` ancestry for the exact provenance
+bootstrap digest and candidate import roots. Wrapper169's existing bootstrap is compatible; there
+is no ambient environment marker, permission file or cached PID. Native `shared` children retain
+authorization through a fresh environment whitelist and `PYTHONPATH=""`. Sibling head commands,
+later commands and reparented children have no such ancestor. The hook does not replace the native
+runner's membership checks, fixture environment, marker families or budgets. Refusal is command
+feedback; it introduces no review/CI classification, retry or restart-budget handling.
+
+This is an accidental-command guard, like the Docker guard, not an isolation boundary against the
+interpreter's owner deliberately using `-S`, forging the bootstrap argv, or replacing startup files.
+Every preparation path uses the same host ownership decision: the dispatcher-owned workspace venv
+is required; an additional declared venv is instrumented only if its prefix and site directory
+resolve inside the candidate. A normal venv executable symlink to system Python does not change
+ownership of its local prefix. External system/shared/live declarations are preserved and skipped
+as optional destinations. An intentional absolute command using such an external interpreter stays
+uninstrumented and is outside this candidate-local guard. This does not authorize direct tests:
+head checks must still use `ummanu check`. The installer independently refuses writes to external
+prefixes or escaped site directories, and failures installing the required workspace guard still
+fail preparation. Upgrade/live
+delivery is a separate observer step; these changes do not update production. Fast policy and fake
+backend regressions are local unit/component tests. Real interpreter, role launch and native
+whitelist/absolute-child-pytest and bash/subshell/PATH-child proof belongs to `integration-dispatcher` CI.
+The bounded runner model covers an empty PYTHONPATH and a per-suite PYTHONPATH override; it simplifies
+codegen's suite scheduling and is not an exact copy of its native host argv. That fixture
+is not live codegen evidence: live main `ec96fa79` still needs its next acting head's declared
+`uv sync --locked` setup with pytest_timeout before granular node/count/marker validation.
 The PO confirmed delivery of shared's agreed `python -m shared -- <pytest selector>...` interface
 in codegen-orchestrator-1586, main `ec96fa79`, PR #761. Live granular validation still requires a
 subsequent operator installation of this declaration and the wrapper. A declaration promises runner

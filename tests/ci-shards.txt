@@ -175,6 +175,9 @@ unit tests/test_retro_pending.py
 unit tests/test_role_env.py
 unit tests/test_runtime_env.py
 component tests/test_docker_guard.py
+unit tests/test_test_guard.py
+component tests/test_head_command_guards.py
+integration-dispatcher tests/test_test_guard_interpreters.py
 component tests/test_memory_token_launch.py
 unit tests/test_observer_voice.py
 component tests/test_dispatcher_runtime_isolation.py
