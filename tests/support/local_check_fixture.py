@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,12 +25,12 @@ class LocalCheckFixture:
         self.instance = self.scratch / "instance"
         self.log = self.scratch / "executions"
         self.forbidden = self.scratch / "forbidden-import"
-        (self.root / "checks").mkdir(parents=True)
+        (self.root / "tests").mkdir(parents=True)
         (self.root / "app").mkdir()
         (self.root / "app" / "__init__.py").write_text("", encoding="utf-8")
-        (self.root / "checks" / "__init__.py").write_text("", encoding="utf-8")
+        (self.root / "tests" / "__init__.py").write_text("", encoding="utf-8")
         (self.root / ".gitignore").write_text("state/\n__pycache__/\n.pytest_cache/\n", encoding="utf-8")
-        (self.root / "checks" / "test_local.py").write_text(
+        (self.root / "tests" / "test_local.py").write_text(
             "import unittest\nfrom pathlib import Path\n"
             "class Cases(unittest.TestCase):\n"
             "    def test_one(self):\n"
@@ -39,7 +40,7 @@ class LocalCheckFixture:
             f"        Path({str(self.log)!r}).open('a').write('two\\n')\n",
             encoding="utf-8",
         )
-        (self.root / "checks" / "test_board.py").write_text(
+        (self.root / "tests" / "test_board.py").write_text(
             f"from pathlib import Path\nPath({str(self.forbidden)!r}).touch()\n"
             "raise AssertionError('CI-only test imported')\n",
             encoding="utf-8",
@@ -63,19 +64,43 @@ class LocalCheckFixture:
             "validation": {"ci": "github"},
             "artifact_policy": {"write_project_files": False},
             "broad_check": {
-                "module": "unittest",
+                "module": "tests.broad",
                 "import_package": "app",
                 "local": {
                     "runner": "unittest",
-                    "shards": ["unit"],
-                    "modules": {
-                        "checks/test_local.py": "unit",
-                        "checks/test_board.py": "integration-board",
-                    },
+                    "shards": ["unit", "component"],
+                    "ci_manifest": "tests/ci-shards.txt",
                 },
             },
         }
+        source = Path(__file__).resolve().parents[2]
+        (self.root / "scripts").mkdir()
+        shutil.copy(source / "scripts" / "ci_test_shards.py", self.root / "scripts")
+        shutil.copy(source / "tests" / "broad.py", self.root / "tests")
+        from scripts.ci_test_shards import SUITES
+
+        entries = ["unit tests/test_local.py", "integration-board tests/test_board.py"]
+        for shard in SUITES:
+            if shard in {"unit", "integration-board"}:
+                continue
+            relative = f"tests/test_{shard.replace('-', '_')}.py"
+            (self.root / relative).write_text("", encoding="utf-8")
+            entries.append(f"{shard} {relative}")
+        (self.root / "tests" / "ci-shards.txt").write_text("\n".join(entries) + "\n")
         self.write_adapter()
+        self.init_repository()
+        self.enterContext(
+            mock.patch.dict(
+                os.environ,
+                {
+                    "UMMANU_INSTANCE": str(self.instance),
+                    "PYTHONPATH": str(source / "src") + os.pathsep + os.environ.get("PYTHONPATH", ""),
+                },
+            )
+        )
+        self.enterContext(mock.patch("ummanu.broad_check.time.monotonic", return_value=100.0))
+
+    def init_repository(self) -> None:
         for argv in (
             ["init", "-q"],
             ["config", "user.name", "fixture"],
@@ -84,8 +109,6 @@ class LocalCheckFixture:
             ["commit", "-q", "-m", "fixture"],
         ):
             subprocess.run(["git", "-C", str(self.root), *argv], check=True, capture_output=True)
-        self.enterContext(mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(self.instance)}))
-        self.enterContext(mock.patch("ummanu.broad_check.time.monotonic", return_value=100.0))
 
     def write_adapter(self) -> None:
         (self.instance / "adapters" / "fixture.yaml").write_text(

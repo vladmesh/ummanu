@@ -1,0 +1,9 @@
+# Fragment for the existing adapter. Preserve setup, smoke, validation and artifact_policy.
+# Install only after the external shared runner selector interface has shipped.
+broad_check:
+  module: shared
+  interpreter: .venv/bin/python
+  import_package: shared
+  local:
+    membership: runner
+    selector_args: ["--"]

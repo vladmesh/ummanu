@@ -51,6 +51,7 @@ packaging tests/test_automations_live_window.py
 unit tests/test_broad_check.py
 unit tests/test_broad_suite.py
 unit tests/test_local_check.py
+unit tests/test_local_check_runner.py
 integration-dispatcher tests/test_local_check_pytest.py
 unit tests/test_candidate_history.py
 integration-recovery tests/test_checkpoint.py

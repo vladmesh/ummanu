@@ -1,0 +1,38 @@
+# Adapter fragments for later installation; no live changes or setup replacements.
+# Each project's runner retains its declared paths and markers. These are four separate adapters.
+codegen-product-kit:
+  broad_check:
+    interpreter: .venv/bin/python
+    import_package: framework
+    module: pytest
+    args: [tests/unit, tests/tooling, tests/copier, -m, "not slow"]
+    local:
+      membership: runner
+      selector_args: []
+codegen-platform-services:
+  broad_check:
+    interpreter: .venv/bin/python
+    import_package: platform_core
+    module: pytest
+    args: [libs/platform-core/tests, -q]
+    local:
+      membership: runner
+      selector_args: []
+personal-site:
+  broad_check:
+    interpreter: services/backend/.venv/bin/python
+    import_package: app
+    module: pytest
+    args: [-c, services/backend/pyproject.toml, --rootdir, services/backend, services/backend/tests, -m, "not integration", -p, no:cacheprovider]
+    local:
+      membership: runner
+      selector_args: []
+dnd-simulator:
+  broad_check:
+    interpreter: .venv/bin/python
+    import_package: dnd_simulator
+    module: pytest
+    args: [tests/unit, -q]
+    local:
+      membership: runner
+      selector_args: []

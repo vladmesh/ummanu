@@ -126,7 +126,7 @@ Pytest node-ids retain their parameter text as one argv argument, including spac
 ummanu check 'checks/test_model.py::test_value[param with spaces]'
 ```
 
-Selectors are checked for module membership before the runner starts or imports a test. Ummanu's
+In manifest profiles, selectors are checked for module membership before the runner starts or imports a test. Ummanu's
 `tests/test_board.py` and its node-ids fail with `tests/test_board.py: shard integration-board;
 execution only in CI`. An unknown module fails without an invented shard or test discovery.
 
@@ -147,45 +147,76 @@ The existing validator checks all CI ownership for duplicate, stale, missing or 
 empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
 CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
 
-For other pytest projects, [adapters/pytest-project.yaml](../examples/check-adapters/pytest-project.yaml)
-shows explicit project-relative paths with their CI shard owners:
+Runner-owned profiles delegate membership and node validation to the declared broad runner. They
+need no module map. A selector appends to `broad_check.args`; `selector_args` supplies either an empty
+list for native positional arguments or `["--"]` for a launcher with a selector separator. The complete
+profile always uses exactly the declared broad argv, without the selector separator.
+
+For codegen-orchestrator, the prepared [declaration](../examples/check-adapters/codegen-orchestrator.yaml)
+is an adapter fragment for a later operator installation:
+
+```yaml
+broad_check:
+  module: shared
+  interpreter: .venv/bin/python
+  import_package: shared
+  local:
+    membership: runner
+    selector_args: ["--"]
+```
+
+`ummanu check 'tests/test_x.py::test_name[param with spaces]'` then invokes the candidate interpreter
+with `-m shared -- <selector>`, through the common import-provenance bootstrap. Declared broad args
+remain before `--`. The `shared` runner owns the host profile, environment whitelist, empty PYTHONPATH,
+ci_only marker family (docker, ansible, privileged, slow), deselection, budgets and refusal status.
+The wrapper does not replace that launcher with pytest or impose an Ummanu module list.
+Live granular codegen validation depends on the external delivery of shared's agreed
+`python -m shared -- <pytest selector>...` interface. Install this declaration only after that delivery;
+a declaration promises runner support, and cannot detect a runner that silently ignores all arguments.
+These fixtures prove the wrapper interface, not the current live codegen runner. No other repository
+or live adapter is changed here.
+
+For a declared pytest runner, keep its paths, configuration, markers and plugin options:
 
 ```yaml
 broad_check:
   module: pytest
   interpreter: .venv/bin/python
-  import_package: shared
+  import_package: framework
+  args: [tests/unit, tests/tooling, tests/copier, -m, "not slow"]
   local:
-    runner: pytest
-    shards: [unit, component]
-    modules:
-      checks/test_model.py: unit
-      checks/test_service.py: component
-      checks/test_database.py: integration-database
+    membership: runner
+    selector_args: []
 ```
 
-The directory and shard names belong to that project; Ummanu infers no membership from filenames.
-Every local shard must have modules, and every declared module must be readable inside the candidate.
-The map includes CI-only modules so a refusal can name their owner. A map may also use `runner: unittest`
-with `module: unittest`. The two membership sources (`ci_manifest` and `modules`) are mutually exclusive.
-With `local`, the runner module must match this shape and `broad_check.args` must be empty: the wrapper
-supplies the complete module list or one validated selector. Runner filters and arbitrary shell commands
-cannot stand in for the declared full profile.
+The wrapper appends the intact selector to these arguments, never substitutes it for them. Thus
+pytest still collects the declared paths; a node selection may also collect other tests under those
+paths. Pytest owns marker deselection and the no-tests-selected status. To avoid widening collection,
+an appended selector must stay within the declared paths (or the candidate root when pytest has no
+explicit paths). The installed adapters' separate-value options `-c`, `--rootdir`, `-m`, `-k`, `-p`,
+`-o` and `--override-ini` are excluded when finding those paths; equals-form options are also retained.
+[Prepared fragments](../examples/check-adapters/instance-local.yaml) retain the exact existing argv for
+codegen-product-kit, codegen-platform-services, personal-site and dnd-simulator. They are additions to
+existing adapters, not replacements for setup, smoke or validation configuration.
+
+Manifest declarations use exactly unit + component and `module: tests.broad`. Declared reporting and
+control arguments such as `-v` remain supported; test names and filters cannot narrow the declared
+complete manifest profile. Malformed declarations or unreadable manifests fail without discovery.
+The unshipped intermediate `modules` map is not a supported contract.
 
 Legacy full-profile `ummanu check broad --reuse --module <adapter.module>` and `ummanu check show`
-remain supported. For a registered profile, `--module` must match its declaration; an old contract with
-no module field still needs the full suite's `--module`. With `local`, a single legacy `--module-arg`
-selector is validated and runs without a receipt; `show` refuses a subset. Without `local`, only the
-old full-profile argv is supported. The new bare command and selectors fail as `local_check_not_declared`,
-naming the missing `broad_check.local` setting. There is no automatic adoption of all pytest tests,
-files named unit, or codegen's `shared` shell launcher. Operators must install a project-specific
-declaration separately; these examples change no live adapter or other repository.
+remain supported with the declared module arguments. With a local declaration, a legacy single
+`--module-arg` selector is validated or delegated and runs without a receipt. A full declared argv
+followed by the separator and one selector also runs as a subset; `show` refuses both subset forms.
+Other shape overrides fail. Without `local`, only the old full-profile argv remains supported; the
+new bare command and selectors fail as `local_check_not_declared`. The wrapper never guesses membership.
 
 Candidate interpreter and import provenance use the same adapter resolution and bootstrap as broad
 checks. `--default-interpreter` supplies the dispatcher-owned candidate interpreter when the adapter
-omits its own interpreter. A green local receipt is round evidence, never an exact-SHA CI gate receipt.
-The unit shard covers selector/refusal behavior on temporary repositories; `integration-dispatcher`
-adds real pytest full/module/parameterized-node execution, failure statuses and receipt preservation.
+omits its own interpreter. A local receipt is worker evidence, never a dispatcher-owned exact-SHA CI
+receipt. The unit shard covers manifest and injected runner-owned behavior on temporary repositories;
+`integration-dispatcher` adds actual temporary shared-runner execution and pytest with declared paths
+and markers, parameterized selectors, failure statuses and receipt preservation.
 
 ## Runtime deadline boundary
 

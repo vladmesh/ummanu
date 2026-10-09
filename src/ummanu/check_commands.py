@@ -28,7 +28,7 @@ from ummanu.projects.contract import (
     ModuleContract,
     module_contract,
 )
-from ummanu.projects.local_check import LocalProfile
+from ummanu.projects.local_check import LocalProfile, validate_pytest_path
 from ummanu.runtime.paths import add_instance_argument
 
 _GIT_TIMEOUT = 60
@@ -146,9 +146,19 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
     if new_form and profile is None:
         raise BroadCheckError(
             "local_check_not_declared",
-            "adapter is missing broad_check.local; declare local modules and their CI shards "
+            "adapter is missing broad_check.local; declare manifest or runner-owned membership "
             "before using ummanu check or a selector",
         )
+    if profile is not None and not profile.runner_owned:
+        # Legacy shape overrides cannot hide the manifest's CI ownership diagnostic.
+        if len(args.module_arg) == 1 and tuple(args.module_arg) != contract.args:
+            profile.select(args.module_arg[0])
+        if args.module and args.module != contract.module:
+            try:
+                profile.select(args.module)
+            except BroadCheckError as exc:
+                if exc.code == "ci_only_module":
+                    raise
     if not contract.reason:
         if args.command:
             raise BroadCheckError(
@@ -161,8 +171,18 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
         if args.module_arg:
             if tuple(args.module_arg) == contract.args:
                 pass  # Dispatcher-produced argv for the declared full profile.
-            elif profile is not None and len(args.module_arg) == 1:
-                selector = args.module_arg[0]
+            elif profile is not None:
+                supplied = tuple(args.module_arg)
+                prefix = contract.args + profile.selector_args
+                if len(supplied) == 1:
+                    selector = supplied[0]
+                elif len(supplied) == len(prefix) + 1 and supplied[:-1] == prefix:
+                    selector = supplied[-1]
+                else:
+                    raise BroadCheckError(
+                        "local_check_override",
+                        "subset arguments must retain the declared argv and name one selector",
+                    )
             else:
                 raise BroadCheckError(
                     "local_check_not_declared" if profile is None else "local_check_override",
@@ -181,11 +201,13 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
     if profile is not None:
         if selector:
             _path, target = profile.select(selector)
+            if profile.runner_owned and module == "pytest":
+                validate_pytest_path(Path(args.root), contract.args, selector)
             if args.check_command == "show":
                 raise BroadCheckError("subset_has_no_receipt", "a subset has no full-round receipt to show")
-            module_args = [target]
+            module_args = [*contract.args, *profile.selector_args, target]
         else:
-            module_args = profile.full_args()
+            module_args = list(contract.args)
     elif args.module:
         module_args = list(args.module_arg) if args.module_arg else list(contract.args)
     else:

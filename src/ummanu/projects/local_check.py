@@ -1,4 +1,4 @@
-"""Explicit local membership, checked before a runner imports any selected test."""
+"""Manifest membership checks and selector handoff to project-owned broad runners."""
 
 from __future__ import annotations
 
@@ -12,17 +12,48 @@ from typing import Any
 from ummanu.broad_check import BroadCheckError
 
 
+def validate_pytest_path(root: Path, args: tuple[str, ...], selector: str) -> None:
+    """Keep appended pytest paths inside the declared collection roots.
+
+    Markers, deselection and node validation remain pytest's. These are the separate-value
+    options used by the installed adapters; equals-form options never look like a path.
+    """
+    value_options = {"-c", "--rootdir", "-m", "-k", "-p", "-o", "--override-ini"}
+    paths = []
+    expecting_value = False
+    for arg in args:
+        if expecting_value:
+            expecting_value = False
+        elif arg.startswith("-"):
+            expecting_value = arg in value_options
+        else:
+            paths.append((root / arg.partition("::")[0]).resolve())
+    candidate_root = root.resolve()
+    selected = (root / selector.partition("::")[0]).resolve()
+    allowed = paths or [candidate_root]
+    if not selected.is_relative_to(candidate_root) or not any(
+        selected == path or (path.is_dir() and selected.is_relative_to(path)) for path in allowed
+    ):
+        raise BroadCheckError(
+            "outside_local_profile",
+            f"{selector.partition('::')[0]}: outside declared pytest paths; execution only in CI",
+        )
+
+
 def validate_declaration(local: dict[str, Any], module: str, args: tuple[str, ...]) -> None:
     """Check the executable shape as well as the schema; flags cannot narrow a full round."""
-    manifest = local.get("ci_manifest")
-    expected = "tests.broad" if manifest else local["runner"]
-    if module != expected or args:
+    if not module:
+        raise BroadCheckError("invalid_local_check", "broad_check.local needs broad_check.module")
+    if local.get("membership") == "runner":
+        return
+    options = {"-v", "--verbose", "-q", "--quiet", "-b", "--buffer", "-c", "--catch", "-f", "--failfast"}
+    if module != "tests.broad" or any(arg not in options for arg in args):
         raise BroadCheckError(
             "invalid_local_check",
-            f"broad_check.local requires module {expected!r} and no broad_check.args; "
-            "the declared membership supplies the runner's test arguments",
+            "manifest membership requires tests.broad and only reporting/control arguments; "
+            "test names and filters cannot define a full-profile receipt",
         )
-    if manifest and (local["runner"] != "unittest" or local["shards"] != ["unit", "component"]):
+    if local["runner"] != "unittest" or local["shards"] != ["unit", "component"]:
         raise BroadCheckError(
             "invalid_local_check", "the Ummanu CI manifest local profile is exactly unit + component"
         )
@@ -52,16 +83,16 @@ class LocalProfile:
     runner: str
     owners: dict[str, str]
     shards: tuple[str, ...]
-    manifest: bool = False
+    runner_owned: bool = False
+    selector_args: tuple[str, ...] = ()
 
     @classmethod
     def load(cls, root: Path, declaration: dict[str, Any]) -> LocalProfile:
+        if declaration.get("membership") == "runner":
+            return cls("", {}, (), runner_owned=True, selector_args=tuple(declaration["selector_args"]))
         try:
-            if "ci_manifest" in declaration:
-                grouped = _manifest(root, declaration["ci_manifest"])
-                owners = {path: shard for shard, paths in grouped.items() for path in paths}
-            else:
-                owners = dict(declaration["modules"])
+            grouped = _manifest(root, declaration["ci_manifest"])
+            owners = {path: shard for shard, paths in grouped.items() for path in paths}
             shards = tuple(declaration["shards"])
             if not owners or any(shard not in owners.values() for shard in shards):
                 raise ValueError("local membership or a declared local shard is empty")
@@ -82,14 +113,12 @@ class LocalProfile:
                     raise ValueError(f"invalid unittest module path {relative!r}")
                 with (root / path).open("rb") as handle:
                     handle.read(1)
-            return cls(declaration["runner"], owners, shards, "ci_manifest" in declaration)
+            return cls(declaration["runner"], owners, shards)
         except (OSError, ValueError, UnicodeError, ImportError, AttributeError) as exc:
             raise BroadCheckError("invalid_local_check", f"cannot read broad_check.local: {exc}") from exc
 
     def full_args(self) -> list[str]:
         paths = [path for shard in self.shards for path, owner in self.owners.items() if owner == shard]
-        if self.manifest:
-            return []  # tests.broad uses the same validated manifest and its fixed two shards.
         return [self._dotted(path) for path in paths] if self.runner == "unittest" else paths
 
     @staticmethod
@@ -98,6 +127,10 @@ class LocalProfile:
 
     def select(self, selector: str) -> tuple[str, str]:
         """Return canonical module and runner node-id, preserving pytest parameter text as argv."""
+        if self.runner_owned:
+            if selector.startswith("-"):
+                raise BroadCheckError("invalid_selector", "a selector cannot be a runner option")
+            return selector.partition("::")[0], selector
         path, separator, node = selector.partition("::")
         if self.runner == "unittest" and not separator and path not in self.owners:
             matches = [

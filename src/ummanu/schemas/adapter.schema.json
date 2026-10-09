@@ -154,63 +154,51 @@
           "description": "The exact argument vector passed after the module. Kept as a list, never a rendered string, because `-k a b` and `-k 'a b'` render identically while running different checks."
         },
         "local": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "runner",
-            "shards"
-          ],
-          "description": "Explicit local profile and CI membership. No discovery fallback. ci_manifest uses the existing Ummanu validator and exactly unit + component; modules supports arbitrary project-relative Python paths and CI shard names.",
-          "properties": {
-            "runner": {
-              "enum": [
-                "unittest",
-                "pytest"
-              ]
-            },
-            "shards": {
-              "type": "array",
-              "minItems": 1,
-              "uniqueItems": true,
-              "items": {
-                "type": "string",
-                "minLength": 1
-              }
-            },
-            "ci_manifest": {
-              "const": "tests/ci-shards.txt"
-            },
-            "modules": {
-              "type": "object",
-              "minProperties": 1,
-              "propertyNames": {
-                "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.py$"
-              },
-              "additionalProperties": {
-                "type": "string",
-                "minLength": 1
-              }
-            }
-          },
+          "description": "Local membership is either the validated Ummanu CI manifest or owned by the declared broad runner. Runner selectors append to broad_check.args, with the declared separator; no discovery fallback.",
           "oneOf": [
             {
+              "type": "object",
+              "additionalProperties": false,
               "required": [
+                "runner",
+                "shards",
                 "ci_manifest"
               ],
-              "not": {
-                "required": [
-                  "modules"
-                ]
+              "properties": {
+                "runner": {
+                  "const": "unittest"
+                },
+                "shards": {
+                  "const": [
+                    "unit",
+                    "component"
+                  ]
+                },
+                "ci_manifest": {
+                  "const": "tests/ci-shards.txt"
+                }
               }
             },
             {
+              "type": "object",
+              "additionalProperties": false,
               "required": [
-                "modules"
+                "membership",
+                "selector_args"
               ],
-              "not": {
-                "required": [
-                  "ci_manifest"
-                ]
+              "properties": {
+                "membership": {
+                  "const": "runner"
+                },
+                "selector_args": {
+                  "enum": [
+                    [],
+                    [
+                      "--"
+                    ]
+                  ],
+                  "description": "Empty for native positional selectors (pytest); [\"--\"] for the shared launcher interface. Appended after broad_check.args only on subset runs."
+                }
               }
             }
           ]
