@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from tests.support.local_check_fixture import LocalCheckFixture
+from tests.support.local_check_fixture import LocalCheckFixture, role_git_env
 from tests.support.managed_venv import guarded_product_env
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.runtime import role_env, test_guard
@@ -106,6 +106,9 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         if git is None:
             raise RuntimeError("the installed CLI receipt fixture requires git")
         (self.scratch / "native-bin/git").symlink_to(git)
+        self.env = role_git_env(self.root, self.env)
+        result = self.launch("worker", ["git", "-C", str(self.root), "rev-parse", "--git-dir"])
+        self.assertEqual(result.returncode, 0, result.stderr)
         # Exercise the installed CLI as a separate role command, not an ambient marker
         # and not direct unittest. The same bootstrap is used by wrapper169.
         wrapper = [sys.executable, "-P", "-m", "ummanu", "check", "--root", str(self.root),
