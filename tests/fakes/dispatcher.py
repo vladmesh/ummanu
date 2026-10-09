@@ -452,7 +452,8 @@ class FakeCatalog:
         if self.broad_check_state is not None:
             return self.broad_check_state
         return ContractVerdict.as_fit(
-            ModuleContract(sys.executable, "ummanu", module="tests.broad"),
+            ModuleContract(sys.executable, "ummanu", module="tests.broad",
+                           local={"runner": "unittest", "ci_manifest": "tests/ci-shards.txt", "shards": ["unit", "component"]}),
             "ummanu",
         )
 
@@ -742,6 +743,9 @@ class FakeHost:
     _validated_worker_prerequisites = CommandHostRuntime._validated_worker_prerequisites
     _bound_marker_body = staticmethod(CommandHostRuntime._bound_marker_body)
     _control_plane_command = CommandHostRuntime._control_plane_command
+    _packet_check_contract = CommandHostRuntime._packet_check_contract
+    _check_header = CommandHostRuntime._check_header
+    _prior_review_evidence = CommandHostRuntime._prior_review_evidence
     _local_run_policy = CommandHostRuntime._local_run_policy
     _local_run_section = CommandHostRuntime._local_run_section
     # The document's comment selector, borrowed like the rest of the builder (secretary-1768).

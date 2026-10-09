@@ -28,7 +28,6 @@ from unittest import mock
 
 from ummanu.cli import build_parser
 from ummanu.dispatch.host import CommandHostRuntime
-
 from ummanu.projects.contract import (
     ADAPTER_INVALID,
     ADAPTER_UNAVAILABLE,
@@ -684,6 +683,7 @@ class CatalogContractTests(unittest.TestCase):
             ADAPTER_BODY
             + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n  module: suite\n"
             + f"  args: {json.dumps(args)}\n"
+            + "  local:\n    membership: runner\n    selector_args: []\n"
         )
         verdict = catalog.broad_check_verdict("example")
         self.assertEqual(verdict.state, CONTRACT_UNDECIDABLE)

@@ -27,7 +27,7 @@ from tests.dispatcher_fixtures import clear_env as _clear_env
 from ummanu.dispatch import worker_report
 from ummanu.dispatch.heartbeat import run_heartbeat_identity
 from ummanu.dispatch.runtime_provenance import ProductionRuntime
-from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
 from ummanu.dispatch.worker_comments import (
     WORKER_COMMENTS_HEADING,
     WORKER_COMMENTS_RULE,
@@ -98,6 +98,7 @@ class Card:
         self.audit.records.append(
             {
                 "event_id": "evt_review_red",
+                "request_id": attempt_request_id("attempt-1", "review-red", REF, "1"),
                 "kind": "verdict",
                 "outcome": "success",
                 "ref": REF,

@@ -174,6 +174,7 @@ class LocalRunPacketTests(unittest.TestCase):
             "ummanu",
             module="tests.broad",
             args=("--only", "fast lane", "", "owner's test"),
+            local={"membership": "runner", "selector_args": []},
         )
         self.catalog = SimpleNamespace(
             broad_check_verdict=lambda project: ContractVerdict.as_fit(self.contract, project)

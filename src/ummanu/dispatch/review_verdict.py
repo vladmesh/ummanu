@@ -33,9 +33,6 @@ from ummanu.dispatch.helpers import (
 from ummanu.dispatch.helpers import (
     red_review_count as _red_review_count,
 )
-from ummanu.dispatch.helpers import (
-    safe_one_line as _safe_one_line,
-)
 from ummanu.dispatch.launch import REVIEW_ROLE
 from ummanu.dispatch.state import (
     REVIEW_REJECTION_REASON,
@@ -110,7 +107,9 @@ def advance_review_verdict(
     # The only point where both the last review body and the SHA it judged are available.
     # Keep them for the next review packet instead of reconstructing the card from base.
     record.previous_reviewed_sha = reviewed
-    record.previous_blockers = _safe_one_line(_last_review_red_body(task) or "", limit=2000)
+    # Preserve the verdict as evidence. The packet renderer supplies its data boundary;
+    # flattening/truncating here loses stable IDs and their relationships permanently.
+    record.previous_blockers = _last_review_red_body(task) or ""
     if not parks_for_decision(runtime, task):
         # No observer to release it: the verdict acts on its own tick, and the worker that
         # wrote the code is still suspended, so the verdict goes to that conversation.
