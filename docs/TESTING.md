@@ -369,3 +369,46 @@ Notes:
   [Auditing what is exposed](OPERATIONS.md#auditing-what-is-exposed).
 - Never point a test or rehearsal at `/home/dev/ummanu-data`, `/home/dev/secretary-instance`,
   production systemd or a live observer.
+
+## Test timing budgets
+
+The declared Ummanu local unit/component profile records every test's stable identifier,
+actual Python module, outcome and elapsed time in the full receipt's `parsed.timing` field.
+`check show` and receipt reuse retain these observations. Local output lists the ten slowest
+tests and warns for every test strictly over 5 seconds; warnings preserve the suite exit status.
+Subsets print observations without writing or changing the full receipt. Legacy receipts remain
+valid under their original schema and digest; their timing is unavailable. Missing, interrupted
+or invalid native timing is explicitly unavailable/incomplete, without manufactured durations.
+
+CI applies strict >5 seconds/test and >90 seconds/module budgets only to unit and component.
+A violation is a product failure reported by exact identifier, observed duration and limit in
+JSON, JUnit, logs and the job summary. Existing test failures and infrastructure/cancellation
+classification remain intact. Integration, runtime-component and packaging retain their own
+budgets, and workflow timeouts are unchanged. Codegen retains its native 0.5s/test and 240s CPU
+budgets; these Ummanu thresholds do not apply to its runner.
+
+Test clocks span unittest `startTest` through `stopTest`, including instance setup, teardown
+and cleanups. Module clocks span all classes of the actual test module, including module/class
+setup, teardown and cleanups; each module completes its stdlib suite before the next begins.
+Imports and collection are outside module clocks. Fixture, loader and skipped subtest outcomes are separate
+`native_outcomes` with source module, phase and native identifier, without per-test durations.
+Completed fixture skips leave timing complete; fixture/loader errors retain native failures.
+The shared callback outcome domain drives collection, validation and JUnit rendering for
+both timed tests and native events. A loader `load_tests` AssertionError is a native failure;
+a fixture AssertionError is a native error, as reported by unittest. Complete observations
+are validated before serialization, retaining other tests' measurements for either outcome.
+Missing test stops and interrupted execution leave timing incomplete. Empty selected modules
+run an empty stdlib suite and have no test measurements or fixture execution.
+The manifest importer loads its collector from candidate source under a private identity,
+registered only while definitions execute. Installed receipt validation and rendering import
+the installed canonical helper independently of the candidate manifest import order.
+Permanent regressions use deterministic clocks. The intentional slow specimen belongs only to
+a separate CI proof PR and must never enter the candidate or main.
+
+Timing rollout exposed four modules containing real integration work. Their assertions and
+fixtures are retained in CI: `test_docker_guard` executes installed role wrappers and native
+tool subprocesses in runtime-component; `test_owned_cleanup` and `test_bounded_cleanup_replay`
+exercise real Git, process termination, journals and runtime cleanup in integration-dispatcher;
+`test_measurement_script` runs loopback HTTP and real cadence waits in integration-board.
+The original component CI report observed a 94.627437s cleanup replay module, a 10.425188s
+guard test and an 18.513881s measurement test. The journal-layout component tests remain local.

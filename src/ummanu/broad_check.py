@@ -588,6 +588,9 @@ def run_broad_check(
     with tempfile.TemporaryDirectory(prefix="ummanu-broad-check-") as scratch:
         # Keep provenance outside the workspace whose contents the receipt names.
         record = Path(scratch) / "provenance.json" if spec.attests_provenance else None
+        environment.pop("UMMANU_TEST_TIMING_RECORD", None)
+        if record is not None:
+            environment["UMMANU_TEST_TIMING_RECORD"] = str(record.with_name("timing.json"))
         return _run_and_record(
             spec,
             root=root,
@@ -694,7 +697,7 @@ def _run_and_record(
                     duration=time.monotonic() - started,
                     exit_code=exit_code,
                     tail=tail,
-                    parsed=scanner.finish(),
+                    parsed=_with_timing(scanner.finish(), record, incomplete=True),
                     incomplete_reason=incomplete_reason,
                 ),
             )
@@ -714,12 +717,28 @@ def _run_and_record(
         duration=time.monotonic() - started,
         exit_code=exit_code,
         tail=tail,
-        parsed=scanner.finish(),
+        parsed=_with_timing(scanner.finish(), record, incomplete=bool(incomplete_reason)),
         incomplete_reason=incomplete_reason,
     )
     if target is not None:
         _write_receipt(target, payload)
     return exit_code, payload
+
+
+def _with_timing(parsed: dict[str, object], record: Path | None, *, incomplete: bool) -> dict[str, object]:
+    from ummanu.projects.test_timing import valid_observation
+
+    observation: dict[str, object] = {"status": "unavailable", "tests": [], "modules": {}}
+    if record is not None:
+        try:
+            data = json.loads(record.with_name("timing.json").read_text(encoding="utf-8"))
+            if valid_observation(data):
+                observation = data
+        except (OSError, ValueError):
+            pass
+    if incomplete:
+        observation["status"] = "incomplete"
+    return {**parsed, "timing": observation}
 
 
 def _build_payload(
@@ -1067,7 +1086,7 @@ def summarize(receipt: Mapping[str, Any]) -> str:
     parsed = receipt.get("parsed")
     counts = ""
     if isinstance(parsed, Mapping) and parsed:
-        counts = ", ".join(f"{key}={value}" for key, value in sorted(parsed.items()))
+        counts = ", ".join(f"{key}={value}" for key, value in sorted(parsed.items()) if key != "timing")
     identity = receipt.get("content_identity")
     tree = identity.get("tree_sha", "") if isinstance(identity, Mapping) else ""
     provenance = receipt.get("project_provenance")
@@ -1097,4 +1116,8 @@ def summarize(receipt: Mapping[str, Any]) -> str:
     ]
     if counts:
         lines.append(f"- parsed: {counts}")
+    from ummanu.projects.test_timing import summary
+
+    timing = parsed.get("timing", {}) if isinstance(parsed, Mapping) else {}
+    lines.append(summary(timing))
     return "\n".join(lines)

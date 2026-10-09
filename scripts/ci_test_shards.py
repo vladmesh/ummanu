@@ -7,6 +7,7 @@ import argparse
 import contextlib
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -20,6 +21,31 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TextIO
+
+# The installed wrapper imports this file by path to validate the candidate manifest.
+# Resolve its stdlib-only collector from that same candidate, even before an upgrade.
+_timing_path = Path(__file__).resolve().parents[1] / "src/ummanu/projects/test_timing.py"
+_timing_spec = importlib.util.spec_from_file_location(f"{__name__}._candidate_test_timing", _timing_path)
+if _timing_spec is None or _timing_spec.loader is None:
+    raise ImportError(f"timing helper unavailable: {_timing_path}")
+_timing = importlib.util.module_from_spec(_timing_spec)
+# Dataclasses need registration only while the helper's definitions execute.
+# Keep the candidate module by reference afterwards; never register/reuse the
+# installed canonical ummanu.projects.test_timing identity.
+_timing_registered = _timing_spec.name in sys.modules
+_prior_timing = sys.modules.get(_timing_spec.name)
+sys.modules[_timing_spec.name] = _timing
+try:
+    _timing_spec.loader.exec_module(_timing)
+finally:
+    if _timing_registered:
+        sys.modules[_timing_spec.name] = _prior_timing
+    else:
+        del sys.modules[_timing_spec.name]
+TestRecord, TimingResult, TimingSuite = _timing.TestRecord, _timing.TimingResult, _timing.TimingSuite
+diagnostic, violations = _timing.diagnostic, _timing.violations
+native_diagnostic = _timing.native_diagnostic
+junit_tag = _timing.junit_tag
 
 SUITES = (
     "unit",
@@ -153,16 +179,6 @@ def _required_integration_setup_reason(error: object) -> str | None:
 
 
 @dataclasses.dataclass
-class TestRecord:
-    identifier: str
-    classname: str
-    name: str
-    duration_seconds: float
-    outcome: str = "passed"
-    detail: str | None = None
-
-
-@dataclasses.dataclass
 class CheckoutStatus:
     before_entries: int
     before_sha256: str
@@ -197,6 +213,8 @@ class SuiteEvidence:
     detail: str | None = None
     test_records: list[TestRecord] = dataclasses.field(default_factory=list, repr=False)
     checkout_status: CheckoutStatus | None = None
+    timing: dict = dataclasses.field(default_factory=dict)
+    timing_violations: list[dict] = dataclasses.field(default_factory=list)
 
     def as_json(self) -> dict[str, object]:
         return {
@@ -208,6 +226,8 @@ class SuiteEvidence:
             "duration_seconds": round(self.duration_seconds, 3),
             "slowest_tests": [dataclasses.asdict(record) for record in self.slowest_tests],
             "failure_locations": self.failure_locations,
+            "timing": self.timing or {"status": "unavailable"},
+            "timing_violations": self.timing_violations,
             "log_truncated": self.log_truncated,
             "detail": self.detail,
             "artifacts": {"junit": "junit.xml", "log": "test-output.log"},
@@ -248,62 +268,15 @@ class BoundedTee:
         self._log.close()
 
 
-class EvidenceResult(unittest.TextTestResult):
+class EvidenceResult(TimingResult):
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)
-        self.records: dict[str, TestRecord] = {}
-        self._started: dict[str, float] = {}
         self.required_integration_setup_reasons: list[str] = []
 
-    def startTest(self, test: unittest.case.TestCase) -> None:
-        identifier = test.id()
-        self._started[identifier] = time.monotonic()
-        super().startTest(test)
-
-    def stopTest(self, test: unittest.case.TestCase) -> None:
-        identifier = test.id()
-        duration = time.monotonic() - self._started.pop(identifier, time.monotonic())
-        record = self.records.get(identifier)
-        if record is None:
-            classname, _, name = identifier.rpartition(".")
-            record = TestRecord(identifier, classname, name, duration)
-            self.records[identifier] = record
-        else:
-            record.duration_seconds = duration
-        super().stopTest(test)
-
-    def _mark(self, test: unittest.case.TestCase, outcome: str, detail: str | None = None) -> None:
-        record = self.records.get(test.id())
-        if record is None:
-            classname, _, name = test.id().rpartition(".")
-            record = TestRecord(test.id(), classname, name, 0.0)
-            self.records[test.id()] = record
-        record.outcome = outcome
-        record.detail = detail
-
-    def addFailure(self, test: unittest.case.TestCase, err: object) -> None:
-        detail = self._exc_info_to_string(err, test)
-        self._mark(test, "failed", detail)
-        super().addFailure(test, err)
-
     def addError(self, test: unittest.case.TestCase, err: object) -> None:
-        detail = self._exc_info_to_string(err, test)
-        self._mark(test, "error", detail)
         if reason := _required_integration_setup_reason(err):
             self.required_integration_setup_reasons.append(reason)
         super().addError(test, err)
-
-    def addSkip(self, test: unittest.case.TestCase, reason: str) -> None:
-        self._mark(test, "skipped", reason)
-        super().addSkip(test, reason)
-
-    def addExpectedFailure(self, test: unittest.case.TestCase, err: object) -> None:
-        self._mark(test, "failed", self._exc_info_to_string(err, test))
-        super().addExpectedFailure(test, err)
-
-    def addUnexpectedSuccess(self, test: unittest.case.TestCase) -> None:
-        self._mark(test, "failed", "unexpected success")
-        super().addUnexpectedSuccess(test)
 
 
 def _failure_location(identifier: str, detail: str | None) -> str:
@@ -321,7 +294,7 @@ def _counts(result: EvidenceResult) -> dict[str, int]:
     skipped = len(result.skipped)
     return {
         "collected": result.testsRun,
-        "passed": max(result.testsRun - failed - errors - skipped, 0),
+        "passed": result.successful_tests,
         "failed": failed,
         "error": errors,
         "skipped": skipped,
@@ -383,55 +356,76 @@ def run_reported_suite(
     """Run one manifest suite and retain the unittest facts needed by CI evidence."""
     started = time.monotonic()
     loader = unittest.defaultTestLoader
+    result = None
+
+    def collect_result(*args, **kwargs):
+        nonlocal result
+        result = EvidenceResult(*args, **kwargs)
+        return result
+
+    def interrupted_evidence(outcome, location, detail=None):
+        records = list(result.records.values()) if result is not None else []
+        return SuiteEvidence(
+            suite_name, candidate_sha, outcome,
+            _counts(result) if result is not None else _empty_counts(),
+            time.monotonic() - started, [], [location], detail=detail,
+            test_records=records,
+            timing=result.observation() if result is not None else {"status": "unavailable"},
+        )
+
     try:
-        selected = unittest.TestSuite(loader.loadTestsFromName(module) for module in modules(paths))
-        runner = unittest.TextTestRunner(stream=log, verbosity=2, resultclass=EvidenceResult)
+        sources = modules(paths)
+        selected = TimingSuite((loader.loadTestsFromName(module) for module in sources), source_modules=sources)
+        runner = unittest.TextTestRunner(stream=log, verbosity=2, resultclass=collect_result)
         with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
             result = runner.run(selected)
     except KeyboardInterrupt:
-        return SuiteEvidence(
-            suite_name,
-            candidate_sha,
-            "cancelled",
-            _empty_counts(),
-            time.monotonic() - started,
-            [],
-            ["test execution cancelled"],
-        )
+        return interrupted_evidence("cancelled", "test execution cancelled")
     except Exception as exc:  # noqa: BLE001 - this boundary must report unexpected runner failures.
         traceback.print_exc(file=log)
-        return SuiteEvidence(
-            suite_name,
-            candidate_sha,
-            "infrastructure_failure",
-            _empty_counts(),
-            time.monotonic() - started,
-            [],
-            [f"test runner error: {type(exc).__name__}"],
-            detail=str(exc),
-        )
+        return interrupted_evidence("infrastructure_failure", f"test runner error: {type(exc).__name__}", str(exc))
 
+    timing = result.observation()
+    for event in timing["native_outcomes"]:
+        print(native_diagnostic(event), file=log)
+    budget_violations = violations(timing, modules=True) if suite_name in {"unit", "component"} else []
+    for violation in budget_violations:
+        print(diagnostic(violation), file=log)
     records = list(result.records.values())
-    failures = [record for record in records if record.outcome in {"failed", "error"}]
+    failures = [record for record in [*records, *result.native_outcomes]
+                if junit_tag(record.outcome) in {"failure", "error"}]
     counts = _counts(result)
     setup_reasons = result.required_integration_setup_reasons
     if setup_reasons:
         outcome = "infrastructure_failure"
         detail = f"required integration setup unavailable: {setup_reasons[0]}"
     else:
-        outcome = "success" if result.wasSuccessful() else "product_failure"
+        outcome = "success" if result.wasSuccessful() and not budget_violations else "product_failure"
         detail = None
+        if timing["status"] != "complete" and outcome == "success":
+            outcome, detail = "infrastructure_failure", "incomplete test timing"
     return SuiteEvidence(
         suite_name,
         candidate_sha,
         outcome,
         counts,
         time.monotonic() - started,
-        sorted(records, key=lambda record: record.duration_seconds, reverse=True)[:SLOWEST_TEST_LIMIT],
-        [_failure_location(record.identifier, record.detail) for record in failures],
+        sorted(records, key=lambda record: record.duration_seconds if record.duration_seconds is not None else -1, reverse=True)[:SLOWEST_TEST_LIMIT],
+        [_failure_location(record.identifier, record.detail) for record in failures]
+        + [diagnostic(item) for item in budget_violations],
         detail=detail,
         test_records=records,
+        timing=timing,
+        timing_violations=budget_violations,
     )
+
+
+def _write_junit_outcome(case, outcome, detail):
+    tag = junit_tag(outcome)
+    if tag == "skipped":
+        ET.SubElement(case, tag, {"message": detail or "skipped"})
+    elif tag is not None:
+        ET.SubElement(case, tag).text = detail or outcome
 
 
 def _write_junit(path: Path, evidence: SuiteEvidence) -> None:
@@ -439,8 +433,9 @@ def _write_junit(path: Path, evidence: SuiteEvidence) -> None:
         "testsuite",
         {
             "name": evidence.suite,
-            "tests": str(evidence.counts["collected"]),
-            "failures": str(evidence.counts["failed"]),
+            "tests": str(len(evidence.test_records) + len(evidence.timing.get("native_outcomes", []))
+                         + len(evidence.timing_violations)),
+            "failures": str(evidence.counts["failed"] + len(evidence.timing_violations)),
             "errors": str(evidence.counts["error"]),
             "skipped": str(evidence.counts["skipped"]),
             "time": f"{evidence.duration_seconds:.3f}",
@@ -451,13 +446,21 @@ def _write_junit(path: Path, evidence: SuiteEvidence) -> None:
         case = ET.SubElement(
             testsuite,
             "testcase",
-            {"classname": record.classname, "name": record.name, "time": f"{record.duration_seconds:.3f}"},
+            {"classname": record.classname, "name": record.name,
+             **({"time": f"{record.duration_seconds:.6f}"} if record.duration_seconds is not None else {})},
         )
-        if record.outcome == "skipped":
-            ET.SubElement(case, "skipped", {"message": record.detail or "skipped"})
-        elif record.outcome in {"failed", "error"}:
-            node = ET.SubElement(case, "failure" if record.outcome == "failed" else "error")
-            node.text = record.detail or record.outcome
+        _write_junit_outcome(case, record.outcome, record.detail)
+    for event in evidence.timing.get("native_outcomes", []):
+        case = ET.SubElement(testsuite, "testcase", {
+            "classname": event["module"], "name": event["identifier"], "phase": event["phase"],
+        })
+        _write_junit_outcome(case, event["outcome"], event.get("detail"))
+    for item in evidence.timing_violations:
+        case = ET.SubElement(testsuite, "testcase", {
+            "classname": "timing_budget", "name": item["identifier"],
+            "time": f"{item['duration_seconds']:.6f}",
+        })
+        ET.SubElement(case, "failure", {"message": diagnostic(item)}).text = diagnostic(item)
     ET.ElementTree(testsuite).write(path, encoding="utf-8", xml_declaration=True)
 
 
@@ -564,6 +567,8 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
         bool(data.get("log_truncated")),
         data.get("detail"),
         checkout_status=checkout_status,
+        timing=data.get("timing", {}),
+        timing_violations=data.get("timing_violations", []),
     )
 
 
@@ -587,11 +592,13 @@ def _summary(evidence: SuiteEvidence) -> str:
             [
                 "- Slowest tests:",
                 *[
-                    f"  - `{record.identifier}` ({record.duration_seconds:.3f}s)"
+                    f"  - `{record.identifier}` ({record.duration_seconds}s)"
                     for record in evidence.slowest_tests
                 ],
             ]
         )
+    lines.extend(f"- {diagnostic(item)}" for item in evidence.timing_violations)
+    lines.extend(f"- {native_diagnostic(event)}" for event in evidence.timing.get("native_outcomes", []))
     if evidence.detail:
         lines.append(f"- Detail: {evidence.detail}")
     if evidence.checkout_status:

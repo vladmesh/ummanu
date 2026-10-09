@@ -175,7 +175,7 @@ unit tests/test_retro_search_log.py
 unit tests/test_retro_pending.py
 unit tests/test_role_env.py
 unit tests/test_runtime_env.py
-component tests/test_docker_guard.py
+runtime-component tests/test_docker_guard.py
 unit tests/test_test_guard.py
 component tests/test_head_command_guards.py
 integration-dispatcher tests/test_test_guard_interpreters.py
@@ -237,10 +237,10 @@ unit tests/test_restore_refused_batch.py
 component tests/test_onboarding_snapshot.py
 integration-recovery tests/test_snapshot_recovery_postgres.py
 unit tests/test_instance_maintenance.py
-component tests/test_owned_cleanup.py
-component tests/test_bounded_cleanup_replay.py
+integration-dispatcher tests/test_owned_cleanup.py
+integration-dispatcher tests/test_bounded_cleanup_replay.py
 integration-board tests/test_status.py
-component tests/test_measurement_script.py
+integration-board tests/test_measurement_script.py
 integration-board tests/test_web_command_protocol.py
 integration-board tests/test_web_pause_protocol.py
 integration-board tests/test_web_read_protocol.py

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import gc
+from collections import deque
 
 _trees: dict[str, ast.Module] = {}
 _walks: dict[int, tuple[ast.AST, ...]] = {}
@@ -53,6 +54,23 @@ def parents(tree: ast.AST) -> dict[int, ast.AST]:
         found = {id(child): node for node in walk(tree) for child in ast.iter_child_nodes(node)}
         _parents[id(tree)] = found
     return found
+
+
+def imports(tree: ast.AST) -> tuple[ast.Import | ast.ImportFrom, ...]:
+    """All import statements, without walking expression trees that cannot contain them.
+
+    Python statement bodies include exception handlers and match cases. Imports cannot
+    occur inside an expression, decorator, argument, annotation or pattern.
+    """
+    pending = deque([tree])
+    found = []
+    while pending:
+        node = pending.popleft()
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            found.append(node)
+        pending.extend(child for child in ast.iter_child_nodes(node)
+                       if isinstance(child, (ast.stmt, ast.ExceptHandler, ast.match_case)))
+    return tuple(found)
 
 
 def clear() -> None:

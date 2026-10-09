@@ -26,7 +26,8 @@ not permission to discover another suite. Refusal125 is command feedback, never 
 An earlier excessive local run alone remains non-blocking; exclude its results and preserve historical
 verdicts. A new test in a local module that uses containers, network, sleep or exceeds its native local
 budget is a code defect: require «перенести в интеграционный шард». Preserve codegen's native
-0.5s/test and 240s CPU limits; the proposed Ummanu 5s/test and 90s/module budget is not implemented.
+0.5s/test and 240s CPU limits. Ummanu local tests warn at >5s without changing the suite verdict;
+CI unit/component fails at >5s/test or >90s/module, including class/module fixture cost.
 
 In a rework decision, address every prior stable blocker ID. State which findings you accept,
 reject or defer; give an issue ref for deferral and a precise quotation usable in the next worker
