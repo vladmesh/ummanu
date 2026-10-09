@@ -35,11 +35,14 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         self.host._prepare_workspace_environment(str(self.root), project="fixture")
         self.default = self.root / role_env.WORKSPACE_ENV_DIR / "bin/python3"
         self.declared = self.root / ".venv/bin/python"
-        # CI's pytest is installed in the test process's prefix. Expose those library
-        # files to bounded venv fixtures; no installer, downloads or live venv writes.
+        # Expose CI's installed dependencies and editable Ummanu source to the
+        # bounded venvs. Adding purelib to sys.path does not process its .pth files,
+        # so the source needs its own entry for tests.broad after role_env strips
+        # PYTHONPATH. No installer, downloads or live venv writes are needed.
+        library_paths = [sysconfig.get_path("purelib"), str(Path(__file__).resolve().parents[1] / "src")]
         for environment in (self.default.parent.parent, self.declared.parent.parent):
             site = next(environment.glob("lib/python3*/site-packages"))
-            (site / "fixture-libraries.pth").write_text(sysconfig.get_path("purelib") + "\n")
+            (site / "fixture-libraries.pth").write_text("\n".join(library_paths) + "\n")
             console = environment / "bin/pytest"
             console.write_text(f"#!{environment / 'bin/python3'}\nimport pytest\nraise SystemExit(pytest.console_main())\n")
             console.chmod(0o755)
