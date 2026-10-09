@@ -422,8 +422,9 @@ def _no_workspace_attempt(intent: dict[str, Any]) -> bool:
 #: An open obligation (pending, or preserved without a terminal outcome) is attempted at most once
 #: per this many seconds, by every entrypoint, across restarts and concurrent owners.
 RETRY_COOLDOWN = 3600.0
-#: The kinds of terminal outcome: dead ends no retry can change, each decided from current facts.
-TERMINAL_KINDS = ("workspace-disappeared", "registration-without-directory", "project-unregistered", "follows")
+#: Final outcomes decided from current facts: dead ends or a proved transfer of the old obligation.
+TERMINAL_KINDS = ("workspace-disappeared", "registration-without-directory", "project-unregistered", "follows",
+                  "attempt-replaced")
 
 
 def _terminal(intent: dict[str, Any]) -> dict[str, Any] | None:
@@ -1563,8 +1564,15 @@ class CleanupOwner:
             return {**current, "claim": {}, "successor": self._observer_successor(intent)}
         if current is None:
             current = self.runtime.reader.show(task["ref"])
-        if current["id"] != task["id"] or current["project"] != task["project"]:
+        if (current["id"] != task["id"] or current.get("ref") != task["ref"]
+                or current["project"] != task["project"]):
             raise HostError("cleanup card identity changed")
+        state = self._state()
+        successor = self._card_successor(intent, current, state.get("records", {}))
+        if successor:
+            # This admits only the predecessor's recorded head obligation. The
+            # current board state and claim continue to belong to the successor.
+            return {**current, "successor": successor}
         if (current.get("state") in {"in_progress", "validate", "review", "assessment", "ready"}
                 and not current.get("closed")
                 and (intent["disposition"] != "done" or current.get("state") != "assessment")):
@@ -1575,7 +1583,6 @@ class CleanupOwner:
             raise HostError("cleanup claim is foreign or unknown")
         if claim.get("claimed_at") and claim != task.get("claim"):
             raise HostError("cleanup claim changed")
-        state = self._state()
         for ref, other in state.get("records", {}).items():
             if not isinstance(other, dict):
                 raise HostError("current dispatcher record is unreadable")
@@ -1596,6 +1603,84 @@ class CleanupOwner:
                                            for raw in intent["heads"]):
                     raise HostError("cleanup target has a newer launch intent")
         return current
+
+    def _card_successor(self, intent: dict[str, Any], card: dict[str, Any],
+                        records: dict[str, Any]) -> str:
+        """Prove a live replacement using the dispatcher's record and owned journal identity.
+
+        Called only inside ownership admission, before any workspace or claim effect.
+        No workspace is inspected: its recorded ownership belongs to the successor.
+        """
+        from ummanu.runtime.head import HeadRun
+        task, record = intent["task"], intent["record"]
+        current = records.get(task["ref"])
+        if not current:
+            return ""
+        if not isinstance(current, dict):
+            raise HostError("current dispatcher record is unreadable")
+        if current.get("attempt_id") == record.get("attempt_id"):
+            return ""
+        attempt, successor = record.get("attempt_id"), current.get("attempt_id")
+        if not attempt or not successor:
+            # No replacement classification: the ordinary active-owner guards
+            # still refuse this record, including an empty legacy obligation.
+            return ""
+        if (not isinstance(attempt, str) or not attempt or not isinstance(successor, str) or not successor
+                or not all(task.get(field) for field in ("id", "ref", "project"))
+                or not record.get("worker") or not record.get("workspace")
+                or any(current.get(field) != record[field] for field in ("worker", "workspace"))):
+            raise HostError("cleanup replacement attempt ownership is unproven")
+        other = self.journal.load_intent(_intent_key(task["ref"], successor))
+        if (other is None or other["status"] != "owned" or other["disposition"] != "owned"
+                or other["task"].get("kind") == "observer"
+                or any(other["task"].get(field) != task[field] for field in ("id", "ref", "project"))
+                or other["record"] != cleanup_record(current)
+                or card.get("claim") != other["task"].get("claim")
+                or (card.get("claim") or {}).get("worker") not in (None, record["worker"])):
+            raise HostError("cleanup replacement has no matching live attempt identity")
+        identity, replacement = intent.get("identity"), other.get("identity")
+        fields = ("repo", "common", "workspace", "branch", "device", "inode", "admin", "gitfile",
+                  "admin_device", "admin_inode", "admin_gitdir", "admin_commondir", "admin_head")
+        expected = self.data_dir / "workspaces" / task["project"] / record["worker"]
+        binding = self.runtime.catalog.binding(task["project"])
+        if (not isinstance(identity, dict) or not isinstance(replacement, dict)
+                or any(field not in identity or field not in replacement
+                       or identity[field] != replacement[field] for field in fields)
+                or any(not isinstance(identity[field], str) or not identity[field]
+                       for field in fields if field not in {"device", "inode", "admin_device", "admin_inode"})
+                or any(type(identity[field]) is not int or identity[field] < 0
+                       for field in ("device", "inode", "admin_device", "admin_inode"))
+                or identity.get("workspace") != str(expected.absolute())
+                or identity.get("workspace") != record["workspace"]
+                or identity.get("repo") != str(Path(binding["repo"]).absolute())
+                or identity.get("branch") != "refs/heads/pipeline/" + task["ref"]):
+            raise HostError("cleanup replacement workspace identity is unproven")
+        for ref, raw in records.items():
+            if not isinstance(raw, dict):
+                raise HostError("current dispatcher record is unreadable")
+            if ref != task["ref"] and raw.get("workspace") == record["workspace"]:
+                raise HostError("cleanup target has another active owner")
+        old_runs, new_runs = [], []
+        for obligation, runs in ((intent, old_runs), (other, new_runs)):
+            if not obligation["heads"]:
+                raise HostError("cleanup replacement head ownership is missing")
+            for raw in obligation["heads"]:
+                run = HeadRun.from_json(raw)
+                if (run.workspace != record["workspace"] or run.task_ref.kind != "card"
+                        or run.task_ref.ref != task["ref"] or run.role not in {"worker", "review", "reviewer"}):
+                    raise HostError("cleanup replacement head identity is foreign")
+                runs.append(run)
+            raw_record = obligation["record"]
+            for head in (*(raw_record.get(field) for field in _HEAD_RUN_FIELDS),
+                         (raw_record.get("launch_intent") or {}).get("head_run")):
+                if head and not any(head.get("run_id") == run.run_id
+                                    and head.get("scope_generation", "") == run.scope_generation for run in runs):
+                    raise HostError("cleanup replacement has an unrecorded head")
+        if any(old.run_id == new.run_id or (old.scope_generation
+                                           and old.scope_generation == new.scope_generation)
+               for old in old_runs for new in new_runs):
+            raise HostError("cleanup replacement shares a recorded head identity")
+        return successor
 
     @contextlib.contextmanager
     def admission(self, task: dict[str, Any], *, intent: dict[str, Any] | None = None,
@@ -1759,7 +1844,8 @@ class CleanupOwner:
             raise Preserved("attempt recorded no workspace but " + ref + " exists at " + tip, verified=True)
 
     def _scope_fence(self, intent: dict[str, Any], *, replaced: bool = False) -> None:
-        if intent["disposition"] == "catch-up" or _empty_attempt(intent) or _no_workspace_attempt(intent):
+        if not replaced and (intent["disposition"] == "catch-up" or _empty_attempt(intent)
+                             or _no_workspace_attempt(intent)):
             from ummanu.dispatch.watchdog import pid_file_path
             from ummanu.runtime.head.identity import head_process_status
             for role in ("worker", "review"):
@@ -1858,7 +1944,7 @@ class CleanupOwner:
                     or run.task_ref.kind != expected_kind):
                 raise HostError("cleanup head belongs to another workspace or card")
             guard = getattr(self.runtime.host, "_guard_head_run", None)
-            # A replaced observer's pid file now names its successor: never read it. A scoped run
+            # A replaced attempt's pid file now names its successor: never read it. A scoped run
             # is fenced by its own run directory's heartbeat, as its stop below is addressed.
             if callable(guard) and workspace_owned:
                 pid_file = (str(head_run_pid_file(self._heads_root(), run.run_id)) if run.scope_generation
@@ -1871,8 +1957,8 @@ class CleanupOwner:
         # Fence every recorded identity before stopping the first head. A
         # foreign reviewer must not cause us to stop a worker and only then refuse.
         for run in runs:
-            # A role's shared pid file names only its latest generation, and a replaced observer's
-            # names its successor. A scoped run, and every run of a replaced observer, is addressed
+            # A role's shared pid file names only its latest generation, and a replaced attempt's
+            # names its successor. A scoped run, and every run of a replaced attempt, is addressed
             # by its own run directory instead; the runtime still proves its own identity and scope.
             target = run if workspace_owned and not run.scope_generation else replace(run, pid_file="")
             if self._planned is not None:
@@ -1959,11 +2045,17 @@ class CleanupOwner:
             raise
 
     def _settle_claim(self, intent: dict[str, Any]) -> None:
-        with self.admission(intent["task"], intent=intent):
-            self._settle_claim_admitted(intent)
+        with self.admission(intent["task"], intent=intent) as current:
+            self._settle_claim_admitted(intent, current)
 
-    def _settle_claim_admitted(self, intent: dict[str, Any]) -> None:
-        current = self._validate_owner(intent)
+    def _settle_claim_admitted(self, intent: dict[str, Any], current: dict[str, Any]) -> None:
+        if intent["task"].get("kind") != "observer" and current.get("successor"):
+            # Only the old attempt's duty is complete. Never release or wait on
+            # the successor's claim, even when the board is Blocked or Validate.
+            intent["progress"]["claim_settled"] = True
+            intent["progress"]["handoff"] = {"attempt_id": intent["record"]["attempt_id"],
+                                               "successor_attempt_id": current["successor"]}
+            return
         claim = current.get("claim") or {}
         if claim.get("worker"):
             if not current.get("closed") and current.get("state") != "done":
@@ -2390,18 +2482,26 @@ class CleanupOwner:
                 self._follow(intent, owners)
                 self._save(value)
                 return intent
+        successor = ""
         try:
             with self.admission(intent["task"], intent=intent) as current:
                 successor = current.get("successor", "")
             self._scope_fence(intent, replaced=bool(successor))
-            self._stop(intent, workspace_owned=not successor)
+            with self.admission(intent["task"], intent=intent) if successor else contextlib.nullcontext():
+                self._stop(intent, workspace_owned=not successor)
+            if successor:
+                # Revalidate the specific successor after the unlocked stop proof,
+                # and checkpoint only the old head obligation under the effect fence.
+                with self.admission(intent["task"], intent=intent):
+                    intent["progress"]["heads_stopped"] = True
+                    self._checkpoint_intent(intent)
+                kind = "observer" if intent["task"].get("kind") == "observer" else "card attempt"
+                raise Preserved(kind + " " + str(intent["record"].get("attempt_id")) + " was replaced by "
+                                + successor + "; its own runs are settled and the workspace is handed "
+                                "to the successor", verified=True)
             # Each stop receipt is already durable (`_stop`). The flag is published with the first
             # checkpoint that follows: before any workspace or ref effect, or with the outcome.
             intent["progress"]["heads_stopped"] = True
-            if successor:
-                raise Preserved("observer " + str(intent["record"].get("attempt_id")) + " was replaced by "
-                                + successor + "; its own runs are settled and the workspace is handed "
-                                "to the successor", verified=True)
             if intent["disposition"] == "observer-close":
                 # The head is down; only workspace removal and completion wait for the cards.
                 waiting = self._unsettled_cards(intent["task"]["ref"])
@@ -2432,17 +2532,31 @@ class CleanupOwner:
             intent["reason"] = str(exc)
             if intent["progress"].get("heads_stopped"):
                 try:
-                    self._settle_claim(intent)
-                    intent["progress"]["preservation_verified"] = exc.verified
-                    if isinstance(exc, Terminal):
-                        # Ends the obligation only with its heads' stop and claim proof in hand.
-                        intent["progress"]["terminal"] = {"kind": exc.kind, "reason": str(exc)[:1000]}
+                    with self.admission(intent["task"], intent=intent) as current:
+                        self._settle_claim_admitted(intent, current)
+                        intent["progress"]["preservation_verified"] = exc.verified
+                        if successor and intent["task"].get("kind") != "observer":
+                            # Ownership was handed off permanently. A later disappearance
+                            # of the successor record can never return its workspace to us.
+                            intent["progress"]["terminal"] = {"kind": "attempt-replaced",
+                                                                "reason": str(exc)[:1000]}
+                        elif isinstance(exc, Terminal):
+                            # Ends the obligation only with its heads' stop and claim proof in hand.
+                            intent["progress"]["terminal"] = {"kind": exc.kind, "reason": str(exc)[:1000]}
+                        self._save(value)
+                    return intent
                 except Exception as settlement:  # noqa: BLE001 - a failed obligation is retained as pending evidence
                     intent["status"] = "pending"
                     intent["reason"] += "; " + str(settlement)
+                    if successor:
+                        intent["progress"]["heads_stopped"] = False
+                        intent["progress"]["preservation_verified"] = False
         except Exception as exc:  # noqa: BLE001 - a failed obligation is retained as pending evidence
             intent["status"] = "pending"
             intent["reason"] = str(exc)[:1000]
+            if successor:
+                intent["progress"]["heads_stopped"] = False
+                intent["progress"]["preservation_verified"] = False
         self._save(value)
         return intent
 
