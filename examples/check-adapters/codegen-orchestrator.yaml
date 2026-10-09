@@ -1,5 +1,6 @@
 # Fragment for the existing adapter. Preserve setup, smoke, validation and artifact_policy.
-# Install only after the external shared runner selector interface has shipped.
+# The PO confirmed shared selector delivery in codegen-orchestrator-1586 (main ec96fa79).
+# Installation of this declaration and the wrapper remains a separate operator operation.
 broad_check:
   module: shared
   interpreter: .venv/bin/python

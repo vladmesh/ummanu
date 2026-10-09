@@ -75,13 +75,25 @@ class PytestSelectorTests(LocalCheckFixture, unittest.TestCase):
         self.assertEqual(list(receipt.parent.glob("broad-*.json")), [receipt])
 
     def test_real_pytest_missing_node_and_failing_assertion_return_its_own_status(self) -> None:
+        # Isolate native node errors from duplicate collection: pytest 9 can collect a
+        # declared file successfully even when its appended node does not exist.
+        # The separate full/module/node test proves declared paths remain in argv.
+        self.adapter["broad_check"]["args"] = ["-m", "not ci_only"]
+        self.write_adapter()
         status, subset, output = self.invoke("tests/test_local.py::missing_node")
         self.assertEqual(status, 4, output)
         self.assertEqual(subset["exit_code"], 4)
+        self.assertIn("missing_node", output)
+        self.assertEqual(subset["argv"][7:], ["-m", "not ci_only", "tests/test_local.py::missing_node"])
+        self.assertFalse(self.log.exists())
+        self.assertNotIn("receipt", subset)
         (self.root / "tests" / "test_local.py").write_text("def test_red():\n    assert False\n")
         status, subset, output = self.invoke("tests/test_local.py::test_red")
         self.assertEqual(status, 1, output)
         self.assertEqual(subset["exit_code"], 1)
+        self.assertIn("1 failed", output)
+        self.assertNotIn("receipt", subset)
+        self.assertFalse((self.root / "state" / "checks").exists())
 
     def test_declared_pytest_marker_deselection_is_preserved_on_subset(self) -> None:
         self.adapter["broad_check"]["args"] = ["tests", "-m", "not ci_only"]

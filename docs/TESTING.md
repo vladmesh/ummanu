@@ -170,11 +170,12 @@ with `-m shared -- <selector>`, through the common import-provenance bootstrap. 
 remain before `--`. The `shared` runner owns the host profile, environment whitelist, empty PYTHONPATH,
 ci_only marker family (docker, ansible, privileged, slow), deselection, budgets and refusal status.
 The wrapper does not replace that launcher with pytest or impose an Ummanu module list.
-Live granular codegen validation depends on the external delivery of shared's agreed
-`python -m shared -- <pytest selector>...` interface. Install this declaration only after that delivery;
-a declaration promises runner support, and cannot detect a runner that silently ignores all arguments.
-These fixtures prove the wrapper interface, not the current live codegen runner. No other repository
-or live adapter is changed here.
+The PO confirmed delivery of shared's agreed `python -m shared -- <pytest selector>...` interface
+in codegen-orchestrator-1586, main `ec96fa79`, PR #761. Live granular validation still requires a
+subsequent operator installation of this declaration and the wrapper. A declaration promises runner
+support and cannot detect a runner that silently ignores all arguments. These fixtures prove the
+wrapper interface; they do not attest the live installation. No other repository or live adapter is
+changed here.
 
 For a declared pytest runner, keep its paths, configuration, markers and plugin options:
 
