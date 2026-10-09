@@ -6,7 +6,6 @@ import ast
 import inspect
 import re
 import shlex
-import unicodedata
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -467,11 +466,7 @@ class SourceLayoutTests(unittest.TestCase):
             for path in (ROOT / tree_root).rglob("*.py"):
                 source = path.read_text(encoding="utf-8")
                 tree = source_trees.parse(source, filename=str(path))
-                # Python normalizes identifiers to NFKC. Keep parsing every source, but
-                # avoid walking millions of unrelated nodes when this identifier is absent.
-                if RETIRED_DISPATCHER_MODULE[-1] not in unicodedata.normalize("NFKC", source):
-                    continue
-                for node in source_trees.walk(tree):
+                for node in source_trees.imports(tree):
                     if isinstance(node, ast.Import):
                         modules = [alias.name for alias in node.names]
                     elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
@@ -483,6 +478,31 @@ class SourceLayoutTests(unittest.TestCase):
                         if module == retired or module.startswith(f"{retired}."):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
         self.assertEqual(offenders, [])
+
+    def test_import_walk_matches_ast_walk_in_nested_statement_containers(self) -> None:
+        tree = ast.parse("""
+import top
+def function():
+    if True:
+        from package import name
+    try:
+        with manager():
+            import nested
+    except Exception:
+        import handled
+    finally:
+        import final
+    match value:
+        case 1:
+            import matched
+    class Nested:
+        import class_body
+async def asynchronous():
+    async for value in values:
+        import async_body
+""")
+        expected = {id(node) for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))}
+        self.assertEqual({id(node) for node in source_trees.imports(tree)}, expected)
 
     def test_dispatcher_claim_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
