@@ -390,8 +390,14 @@ budgets; these Ummanu thresholds do not apply to its runner.
 Test clocks span unittest `startTest` through `stopTest`, including instance setup, teardown
 and cleanups. Module clocks span all classes of the actual test module, including module/class
 setup, teardown and cleanups; each module completes its stdlib suite before the next begins.
-Imports and collection are outside module clocks. Fixture errors without a started test have
-unavailable per-test duration and incomplete timing; ordinary fixture errors still fail the suite.
+Imports and collection are outside module clocks. Fixture, loader and skipped subtest outcomes are separate
+`native_outcomes` with source module, phase and native identifier, without per-test durations.
+Completed fixture skips leave timing complete; fixture/loader errors retain native failures.
+Missing test stops and interrupted execution leave timing incomplete. Empty selected modules
+run an empty stdlib suite and have no test measurements or fixture execution.
+The manifest importer loads its collector from candidate source under a private identity,
+registered only while definitions execute. Installed receipt validation and rendering import
+the installed canonical helper independently of the candidate manifest import order.
 Permanent regressions use deterministic clocks. The intentional slow specimen belongs only to
 a separate CI proof PR and must never enter the candidate or main.
 

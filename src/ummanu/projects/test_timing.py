@@ -28,6 +28,17 @@ class TestRecord:
     module: str = ""
 
 
+@dataclasses.dataclass
+class NativeOutcome:
+    """A stdlib fixture/loader/subtest event, not a measured test execution."""
+
+    identifier: str
+    module: str
+    phase: str
+    outcome: str
+    detail: str | None = None
+
+
 class TimingResult(unittest.TextTestResult):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -35,6 +46,11 @@ class TimingResult(unittest.TextTestResult):
         self._started: dict[str, float] = {}
         self.module_durations: dict[str, float] = {}
         self.timing_complete = False
+        self.native_outcomes: list[NativeOutcome] = []
+        self.successful_tests = 0
+
+    def _synthetic(self, test):
+        return isinstance(test, (unittest.suite._ErrorHolder, unittest.case._SubTest)) or _loader_outcome(test)
 
     def _record(self, test):
         identifier = test.id()
@@ -42,30 +58,42 @@ class TimingResult(unittest.TextTestResult):
             classname, _, name = identifier.rpartition(".")
             self.records[identifier] = TestRecord(
                 identifier, classname, name, None,
-                module=(getattr(self, "active_module", "")
-                        if isinstance(test, unittest.suite._ErrorHolder) else test.__class__.__module__)
+                module=test.__class__.__module__
             )
         return self.records[identifier]
 
     def startTest(self, test):
-        self._record(test)
-        self._started[test.id()] = time.monotonic()
+        if not self._synthetic(test):
+            self._record(test)
+            self._started[test.id()] = time.monotonic()
         super().startTest(test)
 
     def stopTest(self, test):
-        started = self._started.pop(test.id(), None)
-        self._record(test).duration_seconds = (
-            time.monotonic() - started if started is not None else None
-        )
+        if not self._synthetic(test):
+            started = self._started.pop(test.id(), None)
+            self._record(test).duration_seconds = (
+                time.monotonic() - started if started is not None else None
+            )
         super().stopTest(test)
 
     def _mark(self, test, outcome, detail=None):
+        if self._synthetic(test):
+            phase = ("load" if _loader_outcome(test) else "subTest"
+                     if isinstance(test, unittest.case._SubTest) else test.id().split(" (", 1)[0])
+            self.native_outcomes.append(NativeOutcome(
+                test.id(), self.active_module, phase, outcome, detail,
+            ))
+            return
         record = self._record(test)
         record.outcome, record.detail = outcome, detail
 
     def addFailure(self, test, err):
         self._mark(test, "failed", self._exc_info_to_string(err, test))
         super().addFailure(test, err)
+
+    def addSuccess(self, test):
+        self.successful_tests += 1
+        super().addSuccess(test)
 
     def addError(self, test, err):
         self._mark(test, "error", self._exc_info_to_string(err, test))
@@ -95,23 +123,41 @@ class TimingResult(unittest.TextTestResult):
                       and all(r.duration_seconds is not None for r in self.records.values()) else "incomplete",
             "tests": [dataclasses.asdict(record) for record in self.records.values()],
             "modules": self.module_durations,
+            "native_outcomes": [dataclasses.asdict(event) for event in self.native_outcomes],
         }
+
+
+def _loader_outcome(test):
+    return (isinstance(test, unittest.loader._FailedTest)
+            or (test.__class__.__module__ == "unittest.loader" and test.__class__.__name__ == "ModuleSkipped"))
 
 
 class TimingSuite(unittest.TestSuite):
     """Keep all classes of each actual module inside one fixture-inclusive clock."""
 
+    def __init__(self, tests=(), *, source_modules=()):
+        super().__init__(tests)
+        # Names supplied by the existing selector/loader preserve source ownership even
+        # when unittest replaces a failed load with its own _FailedTest class.
+        self.source_modules = tuple(source_modules)
+
     def run(self, result, debug=False):
         grouped = OrderedDict()
 
-        def collect(suite):
+        def collect(suite, source=None):
             for test in suite:
                 if isinstance(test, unittest.TestSuite):
-                    collect(test)
+                    collect(test, source)
                 else:
-                    grouped.setdefault(test.__class__.__module__, []).append(test)
+                    module = (source or test._testMethodName
+                              if _loader_outcome(test) else test.__class__.__module__)
+                    grouped.setdefault(module, []).append(test)
 
-        collect(self)
+        for index, test in enumerate(self):
+            source = self.source_modules[index] if index < len(self.source_modules) else None
+            if source and test.countTestCases() == 0:
+                grouped.setdefault(source, [])
+            collect([test], source)
         for module, tests in grouped.items():
             if result.shouldStop:
                 return result
@@ -122,8 +168,10 @@ class TimingSuite(unittest.TestSuite):
             result._testRunEntered = False
             result._previousTestClass = None
             result._moduleSetUpFailed = False
-            unittest.TestSuite(tests).run(result, debug)
-            result.module_durations[module] = time.monotonic() - started
+            try:
+                unittest.TestSuite(tests).run(result, debug)
+            finally:
+                result.module_durations[module] = time.monotonic() - started
         result.timing_complete = not result.shouldStop
         return result
 
@@ -131,8 +179,18 @@ class TimingSuite(unittest.TestSuite):
 class TimingRunner(unittest.TextTestRunner):
     resultclass = TimingResult
 
+    def __init__(self, *args, source_modules=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.source_modules = source_modules
+        self.result = None
+
+    def _makeResult(self):
+        self.result = super()._makeResult()
+        return self.result
+
     def run(self, test):
-        return super().run(TimingSuite([test]))
+        tests = test if isinstance(test, unittest.TestSuite) else [test]
+        return super().run(TimingSuite(tests, source_modules=self.source_modules))
 
 
 def valid_observation(value):
@@ -149,6 +207,15 @@ def valid_observation(value):
                 or record.get("outcome") not in {"passed", "failed", "error", "skipped", "expected_failure", "unexpected_success"}
                 or (record.get("duration_seconds") is None and value["status"] == "complete")
                 or (record.get("duration_seconds") is not None and not duration(record["duration_seconds"]))):
+            return False
+    if not isinstance(value.get("native_outcomes", []), list):
+        return False
+    for event in value.get("native_outcomes", []):
+        if (not isinstance(event, dict)
+                or not all(isinstance(event.get(key), str) and event[key]
+                           for key in ("identifier", "module", "phase"))
+                or event.get("outcome") not in {"error", "skipped"}
+                or "duration_seconds" in event):
             return False
     return all(isinstance(module, str) and module and duration(seconds)
                for module, seconds in value["modules"].items())
@@ -174,8 +241,13 @@ def diagnostic(violation):
             f"{violation['duration_seconds']:.6f}s > {violation['limit_seconds']:g}s")
 
 
+def native_diagnostic(event):
+    return f"native {event['outcome']} {event['module']} {event['phase']}: {event['identifier']}"
+
+
 def summary(observation):
     lines = [f"timing: {observation.get('status', 'unavailable')}"]
+    lines.extend(native_diagnostic(event) for event in observation.get("native_outcomes", []))
     records = [record for record in observation.get("tests", [])
                if record.get("duration_seconds") is not None]
     for record in sorted(records, key=lambda r: r['duration_seconds'], reverse=True)[:10]:

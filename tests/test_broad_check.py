@@ -248,6 +248,132 @@ class RunAndCaptureTests(BroadCheckTestCase):
 
 
 class TimingReceiptTests(BroadCheckTestCase):
+    def test_native_fixture_and_loader_observations_retain_receipt_verdict_and_measurements(self):
+        from types import ModuleType
+
+        from ummanu.projects.test_timing import TimingRunner, valid_observation
+
+        for phase in ("setUpClass", "setUpModule", "load"):
+            for kind in ("skip", "error"):
+                with self.subTest(phase=phase, kind=kind):
+                    now = [0.0]
+                    module = ModuleType("tests.receipt_fixture")
+
+                    class Case(unittest.TestCase):
+                        def test_body(self, clock=now):
+                            clock[0] += 1
+
+                    Case.__module__, Case.__qualname__ = module.__name__, "Case"
+                    module.Case = Case
+
+                    def fixture(clock=now, outcome=kind):
+                        clock[0] += 2
+                        raise unittest.SkipTest("fixture skip") if outcome == "skip" else ValueError("fixture error")
+
+                    if phase == "setUpClass":
+                        Case.setUpClass = classmethod(lambda cls, fixture=fixture: fixture())
+                    elif phase == "setUpModule":
+                        module.setUpModule = fixture
+                    else:
+                        # Loader errors retain prior valid timings; import skips use the
+                        # stdlib loader's own synthetic skipped class.
+                        exc = unittest.SkipTest("loader skip") if kind == "skip" else ValueError("loader error")
+                        if kind == "skip":
+                            failed = unittest.loader._make_skipped_test("broken", exc, unittest.TestSuite)
+                        else:
+                            failed = unittest.TestSuite([unittest.loader._FailedTest("broken", exc)])
+                    output = StringIO()
+                    with (mock.patch.dict(sys.modules, {module.__name__: module}),
+                          mock.patch("time.monotonic", side_effect=lambda clock=now: clock[0])):
+                        suites = [unittest.TestLoader().loadTestsFromModule(module)]
+                        sources = [module.__name__]
+                        if phase == "load":
+                            suites.append(failed)
+                            sources.append("tests.broken_fixture")
+                        result = TimingRunner(stream=output, source_modules=sources).run(unittest.TestSuite(suites))
+                    observation = result.observation()
+                    self.assertTrue(valid_observation(observation))
+                    self.assertEqual(observation["status"], "complete")
+                    self.assertEqual(len(observation["tests"]), int(phase == "load"))
+                    self.assertEqual(observation["native_outcomes"][0]["phase"], phase)
+                    code = 0 if result.wasSuccessful() else 1
+                    suite = self._suite(f"native{phase}{kind}",
+                        "import json, os, sys\nfrom pathlib import Path\n"
+                        f"Path(os.environ['UMMANU_TEST_TIMING_RECORD']).write_text(json.dumps({observation!r}))\n"
+                        f"print({output.getvalue()!r})\nsys.exit({code})\n")
+                    actual, receipt = self._run(suite)
+                    self.assertEqual(actual, code)
+                    self.assertEqual(receipt["verdict"], "passed" if code == 0 else "failed")
+                    self.assertEqual(receipt["parsed"]["tests"], result.testsRun)
+                    self.assertEqual(receipt["parsed"]["timing"], observation)
+                    self.assertTrue(usable_receipt(self.root, suite).usable)
+                    self.assertIn(observation["native_outcomes"][0]["identifier"], broad_check.summarize(receipt))
+
+    def test_partial_native_interrupt_is_written_by_local_main_and_retained_in_receipt(self):
+        from tests import broad
+        from ummanu.projects.test_timing import valid_observation
+
+        now = [0.0]
+
+        class Case(unittest.TestCase):
+            def test_a(self):
+                now[0] += 1
+
+            def test_b(self):
+                now[0] += 2
+                raise KeyboardInterrupt()
+
+        def native_main(**kwargs):
+            kwargs["testRunner"]().run(unittest.TestLoader().loadTestsFromTestCase(Case))
+
+        timing_path = self.root / "native-interrupted.json"
+        with (mock.patch.dict(os.environ, {"UMMANU_TEST_TIMING_RECORD": str(timing_path)}),
+              mock.patch("time.monotonic", side_effect=lambda: now[0]),
+              mock.patch("tests.broad.unittest.main", side_effect=native_main),
+              mock.patch("sys.stderr", StringIO()), self.assertRaises(KeyboardInterrupt)):
+            broad.main(["tests.test_broad_check"])
+        observation = json.loads(timing_path.read_text())
+        self.assertTrue(valid_observation(observation))
+        self.assertEqual(observation["status"], "incomplete")
+        self.assertEqual([r["duration_seconds"] for r in observation["tests"]], [1, 2])
+        # Feed the actual producer's sidecar through the existing receipt fixture;
+        # no installed full-profile activation or delivery is simulated here.
+        suite = self._suite("partialnative",
+            "import json, os, sys\nfrom pathlib import Path\n"
+            f"Path(os.environ['UMMANU_TEST_TIMING_RECORD']).write_text(json.dumps({observation!r}))\n"
+            "sys.exit(130)\n")
+        code, receipt = self._run(suite)
+        self.assertEqual(code, 130)
+        self.assertEqual(receipt["verdict"], "failed")
+        self.assertEqual(receipt["parsed"]["timing"], observation)
+        self.assertTrue(usable_receipt(self.root, suite).usable)
+
+    def test_source_hints_preserve_native_verbosity_failfast_and_buffer_options(self):
+        from tests import broad
+
+        class Case(unittest.TestCase):
+            def test_a(self):
+                print("native buffered output")
+                self.fail("native failure")
+
+            def test_b(self):
+                self.fail("failfast must stop before this test")
+
+        timing_path = self.root / "flags.json"
+        output = StringIO()
+        with (mock.patch.dict(os.environ, {"UMMANU_TEST_TIMING_RECORD": str(timing_path)}),
+              mock.patch.object(unittest.defaultTestLoader, "loadTestsFromNames",
+                                return_value=unittest.TestLoader().loadTestsFromTestCase(Case)),
+              mock.patch("sys.stderr", output), mock.patch("sys.stdout", StringIO())):
+            code = broad.main(["-q", "-f", "-b", "tests.test_broad_check"])
+        observation = json.loads(timing_path.read_text())
+        self.assertEqual(code, 1)
+        self.assertEqual(len(observation["tests"]), 1)
+        self.assertEqual(observation["status"], "incomplete")
+        self.assertIn("Stdout:\nnative buffered output", output.getvalue())
+        self.assertNotIn("failfast must stop", output.getvalue())
+        self.assertFalse(output.getvalue().startswith("F"))
+
     def test_timings_survive_truncation_reuse_original_status_and_digest(self):
         observation = {"status": "complete", "tests": [
             {"identifier": "tests.fixture.Case.test_a", "module": "tests.fixture",

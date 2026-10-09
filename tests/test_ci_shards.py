@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -10,6 +11,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 from xml.etree import ElementTree
 
@@ -161,6 +163,279 @@ class TimingBudgetTests(unittest.TestCase):
         interrupted.startTest(Cases("test_pass"))
         self.assertIsNone(interrupted.observation()["tests"][0]["duration_seconds"])
         self.assertEqual(interrupted.observation()["status"], "incomplete")
+
+
+class NativeTimingOutcomeTests(unittest.TestCase):
+    def test_skipped_subtest_is_native_outcome_without_a_missing_test_clock(self):
+        from ummanu.projects.test_timing import TimingRunner, valid_observation
+
+        now = [0.0]
+
+        class Case(unittest.TestCase):
+            def test_body(self):
+                now[0] += 1
+                with self.subTest(part="skipped"):
+                    self.skipTest("subtest skip")
+                now[0] += 1
+
+        with patch("time.monotonic", side_effect=lambda: now[0]):
+            result = TimingRunner(stream=StringIO()).run(unittest.TestSuite([Case("test_body")]))
+        observation = result.observation()
+        self.assertTrue(result.wasSuccessful())
+        self.assertEqual(result.testsRun, 1)
+        self.assertEqual(len(result.skipped), 1)
+        self.assertTrue(valid_observation(observation))
+        self.assertEqual(observation["status"], "complete")
+        self.assertEqual([r["duration_seconds"] for r in observation["tests"]], [2])
+        self.assertEqual(observation["native_outcomes"][0]["phase"], "subTest")
+
+    def _fixture(self, phase, exception, now, cost=2):
+        module = ModuleType("tests.timing_fixture")
+
+        def cleanup():
+            now[0] += 3
+            if phase.endswith("Cleanup") and exception:
+                raise exception
+
+        def fixture():
+            now[0] += cost
+            if phase in {"setUpModule", "moduleCleanup"}:
+                unittest.addModuleCleanup(cleanup)
+            if exception and not phase.endswith("Cleanup"):
+                raise exception
+
+        class Case(unittest.TestCase):
+            def test_body(self):
+                now[0] += 1
+
+        Case.__module__, Case.__qualname__ = module.__name__, "Case"
+        module.Case = Case
+        if "Class" in phase or phase == "classCleanup":
+            def class_fixture(cls):
+                if phase in {"setUpClass", "classCleanup"}:
+                    cls.addClassCleanup(cleanup)
+                fixture()
+            setattr(Case, "setUpClass" if phase == "classCleanup" else phase, classmethod(class_fixture))
+        else:
+            setattr(module, "setUpModule" if phase == "moduleCleanup" else phase, fixture)
+        return module
+
+    def test_native_fixtures_keep_local_and_ci_outcomes_counts_and_junit(self):
+        from ummanu.projects.test_timing import TimingRunner, summary, valid_observation
+
+        for phase in ("setUpClass", "setUpModule", "tearDownClass", "tearDownModule",
+                      "classCleanup", "moduleCleanup"):
+            for kind in ("skip", "error", "success"):
+                for shard in ("unit", "component", "integration-board"):
+                    with self.subTest(phase=phase, kind=kind, shard=shard):
+                        now = [0.0]
+                        exc = unittest.SkipTest("native skip") if kind == "skip" else (
+                            ValueError("native fixture error") if kind == "error" else None)
+                        module = self._fixture(phase, exc, now)
+                        with (patch.dict(sys.modules, {module.__name__: module}),
+                              patch("time.monotonic", side_effect=lambda clock=now: clock[0])):
+                            local = TimingRunner(stream=StringIO(), source_modules=[module.__name__]).run(
+                                unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromModule(module)]))
+                            observation = local.observation()
+                            self.assertTrue(valid_observation(observation))
+                            self.assertEqual(observation["status"], "complete")
+                            self.assertEqual(local.wasSuccessful(), kind != "error")
+                            events = observation["native_outcomes"]
+                            self.assertEqual(len(events), 0 if kind == "success" else 1)
+                            for event in events:
+                                self.assertEqual(event["module"], module.__name__)
+                                self.assertEqual(event["phase"], {"classCleanup": "tearDownClass",
+                                                                 "moduleCleanup": "tearDownModule"}.get(phase, phase))
+                                self.assertNotIn("duration_seconds", event)
+                                self.assertIn(event["identifier"], summary(observation))
+                            setup_blocked = phase.startswith("setUp") and kind != "success"
+                            self.assertEqual(len(observation["tests"]), 0 if setup_blocked else 1)
+                            self.assertEqual(observation["modules"][module.__name__],
+                                             2 + (3 if phase.startswith("setUp") or phase.endswith("Cleanup") else 0)
+                                             + (0 if setup_blocked else 1))
+                            with tempfile.TemporaryDirectory() as directory:
+                                root = Path(directory)
+                                log = BoundedTee(StringIO(), root / "test-output.log")
+                                with patch.object(unittest.defaultTestLoader, "loadTestsFromName",
+                                                  side_effect=lambda _, module=module: unittest.defaultTestLoader.loadTestsFromModule(module)):
+                                    evidence = run_reported_suite(shard, ["tests/timing_fixture.py"], CANDIDATE_SHA, log)
+                                self.assertEqual(evidence.outcome, "product_failure" if kind == "error" else "success")
+                                self.assertEqual(evidence.counts, {
+                                    "collected": 0 if setup_blocked else 1,
+                                    "passed": 0 if setup_blocked else 1,
+                                    "failed": 0, "error": int(kind == "error"), "skipped": int(kind == "skip"),
+                                })
+                                self.assertEqual(evidence.timing["status"], "complete")
+                                _write_evidence(root, evidence, log)
+                                self.assertEqual(_read_evidence(root).timing, evidence.timing)
+                                junit = ElementTree.parse(root / "junit.xml")
+                                native = junit.find("testcase[@phase]")
+                                if events:
+                                    self.assertIn(events[0]["identifier"], _summary(evidence))
+                                    self.assertIn(events[0]["module"], _summary(evidence))
+                                    self.assertIsNotNone(native)
+                                    self.assertNotIn("time", native.attrib)
+                                    self.assertEqual(native.attrib["name"], events[0]["identifier"])
+                                    self.assertIsNotNone(native.find("error" if kind == "error" else "skipped"))
+                                    self.assertIn("native fixture error" if kind == "error" else "native skip",
+                                                  (root / "test-output.log").read_text())
+                                    self.assertIn(events[0]["module"], (root / "test-output.log").read_text())
+
+    def test_fixture_only_cost_still_has_module_budget_and_explicit_setup_classification(self):
+        from tests.integration_setup import RequiredIntegrationSetup
+
+        for exception in (unittest.SkipTest("skip after fixture work"), RequiredIntegrationSetup("backend missing")):
+            for shard in ("unit", "component", "integration-board"):
+                now = [0.0]
+                module = self._fixture("setUpClass", exception, now, cost=91)
+                with (patch.dict(sys.modules, {module.__name__: module}),
+                      patch("time.monotonic", side_effect=lambda clock=now: clock[0]),
+                      patch.object(unittest.defaultTestLoader, "loadTestsFromName",
+                                   side_effect=lambda _, module=module: unittest.defaultTestLoader.loadTestsFromModule(module)),
+                      tempfile.TemporaryDirectory() as directory):
+                    log = BoundedTee(StringIO(), Path(directory) / "test-output.log")
+                    evidence = run_reported_suite(shard, ["tests/timing_fixture.py"], CANDIDATE_SHA, log)
+                    log.close()
+                required = isinstance(exception, RequiredIntegrationSetup)
+                limited = shard in {"unit", "component"}
+                self.assertEqual(evidence.outcome, "infrastructure_failure" if required else (
+                    "product_failure" if limited else "success"))
+                self.assertEqual(evidence.timing["tests"], [])
+                self.assertEqual(evidence.timing["status"], "complete")
+                self.assertEqual(evidence.timing["modules"][module.__name__], 94)
+                self.assertEqual([v["identifier"] for v in evidence.timing_violations],
+                                 [module.__name__] if limited else [])
+
+    def test_loader_error_before_ordinary_test_empty_module_and_partial_interruption(self):
+        from ummanu.projects.test_timing import TimingResult, TimingRunner, valid_observation
+
+        now = [0.0]
+
+        class Ordinary(unittest.TestCase):
+            def test_a(self):
+                now[0] += 1
+
+            def test_b(self):
+                now[0] += 2
+                raise KeyboardInterrupt()
+
+        def selected(name):
+            if name == "tests.missing_fixture":
+                # Exercise the actual stdlib loader, including its shortened native id.
+                return unittest.TestLoader().loadTestsFromName(name)
+            if name == "tests.empty_fixture":
+                empty = ModuleType(name)
+                empty.setUpModule = lambda: self.fail("stdlib must not execute fixtures of a no-test module")
+                return unittest.TestLoader().loadTestsFromModule(empty)
+            return unittest.TestSuite([Ordinary("test_a")])
+
+        sources = ["tests.missing_fixture", "tests.empty_fixture", __name__]
+        with patch("time.monotonic", side_effect=lambda: now[0]):
+            local = TimingRunner(stream=StringIO(), source_modules=sources).run(
+                unittest.TestSuite(selected(name) for name in sources))
+        observation = local.observation()
+        self.assertTrue(valid_observation(observation))
+        self.assertFalse(local.wasSuccessful())
+        self.assertEqual(local.testsRun, 2)
+        self.assertEqual(len(local.errors), 1)
+        self.assertEqual(observation["tests"][0]["duration_seconds"], 1)
+        self.assertEqual(observation["native_outcomes"][0]["module"], sources[0])
+        self.assertEqual(observation["native_outcomes"][0]["phase"], "load")
+        self.assertEqual(observation["modules"][sources[1]], 0)
+        self.assertEqual(observation["status"], "complete")
+        for shard in ("unit", "integration-board"):
+            with (patch("time.monotonic", side_effect=lambda: now[0]),
+                  patch.object(unittest.defaultTestLoader, "loadTestsFromName", side_effect=selected),
+                  tempfile.TemporaryDirectory() as directory):
+                root = Path(directory)
+                log = BoundedTee(StringIO(), root / "test-output.log")
+                evidence = run_reported_suite(shard, [name.replace(".", "/") + ".py" for name in sources], CANDIDATE_SHA, log)
+                self.assertEqual(evidence.outcome, "product_failure")
+                self.assertEqual(evidence.counts, {"collected": 2, "passed": 1, "error": 1, "failed": 0, "skipped": 0})
+                self.assertEqual(evidence.timing["status"], "complete")
+                _write_evidence(root, evidence, log)
+                self.assertIn("missing_fixture", evidence.failure_locations[0])
+                self.assertEqual(ElementTree.parse(root / "junit.xml").find("testcase[@phase='load']").attrib["classname"], sources[0])
+        with (patch("time.monotonic", side_effect=lambda: now[0]),
+              patch.object(unittest.defaultTestLoader, "loadTestsFromName",
+                           return_value=unittest.TestSuite([Ordinary("test_a"), Ordinary("test_b")])),
+              tempfile.TemporaryDirectory() as directory):
+            log = BoundedTee(StringIO(), Path(directory) / "test-output.log")
+            evidence = run_reported_suite("unit", ["tests/test_ci_shards.py"], CANDIDATE_SHA, log)
+            log.close()
+        self.assertEqual(evidence.outcome, "cancelled")
+        self.assertEqual(evidence.counts["collected"], 2)
+        self.assertEqual(evidence.counts["passed"], 1)
+        self.assertEqual(evidence.timing["status"], "incomplete")
+        self.assertTrue(valid_observation(evidence.timing))
+        self.assertEqual([r["duration_seconds"] for r in evidence.timing["tests"]], [1, 2])
+        # A genuinely missing stop differs from a completed fixture event.
+        result = TimingResult(unittest.runner._WritelnDecorator(StringIO()), True, 1)
+        result.startTest(Ordinary("test_a"))
+        result.timing_complete = True
+        self.assertEqual(result.observation()["status"], "incomplete")
+        self.assertIsNone(result.observation()["tests"][0]["duration_seconds"])
+        self.assertTrue(valid_observation(result.observation()))
+        runner = TimingRunner(stream=StringIO())
+        with patch("time.monotonic", side_effect=lambda: now[0]), self.assertRaises(KeyboardInterrupt):
+            runner.run(unittest.TestSuite([Ordinary("test_a"), Ordinary("test_b")]))
+        self.assertEqual(runner.result.observation()["status"], "incomplete")
+        self.assertEqual(runner.result.successful_tests, 1)
+        self.assertTrue(valid_observation(runner.result.observation()))
+
+
+class TimingImportIdentityTests(unittest.TestCase):
+    def test_candidate_source_and_installed_consumers_are_independent_of_import_order(self):
+        import scripts.ci_test_shards as runner
+        from ummanu import broad_check
+
+        canonical = "ummanu.projects.test_timing"
+        installed = ModuleType(canonical)
+        installed.valid_observation = unittest.mock.Mock(return_value=False)
+        installed.summary = unittest.mock.Mock(return_value="installed timing summary")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            (root / "src/ummanu/projects").mkdir(parents=True)
+            script = root / "scripts/ci_test_shards.py"
+            script.write_text(Path(runner.__file__).read_text())
+            helper = root / "src/ummanu/projects/test_timing.py"
+            helper.write_text(Path(runner._timing.__file__).read_text() + '\nIMPLEMENTATION_ID = "candidate"\n')
+            record = root / "provenance.json"
+            observation = {"status": "complete", "tests": [], "modules": {}}
+            record.with_name("timing.json").write_text(json.dumps(observation))
+            for order, registration in ((order, registration) for order in ("installed-first", "candidate-first")
+                                        for registration in ("absent", "module", "none")):
+                with self.subTest(order=order, registration=registration), patch.dict(sys.modules):
+                    sys.modules.pop(canonical, None)
+                    if order == "installed-first":
+                        sys.modules[canonical] = installed
+                    name = "timing_identity_fixture"
+                    private = name + "._candidate_test_timing"
+                    prior_private = ModuleType(private) if registration == "module" else None
+                    # A pre-existing private registration is also restored, never reused.
+                    if registration != "absent":
+                        sys.modules[private] = prior_private
+                    before = dict(sys.modules)
+                    spec = importlib.util.spec_from_file_location(name, script)
+                    candidate = importlib.util.module_from_spec(spec)
+                    sys.modules[name] = candidate
+                    spec.loader.exec_module(candidate)
+                    self.assertEqual(candidate._timing.IMPLEMENTATION_ID, "candidate")
+                    self.assertEqual(Path(candidate._timing.__file__), helper)
+                    self.assertEqual(candidate.EvidenceResult.__mro__[1], candidate._timing.TimingResult)
+                    self.assertEqual(private in sys.modules, registration != "absent")
+                    self.assertIs(sys.modules.get(private), before.get(private))
+                    self.assertEqual(canonical in sys.modules, canonical in before)
+                    self.assertIs(sys.modules.get(canonical), before.get(canonical))
+                    if order == "candidate-first":
+                        sys.modules[canonical] = installed
+                    self.assertTrue(candidate._timing.valid_observation(observation))
+                    self.assertEqual(broad_check._with_timing({}, record, incomplete=False)["timing"]["status"], "unavailable")
+                    self.assertIn("installed timing summary", broad_check.summarize({"parsed": {"timing": observation}}))
+                    self.assertIs(sys.modules[canonical], installed)
+                    installed.valid_observation.assert_called_with(observation)
+                    installed.summary.assert_called_with(observation)
 
 
 class CiTestSuiteManifestTests(unittest.TestCase):

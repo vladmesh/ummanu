@@ -106,6 +106,7 @@ def main(argv: list[str] | None = None) -> int:
             "unittest", {path: shard for shard, paths in grouped.items() for path in paths}, BROAD_SUITES
         )
         expecting_value = False
+        sources = []
         for index, argument in enumerate(arguments):
             if expecting_value:
                 expecting_value = False
@@ -113,20 +114,38 @@ def main(argv: list[str] | None = None) -> int:
                 expecting_value = argument in _OPTIONS_TAKING_A_VALUE
             else:
                 _path, arguments[index] = profile.select(argument)
+                sources.append(_path[:-3].replace("/", "."))
         selected = [] if _names_tests(arguments) else profile.full_args()
+        if selected:
+            sources = selected
     except (BroadCheckError, OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    program = unittest.main(
-        module=None,
-        argv=["python -m tests.broad", *arguments, *selected],
-        exit=False,
-        testRunner=TimingRunner,
-    )
-    observation = program.result.observation()
-    if timing_path := os.environ.get("UMMANU_TEST_TIMING_RECORD"):
-        Path(timing_path).write_text(json.dumps(observation), encoding="utf-8")
-    print(summary(observation), file=sys.stderr)
+    runner = None
+
+    class SelectedTimingRunner(TimingRunner):
+        # unittest constructs this with the parsed verbosity/failfast/buffer options.
+        # Scope the source hints and partial result to this invocation.
+        def __init__(self, *args, **kwargs):
+            nonlocal runner
+            super().__init__(*args, source_modules=sources, **kwargs)
+            runner = self
+
+    program = None
+    try:
+        program = unittest.main(
+            module=None,
+            argv=["python -m tests.broad", *arguments, *selected],
+            exit=False,
+            testRunner=SelectedTimingRunner,
+        )
+    finally:
+        result = program.result if program is not None else runner.result if runner is not None else None
+        if result is not None:
+            observation = result.observation()
+            if timing_path := os.environ.get("UMMANU_TEST_TIMING_RECORD"):
+                Path(timing_path).write_text(json.dumps(observation), encoding="utf-8")
+            print(summary(observation), file=sys.stderr)
     return 0 if program.result.wasSuccessful() else 1
 
 
