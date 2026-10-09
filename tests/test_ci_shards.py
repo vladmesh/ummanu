@@ -52,6 +52,13 @@ from tests.support.git import git
 CANDIDATE_SHA = "a" * 40
 
 
+class NeverMergeSlowUnitTimingProof(unittest.TestCase):
+    """PR-only specimen for ummanu-180. Never merge or run on the control host."""
+
+    def test_ci_rejects_named_unit_over_five_seconds(self):
+        time.sleep(6.1)
+
+
 class TimingBudgetTests(unittest.TestCase):
     def test_strict_thresholds_and_actual_module_membership(self):
         from ummanu.test_timing import violations
