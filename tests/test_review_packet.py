@@ -623,9 +623,11 @@ class PacketHeaderTests(unittest.TestCase):
             audit=SimpleNamespace(events=lambda _: fixture.events),
             save_records=lambda *_: saved.append(record.to_json()),
         )
-        with mock.patch.object(worker_continuation, "complete_red_transition", side_effect=RuntimeError("crash before move")):
-            with self.assertRaisesRegex(RuntimeError, "crash before move"):
-                assessment_decision.rework_parked(runtime, fixture.task, record, records, {}, "attempt-1", reason=fixture.decision, protocol_prerequisites=())
+        with (
+            mock.patch.object(worker_continuation, "complete_red_transition", side_effect=RuntimeError("crash before move")),
+            self.assertRaisesRegex(RuntimeError, "crash before move"),
+        ):
+            assessment_decision.rework_parked(runtime, fixture.task, record, records, {}, "attempt-1", reason=fixture.decision, protocol_prerequisites=())
         recovered = DispatcherRecord.from_json(saved[0])
         self.assertEqual(recovered.previous_reviewed_sha, "b" * 40)
         self.assertEqual(recovered.worker_continuation.reserved_generation, 3)

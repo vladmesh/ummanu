@@ -8243,7 +8243,15 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         document = self._task_document()
         self.assertIn("## Observer rework decision to follow", document)
-        self.assertNotIn("Reviewer findings, as supporting context", document)
+        self.assertIn("## Reviewer findings, as supporting context (previous submission was GREEN)", document)
+        self.assertIn("GREEN: code holds", document)
+        self.assertNotIn("previous submission was RED", document)
+        self.assertIn("source_event: " + self._pilot_record()["previous_review_id"], document)
+        self.assertIn("source_event: " + self._pilot_record()["report_decision_id"], document)
+        self.assertLess(
+            document.index("## Observer rework decision to follow"),
+            document.index("## Reviewer findings, as supporting context"),
+        )
         self.assertEqual(self._document_decision(), decision)
         self.assertEqual(_task_doc_protocol_prerequisites(self._pilot_record()["workspace"]), ("external_dependency",))
         self._drop_records_and_restart_attempt()
