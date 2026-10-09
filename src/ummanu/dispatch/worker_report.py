@@ -29,17 +29,24 @@ from ummanu.dispatch.helpers import (
     scrub_host_output,
 )
 from ummanu.dispatch.host import _record_worker_delivery_evidence
-from ummanu.dispatch.launch import STAGE_REWORK, WORKER_ROLE
-from ummanu.dispatch.launch import clear_launch_intent as _clear_launch_intent
-from ummanu.dispatch.launch import launch_intent_unwritable as _launch_intent_unwritable
-from ummanu.dispatch.state import DispatcherRecord, OutcomeTerminalPath
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
+from ummanu.dispatch.launch import (
+    STAGE_REWORK,
+    WORKER_ROLE,
+    clear_launch_intent as _clear_launch_intent,
+    launch_intent_unwritable as _launch_intent_unwritable,
+)
+from ummanu.dispatch.state import (
+    DispatcherRecord,
+    OutcomeTerminalPath,
+    attempt_request_id as _attempt_request_id,
+)
 from ummanu.dispatch.types import HostError
-from ummanu.dispatch.watchdog import reset_idle as _reset_idle
-from ummanu.dispatch.watchdog import reset_wait as _reset_wait
+from ummanu.dispatch.watchdog import reset_idle as _reset_idle, reset_wait as _reset_wait
 from ummanu.dispatch.worker_comments import task_doc_comment_keys as _task_doc_comment_keys
-from ummanu.dispatch.worker_launch import bring_up_worker_head as _bring_up_worker_head
-from ummanu.dispatch.worker_launch import write_worker_relaunch_intent as _write_worker_relaunch_intent
+from ummanu.dispatch.worker_launch import (
+    bring_up_worker_head as _bring_up_worker_head,
+    write_worker_relaunch_intent as _write_worker_relaunch_intent,
+)
 from ummanu.dispatch.worker_lifecycle import WorkerContinuationStage
 
 
@@ -529,6 +536,7 @@ def _reject_stale_done(
     # Nobody adjudicated this round: it was opened by the bounce, not an observer. The decision
     # that opened the previous one goes with it, or the document names a review this is not about.
     record.report_decision = ""
+    record.report_decision_id = ""
     record.report_protocol_prerequisites = ()
     _reset_wait(record, "worker")
     _reset_wait(record, "review")

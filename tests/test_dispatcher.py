@@ -87,6 +87,7 @@ from ummanu.dispatch.production import _budget_event_type, production_adopt_atte
 from ummanu.dispatch.review import (
     start_review as start_reviewer,
 )
+from ummanu.dispatch.review_packet import dispositions, resolve_review_evidence
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import (
     DispatcherRecord,
@@ -4431,6 +4432,47 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("non-fast-forward", card["comments"][-1]["body"])
         self.assertEqual(self.host.calls.count("complete_green"), 1)
 
+    def test_green_observer_rework_binds_the_parked_predecessor_to_the_new_report(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        reviewed = self.host.commit
+        review_request = self._review_verdict_request_id("green")
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="ummanu-510", kind="green",
+            body="GREEN: invariants hold.", request_id=review_request,
+        )
+        self.assertEqual(self.tick()["to"], "assessment")
+        parked = self._parked_record()
+        reason = "Accept BLOCKER-observer-packet: carry this GREEN predecessor through rework."
+        self._decide("rework", reason=reason)
+        # A mutable worktree cannot replace the SHA the accepted park reviewed.
+        self.host.commit = "b" * 40
+        self.assertEqual(self.tick()["action"], "review-red-reused-worker")
+        record = self._parked_record()
+        self.assertEqual(record["previous_reviewed_sha"], reviewed)
+        self.assertEqual(record["previous_blockers"], "GREEN: invariants hold.")
+        self.assertEqual(record["report_generation"], parked["report_generation"] + 1)
+        self.assertEqual(record["review_commit"], "")
+        self.assertEqual(record["report_decision"], reason)
+        report = "BLOCKER-observer-packet: fixed; commit: " + self.host.commit
+        self._report_done(report)
+        task = self.reader.show("ummanu-510")
+        events = task_audit_for(self.board).events("ummanu-510")
+        evidence = resolve_review_evidence(
+            task, events, attempt=record["attempt_id"], generation=record["report_generation"],
+            decision=record["report_decision"], decision_id=record["report_decision_id"],
+            review_id=record["previous_review_id"], previous=record["previous_blockers"],
+        )
+        self.assertEqual(evidence.verdict, "green")
+        self.assertEqual(evidence.decision, reason)
+        self.assertEqual(evidence.report, report)
+        self.assertEqual(evidence.diagnostic, "applicable round/spec evidence")
+        self.assertEqual(dispositions(evidence), [(
+            "BLOCKER-observer-packet", "fixed (reported, verify independently); commit: " + self.host.commit,
+        )])
+
     def test_a_red_verdict_parks_before_the_worker_continues(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
@@ -8201,7 +8243,15 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         document = self._task_document()
         self.assertIn("## Observer rework decision to follow", document)
-        self.assertNotIn("Reviewer findings, as supporting context", document)
+        self.assertIn("## Reviewer findings, as supporting context (previous submission was GREEN)", document)
+        self.assertIn("GREEN: code holds", document)
+        self.assertNotIn("previous submission was RED", document)
+        self.assertIn("source_event: " + self._pilot_record()["previous_review_id"], document)
+        self.assertIn("source_event: " + self._pilot_record()["report_decision_id"], document)
+        self.assertLess(
+            document.index("## Observer rework decision to follow"),
+            document.index("## Reviewer findings, as supporting context"),
+        )
         self.assertEqual(self._document_decision(), decision)
         self.assertEqual(_task_doc_protocol_prerequisites(self._pilot_record()["workspace"]), ("external_dependency",))
         self._drop_records_and_restart_attempt()

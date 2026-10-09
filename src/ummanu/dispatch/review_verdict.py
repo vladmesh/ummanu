@@ -91,6 +91,7 @@ def advance_review_verdict(
     # The only point where both the last review body and the SHA it judged are available.
     # Keep them for the next review packet instead of reconstructing the card from base.
     record.previous_reviewed_sha = reviewed
+    record.previous_review_id = ""
     # Preserve the verdict as evidence. The packet renderer supplies its data boundary;
     # flattening/truncating here loses stable IDs and their relationships permanently.
     record.previous_blockers = _last_review_red_body(task) or ""

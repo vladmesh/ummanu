@@ -11,6 +11,7 @@ from ummanu.board.protocol_artifacts import (
 from ummanu.dispatch import attempt_accounting, release_lifecycle
 from ummanu.dispatch.decision_pointer import decision_pointer
 from ummanu.dispatch.helpers import _last_marker_body
+from ummanu.dispatch.review_packet import retain_rework_review
 from ummanu.dispatch.review_verdict import complete_park as _complete_park
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from ummanu.dispatch.tick_telemetry import tick_stage
@@ -184,6 +185,10 @@ def rework_parked(
 ) -> dict[str, Any]:
     """Release the retained worker round for an accepted rework decision."""
     ref = task["ref"]
+    # Before stopping an adopted reviewer or opening a generation: the accepted
+    # park's pin and this visit's canonical evidence travel with the rework intent.
+    retain_rework_review(task, runtime.audit.events(ref), record, reason)
+    verdict = record.worker_continuation.verdict_outcome
     # A parked card should have no reviewer left; an adopted one may still name a pane nobody
     # stopped. Either way nothing is woken beside a head the host will not confirm gone.
     if record.owns_head("review"):
@@ -199,7 +204,7 @@ def rework_parked(
         if unconfirmed is not None:
             return unconfirmed
 
-    # Findings are not repeated in the move: the rework prompt reads the card's last red verdict.
+    # Findings are not repeated in the move: packets use the frozen predecessor.
     # The decision is frozen with the round so recovery cannot substitute a later instruction.
     return _begin_red_transition(
         runtime,
@@ -210,7 +215,7 @@ def rework_parked(
         attempt_id,
         phase="review",
         move_reason=decision_pointer(runtime, task, "rework"),
-        verdict_outcome="red",
+        verdict_outcome=verdict,
         decision="rework",
         decision_body=reason,
         decision_protocol_prerequisites=protocol_prerequisites,

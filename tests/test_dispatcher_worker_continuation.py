@@ -163,6 +163,9 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
     def test_recovered_observer_rework_keeps_frozen_reason_and_worker_instruction(self):
         self.runtime.audit.events.return_value = []
         body = "Repair the canonical defect and preserve its evidence."
+        self.record.previous_reviewed_sha = "b" * 40
+        self.record.previous_review_id = "prior-green"
+        self.record.report_decision_id = "canonical-rework"
         self.record.worker_continuation.begin_red_transition(
             "review", 0, f"Observer decision: rework. {body}", "red", "rework",
             reserved_generation=4, decision_body=body,
@@ -177,6 +180,39 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.assertEqual(move["reason"], f"Observer decision: rework. {body}")
         self.assertEqual(self.record.report_decision, body)
         self.assertEqual(self.record.report_protocol_prerequisites, ("repair-contract",))
+        self.assertEqual(self.record.previous_reviewed_sha, "b" * 40)
+        self.assertEqual(self.record.previous_review_id, "prior-green")
+        self.assertEqual(self.record.report_decision_id, "canonical-rework")
+
+    def test_retained_and_replacement_rounds_preserve_frozen_review_context(self):
+        for mode in ("retained", "replacement"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                self.record.previous_reviewed_sha = "b" * 40
+                self.record.previous_review_id = "prior-green"
+                self.record.previous_blockers = "Full GREEN supporting body"
+                self.record.report_decision_id = "canonical-rework"
+                self.record.report_decision = "Repair BLOCKER-observer-only."
+                self.record.report_generation = 4
+                if mode == "retained":
+                    self.retain()
+                    result = self.deliver()
+                    self.assertEqual(result["action"], "gate-red-reused-worker")
+                else:
+                    with (
+                        mock.patch.object(continuation_module, "_write_worker_relaunch_intent", return_value=None),
+                        mock.patch.object(continuation_module, "_bring_up_worker_head", return_value=(SimpleNamespace(run={}), None)),
+                    ):
+                        result = self.restart()
+                    self.assertEqual(result["action"], "gate-red-rework")
+                self.assertEqual(self.record.worker_continuation.to_json(), {})
+                recovered = DispatcherRecord.from_json(self.record.to_json())
+                self.assertEqual(recovered.report_generation, 4)
+                self.assertEqual(recovered.previous_reviewed_sha, "b" * 40)
+                self.assertEqual(recovered.previous_review_id, "prior-green")
+                self.assertEqual(recovered.previous_blockers, "Full GREEN supporting body")
+                self.assertEqual(recovered.report_decision_id, "canonical-rework")
+                self.assertEqual(recovered.report_decision, "Repair BLOCKER-observer-only.")
 
     def test_new_observer_rework_freezes_pointer_before_move(self):
         from ummanu.dispatch import assessment_decision
