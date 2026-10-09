@@ -394,3 +394,11 @@ Imports and collection are outside module clocks. Fixture errors without a start
 unavailable per-test duration and incomplete timing; ordinary fixture errors still fail the suite.
 Permanent regressions use deterministic clocks. The intentional slow specimen belongs only to
 a separate CI proof PR and must never enter the candidate or main.
+
+Timing rollout exposed four modules containing real integration work. Their assertions and
+fixtures are retained in CI: `test_docker_guard` executes installed role wrappers and native
+tool subprocesses in runtime-component; `test_owned_cleanup` and `test_bounded_cleanup_replay`
+exercise real Git, process termination, journals and runtime cleanup in integration-dispatcher;
+`test_measurement_script` runs loopback HTTP and real cadence waits in integration-board.
+The original component CI report observed a 94.627437s cleanup replay module, a 10.425188s
+guard test and an 18.513881s measurement test. The journal-layout component tests remain local.
