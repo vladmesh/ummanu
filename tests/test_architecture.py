@@ -466,12 +466,13 @@ class SourceLayoutTests(unittest.TestCase):
             for path in (ROOT / tree_root).rglob("*.py"):
                 tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
                 for node in source_trees.walk(tree):
-                    modules: list[str] = []
                     if isinstance(node, ast.Import):
                         modules = [alias.name for alias in node.names]
                     elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                         modules = [node.module]
                         modules += [f"{node.module}.{alias.name}" for alias in node.names]
+                    else:
+                        continue
                     for module in modules:
                         if module == retired or module.startswith(f"{retired}."):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")

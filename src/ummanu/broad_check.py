@@ -726,7 +726,7 @@ def _run_and_record(
 
 
 def _with_timing(parsed: dict[str, object], record: Path | None, *, incomplete: bool) -> dict[str, object]:
-    from ummanu.test_timing import valid_observation
+    from ummanu.projects.test_timing import valid_observation
 
     observation: dict[str, object] = {"status": "unavailable", "tests": [], "modules": {}}
     if record is not None:
@@ -1116,7 +1116,7 @@ def summarize(receipt: Mapping[str, Any]) -> str:
     ]
     if counts:
         lines.append(f"- parsed: {counts}")
-    from ummanu.test_timing import summary
+    from ummanu.projects.test_timing import summary
 
     timing = parsed.get("timing", {}) if isinstance(parsed, Mapping) else {}
     lines.append(summary(timing))

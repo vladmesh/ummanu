@@ -123,8 +123,8 @@ class BroadSuiteManifestFailureTests(unittest.TestCase):
             root = Path(tmp) / "checkout"
             (root / "scripts").mkdir(parents=True)
             (root / "tests").mkdir()
-            (root / "src/ummanu").mkdir(parents=True)
-            shutil.copy(REPO_ROOT / "src/ummanu/test_timing.py", root / "src/ummanu")
+            (root / "src/ummanu/projects").mkdir(parents=True)
+            shutil.copy(REPO_ROOT / "src/ummanu/projects/test_timing.py", root / "src/ummanu/projects")
             shutil.copy(REPO_ROOT / "scripts" / "ci_test_shards.py", root / "scripts")
             shutil.copy(REPO_ROOT / "tests" / "broad.py", root / "tests")
             (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
