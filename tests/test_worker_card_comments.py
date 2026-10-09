@@ -20,10 +20,10 @@ from unittest import mock
 from tests.dispatcher_fixtures import (
     PromptAfterStartCatalog,
     RecordingReviewHost,
+    clear_env as _clear_env,
     supervised_run,
     write_heartbeat,
 )
-from tests.dispatcher_fixtures import clear_env as _clear_env
 from ummanu.dispatch import worker_report
 from ummanu.dispatch.heartbeat import run_heartbeat_identity
 from ummanu.dispatch.runtime_provenance import ProductionRuntime

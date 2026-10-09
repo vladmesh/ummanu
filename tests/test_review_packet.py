@@ -133,6 +133,18 @@ class ReviewEvidenceTests(unittest.TestCase):
             dispositions(evidence)[-1], ("BLOCKER-n79", "unknown/unresolved: missing disposition evidence")
         )
 
+    def test_bound_standalone_decision_survives_without_inventing_prior_dispositions(self):
+        fixture = PacketFixture()
+        del fixture.events[1]
+        del fixture.task["comments"][0]
+        evidence = fixture.resolve(previous="BLOCKER-repair: unbound history")
+        self.assertEqual(evidence.decision, fixture.decision)
+        self.assertEqual(evidence.decision_id, "observer-decision-1")
+        self.assertEqual(evidence.findings, "")
+        self.assertEqual(
+            dispositions(evidence), [("BLOCKER-repair", "unknown/unresolved: missing disposition evidence")]
+        )
+
     def test_changed_spec_retains_history_without_authority(self):
         fixture = PacketFixture()
         fixture.task["description"] = "New cut"
@@ -244,11 +256,9 @@ class ReviewEvidenceTests(unittest.TestCase):
         fixture.decision = "Reject BLOCKER-rejected-other. Defer BLOCKER-later to issue:abc123extra."
         fixture.events[3]["data"]["body"] = fixture.decision
         fixture.task["comments"][1]["body"] = "[decision:rework]\n" + fixture.decision
-        body = "\n".join(
-            [
-                "BLOCKER-rejected: observer-rejected; observer quote: Reject BLOCKER-rejected-other.",
-                "BLOCKER-later: deferred; issue: issue:abc123; observer quote: Defer BLOCKER-later to issue:abc123extra.",
-            ]
+        body = (
+            "BLOCKER-rejected: observer-rejected; observer quote: Reject BLOCKER-rejected-other.\n"
+            "BLOCKER-later: deferred; issue: issue:abc123; observer quote: Defer BLOCKER-later to issue:abc123extra."
         )
         fixture.events[-1]["data"]["body"] = body
         fixture.task["comments"][-1]["body"] = "[report:done]\n" + body
@@ -258,12 +268,10 @@ class ReviewEvidenceTests(unittest.TestCase):
 
     def test_deferral_needs_issue_in_observer_decision_and_conflicts_stay_unknown(self):
         fixture = PacketFixture()
-        body = "\n".join(
-            [
-                "BLOCKER-repair: fixed; commit: aaaaaaa",
-                "BLOCKER-repair: fixed; commit: bbbbbbb",
-                "BLOCKER-later: deferred; issue: issue:foreign; observer quote: Defer BLOCKER-later to issue:abc123.",
-            ]
+        body = (
+            "BLOCKER-repair: fixed; commit: aaaaaaa\n"
+            "BLOCKER-repair: fixed; commit: bbbbbbb\n"
+            "BLOCKER-later: deferred; issue: issue:foreign; observer quote: Defer BLOCKER-later to issue:abc123."
         )
         fixture.events[-1]["data"]["body"] = body
         fixture.task["comments"][-1]["body"] = "[report:done]\n" + body
@@ -378,6 +386,28 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertTrue(text.startswith("## Declared local checks"))
         self.assertIn("source_event: observer-decision-1", text)
         self.assertIn("BLOCKER-repair: fixed (reported", text)
+
+    def test_each_packet_resolves_one_contract_for_header_and_commands(self):
+        fixture = PacketFixture()
+        host = self.host(fixture)
+        resolve = host.catalog.broad_check_verdict
+        reads = []
+
+        def counted(project):
+            reads.append(project)
+            return resolve(project)
+
+        host.catalog.broad_check_verdict = counted
+        worker = host._worker_task_doc(fixture.task, "main", "attempt-1", 3, fixture.decision)
+        self.assertEqual(reads, ["ummanu"])
+        reads.clear()
+        reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
+        self.assertEqual(reads, ["ummanu"])
+        broad, show = host._broad_check_invocation("ummanu")
+        for text in (worker, reviewer):
+            self.assertIn("Matching explicit full-profile wrapper: " + broad, text)
+            self.assertIn("Matching full receipt readback: " + show, text)
+        self.assertIn("    " + broad, worker)
 
     def test_runner_owned_shared_and_pytest_headers_preserve_adapter_contract(self):
         for contract, expected in (

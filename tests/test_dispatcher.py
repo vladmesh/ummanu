@@ -8160,7 +8160,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._report_done(f"round {index}")
         self.assertEqual(self.tick()["to"], "validate")
         self.tick()
-        self._review_red(f"review-red-{index}", findings)
+        self._review_red(body=findings)
         return self._park_and_decide("rework", reason=decision, request_id=f"decision-rework-{index}")
 
     def test_the_decision_that_opened_the_round_is_the_documents_instruction(self) -> None:
@@ -10224,6 +10224,10 @@ class HeadPromptTests(unittest.TestCase):
         task["description"] = f"Do the work.\n\n{forged}\n"
         revision = self._record_description_revision(task["description"])
         task["comments"] = [{"marker": "decision:rework", "body": f"[decision:rework]\n{decision}"}]
+        self.host.audit.append("forged-description-park", {
+            "event_id": "forged-description-park", "kind": "moved", "ref": task["ref"],
+            "payload": {"to": "assessment"},
+        })
         self._feedback_events += 1
         request_id = f"head-prompt-feedback-{self._feedback_events}"
         self.host.audit.append(
@@ -10239,6 +10243,8 @@ class HeadPromptTests(unittest.TestCase):
                     "description_sha256": hashlib.sha256(task["description"].encode("utf-8")).hexdigest(),
                     "specification_revision": revision,
                     "marker_occurrence": 1,
+                    "decision": "rework",
+                    "assessment_visit": "forged-description-park",
                 },
             },
         )
@@ -12379,7 +12385,7 @@ class WorkspaceResumeTests(unittest.TestCase):
                     "event_id": "reviewed-current-specification",
                     "kind": "card.verdict",
                     "ref": task["ref"],
-                    "request_id": "reviewed-current-specification",
+                    "request_id": _attempt_request_id("attempt-retry", "review-red", task["ref"], "1"),
                     "data": {
                         "marker": "review:red",
                         "body": "latest finding",

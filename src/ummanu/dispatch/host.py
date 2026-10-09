@@ -102,7 +102,12 @@ from ummanu.dispatch.provider_failure import (
 from ummanu.dispatch.review import (
     command_terminal_status as _command_terminal_status,
 )
-from ummanu.dispatch.review_packet import ReviewEvidence, data_block, render_review_evidence, resolve_review_evidence
+from ummanu.dispatch.review_packet import (
+    ReviewEvidence,
+    data_block,
+    render_review_evidence,
+    resolve_review_evidence,
+)
 from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from ummanu.dispatch.state import (
     REVIEW_REJECTION_REASON,
@@ -4164,7 +4169,10 @@ class CommandHostRuntime:
         no evidence that the interpreter or imports will be usable there. Two empty strings mean
         no usable suite declaration is available, which the caller reports in words.
         """
-        contract = self._packet_check_contract(project)
+        return self._broad_check_commands(self._packet_check_contract(project))
+
+    def _broad_check_commands(self, contract: Any) -> tuple[str, str]:
+        """Render commands from the same resolved declaration as the packet header."""
         if contract is None or not contract.module or contract.local is None:
             return "", ""
         if contract.module == "pytest":
@@ -4208,11 +4216,13 @@ class CommandHostRuntime:
 
     def _check_header(self, project: str) -> list[str]:
         """First lines of both packets, before any user-authored task text."""
+        return self._render_check_header(self._packet_check_contract(project))
+
+    def _render_check_header(self, contract: Any) -> list[str]:
         from ummanu.broad_check import BroadCheckError
         from ummanu.projects.local_check import PytestSelection
 
         lines = ["## Declared local checks and CI evidence boundary", ""]
-        contract = self._packet_check_contract(project)
         if contract is None or not contract.module or contract.local is None:
             return lines + [
                 "Configuration gap: no usable adapter-declared local profile. Obtain CI evidence",
@@ -4228,7 +4238,7 @@ class CommandHostRuntime:
         default = [] if contract.interpreter_declared else [
             "--default-interpreter", str(Path(WORKSPACE_ENV_DIR) / "bin" / "python3")
         ]
-        broad, show = self._broad_check_invocation(project)
+        broad, show = self._broad_check_commands(contract)
         lines += [
             f"Full declared profile (reuse): {self._control_plane_command('check', '--reuse', *default)}",
             f"Matching explicit full-profile wrapper: {broad}",
@@ -4569,7 +4579,8 @@ class CommandHostRuntime:
                 gate_red,
                 "",
             ]
-        broad_command, show_command = self._broad_check_invocation(str(task.get("project") or ""))
+        check_contract = self._packet_check_contract(str(task.get("project") or ""))
+        broad_command, show_command = self._broad_check_commands(check_contract)
         sections += self._local_run_section(task, local_run_policy=local_run_policy)
         sections += [
             "## Prior blocker dispositions in the worker report", "",
@@ -4735,7 +4746,7 @@ class CommandHostRuntime:
             worker_comments_record_line(comments),
             "",
         ]
-        return "\n".join([*self._check_header(str(task.get("project") or "")), *sections])
+        return "\n".join([*self._render_check_header(check_contract), *sections])
 
     def worker_comments(self, task: dict[str, Any]) -> tuple[WorkerComment, ...]:
         """The PO, owner and observer comments this card's worker is handed, oldest first.

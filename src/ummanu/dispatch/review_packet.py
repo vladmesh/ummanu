@@ -111,6 +111,20 @@ def resolve_review_evidence(
         if re.fullmatch(re.escape(prefix) + r"\d+", str(e.get("request_id") or "")) and bound(e, "review:red")
     ]
     if not reviews:
+        # A bound Assessment decision can open a round without prior findings. Keep
+        # that instruction, but never attach a foreign review or invent dispositions.
+        if selected_decision and not any(
+            payload(e).get("marker") in {"review:red", "review:green"} and payload(e).get("body")
+            for e in events[:boundary]
+        ):
+            return ReviewEvidence(
+                decision=payload(selected_decision)["body"],
+                decision_id=str(selected_decision.get("event_id") or ""),
+                report=payload(report).get("body", ""),
+                report_id=str(report.get("event_id") or ""),
+                historical=previous,
+                diagnostic="unknown/unresolved: no applicable prior review",
+            )
         return ReviewEvidence(
             historical=previous, diagnostic="unknown/unresolved: no applicable prior review"
         )
@@ -143,11 +157,12 @@ def resolve_review_evidence(
 def dispositions(evidence: ReviewEvidence) -> list[tuple[str, str]]:
     """Standard report lines describe claims, with exact observer quotations for exceptions."""
     ids = list(dict.fromkeys(re.findall(BLOCKER, evidence.findings or evidence.historical)))
+    report = evidence.report if evidence.findings else ""
     result = []
     for blocker in ids:
         claims = []
         invalid = False
-        for line in evidence.report.splitlines():
+        for line in report.splitlines():
             match = re.fullmatch(rf"\s*(?:- )?{re.escape(blocker)}: (.+)", line)
             if not match:
                 continue
@@ -174,7 +189,7 @@ def dispositions(evidence: ReviewEvidence) -> list[tuple[str, str]]:
         # supplies a legacy fixed claim; reviewer prose never supplies observer rejection.
         legacy = re.findall(
             rf"Repair commit `?([0-9a-f]{{7,40}})`? fixes {re.escape(blocker)}(?![A-Za-z0-9_-])",
-            evidence.report,
+            report,
         )
         claims.extend(f"fixed (reported, verify independently); commit: {sha}" for sha in legacy)
         distinct = list(dict.fromkeys(claims))
