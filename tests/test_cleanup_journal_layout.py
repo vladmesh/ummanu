@@ -326,6 +326,29 @@ class PerIntentLayoutTests(JournalTestCase):
 class GeneratedBoundTests(JournalTestCase):
     """Generated digests are active journal files too: bounded, never truncated (ummanu-131 review 14)."""
 
+    def seed_generated_at_bound(self) -> tuple[dict[str, str], dict[str, str]]:
+        """One acknowledged addition fits; the next crosses the real serialized byte bound."""
+        generated, size, after = {}, 0, 0
+        while True:
+            entry, after = skewed_generated(1, start=after)
+            # With the journal's JSON separators, a nonempty map's size is the sum of
+            # its singleton sizes. Size each entry once instead of serializing each growing map.
+            entry_size = len(cleanup._generated_buckets(entry, 1)["0"])
+            if size + entry_size > INTENT_FILE_LIMIT:
+                name, digest = generated.popitem()
+                more = {name: digest, **entry}
+                break
+            generated.update(entry)
+            size += entry_size
+        name = next(iter(more))
+        first = {name: more[name]}
+        self.assertLessEqual(len(cleanup._generated_buckets({**generated, **first}, 1)["0"]), INTENT_FILE_LIMIT)
+        self.assertGreater(len(cleanup._generated_buckets({**generated, **more}, 1)["0"]), INTENT_FILE_LIMIT)
+        self.write_legacy(json.dumps({"version": 1, "intents": {}, "generated": generated}).encode())
+        self.assertTrue(self.journal.migrate())
+        self.assertEqual(self.journal._generated_depth(), 1)
+        return generated, more
+
     def assert_bounded(self) -> None:
         sizes = active_files(self.journal)
         self.assertTrue(sizes)
@@ -349,13 +372,9 @@ class GeneratedBoundTests(JournalTestCase):
         self.assertEqual(self.journal.generated_digests(), {**generated, **more})
 
     def test_ordinary_growth_across_the_bound_deepens_without_losing_a_digest(self) -> None:
-        generated, after = skewed_generated(7000)
-        self.write_legacy(json.dumps({"version": 1, "intents": {}, "generated": generated}).encode())
-        self.journal.migrate()
-        self.assertEqual(self.journal._generated_depth(), 1)
+        generated, more = self.seed_generated_at_bound()
         bucket = self.journal.path / "generated" / "0.json"
         self.assertGreater(bucket.stat().st_size, INTENT_FILE_LIMIT - 30_000)
-        more, _ = skewed_generated(300, start=after)
         replace = cleanup._replace_file
         published = []
         with tick_counting() as counters, mock.patch.object(
@@ -371,42 +390,40 @@ class GeneratedBoundTests(JournalTestCase):
         self.assertEqual(counters["cleanup_intent_writes"], 0)
 
     def test_crash_while_deepening_keeps_the_published_depth_complete(self) -> None:
-        generated, after = skewed_generated(7000)
-        self.write_legacy(json.dumps({"version": 1, "intents": {}, "generated": generated}).encode())
-        self.journal.migrate()
-        more, _ = skewed_generated(300, start=after)
+        generated, more = self.seed_generated_at_bound()
         replace = cleanup._replace_file
         writes = []
 
         def crash(path, body):
-            if "generated-2" in str(path):
+            if path.parent.name == "generated-2":
                 writes.append(path)
                 if len(writes) == 5:
                     raise OSError("power lost while deepening")
             return replace(path, body)
 
-        names = iter(more.items())
-        written = {}
-        with mock.patch.object(cleanup, "_replace_file", side_effect=crash), self.assertRaises(OSError):
-            for name, digest in names:
-                self.journal.generated(Path(name), "unused")  # through the locked public API
-                written[name] = self.journal.generated_digests()[name]
+        acknowledged, crossing = more
+        self.journal.generated(Path(acknowledged), acknowledged.encode() + b"body")
+        written = {acknowledged: more[acknowledged]}
+        before = stored_files(self.journal)
+        with mock.patch.object(cleanup, "_replace_file", side_effect=crash), \
+                self.assertRaisesRegex(OSError, "power lost while deepening"):
+            self.journal.generated(Path(crossing), crossing.encode() + b"body")
+        self.assertEqual(len(writes), 5)
+        self.assertEqual([path.exists() for path in writes], [True, True, True, True, False])
         # The meta still names depth 1, whose files are untouched and complete.
         self.assertEqual(self.journal._generated_depth(), 1)
         self.assertEqual(self.journal.generated_digests(), {**generated, **written})
+        after = stored_files(self.journal)
+        self.assertEqual({name: after[name] for name in before}, before)
         self.assert_bounded()
         # The retried write finishes the deepening from scratch.
-        for name, digest in more.items():
-            self.journal._record_generated(name, digest)
+        self.journal.generated(Path(crossing), crossing.encode() + b"body")
         self.assertEqual(self.journal._generated_depth(), 2)
         self.assertEqual(self.journal.generated_digests(), {**generated, **more})
         self.assert_bounded()
 
     def test_crash_after_the_depth_switch_reads_the_new_depth(self) -> None:
-        generated, after = skewed_generated(7000)
-        self.write_legacy(json.dumps({"version": 1, "intents": {}, "generated": generated}).encode())
-        self.journal.migrate()
-        more, _ = skewed_generated(300, start=after)
+        generated, more = self.seed_generated_at_bound()
         with mock.patch.object(cleanup.shutil, "rmtree", side_effect=OSError("crash before removal")), \
                 self.assertRaises(OSError):
             for name, digest in more.items():
