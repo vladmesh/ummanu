@@ -179,6 +179,7 @@ class LocalSelectorTests(LocalCheckFixture, unittest.TestCase):
 
     def test_pytest_parameter_node_is_one_argv_argument_without_shell_interpolation(self) -> None:
         self.adapter["broad_check"]["module"] = "pytest"
+        self.adapter["broad_check"]["args"] = ["tests"]
         self.adapter["broad_check"]["local"] = {"membership": "runner", "selector_args": []}
         self.write_adapter()
         selector = "tests/test_local.py::test_one[param with spaces;$(touch injected)::value]"
@@ -197,7 +198,8 @@ class LocalSelectorTests(LocalCheckFixture, unittest.TestCase):
         }
         with mock.patch.object(check_commands, "run_broad_check", return_value=(5, observation)) as run:
             status, subset, _ = self.invoke(selector)
-            self.assertEqual(status, 5)
+            self.assertEqual(status, 2)
+            self.assertEqual(subset["error"]["code"], "pytest_selection_empty")
             spec = run.call_args.args[0]
             self.assertEqual(spec.module_args, (selector,))
             self.assertEqual(spec.argv(self.scratch / "provenance", self.root)[-1], selector)

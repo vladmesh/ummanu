@@ -1,5 +1,6 @@
 # Adapter fragments for later installation; no live changes or setup replacements.
-# Each project's runner retains its declared paths and markers. These are four separate adapters.
+# Full argv stays intact; pytest subsets replace roots after membership validation.
+# These are four separate adapters; options and markers remain on every run.
 codegen-product-kit:
   broad_check:
     interpreter: .venv/bin/python

@@ -167,6 +167,7 @@ class ModuleContract:
     args: tuple[str, ...] = ()
     interpreter_declared: bool = True
     local: dict[str, Any] | None = None
+    collection_roots: tuple[str, ...] | None = None
 
     def as_dict(self) -> dict[str, str]:
         if self.reason:
@@ -373,6 +374,9 @@ def _declared_contract(
             f"adapter {adapter_name!r} declares broad-check arguments that are not a list of strings",
         )
     local = configured.get("local")
+    collection_roots = (
+        tuple(configured["collection_roots"]) if "collection_roots" in configured else None
+    )
     if local is not None:
         from ummanu.broad_check import BroadCheckError
         from ummanu.projects.local_check import validate_declaration
@@ -407,6 +411,7 @@ def _declared_contract(
                 args=args,
                 interpreter_declared=False,
                 local=local,
+                collection_roots=collection_roots,
             ),
             adapter_name,
         )
@@ -429,7 +434,12 @@ def _declared_contract(
                 "schema resolves from the candidate workspace; no candidate workspace exists yet, "
                 "so the tree that will run the check is the only side that can answer this",
                 declared_contract=ModuleContract(
-                    interpreter, import_package, module=module, args=args, local=local
+                    interpreter,
+                    import_package,
+                    module=module,
+                    args=args,
+                    local=local,
+                    collection_roots=collection_roots,
                 ),
             )
         # Preserve a venv symlink: resolving it loses its site paths.
@@ -441,7 +451,11 @@ def _declared_contract(
             f"could not start configured interpreter {interpreter!r}: it is not an executable file",
         )
     return ContractVerdict.as_fit(
-        ModuleContract(interpreter, import_package, module=module, args=args, local=local), adapter_name
+        ModuleContract(
+            interpreter, import_package, module=module, args=args, local=local,
+            collection_roots=collection_roots,
+        ),
+        adapter_name,
     )
 
 

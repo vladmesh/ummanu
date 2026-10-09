@@ -28,7 +28,7 @@ from ummanu.projects.contract import (
     ModuleContract,
     module_contract,
 )
-from ummanu.projects.local_check import LocalProfile, validate_pytest_path
+from ummanu.projects.local_check import LocalProfile, PytestSelection
 from ummanu.runtime.paths import add_instance_argument
 
 _GIT_TIMEOUT = 60
@@ -54,6 +54,7 @@ class ResolvedCheck:
     def __init__(
         self, spec: CheckSpec, module_contract: dict[str, str] | None = None, selector: str = ""
     ) -> None:
+        self.pytest_marker: str | None = None
         self.spec = spec
         self.module_contract = module_contract
         self.selector = selector
@@ -65,6 +66,7 @@ def add_check_subcommands(subparsers) -> None:
     )
     _common(check)
     check.add_argument("check_command", nargs="?", default="", metavar="SELECTOR|broad|show")
+    check.add_argument("selectors", nargs="*", metavar="SELECTOR")
     check.add_argument("--timeout-seconds", type=float, default=0.0)
     check.add_argument("--reuse", action="store_true", help="reuse a usable full-profile receipt")
     check.set_defaults(handler=run_check)
@@ -142,6 +144,9 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
     )
     new_form = args.check_command not in {"broad", "show"}
     selector = args.check_command if new_form else ""
+    selectors = (selector, *args.selectors) if selector else ()
+    if args.selectors and not new_form:
+        raise BroadCheckError("local_check_override", "broad/show selectors use --module-arg")
     profile = LocalProfile.load(Path(args.root), contract.local) if contract.local is not None else None
     if new_form and profile is None:
         raise BroadCheckError(
@@ -174,15 +179,15 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
             elif profile is not None:
                 supplied = tuple(args.module_arg)
                 prefix = contract.args + profile.selector_args
-                if len(supplied) == 1:
-                    selector = supplied[0]
-                elif len(supplied) == len(prefix) + 1 and supplied[:-1] == prefix:
-                    selector = supplied[-1]
+                if len(supplied) > len(prefix) and supplied[:len(prefix)] == prefix:
+                    selectors = supplied[len(prefix):]
                 else:
+                    selectors = supplied
+                if len(selectors) != 1 and contract.module != "pytest":
                     raise BroadCheckError(
-                        "local_check_override",
-                        "subset arguments must retain the declared argv and name one selector",
+                        "local_check_override", "subset arguments must name one selector"
                     )
+                selector = selectors[0]
             else:
                 raise BroadCheckError(
                     "local_check_not_declared" if profile is None else "local_check_override",
@@ -198,14 +203,19 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
         raise BroadCheckError(
             "no_broad_check_module", "pass --module or declare broad_check.module in the adapter"
         )
+    pytest_selection = None
     if profile is not None:
-        if selector:
-            _path, target = profile.select(selector)
+        if selectors:
             if profile.runner_owned and module == "pytest":
-                validate_pytest_path(Path(args.root), contract.args, selector)
+                pytest_selection = PytestSelection.resolve(contract.args, contract.collection_roots)
+                module_args = list(pytest_selection.select(Path(args.root), selectors))
+            else:
+                if len(selectors) != 1:
+                    raise BroadCheckError("local_check_override", "subset arguments must name one selector")
+                _path, target = profile.select(selectors[0])
+                module_args = [*contract.args, *profile.selector_args, target]
             if args.check_command == "show":
                 raise BroadCheckError("subset_has_no_receipt", "a subset has no full-round receipt to show")
-            module_args = [*contract.args, *profile.selector_args, target]
         else:
             module_args = list(contract.args)
     elif args.module:
@@ -214,13 +224,16 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
         if args.module_arg:
             raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
         module_args = list(contract.args)
-    return ResolvedCheck(
+    resolved = ResolvedCheck(
         CheckSpec.for_module(
             module, module_args, interpreter=contract.interpreter, import_package=contract.import_package
         ),
         contract.as_dict(),
         selector,
     )
+    if pytest_selection is not None:
+        resolved.pytest_marker = pytest_selection.marker()
+    return resolved
 
 
 def _module_contract(
@@ -411,6 +424,12 @@ def _run_subset(args: argparse.Namespace, resolved: ResolvedCheck) -> int:
     result = recorded_result(observation)
     if result is None:
         raise BroadCheckError("unrepresentable_result", "the subset returned an unrepresentable result")
+    if resolved.pytest_marker is not None and result.exit_code == 5:
+        marker = f"; declared marker {resolved.pytest_marker!r}" if resolved.pytest_marker else ""
+        raise BroadCheckError(
+            "pytest_selection_empty",
+            f"pytest selector deselected or collected no tests{marker}; execution only in CI",
+        )
     print(
         json.dumps(
             {

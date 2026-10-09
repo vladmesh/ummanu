@@ -12,32 +12,147 @@ from typing import Any
 from ummanu.broad_check import BroadCheckError
 
 
-def validate_pytest_path(root: Path, args: tuple[str, ...], selector: str) -> None:
-    """Keep appended pytest paths inside the declared collection roots.
+# Built-in pytest options with a separate value. Unknown plugin options require explicit roots;
+# equals-form options are self-contained and never consume a following collection argument.
+_PYTEST_VALUES = frozenset({
+    "-m", "--markexpr", "-k", "-p", "-c", "-o", "--override-ini", "-W", "--pythonwarnings",
+    "--rootdir", "--confcutdir", "--basetemp", "--junitxml", "--junit-xml", "--junitprefix",
+    "--junit-prefix", "--durations", "--durations-min", "--maxfail", "--ignore", "--ignore-glob",
+    "--deselect", "--import-mode", "--assert", "--capture", "--tb", "--show-capture", "--color",
+    "--code-highlight", "--verbosity", "--log-level", "--log-format", "--log-date-format",
+    "--log-cli-level", "--log-cli-format", "--log-cli-date-format", "--log-file",
+    "--log-file-mode", "--log-file-level", "--log-file-format", "--log-file-date-format",
+    "--log-auto-indent", "--log-disable", "--debug", "--pastebin",
+    "--lfnf", "--last-failed-no-failures", "--pdbcls", "--doctest-report",
+    "--doctest-glob", "--doctest-resolution", "--doctest-optionflags", "--cache-show", "-r",
+})
+_PYTEST_OPTIONAL_VALUES = frozenset({"--debug", "--cache-show", "-r"})
+_PYTEST_FLAGS = frozenset({
+    "-v", "--verbose", "-q", "--quiet", "-x", "--exitfirst", "-s", "--runxfail", "--lf",
+    "--last-failed", "--ff", "--failed-first", "--nf", "--new-first",
+    "--cache-clear", "--stepwise", "--sw", "--stepwise-skip", "--sw-skip", "--stepwise-reset",
+    "--sw-reset", "--fixtures", "--funcargs", "--fixtures-per-test", "--pdb", "--trace",
+    "--disable-warnings", "--disable-pytest-warnings", "-l", "--showlocals", "--no-showlocals",
+    "--full-trace", "--collect-only", "--co", "--pyargs", "--noconftest", "--keep-duplicates",
+    "--continue-on-collection-errors", "--strict-config", "--strict-markers", "--strict",
+    "--doctest-modules", "--doctest-ignore-import-errors", "--doctest-continue-on-failure",
+    "--help", "-h", "--version", "-V", "--markers", "--trace-config", "--setup-only",
+    "--setup-show", "--setup-plan", "--no-header", "--no-summary", "--force-short-summary",
+    "--no-fold-skipped", "--disable-plugin-autoload",
+})
 
-    Markers, deselection and node validation remain pytest's. These are the separate-value
-    options used by the installed adapters; equals-form options never look like a path.
+
+def _relative_path(value: str) -> Path:
+    path = Path(value.partition("::")[0])
+    if not value.partition("::")[0] or not str(path) or value.startswith("-") or path.is_absolute() or ".." in path.parts:
+        raise ValueError("expected a relative collection path without '..' or a leading '-'")
+    return path
+
+
+@dataclass(frozen=True)
+class PytestSelection:
+    """Resolve declaration roles, membership and replacement without filesystem discovery.
+
+    Explicit roots identify exact argv tokens, each occurring once. All other tokens are
+    preserved without inferring plugin option arity. Resolution happens only for subsets.
     """
-    value_options = {"-c", "--rootdir", "-m", "-k", "-p", "-o", "--override-ini"}
-    paths = []
-    expecting_value = False
-    for arg in args:
-        if expecting_value:
-            expecting_value = False
-        elif arg.startswith("-"):
-            expecting_value = arg in value_options
+
+    args: tuple[str, ...]
+    roots: tuple[str, ...]
+    positions: tuple[int, ...]
+
+    @classmethod
+    def resolve(cls, args: tuple[str, ...], explicit: tuple[str, ...] | None = None) -> PytestSelection:
+        def ambiguous(reason: str) -> BroadCheckError:
+            return BroadCheckError(
+                "ambiguous_pytest_declaration",
+                f"{reason}; declare broad_check.collection_roots explicitly; execution only in CI",
+            )
+
+        if explicit is not None:
+            if not explicit or len(set(explicit)) != len(explicit):
+                raise ambiguous("collection_roots must be nonempty and unique")
+            positions = []
+            for entry in explicit:
+                if args.count(entry) != 1:
+                    raise ambiguous(f"collection root {entry!r} must occur exactly once in broad_check.args")
+                position = args.index(entry)
+                if position and args[position - 1] in _PYTEST_VALUES:
+                    raise ambiguous(f"collection root {entry!r} is an option value")
+                positions.append(position)
+            positions.sort()
         else:
-            paths.append((root / arg.partition("::")[0]).resolve())
-    candidate_root = root.resolve()
-    selected = (root / selector.partition("::")[0]).resolve()
-    allowed = paths or [candidate_root]
-    if not selected.is_relative_to(candidate_root) or not any(
-        selected == path or (path.is_dir() and selected.is_relative_to(path)) for path in allowed
-    ):
-        raise BroadCheckError(
-            "outside_local_profile",
-            f"{selector.partition('::')[0]}: outside declared pytest paths; execution only in CI",
-        )
+            positions = []
+            index = 0
+            positional_only = False
+            while index < len(args):
+                arg = args[index]
+                if positional_only or not arg.startswith("-"):
+                    positions.append(index)
+                elif arg == "--":
+                    positional_only = True
+                elif "=" in arg:
+                    pass
+                elif arg in _PYTEST_VALUES:
+                    has_value = index + 1 < len(args) and not args[index + 1].startswith("-")
+                    if has_value:
+                        index += 1
+                    elif arg not in _PYTEST_OPTIONAL_VALUES:
+                        raise ambiguous(f"option {arg!r} lacks an unambiguous separate value")
+                elif arg in _PYTEST_FLAGS or re.fullmatch(r"-[vq]+", arg):
+                    pass
+                elif any(arg.startswith(option) and len(arg) > len(option)
+                         for option in ("-m", "-k", "-p", "-c", "-o", "-W", "-r")):
+                    pass
+                else:
+                    raise ambiguous(f"unknown option {arg!r}")
+                index += 1
+        roots = tuple(args[position] for position in positions)
+        if not roots:
+            raise ambiguous("pytest declaration has no positional collection roots")
+        try:
+            for entry in roots:
+                _relative_path(entry)
+                if "::" in entry:
+                    raise ValueError("collection roots cannot contain node-ids")
+        except ValueError as exc:
+            raise ambiguous(f"invalid collection_roots: {exc}") from exc
+        return cls(args, roots, tuple(positions))
+
+    def select(self, checkout: Path, selectors: tuple[str, ...]) -> tuple[str, ...]:
+        root = checkout.resolve()
+        allowed = tuple((root / entry).resolve() for entry in self.roots)
+        for selector in selectors:
+            try:
+                path = _relative_path(selector)
+                selected = (root / path).resolve()
+                if not selected.is_relative_to(root) or not any(
+                    selected.is_relative_to(entry) and entry.is_relative_to(root) for entry in allowed
+                ):
+                    raise ValueError("outside roots")
+            except ValueError as exc:
+                raise BroadCheckError(
+                    "outside_local_profile",
+                    f"{selector!r}: outside declared pytest roots {list(self.roots)!r}; execution only in CI",
+                ) from exc
+        result = []
+        for position, arg in enumerate(self.args):
+            if position == self.positions[0]:
+                result.extend(selectors)
+            if position not in self.positions:
+                result.append(arg)
+        return tuple(result)
+
+    def marker(self) -> str:
+        marker = ""
+        for index, arg in enumerate(self.args):
+            if arg in {"-m", "--markexpr"} and index + 1 < len(self.args):
+                marker = self.args[index + 1]
+            elif arg.startswith("--markexpr="):
+                marker = arg.partition("=")[2]
+            elif arg.startswith("-m") and arg != "-m":
+                marker = arg[2:]
+        return marker
 
 
 def validate_declaration(local: dict[str, Any], module: str, args: tuple[str, ...]) -> None:

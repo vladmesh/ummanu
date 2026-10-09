@@ -12,6 +12,7 @@ from unittest import mock
 from tests.support.local_check_fixture import LocalCheckFixture
 from tests.support.runner_owned_fixture import PARAMETER_NODE, host_profile
 from ummanu import broad_check, check_commands
+from ummanu.projects.local_check import PytestSelection
 
 
 class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
@@ -44,12 +45,16 @@ class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
         )
 
     def launch(self, argv, *, env, **kwargs):
-        self.assertEqual(argv[4], "shared")
+        self.assertEqual(argv[4], self.adapter["broad_check"]["module"])
         self.calls.append(argv[7:])
         output = []
-        status = host_profile(
-            argv[7:], env, output.append, lambda node, environment: self.executed.append((node, environment))
-        )
+        if argv[4] == "pytest":
+            status = 0  # Injected runner: argv/receipt proof only, never real pytest evidence.
+        else:
+            status = host_profile(
+                argv[7:], env, output.append,
+                lambda node, environment: self.executed.append((node, environment)),
+            )
         Path(argv[3]).write_text(
             json.dumps(
                 {
@@ -146,7 +151,7 @@ class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
             self.assertEqual(self.invoke()[0], 2)
             self.process.assert_not_called()
 
-    def test_pytest_keeps_paths_and_markers_and_rejects_expansion(self) -> None:
+    def test_pytest_replaces_roots_keeps_markers_and_refuses_empty_selection(self) -> None:
         declared = [
             "tests",
             "-m",
@@ -178,8 +183,10 @@ class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
         selector = "tests/test_local.py::test_one[param with spaces;$(touch injected)]"
         with mock.patch.object(check_commands, "run_broad_check", return_value=(5, observation)) as run:
             status, subset, _ = self.invoke(selector)
-            self.assertEqual(status, 5)
-            self.assertEqual(run.call_args.args[0].module_args, (*declared, selector))
+            self.assertEqual(status, 2)
+            self.assertIn("not slow", subset["error"]["message"])
+            self.assertIn("deselected", subset["error"]["message"])
+            self.assertEqual(run.call_args.args[0].module_args, (selector, *declared[1:]))
             self.assertFalse(run.call_args.kwargs["record_receipt"])
             self.assertNotIn("receipt", subset)
         with mock.patch.object(check_commands, "run_broad_check") as run:
@@ -187,3 +194,117 @@ class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
                 self.invoke("outside/test_other.py")[1]["error"]["code"], "outside_local_profile"
             )
             run.assert_not_called()
+
+
+    def pytest_declaration(self, args, **extra) -> None:
+        self.adapter["broad_check"].update(
+            module="pytest", args=args, local={"membership": "runner", "selector_args": []}, **extra
+        )
+        self.write_adapter()
+
+    def test_pytest_option_roles_and_explicit_roots_do_not_use_file_existence(self) -> None:
+        # These paths deliberately do not exist. Values must never become allowed roots.
+        declared = (
+            "-m", "not ci_only", "--ignore", "ignored", "--ignore-glob", "globbed/*",
+            "--deselect", "other/test.py::test_x", "-W", "ignore::DeprecationWarning",
+            "--basetemp", "scratch", "--junitxml", "output.xml", "--durations", "10",
+            "--log-file", "logs/run", "--rootdir=outside", "-o", "key=value",
+            "--cache-show", "cached/*", "--debug", "debug.log", "-r", "a",
+            "nonexistent/tests", "-q", "-kexpr", "-pno:cacheprovider", "-rA",
+        )
+        selection = PytestSelection.resolve(declared)
+        self.assertEqual(selection.roots, ("nonexistent/tests",))
+        target = "./nonexistent/tests/missing.py::missing[param with spaces]"
+        self.assertEqual(selection.select(self.root, (target,)),
+                         tuple(target if arg == "nonexistent/tests" else arg for arg in declared))
+        for value in ("ignored", "globbed", "scratch", "output.xml", "outside", "logs/run", "cached", "debug.log"):
+            with self.assertRaises(broad_check.BroadCheckError):
+                selection.select(self.root, (value,))
+        self.assertEqual(PytestSelection.resolve(("tests", "--cache-show", "--debug", "-r")).roots,
+                         ("tests",))
+        explicit = PytestSelection.resolve(("--plugin-option", "plugin-value", "tests"), ("tests",))
+        self.assertEqual(explicit.select(self.root, ("tests/missing.py",)),
+                         ("--plugin-option", "plugin-value", "tests/missing.py"))
+
+    def test_pytest_all_selectors_validate_before_execution_on_every_public_path(self) -> None:
+        self.pytest_declaration(["tests", "-m", "not ci_only"])
+        node = "tests/missing.py::missing[param space;$(touch injected)]"
+        for argv in (
+            (node,), ("tests/missing.py", node),
+            ("broad", "--reuse", "--module", "pytest", f"--module-arg={node}"),
+            ("broad", "--module", "pytest", "--module-arg=tests", "--module-arg=-m",
+             "--module-arg=not ci_only", f"--module-arg={node}"),
+        ):
+            status, subset, output = self.invoke(*argv)
+            self.assertEqual(status, 0, output)
+            targets = ["tests/missing.py", node] if len(argv) == 2 else [node]
+            self.assertEqual(self.calls[-1], [*targets, "-m", "not ci_only"])
+            self.assertNotIn("receipt", subset)
+        for bad in ("/tests/test.py", "tests/../tests/test.py", "outside/test.py", "-bad"):
+            for argv in (
+                (node, "--", bad),
+                ("broad", "--module", "pytest", f"--module-arg={node}", f"--module-arg={bad}"),
+            ):
+                with self.subTest(argv=argv):
+                    self.process.reset_mock()
+                    status, error, _ = self.invoke(*argv)
+                    self.assertEqual(status, 2)
+                    self.assertIn("declared pytest roots ['tests']", error["error"]["message"])
+                    self.assertIn("CI", error["error"]["message"])
+                    self.process.assert_not_called()
+        self.assertFalse(broad_check.receipt_dir(self.root).exists())
+
+    def test_pytest_ambiguous_declaration_refuses_only_subset_and_explicit_field_resolves(self) -> None:
+        for declared in (["tests", "--plugin", "value"], ["tests", "--ignore"], ["-q"]):
+            self.pytest_declaration(declared)
+            status, full, output = self.invoke()
+            self.assertEqual(status, 0, output)
+            self.assertEqual(self.calls[-1], declared)
+            receipt = Path(full["path"])
+            before = receipt.read_bytes()
+            self.process.reset_mock()
+            status, error, _ = self.invoke("tests/test_local.py")
+            self.assertEqual(status, 2)
+            self.assertIn("broad_check.collection_roots", error["error"]["message"])
+            self.process.assert_not_called()
+            self.assertEqual(receipt.read_bytes(), before)
+        self.pytest_declaration(["--plugin", "value", "tests"], collection_roots=["tests"])
+        status, subset, output = self.invoke("tests/test_local.py")
+        self.assertEqual(status, 0, output)
+        self.assertEqual(self.calls[-1], ["--plugin", "value", "tests/test_local.py"])
+        self.assertNotIn("receipt", subset)
+        for args, roots in (
+            (("tests",), ("missing",)), (("tests", "tests"), ("tests",)),
+            (("../tests",), ("../tests",)), (("/tests",), ("/tests",)),
+            (("--ignore", "tests"), ("tests",)), (("tests::test_x",), ("tests::test_x",)),
+        ):
+            with self.subTest(args=args), self.assertRaises(broad_check.BroadCheckError):
+                PytestSelection.resolve(args, roots)
+
+    def test_pytest_subset_full_reuse_and_show_preserve_receipt_bytes(self) -> None:
+        declared = ["tests", "-c", "config.ini", "-m", "not ci_only", "-q"]
+        self.pytest_declaration(declared)
+        status, full, output = self.invoke()
+        self.assertEqual(status, 0, output)
+        self.assertEqual(self.calls[-1], declared)
+        receipt = Path(full["path"])
+        before = receipt.read_bytes()
+        status, reused, _ = self.invoke(
+            "broad", "--reuse", "--module", "pytest", *[f"--module-arg={arg}" for arg in declared]
+        )
+        self.assertEqual(status, 0)
+        self.assertTrue(reused["reused"])
+        count = len(self.calls)
+        for targets in (("tests/test_local.py",), (PARAMETER_NODE.replace("checks/", "tests/"),),
+                        ("tests/test_local.py", "tests/missing.py")):
+            status, subset, output = self.invoke(*targets, "--reuse")
+            self.assertEqual(status, 0, output)
+            self.assertEqual(self.calls[-1], [*targets, *declared[1:]])
+            self.assertNotIn("receipt", subset)
+            self.assertEqual(receipt.read_bytes(), before)
+        self.assertEqual(len(self.calls), count + 3)
+        self.assertEqual(self.invoke("show")[0], 0)
+        status, error, _ = self.invoke("show", "--module", "pytest", "--module-arg=tests/test_local.py")
+        self.assertEqual(status, 2)
+        self.assertEqual(error["error"]["code"], "subset_has_no_receipt")
+        self.assertEqual(receipt.read_bytes(), before)

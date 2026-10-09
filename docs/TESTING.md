@@ -148,7 +148,7 @@ empty shards. This validation is not a discovery fallback. The other seven shard
 CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
 
 Runner-owned profiles delegate membership and node validation to the declared broad runner. They
-need no module map. A selector appends to `broad_check.args`; `selector_args` supplies either an empty
+need no module map. Except for pytest below, a selector appends to `broad_check.args`; `selector_args` supplies either an empty
 list for native positional arguments or `["--"]` for a launcher with a selector separator. The complete
 profile always uses exactly the declared broad argv, without the selector separator.
 
@@ -190,12 +190,37 @@ broad_check:
     selector_args: []
 ```
 
-The wrapper appends the intact selector to these arguments, never substitutes it for them. Thus
-pytest still collects the declared paths; a node selection may also collect other tests under those
-paths. Pytest owns marker deselection and the no-tests-selected status. To avoid widening collection,
-an appended selector must stay within the declared paths (or the candidate root when pytest has no
-explicit paths). The installed adapters' separate-value options `-c`, `--rootdir`, `-m`, `-k`, `-p`,
-`-o` and `--override-ini` are excluded when finding those paths; equals-form options are also retained.
+Declared collection roots define the allowed set. Full `check` / `check broad` passes the exact
+original argv. A granular module, node-id or parameter replaces only positional collection roots
+with the selected tokens, keeping every option, marker, configuration argument and the same
+interpreter, environment and import provenance. Multiple pytest selectors are allowed; each is one
+argv token and all must pass membership before execution. For the example above, selecting
+`tests/unit/test_x.py::test_name[param with spaces]` produces
+`["tests/unit/test_x.py::test_name[param with spaces]", "-m", "not slow"]`.
+
+Membership compares the selector path before `::`, normalized relative to the checkout, with the
+roots and their descendants. Absolute paths, any `..` component, leading `-` and paths outside roots
+refuse before execution, naming the roots and CI. No file-existence discovery determines membership;
+a missing file under a directory root reaches pytest. Pytest missing-file/node status 4 and native
+errors propagate. Exit 5 becomes a one-line refusal naming deselection, the declared marker expression
+if present, and CI. It never becomes a successful check or a full-round receipt.
+
+The parser excludes values of known pytest options such as `-m`, `-k`, `-p`, `-c`, `-o`, `-W`,
+`--rootdir`, `--confcutdir`, `--basetemp`, `--junitxml`, `--durations`, `--ignore`, `--ignore-glob`,
+`--deselect`, `--cache-show`, `--debug`, `-r` and logging options. Equals-form options occupy one token. Unknown separate-value plugin
+options and missing option values make granular resolution fail closed, with a hint to declare
+`broad_check.collection_roots`; full argv remains unchanged. No implicit checkout-wide root is used.
+
+Optional explicit `broad_check.collection_roots: [tests/unit, tests/tooling, tests/copier]` identifies
+the complete set of exact positional argv tokens without inferring plugin option arity. The schema requires a nonempty
+unique list of strings. Granular validation requires each root to occur exactly once in `args`, be a
+relative path without `..`, a leading `-` or `::`, and not occupy a known option's value position.
+All other tokens remain in their original order. A root repeated as an option value must be spelled
+differently there (for example `--ignore=tests/unit`) to make its positional role explicit. Invalid
+root roles refuse granular execution; a schema-valid full argv still runs unchanged.
+
+This implements decision ummanu-168 variant 1, clarifying the
+prior ummanu-161 append wording: an addressed node must execute only the selection.
 [Prepared fragments](../examples/check-adapters/instance-local.yaml) retain the exact existing argv for
 codegen-product-kit, codegen-platform-services, personal-site and dnd-simulator. They are additions to
 existing adapters, not replacements for setup, smoke or validation configuration.
@@ -206,10 +231,10 @@ complete manifest profile. Malformed declarations or unreadable manifests fail w
 The unshipped intermediate `modules` map is not a supported contract.
 
 Legacy full-profile `ummanu check broad --reuse --module <adapter.module>` and `ummanu check show`
-remain supported with the declared module arguments. With a local declaration, a legacy single
-`--module-arg` selector is validated or delegated and runs without a receipt. A full declared argv
-followed by the separator and one selector also runs as a subset; `show` refuses both subset forms.
-Other shape overrides fail. Without `local`, only the old full-profile argv remains supported; the
+remain supported with the declared module arguments. With a local declaration, legacy
+`--module-arg` selectors are validated or delegated and run without a receipt. A full declared argv
+followed by the declared separator and selectors also runs as a subset; `show` refuses both subset forms.
+Pytest legacy append inputs reach the same membership/replacement resolver. Other shape overrides fail. Without `local`, only the old full-profile argv remains supported; the
 new bare command and selectors fail as `local_check_not_declared`. The wrapper never guesses membership.
 
 Candidate interpreter and import provenance use the same adapter resolution and bootstrap as broad

@@ -122,13 +122,13 @@ class LocalCheckFixture:
             status = main(
                 [
                     "check",
-                    *argv,
                     "--root",
                     str(self.root),
                     "--instance",
                     str(self.instance),
                     "--default-interpreter",
                     sys.executable,
+                    *argv,
                 ]
             )
         text = stdout.getvalue() or stderr.getvalue()
