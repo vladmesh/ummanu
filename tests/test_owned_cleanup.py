@@ -145,6 +145,316 @@ class OwnedCleanupTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"records": records}))
 
+    def replaced_card(self, *, state="blocked", settled=True):
+        """Inactive predecessor, retained green review_starting successor, current claim."""
+        from ummanu.dispatch.gate_receipt import GateReceipt, TerminalCheck
+        run = replace(self.head(), pid_file=str(self.root / "shared-worker.pid"))
+        if settled:
+            run = run.finishing(StopInitiator(actor="ummanu-dispatcher")).exited()
+        self.record.worker_head_run = run.to_json()
+        self.record.worker_pid_file = run.pid_file
+        self.task.update(state="blocked", claim={"worker": self.record.worker, "claimed_at": "old"})
+        key = self.request("inactive")
+        successor = DispatcherRecord.from_json(self.record.to_json())
+        successor.attempt_id = "attempt-2"
+        successor.state = "review_starting"
+        successor.attempt_round = 1
+        successor.review_infra_failures = 10
+        successor.gate_state = "green"
+        successor.worker_continuation.begin_retention(1.0)
+        successor.worker_continuation.confirm_validation_move()
+        successor.gate_attestation = GateReceipt(
+            self.base, self.base, "github", (TerminalCheck("test", "SUCCESS"),),
+            "2026-10-09T01:00:00Z", "a" * 64)
+        successor.worker_head_run = replace(run, run_id="successor-worker", scope_generation="new-scope",
+                                             lifecycle="working", stopped_by=None).to_json()
+        self.task.update(state=state, claim={"worker": self.record.worker, "claimed_at": "current"})
+        owned = self.owner.remember(self.task, successor)
+        self.state({self.task["ref"]: successor.to_json()})
+        environment = self.workspace / ".ummanu-task-env"
+        environment.mkdir()
+        (environment / "retained").write_text("successor environment\n")
+        fenced, guarded, stopped = [], [], []
+        self.host.fence_cleanup_scopes = lambda workspace, task, runs, recorded_only=False: fenced.append(
+            ([r.run_id for r in runs], recorded_only))
+        self.host._guard_head_run = lambda run, role, **kwargs: guarded.append(run.run_id)
+        def recorded_stop(target, initiator):
+            stopped.append(target)
+            self.stops.append((target.run_id, target.scope_generation))
+            return SimpleNamespace(ok=not self.stop_failure, reason="simulated stop failure",
+                                   run=target if target.settled else target.finishing(initiator).exited())
+
+        self.backend.stop = recorded_stop
+        return key, owned, successor, fenced, guarded, stopped
+
+    def successor_snapshot(self, owned):
+        return ((self.data / "dispatcher" / "production-state.json").read_bytes(),
+                self.owner.journal._intent_path(owned).read_bytes(), copy.deepcopy(self.task),
+                {str(p.relative_to(self.workspace)): p.read_bytes()
+                 for p in self.workspace.rglob("*") if p.is_file()},
+                git(self.repo, "show-ref"), git(self.repo, "worktree", "list", "--porcelain"))
+
+    def test_replaced_card_settles_only_old_heads_and_preserves_successor_across_reload(self):
+        key, owned, successor, fenced, guarded, stopped = self.replaced_card()
+        before = self.successor_snapshot(owned)
+        self.assertTrue(self.owner.journal.admission_refusal(self.task["ref"]))
+        first = None
+        with mock.patch.object(self.owner, "_environment_owner") as environment, \
+                mock.patch.object(self.owner, "_remove_workspace") as remove, \
+                mock.patch.object(self.owner, "_delete_branch") as delete, \
+                mock.patch.object(self.runtime.writer, "settle_cleanup_claim") as claim:
+            for _ in range(2):
+                result = self.owner.replay_one(key)
+                self.assertEqual(result["status"], "preserved", result["reason"])
+                self.assertTrue(result["progress"]["heads_stopped"])
+                self.assertTrue(result["progress"]["preservation_verified"])
+                self.assertTrue(result["progress"]["claim_settled"])
+                self.assertEqual(result["progress"]["terminal"]["kind"], "attempt-replaced")
+                if first is not None:
+                    self.assertEqual(result, first)
+                first = copy.deepcopy(result)
+                self.assertEqual(result["progress"]["handoff"], {
+                    "attempt_id": "attempt-1", "successor_attempt_id": successor.attempt_id})
+                self.assertEqual(self.owner.journal.admission_refusal(self.task["ref"]), "")
+                self.assertEqual(self.successor_snapshot(owned), before)
+                self.owner = CleanupOwner(self.runtime)
+            for effect in (environment, remove, delete, claim):
+                effect.assert_not_called()
+        self.assertEqual(fenced, [(["run-worker"], True)])
+        self.assertEqual(guarded, [])
+        self.assertEqual([r.run_id for r in stopped], ["run-worker"])
+        self.assertTrue(all(not r.pid_file for r in stopped))
+        with self.owner.admission(self.task, launch=True):
+            pass
+
+    def test_replaced_card_terminal_handoff_never_reclaims_a_later_owner_workspace(self):
+        key, _, _, _, _, _ = self.replaced_card()
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        before = journal_bytes(self.owner.journal)
+        self.state({})
+        self.task.update(state="done", claim={"worker": None, "claimed_at": None})
+        self.owner = CleanupOwner(self.runtime)
+        with mock.patch.object(self.runtime.reader, "show", side_effect=AssertionError("old owner read")), \
+                mock.patch.object(self.owner, "_stop") as stop, \
+                mock.patch.object(self.owner, "_remove_workspace") as remove, \
+                mock.patch.object(self.runtime.writer, "settle_cleanup_claim") as claim:
+            self.assertEqual(self.owner.replay_one(key), result)
+            self.assertEqual(self.owner.replay(), [])
+        for effect in (stop, remove, claim):
+            effect.assert_not_called()
+        self.assertEqual(journal_bytes(self.owner.journal), before)
+        self.assertTrue(self.workspace.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_replaced_card_active_validate_settles_with_current_claim(self):
+        key, owned, _, _, _, _ = self.replaced_card(state="validate")
+        before = self.successor_snapshot(owned)
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertEqual(self.successor_snapshot(owned), before)
+        with self.owner.admission(self.task, launch=True):
+            pass
+
+    def test_replaced_card_failed_stop_remains_pending_and_refuses_launch(self):
+        key, owned, _, _, _, _ = self.replaced_card()
+        before = self.successor_snapshot(owned)
+        self.stop_failure = True
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertTrue(self.owner.journal.admission_refusal(self.task["ref"]))
+        self.assertEqual(self.successor_snapshot(owned), before)
+        self.stop_failure = False
+        self.assertEqual(self.owner.replay_one(key)["status"], "preserved")
+
+    def test_replaced_card_rechecks_specific_successor_after_stop_proof(self):
+        key, _, successor, _, _, _ = self.replaced_card()
+        stop = self.backend.stop
+
+        def replaced_again(run, initiator):
+            receipt = stop(run, initiator)
+            successor.attempt_id = "attempt-3"
+            CleanupOwner(self.runtime).remember(self.task, successor)
+            self.state({self.task["ref"]: successor.to_json()})
+            return receipt
+
+        with mock.patch.object(self.backend, "stop", side_effect=replaced_again):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("ownership changed since admission", result["reason"])
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertTrue(self.owner.journal.admission_refusal(self.task["ref"]))
+        self.assertEqual(self.owner.replay_one(key)["status"], "preserved")
+
+    def test_replaced_card_unproven_successors_refuse_before_fence_or_stop(self):
+        key, owned, successor, fenced, guarded, stopped = self.replaced_card(state="validate")
+        original = self.owner.journal.load_intent(owned)
+        cases = ("no-identity", "foreign-project", "foreign-card", "foreign-workspace", "foreign-worker",
+                 "foreign-ref", "foreign-branch", "foreign-head", "shared-head", "missing-head",
+                 "same-attempt", "empty-attempt", "foreign-claim", "other-workspace-owner")
+        for case in cases:
+            with self.subTest(case=case):
+                other = copy.deepcopy(original)
+                records = {self.task["ref"]: successor.to_json()}
+                self.task["claim"]["worker"] = self.record.worker
+                if case == "no-identity":
+                    other["identity"] = None
+                elif case.startswith("foreign-") and case[8:] in {"project", "card", "ref"}:
+                    other["task"]["id" if case == "foreign-card" else case[8:]] = "foreign"
+                elif case in {"foreign-workspace", "foreign-worker"}:
+                    records[self.task["ref"]][case[8:]] = "foreign"
+                elif case == "foreign-branch":
+                    other["identity"]["branch"] = "refs/heads/foreign"
+                elif case == "foreign-head":
+                    other["heads"][0]["task_ref"]["ref"] = "foreign"
+                elif case == "shared-head":
+                    other["heads"][0] = copy.deepcopy(self.record.worker_head_run)
+                elif case == "missing-head":
+                    other["heads"] = []
+                elif case in {"same-attempt", "empty-attempt"}:
+                    records[self.task["ref"]]["attempt_id"] = "attempt-1" if case == "same-attempt" else ""
+                elif case == "foreign-claim":
+                    self.task["claim"]["worker"] = "foreign"
+                elif case == "other-workspace-owner":
+                    records["foreign-card"] = successor.to_json()
+                self.owner.journal.save({"intents": {owned: other}})
+                self.state(records)
+                result = self.owner.replay_one(key)
+                self.assertEqual(result["status"], "pending", result["reason"])
+                self.assertFalse(result["progress"]["heads_stopped"])
+                self.assertTrue(self.owner.journal.admission_refusal(self.task["ref"]))
+        self.assertEqual((fenced, guarded, stopped), ([], [], []))
+
+    def test_replaced_card_does_not_hide_another_unsettled_obligation(self):
+        key, _, _, _, _, _ = self.replaced_card()
+        unresolved = self.owner.journal.load_intent(key)
+        unresolved["record"]["attempt_id"] = "unproven-attempt"
+        unresolved["identity"] = None
+        self.owner.journal.remember(unresolved["task"], unresolved["record"], disposition="inactive")
+        self.assertEqual(self.owner.replay_one(key)["status"], "preserved")
+        self.assertTrue(self.owner.journal.admission_refusal(self.task["ref"]))
+
+    def test_replaced_card_runtime_accepts_exited_receipt_with_own_empty_scope(self):
+        from ummanu.runtime.head.identity import publish_heartbeat
+        from ummanu.runtime.head.local_pty import scoped_lifecycle
+        from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
+        key, owned, _, _, guarded, _ = self.replaced_card()
+        before = self.successor_snapshot(owned)
+        run = HeadRun.from_json(self.record.worker_head_run)
+        root = self.root / "heads"
+        directory = root / run.run_id
+        directory.mkdir(parents=True)
+        scope = scoped_lifecycle.ScopedHeadLifecycle(run.run_id, 128, generation=run.scope_generation)
+        scope.persist(directory, role=run.role, task="card:" + self.task["ref"], workspace=run.workspace)
+        evidence = scope.read_owner(directory)
+        evidence.update(launch_allowed=False, cleanup_complete=True)
+        scope.update_owner(directory, evidence)
+        # An unreadable successor scope must never be addressed by recorded-only replay.
+        replacement = root / "successor-worker"
+        replacement.mkdir()
+        (replacement / "scope-owner.json").write_text("unreadable successor scope")
+        publish_heartbeat(run.pid_file, {"run_id": "successor-worker", "role": "worker",
+                                         "task": "card:" + self.task["ref"]})
+        identity = mock.Mock(side_effect=AssertionError("shared heartbeat read"))
+        backend = LocalPtyHeadRuntime(root, head_process_status=identity, stop_timeout=0)
+        self.host.head_runtime_for = lambda run: backend
+        self.host._local_pty_root = lambda: root
+        self.host.fence_cleanup_scopes = lambda *args, **kwargs: CommandHostRuntime.fence_cleanup_scopes(
+            self.host, *args, **kwargs)
+        with mock.patch.object(scoped_lifecycle, "CGROUP_ROOT", self.root / "empty-cgroups"), \
+                mock.patch.object(backend, "_ask_to_stop", return_value=None) as ask:
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertEqual(ask.call_args.args[0].run_dir, directory)
+        self.assertEqual(self.successor_snapshot(owned), before)
+        self.assertEqual(guarded, [])
+        identity.assert_not_called()
+        self.assertEqual(result["heads"], [run.to_json()])
+
+    def test_replaced_card_missing_runtime_journals_do_not_prove_exit(self):
+        from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
+        key, _, _, _, _, _ = self.replaced_card(settled=False)
+        backend = LocalPtyHeadRuntime(self.root / "missing-heads", head_process_status=lambda *a, **k: {},
+                                     stop_timeout=0)
+        self.host.head_runtime_for = lambda run: backend
+        with mock.patch.object(backend, "_ask_to_stop", return_value=None):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("lost its owner", result["reason"])
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertTrue(self.owner.journal.admission_refusal(self.task["ref"]))
+
+    def test_replaced_card_admission_keeps_sql_fence_before_effects(self):
+        key, _, _, _, _, _ = self.replaced_card()
+        active, locks = False, []
+
+        @contextlib.contextmanager
+        def transaction():
+            nonlocal active
+            self.assertFalse(active)
+            active = True
+            try:
+                yield
+            finally:
+                active = False
+
+        def call(method, **kwargs):
+            self.assertTrue(active)
+            self.assertEqual((method, kwargs), ("lockOwnershipReference", {
+                "reference": self.task["ref"], "observer": False}))
+            locks.append(method)
+            return True
+
+        self.runtime.reader.client = SimpleNamespace(transaction=transaction, call=call)
+        stop = self.backend.stop
+
+        def effect(*args):
+            self.assertFalse(active)
+            return stop(*args)
+
+        with mock.patch.object(self.backend, "stop", side_effect=effect):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertGreaterEqual(len(locks), 4)
+
+    def test_replaced_card_blocked_validate_retry_launches_only_reviewer(self):
+        from ummanu.dispatch import review, runtime as runtime_module
+        from ummanu.dispatch.types import ReviewLaunch
+        key, _, successor, _, _, _ = self.replaced_card()
+        records = {self.task["ref"]: successor}
+        worker = successor.worker_head_run.to_json()
+        attestation = successor.gate_attestation.to_json()
+        self.host.review_status = lambda *args: {"live": False, "known": True}
+
+        def reviewer(task, record):
+            with self.owner.admission(task, launch=True):
+                return ReviewLaunch(handle="review", leaf="review", run={}, commit=self.base)
+
+        self.host.start_review = mock.Mock(side_effect=reviewer)
+        self.runtime.head_readiness = lambda head: SimpleNamespace(launch_allowed=True)
+        self.runtime.record_review_routing = mock.Mock()
+        with mock.patch.object(runtime_module, "_advance_review_verdict", return_value=None), \
+                mock.patch.object(runtime_module, "_run_gate") as gate, \
+                mock.patch.object(review, "write_launch_intent", return_value=None), \
+                mock.patch.object(review, "confirm_launch_intent"):
+            with self.assertRaisesRegex(HostError, "previous cleanup"):
+                reviewer(self.task, successor)
+            self.assertEqual(self.owner.replay_one(key)["status"], "preserved")
+            # Supported board retry; no live board or production tick is involved.
+            self.task["state"] = "validate"
+            result = DispatcherRuntime._advance_review(
+                self.runtime, self.task, records, {}, successor.attempt_id)
+        self.assertEqual(result["action"], "review-restarted")
+        self.host.start_review.assert_called_once_with(self.task, successor)
+        gate.assert_not_called()
+        self.assertEqual(successor.worker_head_run.to_json(), worker)
+        self.assertEqual(successor.gate_attestation.to_json(), attestation)
+        self.assertEqual(successor.attempt_round, 1)
+        self.assertEqual(successor.review_commit, self.base)
+        self.assertEqual(successor.state, "reviewing")
+
     def observer(self, *, committed=False):
         repo = observer_root_repo(self.data)
         repo.mkdir(parents=True)
