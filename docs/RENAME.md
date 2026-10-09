@@ -601,6 +601,9 @@ GitHub rename needs no rollback: the old URL still redirects.
   - **H:** `hermes-secretary`, `hermes-secretary-roles`, `~/.hermes/skills/secretary`, `~/.hermes/skills/secretary-roles` (only in `skills/manifest.toml`).
   - **I:** `secretary-instance` (any file).
   - **R:** card refs `\bsecretary-\d+\b`; the fixture path `tests/fixtures/local_pty_journals/secretary_1727_*.jsonl.gz`.
+    The standalone `opus_review.md` audit is also a class R record: it preserves quoted historical
+    source and production unit names. Its exact path is allowlisted; this does not permit the same
+    names in operational documentation or product source.
   - **T:** `src/ummanu/transition/**`, `scripts/transition-from-secretary.sh`, `tests/test_transition_from_secretary.py`, `docs/RENAME.md`, the guard test itself and its shared matcher `src/ummanu/infra/old_name_guard.py`.
 
   Nothing else, and no per-file exemptions outside these four classes.
