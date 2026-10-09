@@ -24,15 +24,15 @@ from typing import TextIO
 
 # The installed wrapper imports this file by path to validate the candidate manifest.
 # Resolve its stdlib-only collector from that same candidate, even before an upgrade.
-_timing_path = Path(__file__).resolve().parents[1] / "src/ummanu/test_timing.py"
-_timing_spec = importlib.util.spec_from_file_location("ummanu.test_timing", _timing_path)
-if "ummanu.test_timing" not in sys.modules:
+_timing_path = Path(__file__).resolve().parents[1] / "src/ummanu/projects/test_timing.py"
+_timing_spec = importlib.util.spec_from_file_location("ummanu.projects.test_timing", _timing_path)
+if "ummanu.projects.test_timing" not in sys.modules:
     if _timing_spec is None or _timing_spec.loader is None:
         raise ImportError(f"timing helper unavailable: {_timing_path}")
     _timing = importlib.util.module_from_spec(_timing_spec)
     sys.modules[_timing_spec.name] = _timing
     _timing_spec.loader.exec_module(_timing)
-from ummanu.test_timing import TestRecord, TimingResult, TimingSuite, diagnostic, violations
+from ummanu.projects.test_timing import TestRecord, TimingResult, TimingSuite, diagnostic, violations
 
 SUITES = (
     "unit",

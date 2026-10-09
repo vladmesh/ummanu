@@ -94,8 +94,8 @@ class LocalCheckFixture:
         source = Path(__file__).resolve().parents[2]
         (self.root / "scripts").mkdir()
         shutil.copy(source / "scripts" / "ci_test_shards.py", self.root / "scripts")
-        (self.root / "src/ummanu").mkdir(parents=True, exist_ok=True)
-        shutil.copy(source / "src/ummanu/test_timing.py", self.root / "src/ummanu")
+        (self.root / "src/ummanu/projects").mkdir(parents=True, exist_ok=True)
+        shutil.copy(source / "src/ummanu/projects/test_timing.py", self.root / "src/ummanu/projects")
         shutil.copy(source / "tests" / "broad.py", self.root / "tests")
         from scripts.ci_test_shards import SUITES
 

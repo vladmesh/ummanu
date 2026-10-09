@@ -54,7 +54,7 @@ CANDIDATE_SHA = "a" * 40
 
 class TimingBudgetTests(unittest.TestCase):
     def test_strict_thresholds_and_actual_module_membership(self):
-        from ummanu.test_timing import violations
+        from ummanu.projects.test_timing import violations
 
         observation = {"tests": [
             {"identifier": "tests.real.IntegrationNamed.test_a", "duration_seconds": 5.0},
@@ -64,7 +64,7 @@ class TimingBudgetTests(unittest.TestCase):
                          ["tests.real.Other.test_b", "tests.other"])
 
     def test_module_clock_includes_fixtures_across_classes(self):
-        from ummanu.test_timing import TimingResult, TimingSuite, violations
+        from ummanu.projects.test_timing import TimingResult, TimingSuite, violations
 
         now = [0.0]
 
@@ -95,7 +95,7 @@ class TimingBudgetTests(unittest.TestCase):
         def teardown_module():
             now[0] += 4
 
-        with (patch("ummanu.test_timing.time.monotonic", side_effect=lambda: now[0]),
+        with (patch("ummanu.projects.test_timing.time.monotonic", side_effect=lambda: now[0]),
               patch.object(sys.modules[__name__], "setUpModule", setup_module, create=True),
               patch.object(sys.modules[__name__], "tearDownModule", teardown_module, create=True)):
             runner = unittest.TextTestRunner(stream=StringIO(), resultclass=TimingResult)
@@ -107,7 +107,7 @@ class TimingBudgetTests(unittest.TestCase):
         self.assertEqual(violations(observation, modules=True)[0]["kind"], "module")
 
     def test_ci_budget_failure_report_junit_summary_and_nonlocal_exemption(self):
-        from ummanu.test_timing import TimingSuite
+        from ummanu.projects.test_timing import TimingSuite
 
         now = [0.0]
 
@@ -119,7 +119,7 @@ class TimingBudgetTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 log = BoundedTee(StringIO(), root / "test-output.log")
-                with (patch("ummanu.test_timing.time.monotonic", side_effect=lambda: now[0]),
+                with (patch("ummanu.projects.test_timing.time.monotonic", side_effect=lambda: now[0]),
                       patch.object(unittest.defaultTestLoader, "loadTestsFromName",
                                    return_value=TimingSuite([Specimen("test_slow_fake_clock")]))):
                     evidence = run_reported_suite(suite, ["tests/test_fake.py"], CANDIDATE_SHA, log)
@@ -136,7 +136,7 @@ class TimingBudgetTests(unittest.TestCase):
                     self.assertIn("timing budget test", (root / "test-output.log").read_text())
 
     def test_outcomes_and_interrupted_timing_have_no_invented_zero(self):
-        from ummanu.test_timing import TimingResult, TimingRunner
+        from ummanu.projects.test_timing import TimingResult, TimingRunner
 
         class Cases(unittest.TestCase):
             def test_pass(self):

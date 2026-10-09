@@ -97,7 +97,7 @@ def _names_tests(arguments: list[str]) -> bool:
 def main(argv: list[str] | None = None) -> int:
     from ummanu.broad_check import BroadCheckError
     from ummanu.projects.local_check import LocalProfile
-    from ummanu.test_timing import TimingRunner, summary
+    from ummanu.projects.test_timing import TimingRunner, summary
 
     arguments = list(sys.argv[1:] if argv is None else argv)
     try:

@@ -1,4 +1,4 @@
-"""Timing observations shared by the local unittest profile and CI.
+"""Timing observations shared by the declared project unittest profile and CI.
 
 Test time spans startTest/stopTest (setUp, body, tearDown and test cleanups).
 Module time spans its complete suite, including class/module fixtures and cleanups.
