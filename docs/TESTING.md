@@ -86,6 +86,25 @@ coverage baseline. Its summary lists each suite as `success`, `product_failure`,
   infrastructure failure even if a product test also failed; the failure location stays in evidence;
 - cancelled work is never success; routing that skips a suite records `not_applicable`.
 
+Before reporting completion, inspect the check runs on the exact candidate SHA, including other
+workflow runs on that SHA. The dispatcher reads all instances of its selected check names; a green
+PR run does not supersede a failed or cancelled manual run with the same names. Cancelling a
+redundant current-candidate run can leave a failed `test` aggregate even after the PR run succeeds.
+Use the existing PR run when it supplies the required evidence. Let already-started runs finish;
+if a selected run was interrupted, rerun its failed/cancelled jobs and wait for their terminal
+results. Do not report completion while a selected check remains failed, cancelled or pending.
+The failed aggregate's preceding suite/coverage steps identify its cause; the final shell assertion
+alone does not establish a candidate test defect.
+
+Read-only inspection for this repository (replace `CANDIDATE_SHA` with the committed full SHA):
+
+```bash
+gh api --paginate repos/vladmesh/ummanu/commits/CANDIDATE_SHA/check-runs \
+  --jq '.check_runs[] | {name, status, conclusion, head_sha, details_url}'
+```
+
+This check does not mint a mechanical gate attestation or change the gate's selection policy.
+
 ## Control-host fast profile
 
     python3 scripts/ci_test_shards.py --fast
