@@ -76,10 +76,27 @@ import edges, while imports and recognized dynamic loaders inside their bodies a
 Analysis never executes imports
 to try to infer their runtime behaviour.
 
-This safety boundary currently limits effectiveness. The independent ummanu-205 review of
+Call identity preserves import namespaces in lexical module, function, class and
+comprehension scopes. A single direct scope-body import with no competing binding can
+prove an alias; parameters, assignments/deletions, conditional imports and ambiguous
+receivers refuse that proof. Methods resolve enclosing names outside the class namespace.
+Wildcard imports, global/nonlocal writes and explicit namespace mutation invalidate proof
+conservatively. Value aliases retain hazardous spellings but do not establish safe identity.
+Proven `unittest.mock.call` constructs an expectation record without invoking its arguments,
+so it no longer creates universal dependencies solely because its leaf is `call`.
+Calls inside its arguments are still analyzed. Other imported APIs with the same name,
+unknown receivers, source/file reads (including temporary files), subprocesses and entry
+points remain conservative. Literal dynamic imports require a proven `importlib.import_module`
+or builtin `__import__` identity; an ambiguous loader stays opaque even with a literal argument.
+`asyncio.run` remains opaque: its identity alone proves neither the origin nor the dependencies
+of an arbitrary awaitable/callback. This refinement does not infer callback targets, receiver
+types, arbitrary third-party/native execution or runtime monkeypatching through external code.
+
+This safety boundary limits effectiveness. The historical independent ummanu-205 review of
 [PR #714](https://github.com/vladmesh/ummanu/pull/714), candidate `c3b51bf1113bf66dd13d4903041556d35615c903`,
 found 219 of 294 manifest test modules and 149 of 386 product modules opaque. Its offline graph
-analysis selected 280–293 of 294 test modules and all nine owners for nonopaque source changes;
+analysis selected 280–293 of 294 test modules and all nine owners for single-module nonopaque
+product-source changes;
 opaque source changes required full fallback. This is safe over-selection, with practically no
 code-PR wall-clock gain at that snapshot, not evidence of useful acceleration. The docs-only path
 avoids suite execution independently of this limitation.
@@ -94,6 +111,16 @@ selected module and its reason in `test / integration-dispatcher`'s bounded log.
 uses the committed source graph and checks that membership is smaller than the full manifest.
 At candidate205 that projection selected 291 of 294 modules.
 Fixtures and projections are not natural PR acceptance proofs.
+
+The CI-only identity comparison in the same existing `integration-dispatcher` owner runs
+the original analyzer pinned at `8d722448497dcbd4ab32ee6e347fb1bc53024d9d` and the refined
+analyzer over one committed candidate source snapshot. Its bounded log records SHA/tree,
+opaque counts, removed identities and graph edges, and before/after membership, owners and
+every selected reason for `terminal_taxonomy.py`, `webfront/caddyfile.py` and the real
+`test_web_front_cookie_order.py` expectation consumer. Those projections describe graph
+effectiveness, not an executed affected-source PR or a wall-clock speedup. This infrastructure
+PR itself requires the full manifest, and leaves the genuine affected-source acceptance proof
+and final-main controlled-load measurement to their later authorized work.
 
 Runner and aggregators independently regenerate the plan from the exact checkout/base/event and
 require byte-equivalent JSON data. A manually edited subset, wrong event/base/SHA, duplicate or
