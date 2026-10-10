@@ -7,9 +7,7 @@ commands retain the adapter's full-profile argv; a selector runs without a broad
 from __future__ import annotations
 
 import argparse
-import copy
 import json
-import re
 import shlex
 import subprocess
 import sys
@@ -18,10 +16,9 @@ from pathlib import Path
 from ummanu.broad_check import (
     BroadCheckError,
     CheckSpec,
+    admission_snapshot,
     candidate_import_refusal,
-    check_set_digest,
     receipt_path,
-    receipt_provenance_refusal,
     recorded_result,
     run_broad_check,
     summarize,
@@ -40,95 +37,6 @@ from ummanu.runtime.role_env import WORKSPACE_ENV_DIR
 from ummanu.runtime.test_guard import check_refusal
 
 _GIT_TIMEOUT = 60
-ADMISSION_MAX_BYTES = 16 * 1024
-_TEXT_MAX_BYTES = 2048
-_COUNT_KEYS = ("tests", "skipped", "failures", "errors", "expected_failures", "unexpected_successes")
-_PROVENANCE_KEYS = ("origin", "python", "environment_prefix", "cwd", "imported_package", "imported_project", "import_roots")
-_ADMISSION_KEYS = {"schema", "candidate_sha", "tree_sha", "path", "receipt_digest", "check_set",
-                   "command_or_check_set_digest", "cwd", "project_provenance", "status", "exit_code",
-                   "verdict", "counts", "summary", "snapshot_digest"}
-
-
-def _admission_text(value: object, limit: int = _TEXT_MAX_BYTES) -> bool:
-    return isinstance(value, str) and bool(value) and len(value.encode("utf-8", "surrogateescape")) <= limit
-
-
-def _admission_summary(counts: dict[str, object]) -> str:
-    return "complete/passed; exit=0" + "".join(f"; {key}={counts[key]}" for key in _COUNT_KEYS if key in counts)
-
-
-def admission_snapshot(receipt: dict[str, object], *, candidate_sha: str, tree_sha: str, path: Path) -> dict[str, object]:
-    """Compact writer evidence after completion_check authorizes the intact full artifact.
-
-    The original digest identifies that artifact; snapshot_digest seals this separate,
-    bounded decision record. No output, timing arrays or arbitrary parsed fields enter it.
-    """
-    parsed = receipt["parsed"] if isinstance(receipt["parsed"], dict) else {}
-    counts = {key: parsed[key] for key in _COUNT_KEYS if key in parsed}
-    provenance = receipt["project_provenance"]
-    evidence = {"schema": "worker-admission-v1", "candidate_sha": candidate_sha, "tree_sha": tree_sha,
-                "path": str(path), "receipt_digest": receipt["receipt_digest"],
-                "check_set": receipt["check_set"], "command_or_check_set_digest": receipt["command_or_check_set_digest"],
-                "cwd": receipt["cwd"], "project_provenance": {key: provenance.get(key) for key in _PROVENANCE_KEYS},
-                "status": receipt["status"], "exit_code": receipt["exit_code"], "verdict": receipt["verdict"],
-                "counts": counts, "summary": _admission_summary(counts)}
-    evidence["snapshot_digest"] = check_set_digest(evidence)
-    if admitted_check(evidence) is None:
-        raise BroadCheckError("done_receipt_required", "green admission snapshot is invalid or exceeds bounded field/16 KiB limits")
-    # Detach nested fields from the loaded artifact before writing immutable audit data.
-    return copy.deepcopy(evidence)
-
-
-def admitted_check(evidence: object) -> dict[str, object] | None:
-    """Read a previously admitted immutable snapshot without re-deciding current config/tree."""
-    if not isinstance(evidence, dict) or set(evidence) != _ADMISSION_KEYS:
-        return None
-    if (evidence["schema"] != "worker-admission-v1" or evidence["status"] != "complete"
-            or type(evidence["exit_code"]) is not int or evidence["exit_code"] != 0 or evidence["verdict"] != "passed"):
-        return None
-    for key in ("candidate_sha", "tree_sha", "receipt_digest", "command_or_check_set_digest", "snapshot_digest"):
-        size = r"(?:[0-9a-f]{40}|[0-9a-f]{64})" if key in {"candidate_sha", "tree_sha"} else r"[0-9a-f]{64}"
-        if not isinstance(evidence[key], str) or not re.fullmatch(size, evidence[key]):
-            return None
-    try:
-        if not all(_admission_text(evidence[key]) for key in ("path", "cwd")):
-            return None
-        if not Path(evidence["path"]).is_absolute() or not Path(evidence["cwd"]).is_absolute():
-            return None
-        counts = evidence["counts"]
-        if (not isinstance(counts, dict) or not set(counts) <= set(_COUNT_KEYS)
-                or any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in counts.values())):
-            return None
-        if not _admission_text(evidence["summary"], 512) or evidence["summary"] != _admission_summary(counts):
-            return None
-        check = evidence["check_set"]
-        if not isinstance(check, dict) or set(check) != {"schema", "shape", "module", "args", "interpreter", "import_package"}:
-            return None
-        args = check["args"]
-        if (not isinstance(args, list) or len(args) > 64
-                or any(not isinstance(arg, str) or len(arg.encode("utf-8", "surrogateescape")) > _TEXT_MAX_BYTES for arg in args)
-                or not all(_admission_text(check[key]) for key in ("module", "interpreter", "import_package"))):
-            return None
-        spec = CheckSpec.for_module(check["module"], args, interpreter=check["interpreter"], import_package=check["import_package"])
-        if check != spec.check_set or evidence["command_or_check_set_digest"] != spec.digest:
-            return None
-        provenance = evidence["project_provenance"]
-        if not isinstance(provenance, dict) or set(provenance) != set(_PROVENANCE_KEYS):
-            return None
-        roots = provenance["import_roots"]
-        if (not isinstance(roots, list) or len(roots) != 2 or not all(_admission_text(root) for root in roots)
-                or not all(_admission_text(provenance[key]) for key in _PROVENANCE_KEYS if key != "import_roots")):
-            return None
-        canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        if len(canonical.encode("utf-8", "surrogateescape")) > ADMISSION_MAX_BYTES:
-            return None
-        if evidence["snapshot_digest"] != check_set_digest({key: value for key, value in evidence.items() if key != "snapshot_digest"}):
-            return None
-        if receipt_provenance_refusal(evidence, Path(evidence["cwd"]), spec):
-            return None
-    except (BroadCheckError, OSError, ValueError, UnicodeError):
-        return None
-    return evidence
 
 
 def completion_check(project: str, root: Path, instance: Path) -> dict[str, object] | None:

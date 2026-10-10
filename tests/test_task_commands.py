@@ -11,8 +11,14 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.support.completion_receipt import SHA, TREE, declared_receipt, save_receipt
-from ummanu.broad_check import BroadCheckError, ContentIdentity, check_set_digest
-from ummanu.check_commands import ADMISSION_MAX_BYTES, admitted_check, completion_check
+from ummanu.broad_check import (
+    ADMISSION_MAX_BYTES,
+    BroadCheckError,
+    ContentIdentity,
+    admitted_check,
+    check_set_digest,
+)
+from ummanu.check_commands import completion_check
 from ummanu.task_commands import resolve_data_dir
 from ummanu.tasks import TaskError, TaskWriter
 

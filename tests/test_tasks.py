@@ -4783,8 +4783,8 @@ class ReportDurabilityGateTests(CardStoreCase):
     def test_registered_code_admission_keeps_bounded_native_snapshot_in_sql_event_and_replays_after_loss(self):
         import sys
 
-        from ummanu.broad_check import run_broad_check
-        from ummanu.check_commands import ADMISSION_MAX_BYTES, _spec, admitted_check
+        from ummanu.broad_check import ADMISSION_MAX_BYTES, admitted_check, run_broad_check
+        from ummanu.check_commands import _spec
 
         self.client.move(12, "in_progress")
         instance = Path(self.tmpdir.name)

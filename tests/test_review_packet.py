@@ -445,7 +445,7 @@ class PacketHeaderTests(unittest.TestCase):
         import tempfile
 
         from tests.support.completion_receipt import SHA, TREE, declared_receipt
-        from ummanu.check_commands import admission_snapshot
+        from ummanu.broad_check import admission_snapshot
 
         fixture = PacketFixture()
         scratch = tempfile.TemporaryDirectory()

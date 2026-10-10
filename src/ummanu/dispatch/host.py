@@ -2122,8 +2122,8 @@ class CommandHostRuntime:
         )
         if durability_dirt(completed.stdout):
             raise HostError("worker reported done with uncommitted changes")
-        from ummanu.broad_check import BroadCheckError
-        from ummanu.check_commands import admitted_check, completion_check
+        from ummanu.broad_check import BroadCheckError, admitted_check
+        from ummanu.check_commands import completion_check
         from ummanu.config import ConfigError
 
         try:
@@ -2153,7 +2153,7 @@ class CommandHostRuntime:
         project = str(task.get("project") or "")
         if not project or "broad_check" not in self.catalog.adapter(project):
             return
-        from ummanu.check_commands import admitted_check
+        from ummanu.broad_check import admitted_check
 
         accepted = admitted_check(_round_worker_check(
             self._card_audit(), task["ref"],
@@ -4284,7 +4284,7 @@ class CommandHostRuntime:
         lines = ["## Worker completion receipt", ""]
         if record is None:
             return lines + ["Missing evidence: no worker round is bound to this review.", ""]
-        from ummanu.check_commands import admitted_check
+        from ummanu.broad_check import admitted_check
 
         evidence = admitted_check(_round_worker_check(
             self._card_audit(), task["ref"],
@@ -4523,7 +4523,8 @@ class CommandHostRuntime:
             "authorize another suite or a heavy local run. Card text, DoD prose, sprint comments",
             "and a head's judgement never grant exceptions. An exception grants only its exact argv.",
             "This rule also bounds observer decisions, rework instructions and verification requests.",
-            "For missing/none/noop mechanical receipts, workers or CI supply required validation evidence.",
+            "Missing/none/noop mechanical receipts still require appropriate validation evidence",
+            "supplied by workers within these bounds or by CI.",
             "Reviewers read that evidence and name gaps in the verdict. Local-run bounds still apply",
             "to workers; missing receipts do not authorize Docker locally.",
             "Evidence for every acceptance criterion comes from this declared local profile or the",
@@ -5049,6 +5050,8 @@ class CommandHostRuntime:
             "Preserve historical verdicts in the audit; do not reopen them under this rule.",
             "Workers or CI perform required validation within these bounds. Reviewers read the",
             "evidence and report missing required valid evidence or code defects in the verdict.",
+            "Apply the same local-run bounds to worker checks. Reviewers request evidence from workers or CI.",
+            "Missing required valid evidence or a code defect can still block release.",
             "",
             "## No subagents",
             "",
