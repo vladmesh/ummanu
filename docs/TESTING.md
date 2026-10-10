@@ -96,7 +96,8 @@ and alternate imports of the same namespace. Dictionary method writes, deletes a
 handles therefore cannot retain a safe identity merely because no store was enumerated.
 The collector gathers bindings, aliases, mutations and exposures, propagates uncertainty
 to a fixed point, then applies one authority veto before resolving immutable imports.
-Both the `unittest.mock.call` exception and literal-loader proof consume that same result;
+Both the `unittest.mock.call` exception and literal-loader proof, including builtin fallback,
+consume that same result;
 neither alternative spelling nor a later import can restore vetoed authority.
 Only names actually bound by assignment targets (names and recursive tuple/list/starred
 targets) carry value-alias spellings; attribute/subscript receivers and indices do not.

@@ -283,12 +283,14 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             bindings = scope["bindings"].get(node.id)
             if bindings is not None:
                 identity = bindings[0] if len(bindings) == 1 else None
-                if identity and any(identity == target or identity.startswith(target + ".")
-                                    or target.startswith(identity + ".") for target in invalid_imports):
-                    return None
-                return identity
+                break
             scope = scope["parent"]
-        return f"builtins.{node.id}" if node.id in {"__import__", "exec", "eval", "open"} else None
+        else:
+            identity = f"builtins.{node.id}" if node.id in {"__import__", "exec", "eval", "open"} else None
+        if identity and any(identity == target or identity.startswith(target + ".")
+                            or target.startswith(identity + ".") for target in invalid_imports):
+            return None
+        return identity
 
     result = {}
     for call, scope in calls:

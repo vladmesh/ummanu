@@ -342,6 +342,8 @@ class SelectionTests(unittest.TestCase):
             ("import importlib as loader", "escaped = [loader.__dict__]", "loader.import_module"),
             ("import importlib as first\nimport importlib as second", "second.__dict__", "first.import_module"),
             ("import importlib as loader", "holder[0] = loader\nvars(holder[0])", "loader.import_module"),
+            ("import builtins as namespace", "namespace.__dict__", "__import__"),
+            ("import builtins as namespace", "vars(namespace)", "__import__"),
         ):
             for before_import in (False, True):
                 code = ((exposure + "\n" + imports if before_import else imports + "\n" + exposure)
