@@ -233,11 +233,26 @@ class SelectionTests(unittest.TestCase):
                 self.assert_call_boundary(code, True)
 
     def test_assignment_bindings_do_not_alias_attribute_or_subscript_receivers(self):
+        import ast
+
+        from scripts.ci_selection import call_identities
+
         for target in ("record.run", "record[0]", "state[record]",
                        "(record.run, state[record])"):
             code = ("from logging import info as record\nrecord('message')\n"
                     f"def unrelated(record, state, exc):\n    {target} = exc.run\n")
             with self.subTest(target=target):
+                self.assert_call_boundary(code, False)
+        for target in ("makeLogRecord.run", "makeLogRecord[0]", "state[makeLogRecord]",
+                       "(makeLogRecord.run, state[makeLogRecord])"):
+            code = ("import logging as api\napi.makeLogRecord({})\n"
+                    f"def unrelated(makeLogRecord, state, exc):\n    {target} = exc.run\n")
+            with self.subTest(target=target):
+                tree = ast.parse(code)
+                identities = call_identities(tree, "tests")
+                call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute) and node.func.attr == "makeLogRecord")
+                self.assertEqual(identities[id(call)][0], "logging.makeLogRecord")
                 self.assert_call_boundary(code, False)
         for target in ("record", "(record,)", "[record]", "(other, *record)"):
             code = f"import subprocess\n{target} = subprocess.run\nrecord([])\n"
