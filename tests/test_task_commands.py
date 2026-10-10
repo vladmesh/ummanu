@@ -118,7 +118,7 @@ class CompletionAdmissionTests(unittest.TestCase):
         self.writer._marker_write = mock.Mock(return_value={"accepted": True})
 
     def report(self, **overrides):
-        args = dict(role="worker", actor="worker", reference="other-1", kind="done", body="ready", request_id="report-1")
+        args = {"role": "worker", "actor": "worker", "reference": "other-1", "kind": "done", "body": "ready", "request_id": "report-1"}
         return self.writer.report(**{**args, **overrides})
 
     def test_other_project_native_and_pytest_complete_green_admission(self):
@@ -175,9 +175,9 @@ class CompletionAdmissionTests(unittest.TestCase):
         self.head.return_value.stdout = f"{SHA}\n{'c' * 40}\n"
         with self.assertRaisesRegex(BroadCheckError, "committed HEAD tree"):
             completion_check("other", self.root, self.instance)
-        with mock.patch("ummanu.check_commands._same_repository", return_value=False):
-            with self.assertRaisesRegex(BroadCheckError, "registered project's checkout"):
-                completion_check("other", self.root, self.instance)
+        with (mock.patch("ummanu.check_commands._same_repository", return_value=False),
+              self.assertRaisesRegex(BroadCheckError, "registered project's checkout")):
+            completion_check("other", self.root, self.instance)
         self.writer._marker_write.assert_not_called()
 
     def test_dispatcher_uses_real_admission_and_immutable_round_binding(self):

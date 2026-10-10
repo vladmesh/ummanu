@@ -4786,6 +4786,7 @@ class ReportDurabilityGateTests(CardStoreCase):
         from ummanu.broad_check import run_broad_check
         from ummanu.check_commands import _spec
 
+        self.place_card("ummanu-468", "in_progress")
         instance = Path(self.tmpdir.name)
         (instance / "projects").mkdir()
         (instance / "adapters").mkdir()
@@ -4796,7 +4797,7 @@ class ReportDurabilityGateTests(CardStoreCase):
             "validation": {"ci": "github"}, "artifact_policy": {"write_project_files": False},
             "broad_check": {"module": "native", "interpreter": sys.executable, "import_package": "app",
                             "local": {"membership": "runner", "selector_args": ["--"]}}}))
-        (self.workspace / ".gitignore").write_text(".ummanu-task-env/\n__pycache__/\n")
+        (self.workspace / ".gitignore").write_text(".ummanu-task-env/\nstate/checks/\n__pycache__/\n")
         (self.workspace / "app.py").write_text("VALUE = 1\n")
         (self.workspace / "native.py").write_text(
             "import unittest\nclass Case(unittest.TestCase):\n    def test_value(self):\n        import app\n        self.assertEqual(app.VALUE, 1)\nunittest.main()\n")

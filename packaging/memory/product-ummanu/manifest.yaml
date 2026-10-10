@@ -22,16 +22,16 @@ facts:
     sha256: ff30c0433c12e7b7b655739f8e354b265c7059b0f64b81a705ab8ddb33acde5d
   - id: sprints-and-reservations
     path: sprints-and-reservations.md
-    sha256: 79c91bb7ea480f2b3e26799dc0cf241f64c3c4b2f869a593aae3528f7fd39616
+    sha256: 78e0f15a6a06b18814d35537ae1e85f7ca7a3d61bb6a733c0907bf69c3c0a0b7
   - id: worker-reporting
     path: worker-reporting.md
-    sha256: 3ac236e930306f7aa6814709aeb2b3bdee26ae4dfd3873ad6d3fb619ff7ec9aa
+    sha256: cd40132b196dd85243f8a5d83bac8353eba419532a0232417f915ec4140574ce
   - id: validation-review-assessment
     path: validation-review-assessment.md
     sha256: 8776ca900c4990e5471c33e7130e886ac9b67b5ed042de80b3e31899b7e14872
   - id: roles-and-authority
     path: roles-and-authority.md
-    sha256: bf73ca6e2778c0e4f0598ac86bded61796c2ca3f07b833310e4829b8954d1538
+    sha256: bdfbb8dff12c558703a80abb1cc890417746b827f6bfb826422cf546e85242e1
   - id: operational-boundaries
     path: operational-boundaries.md
     sha256: 4800af33353cb15992e7da79f7559d8e54974895a04537e24a45ddaef9612234

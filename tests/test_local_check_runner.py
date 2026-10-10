@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from io import BytesIO
@@ -63,7 +64,7 @@ class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
                     "cwd": str(self.root),
                     "imported_package": "app",
                     "imported_project": str(self.root / "app" / "__init__.py"),
-                    "import_roots": [str(self.root)],
+                    "import_roots": argv[6].split(os.pathsep),
                 }
             )
         )

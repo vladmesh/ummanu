@@ -1618,6 +1618,10 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         )
         self.host.preflight_codex_run = self._real_preflight  # type: ignore[method-assign]
         self.host._run = self._run  # type: ignore[method-assign]
+        # This provider handoff seam starts after candidate admission. The real
+        # receipt decision and immutable binding are exercised in task_commands;
+        # this fixture has neither candidate Git history nor a report audit.
+        self.host._require_worker_admission = lambda *args, **kwargs: None  # type: ignore[method-assign]
         # This handoff fixture supplies only an interpreter symlink and stubs
         # provisioning; it has no candidate site-packages to install guards into.
         self.host._install_workspace_test_guards = lambda *args, **kwargs: None  # type: ignore[method-assign]

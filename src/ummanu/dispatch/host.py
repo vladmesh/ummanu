@@ -61,13 +61,13 @@ from ummanu.dispatch.head_vitality_episode import (
 )
 from ummanu.dispatch.heartbeat import heartbeat_identity, sprint_task
 from ummanu.dispatch.helpers import (
-    _round_report_ids,
-    _round_worker_check,
     _decision_record_line,
     _last_gate_red_body,
     _legacy_worker_branch,
     _protocol_prerequisites_record_line,
     _round_record_line,
+    _round_report_ids,
+    _round_worker_check,
     _tail,
     safe_one_line as _safe_one_line,
     scrub_host_output,

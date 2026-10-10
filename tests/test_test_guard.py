@@ -34,9 +34,10 @@ class TestGuardTests(unittest.TestCase):
                 self.assertFalse(test_guard.reviewer_head())
 
     def test_all_reviewer_check_forms_refuse_before_parser_resolution_runner_or_reuse(self):
-        from ummanu.cli import main
-        from ummanu import check_commands
         from io import StringIO
+
+        from ummanu import check_commands
+        from ummanu.cli import main
 
         forms = ([], ["tests.test_one"], ["test_one.py::Case::test_one"],
                  ["broad", "--reuse"], ["show"], ["broad", "--command", "anything"],
