@@ -6,14 +6,19 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
+from scripts import ci_selection
 from scripts.ci_selection import (
     SelectionError,
     build_plan,
+    call_identities,
+    import_graph,
     read_plan,
     select,
     snapshot,
@@ -41,6 +46,91 @@ class SelectionGitTests(unittest.TestCase):
                 "mode": mode, "reasons": reasons, "selected": selected, "explanations": explanations}
         print("Narrow terminal_taxonomy source projection; not live acceptance evidence")
         print(summary(plan))
+
+    def test_repository_identity_refinement_comparison_on_one_committed_snapshot(self):
+        import ast
+
+        root = Path(__file__).resolve().parents[1]
+        candidate = git(root, "rev-parse", "HEAD")
+        baseline = "8d722448497dcbd4ab32ee6e347fb1bc53024d9d"
+        # Execute only the pinned, trusted selector implementation. Neither
+        # analyzer executes/imports any source in the snapshot it analyzes.
+        original = types.ModuleType("original_ci_selection")
+        original_code = git(root, "show", f"{baseline}:scripts/ci_selection.py")
+        exec(compile(original_code, "original_ci_selection.py", "exec"), original.__dict__)
+        sources = snapshot(root, candidate)
+        grouped = load_manifest(root)
+        old_graph, old_opaque = original.import_graph(sources)
+        new_graph, new_opaque = import_graph(sources)
+        self.assertNotIn("ummanu.dispatch.observer", new_opaque)
+        manifest = {path.removesuffix(".py").replace("/", ".")
+                    for paths in grouped.values() for path in paths}
+        products = {name for name in new_graph if name == "ummanu" or name.startswith("ummanu.")}
+        removed = sorted(old_opaque - new_opaque)
+        self.assertIn("tests.test_web_front_cookie_order", removed)
+        identities = {}
+        for name in removed:
+            path = next(path for path in sources
+                        if path.removesuffix(".py").replace("/", ".").removeprefix("src.") == name)
+            tree = ast.parse(sources[path])
+            package = name.rpartition(".")[0]
+            calls = call_identities(tree, package)
+            identities[name] = [{"line": node.lineno, "identity": calls[id(node)][0]}
+                                for node in ast.walk(tree) if isinstance(node, ast.Call)
+                                and calls[id(node)][0] == "unittest.mock.call"]
+            self.assertTrue(identities[name], name)
+        added_calls = {}
+        for name in sorted(new_opaque - old_opaque):
+            path = next(path for path in sources
+                        if path.removesuffix(".py").replace("/", ".").removeprefix("src.") == name)
+            tree = ast.parse(sources[path])
+            calls = call_identities(tree, name.rpartition(".")[0])
+            added_calls[name] = [{"line": node.lineno, "identity": calls[id(node)][0],
+                                  "possible": sorted(calls[id(node)][1] &
+                                                     (ci_selection.OPAQUE_CALLS | ci_selection.DYNAMIC_CALLS))}
+                                 for node in ast.walk(tree) if isinstance(node, ast.Call)
+                                 and calls[id(node)][1] & (ci_selection.OPAQUE_CALLS | ci_selection.DYNAMIC_CALLS)
+                                 and calls[id(node)][0] != "unittest.mock.call"]
+        print("Identity comparison; committed source projection, not natural affected-source PR evidence")
+        print(json.dumps({"candidate_sha": candidate, "candidate_tree": git(root, "rev-parse", "HEAD^{tree}"),
+                          "original_analyzer_sha": baseline, "source_snapshot_sha": candidate,
+                          "manifest_modules": len(manifest), "product_modules": len(products),
+                          "opaque_manifest_before_after": [len(old_opaque & manifest), len(new_opaque & manifest)],
+                          "opaque_product_before_after": [len(old_opaque & products), len(new_opaque & products)],
+                          "removed_opaque_identities": identities, "added_opaque_modules": sorted(new_opaque - old_opaque),
+                          "added_opaque_potential_calls": added_calls,
+                          "removed_graph_edges": sum(len(deps - new_graph[name]) for name, deps in old_graph.items()),
+                          "added_graph_edges": sum(len(deps - old_graph[name]) for name, deps in new_graph.items())},
+                         sort_keys=True))
+        self.assertGreater(sum(len(deps - new_graph[name]) for name, deps in old_graph.items()), 0)
+        for path in ("src/ummanu/board/terminal_taxonomy.py", "src/ummanu/webfront/caddyfile.py",
+                     "src/ummanu/dispatch/observer.py", "tests/test_web_front_cookie_order.py"):
+            results = []
+            for analyzer, graph, opaque in ((original, old_graph, old_opaque), (ci_selection, new_graph, new_opaque)):
+                # Reuse the actual graphs computed above, rather than repeatedly
+                # parsing this repository under coverage for each projection.
+                with patch.object(analyzer, "import_graph", return_value=(graph, opaque)):
+                    mode, reasons, selected, why = analyzer.select(grouped, [("M", (path,))], sources, sources)
+                results.append({"mode": mode, "reasons": reasons, "selected": selected, "explanations": why,
+                                "modules": sum(map(len, selected.values())), "owners": list(selected)})
+            removed_members = {owner: sorted(set(results[0]["selected"].get(owner, []))
+                                            - set(results[1]["selected"].get(owner, []))) for owner in grouped}
+            added_members = {owner: sorted(set(results[1]["selected"].get(owner, []))
+                                          - set(results[0]["selected"].get(owner, []))) for owner in grouped}
+            if path.startswith("tests/"):
+                self.assertEqual([result["mode"] for result in results], ["full", "affected"])
+                self.assertIn(path, results[1]["selected"]["unit"])
+            else:
+                self.assertEqual([result["mode"] for result in results], ["affected", "affected"])
+                expected = {"src/ummanu/board/terminal_taxonomy.py": "tests/test_terminal_taxonomy.py",
+                            "src/ummanu/webfront/caddyfile.py": "tests/test_web_front_cookie_order.py"}
+                if path in expected:
+                    self.assertIn(expected[path], results[1]["selected"]["unit"])
+                else:
+                    self.assertIn("tests/test_dispatcher_observer.py", results[1]["selected"]["integration-heads"])
+            print(json.dumps({"changed_path": path, "before": results[0], "after": results[1],
+                              "removed_members_by_owner": removed_members, "added_members_by_owner": added_members},
+                             sort_keys=True))
 
     def fixture(self, root):
         (root / "tests").mkdir()

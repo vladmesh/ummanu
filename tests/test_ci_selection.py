@@ -139,6 +139,282 @@ class SelectionTests(unittest.TestCase):
         with self.assertRaises(SelectionError):
             import_graph({"tests/foo.py": "", "tests/foo/__init__.py": ""})
 
+    def assert_call_boundary(self, code, opaque):
+        sources = self.sources()
+        sources["tests/test_other.py"] = code
+        graph, uncertain = import_graph(sources)
+        self.assertEqual("tests.test_other" in uncertain, opaque, code)
+        self.assertEqual("ummanu.leaf" in graph["tests.test_other"], opaque, code)
+        mode, _, selected, why = self.choose(
+            [("M", ("src/ummanu/leaf.py",))], before=sources, after=sources)
+        self.assertEqual(mode, "affected")
+        self.assertEqual("tests/test_other.py" in selected["unit"], opaque, code)
+        if opaque:
+            self.assertEqual(why["tests/test_other.py"], ["conservative opaque consumer"])
+        self.assertEqual(self.choose([("M", ("tests/test_other.py",))],
+                                     before=sources, after=sources)[0],
+                         "full" if opaque else "affected")
+
+    def test_qualified_same_leaf_call_pairs_and_import_aliases(self):
+        for module, opaque in (("unittest.mock", False), ("subprocess", True), ("vendor", True)):
+            for code in (f"import {module}\n{module}.call('argument')\n",
+                         f"import {module} as api\napi.call('argument')\n",
+                         f"from {module} import call\ncall('argument')\n",
+                         f"from {module} import call as invoke\ninvoke('argument')\n",
+                         f"def f():\n    from {module} import call as invoke\n    invoke('argument')\n"):
+                with self.subTest(code=code):
+                    self.assert_call_boundary(code, opaque)
+        self.assert_call_boundary("from unittest import mock\nmock.call('argument')\n", False)
+        self.assert_call_boundary("def f(run):\n    return run.to_json()\n", False)
+        # Arguments are still visited; expectation construction cannot hide execution.
+        self.assert_call_boundary("from unittest.mock import call\ncall(open('source.py'))\n", True)
+
+    def test_lexical_scopes_do_not_exchange_import_identities(self):
+        self.assert_call_boundary(
+            "def first():\n    from subprocess import call as invoke\n"
+            "def second():\n    from unittest.mock import call as invoke\n    invoke()\n", False)
+        self.assert_call_boundary(
+            "def first():\n    from unittest.mock import call as invoke\n"
+            "def second():\n    from subprocess import call as invoke\n    invoke()\n", True)
+        self.assert_call_boundary(
+            "from unittest.mock import call\ndef outer():\n    def inner():\n        call()\n", False)
+        self.assert_call_boundary(
+            "from unittest.mock import call\nclass C:\n    call = unknown\n"
+            "    def method(self):\n        call()\n", False)
+        self.assert_call_boundary(
+            "class C:\n    from unittest.mock import call\n    def method(self):\n        call()\n", True)
+        self.assert_call_boundary(
+            "class C:\n    from unittest.mock import call\n    items = [call() for x in values]\n", True)
+        self.assert_call_boundary(
+            "class C:\n    from unittest.mock import call\n    class D:\n        call()\n", True)
+        self.assert_call_boundary(
+            "from unittest.mock import call\nclass C:\n    call = unknown\n"
+            "    items = [call() for x in values]\n", False)
+        self.assert_call_boundary(
+            "from unittest import mock\nclass C:\n    import subprocess as mock\n"
+            "    items = [x for x in mock.call()]\n", True)
+        self.assert_call_boundary(
+            "import subprocess as mock\nclass C:\n    from unittest import mock\n"
+            "    items = [x for x in mock.call()]\n", False)
+
+    def test_shadowing_rebinding_and_unresolved_receivers_stay_conservative(self):
+        for code in (
+            "from unittest.mock import call\ndef f(call):\n    call()\n",
+            "from unittest.mock import call as invoke\ndef f(invoke):\n    invoke()\n",
+            "from unittest.mock import call\ncall = unknown\ncall()\n",
+            "from unittest.mock import call\ndef f():\n    call()\n    call = unknown\n",
+            "from unittest.mock import call\ndef f():\n    global call\n    call = unknown\ncall()\n",
+            ("def outer():\n    from unittest.mock import call\n    def inner():\n"
+             "        nonlocal call\n        call = unknown\n    call()\n"),
+            "from unittest.mock import call\ndel call\ncall()\n",
+            "from unittest.mock import call\nwith manager as call:\n    call()\n",
+            "from unittest import mock\nmock.call = unknown\nmock.call()\n",
+            "from unittest import mock\nsetattr(mock, 'call', unknown)\nmock.call()\n",
+            "from unittest import mock\napi = mock\napi.call = unknown\nmock.call()\n",
+            "from unittest import mock\napi = mock if flag else unknown\napi.call = unknown\nmock.call()\n",
+            "from unittest import mock\napi = [mock]\napi[0].call = unknown\nmock.call()\n",
+            ("from unittest import mock as first\nimport unittest.mock as second\n"
+             "second.call = unknown\nfirst.call()\n"),
+            ("from unittest import mock as first\nif flag:\n    import unittest.mock as second\n"
+             "    second.call = unknown\nfirst.call()\n"),
+            "from unittest.mock import call\n[call() for call in unknown]\n",
+            "from unittest.mock import call\n[(call := unknown) for x in items]\ncall()\n",
+            "from unittest.mock import call\ntry:\n    pass\nexcept Exception as call:\n    call()\n",
+            "from unittest.mock import call\nmatch obj:\n    case {'call': call}:\n        call()\n",
+            "if condition:\n    from unittest.mock import call\ncall()\n",
+            "from unittest.mock import call\nfrom external import *\ncall()\n",
+            "unknown.call()\n",
+            "from unittest.mock import call\ninvoke = call\ninvoke()\n",
+            "import subprocess\ninvoke = subprocess.run\ninvoke([])\n",
+            "from subprocess import run\n(invoke,) = [run]\ninvoke([])\n",
+            "import subprocess\n(subprocess.run if flag else unknown)([])\n",
+        ):
+            with self.subTest(code=code):
+                self.assert_call_boundary(code, True)
+
+    def test_assignment_bindings_do_not_alias_attribute_or_subscript_receivers(self):
+        import ast
+
+        from scripts.ci_selection import call_identities
+
+        for target in ("record.run", "record[0]", "state[record]",
+                       "(record.run, state[record])"):
+            code = ("from logging import info as record\nrecord('message')\n"
+                    f"def unrelated(record, state, exc):\n    {target} = exc.run\n")
+            with self.subTest(target=target):
+                self.assert_call_boundary(code, False)
+        for target in ("makeLogRecord.run", "makeLogRecord[0]", "state[makeLogRecord]",
+                       "(makeLogRecord.run, state[makeLogRecord])"):
+            code = ("import logging as api\napi.makeLogRecord({})\n"
+                    f"def unrelated(makeLogRecord, state, exc):\n    {target} = exc.run\n")
+            with self.subTest(target=target):
+                tree = ast.parse(code)
+                identities = call_identities(tree, "tests")
+                call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                            and isinstance(node.func, ast.Attribute) and node.func.attr == "makeLogRecord")
+                self.assertEqual(identities[id(call)][0], "logging.makeLogRecord")
+                self.assert_call_boundary(code, False)
+        for target in ("record", "(record,)", "[record]", "(other, *record)"):
+            code = f"import subprocess\n{target} = subprocess.run\nrecord([])\n"
+            with self.subTest(target=target):
+                self.assert_call_boundary(code, True)
+
+    def test_subscript_namespace_mutation_refuses_import_authority(self):
+        for receiver in ("mock.__dict__", "vars(mock)", "(mock if flag else unknown).__dict__",
+                         "vars(mock if flag else unknown)"):
+            for operation in (f"{receiver}['call'] = unknown", f"del {receiver}['call']"):
+                for alias in (False, True):
+                    mutation = (f"namespace = {receiver}\n" + operation.replace(receiver, "namespace")
+                                if alias else operation)
+                    code = "from unittest import mock\n" + mutation + "\nmock.call()\n"
+                    with self.subTest(code=code):
+                        self.assert_call_boundary(code, True)
+        for receiver in ("globals()", "locals()", "vars()"):
+            for operation in (f"{receiver}['call'] = unknown", f"del {receiver}['call']"):
+                for alias in (False, True):
+                    mutation = (f"namespace = {receiver}\n" + operation.replace(receiver, "namespace")
+                                if alias else operation)
+                    code = "from unittest.mock import call\n" + mutation + "\ncall()\n"
+                    with self.subTest(code=code):
+                        self.assert_call_boundary(code, True)
+        self.assert_call_boundary(
+            "from unittest import mock as first\nimport unittest.mock as second\n"
+            "vars(second)['call'] = unknown\nfirst.call()\n", True)
+        self.assert_call_boundary(
+            "from unittest import mock\nnamespace = [vars(mock)]\n"
+            "namespace[0]['call'] = unknown\nmock.call()\n", True)
+        for target, receiver in (("holder.namespace", "holder.namespace"),
+                                 ("holder[0]", "holder[0]")):
+            code = ("from unittest import mock\n"
+                    f"{target} = mock\nvars({receiver})['call'] = unknown\nmock.call()\n")
+            with self.subTest(code=code):
+                self.assert_call_boundary(code, True)
+
+    def test_namespace_exposure_revokes_safe_call_without_mutator_classification(self):
+        for exposure in (
+            "globals().update(call=subprocess.run)",
+            "globals().pop('call')", "vars().update(call=subprocess.run)",
+            "g = globals(); g.update(call=subprocess.run)",
+            "globals()", "locals()", "vars()", "globals()['call']",
+            "escaped = [locals()]; unknown(escaped)",
+            "from builtins import globals as expose\nexpose()",
+            "import builtins as namespace\nnamespace.vars()",
+            "expose = globals\nexpose().update(call=subprocess.run)",
+            "holder.expose = vars\nunknown(holder)",
+            "accessors = [globals]\naccessors[0]()",
+        ):
+            for before_import in (False, True):
+                imports = "from unittest.mock import call\nimport subprocess\n"
+                code = ((exposure + "\n" + imports if before_import else imports + exposure + "\n")
+                        + "call(['x'])\n")
+                with self.subTest(code=code):
+                    self.assert_call_boundary(code, True)
+        for exposure in (
+            "vars(mock).update(call=subprocess.run)",
+            "mock.__dict__.update(call=subprocess.run)",
+            "vars(mock)", "mock.__dict__['call']",
+            "g = mock.__dict__; g.pop('call')",
+            "escaped = [vars(mock)]; unknown(escaped)",
+            "holder.namespace = mock\nvars(holder.namespace).setdefault('call', subprocess.run)",
+            "holder[0] = mock\nunknown(holder[0].__dict__)",
+            "other = mock if flag else unknown\nother.__dict__",
+            "from builtins import vars as expose\nexpose(mock)",
+            "import unittest.mock as other\nother.__dict__",
+            "import operator\noperator.setitem(mock.__dict__, 'call', subprocess.run)",
+        ):
+            code = "from unittest import mock\nimport subprocess\n" + exposure + "\nmock.call(['x'])\n"
+            with self.subTest(code=code):
+                self.assert_call_boundary(code, True)
+        # Exposure of an unrelated object does not revoke this import namespace.
+        self.assert_call_boundary(
+            "from unittest import mock\nvars(unknown)\nmock.call()\n", False)
+
+    def test_namespace_authority_veto_is_shared_with_literal_loader_proof(self):
+        import ast
+
+        from scripts.ci_selection import call_identities
+
+        for imports, exposure, invocation in (
+            ("from importlib import import_module as load", "globals()", "load"),
+            ("from importlib import import_module as call", "locals()", "call"),
+            ("from builtins import __import__ as open", "vars()", "open"),
+            ("import importlib as loader", "vars(loader)", "loader.import_module"),
+            ("import importlib as loader", "escaped = [loader.__dict__]", "loader.import_module"),
+            ("import importlib as first\nimport importlib as second", "second.__dict__", "first.import_module"),
+            ("import importlib as loader", "holder[0] = loader\nvars(holder[0])", "loader.import_module"),
+            ("import builtins as namespace", "namespace.__dict__", "__import__"),
+            ("import builtins as namespace", "vars(namespace)", "__import__"),
+        ):
+            for before_import in (False, True):
+                code = ((exposure + "\n" + imports if before_import else imports + "\n" + exposure)
+                        + f"\n{invocation}('ummanu.leaf')\n")
+                with self.subTest(code=code):
+                    tree = ast.parse(code)
+                    identities = call_identities(tree, "tests")
+                    call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                                and ast.unparse(node.func) == invocation)
+                    self.assertIsNone(identities[id(call)][0])
+                    self.assert_call_boundary(code, True)
+
+    def test_real_source_dynamic_subprocess_and_async_consumers_remain_opaque(self):
+        for code in (
+            "import subprocess as process\nprocess.run([])\n",
+            "from subprocess import check_output as invoke\ninvoke([])\n",
+            "from importlib import import_module as load\nload(variable)\n",
+            "from importlib.util import spec_from_file_location as load\nload('m', path)\n",
+            "from runpy import run_path as load\nload(path)\n",
+            "from inspect import getsource as read\nread(obj)\n",
+            "from importlib.metadata import entry_points as discover\ndiscover()\n",
+            "from os import system as invoke\ninvoke('command')\n",
+            "from pathlib import Path\nPath('temporary.txt').read_text()\n",
+            "obj.read_bytes()\n", "open('temporary.txt')\n", "exec(code)\n", "eval(code)\n",
+            "import asyncio\nasyncio.run(callback())\n",
+            "import asyncio as tasks\ntasks.run(awaitable)\n",
+            "from asyncio import run as drive\ndrive(callback())\n",
+            "import importlib\nimportlib = unknown\nimportlib.import_module('ummanu.leaf')\n",
+            "obj.import_module('ummanu.leaf')\n",
+            "import importlib\ndef f(importlib):\n    importlib.import_module('ummanu.leaf')\n",
+            "import importlib\nimportlib.import_module('.leaf', package)\n",
+            "__import__('leaf', level=1)\n",
+            "__import__('ummanu.leaf', **options)\n",
+            "__import__('ummanu', fromlist=names)\n",
+            "__import__('ummanu', fromlist=['leaf'])\n",
+        ):
+            with self.subTest(code=code):
+                self.assert_call_boundary(code, True)
+
+    def test_proven_literal_loader_aliases_retain_specific_edges(self):
+        for code in (
+            "import importlib as loader\nloader.import_module('ummanu.leaf')\n",
+            "from importlib import import_module as load\nload('ummanu.leaf')\n",
+            "from importlib import import_module as call\ncall('ummanu.leaf')\n",
+            "from builtins import __import__ as load\nload('ummanu.leaf')\n",
+            "from builtins import __import__ as open\nopen('ummanu.leaf')\n",
+            "__import__('ummanu.leaf')\n",
+            "__import__('ummanu.leaf', fromlist=(), level=0)\n",
+            "def f():\n    from importlib import import_module as load\n    load('ummanu.leaf')\n",
+        ):
+            with self.subTest(code=code):
+                sources = self.sources()
+                sources["tests/test_other.py"] = code
+                graph, opaque = import_graph(sources)
+                self.assertNotIn("tests.test_other", opaque)
+                self.assertIn("ummanu.leaf", graph["tests.test_other"])
+                self.assertNotIn("ummanu.unrelated", graph["tests.test_other"])
+                result = self.choose([("M", ("src/ummanu/leaf.py",))], before=sources, after=sources)
+                self.assertIn("tests/test_other.py", result[2]["unit"])
+
+    def test_base_and_candidate_keep_unsafe_twin_even_after_safe_identity_repair(self):
+        safe, unsafe = self.sources(), self.sources()
+        safe["tests/test_other.py"] = "from unittest.mock import call\ncall()\n"
+        unsafe["tests/test_other.py"] = "from subprocess import call\ncall([])\n"
+        for before, after in ((safe, unsafe), (unsafe, safe)):
+            mode, _, selected, why = self.choose([("M", ("src/ummanu/leaf.py",))], before, after)
+            self.assertEqual(mode, "affected")
+            self.assertIn("tests/test_other.py", selected["unit"])
+            self.assertEqual(why["tests/test_other.py"], ["conservative opaque consumer"])
+            self.assertEqual(self.choose([("M", ("tests/test_other.py",))], before, after)[0], "full")
+
     def test_invalid_diff_contract_refuses(self):
         for data in (b"M\0README.md", b"R100\0a\0", b"U\0a\0", b"M\0../escape.md\0"):
             with self.assertRaises(SelectionError):

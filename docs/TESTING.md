@@ -76,11 +76,56 @@ import edges, while imports and recognized dynamic loaders inside their bodies a
 Analysis never executes imports
 to try to infer their runtime behaviour.
 
-This safety boundary currently limits effectiveness. The independent ummanu-205 review of
+Call identity preserves import namespaces in lexical module, function, class and
+comprehension scopes. A single direct scope-body import with no competing binding can
+prove an alias; parameters, assignments/deletions, conditional imports and ambiguous
+receivers refuse that proof. Methods, nested classes and comprehension bodies resolve enclosing
+names outside the class namespace; the first comprehension iterable uses its enclosing scope.
+Wildcard imports, global/nonlocal writes and explicit namespace mutation invalidate proof
+conservatively, including mutation through another alias of the imported namespace or a
+computed receiver whose value may contain that namespace. Conditional/container aliases
+cannot preserve a safe identity after such a write.
+Attribute stores/deletes, `setattr`/`delattr` and subscript stores/deletes invalidate
+receiver authority. Namespace exposure also revokes authority without classifying later
+dictionary operations: `globals()`, `locals()` and argument-free `vars()` refuse import
+identity module-wide, even for read-only observations. Escaped namespace accessor functions
+also refuse proof, including imported/value aliases and functions stored in containers.
+`vars(namespace)` and `namespace.__dict__` invalidate that receiver's import authority
+as soon as the dictionary is exposed, including value/container aliases, computed receivers
+and alternate imports of the same namespace. Dictionary method writes, deletes and escaped
+handles therefore cannot retain a safe identity merely because no store was enumerated.
+The collector gathers bindings, aliases, mutations and exposures, propagates uncertainty
+to a fixed point, then applies one authority veto before resolving immutable imports.
+Both the `unittest.mock.call` exception and literal-loader proof, including builtin fallback,
+consume that same result;
+neither alternative spelling nor a later import can restore vetoed authority.
+Only names actually bound by assignment targets (names and recursive tuple/list/starred
+targets) carry value-alias spellings; attribute/subscript receivers and indices do not.
+Value aliases retain hazardous spellings but do not establish safe identity. Their
+uncertainty remains module-wide across lexical scopes, allowing conservative over-selection.
+Proven `unittest.mock.call` constructs an expectation record without invoking its arguments,
+so it no longer creates universal dependencies solely because its leaf is `call`.
+Calls inside its arguments are still analyzed. Other imported APIs with the same name,
+unknown receivers, source/file reads (including temporary files), subprocesses and entry
+points remain conservative. Literal dynamic imports require a proven `importlib.import_module`
+or builtin `__import__` identity; an ambiguous loader stays opaque even with a literal argument.
+Relative dynamic names, nonzero/unknown import levels, nonempty/unknown `__import__` fromlists
+and argument expansion stay opaque. A proven literal loader alias uses its API identity even
+when the alias is spelled `call` or `open`.
+`asyncio.run` remains opaque: its identity alone proves neither the origin nor the dependencies
+of an arbitrary awaitable/callback. This refinement does not infer callback targets, receiver
+types, arbitrary third-party/native execution or runtime monkeypatching through external code,
+including `mock.patch.object`, indirect `sys.modules` monkeypatching and other external
+monkeypatch APIs. There is no general discovery of calls such as `operator.setitem`;
+an explicit `mock.__dict__` argument still revokes authority through exposure itself.
+Such APIs do not prove static purity; the supported local mutation and exposure forms
+above still invalidate import authority.
+
+This safety boundary limits effectiveness. The historical independent ummanu-205 review of
 [PR #714](https://github.com/vladmesh/ummanu/pull/714), candidate `c3b51bf1113bf66dd13d4903041556d35615c903`,
 found 219 of 294 manifest test modules and 149 of 386 product modules opaque. Its offline graph
-analysis selected 280–293 of 294 test modules and all nine owners for nonopaque source changes;
-opaque source changes required full fallback. This is safe over-selection, with practically no
+analysis selected 280–293 of 294 test modules and all nine owners for single-module nonopaque
+product-source changes; opaque source changes required full fallback. This is safe over-selection, with practically no
 code-PR wall-clock gain at that snapshot, not evidence of useful acceleration. The docs-only path
 avoids suite execution independently of this limitation.
 
@@ -94,6 +139,55 @@ selected module and its reason in `test / integration-dispatcher`'s bounded log.
 uses the committed source graph and checks that membership is smaller than the full manifest.
 At candidate205 that projection selected 291 of 294 modules.
 Fixtures and projections are not natural PR acceptance proofs.
+
+The CI-only identity comparison in the same existing `integration-dispatcher` owner runs
+the original analyzer pinned at `8d722448497dcbd4ab32ee6e347fb1bc53024d9d` and the refined
+analyzer over one committed candidate source snapshot. Its bounded log records SHA/tree,
+opaque counts, removed identities and graph edges, and before/after membership, owners and
+every selected reason for `terminal_taxonomy.py`, `webfront/caddyfile.py`, `dispatch/observer.py` and the real
+`test_web_front_cookie_order.py` expectation consumer. Those projections describe graph
+effectiveness, not an executed affected-source PR or a wall-clock speedup. This infrastructure
+PR itself requires the full manifest, and leaves the genuine affected-source acceptance proof
+and final-main controlled-load measurement to their later authorized work.
+
+The [repaired CI comparison at candidate `74977cd0`](https://github.com/vladmesh/ummanu/actions/runs/38091522011/job/114328788730)
+used source snapshot `74977cd08e300d86609087fae26eccfbbb8d7fbf`, tree
+`7a6c295565934a6a30744aaaeddbd7632ab4df81`, for both analyzers. It removed 740 obsolete
+graph edges from the proven `unittest.mock.call` at line 93 of `test_web_front_cookie_order.py`.
+Conservative handling of actual value aliases added 2,206 edges and three opaque modules:
+`tests.test_dispatcher_sprint_admission`, `tests.test_sprint_guard_outside_sprint`,
+and `tests.test_sprint_listing_budget`. Opaque manifest modules were 219 before and 221 after;
+opaque product modules were 149 before and 149 after (387 product graph identities including
+package ancestors). Total test opacity and total edges did not decrease. The comparison prints
+the added aliases' potential call identities as well as the removed identity.
+
+The prior candidate `fb8a8d68` made `ummanu.dispatch.observer` opaque through an
+assignment-target defect: `record.run = ...`
+incorrectly treated `record` as a bound value alias and tainted the unrelated proven
+`owner_events.record` call. That defect forced an observer-only source change to full 294/294;
+it was not unresolved API identity. The repair separates bound names from mutated receivers:
+observer is nonopaque, and its projected change remains affected 291/294, matching the original
+analyzer. Its membership and reasons are included in the same-snapshot comparison.
+
+| Projected single-module change | Original mode/modules | Refined mode/modules |
+| --- | --- | --- |
+| `src/ummanu/board/terminal_taxonomy.py` | affected, 291/294 | affected, 291/294 |
+| `src/ummanu/webfront/caddyfile.py` | affected, 291/294 | affected, 291/294 |
+| `src/ummanu/dispatch/observer.py` | affected, 291/294 | affected, 291/294 |
+| `tests/test_web_front_cookie_order.py` | full, 294/294 | affected, 291/294 |
+
+All nine owners remain included. None of the three product projections removes or adds membership:
+the cookie-order test still consumes `ummanu.webfront.commands`, whose source/subprocess
+dependencies remain opaque. For the changed-test projection, the removed modules are
+`tests/test_provider_models.py` and `tests/test_hermetic_source_tree.py` under unit, and
+`tests/test_agent_prompt_transport.py` under component; no owner disappears and no module
+is added. The full fallback reason for that test becomes the ordinary base/candidate
+closure reason, with `changed test` for the consumer itself. These data show a bounded
+false-positive repair and a small changed-test membership improvement, not product-source
+acceleration. The unresolved consumers remain blockers to substantial selection gains.
+The observer projection likewise retains the base/candidate closure reason; its existing
+`tests/test_dispatcher_observer.py` consumer remains under integration-heads with
+`conservative opaque consumer` as its selected reason.
 
 Runner and aggregators independently regenerate the plan from the exact checkout/base/event and
 require byte-equivalent JSON data. A manually edited subset, wrong event/base/SHA, duplicate or

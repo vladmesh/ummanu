@@ -16,6 +16,291 @@ from pathlib import Path
 MAX_PLAN_BYTES = 1_000_000
 MAX_FILES = 4000
 MAX_SOURCE_BYTES = 30_000_000
+OPAQUE_CALLS = {"exec", "eval", "spec_from_file_location", "run_module", "run_path",
+                "read_text", "read_bytes", "open", "getsource", "source_trees",
+                "Popen", "run", "call", "check_output", "check_call", "system", "entry_points"}
+DYNAMIC_CALLS = {"import_module", "__import__"}
+NAMESPACE_CALLS = {"globals", "locals", "vars"}
+
+
+def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, set[str]]]:
+    """Prove immutable import bindings, not receiver types or runtime values.
+
+    Bindings are lexical and order-independent: a second binding anywhere in a
+    scope refuses proof, even if it precedes the import. Only direct scope-body
+    imports prove identity. Alias spellings remain conservative after rebinding.
+    """
+    calls = []
+    aliases = {}
+    imported = {}
+    assignments = []
+    references = []
+    exposed_receivers = []
+    invalid = set()
+    wildcard = False
+
+    def leaves(node):
+        # Identity belongs to the callable's terminal name, not to identifiers
+        # used as receivers/data (a record named run does not execute code).
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.Attribute):
+            return {node.attr}
+        if isinstance(node, ast.Call):
+            return set()  # nested calls are collected independently
+        return set().union(*(leaves(child) for child in ast.iter_child_nodes(node)))
+
+    def bound_names(node):
+        # Stores to attributes/subscripts mutate objects; they bind neither the
+        # receiver nor any index expression to the assigned value.
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.Starred):
+            return bound_names(node.value)
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return set().union(*(bound_names(item) for item in node.elts))
+        return set()
+
+    class Collector(ast.NodeVisitor):
+        def __init__(self):
+            self.scope = None
+
+        def bind(self, name, identity=None):
+            self.scope["bindings"].setdefault(name, []).append(identity)
+            if identity:
+                imported.setdefault(name, set()).add(identity)
+
+        def body(self, node, body, arguments=None):
+            parent = self.scope
+            closure = parent
+            while closure and closure["class"]:
+                closure = closure["parent"]
+            self.scope = {"bindings": {}, "parent": closure,
+                          "class": isinstance(node, ast.ClassDef), "imports": set()}
+            self.scope["imports"] = {id(n) for n in body if isinstance(n, (ast.Import, ast.ImportFrom))}
+            if arguments:
+                for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs):
+                    self.bind(arg.arg)
+                for arg in (arguments.vararg, arguments.kwarg):
+                    if arg:
+                        self.bind(arg.arg)
+            for item in body:
+                self.visit(item)
+            self.scope = parent
+
+        def visit_Module(self, node):
+            self.body(node, node.body)
+
+        def visit_FunctionDef(self, node):
+            self.bind(node.name)
+            for item in (*node.decorator_list, *node.args.defaults,
+                         *filter(None, node.args.kw_defaults),
+                         *[arg.annotation for arg in ast.walk(node.args)
+                           if isinstance(arg, ast.arg) and arg.annotation],
+                         *([node.returns] if node.returns else []),
+                         *node.type_params):
+                self.visit(item)
+            self.body(node, node.body, node.args)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Lambda(self, node):
+            for item in (*node.args.defaults, *filter(None, node.args.kw_defaults)):
+                self.visit(item)
+            self.body(node, [node.body], node.args)
+
+        def visit_ClassDef(self, node):
+            self.bind(node.name)
+            for item in (*node.bases, *node.keywords, *node.decorator_list, *node.type_params):
+                self.visit(item)
+            self.body(node, node.body)
+
+        def visit_Import(self, node):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                target = alias.name if alias.asname else bound
+                self.bind(bound, target if id(node) in self.scope["imports"] else None)
+                imported.setdefault(bound, set()).add(target)
+                aliases.setdefault(bound, set()).add(alias.name.rsplit(".", 1)[-1])
+
+        def visit_ImportFrom(self, node):
+            nonlocal wildcard
+            prefix = node.module or ""
+            if node.level:
+                parts = package.split(".")
+                prefix = ".".join(parts[:len(parts) - node.level + 1] + ([prefix] if prefix else []))
+            for alias in node.names:
+                if alias.name == "*":
+                    wildcard = True
+                    continue
+                bound = alias.asname or alias.name
+                self.bind(bound, f"{prefix}.{alias.name}" if id(node) in self.scope["imports"] else None)
+                imported.setdefault(bound, set()).add(f"{prefix}.{alias.name}")
+                aliases.setdefault(bound, set()).add(alias.name)
+
+        def visit_Name(self, node):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self.bind(node.id)
+            else:
+                references.append(node)
+
+        def visit_Assign(self, node):
+            assignments.extend((target, node.value) for target in node.targets)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node):
+            if node.value:
+                assignments.append((node.target, node.value))
+            self.generic_visit(node)
+
+        def visit_NamedExpr(self, node):
+            # A comprehension walrus can write into the enclosing scope.
+            self.invalidate_receiver(node.target)
+            self.visit_AnnAssign(node)
+
+        def visit_TypeVar(self, node):
+            invalid.add(node.name)
+            self.generic_visit(node)
+
+        visit_ParamSpec = visit_TypeVar
+        visit_TypeVarTuple = visit_TypeVar
+
+        def visit_Global(self, node):
+            invalid.update(node.names)
+
+        visit_Nonlocal = visit_Global
+
+        def visit_ExceptHandler(self, node):
+            if node.name:
+                self.bind(node.name)
+            self.generic_visit(node)
+
+        def visit_MatchAs(self, node):
+            if node.name:
+                self.bind(node.name)
+            self.generic_visit(node)
+
+        visit_MatchStar = visit_MatchAs
+
+        def visit_MatchMapping(self, node):
+            if node.rest:
+                self.bind(node.rest)
+            self.generic_visit(node)
+
+        def invalidate_receiver(self, node):
+            invalid.update(item.id for item in ast.walk(node) if isinstance(item, ast.Name))
+
+        def visit_Attribute(self, node):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self.invalidate_receiver(node)
+            else:
+                references.append(node)
+            if node.attr == "__dict__":
+                exposed_receivers.append(node.value)
+            self.generic_visit(node)
+
+        def visit_Subscript(self, node):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self.invalidate_receiver(node.value)
+            self.generic_visit(node)
+
+        def visit_Call(self, node):
+            calls.append((node, self.scope))
+            if isinstance(node.func, ast.Name) and node.func.id in {"setattr", "delattr"} and node.args:
+                self.invalidate_receiver(node.args[0])
+            self.generic_visit(node)
+
+        def visit_ListComp(self, node):
+            # Only the first iterable executes in the enclosing namespace;
+            # subsequent iterables/filters and elements use the comprehension.
+            first, *remaining = node.generators
+            self.visit(first.iter)
+            body = [first.target, *first.ifs]
+            for generator in remaining:
+                body.extend([generator.iter, generator.target, *generator.ifs])
+            body.extend([node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt])
+            self.body(node, body)
+
+        visit_SetComp = visit_ListComp
+        visit_DictComp = visit_ListComp
+        visit_GeneratorExp = visit_ListComp
+
+    collector = Collector()
+    collector.visit(tree)
+    direct_callees = {id(call.func) for call, _ in calls}
+
+    def spellings(node):
+        names = leaves(node)
+        return names | set().union(*(aliases.get(name, set()) for name in names))
+
+    # Exposure itself revokes authority: neither dictionary contents nor escaped
+    # handles have a purity proof. No inventory of mutating methods is needed.
+    for receiver in exposed_receivers:
+        collector.invalidate_receiver(receiver)
+    # Collect aliases and propagate mutation/exposure uncertainty to a fixed
+    # point before any consumer can obtain an immutable import identity.
+    while True:
+        previous = {key: set(value) for key, value in aliases.items()}
+        previous_invalid = set(invalid)
+        previous_wildcard = wildcard
+        for target, value in assignments:
+            possible = spellings(value) & (OPAQUE_CALLS | DYNAMIC_CALLS | NAMESPACE_CALLS)
+            for bound in bound_names(target):
+                aliases.setdefault(bound, set()).update(possible)
+            # Mutation propagation is separate from bindings: an attribute or
+            # container slot can hold the namespace without binding its receiver
+            # to the value's callable spelling.
+            if any(item.id in invalid for item in ast.walk(target) if isinstance(item, ast.Name)):
+                collector.invalidate_receiver(value)
+        for call, _ in calls:
+            names = spellings(call.func) & NAMESPACE_CALLS
+            if names & {"globals", "locals"} or "vars" in names and (
+                    not call.args or any(isinstance(arg, ast.Starred) for arg in call.args)
+                    or any(keyword.arg is None for keyword in call.keywords)):
+                wildcard = True
+            if "vars" in names:
+                for receiver in (*call.args, *(keyword.value for keyword in call.keywords)):
+                    collector.invalidate_receiver(receiver)
+        # A namespace accessor passed/stored as a value can later expose the
+        # current namespace. Its purity is unknown, including container escapes.
+        if any(id(node) not in direct_callees and spellings(node) & NAMESPACE_CALLS
+               for node in references):
+            wildcard = True
+        if aliases == previous and invalid == previous_invalid and wildcard == previous_wildcard:
+            break
+    invalid_imports = {identity for bound in invalid for identity in imported.get(bound, set())}
+
+    def resolve(node, scope):
+        # This is the shared authority veto for every identity consumer, both
+        # the mock.call exception and literal-loader proof. Lexical uniqueness
+        # cannot restore an identity after namespace uncertainty has revoked it.
+        if isinstance(node, ast.Attribute):
+            parent = resolve(node.value, scope)
+            return f"{parent}.{node.attr}" if parent else None
+        if not isinstance(node, ast.Name) or node.id in invalid or wildcard:
+            return None
+        while scope:
+            bindings = scope["bindings"].get(node.id)
+            if bindings is not None:
+                identity = bindings[0] if len(bindings) == 1 else None
+                break
+            scope = scope["parent"]
+        else:
+            identity = f"builtins.{node.id}" if node.id in {"__import__", "exec", "eval", "open"} else None
+        if identity and any(identity == target or identity.startswith(target + ".")
+                            or target.startswith(identity + ".") for target in invalid_imports):
+            return None
+        return identity
+
+    result = {}
+    for call, scope in calls:
+        func = call.func
+        names = leaves(func)
+        possible = set(names)
+        for leaf in names:
+            possible.update(aliases.get(leaf, set()))
+        result[id(call)] = resolve(func, scope), possible
+    return result
 
 
 class SelectionError(ValueError):
@@ -151,9 +436,7 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
                       and isinstance(item.body[0].value, ast.Constant)
                       and isinstance(item.body[0].value.value, str)}
         package = name if path.endswith("/__init__.py") else name.rpartition(".")[0]
-        aliases = {alias.asname or alias.name: alias.name.rpartition(".")[2]
-                   for item in nodes if isinstance(item, (ast.Import, ast.ImportFrom))
-                   for alias in item.names}
+        identities = call_identities(tree, package)
         for node in nodes:
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -181,19 +464,38 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
                 for target in re.findall(r"(?:ummanu|tests)(?:\.[A-Za-z0-9_]+)+", node.value):
                     add(name, target)
             elif isinstance(node, ast.Call):
-                function = node.func
-                called = function.id if isinstance(function, ast.Name) else (
-                    function.attr if isinstance(function, ast.Attribute) else "")
-                called = aliases.get(called, called)
-                if called in {"import_module", "__import__"}:
-                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                identity, possible = identities[id(node)]
+                # mock.call constructs an expectation record; it does not invoke
+                # its arguments. This exception is about identity, not spelling.
+                if identity == "unittest.mock.call":
+                    continue
+                if identity in {"importlib.import_module", "builtins.__import__"}:
+                    possible = {identity.rsplit(".", 1)[-1]}
+                elif identity:
+                    possible.add(identity.rsplit(".", 1)[-1])
+                if possible & DYNAMIC_CALLS:
+                    levels = ([node.args[4]] if len(node.args) > 4 else []) + [
+                        item.value for item in node.keywords if item.arg == "level"]
+                    fromlists = ([node.args[3]] if len(node.args) > 3 else []) + [
+                        item.value for item in node.keywords if item.arg == "fromlist"]
+                    if (identity in {"importlib.import_module", "builtins.__import__"}
+                            and node.args and isinstance(node.args[0], ast.Constant)
+                            and isinstance(node.args[0].value, str)
+                            and not node.args[0].value.startswith(".")
+                            and not any(isinstance(arg, ast.Starred) for arg in node.args)
+                            and not any(item.arg is None for item in node.keywords)
+                            and (identity != "builtins.__import__" or all(
+                                isinstance(level, ast.Constant) and level.value == 0 for level in levels))
+                            and (identity != "builtins.__import__" or all(
+                                isinstance(items, (ast.List, ast.Tuple)) and not items.elts
+                                for items in fromlists))):
                         add(name, node.args[0].value)
                     else:
                         opaque.add(name)
                 # These consumers can inspect or execute code without a Python import edge.
-                if called in {"exec", "eval", "spec_from_file_location", "run_module", "run_path",
-                              "read_text", "read_bytes", "open", "getsource", "source_trees",
-                              "Popen", "run", "call", "check_output", "check_call", "system", "entry_points"}:
+                # asyncio.run remains opaque: import identity alone cannot prove
+                # the origin or execution dependencies of an arbitrary awaitable.
+                if possible & OPAQUE_CALLS:
                     opaque.add(name)
         add(name, package)
     # Unknown dependencies are universal, never silently absent from the graph.
