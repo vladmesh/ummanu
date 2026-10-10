@@ -20,6 +20,7 @@ OPAQUE_CALLS = {"exec", "eval", "spec_from_file_location", "run_module", "run_pa
                 "read_text", "read_bytes", "open", "getsource", "source_trees",
                 "Popen", "run", "call", "check_output", "check_call", "system", "entry_points"}
 DYNAMIC_CALLS = {"import_module", "__import__"}
+NAMESPACE_CALLS = {"globals", "locals", "vars"}
 
 
 def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, set[str]]]:
@@ -33,6 +34,8 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
     aliases = {}
     imported = {}
     assignments = []
+    references = []
+    exposed_receivers = []
     invalid = set()
     wildcard = False
 
@@ -138,6 +141,8 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
         def visit_Name(self, node):
             if isinstance(node.ctx, (ast.Store, ast.Del)):
                 self.bind(node.id)
+            else:
+                references.append(node)
 
         def visit_Assign(self, node):
             assignments.extend((target, node.value) for target in node.targets)
@@ -183,19 +188,15 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             self.generic_visit(node)
 
         def invalidate_receiver(self, node):
-            nonlocal wildcard
             invalid.update(item.id for item in ast.walk(node) if isinstance(item, ast.Name))
-            # These explicit local namespace writes can replace any imported
-            # binding. Aliases/computed receivers reach here during propagation.
-            for item in ast.walk(node):
-                if isinstance(item, ast.Call) and (
-                        leaves(item.func) & {"globals", "locals"}
-                        or "vars" in leaves(item.func) and not item.args):
-                    wildcard = True
 
         def visit_Attribute(self, node):
             if isinstance(node.ctx, (ast.Store, ast.Del)):
                 self.invalidate_receiver(node)
+            else:
+                references.append(node)
+            if node.attr == "__dict__":
+                exposed_receivers.append(node.value)
             self.generic_visit(node)
 
         def visit_Subscript(self, node):
@@ -226,15 +227,24 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
 
     collector = Collector()
     collector.visit(tree)
-    # Value aliases are never proof, but must not hide an opaque API's spelling.
+    direct_callees = {id(call.func) for call, _ in calls}
+
+    def spellings(node):
+        names = leaves(node)
+        return names | set().union(*(aliases.get(name, set()) for name in names))
+
+    # Exposure itself revokes authority: neither dictionary contents nor escaped
+    # handles have a purity proof. No inventory of mutating methods is needed.
+    for receiver in exposed_receivers:
+        collector.invalidate_receiver(receiver)
+    # Collect aliases and propagate mutation/exposure uncertainty to a fixed
+    # point before any consumer can obtain an immutable import identity.
     while True:
         previous = {key: set(value) for key, value in aliases.items()}
         previous_invalid = set(invalid)
+        previous_wildcard = wildcard
         for target, value in assignments:
-            names = leaves(value)
-            possible = names & (OPAQUE_CALLS | DYNAMIC_CALLS)
-            for leaf in names:
-                possible.update(aliases.get(leaf, set()) & (OPAQUE_CALLS | DYNAMIC_CALLS))
+            possible = spellings(value) & (OPAQUE_CALLS | DYNAMIC_CALLS | NAMESPACE_CALLS)
             for bound in bound_names(target):
                 aliases.setdefault(bound, set()).update(possible)
             # Mutation propagation is separate from bindings: an attribute or
@@ -242,11 +252,28 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             # to the value's callable spelling.
             if any(item.id in invalid for item in ast.walk(target) if isinstance(item, ast.Name)):
                 collector.invalidate_receiver(value)
-        if aliases == previous and invalid == previous_invalid:
+        for call, _ in calls:
+            names = spellings(call.func) & NAMESPACE_CALLS
+            if names & {"globals", "locals"} or "vars" in names and (
+                    not call.args or any(isinstance(arg, ast.Starred) for arg in call.args)
+                    or any(keyword.arg is None for keyword in call.keywords)):
+                wildcard = True
+            if "vars" in names:
+                for receiver in (*call.args, *(keyword.value for keyword in call.keywords)):
+                    collector.invalidate_receiver(receiver)
+        # A namespace accessor passed/stored as a value can later expose the
+        # current namespace. Its purity is unknown, including container escapes.
+        if any(id(node) not in direct_callees and spellings(node) & NAMESPACE_CALLS
+               for node in references):
+            wildcard = True
+        if aliases == previous and invalid == previous_invalid and wildcard == previous_wildcard:
             break
     invalid_imports = {identity for bound in invalid for identity in imported.get(bound, set())}
 
     def resolve(node, scope):
+        # This is the shared authority veto for every identity consumer, both
+        # the mock.call exception and literal-loader proof. Lexical uniqueness
+        # cannot restore an identity after namespace uncertainty has revoked it.
         if isinstance(node, ast.Attribute):
             parent = resolve(node.value, scope)
             return f"{parent}.{node.attr}" if parent else None

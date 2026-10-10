@@ -290,6 +290,70 @@ class SelectionTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assert_call_boundary(code, True)
 
+    def test_namespace_exposure_revokes_safe_call_without_mutator_classification(self):
+        for exposure in (
+            "globals().update(call=subprocess.run)",
+            "globals().pop('call')", "vars().update(call=subprocess.run)",
+            "g = globals(); g.update(call=subprocess.run)",
+            "globals()", "locals()", "vars()", "globals()['call']",
+            "escaped = [locals()]; unknown(escaped)",
+            "from builtins import globals as expose\nexpose()",
+            "import builtins as namespace\nnamespace.vars()",
+            "expose = globals\nexpose().update(call=subprocess.run)",
+            "holder.expose = vars\nunknown(holder)",
+            "accessors = [globals]\naccessors[0]()",
+        ):
+            for before_import in (False, True):
+                imports = "from unittest.mock import call\nimport subprocess\n"
+                code = ((exposure + "\n" + imports if before_import else imports + exposure + "\n")
+                        + "call(['x'])\n")
+                with self.subTest(code=code):
+                    self.assert_call_boundary(code, True)
+        for exposure in (
+            "vars(mock).update(call=subprocess.run)",
+            "mock.__dict__.update(call=subprocess.run)",
+            "vars(mock)", "mock.__dict__['call']",
+            "g = mock.__dict__; g.pop('call')",
+            "escaped = [vars(mock)]; unknown(escaped)",
+            "holder.namespace = mock\nvars(holder.namespace).setdefault('call', subprocess.run)",
+            "holder[0] = mock\nunknown(holder[0].__dict__)",
+            "other = mock if flag else unknown\nother.__dict__",
+            "from builtins import vars as expose\nexpose(mock)",
+            "import unittest.mock as other\nother.__dict__",
+            "import operator\noperator.setitem(mock.__dict__, 'call', subprocess.run)",
+        ):
+            code = "from unittest import mock\nimport subprocess\n" + exposure + "\nmock.call(['x'])\n"
+            with self.subTest(code=code):
+                self.assert_call_boundary(code, True)
+        # Exposure of an unrelated object does not revoke this import namespace.
+        self.assert_call_boundary(
+            "from unittest import mock\nvars(unknown)\nmock.call()\n", False)
+
+    def test_namespace_authority_veto_is_shared_with_literal_loader_proof(self):
+        import ast
+
+        from scripts.ci_selection import call_identities
+
+        for imports, exposure, invocation in (
+            ("from importlib import import_module as load", "globals()", "load"),
+            ("from importlib import import_module as call", "locals()", "call"),
+            ("from builtins import __import__ as open", "vars()", "open"),
+            ("import importlib as loader", "vars(loader)", "loader.import_module"),
+            ("import importlib as loader", "escaped = [loader.__dict__]", "loader.import_module"),
+            ("import importlib as first\nimport importlib as second", "second.__dict__", "first.import_module"),
+            ("import importlib as loader", "holder[0] = loader\nvars(holder[0])", "loader.import_module"),
+        ):
+            for before_import in (False, True):
+                code = ((exposure + "\n" + imports if before_import else imports + "\n" + exposure)
+                        + f"\n{invocation}('ummanu.leaf')\n")
+                with self.subTest(code=code):
+                    tree = ast.parse(code)
+                    identities = call_identities(tree, "tests")
+                    call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                                and ast.unparse(node.func) == invocation)
+                    self.assertIsNone(identities[id(call)][0])
+                    self.assert_call_boundary(code, True)
+
     def test_real_source_dynamic_subprocess_and_async_consumers_remain_opaque(self):
         for code in (
             "import subprocess as process\nprocess.run([])\n",

@@ -86,9 +86,18 @@ conservatively, including mutation through another alias of the imported namespa
 computed receiver whose value may contain that namespace. Conditional/container aliases
 cannot preserve a safe identity after such a write.
 Attribute stores/deletes, `setattr`/`delattr` and subscript stores/deletes invalidate
-receiver authority, including namespace `__dict__` and `vars(namespace)` writes.
-Writes/deletes through `globals()`, `locals()` or argument-free `vars()` refuse import
-identity module-wide, including through value/container aliases.
+receiver authority. Namespace exposure also revokes authority without classifying later
+dictionary operations: `globals()`, `locals()` and argument-free `vars()` refuse import
+identity module-wide, even for read-only observations. Escaped namespace accessor functions
+also refuse proof, including imported/value aliases and functions stored in containers.
+`vars(namespace)` and `namespace.__dict__` invalidate that receiver's import authority
+as soon as the dictionary is exposed, including value/container aliases, computed receivers
+and alternate imports of the same namespace. Dictionary method writes, deletes and escaped
+handles therefore cannot retain a safe identity merely because no store was enumerated.
+The collector gathers bindings, aliases, mutations and exposures, propagates uncertainty
+to a fixed point, then applies one authority veto before resolving immutable imports.
+Both the `unittest.mock.call` exception and literal-loader proof consume that same result;
+neither alternative spelling nor a later import can restore vetoed authority.
 Only names actually bound by assignment targets (names and recursive tuple/list/starred
 targets) carry value-alias spellings; attribute/subscript receivers and indices do not.
 Value aliases retain hazardous spellings but do not establish safe identity. Their
@@ -105,8 +114,11 @@ when the alias is spelled `call` or `open`.
 `asyncio.run` remains opaque: its identity alone proves neither the origin nor the dependencies
 of an arbitrary awaitable/callback. This refinement does not infer callback targets, receiver
 types, arbitrary third-party/native execution or runtime monkeypatching through external code,
-including `mock.patch.object` and other external monkeypatch APIs. Such APIs do not prove
-static purity; the supported local mutation forms above still invalidate import authority.
+including `mock.patch.object`, indirect `sys.modules` monkeypatching and other external
+monkeypatch APIs. There is no general discovery of calls such as `operator.setitem`;
+an explicit `mock.__dict__` argument still revokes authority through exposure itself.
+Such APIs do not prove static purity; the supported local mutation and exposure forms
+above still invalidate import authority.
 
 This safety boundary limits effectiveness. The historical independent ummanu-205 review of
 [PR #714](https://github.com/vladmesh/ummanu/pull/714), candidate `c3b51bf1113bf66dd13d4903041556d35615c903`,
