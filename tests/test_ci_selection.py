@@ -211,6 +211,8 @@ class SelectionTests(unittest.TestCase):
             "from unittest import mock\nmock.call = unknown\nmock.call()\n",
             "from unittest import mock\nsetattr(mock, 'call', unknown)\nmock.call()\n",
             "from unittest import mock\napi = mock\napi.call = unknown\nmock.call()\n",
+            "from unittest import mock\napi = mock if flag else unknown\napi.call = unknown\nmock.call()\n",
+            "from unittest import mock\napi = [mock]\napi[0].call = unknown\nmock.call()\n",
             ("from unittest import mock as first\nimport unittest.mock as second\n"
              "second.call = unknown\nfirst.call()\n"),
             ("from unittest import mock as first\nif flag:\n    import unittest.mock as second\n"

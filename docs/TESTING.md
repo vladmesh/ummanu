@@ -82,7 +82,9 @@ prove an alias; parameters, assignments/deletions, conditional imports and ambig
 receivers refuse that proof. Methods, nested classes and comprehension bodies resolve enclosing
 names outside the class namespace; the first comprehension iterable uses its enclosing scope.
 Wildcard imports, global/nonlocal writes and explicit namespace mutation invalidate proof
-conservatively, including mutation through another alias of the imported namespace.
+conservatively, including mutation through another alias of the imported namespace or a
+computed receiver whose value may contain that namespace. Conditional/container aliases
+cannot preserve a safe identity after such a write.
 Value aliases retain hazardous spellings but do not establish safe identity.
 Proven `unittest.mock.call` constructs an expectation record without invoking its arguments,
 so it no longer creates universal dependencies solely because its leaf is `call`.

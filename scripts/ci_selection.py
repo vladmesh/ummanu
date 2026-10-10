@@ -172,10 +172,7 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             self.generic_visit(node)
 
         def invalidate_receiver(self, node):
-            while isinstance(node, ast.Attribute):
-                node = node.value
-            if isinstance(node, ast.Name):
-                invalid.add(node.id)
+            invalid.update(item.id for item in ast.walk(node) if isinstance(item, ast.Name))
 
         def visit_Attribute(self, node):
             if isinstance(node.ctx, (ast.Store, ast.Del)):
@@ -216,7 +213,7 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             for item in ast.walk(target):
                 if isinstance(item, ast.Name):
                     aliases.setdefault(item.id, set()).update(possible)
-                    if item.id in invalid and isinstance(value, (ast.Name, ast.Attribute)):
+                    if item.id in invalid:
                         # A write through a value alias can mutate the imported
                         # namespace too. Refuse all spellings of that namespace.
                         invalid.update(n.id for n in ast.walk(value) if isinstance(n, ast.Name))
