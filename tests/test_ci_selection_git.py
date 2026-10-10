@@ -62,6 +62,7 @@ class SelectionGitTests(unittest.TestCase):
         grouped = load_manifest(root)
         old_graph, old_opaque = original.import_graph(sources)
         new_graph, new_opaque = import_graph(sources)
+        self.assertNotIn("ummanu.dispatch.observer", new_opaque)
         manifest = {path.removesuffix(".py").replace("/", ".")
                     for paths in grouped.values() for path in paths}
         products = {name for name in new_graph if name == "ummanu" or name.startswith("ummanu.")}
@@ -103,7 +104,7 @@ class SelectionGitTests(unittest.TestCase):
                          sort_keys=True))
         self.assertGreater(sum(len(deps - new_graph[name]) for name, deps in old_graph.items()), 0)
         for path in ("src/ummanu/board/terminal_taxonomy.py", "src/ummanu/webfront/caddyfile.py",
-                     "tests/test_web_front_cookie_order.py"):
+                     "src/ummanu/dispatch/observer.py", "tests/test_web_front_cookie_order.py"):
             results = []
             for analyzer, graph, opaque in ((original, old_graph, old_opaque), (ci_selection, new_graph, new_opaque)):
                 # Reuse the actual graphs computed above, rather than repeatedly
@@ -121,8 +122,12 @@ class SelectionGitTests(unittest.TestCase):
                 self.assertIn(path, results[1]["selected"]["unit"])
             else:
                 self.assertEqual([result["mode"] for result in results], ["affected", "affected"])
-                self.assertIn("tests/test_terminal_taxonomy.py" if "terminal_taxonomy" in path
-                              else "tests/test_web_front_cookie_order.py", results[1]["selected"]["unit"])
+                expected = {"src/ummanu/board/terminal_taxonomy.py": "tests/test_terminal_taxonomy.py",
+                            "src/ummanu/webfront/caddyfile.py": "tests/test_web_front_cookie_order.py"}
+                if path in expected:
+                    self.assertIn(expected[path], results[1]["selected"]["unit"])
+                else:
+                    self.assertIn("tests/test_dispatcher_observer.py", results[1]["selected"]["integration-heads"])
             print(json.dumps({"changed_path": path, "before": results[0], "after": results[1],
                               "removed_members_by_owner": removed_members, "added_members_by_owner": added_members},
                              sort_keys=True))

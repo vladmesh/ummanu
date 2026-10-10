@@ -47,6 +47,17 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             return set()  # nested calls are collected independently
         return set().union(*(leaves(child) for child in ast.iter_child_nodes(node)))
 
+    def bound_names(node):
+        # Stores to attributes/subscripts mutate objects; they bind neither the
+        # receiver nor any index expression to the assigned value.
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.Starred):
+            return bound_names(node.value)
+        if isinstance(node, (ast.Tuple, ast.List)):
+            return set().union(*(bound_names(item) for item in node.elts))
+        return set()
+
     class Collector(ast.NodeVisitor):
         def __init__(self):
             self.scope = None
@@ -172,11 +183,24 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             self.generic_visit(node)
 
         def invalidate_receiver(self, node):
+            nonlocal wildcard
             invalid.update(item.id for item in ast.walk(node) if isinstance(item, ast.Name))
+            # These explicit local namespace writes can replace any imported
+            # binding. Aliases/computed receivers reach here during propagation.
+            for item in ast.walk(node):
+                if isinstance(item, ast.Call) and (
+                        leaves(item.func) & {"globals", "locals"}
+                        or "vars" in leaves(item.func) and not item.args):
+                    wildcard = True
 
         def visit_Attribute(self, node):
             if isinstance(node.ctx, (ast.Store, ast.Del)):
                 self.invalidate_receiver(node)
+            self.generic_visit(node)
+
+        def visit_Subscript(self, node):
+            if isinstance(node.ctx, (ast.Store, ast.Del)):
+                self.invalidate_receiver(node.value)
             self.generic_visit(node)
 
         def visit_Call(self, node):
@@ -200,7 +224,8 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
         visit_DictComp = visit_ListComp
         visit_GeneratorExp = visit_ListComp
 
-    Collector().visit(tree)
+    collector = Collector()
+    collector.visit(tree)
     # Value aliases are never proof, but must not hide an opaque API's spelling.
     while True:
         previous = {key: set(value) for key, value in aliases.items()}
@@ -210,13 +235,12 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             possible = names & (OPAQUE_CALLS | DYNAMIC_CALLS)
             for leaf in names:
                 possible.update(aliases.get(leaf, set()) & (OPAQUE_CALLS | DYNAMIC_CALLS))
-            for item in ast.walk(target):
-                if isinstance(item, ast.Name):
-                    aliases.setdefault(item.id, set()).update(possible)
-                    if item.id in invalid:
-                        # A write through a value alias can mutate the imported
-                        # namespace too. Refuse all spellings of that namespace.
-                        invalid.update(n.id for n in ast.walk(value) if isinstance(n, ast.Name))
+            for bound in bound_names(target):
+                aliases.setdefault(bound, set()).update(possible)
+                if bound in invalid:
+                    # A write through a value alias can mutate the imported
+                    # namespace too. Refuse all spellings of that namespace.
+                    collector.invalidate_receiver(value)
         if aliases == previous and invalid == previous_invalid:
             break
     invalid_imports = {identity for bound in invalid for identity in imported.get(bound, set())}

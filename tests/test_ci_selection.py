@@ -232,6 +232,43 @@ class SelectionTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assert_call_boundary(code, True)
 
+    def test_assignment_bindings_do_not_alias_attribute_or_subscript_receivers(self):
+        for target in ("record.run", "record[0]", "state[record]",
+                       "(record.run, state[record])"):
+            code = ("from logging import info as record\nrecord('message')\n"
+                    f"def unrelated(record, state, exc):\n    {target} = exc.run\n")
+            with self.subTest(target=target):
+                self.assert_call_boundary(code, False)
+        for target in ("record", "(record,)", "[record]", "(other, *record)"):
+            code = f"import subprocess\n{target} = subprocess.run\nrecord([])\n"
+            with self.subTest(target=target):
+                self.assert_call_boundary(code, True)
+
+    def test_subscript_namespace_mutation_refuses_import_authority(self):
+        for receiver in ("mock.__dict__", "vars(mock)", "(mock if flag else unknown).__dict__",
+                         "vars(mock if flag else unknown)"):
+            for operation in (f"{receiver}['call'] = unknown", f"del {receiver}['call']"):
+                for alias in (False, True):
+                    mutation = (f"namespace = {receiver}\n" + operation.replace(receiver, "namespace")
+                                if alias else operation)
+                    code = "from unittest import mock\n" + mutation + "\nmock.call()\n"
+                    with self.subTest(code=code):
+                        self.assert_call_boundary(code, True)
+        for receiver in ("globals()", "locals()", "vars()"):
+            for operation in (f"{receiver}['call'] = unknown", f"del {receiver}['call']"):
+                for alias in (False, True):
+                    mutation = (f"namespace = {receiver}\n" + operation.replace(receiver, "namespace")
+                                if alias else operation)
+                    code = "from unittest.mock import call\n" + mutation + "\ncall()\n"
+                    with self.subTest(code=code):
+                        self.assert_call_boundary(code, True)
+        self.assert_call_boundary(
+            "from unittest import mock as first\nimport unittest.mock as second\n"
+            "vars(second)['call'] = unknown\nfirst.call()\n", True)
+        self.assert_call_boundary(
+            "from unittest import mock\nnamespace = [vars(mock)]\n"
+            "namespace[0]['call'] = unknown\nmock.call()\n", True)
+
     def test_real_source_dynamic_subprocess_and_async_consumers_remain_opaque(self):
         for code in (
             "import subprocess as process\nprocess.run([])\n",

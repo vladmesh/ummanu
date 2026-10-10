@@ -85,7 +85,14 @@ Wildcard imports, global/nonlocal writes and explicit namespace mutation invalid
 conservatively, including mutation through another alias of the imported namespace or a
 computed receiver whose value may contain that namespace. Conditional/container aliases
 cannot preserve a safe identity after such a write.
-Value aliases retain hazardous spellings but do not establish safe identity.
+Attribute stores/deletes, `setattr`/`delattr` and subscript stores/deletes invalidate
+receiver authority, including namespace `__dict__` and `vars(namespace)` writes.
+Writes/deletes through `globals()`, `locals()` or argument-free `vars()` refuse import
+identity module-wide, including through value/container aliases.
+Only names actually bound by assignment targets (names and recursive tuple/list/starred
+targets) carry value-alias spellings; attribute/subscript receivers and indices do not.
+Value aliases retain hazardous spellings but do not establish safe identity. Their
+uncertainty remains module-wide across lexical scopes, allowing conservative over-selection.
 Proven `unittest.mock.call` constructs an expectation record without invoking its arguments,
 so it no longer creates universal dependencies solely because its leaf is `call`.
 Calls inside its arguments are still analyzed. Other imported APIs with the same name,
@@ -97,7 +104,9 @@ and argument expansion stay opaque. A proven literal loader alias uses its API i
 when the alias is spelled `call` or `open`.
 `asyncio.run` remains opaque: its identity alone proves neither the origin nor the dependencies
 of an arbitrary awaitable/callback. This refinement does not infer callback targets, receiver
-types, arbitrary third-party/native execution or runtime monkeypatching through external code.
+types, arbitrary third-party/native execution or runtime monkeypatching through external code,
+including `mock.patch.object` and other external monkeypatch APIs. Such APIs do not prove
+static purity; the supported local mutation forms above still invalidate import authority.
 
 This safety boundary limits effectiveness. The historical independent ummanu-205 review of
 [PR #714](https://github.com/vladmesh/ummanu/pull/714), candidate `c3b51bf1113bf66dd13d4903041556d35615c903`,
@@ -122,7 +131,7 @@ The CI-only identity comparison in the same existing `integration-dispatcher` ow
 the original analyzer pinned at `8d722448497dcbd4ab32ee6e347fb1bc53024d9d` and the refined
 analyzer over one committed candidate source snapshot. Its bounded log records SHA/tree,
 opaque counts, removed identities and graph edges, and before/after membership, owners and
-every selected reason for `terminal_taxonomy.py`, `webfront/caddyfile.py` and the real
+every selected reason for `terminal_taxonomy.py`, `webfront/caddyfile.py`, `dispatch/observer.py` and the real
 `test_web_front_cookie_order.py` expectation consumer. Those projections describe graph
 effectiveness, not an executed affected-source PR or a wall-clock speedup. This infrastructure
 PR itself requires the full manifest, and leaves the genuine affected-source acceptance proof
@@ -132,11 +141,15 @@ The [CI comparison at candidate `00be5dde`](https://github.com/vladmesh/ummanu/a
 used source snapshot `00be5dded5075bc02787e52b32268612b41a8099`, tree
 `35497803184b6a98f52aac0746a6e09323c357b5`, for both analyzers. It removed 740 obsolete
 graph edges from the proven `unittest.mock.call` at line 93 of `test_web_front_cookie_order.py`.
-Conservative value-alias handling added 2,568 edges and four opaque modules:
+That historical candidate added 2,568 edges and four opaque modules:
 `tests.test_dispatcher_sprint_admission`, `tests.test_sprint_guard_outside_sprint`,
 `tests.test_sprint_listing_budget` and `ummanu.dispatch.observer`. Opaque manifest modules
 were 219 before and 221 after; opaque product modules were 149 before and 150 after.
-Thus obsolete links decreased, but total opacity and total edges did not. The existing
+The observer opacity in that candidate was an assignment-target defect: `record.run = ...`
+incorrectly treated `record` as a bound value alias and tainted the unrelated proven
+`owner_events.record` call. The repair separates bound names from mutated receivers and
+adds the observer source change to the CI comparison. The historical counts above must
+not be treated as repaired measurements. The existing
 CI comparison prints the added aliases' potential call identities as well as the removed identity.
 
 | Projected single-module change | Original mode/modules | Refined mode/modules |
