@@ -240,8 +240,27 @@ later commands and reparented children have no such ancestor. The hook does not 
 runner's membership checks, fixture environment, marker families or budgets. Refusal is command
 feedback; it introduces no review/CI classification, retry or restart-budget handling.
 
-The acceptance boundary is the fresh report marker transaction: its immutable data contains the
-worker receipt and SHA/tree binding. Same-request replay retains that data without reading the card
+The acceptance boundary is the fresh report marker transaction: the writer validates the intact,
+complete green full receipt against the declared check set, interpreter, candidate imports and
+committed HEAD tree, then records a bounded admission snapshot with its SHA/tree binding.
+The full receipt stays in the existing workspace artifact; audit and packets contain no per-test or
+module timing, output or tail. `receipt_digest` identifies that original full artifact and is never
+recomputed from the compact snapshot. `snapshot_digest` is SHA-256 over the snapshot's canonical
+JSON (sorted keys, compact separators, UTF-8 with surrogateescape, excluding `snapshot_digest`).
+
+`admitted_check` enforces a 16,384-byte maximum for the canonical snapshot including its digest,
+exactly 15 top-level fields, the six-field module check set, and seven provenance fields with exactly
+two import roots. Paths, check-set strings/arguments and provenance strings each have a 2,048-byte
+limit; the exact argument vector has at most 64 entries. The generated summary is at most 512 bytes.
+Counts allow only `tests`, `skipped`, `failures`, `errors`, `expected_failures`, and
+`unexpected_successes`, each an integer from 0 through 2^63-1. Unknown fields are refused, rather
+than copied or truncated. No per-test list enters this bound. An oversized declared contract or
+provenance refuses before the report marker with the allowed worker wrapper command.
+
+Handoff, recovery and packets use the same canonical snapshot verifier: digest, complete/exit-zero/
+passed, exact check-set digest and import/environment provenance remain mandatory. Handoff also
+compares the freshly authorized snapshot digest with the immutable admission, covering the original
+SHA/tree, check set and artifact digest. Same-request replay retains that data without reading the card
 or checkout again. Before consuming a report, replaying a pending Validate move, gating a recovered
 Validate record or bringing up review, the dispatcher verifies durable candidate evidence against
 that admitted binding. Report handoff requires the exact admitted checkout; later gates/reviews read
@@ -260,6 +279,38 @@ identity and full green receipt. Existing same-request historical replay remains
 not create new admission authority. Drain existing reviewer heads before activation so future commands
 import the upgraded control-plane guard and receive regenerated packets. Native adapters that still
 omit `broad_check.module` must declare their actual full suite first; no discovery can supply it.
+
+Two live registered consumers have a separate unresolved precondition: `public-profile` and
+`ai-risk-decision-lab` both declare `interpreter: /usr/bin/python3`, `module: doctest`, and
+`import_package: doctest`. The public-profile args are `README.md`, `PLAN.md`, `content_plan.md`,
+`series/README.md`. The ai-risk-decision-lab args are `README.md`, `open-questions.md`,
+`research/funding-landscape.md`, `projects/risk-decision-lab/research/mit-data-recon.md`,
+`projects/risk-decision-lab/applications/manifund/draft.md`, and
+`projects/risk-decision-lab/applications/bluedot-rapid/draft.md`.
+These Markdown doctest declarations import the stdlib package outside the candidate. They produce
+no reusable candidate receipt under the existing provenance boundary. After activation, fresh
+code `report:done` for either project necessarily refuses; `report:blocked` remains available.
+Declaring a module alone does not resolve this precondition.
+
+The separate production operation must explicitly resolve both consumers through a supported
+candidate-owned check contract, or record an operational classification acknowledging that code
+completion remains impossible for them. Until then activation readiness is unresolved. Do not
+backfill accepted reports, exempt these projects, weaken provenance, or silently treat a docs-only
+declaration as code completion evidence. This code card changes neither live adapters nor card
+classification. Read-only precondition inspection, without executing any check:
+
+```bash
+activation_instance="${UMMANU_INSTANCE:-$HOME/ummanu-data/instance}"
+for activation_project in public-profile ai-risk-decision-lab; do
+  sed -n '/^id:/p; /^repo:/p; /^enabled:/p; /^adapter:/p' "$activation_instance/projects/$activation_project.yaml"
+  sed -n '/^broad_check:/,$p' "$activation_instance/adapters/$activation_project.yaml"
+done
+/usr/bin/python3 -P -c 'import importlib.util; print(importlib.util.find_spec("doctest").origin)'
+```
+
+The inspected bindings point to these same-named adapters; the result is the shapes and args above
+and an external stdlib `doctest.py` origin. Recheck the bindings and their named adapters before the
+operation; changing only the installed policy leaves both prerequisites unresolved.
 No deployment, service restart or executor registry write is part of this change. The natural live
 DoD5 card follows production activation; fixtures and candidate CI are not a delivered live packet proof.
 

@@ -1339,7 +1339,10 @@ run, or a checkout with no resolvable identity attests nothing.
 Fresh code `report:done` for every registered project declaring `broad_check` requires an intact complete
 green receipt for the exact full declaration, interpreter, imports and committed HEAD tree. Admission
 never runs tests and refuses before the accepted marker when evidence is missing or mismatched.
-The report event keeps the admitted snapshot and candidate SHA/tree binding. Same-request replay
+The report event keeps a canonical admission snapshot of at most 16 KiB with its own digest,
+candidate SHA/tree, exact check set, provenance, green status and bounded counts/summary. The original
+full receipt digest and artifact path bind the snapshot to the workspace artifact; timing and output
+remain there. Handoff, recovery and packets use the same snapshot verifier. Same-request replay
 uses that immutable event without rereading changed card or checkout state. Blocked and non-candidate
 completion contracts are unchanged. See [Testing](TESTING.md) for recovery ordering and activation drain.
 

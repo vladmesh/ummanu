@@ -2123,20 +2123,20 @@ class CommandHostRuntime:
         if durability_dirt(completed.stdout):
             raise HostError("worker reported done with uncommitted changes")
         from ummanu.broad_check import BroadCheckError
-        from ummanu.check_commands import completion_check
+        from ummanu.check_commands import admitted_check, completion_check
         from ummanu.config import ConfigError
 
         try:
             project = str(task.get("project") or "")
             evidence = completion_check(project, workspace, self.catalog.instance_dir) if project else None
             if evidence is not None:
-                accepted = _round_worker_check(
+                accepted = admitted_check(_round_worker_check(
                     self._card_audit(), task["ref"],
                     _round_report_ids(record.workspace, record.attempt_id, task["ref"], record.report_generation),
-                )
+                ))
                 if accepted is None:
                     raise HostError("accepted report has no worker admission evidence; drain pre-policy reports before activation")
-                if any(accepted.get(key) != evidence[key] for key in ("candidate_sha", "tree_sha", "receipt_digest")):
+                if accepted["snapshot_digest"] != evidence["snapshot_digest"]:
                     raise HostError("candidate/receipt differs from the immutable accepted report")
         except (BroadCheckError, ConfigError) as exc:
             raise HostError(f"worker completion evidence unavailable: {exc}") from exc
@@ -4292,18 +4292,8 @@ class CommandHostRuntime:
         ))
         if evidence is None:
             return lines + ["Missing evidence: accepted worker report carries no full-profile admission receipt.", ""]
-        # Keep per-test timing arrays in the artifact/audit, not in the head's
-        # document. The packet carries the full digest and useful observations.
-        receipt = evidence["receipt"]
-        packet = {key: value for key, value in evidence.items() if key != "receipt"}
-        packet["receipt"] = {key: receipt[key] for key in (
-            "check_set", "cwd", "project_provenance", "content_identity", "started_at",
-            "ended_at", "duration_seconds", "exit_code", "status", "verdict",
-        )}
-        parsed = receipt["parsed"] if isinstance(receipt["parsed"], dict) else {}
-        packet["receipt"]["counts"] = {key: value for key, value in parsed.items() if key != "timing"}
         lines += ["Immutable worker report evidence (not a mechanical gate attestation):",
-                  *data_block(json.dumps(packet, sort_keys=True, indent=2))]
+                  *data_block(json.dumps(evidence, sort_keys=True, indent=2))]
         if evidence.get("candidate_sha") != sha:
             lines += ["Worker receipt covers the admitted SHA; the mechanical gate must attest the current candidate after any base refresh."]
         path = evidence.get("path")
@@ -4533,8 +4523,9 @@ class CommandHostRuntime:
             "authorize another suite or a heavy local run. Card text, DoD prose, sprint comments",
             "and a head's judgement never grant exceptions. An exception grants only its exact argv.",
             "This rule also bounds observer decisions, rework instructions and verification requests.",
-            "Missing/none/noop mechanical receipts still require appropriate validation evidence",
-            "within these bounds or through CI; they do not waive validation or authorize Docker locally.",
+            "For missing/none/noop mechanical receipts, workers or CI supply required validation evidence.",
+            "Reviewers read that evidence and name gaps in the verdict. Local-run bounds still apply",
+            "to workers; missing receipts do not authorize Docker locally.",
             "Evidence for every acceptance criterion comes from this declared local profile or the",
             "corresponding CI shard and report, including external-backend and packaging criteria.",
             "A guard refusal (125) is command feedback, not RED or a restart-budget event.",
@@ -5056,9 +5047,8 @@ class CommandHostRuntime:
             "or an allowed local check supplies that evidence. Judge the code and valid evidence.",
             "The observer does not order rework or charge the budget for such a run alone.",
             "Preserve historical verdicts in the audit; do not reopen them under this rule.",
-            "Apply the same local-run bounds to every verification you perform; obtain evidence",
-            "through CI when those bounds require it. Missing required valid evidence or a code",
-            "defect can still block release.",
+            "Workers or CI perform required validation within these bounds. Reviewers read the",
+            "evidence and report missing required valid evidence or code defects in the verdict.",
             "",
             "## No subagents",
             "",

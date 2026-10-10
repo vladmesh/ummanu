@@ -25,7 +25,7 @@ facts:
     sha256: 78e0f15a6a06b18814d35537ae1e85f7ca7a3d61bb6a733c0907bf69c3c0a0b7
   - id: worker-reporting
     path: worker-reporting.md
-    sha256: cd40132b196dd85243f8a5d83bac8353eba419532a0232417f915ec4140574ce
+    sha256: 17ccda217965f48e25291ab40e2b7977ce910a34f9ac37fcd9fd793418fea1a4
   - id: validation-review-assessment
     path: validation-review-assessment.md
     sha256: 8776ca900c4990e5471c33e7130e886ac9b67b5ed042de80b3e31899b7e14872

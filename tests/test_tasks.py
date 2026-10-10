@@ -4780,11 +4780,11 @@ class ReportDurabilityGateTests(CardStoreCase):
     def test_clean_workspace_reports_done(self) -> None:
         self.assertEqual(self._report("done")["action"], "reported")
 
-    def test_registered_code_admission_keeps_native_receipt_in_sql_event_and_replays_after_loss(self):
+    def test_registered_code_admission_keeps_bounded_native_snapshot_in_sql_event_and_replays_after_loss(self):
         import sys
 
         from ummanu.broad_check import run_broad_check
-        from ummanu.check_commands import _spec
+        from ummanu.check_commands import ADMISSION_MAX_BYTES, _spec, admitted_check
 
         self.client.move(12, "in_progress")
         instance = Path(self.tmpdir.name)
@@ -4817,12 +4817,17 @@ class ReportDurabilityGateTests(CardStoreCase):
         first = self.writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ready", request_id=request)
         admitted = self.writer.board_host.canon.event(request).data["worker_check"]
         self.assertEqual(admitted["receipt_digest"], receipt["receipt_digest"])
-        self.assertEqual(admitted["receipt"], receipt)
+        self.assertEqual(admitted_check(admitted), admitted)
+        self.assertEqual(admitted["check_set"], receipt["check_set"])
+        self.assertEqual(admitted["counts"], {"tests": 1})
+        self.assertLessEqual(len(json.dumps(admitted, sort_keys=True, separators=(",", ":")).encode()), ADMISSION_MAX_BYTES)
+        self.assertEqual(json.loads(Path(admitted["path"]).read_text()), receipt)
         Path(admitted["path"]).unlink()
         (self.workspace / "app.py").write_text("VALUE = 2\n")
         replay = self.writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ready", request_id=request)
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
+        self.assertEqual(self.writer.board_host.canon.event(request).data["worker_check"], admitted)
         self.assertEqual(len(self.client.comments(12)), 1)
 
     def test_dirty_workspace_is_refused_without_touching_the_board(self) -> None:

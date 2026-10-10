@@ -918,7 +918,7 @@ def load_receipt(path: Path) -> dict[str, object] | None:
 
 
 def intact_receipt(payload: object) -> dict[str, object] | None:
-    """The same semantic reader for a local artifact or its immutable audit snapshot."""
+    """Validate the complete workspace artifact, including its original digest."""
     if not isinstance(payload, dict):
         return None
     digest = payload.get("receipt_digest")
@@ -1070,24 +1070,9 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     if receipt.get("status") != _STATUS_COMPLETE:
         reason = str(receipt.get("incomplete_reason") or "run did not finish")
         return ReceiptLookup(False, f"run did not finish: {reason}", receipt, path)
-    refusal = candidate_import_refusal(receipt, root, expected_package=spec.import_package)
+    refusal = receipt_provenance_refusal(receipt, root, spec)
     if refusal:
         return ReceiptLookup(False, refusal, receipt, path)
-    provenance = receipt["project_provenance"]
-    workspace = str(root.resolve())
-    if (receipt.get("cwd") != workspace or provenance.get("cwd") != workspace
-            or provenance.get("import_roots") != candidate_import_roots(root)):
-        return ReceiptLookup(False, "receipt is for a different checkout/import roots", receipt, path)
-    # Keep executable symlinks intact: two venvs may link to the same system Python
-    # while supplying different dependencies. Compare the spelling Python observed.
-    interpreter = spec.interpreter
-    if not Path(interpreter).is_absolute():
-        interpreter = os.path.abspath(root / interpreter)
-    if provenance.get("python") != interpreter:
-        return ReceiptLookup(False, "receipt interpreter provenance differs from the declared interpreter", receipt, path)
-    prefix = Path(interpreter).parent.parent
-    if (prefix / "pyvenv.cfg").is_file() and provenance.get("environment_prefix") != str(prefix):
-        return ReceiptLookup(False, "receipt interpreter environment differs from the declared environment", receipt, path)
     recorded = receipt.get("content_identity")
     if not isinstance(recorded, Mapping):
         return ReceiptLookup(False, "receipt records no content identity", receipt, path)
@@ -1099,6 +1084,29 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     if not stored.matches(current):
         return ReceiptLookup(False, "content changed since the receipt was written", receipt, path)
     return ReceiptLookup(True, "receipt describes this exact content", receipt, path)
+
+
+def receipt_provenance_refusal(receipt: Mapping[str, object], root: Path, spec: CheckSpec) -> str:
+    """One import/environment boundary for full artifacts and bounded admission evidence."""
+    refusal = candidate_import_refusal(receipt, root, expected_package=spec.import_package)
+    if refusal:
+        return refusal
+    provenance = receipt["project_provenance"]
+    workspace = str(root.resolve())
+    if (receipt.get("cwd") != workspace or provenance.get("cwd") != workspace
+            or provenance.get("import_roots") != candidate_import_roots(root)):
+        return "receipt is for a different checkout/import roots"
+    # Keep executable symlinks intact: two venvs may link to the same system Python
+    # while supplying different dependencies. Compare the spelling Python observed.
+    interpreter = spec.interpreter
+    if not Path(interpreter).is_absolute():
+        interpreter = os.path.abspath(root / interpreter)
+    if provenance.get("python") != interpreter:
+        return "receipt interpreter provenance differs from the declared interpreter"
+    prefix = Path(interpreter).parent.parent
+    if (prefix / "pyvenv.cfg").is_file() and provenance.get("environment_prefix") != str(prefix):
+        return "receipt interpreter environment differs from the declared environment"
+    return ""
 
 
 def summarize(receipt: Mapping[str, Any]) -> str:

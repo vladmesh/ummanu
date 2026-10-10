@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import json
 import os
 import tempfile
 import unittest
@@ -9,8 +11,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.support.completion_receipt import SHA, TREE, declared_receipt, save_receipt
-from ummanu.broad_check import BroadCheckError, ContentIdentity
-from ummanu.check_commands import completion_check
+from ummanu.broad_check import BroadCheckError, ContentIdentity, check_set_digest
+from ummanu.check_commands import ADMISSION_MAX_BYTES, admitted_check, completion_check
 from ummanu.task_commands import resolve_data_dir
 from ummanu.tasks import TaskError, TaskWriter
 
@@ -130,7 +132,84 @@ class CompletionAdmissionTests(unittest.TestCase):
                 self.assertEqual(data["candidate_sha"], SHA)
                 self.assertEqual(data["tree_sha"], TREE)
                 self.assertEqual(data["receipt_digest"], self.receipt["receipt_digest"])
-                self.assertEqual(data["receipt"]["check_set"], self.spec.check_set)
+                self.assertEqual(data["check_set"], self.spec.check_set)
+                self.assertEqual(admitted_check(data), data)
+
+    def test_large_timing_artifact_produces_bounded_writer_snapshot(self):
+        self.report()
+        first = self.writer._marker_write.call_args.kwargs["data"]["worker_check"]
+        self.receipt["parsed"]["timing"] = {"tests": [{"name": "x" * 100, "seconds": 1}] * 10000}
+        self.receipt["tail"] = "output" * 20000
+        self.receipt["parsed"]["summary"] = "verbose" * 20000
+        save_receipt(self.path, self.receipt)
+        self.report(request_id="large-report")
+        large = self.writer._marker_write.call_args.kwargs["data"]["worker_check"]
+        encoded = json.dumps(large, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        self.assertGreater(self.path.stat().st_size, 1_000_000)
+        self.assertLessEqual(len(encoded), ADMISSION_MAX_BYTES)
+        self.assertEqual(len(encoded), len(json.dumps(first, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()))
+        self.assertEqual(large["counts"], {"tests": 2})
+        self.assertEqual(large["receipt_digest"], self.receipt["receipt_digest"])
+        self.assertNotEqual(large["snapshot_digest"], first["snapshot_digest"])
+        self.assertEqual(admitted_check(large), large)
+
+    def test_snapshot_semantics_and_all_field_bounds_refuse_even_with_resealed_digest(self):
+        original = completion_check("other", self.root, self.instance)
+        cases = ("tampered", "missing", "red", "incomplete", "check_set", "provenance", "interpreter",
+                 "environment", "summary", "provenance_size", "args_size", "args_count", "total_size", "counts", "extra")
+        for case in cases:
+            evidence = copy.deepcopy(original)
+            if case in {"tampered", "red"}:
+                evidence["exit_code"] = 1
+            elif case == "missing":
+                evidence.pop("tree_sha")
+            elif case == "incomplete":
+                evidence["status"] = "incomplete"
+            elif case == "check_set":
+                evidence["check_set"]["args"] = ["subset"]
+            elif case == "provenance":
+                evidence["project_provenance"]["imported_project"] = "/foreign/app.py"
+            elif case == "interpreter":
+                evidence["project_provenance"]["python"] = "/different/python"
+            elif case == "environment":
+                evidence["project_provenance"]["environment_prefix"] = str(self.root / "app")
+            elif case == "summary":
+                evidence["summary"] = "x" * 513
+            elif case == "provenance_size":
+                evidence["project_provenance"]["origin"] = "x" * 2049
+            elif case == "args_size":
+                evidence["check_set"]["args"] = ["x" * 2049]
+            elif case == "args_count":
+                evidence["check_set"]["args"] = ["x"] * 65
+            elif case == "total_size":
+                evidence["check_set"]["args"] = ["x" * 2048] * 9
+                evidence["command_or_check_set_digest"] = check_set_digest(evidence["check_set"])
+            elif case == "counts":
+                evidence["counts"]["tests"] = 2**63
+            else:
+                evidence["tail"] = "unbounded field"
+            if case != "tampered":
+                evidence["snapshot_digest"] = check_set_digest({key: value for key, value in evidence.items() if key != "snapshot_digest"})
+            with self.subTest(case=case):
+                self.assertIsNone(admitted_check(evidence))
+
+    def test_oversize_declared_contract_refuses_writer_before_marker(self):
+        adapter = self.instance / "adapters/other.yaml"
+        declaration = json.loads(adapter.read_text())
+        declaration["broad_check"]["args"] = ["x" * 2048] * 9
+        adapter.write_text(json.dumps(declaration))
+        self.receipt["check_set"]["args"] = declaration["broad_check"]["args"]
+        self.receipt["command_or_check_set_digest"] = check_set_digest(self.receipt["check_set"])
+        save_receipt(self.path, self.receipt)
+        # The full declared receipt has a different artifact key, without executing a runner.
+        from ummanu.broad_check import receipt_path
+        from ummanu.check_commands import _spec
+        args = argparse.Namespace(root=str(self.root), instance=str(self.instance), default_interpreter="",
+                                  check_command="broad", selectors=[], module=None, command=None, module_arg=[])
+        save_receipt(receipt_path(self.root, _spec(args).spec), self.receipt)
+        with self.assertRaisesRegex(TaskError, "16 KiB"):
+            self.report()
+        self.writer._marker_write.assert_not_called()
 
     def test_registration_identity_does_not_depend_on_binding_filename(self):
         (self.instance / "projects/other.yaml").rename(self.instance / "projects/registered.yaml")
@@ -199,9 +278,15 @@ class CompletionAdmissionTests(unittest.TestCase):
         events[0]["data"].pop("worker_check")
         with self.assertRaisesRegex(HostError, "drain pre-policy reports"):
             host.verify_worker_result(task, record)
-        events[0]["data"]["worker_check"] = {**evidence, "candidate_sha": "c" * 40}
-        with self.assertRaisesRegex(HostError, "immutable accepted report"):
-            host.verify_worker_result(task, record)
+        for key in ("candidate_sha", "tree_sha", "receipt_digest", "check_set"):
+            changed = copy.deepcopy(evidence)
+            changed[key] = {**evidence[key], "args": ["subset"]} if key == "check_set" else "c" * len(evidence[key])
+            if key == "check_set":
+                changed["command_or_check_set_digest"] = check_set_digest(changed[key])
+            changed["snapshot_digest"] = check_set_digest({name: value for name, value in changed.items() if name != "snapshot_digest"})
+            events[0]["data"]["worker_check"] = changed
+            with self.subTest(key=key), self.assertRaisesRegex(HostError, "immutable accepted report"):
+                host.verify_worker_result(task, record)
         self.path.unlink()
         with self.assertRaisesRegex(HostError, "evidence unavailable"):
             host.verify_worker_result(task, record)
@@ -223,7 +308,10 @@ class CompletionAdmissionTests(unittest.TestCase):
         self.path.unlink()
         host._require_worker_admission({**self.task, "ref": "other-1"}, record)
         self.assertEqual(host._run.call_args.args[0][-4:], ["merge-base", "--is-ancestor", SHA, "HEAD"])
-        evidence["receipt"]["exit_code"] = 1
+        host._run.return_value.stdout = "c" * 40
+        with self.assertRaisesRegex(HostError, "does not match its receipt tree"):
+            host._require_worker_admission({**self.task, "ref": "other-1"}, record)
+        evidence["exit_code"] = 1
         with self.assertRaisesRegex(HostError, "missing or damaged"):
             host._require_worker_admission({**self.task, "ref": "other-1"}, record)
 

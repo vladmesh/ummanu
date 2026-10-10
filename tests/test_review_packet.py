@@ -445,15 +445,14 @@ class PacketHeaderTests(unittest.TestCase):
         import tempfile
 
         from tests.support.completion_receipt import SHA, TREE, declared_receipt
-        from ummanu.broad_check import summarize
+        from ummanu.check_commands import admission_snapshot
 
         fixture = PacketFixture()
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         root = Path(scratch.name)
         _, path, receipt = declared_receipt(root / "candidate", root / "instance")
-        evidence = {"candidate_sha": SHA, "tree_sha": TREE, "path": str(path),
-                    "receipt_digest": receipt["receipt_digest"], "summary": summarize(receipt), "receipt": receipt}
+        evidence = admission_snapshot(receipt, candidate_sha=SHA, tree_sha=TREE, path=path)
         path.unlink()
         fixture.events[-1]["data"]["worker_check"] = evidence
         host = self.host(fixture)
@@ -469,8 +468,11 @@ class PacketHeaderTests(unittest.TestCase):
                 packet = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
             self.assertIn("Reviewer heads must not run tests or any ummanu check", packet)
             self.assertIn("request validation from the worker or CI", packet)
+            self.assertIn("Workers or CI perform required validation within these bounds", packet)
+            self.assertIn("Reviewers read that evidence and name gaps in the verdict", packet)
             self.assertIn("Read the diff, commits", packet)
             self.assertIn(evidence["receipt_digest"], packet)
+            self.assertIn(evidence["snapshot_digest"], packet)
             self.assertIn(TREE, packet)
             self.assertIn("complete/passed", packet)
             self.assertIn("tests=2", packet)
@@ -480,6 +482,9 @@ class PacketHeaderTests(unittest.TestCase):
                 self.assertIn("https://ci.invalid/1", packet)
             else:
                 self.assertIn("No valid SHA-bound mechanical-gate receipt", packet)
+        evidence["exit_code"] = 1
+        packet = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
+        self.assertIn("Missing evidence: accepted worker report", packet)
         fixture.events[-1]["data"].pop("worker_check")
         packet = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
         self.assertIn("Missing evidence: accepted worker report", packet)
