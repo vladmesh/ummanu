@@ -914,6 +914,11 @@ def load_receipt(path: Path) -> dict[str, object] | None:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         return None
+    return intact_receipt(payload)
+
+
+def intact_receipt(payload: object) -> dict[str, object] | None:
+    """The same semantic reader for a local artifact or its immutable audit snapshot."""
     if not isinstance(payload, dict):
         return None
     digest = payload.get("receipt_digest")
@@ -1068,6 +1073,21 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     refusal = candidate_import_refusal(receipt, root, expected_package=spec.import_package)
     if refusal:
         return ReceiptLookup(False, refusal, receipt, path)
+    provenance = receipt["project_provenance"]
+    workspace = str(root.resolve())
+    if (receipt.get("cwd") != workspace or provenance.get("cwd") != workspace
+            or provenance.get("import_roots") != candidate_import_roots(root)):
+        return ReceiptLookup(False, "receipt is for a different checkout/import roots", receipt, path)
+    # Keep executable symlinks intact: two venvs may link to the same system Python
+    # while supplying different dependencies. Compare the spelling Python observed.
+    interpreter = spec.interpreter
+    if not Path(interpreter).is_absolute():
+        interpreter = os.path.abspath(root / interpreter)
+    if provenance.get("python") != interpreter:
+        return ReceiptLookup(False, "receipt interpreter provenance differs from the declared interpreter", receipt, path)
+    prefix = Path(interpreter).parent.parent
+    if (prefix / "pyvenv.cfg").is_file() and provenance.get("environment_prefix") != str(prefix):
+        return ReceiptLookup(False, "receipt interpreter environment differs from the declared environment", receipt, path)
     recorded = receipt.get("content_identity")
     if not isinstance(recorded, Mapping):
         return ReceiptLookup(False, "receipt records no content identity", receipt, path)

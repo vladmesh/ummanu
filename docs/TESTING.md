@@ -103,10 +103,23 @@ board, API, cloud or other credentials. A startup guard rejects network connecti
 other than Python and the read-only temporary-instance Git queries of the board seam, so live board/API
 use and Docker, VM, Ansible or provisioning commands fail loudly.
 
-Workers and reviewers start with focused `ummanu check <selector>` checks. Their permitted local
+Workers start with focused `ummanu check <selector>` checks. Their permitted local
 checks are the adapter-declared broad profile and its subsets; the fast runner above is not another
 worker validation command. When the task requires the local broad suite, run it once through the
 receipt wrapper and reuse its intact receipt for unchanged content.
+
+Before a fresh code `report:done`, every registered project declaring `broad_check` must supply an
+intact complete green receipt for its exact full declaration, candidate interpreter, import provenance
+and committed HEAD tree. The report writer reads evidence and never runs tests. A refusal writes no
+accepted report marker and leaves the card In progress; `report:blocked`, non-candidate completion
+and same-request report replay keep their existing contracts. Subsets write no full receipt.
+
+Reviewers inspect code, commits and existing worker/CI evidence without executing tests. Every
+`ummanu check` form, including `show`, `--reuse`, selectors and legacy overrides, refuses with 125
+before resolution or receipt lookup. Reviewer packets embed the admitted worker receipt, its summary,
+digest, artifact path, candidate SHA and content tree separately from exact-SHA mechanical gate
+attestation. Missing, none and noop gates attest no suite: name the gap in the verdict and request
+validation from the worker or CI. A worker receipt never becomes a CI gate attestation.
 
 ## Control-host local profile
 
@@ -205,18 +218,50 @@ and the declared candidate-local venv after setup. Resuming a materialized works
 files without rebuilding dependencies. Direct `pytest`, `python -m pytest` and `python -m unittest`
 refuse before runner/test import, with status 125 and one line naming `ummanu check <selector>`.
 This includes `python`, `python3` and absolute candidate-local declared interpreter paths. Ordinary Python,
-library imports of pytest/unittest and the Ummanu CLI continue to work. Native Ansible commands and
+library imports of pytest/unittest and other Ummanu CLI commands continue to work. Native Ansible commands and
 sudo in the head PATH refuse with one line directing execution to CI. The Docker guard's order,
 backend bindings and exact policy are unchanged. Standing roles receive no head guard PATH.
 
-Authorization belongs to the live module runner process launched by the receipt wrapper, and its
+Reviewer refusal takes precedence over wrapper ancestry. The guard reads the common role launcher's
+`BOARD_ROLE=reviewer` identity from the live process exec environment in `/proc` ancestry, including
+when a child clears its environment. A check argument, candidate adapter, inherited runtime.env value
+or prompt does not set that identity: `role_env` overwrites it from the bound launch role. Both new
+and supported retained review bring-up repair candidate-local startup hooks. Shared and external
+interpreter prefixes are never written. The role's `PYTHONPATH` carries only the workspace-owned
+`.ummanu-task-env/test-guard` startup directory for absolute external interpreters; it does not carry
+the product source tree. Candidate-local venv hooks continue to work when a child clears its environment.
+
+Worker authorization belongs to the live module runner process launched by the receipt wrapper, and its
 descendants, in that workspace. The hook checks Linux `/proc` ancestry for the exact provenance
 bootstrap digest and candidate import roots. Wrapper169's existing bootstrap is compatible; there
-is no ambient environment marker, permission file or cached PID. Native `shared` children retain
+is no wrapper permission environment marker, permission file or cached PID. Native `shared` children retain
 authorization through a fresh environment whitelist and `PYTHONPATH=""`. Sibling head commands,
 later commands and reparented children have no such ancestor. The hook does not replace the native
 runner's membership checks, fixture environment, marker families or budgets. Refusal is command
 feedback; it introduces no review/CI classification, retry or restart-budget handling.
+
+The acceptance boundary is the fresh report marker transaction: its immutable data contains the
+worker receipt and SHA/tree binding. Same-request replay retains that data without reading the card
+or checkout again. Before consuming a report, replaying a pending Validate move, gating a recovered
+Validate record or bringing up review, the dispatcher verifies durable candidate evidence against
+that admitted binding. Report handoff requires the exact admitted checkout; later gates/reviews read
+the immutable snapshot and verify its commit/tree and ancestry after machinery-owned base refreshes.
+The exact-SHA gate owns the refreshed tree. Recovery verifies first, freezes or confirms the worker once, saves retention,
+then performs the idempotent Validate move. A lost or changed receipt is an explicit refusal; reviewer
+packets also label an unavailable artifact even when the immutable admitted snapshot survives.
+
+Production activation requires a separate operation. Drain all pre-policy code report occurrences
+with outstanding effects, including staged/pending report writes and `validation_move_pending`
+continuations, and code Validate/review records for adapters declaring `broad_check`. Their released
+producers never recorded `worker_check`; old accepted events must remain unchanged and cannot be
+backfilled from report prose. Settle their current effects under the installed policy before upgrading,
+or park them for an explicit new worker round under the new policy. A new round needs a new request
+identity and full green receipt. Existing same-request historical replay remains available and does
+not create new admission authority. Drain existing reviewer heads before activation so future commands
+import the upgraded control-plane guard and receive regenerated packets. Native adapters that still
+omit `broad_check.module` must declare their actual full suite first; no discovery can supply it.
+No deployment, service restart or executor registry write is part of this change. The natural live
+DoD5 card follows production activation; fixtures and candidate CI are not a delivered live packet proof.
 
 This is an accidental-command guard, like the Docker guard, not an isolation boundary against the
 interpreter's owner deliberately using `-S`, forging the bootstrap argv, or replacing startup files.

@@ -15,6 +15,37 @@ from pathlib import Path
 
 MODULE_FILE = "_ummanu_test_guard.py"
 STARTUP_FILE = "01-ummanu-test-guard.pth"
+WORKSPACE_STARTUP_DIR = ".ummanu-task-env/test-guard"
+
+
+def reviewer_head() -> bool:
+    """Read the role_env launch identity from live process ancestry.
+
+    BOARD_ROLE is set by the common role launcher, never by candidate configuration.
+    /proc's exec environment also survives a child's env -i and changes to its own
+    environment. Like the existing bootstrap guard, this is an accidental-command
+    policy, not a security sandbox against the process owner.
+    """
+    pid = os.getpid()
+    seen: set[int] = set()
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        proc = Path("/proc") / str(pid)
+        try:
+            if b"BOARD_ROLE=reviewer" in proc.joinpath("environ").read_bytes().split(b"\0"):
+                return True
+            fields = proc.joinpath("stat").read_text().rsplit(")", 1)[1].split()
+            pid = int(fields[1])
+        except (OSError, UnicodeError, ValueError, IndexError):
+            break
+    return False
+
+
+def check_refusal() -> int | None:
+    if reviewer_head():
+        sys.stderr.write("test-guard: reviewer ummanu check refused; read worker artifacts and CI evidence; request validation from worker or CI\n")
+        return 125
+    return None
 
 
 def bootstrap_authorizes(argv: list[str], workspace: str, digest: str) -> bool:
@@ -76,9 +107,11 @@ def install(workspace: str, digest: str) -> None:
             runner = str(args[0])
         elif event == "cpython.run_file" and Path(str(args[0])).name in {"pytest", "py.test"}:
             runner = "pytest"
-        if runner and not authorized(workspace, digest):
+        if runner and (reviewer_head() or not authorized(workspace, digest)):
             # Exiting from an audit hook avoids site/runpy tracebacks and imports no test runner.
-            os.write(2, guidance(runner, sys.argv[1:]).encode())
+            message = ("test-guard: reviewer test execution refused, including ummanu check; read worker artifacts and CI evidence\n"
+                       if reviewer_head() else guidance(runner, sys.argv[1:]))
+            os.write(2, message.encode())
             os._exit(125)
 
     sys.addaudithook(audit)
@@ -106,6 +139,35 @@ def install_environment(workspace: Path, environment: Path) -> None:
     }
     for name, body in files.items():
         target = sites[0] / name
+        if target.is_file() and not target.is_symlink() and target.read_text(encoding="utf-8") == body:
+            continue
+        write_text_atomic(target, body)
+
+
+def install_workspace(workspace: Path) -> None:
+    """Provide startup hooks to external interpreters through the role's import path.
+
+    The directory belongs to the claimed workspace namespace. No external or
+    shared prefix is modified, even when an adapter declares a system Python.
+    """
+    from ummanu._fsutil import write_text_atomic
+    from ummanu.broad_check import _PROVENANCE_BOOTSTRAP
+
+    root = workspace.resolve(strict=True)
+    namespace = root / ".ummanu-task-env"
+    if not namespace.resolve().is_relative_to(root):
+        raise ValueError("workspace test guard namespace escapes the candidate")
+    directory = root / WORKSPACE_STARTUP_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    if not directory.resolve(strict=True).is_relative_to(namespace.resolve(strict=True)):
+        raise ValueError("workspace test guard directory escapes its namespace")
+    digest = hashlib.sha256(_PROVENANCE_BOOTSTRAP.encode()).hexdigest()
+    files = {
+        MODULE_FILE: Path(__file__).read_text(encoding="utf-8"),
+        "sitecustomize.py": f"import _ummanu_test_guard; _ummanu_test_guard.install({str(root)!r}, {digest!r})\n",
+    }
+    for name, body in files.items():
+        target = directory / name
         if target.is_file() and not target.is_symlink() and target.read_text(encoding="utf-8") == body:
             continue
         write_text_atomic(target, body)

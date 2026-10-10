@@ -17,7 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ummanu.board.local_run import parse_local_run_policy
-from ummanu.runtime import docker_guard
+from ummanu.runtime import docker_guard, test_guard
 from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path
 from ummanu.runtime_env import RuntimeEnvError, parse_runtime_env
 
@@ -329,6 +329,10 @@ def runtime_env(
             env.update(workspace_tool_cache_env(workspace))
         # PYTHONPATH served only the wrapper's own import; it is not authority for the head's commands.
         env.pop("PYTHONPATH", None)
+        if workspace is not None:
+            startup = Path(workspace).expanduser() / test_guard.WORKSPACE_STARTUP_DIR
+            if (startup / "sitecustomize.py").is_file():
+                env["PYTHONPATH"] = str(startup)
         env["PATH"] = str(docker_guard_dir()) + os.pathsep + env.get("PATH", "")
     elif role in PRODUCT_VENV_ROLES:
         venv_bin = managed_venv_bin()
@@ -336,6 +340,8 @@ def runtime_env(
         env["VIRTUAL_ENV"] = str(venv_bin.parent)
 
     if role in BOARD_ROLES:
+        # This exec identity is also read by the check/test policy through live
+        # /proc ancestry. Candidate config and runtime.env never choose the role.
         env["BOARD_ROLE"] = role
         env[BOARD_ACTOR_ENV] = board_actor(role, env)
     else:

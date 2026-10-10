@@ -4780,6 +4780,50 @@ class ReportDurabilityGateTests(CardStoreCase):
     def test_clean_workspace_reports_done(self) -> None:
         self.assertEqual(self._report("done")["action"], "reported")
 
+    def test_registered_code_admission_keeps_native_receipt_in_sql_event_and_replays_after_loss(self):
+        import sys
+
+        from ummanu.broad_check import run_broad_check
+        from ummanu.check_commands import _spec
+
+        instance = Path(self.tmpdir.name)
+        (instance / "projects").mkdir()
+        (instance / "adapters").mkdir()
+        (instance / "projects/ummanu.yaml").write_text(json.dumps(
+            {"id": "ummanu", "repo": str(self.workspace), "adapter": "native", "enabled": True}))
+        (instance / "adapters/native.yaml").write_text(json.dumps({
+            "setup": {"commands": ["true"]}, "smoke": {"command": "true"},
+            "validation": {"ci": "github"}, "artifact_policy": {"write_project_files": False},
+            "broad_check": {"module": "native", "interpreter": sys.executable, "import_package": "app",
+                            "local": {"membership": "runner", "selector_args": ["--"]}}}))
+        (self.workspace / ".gitignore").write_text(".ummanu-task-env/\n__pycache__/\n")
+        (self.workspace / "app.py").write_text("VALUE = 1\n")
+        (self.workspace / "native.py").write_text(
+            "import unittest\nclass Case(unittest.TestCase):\n    def test_value(self):\n        import app\n        self.assertEqual(app.VALUE, 1)\nunittest.main()\n")
+        subprocess.run(["git", "-C", str(self.workspace), "add", "-A"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.workspace), "commit", "-qm", "native declaration"], check=True, capture_output=True)
+        with self.assertRaises(TaskError) as caught:
+            self._report("done")
+        self.assertEqual(caught.exception.code, "done_receipt_required")
+        self.assertEqual(self.client.comments(12), [])
+        self.assertEqual(self.writer.reader.show("ummanu-468")["state"], "in_progress")
+        args = argparse.Namespace(root=str(self.workspace), instance=str(instance), default_interpreter="",
+                                  check_command="broad", selectors=[], module=None, command=None, module_arg=[])
+        spec = _spec(args).spec
+        status, receipt = run_broad_check(spec, root=self.workspace, stream=io.StringIO())
+        self.assertEqual(status, 0)
+        request = "native-accepted-report"
+        first = self.writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ready", request_id=request)
+        admitted = self.writer.board_host.canon.event(request).data["worker_check"]
+        self.assertEqual(admitted["receipt_digest"], receipt["receipt_digest"])
+        self.assertEqual(admitted["receipt"], receipt)
+        Path(admitted["path"]).unlink()
+        (self.workspace / "app.py").write_text("VALUE = 2\n")
+        replay = self.writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ready", request_id=request)
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["event_id"], first["event_id"])
+        self.assertEqual(len(self.client.comments(12)), 1)
+
     def test_dirty_workspace_is_refused_without_touching_the_board(self) -> None:
         (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
         with self.assertRaises(TaskError) as caught:

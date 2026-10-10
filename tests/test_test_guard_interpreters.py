@@ -47,6 +47,7 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
             console = environment / "bin/pytest"
             console.write_text(f"#!{environment / 'bin/python3'}\nimport pytest\nraise SystemExit(pytest.console_main())\n")
             console.chmod(0o755)
+            (environment / "bin/py.test").symlink_to("pytest")
         self.product_env = guarded_product_env(self.scratch)
         self.env = {**os.environ, **self.product_env, "UMMANU_INSTANCE": str(self.instance),
                     "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
@@ -80,8 +81,11 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
                     with self.subTest(role=role, python=python, runner=runner):
                         result = self.launch(role, [python, "-m", runner, selector])
                         self.refused(result)
-                        self.assertIn(f"ummanu check {selector}", result.stderr)
-            for console in ("pytest", str(self.declared.parent / "pytest")):
+                        if role == "worker":
+                            self.assertIn(f"ummanu check {selector}", result.stderr)
+                        else:
+                            self.assertIn("reviewer test execution refused", result.stderr)
+            for console in ("pytest", "py.test", str(self.declared.parent / "pytest"), str(self.declared.parent / "py.test")):
                 self.refused(self.launch(role, [console, "tests/test_local.py::Cases::test_one"]))
             result = self.launch(role, ["python", "-c", "import unittest, pytest; print('libraries-ok')"])
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -136,6 +140,10 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
                     self.assertTrue((site / test_guard.STARTUP_FILE).is_file())
                     for role in ("worker", "reviewer"):
                         self.refused(self.launch(role, [str(python), "-m", "unittest", "tests.test_local"], workspace=root))
+                        # The role-owned startup path instruments even an absolute external
+                        # candidate Python without writing a shared interpreter prefix.
+                        external_python = declaration if Path(declaration).is_absolute() else str(root / declaration)
+                        self.refused(self.launch(role, [external_python, "-m", "unittest", "tests.test_local"], workspace=root))
                     self.assertEqual(external_hooks(), before_hooks)
                     self.assertEqual({str(path.relative_to(shared)): path.read_bytes() for path in shared.rglob("*")
                                       if path.is_file() and not path.is_symlink()}, shared_before)
@@ -167,16 +175,16 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         self.assertTrue(full["receipt"]["project_provenance"]["inside_workspace"])
         receipt = Path(full["path"])
         before = receipt.read_bytes()
-        result = self.launch("reviewer", [*wrapper, "show"])
+        result = self.launch("worker", [*wrapper, "show"])
         lookup = json.loads(result.stdout)
         self.assertEqual(result.returncode, 0, lookup)
         self.assertTrue(lookup["usable"], lookup["reason"])
         self.assertEqual(receipt.read_bytes(), before)
-        result = self.launch("reviewer", wrapper)
+        result = self.launch("worker", wrapper)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(json.loads(result.stdout)["reused"])
         self.assertEqual(self.log.read_text().splitlines(), ["one", "two"])
-        result = self.launch("reviewer", [*wrapper, "tests/test_local.py::Cases::test_one", "--reuse"])
+        result = self.launch("worker", [*wrapper, "tests/test_local.py::Cases::test_one", "--reuse"])
         self.assertEqual(result.returncode, 0, result.stderr)
         subset = json.loads(result.stdout)
         self.assertIn("Ran 1 test", result.stderr)
@@ -185,6 +193,12 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         self.assertEqual(receipt.read_bytes(), before)
         self.imported.unlink()
         self.log.unlink()
+        for args in ([], ["show"], ["broad", "--reuse"], ["tests.test_local"],
+                     ["tests/test_local.py::Cases::test_one", "--reuse"],
+                     ["broad", "--command", "python -m unittest"], ["--unknown"], ["--help"]):
+            with self.subTest(args=args):
+                self.refused(self.launch("reviewer", [*wrapper, *args]))
+                self.assertEqual(receipt.read_bytes(), before)
         self.refused(self.launch("reviewer", [str(self.declared), "-m", "unittest", "tests.test_local"]))
         self.assertEqual(receipt.read_bytes(), before)
 

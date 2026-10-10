@@ -61,6 +61,8 @@ from ummanu.dispatch.head_vitality_episode import (
 )
 from ummanu.dispatch.heartbeat import heartbeat_identity, sprint_task
 from ummanu.dispatch.helpers import (
+    _round_report_ids,
+    _round_worker_check,
     _decision_record_line,
     _last_gate_red_body,
     _legacy_worker_branch,
@@ -1826,6 +1828,7 @@ class CommandHostRuntime:
             workspace.mkdir(parents=True, exist_ok=True)
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
+        self._require_worker_admission(task, record)
         self._prepare_workspace_environment(record.workspace, project=str(task["project"]))
         self._require_workspace_environment(record.workspace)
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
@@ -1929,6 +1932,8 @@ class CommandHostRuntime:
         self._refuse_legacy_record(record, "deliver to the reviewer of")
         if not record.workspace:
             raise HostError("review workspace is unavailable for a retained launch")
+        self._require_worker_admission(task, record)
+        self._prepare_workspace_environment(record.workspace, project=str(task["project"]))
         stored_run = intent.get("head_run")
         if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
             raise HostError("retained reviewer launch has no durable head run")
@@ -2090,6 +2095,7 @@ class CommandHostRuntime:
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         self._require_production_runtime("candidate-gate-before")
+        self._require_worker_admission(task, record)
         if record.workspace:
             self._decide_workspace_environment_ownership(record.workspace)
         result = _gate_check(self, task, record)
@@ -2116,6 +2122,54 @@ class CommandHostRuntime:
         )
         if durability_dirt(completed.stdout):
             raise HostError("worker reported done with uncommitted changes")
+        from ummanu.broad_check import BroadCheckError
+        from ummanu.check_commands import completion_check
+        from ummanu.config import ConfigError
+
+        try:
+            project = str(task.get("project") or "")
+            evidence = completion_check(project, workspace, self.catalog.instance_dir) if project else None
+            if evidence is not None:
+                accepted = _round_worker_check(
+                    self._card_audit(), task["ref"],
+                    _round_report_ids(record.workspace, record.attempt_id, task["ref"], record.report_generation),
+                )
+                if accepted is None:
+                    raise HostError("accepted report has no worker admission evidence; drain pre-policy reports before activation")
+                if any(accepted.get(key) != evidence[key] for key in ("candidate_sha", "tree_sha", "receipt_digest")):
+                    raise HostError("candidate/receipt differs from the immutable accepted report")
+        except (BroadCheckError, ConfigError) as exc:
+            raise HostError(f"worker completion evidence unavailable: {exc}") from exc
+
+    def _require_worker_admission(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        """Recovered Validate/review needs the original admission, not a new worker run.
+
+        The machinery may have merged the integration base since report acceptance.
+        Its exact-SHA gate owns that resulting tree; worker evidence remains bound
+        to the admitted commit and is never upgraded into a gate attestation.
+        """
+        if self.mode == "noop" or not has_candidate(task):
+            return
+        project = str(task.get("project") or "")
+        if not project or "broad_check" not in self.catalog.adapter(project):
+            return
+        from ummanu.check_commands import admitted_check
+
+        accepted = admitted_check(_round_worker_check(
+            self._card_audit(), task["ref"],
+            _round_report_ids(record.workspace, record.attempt_id, task["ref"], record.report_generation),
+        ))
+        if accepted is None:
+            raise HostError("required immutable worker admission evidence is missing or damaged; drain pre-policy records before activation")
+        sha = str(accepted.get("candidate_sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+            raise HostError("worker admission has no exact candidate SHA")
+        tree = self._run(["git", "-C", record.workspace, "rev-parse", f"{sha}^{{tree}}"],
+                         "worker admitted tree").stdout.strip()
+        if tree != accepted.get("tree_sha"):
+            raise HostError("worker admitted commit does not match its receipt tree")
+        self._run(["git", "-C", record.workspace, "merge-base", "--is-ancestor", sha, "HEAD"],
+                  "worker admission ancestry")
 
     def retained_workspace_state(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
         """Describe the retained worker checkout of a card recovered without a live head.
@@ -3015,7 +3069,7 @@ class CommandHostRuntime:
     def _install_workspace_test_guards(self, root: Path, *, project: str = "") -> None:
         if self.mode == "noop":
             return
-        from ummanu.runtime.test_guard import install_environment
+        from ummanu.runtime.test_guard import install_environment, install_workspace
 
         environments = [self._workspace_environment(root)]
         if project:
@@ -3046,6 +3100,7 @@ class CommandHostRuntime:
                     if eligible:
                         environments.append(prefix)
         try:
+            install_workspace(root)
             for environment in dict.fromkeys(environments):
                 install_environment(root, environment)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -4210,6 +4265,53 @@ class CommandHostRuntime:
         """First lines of both packets, before any user-authored task text."""
         return self._render_check_header(self._packet_check_contract(project))
 
+    def _review_check_header(self, project: str) -> list[str]:
+        contract = self._packet_check_contract(project)
+        return [
+            "## Declared local checks and CI evidence boundary", "",
+            "Reviewer heads must not run tests or any ummanu check, including show or --reuse (refusal125).",
+            "Read the diff, commits, acceptance criteria, worker receipt artifacts and exact-SHA CI evidence.",
+            "Name missing evidence in the verdict; request validation from the worker or CI.",
+            f"Worker declared check: {contract.module if contract else '(configuration unavailable)'}",
+            "Worker-local receipts attest content and imports; only machinery-owned gate receipts attest exact-SHA CI.",
+            "",
+        ]
+
+    def _worker_check_packet(self, task: dict[str, Any], record: DispatcherRecord | None, sha: str) -> list[str]:
+        from ummanu.broad_check import load_receipt
+        from ummanu.dispatch.review_packet import data_block
+
+        lines = ["## Worker completion receipt", ""]
+        if record is None:
+            return lines + ["Missing evidence: no worker round is bound to this review.", ""]
+        from ummanu.check_commands import admitted_check
+
+        evidence = admitted_check(_round_worker_check(
+            self._card_audit(), task["ref"],
+            _round_report_ids(record.workspace, record.attempt_id, task["ref"], record.report_generation),
+        ))
+        if evidence is None:
+            return lines + ["Missing evidence: accepted worker report carries no full-profile admission receipt.", ""]
+        # Keep per-test timing arrays in the artifact/audit, not in the head's
+        # document. The packet carries the full digest and useful observations.
+        receipt = evidence["receipt"]
+        packet = {key: value for key, value in evidence.items() if key != "receipt"}
+        packet["receipt"] = {key: receipt[key] for key in (
+            "check_set", "cwd", "project_provenance", "content_identity", "started_at",
+            "ended_at", "duration_seconds", "exit_code", "status", "verdict",
+        )}
+        parsed = receipt["parsed"] if isinstance(receipt["parsed"], dict) else {}
+        packet["receipt"]["counts"] = {key: value for key, value in parsed.items() if key != "timing"}
+        lines += ["Immutable worker report evidence (not a mechanical gate attestation):",
+                  *data_block(json.dumps(packet, sort_keys=True, indent=2))]
+        if evidence.get("candidate_sha") != sha:
+            lines += ["Worker receipt covers the admitted SHA; the mechanical gate must attest the current candidate after any base refresh."]
+        path = evidence.get("path")
+        artifact = load_receipt(Path(path)) if isinstance(path, str) else None
+        if artifact is None or artifact.get("receipt_digest") != evidence.get("receipt_digest"):
+            lines += ["Worker receipt artifact is missing or changed; the immutable admitted snapshot above remains audit evidence."]
+        return lines + [""]
+
     def _render_check_header(self, contract: Any) -> list[str]:
         from ummanu.broad_check import BroadCheckError
         from ummanu.projects.local_check import PytestSelection
@@ -4283,6 +4385,8 @@ class CommandHostRuntime:
             "Ummanu local tests warn at >5s; CI unit/component fails at >5s/test or >90s/module.",
             "Real integration/packaging/runtime/backend/network/container evidence is CI-only here.",
             "Never run direct pytest/unittest or expand the local profile to satisfy an AC.",
+            "Fresh code report:done requires an intact complete green full declared receipt for committed HEAD tree.",
+            "Subsets are permitted during work; reuse the full receipt for an unchanged validated tree.",
             "A valid executed dispatcher-owned exact-SHA gate suppresses routine broad reruns;",
             "none/noop/missing receipts attest no suite. Subsets and refusal125 do not alter full receipts.",
             "",
@@ -4419,7 +4523,8 @@ class CommandHostRuntime:
         sections = [
             "## Control-host local-run rule",
             "",
-            "On the control host, workers and reviewers may run locally only the project's",
+            "Reviewer heads read evidence and never run tests, including any ummanu check form.",
+            "On the control host, workers may run locally only the project's",
             "adapter-declared broad check and subsets of that check. Integration shards,",
             "Docker/container runs, stands, provisioning and network-heavy checks run in CI only,",
             "unless the exact command/argument vector is expressly covered below by this sprint's",
@@ -4643,6 +4748,10 @@ class CommandHostRuntime:
             show_invocation = "When the adapter declares a suite, use its matching `check show` command and quote its summary"
         sections += [
             "## Check-cost contract",
+            "",
+            "Before fresh code report:done, obtain a complete green full declared profile receipt",
+            "for the committed HEAD tree. Missing, RED, incomplete or mismatched receipts refuse",
+            "admission without running tests. Subsets never satisfy completion. Reuse unchanged content.",
             "",
             "During development, run the smallest relevant checks first. Run at most one local broad",
             "suite for this report generation and unchanged content when it is actually useful; name any",
@@ -4992,7 +5101,7 @@ class CommandHostRuntime:
             "real behaviour you verified and how. If no end-to-end check against the real backend",
             "was possible, write plainly that it was not done and which assumption stays unverified.",
             "In the verdict give the exact candidate SHA, actual REVIEW.md and role environment/hook",
-            "paths and hashes, focused wrapper commands/status/count/import provenance, full receipt",
+            "paths and hashes, worker wrapper commands/status/count/import provenance, full receipt",
             "hashes and CI links. Name each pending evidence item. A fixture or offline projection",
             "does not prove delivery of this candidate's packet to a head that started before it.",
             "",
@@ -5012,17 +5121,16 @@ class CommandHostRuntime:
                     *self._prior_review_evidence(task, record),
                     "",
                 ]
-            return "\n".join([*self._check_header(str(task.get("project") or "")), *sections])
+            return "\n".join([*self._review_check_header(str(task.get("project") or "")), *sections])
         if attestation:
             sections[4:4] = [
                 "## Mechanical gate attestation",
                 "",
                 render_receipt(attestation),
                 "",
-                "Independently inspect the diff, acceptance criteria and invariants. The attested broad",
-                "check above already passed on this exact SHA: do not rerun that broad command or suite on",
-                "the same SHA unless you record a concrete `rerun_reason`. A focused reproduction is allowed",
-                "for a new blocker, an uncovered external behaviour, or a security/data-loss high-risk need.",
+                "Independently inspect the diff, commits, acceptance criteria and invariants using this evidence.",
+                "Do not run broad, focused, pytest, unittest or any ummanu check, including receipt readback.",
+                "Request necessary additional validation from the worker or CI and name the gap in the verdict.",
                 "Mandatory CI and the exact-SHA pre-merge gate remain machinery-owned and are not waived.",
                 "",
             ]
@@ -5033,7 +5141,8 @@ class CommandHostRuntime:
                 "No valid SHA-bound mechanical-gate receipt is available. Independently inspect the diff,",
                 "acceptance criteria and invariants; mandatory CI and exact-SHA pre-merge checks remain",
                 "machinery-owned. Do not claim that a broad suite was attested. This includes none/noop",
-                "gates: run appropriate focused or broad validation when the review needs that evidence.",
+                "gates. Name missing evidence in the verdict; request validation from the worker or CI.",
+                "Do not run broad, focused, pytest, unittest or any ummanu check, including show or reuse.",
                 "",
             ]
         if record and record.preferred_head:
@@ -5064,7 +5173,8 @@ class CommandHostRuntime:
                 "from the original base unless a concrete suspicion requires the historical diff.",
                 "",
             ]
-        return "\n".join([*self._check_header(str(task.get("project") or "")), *sections])
+        sections[4:4] = self._worker_check_packet(task, record, current_sha)
+        return "\n".join([*self._review_check_header(str(task.get("project") or "")), *sections])
 
     def _prior_review_evidence(self, task: dict[str, Any], record: DispatcherRecord) -> list[str]:
         evidence = self._select_revision_bound_worker_feedback(

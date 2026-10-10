@@ -10404,8 +10404,8 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("validated_sha: " + "a" * 40, doc)
         self.assertIn("base_sha: " + "b" * 40, doc)
         self.assertIn("command_or_check_set_digest", doc)
-        self.assertIn("do not rerun that broad command or suite", doc)
-        self.assertIn("rerun_reason", doc)
+        self.assertIn("Do not run broad, focused, pytest, unittest or any ummanu check", doc)
+        self.assertIn("Request necessary additional validation from the worker or CI", doc)
         self.assertIn("previous_reviewed_sha: " + "d" * 40, doc)
         self.assertIn("BLOCKER-keeps-state", doc)
         self.assertIn("do not restart", doc)
@@ -10442,7 +10442,7 @@ class HeadPromptTests(unittest.TestCase):
             doc = self.host._review_prompt(self.task, "attempt-1", 3, record=record)
         self.assertIn("No valid SHA-bound", doc)
         self.assertIn("none/noop", doc)
-        self.assertIn("focused or broad validation", doc)
+        self.assertIn("request validation from the worker or CI", doc)
         self.assertNotIn("do not rerun that broad command", doc)
 
     def test_review_prompt_bounds_full_prior_blocker_data_and_delta_failures(self) -> None:
