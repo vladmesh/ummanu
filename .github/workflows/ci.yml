@@ -24,25 +24,60 @@ permissions:
   contents: read
 
 jobs:
+  selection:
+    name: CI selection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      suites: ${{ steps.select.outputs.suites }}
+      mode: ${{ steps.select.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Select exact-event test modules
+        id: select
+        run: >-
+          python3 scripts/ci_test_shards.py --select
+          --selection-plan "$RUNNER_TEMP/ci-selection/plan.json"
+          --candidate-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --event "${{ github.event_name }}" --event-ref "${{ github.ref }}"
+          >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-selection-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/ci-selection/plan.json
+          if-no-files-found: error
+          retention-days: 14
+
   test_suites:
+    needs: selection
+    if: ${{ needs.selection.result == 'success' && needs.selection.outputs.mode != 'docs-only' }}
     name: test / ${{ matrix.suite }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, component, runtime-component, integration-recovery, integration-memory, integration-board, integration-dispatcher, integration-heads, packaging]
+        suite: ${{ fromJSON(needs.selection.outputs.suites || '["unit"]') }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           # The migration compatibility proof runs the actual pre-migration source tree.
           fetch-depth: 0
+      - name: Download exact-SHA selection plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-selection-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/ci-selection
       - uses: ./.github/actions/python-setup
         with:
           extras: ${{ matrix.suite == 'unit' && 'ci,dev' || 'memory,ci' }}
       - name: Run the hermetic fast profile
-        if: ${{ matrix.suite == 'unit' }}
+        if: ${{ matrix.suite == 'unit' && needs.selection.outputs.mode == 'full' }}
         run: python3 scripts/ci_test_shards.py --fast
       - name: Pull the throwaway PostgreSQL image before any suite needs it
         # The card-store fixtures pull `postgres:16` from inside a test; a Docker Hub hiccup there
@@ -69,6 +104,9 @@ jobs:
           scripts/ci_test_shards.py --suite "${{ matrix.suite }}"
           --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
           --candidate-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+          --selection-plan "$RUNNER_TEMP/ci-selection/plan.json"
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --event "${{ github.event_name }}" --event-ref "${{ github.ref }}"
       - name: Write suite evidence summary
         if: ${{ always() }}
         continue-on-error: true
@@ -102,6 +140,8 @@ jobs:
           > /dev/null
 
   typecheck:
+    needs: selection
+    if: ${{ needs.selection.result == 'success' && needs.selection.outputs.mode != 'docs-only' }}
     name: typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -115,6 +155,8 @@ jobs:
       - run: python3 -m mypy
 
   lint:
+    needs: selection
+    if: ${{ needs.selection.result == 'success' && needs.selection.outputs.mode != 'docs-only' }}
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -136,7 +178,7 @@ jobs:
   test:
     name: test
     if: ${{ always() }}
-    needs: [test_suites, typecheck, lint]
+    needs: [selection, test_suites, typecheck, lint]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -144,6 +186,11 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - name: Download exact-SHA selection plan
+        uses: actions/download-artifact@v4
+        with:
+          name: ci-selection-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/ci-selection
       - uses: ./.github/actions/python-setup
         with:
           extras: ci
@@ -176,6 +223,8 @@ jobs:
           --coverage-output-dir "$RUNNER_TEMP/ci-coverage-combined"
           --candidate-sha "$CANDIDATE_SHA"
           --base-sha "$BASE_SHA"
+          --selection-plan "$RUNNER_TEMP/ci-selection/plan.json"
+          --event "${{ github.event_name }}" --event-ref "${{ github.ref }}"
           >> "$GITHUB_STEP_SUMMARY"
       - name: Upload combined coverage evidence
         if: ${{ always() }}
@@ -196,6 +245,10 @@ jobs:
           python3 scripts/ci_test_shards.py --aggregate
           --evidence-dir "$RUNNER_TEMP/ci-evidence"
           --needs-result "$SUITES_RESULT"
+          --selection-plan "$RUNNER_TEMP/ci-selection/plan.json"
+          --candidate-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --event "${{ github.event_name }}" --event-ref "${{ github.ref }}"
           >> "$GITHUB_STEP_SUMMARY"
       - name: Publish main coverage baseline
         if: >-
@@ -221,8 +274,16 @@ jobs:
           "$BASELINE_SHA" "$BASELINE_ARTIFACT" >> "$GITHUB_STEP_SUMMARY"
       - name: Preserve required aggregate result
         if: ${{ always() }}
+        env:
+          JOB_RESULTS: >-
+            {"selection":"${{ needs.selection.result }}","test_suites":"${{ needs.test_suites.result }}",
+            "typecheck":"${{ needs.typecheck.result }}","lint":"${{ needs.lint.result }}"}
         run: >-
           test "${{ steps.coverage_aggregate.outcome }}" = success
           && test "${{ steps.suite_aggregate.outcome }}" = success
-          && test "${{ needs.typecheck.result }}" = success
-          && test "${{ needs.lint.result }}" = success
+          && python3 scripts/ci_test_shards.py --validation-aggregate
+          --selection-plan "$RUNNER_TEMP/ci-selection/plan.json"
+          --candidate-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --event "${{ github.event_name }}" --event-ref "${{ github.ref }}"
+          --job-results "$JOB_RESULTS"

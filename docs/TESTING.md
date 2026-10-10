@@ -1,7 +1,9 @@
 # Testing
 
-Dispatcher-owned exact-SHA GitHub CI is the complete test contract. It validates
-`tests/ci-shards.txt`, then runs nine named jobs in parallel:
+Dispatcher-owned exact-SHA GitHub CI is the complete test contract. Every pull request,
+push to `main` and manual dispatch starts the workflow and publishes the terminal required
+aggregate `test`. `tests/ci-shards.txt` defines nine owners; a validated execution plan
+determines which owners and modules apply to a PR. Pushes and manual dispatches run all nine:
 
 | Suite | CI job | Scope |
 | --- | --- | --- |
@@ -33,6 +35,64 @@ a unit test. CI still enforces 5 seconds per test and 90 seconds per module in `
 the local warning above 5 seconds does not change the verdict. A
 repository-wide AST check parses through `tests/source_trees.py`, so each file is parsed once per module.
 
+## PR selection
+
+`CI selection` checks out the exact PR head, fetches history and validates the complete manifest
+before classifying the diff. `ci-selection-<sha>/plan.json` is a bounded execution plan, not a
+test receipt. It contains candidate SHA/tree, PR base SHA, merge-base, event/ref, manifest hash,
+mode, reasons, original suite owners, selected module paths and explanations. The diff is from
+the merge-base to the candidate; coverage changed lines retain the explicit PR base comparison.
+Git paths use NUL delimiters. Both rename paths participate in classification.
+
+- `docs-only`: every old/new path is `*.md`, or a documentation file under `docs/` with extension
+  `.rst`, `.txt`, `.png`, `.jpg` or `.svg`. The test matrix, typecheck and lint are skipped. There
+  are zero test-suite jobs and no hermetic fast run. The aggregate recomputes this classification;
+  absent test and coverage artifacts are allowed only for that validated plan. LICENSE, YAML,
+  executable files under docs and other arbitrary paths have no documentation exemption.
+- `affected`: only selected manifest modules execute, within their original owners. The selector
+  parses the base and candidate Python under `src/ummanu/` and `tests/`, resolves direct/relative
+  imports, package initialization, literal dynamic imports and literal module references (including
+  patch targets), and computes transitive consumers. Changed tests and helper consumers participate
+  in the same graph. No analyzed module is imported or executed during selection.
+- `full`: empty diffs, unavailable base/merge-base, unknown paths, configuration/YAML, dependencies,
+  workflows, scripts, manifest and shared infrastructure changes, deleted/renamed/type-changed Python,
+  ambiguous module identities, unresolved internal imports, invalid syntax/encoding or exceeded
+  analysis bounds require the full manifest. Invalid test membership or plan authority refuses as
+  infrastructure instead of choosing an empty set. Every push and manual dispatch is full,
+  including documentation commits on main.
+
+The supported impact boundary is deliberately conservative. Source readers,
+subprocess execution, wildcard imports and nonliteral dynamic loading are opaque consumers.
+Opaque product modules depend on all product Python; opaque tests depend on all analyzed Python.
+Their transitive test consumers are therefore included even when no specific import edge is known.
+Changing opaque code itself requires full fallback. This prevents uncertain consumers from being
+silently omitted; it can select many more modules than the direct import closure. It does not
+promise to discover arbitrary execution through an unrecognized third-party loader, native code,
+an externally constructed callback or a new runtime mechanism. Extend the conservative boundary
+before relying on selection for such code; changes to shared selection infrastructure already
+fall back to full. Aliased recognized loader calls are included. Docstrings are documentation,
+not executable import/patch targets; field `getattr` and module `__getattr__` do not add implicit
+import edges, while imports and recognized dynamic loaders inside their bodies are analyzed normally.
+Analysis never executes imports
+to try to infer their runtime behaviour.
+
+For example, `tests.test_ci_selection.SelectionTests` changes a pure `ummanu.leaf` consumed
+directly by `tests.test_direct` and through `ummanu.middle` and `tests.helper` by
+`tests.test_transitive`. It selects those two modules under unit/component and omits
+`tests.test_other`, whose only dependency is the unrelated leaf. The CI-only Git fixture exercises
+the same rule with real commits, one selected module, actual execution and native coverage.
+The CI-only repository projection for `src/ummanu/board/terminal_taxonomy.py` prints every
+selected module and its reason in `test / integration-dispatcher`'s bounded log. That projection
+uses the committed source graph and checks that membership is smaller than the full manifest.
+Fixtures and projections are not natural PR acceptance proofs.
+
+Runner and aggregators independently regenerate the plan from the exact checkout/base/event and
+require byte-equivalent JSON data. A manually edited subset, wrong event/base/SHA, duplicate or
+foreign membership cannot authorize green. Actions uses the plan's suite list for its dynamic
+matrix; final validation checks job applicability from the regenerated plan. Full CLI/default
+suite execution remains full. The local `tests.broad` declaration remains complete unit+component;
+selective PR execution cannot supply a local broad receipt.
+
 ## Required setup
 
 A missing required dependency is an infrastructure failure, never a green skip. The one exception:
@@ -57,7 +117,10 @@ Each suite run writes a GitHub step summary and uploads `ci-evidence-<suite>-<sh
 `report.json`, `junit.xml` and `test-output.log`. The log keeps up to 1,000,000 bytes and marks
 truncation. Artifacts are retained 14 days. `<sha>` is the pull-request head SHA, otherwise
 `github.sha`. The summary names the SHA, outcome, counts, duration, slowest tests and concise failure
-locations.
+locations, selected/executed module membership and the selection digest. Executed membership
+comes from the runner's actual module clocks. Plan-bound runs produce schema 2 reports; the
+previously shipped schema 1 remains readable for unplanned full CLI reports only. Schema 1
+cannot satisfy a planned CI aggregate. No unpublished intermediate schema is accepted.
 
 The runner records `git status --porcelain=v1 --untracked-files=all` for the candidate checkout before
 and after each suite; a green suite requires identical snapshots. Evidence keeps entry counts, digests
@@ -69,22 +132,43 @@ aggregate step rejects missing, malformed or uncombinable data as an infrastruct
 publishes `ci-coverage-combined-<sha>` with `combined-coverage.json` (per-file executed/missing/excluded
 lines and branches and the branch summary; coverage.py's per-function and per-class regions, which restate
 those lists, are left out, and the published file is bounded at 5 MB) and `changed-lines.json`. For pull requests, `changed-lines.json` classifies each
-changed source line against the exact base and head SHAs as `covered`, `missed`, `excluded` or
-`not_executable`; other events mark it not applicable. A successful push to `main` also keeps the
+changed source line against the exact base and head SHAs as `covered`, `missed`, `excluded`,
+`not_executable` or `unmeasured` (the file is absent from measured coverage). Other events mark
+it not applicable. Affected coverage explicitly records `selected modules`, mode, plan digest
+and module membership; it is never presented as full-profile coverage. Only selected raw data
+is required, and duplicate/foreign raw data refuses combination. Docs-only requires no raw or
+combined coverage artifacts. A successful push to `main` also keeps the full
 aggregate as `ci-coverage-baseline-<sha>` for 90 days. There is no coverage threshold and no local
 coverage collection.
 
 The `test` job is the required aggregate result and succeeds only when every applicable suite
 succeeds, coverage evidence combines, and both `typecheck` and changed-file `lint` succeed.
-A failed, skipped or cancelled typecheck/lint cannot produce a green aggregate or publish a main
-coverage baseline. Its summary lists each suite as `success`, `product_failure`, `infrastructure_failure`,
+A failed, skipped or cancelled applicable typecheck/lint cannot produce a green aggregate or publish a main
+coverage baseline. Docs-only explicitly requires skipped test_suites/typecheck/lint and a successful
+selection job. A failed/cancelled selection or unexpected job result refuses green. Missing, corrupt,
+wrong-SHA/plan, duplicate, foreign or mismatched selected/executed module evidence also refuses green.
+Its summary lists each suite as `success`, `product_failure`, `infrastructure_failure`,
 `cancelled` or `not_applicable`:
 
 - a failing test is a product failure;
 - missing, malformed or unwritable JSON/JUnit/log evidence, an unavailable Git status command, or any
   test-generated tracked or untracked artifact is an infrastructure failure. A contaminated suite is an
   infrastructure failure even if a product test also failed; the failure location stays in evidence;
-- cancelled work is never success; routing that skips a suite records `not_applicable`.
+- cancelled required work is never success; unselected owners are `not_applicable` only by a
+  validated plan. Arbitrary skipped matrices without a plan refuse. Required suites cannot
+  self-report `not_applicable`.
+
+After merging a selector/workflow change and observing full main green, the observer arranges two
+separate natural cards: a docs-only PR and a small supported Python-source PR. Do not create proof
+branches, PRs or manual duplicate workflow runs as part of implementing selection. For docs-only,
+inspect `CI selection`'s exact SHA/base/event plan, absence of matrix execution, skipped validation
+jobs, terminal successful `test`, and the existing dispatcher's exact-SHA gate receipt. For the
+code PR, compare the plan's selected modules and explanations with actual schema 2 membership/counts,
+omitted owners marked not applicable, selected coverage and changed-line visibility, terminal
+`test` and gate receipt. Keep those real check contexts and artifact links with the acceptance card.
+This implementation PR changes the workflow/selector/manifest and must itself use full fallback;
+its green CI proves delivery, not docs-only or narrow live routing. Main must still publish all-nine
+evidence and a full coverage baseline. No adapter, branch protection or dispatcher gate change is needed.
 
 Before reporting completion, inspect the check runs on the exact candidate SHA, including other
 workflow runs on that SHA. The dispatcher reads all instances of its selected check names; a green
@@ -105,14 +189,15 @@ gh api --paginate repos/vladmesh/ummanu/commits/CANDIDATE_SHA/check-runs \
 
 This check does not mint a mechanical gate attestation or change the gate's selection policy.
 
-## Control-host fast profile
+## CI hermetic fast profile
 
     python3 scripts/ci_test_shards.py --fast
 
-The one fast profile for worker feedback. It validates a fixed module list (`FAST_MODULES`) and runs
+The CI full-profile supplement validates a fixed module list (`FAST_MODULES`) and runs
 only hermetic board-refusal and pipeline-state proofs. The explicit SQL board injection
 proof is `tests.test_hermetic_board_integration` in `integration-board`, outside the fast profile.
-CI executes the real fast profile in the unit job. It is not a CI suite and does not
+CI executes the real fast profile in the unit job only when the plan is full. Selective and docs-only
+PRs never run it. It is not a CI suite and does not
 read `tests/ci-shards.txt` or use discovery.
 
 The child process group has a 120-second ceiling; on timeout the runner reports failure, terminates the
@@ -193,7 +278,8 @@ duration, content tree, count and import provenance. The saved pre-routing run w
 for 160 modules and 3,337 tests; the card also records earlier 681/693-second runs. The old approximately
 77-second estimate is not the current promise.
 
-All moved checks remain mandatory in the same nine-suite CI matrix: interpreter preparation and
+All moved checks remain in the same nine-suite manifest and execute when selected, or on every
+full run: interpreter preparation and
 cleanup journals run in `integration-dispatcher`; real PO sockets, turns and role launches in
 `integration-heads`; process locks, child cleanup and native doctor execution in `runtime-component`;
 snapshot export/recovery and bulk restore in `integration-recovery`; native CLI flows in

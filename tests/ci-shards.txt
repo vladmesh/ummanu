@@ -61,6 +61,8 @@ integration-recovery tests/test_transition_board.py
 integration-recovery tests/test_transition_products.py
 integration-recovery tests/test_fresh_postgres_install.py
 unit tests/test_ci_shards.py
+unit tests/test_ci_selection.py
+integration-dispatcher tests/test_ci_selection_git.py
 integration-board tests/test_cli.py
 component tests/test_codex_capability_matrix.py
 component tests/test_codex_fanout_policy.py

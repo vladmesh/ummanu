@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import signal
@@ -21,6 +22,24 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TextIO
+
+# Full manifest readers do not need impact analysis. Load it only at a CI consumer
+# boundary, using the helper beside this candidate runner rather than an installed copy.
+_selection_module = None
+
+
+def _selection_helper():
+    global _selection_module
+    if _selection_module is None:
+        path = Path(__file__).resolve().with_name("ci_selection.py")
+        spec = importlib.util.spec_from_file_location(f"{__name__}._selection", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"selection helper unavailable: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _selection_module = module
+    return _selection_module
+
 
 # The installed wrapper imports this file by path to validate the candidate manifest.
 # Resolve its stdlib-only collector from that same candidate, even before an upgrade.
@@ -215,10 +234,16 @@ class SuiteEvidence:
     checkout_status: CheckoutStatus | None = None
     timing: dict = dataclasses.field(default_factory=dict)
     timing_violations: list[dict] = dataclasses.field(default_factory=list)
+    selection_digest: str | None = None
+    selected_modules: list[str] = dataclasses.field(default_factory=list)
+    executed_modules: list[str] = dataclasses.field(default_factory=list)
 
     def as_json(self) -> dict[str, object]:
         return {
-            "schema_version": EVIDENCE_SCHEMA_VERSION,
+            "schema_version": 2 if self.selection_digest is not None else EVIDENCE_SCHEMA_VERSION,
+            "selection_digest": self.selection_digest,
+            "selected_modules": self.selected_modules,
+            "executed_modules": self.executed_modules,
             "suite": self.suite,
             "candidate_sha": self.candidate_sha,
             "outcome": self.outcome,
@@ -357,6 +382,7 @@ def run_reported_suite(
     started = time.monotonic()
     loader = unittest.defaultTestLoader
     result = None
+    loaded = []
 
     def collect_result(*args, **kwargs):
         nonlocal result
@@ -371,11 +397,18 @@ def run_reported_suite(
             time.monotonic() - started, [], [location], detail=detail,
             test_records=records,
             timing=result.observation() if result is not None else {"status": "unavailable"},
+            selected_modules=modules(paths),
+            executed_modules=list(result.observation().get("modules", {})) if result is not None else [],
         )
 
     try:
         sources = modules(paths)
-        selected = TimingSuite((loader.loadTestsFromName(module) for module in sources), source_modules=sources)
+        def collect():
+            for module in sources:
+                suite = loader.loadTestsFromName(module)
+                loaded.append(module)
+                yield suite
+        selected = TimingSuite(collect(), source_modules=sources)
         runner = unittest.TextTestRunner(stream=log, verbosity=2, resultclass=collect_result)
         with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
             result = runner.run(selected)
@@ -417,6 +450,8 @@ def run_reported_suite(
         test_records=records,
         timing=timing,
         timing_violations=budget_violations,
+        selected_modules=sources,
+        executed_modules=[module for module in loaded if module in timing["modules"]],
     )
 
 
@@ -541,18 +576,58 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
     missing = [name for name, path in required.items() if not path.is_file() or path.stat().st_size == 0]
     if missing:
         raise EvidenceError(f"missing required evidence: {', '.join(missing)}")
+    if any(path.stat().st_size > 5_000_000 for path in required.values()):
+        raise EvidenceError("evidence exceeds intake bound")
     try:
-        data = json.loads(required["report.json"].read_text(encoding="utf-8"))
-        if data.get("schema_version") != EVIDENCE_SCHEMA_VERSION:
+        data = json.loads(required["report.json"].read_text(encoding="utf-8"),
+                          object_pairs_hook=_selection_helper().json_object)
+        if data.get("schema_version") not in {EVIDENCE_SCHEMA_VERSION, 2}:
             raise EvidenceError("unsupported report schema")
         if data.get("outcome") not in OUTCOMES:
             raise EvidenceError("invalid report outcome")
         counts = data["counts"]
         if set(counts) != {"collected", "passed", "failed", "error", "skipped"}:
             raise EvidenceError("invalid report counts")
+        if any(type(n) is not int or n < 0 for n in counts.values()):
+            raise EvidenceError("invalid count values")
+        duration = data["duration_seconds"]
+        if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
+            raise EvidenceError("invalid suite duration")
+        if data.get("schema_version") == 2:
+            if not re.fullmatch(r"[0-9a-f]{64}", data.get("selection_digest", "")):
+                raise EvidenceError("invalid selection digest")
+            for key in ("selected_modules", "executed_modules"):
+                value = data.get(key)
+                if (not isinstance(value, list) or not all(isinstance(n, str) for n in value)
+                        or len(value) != len(set(value))):
+                    raise EvidenceError("invalid module membership")
+            if data["outcome"] == "success" and not _timing.valid_observation(data.get("timing")):
+                raise EvidenceError("invalid successful timing observation")
+            if data["outcome"] == "success":
+                timed = data["timing"]["tests"]
+                native = data["timing"]["native_outcomes"]
+                if (counts["collected"] != len(timed) + sum(r["phase"] == "load" for r in native)
+                        or counts["passed"] != sum(r["outcome"] == "passed" for r in timed)
+                        or counts["skipped"] != sum(r["outcome"] == "skipped" for r in [*timed, *native])):
+                    raise EvidenceError("counts do not match timing execution records")
+        elif data.get("selection_digest") is not None:
+            raise EvidenceError("schema 1 cannot attest a selection plan")
         if not data.get("suite") or not re.fullmatch(r"[0-9a-f]{40,64}", data.get("candidate_sha", "")):
             raise EvidenceError("report lacks an exact candidate SHA")
-        ET.parse(required["junit.xml"])
+        junit = ET.parse(required["junit.xml"]).getroot()
+        if data.get("schema_version") == 2:
+            cases = junit.findall("testcase")
+            timing = data.get("timing", {})
+            expected_cases = [(r["classname"], r["name"]) for r in timing.get("tests", [])]
+            expected_cases.extend((r["module"], r["identifier"]) for r in timing.get("native_outcomes", []))
+            expected_cases.extend(("timing_budget", r["identifier"]) for r in data.get("timing_violations", []))
+            if (junit.tag != "testsuite" or junit.get("name") != data["suite"]
+                    or junit.get("hostname") != data["candidate_sha"]
+                    or junit.get("tests") != str(len(cases))
+                    or [(case.get("classname"), case.get("name")) for case in cases] != expected_cases
+                    or junit.get("failures") != str(counts["failed"] + len(data.get("timing_violations", [])))
+                    or junit.get("errors") != str(counts["error"]) or junit.get("skipped") != str(counts["skipped"])):
+                raise EvidenceError("JUnit does not match suite execution evidence")
         checkout_status = _read_checkout_status(data.get("checkout_status"))
     except (KeyError, TypeError, ValueError, ET.ParseError) as exc:
         raise EvidenceError(f"malformed evidence: {exc}") from exc
@@ -569,6 +644,9 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
         checkout_status=checkout_status,
         timing=data.get("timing", {}),
         timing_violations=data.get("timing_violations", []),
+        selection_digest=data.get("selection_digest"),
+        selected_modules=data.get("selected_modules", []),
+        executed_modules=data.get("executed_modules", []),
     )
 
 
@@ -579,6 +657,9 @@ def _summary(evidence: SuiteEvidence) -> str:
         "",
         f"- Candidate SHA: `{evidence.candidate_sha}`",
         f"- Outcome: `{evidence.outcome}`",
+        f"- Selection digest: `{evidence.selection_digest}`",
+        f"- Selected modules: {', '.join(evidence.selected_modules)}",
+        f"- Executed modules: {', '.join(evidence.executed_modules)}",
         f"- Counts: collected {counts['collected']}, passed {counts['passed']}, failed {counts['failed']}, errors {counts['error']}, skipped {counts['skipped']}",
         f"- Duration: {evidence.duration_seconds:.3f}s",
         f"- Artifacts: `junit.xml`, `test-output.log`{' (truncated at 1,000,000 bytes)' if evidence.log_truncated else ''}",
@@ -646,33 +727,69 @@ def report_summary(report_dir: Path) -> int:
     return _outcome_code(evidence.outcome)
 
 
-def aggregate_evidence(evidence_dir: Path, needs_result: str) -> int:
+def aggregate_evidence(evidence_dir: Path, needs_result: str, plan: dict | None = None) -> int:
     reports: dict[str, SuiteEvidence] = {}
+    required = plan["selected"] if plan else {suite: [] for suite in SUITES}
+    invalid = []
+    if plan and evidence_dir.is_dir():
+        for path in evidence_dir.rglob("*"):
+            if path.is_file() and path.name in {"junit.xml", "test-output.log"} and not (path.parent / "report.json").is_file():
+                invalid.append(f"orphan evidence: {path}")
     for path in evidence_dir.rglob("report.json") if evidence_dir.is_dir() else ():
         try:
             evidence = _read_evidence(path.parent)
-        except EvidenceError:
+            if evidence.suite not in required or evidence.suite in reports:
+                raise EvidenceError("duplicate or foreign suite evidence")
+            if evidence.outcome == "not_applicable":
+                raise EvidenceError("required suite cannot attest not_applicable")
+            if reports and evidence.candidate_sha != next(iter(reports.values())).candidate_sha:
+                raise EvidenceError("suite evidence mixes candidate SHAs")
+            if plan:
+                expected = modules(required[evidence.suite])
+                if (evidence.candidate_sha != plan["candidate_sha"]
+                        or evidence.selection_digest != _selection_helper().plan_digest(plan)
+                        or evidence.selected_modules != expected or evidence.executed_modules != expected):
+                    raise EvidenceError("wrong SHA, plan or selected/executed module membership")
+                if evidence.outcome == "success":
+                    timing = evidence.timing
+                    observed = {r["module"] for r in timing.get("tests", [])}
+                    observed.update(r["module"] for r in timing.get("native_outcomes", []))
+                    observed.update(timing.get("modules", {}))
+                    if (not evidence.checkout_status or evidence.checkout_status.changed
+                            or timing.get("status") != "complete" or not observed <= set(expected)
+                            or evidence.counts["collected"] <= 0 or evidence.counts["failed"]
+                            or evidence.counts["error"]):
+                        raise EvidenceError("successful suite lacks intact execution evidence")
+        except (EvidenceError, KeyError, TypeError, ValueError) as exc:
+            invalid.append(f"{path}: {exc}")
             continue
         reports[evidence.suite] = evidence
     outcomes: dict[str, str] = {}
     for suite in SUITES:
         evidence = reports.get(suite)
-        if evidence:
+        if suite not in required:
+            outcomes[suite] = "not_applicable"
+        elif evidence:
             outcomes[suite] = evidence.outcome
         elif needs_result == "cancelled":
             outcomes[suite] = "cancelled"
-        elif needs_result == "skipped":
-            outcomes[suite] = "not_applicable"
         else:
             outcomes[suite] = "infrastructure_failure"
     lines = ["## Required CI test aggregate", "", *[f"- `{suite}`: `{outcomes[suite]}`" for suite in SUITES]]
+    if plan:
+        lines.insert(0, _selection_helper().summary(plan))
+    lines.extend(f"- Invalid evidence: {detail}" for detail in invalid)
     print("\n".join(lines))
+    if invalid:
+        return 3
     if "infrastructure_failure" in outcomes.values():
         return 3
     if "product_failure" in outcomes.values():
         return 1
     if "cancelled" in outcomes.values():
         return 130
+    if needs_result != ("success" if required else "skipped"):
+        return 3
     return 0
 
 
@@ -682,13 +799,16 @@ def _exact_sha(value: str, label: str) -> str:
     return value
 
 
-def _suite_coverage_data(coverage_dir: Path, candidate_sha: str) -> list[Path]:
+def _suite_coverage_data(coverage_dir: Path, candidate_sha: str, suites=SUITES) -> list[Path]:
     paths: list[Path] = []
-    for suite in SUITES:
+    for suite in suites:
         path = coverage_dir / f"ci-coverage-{suite}-{candidate_sha}" / f"{COVERAGE_RAW_PREFIX}{suite}"
         if not path.is_file() or path.stat().st_size == 0:
             raise CoverageError(f"missing or empty raw coverage datum for {suite} at {path}")
         paths.append(path)
+    actual = set(coverage_dir.rglob("coverage.*")) if coverage_dir.is_dir() else set()
+    if actual != set(paths):
+        raise CoverageError("foreign or duplicate raw coverage data")
     return paths
 
 
@@ -702,7 +822,9 @@ def _validate_coverage_datum(path: Path) -> None:
     try:
         data = CoverageData(basename=str(path))
         data.read()
-        data.measured_files()
+        measured = data.measured_files()
+        if not measured or not data.has_arcs() or not any(data.arcs(name) for name in measured):
+            raise CoverageError(f"raw coverage lacks measured branch data at {path}")
     except (CoverageException, OSError, ValueError) as exc:
         raise CoverageError(f"unreadable or incompatible raw coverage datum at {path}: {exc}") from exc
 
@@ -827,6 +949,8 @@ def _changed_line_report(
                 if number in executed
                 else "missed"
                 if number in missing
+                else "unmeasured"
+                if filename not in files
                 else "not_executable"
             )
             entries.append({"path": filename, "line": number, "classification": classification})
@@ -842,12 +966,19 @@ def _changed_line_report(
 
 
 def aggregate_coverage(
-    root: Path, coverage_dir: Path, output_dir: Path, candidate_sha: str, base_sha: str | None
+    root: Path, coverage_dir: Path, output_dir: Path, candidate_sha: str, base_sha: str | None,
+    plan: dict | None = None,
 ) -> int:
     try:
         candidate_sha = _exact_sha(candidate_sha, "candidate SHA")
         _candidate_checkout(root, candidate_sha)
-        raw_data = _suite_coverage_data(coverage_dir, candidate_sha)
+        raw_data = _suite_coverage_data(coverage_dir, candidate_sha, plan["selected"] if plan else SUITES)
+        if not raw_data:
+            if not plan or plan["mode"] != "docs-only":
+                raise CoverageError("no applicable coverage without a validated docs-only plan")
+            print(_selection_helper().summary(plan))
+            print("- Coverage: not applicable to validated docs-only selection")
+            return 0
         for path in raw_data:
             _validate_coverage_datum(path)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -903,6 +1034,10 @@ def aggregate_coverage(
         combined = {
             "schema_version": 1,
             "candidate_sha": candidate_sha,
+            "selection_mode": plan["mode"] if plan else "full",
+            "selection_digest": _selection_helper().plan_digest(plan) if plan else None,
+            "selected": plan["selected"] if plan else None,
+            "coverage_scope": "selected modules" if plan and plan["mode"] == "affected" else "full profile",
             "source_roots": list(COVERAGE_SOURCE_ROOTS),
             "aggregate_artifacts": [COVERAGE_JSON_NAME, CHANGED_LINES_JSON_NAME],
             "changed_line_visibility": {
@@ -934,6 +1069,7 @@ def aggregate_coverage(
                 "## Combined CI coverage",
                 "",
                 f"- Candidate SHA: `{candidate_sha}`",
+                f"- Coverage scope: {combined['coverage_scope']}",
                 f"- Source roots: {', '.join(f'`{path}`' for path in COVERAGE_SOURCE_ROOTS)}",
                 f"- Aggregate artifacts: `{COVERAGE_JSON_NAME}`, `{CHANGED_LINES_JSON_NAME}`",
                 f"- Changed-line visibility: {'applicable' if changed_report['applicable'] else 'not applicable'} ({changed_report['reason']})",
@@ -957,12 +1093,14 @@ def load_manifest(root: Path, manifest: Path | None = None) -> dict[str, list[st
         suite, relative = parts
         if suite not in grouped:
             raise ManifestError(f"{manifest}:{number}: unknown suite {suite!r}")
-        if not relative.startswith("tests/test_") or not relative.endswith(".py"):
+        if not re.fullmatch(r"tests/test_[A-Za-z0-9_]+\.py", relative):
             raise ManifestError(f"{manifest}:{number}: invalid top-level test path {relative!r}")
         if relative in owners:
             raise ManifestError(f"{manifest}:{number}: {relative} already belongs to {owners[relative]!r}")
         owners[relative] = suite
         grouped[suite].append(relative)
+        if (root / relative).is_symlink():
+            raise ManifestError(f"declared test is a symlink: {relative}")
 
     discovered = {path.relative_to(root).as_posix() for path in (root / "tests").glob("test_*.py")}
     declared = set(owners)
@@ -1072,7 +1210,8 @@ def run_fast(root: Path) -> int:
         )
 
 
-def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candidate_sha: str) -> int:
+def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candidate_sha: str,
+                            plan: dict | None = None) -> int:
     """Make all three required suite artifacts or return an infrastructure result."""
     try:
         report_dir.mkdir(parents=True, exist_ok=True)
@@ -1095,6 +1234,10 @@ def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candi
     else:
         try:
             grouped = load_manifest(root)
+            if plan:
+                if candidate_sha != plan["candidate_sha"] or suite_name not in plan["selected"]:
+                    raise ManifestError("suite is not required by selection")
+                grouped = plan["selected"]
         except (OSError, ManifestError) as exc:
             print(f"CI test manifest is invalid: {exc}", file=log)
             evidence = SuiteEvidence(
@@ -1113,6 +1256,8 @@ def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candi
                 with contextlib.chdir(root):
                     try:
                         before = _checkout_snapshot(root)
+                        if plan and before:
+                            raise CheckoutStatusError("planned suite checkout is not clean")
                     except CheckoutStatusError:
                         print("CI checkout status is unavailable before suite execution", file=log)
                         evidence = SuiteEvidence(
@@ -1153,6 +1298,9 @@ def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candi
             finally:
                 sys.path.pop(0)
     try:
+        if plan:
+            evidence.selection_digest = _selection_helper().plan_digest(plan)
+            evidence.selected_modules = modules(plan["selected"].get(suite_name, []))
         _write_evidence(report_dir, evidence, log)
     except OSError as exc:
         print(f"CI evidence infrastructure failure: cannot write required report: {exc}", file=sys.stderr)
@@ -1164,6 +1312,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--check", action="store_true", help="validate and print the manifest")
+    action.add_argument("--select", action="store_true", help="write exact-event CI selection plan")
+    action.add_argument("--validation-aggregate", action="store_true", help="require applicable jobs")
     action.add_argument("--suite", choices=SUITES, help="validate, then run one CI suite")
     action.add_argument("--fast", action="store_true", help="run the bounded hermetic control-host profile")
     action.add_argument("--summary", action="store_true", help="validate evidence and print a step summary")
@@ -1177,6 +1327,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--coverage-dir", type=Path, help="download directory containing raw suite coverage")
     parser.add_argument("--coverage-output-dir", type=Path, help="directory for combined coverage artifacts")
     parser.add_argument("--base-sha", default="", help="pull-request base SHA for changed-line coverage")
+    parser.add_argument("--selection-plan", type=Path)
+    parser.add_argument("--event", choices=("pull_request", "push", "workflow_dispatch"))
+    parser.add_argument("--event-ref", default="")
+    parser.add_argument("--job-results", help="JSON object of Actions needs results")
     parser.add_argument(
         "--needs-result",
         choices=("success", "failure", "cancelled", "skipped"),
@@ -1185,6 +1339,40 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = Path(__file__).resolve().parents[1]
+    plan = None
+    if args.select or args.selection_plan is not None:
+        if args.selection_plan is None or args.candidate_sha is None or args.event is None:
+            parser.error("selection requires --selection-plan, --candidate-sha and --event")
+        try:
+            grouped = load_manifest(root)
+            if args.select:
+                plan = _selection_helper().build_plan(root, grouped, args.candidate_sha, args.base_sha,
+                                               args.event, args.event_ref)
+                encoded = json.dumps(plan, sort_keys=True, indent=2) + "\n"
+                if len(encoded.encode()) > _selection_helper().MAX_PLAN_BYTES:
+                    raise _selection_helper().SelectionError("selection plan exceeds bound")
+                args.selection_plan.parent.mkdir(parents=True, exist_ok=True)
+                args.selection_plan.write_text(encoded, encoding="utf-8")
+                print(_selection_helper().summary(plan))
+                if os.environ.get("GITHUB_OUTPUT"):
+                    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                        output.write(f"suites={json.dumps(list(plan['selected']))}\nmode={plan['mode']}\n")
+                return 0
+            plan = _selection_helper().read_plan(root, args.selection_plan, grouped,
+                                          candidate_sha=args.candidate_sha, base_sha=args.base_sha,
+                                          event=args.event, ref=args.event_ref)
+        except (OSError, ValueError) as exc:
+            print(f"CI selection infrastructure failure: {exc}", file=sys.stderr)
+            return 3
+    if args.validation_aggregate:
+        if plan is None or args.job_results is None:
+            parser.error("validation aggregate requires selection and --job-results")
+        try:
+            results = json.loads(args.job_results)
+            print(f"Applicable validation results: {results}")
+            return 0 if _selection_helper().validation_result(plan, results) else 3
+        except (ValueError, TypeError):
+            return 3
     if args.summary:
         if args.report_dir is None:
             parser.error("--summary requires --report-dir")
@@ -1192,14 +1380,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.aggregate:
         if args.evidence_dir is None or args.needs_result is None:
             parser.error("--aggregate requires --evidence-dir and --needs-result")
-        return aggregate_evidence(args.evidence_dir, args.needs_result)
+        return aggregate_evidence(args.evidence_dir, args.needs_result, plan)
     if args.coverage_aggregate:
         if args.coverage_dir is None or args.coverage_output_dir is None or args.candidate_sha is None:
             parser.error(
                 "--coverage-aggregate requires --coverage-dir, --coverage-output-dir and --candidate-sha"
             )
         return aggregate_coverage(
-            root, args.coverage_dir, args.coverage_output_dir, args.candidate_sha, args.base_sha or None
+            root, args.coverage_dir, args.coverage_output_dir, args.candidate_sha, args.base_sha or None, plan
         )
     if args.fast:
         return run_fast(root)
@@ -1207,7 +1395,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.suite is not None and (args.report_dir is not None or args.candidate_sha is not None):
         if args.report_dir is None or args.candidate_sha is None:
             parser.error("reported suite execution requires --report-dir and --candidate-sha")
-        return run_suite_with_evidence(root, args.suite, args.report_dir, args.candidate_sha)
+        return run_suite_with_evidence(root, args.suite, args.report_dir, args.candidate_sha, plan)
 
     try:
         grouped = load_manifest(root)
@@ -1219,6 +1407,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({name: len(paths) for name, paths in grouped.items()}, sort_keys=True))
         return 0
     assert args.suite is not None
+    if plan is not None:
+        parser.error("selective execution requires --report-dir and --candidate-sha")
     return subprocess.call([sys.executable, "-m", "unittest", "-v", *modules(grouped[args.suite])], cwd=root)
 
 

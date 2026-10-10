@@ -514,6 +514,7 @@ class TimingImportIdentityTests(unittest.TestCase):
             (root / "src/ummanu/projects").mkdir(parents=True)
             script = root / "scripts/ci_test_shards.py"
             script.write_text(Path(runner.__file__).read_text())
+            script.with_name("ci_selection.py").write_text(Path(runner._selection_helper().__file__).read_text())
             helper = root / "src/ummanu/projects/test_timing.py"
             helper.write_text(Path(runner._timing.__file__).read_text() + '\nIMPLEMENTATION_ID = "candidate"\n')
             record = root / "provenance.json"
@@ -745,20 +746,21 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertEqual(run_fast(Path(__file__).resolve().parents[1]), 0)
 
     def test_aggregate_rejects_each_non_success_typecheck_or_lint_result(self) -> None:
+        from scripts.ci_selection import validation_result
+
         root = Path(__file__).resolve().parents[1]
         workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text())
         aggregate = workflow["jobs"]["test"]
-        self.assertEqual(set(aggregate["needs"]), {"test_suites", "typecheck", "lint"})
-        command = aggregate["steps"][-1]["run"]
+        self.assertEqual(set(aggregate["needs"]), {"selection", "test_suites", "typecheck", "lint"})
+        self.assertIn("--validation-aggregate", aggregate["steps"][-1]["run"])
+        plan = {"selected": {"unit": ["tests/test_ci_shards.py"]},
+                "validation": {"typecheck": True, "lint": True}}
         for typecheck in ("success", "failure", "cancelled", "skipped"):
             for lint in ("success", "failure", "cancelled", "skipped"):
                 with self.subTest(typecheck=typecheck, lint=lint):
-                    rendered = command.replace("${{ steps.coverage_aggregate.outcome }}", "success")
-                    rendered = rendered.replace("${{ steps.suite_aggregate.outcome }}", "success")
-                    rendered = rendered.replace("${{ needs.typecheck.result }}", typecheck)
-                    rendered = rendered.replace("${{ needs.lint.result }}", lint)
-                    result = subprocess.run(["bash", "-c", rendered], check=False)
-                    self.assertEqual(result.returncode == 0, typecheck == lint == "success")
+                    self.assertEqual(validation_result(plan, {"selection": "success", "test_suites": "success",
+                                                             "typecheck": typecheck, "lint": lint}),
+                                     typecheck == lint == "success")
 
     def test_fast_profile_rejects_a_missing_declared_module_before_launch(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -896,8 +898,8 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        for suite in SUITES:
-            self.assertIn(suite, workflow)
+        self.assertIn("fromJSON(needs.selection.outputs.suites", workflow)
+        self.assertIn("needs.selection.outputs.mode == 'full'", workflow)
         candidate_sha = "${{ github.event.pull_request.head.sha || github.sha }}"
         # The board migration proof archives the source before the new revision was added.
         suite_job = workflow.split("  typecheck:", 1)[0]
@@ -975,7 +977,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             """  test:
     name: test
     if: ${{ always() }}
-    needs: [test_suites, typecheck, lint]""",
+    needs: [selection, test_suites, typecheck, lint]""",
             workflow,
         )
         self.assertIn(
@@ -1000,6 +1002,10 @@ class CiTestSuiteManifestTests(unittest.TestCase):
           python3 scripts/ci_test_shards.py --aggregate
           --evidence-dir "$RUNNER_TEMP/ci-evidence"
           --needs-result "$SUITES_RESULT"
+          --selection-plan "$RUNNER_TEMP/ci-selection/plan.json"
+          --candidate-sha "${{ github.event.pull_request.head.sha || github.sha }}"
+          --base-sha "${{ github.event.pull_request.base.sha }}"
+          --event "${{ github.event_name }}" --event-ref "${{ github.ref }}"
           >> "$GITHUB_STEP_SUMMARY""",
             workflow,
         )
@@ -1584,7 +1590,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 self.assertEqual(aggregate_evidence(root, "cancelled"), 130)
 
             with redirect_stdout(StringIO()):
-                self.assertEqual(aggregate_evidence(root, "skipped"), 0)
+                self.assertEqual(aggregate_evidence(root, "skipped"), 3)
 
 
 if __name__ == "__main__":

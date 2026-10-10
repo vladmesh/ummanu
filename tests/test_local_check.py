@@ -215,6 +215,7 @@ class ManifestSelectorTests(LocalCheckFixture, unittest.TestCase):
         (self.root / "tests").mkdir(exist_ok=True)
         source = Path(__file__).resolve().parents[1]
         shutil.copy(source / "scripts" / "ci_test_shards.py", self.root / "scripts")
+        shutil.copy(source / "scripts" / "ci_selection.py", self.root / "scripts")
         (self.root / "src/ummanu/projects").mkdir(parents=True, exist_ok=True)
         shutil.copy(source / "src/ummanu/projects/test_timing.py", self.root / "src/ummanu/projects")
         from scripts.ci_test_shards import SUITES
