@@ -614,7 +614,8 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             workspace = Path(tmp) / "task"
             workspace.mkdir()
             host = CommandHostRuntime(  # type: ignore[arg-type]
-                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+                SimpleNamespace(adapter=lambda project: {}), Path(tmp), mode="real",
+                production_runtime=_Runtime([_observation()]),
             )
             order: list[str] = []
             task = {"ref": "ummanu-1", "project": "ummanu", "routing": {}}

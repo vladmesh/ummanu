@@ -269,9 +269,9 @@ Every preparation path uses the same host ownership decision: the dispatcher-own
 is required; an additional declared venv is instrumented only if its prefix and site directory
 resolve inside the candidate. A normal venv executable symlink to system Python does not change
 ownership of its local prefix. External system/shared/live declarations are preserved and skipped
-as optional destinations. An intentional absolute command using such an external interpreter stays
-uninstrumented and is outside this candidate-local guard. This does not authorize direct tests:
-head checks must still use `ummanu check`. The installer independently refuses writes to external
+as write destinations. Their absolute commands receive the workspace startup hook through the
+role's import path. Deliberately suppressing startup or replacing that path can bypass this
+accidental-command guard; head checks must still use `ummanu check`. The installer refuses writes to external
 prefixes or escaped site directories, and failures installing the required workspace guard still
 fail preparation. Upgrade/live
 delivery is a separate observer step; these changes do not update production. Fast policy and fake

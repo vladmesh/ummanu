@@ -6785,6 +6785,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         report_request = self._worker_report_request_id()
         worker_identity = (before.handle, before.worker_leaf, before.worker_pid_file, before.worker_run)
         real_host = RecordingReviewHost(self.data_dir, catalog=PromptAfterStartCatalog())
+        real_host.audit = self.writer.audit
         real_host.backend.start_failure = head_ops.HeadSpawnAborted(
             "the reviewer never started a turn on its nudge",
             run=None,  # type: ignore[arg-type]
