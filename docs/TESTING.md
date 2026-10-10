@@ -76,6 +76,14 @@ import edges, while imports and recognized dynamic loaders inside their bodies a
 Analysis never executes imports
 to try to infer their runtime behaviour.
 
+This safety boundary currently limits effectiveness. The independent ummanu-205 review of
+[PR #714](https://github.com/vladmesh/ummanu/pull/714), candidate `c3b51bf1113bf66dd13d4903041556d35615c903`,
+found 219 of 294 manifest test modules and 149 of 386 product modules opaque. Its offline graph
+analysis selected 280–293 of 294 test modules and all nine owners for nonopaque source changes;
+opaque source changes required full fallback. This is safe over-selection, with practically no
+code-PR wall-clock gain at that snapshot, not evidence of useful acceleration. The docs-only path
+avoids suite execution independently of this limitation.
+
 For example, `tests.test_ci_selection.SelectionTests` changes a pure `ummanu.leaf` consumed
 directly by `tests.test_direct` and through `ummanu.middle` and `tests.helper` by
 `tests.test_transitive`. It selects those two modules under unit/component and omits
@@ -84,6 +92,7 @@ the same rule with real commits, one selected module, actual execution and nativ
 The CI-only repository projection for `src/ummanu/board/terminal_taxonomy.py` prints every
 selected module and its reason in `test / integration-dispatcher`'s bounded log. That projection
 uses the committed source graph and checks that membership is smaller than the full manifest.
+At candidate205 that projection selected 291 of 294 modules.
 Fixtures and projections are not natural PR acceptance proofs.
 
 Runner and aggregators independently regenerate the plan from the exact checkout/base/event and
@@ -270,13 +279,24 @@ The existing validator checks all CI ownership for duplicate, stale, missing or 
 empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
 CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
 
-The routed profile measured on the control host on 2026-10-10 contains 141 modules and 2,644 tests:
+The historical ummanu-202 routing baseline, measured on the control host on 2026-10-10, contained
+141 modules and 2,644 tests:
 92.254 seconds through the sequential module receipt wrapper (89.354 seconds in the native runner),
-complete/passed with two existing skips, at observed host load 0.90–1.35. This is a measurement,
-with a 100-second target at load at most 2; the current candidate's full receipt supplies its exact
-duration, content tree, count and import provenance. The saved pre-routing run was 282.311 seconds
-for 160 modules and 3,337 tests; the card also records earlier 681/693-second runs. The old approximately
+complete/passed with two existing skips, at observed host load 0.90–1.35. The saved pre-routing run
+was 282.311 seconds for 160 modules and 3,337 tests; the card also records earlier 681/693-second runs. The old approximately
 77-second estimate is not the current promise.
+
+The later published observation is ummanu-205's final candidate
+`c3b51bf1113bf66dd13d4903041556d35615c903` ([PR #714](https://github.com/vladmesh/ummanu/pull/714)),
+tree `e9997e9efe9e3a3d538921ea1086483b29370ab9`: 142 modules (125 unit + 17 component),
+2,677 tests and two existing skips, complete/passed, 98.670 seconds through the sequential wrapper
+and 96.706 seconds in the native runner. The saved worker receipt's module timings and that
+candidate's manifest confirm the module count. No host load was reported for this run; the
+historical load sample does not apply to it. The target remains 100 seconds at load at most 2,
+not an unconditional 98.670-second latency promise. This candidate observation is neither a
+final-main measurement nor final-main controlled-load acceptance, and its worker-local receipt
+is not a dispatcher gate attestation. Each candidate's own full receipt supplies its exact
+duration, content tree, count and import provenance.
 
 All moved checks remain in the same nine-suite manifest and execute when selected, or on every
 full run: interpreter preparation and
