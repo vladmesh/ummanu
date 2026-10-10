@@ -81,13 +81,15 @@ comprehension scopes. A single direct scope-body import with no competing bindin
 prove an alias; parameters, assignments/deletions, conditional imports and ambiguous
 receivers refuse that proof. Methods resolve enclosing names outside the class namespace.
 Wildcard imports, global/nonlocal writes and explicit namespace mutation invalidate proof
-conservatively. Value aliases retain hazardous spellings but do not establish safe identity.
+conservatively, including mutation through another alias of the imported namespace.
+Value aliases retain hazardous spellings but do not establish safe identity.
 Proven `unittest.mock.call` constructs an expectation record without invoking its arguments,
 so it no longer creates universal dependencies solely because its leaf is `call`.
 Calls inside its arguments are still analyzed. Other imported APIs with the same name,
 unknown receivers, source/file reads (including temporary files), subprocesses and entry
 points remain conservative. Literal dynamic imports require a proven `importlib.import_module`
 or builtin `__import__` identity; an ambiguous loader stays opaque even with a literal argument.
+Relative dynamic names, nonzero/unknown import levels and argument expansion stay opaque.
 `asyncio.run` remains opaque: its identity alone proves neither the origin nor the dependencies
 of an arbitrary awaitable/callback. This refinement does not infer callback targets, receiver
 types, arbitrary third-party/native execution or runtime monkeypatching through external code.

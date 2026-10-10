@@ -31,6 +31,7 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
     """
     calls = []
     aliases = {}
+    imported = {}
     assignments = []
     invalid = set()
     wildcard = False
@@ -41,13 +42,14 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
 
         def bind(self, name, identity=None):
             self.scope["bindings"].setdefault(name, []).append(identity)
+            if identity:
+                imported.setdefault(name, set()).add(identity)
 
         def body(self, node, body, arguments=None):
             parent = self.scope
             closure = parent
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                while closure and closure["class"]:
-                    closure = closure["parent"]
+            while closure and closure["class"]:
+                closure = closure["parent"]
             self.scope = {"bindings": {}, "parent": closure,
                           "class": isinstance(node, ast.ClassDef), "imports": set()}
             self.scope["imports"] = {id(n) for n in body if isinstance(n, (ast.Import, ast.ImportFrom))}
@@ -93,6 +95,7 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
                 bound = alias.asname or alias.name.split(".")[0]
                 target = alias.name if alias.asname else bound
                 self.bind(bound, target if id(node) in self.scope["imports"] else None)
+                imported.setdefault(bound, set()).add(target)
                 aliases.setdefault(bound, set()).add(alias.name.rsplit(".", 1)[-1])
 
         def visit_ImportFrom(self, node):
@@ -107,6 +110,7 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
                     continue
                 bound = alias.asname or alias.name
                 self.bind(bound, f"{prefix}.{alias.name}" if id(node) in self.scope["imports"] else None)
+                imported.setdefault(bound, set()).add(f"{prefix}.{alias.name}")
                 aliases.setdefault(bound, set()).add(alias.name)
 
         def visit_Name(self, node):
@@ -174,8 +178,15 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
             self.generic_visit(node)
 
         def visit_ListComp(self, node):
-            # Comprehension targets and named expressions cannot establish imports.
-            self.body(node, list(ast.iter_child_nodes(node)))
+            # Only the first iterable executes in the enclosing namespace;
+            # subsequent iterables/filters and elements use the comprehension.
+            first, *remaining = node.generators
+            self.visit(first.iter)
+            body = [first.target, *first.ifs]
+            for generator in remaining:
+                body.extend([generator.iter, generator.target, *generator.ifs])
+            body.extend([node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt])
+            self.body(node, body)
 
         visit_SetComp = visit_ListComp
         visit_DictComp = visit_ListComp
@@ -185,14 +196,23 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
     # Value aliases are never proof, but must not hide an opaque API's spelling.
     while True:
         previous = {key: set(value) for key, value in aliases.items()}
+        previous_invalid = set(invalid)
         for target, value in assignments:
-            leaf = value.id if isinstance(value, ast.Name) else value.attr if isinstance(value, ast.Attribute) else ""
-            possible = ({leaf} | aliases.get(leaf, set())) & (OPAQUE_CALLS | DYNAMIC_CALLS)
+            leaves = {item.id if isinstance(item, ast.Name) else item.attr
+                      for item in ast.walk(value) if isinstance(item, (ast.Name, ast.Attribute))}
+            possible = leaves & (OPAQUE_CALLS | DYNAMIC_CALLS)
+            for leaf in leaves:
+                possible.update(aliases.get(leaf, set()) & (OPAQUE_CALLS | DYNAMIC_CALLS))
             for item in ast.walk(target):
                 if isinstance(item, ast.Name):
                     aliases.setdefault(item.id, set()).update(possible)
-        if aliases == previous:
+                    if item.id in invalid and isinstance(value, (ast.Name, ast.Attribute)):
+                        # A write through a value alias can mutate the imported
+                        # namespace too. Refuse all spellings of that namespace.
+                        invalid.update(n.id for n in ast.walk(value) if isinstance(n, ast.Name))
+        if aliases == previous and invalid == previous_invalid:
             break
+    invalid_imports = {identity for bound in invalid for identity in imported.get(bound, set())}
 
     def resolve(node, scope):
         if isinstance(node, ast.Attribute):
@@ -203,7 +223,11 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
         while scope:
             bindings = scope["bindings"].get(node.id)
             if bindings is not None:
-                return bindings[0] if len(bindings) == 1 else None
+                identity = bindings[0] if len(bindings) == 1 else None
+                if identity and any(identity == target or identity.startswith(target + ".")
+                                    or target.startswith(identity + ".") for target in invalid_imports):
+                    return None
+                return identity
             scope = scope["parent"]
         return f"builtins.{node.id}" if node.id in {"__import__", "exec", "eval", "open"} else None
 
@@ -388,9 +412,16 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
                 if identity:
                     possible.add(identity.rsplit(".", 1)[-1])
                 if possible & DYNAMIC_CALLS:
+                    levels = ([node.args[4]] if len(node.args) > 4 else []) + [
+                        item.value for item in node.keywords if item.arg == "level"]
                     if (identity in {"importlib.import_module", "builtins.__import__"}
                             and node.args and isinstance(node.args[0], ast.Constant)
-                            and isinstance(node.args[0].value, str)):
+                            and isinstance(node.args[0].value, str)
+                            and not node.args[0].value.startswith(".")
+                            and not any(isinstance(arg, ast.Starred) for arg in node.args)
+                            and not any(item.arg is None for item in node.keywords)
+                            and (identity != "builtins.__import__" or all(
+                                isinstance(level, ast.Constant) and level.value == 0 for level in levels))):
                         add(name, node.args[0].value)
                     else:
                         opaque.add(name)

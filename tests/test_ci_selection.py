@@ -182,6 +182,19 @@ class SelectionTests(unittest.TestCase):
             "    def method(self):\n        call()\n", False)
         self.assert_call_boundary(
             "class C:\n    from unittest.mock import call\n    def method(self):\n        call()\n", True)
+        self.assert_call_boundary(
+            "class C:\n    from unittest.mock import call\n    items = [call() for x in values]\n", True)
+        self.assert_call_boundary(
+            "class C:\n    from unittest.mock import call\n    class D:\n        call()\n", True)
+        self.assert_call_boundary(
+            "from unittest.mock import call\nclass C:\n    call = unknown\n"
+            "    items = [call() for x in values]\n", False)
+        self.assert_call_boundary(
+            "from unittest import mock\nclass C:\n    import subprocess as mock\n"
+            "    items = [x for x in mock.call()]\n", True)
+        self.assert_call_boundary(
+            "import subprocess as mock\nclass C:\n    from unittest import mock\n"
+            "    items = [x for x in mock.call()]\n", False)
 
     def test_shadowing_rebinding_and_unresolved_receivers_stay_conservative(self):
         for code in (
@@ -190,8 +203,17 @@ class SelectionTests(unittest.TestCase):
             "from unittest.mock import call\ncall = unknown\ncall()\n",
             "from unittest.mock import call\ndef f():\n    call()\n    call = unknown\n",
             "from unittest.mock import call\ndef f():\n    global call\n    call = unknown\ncall()\n",
+            "def outer():\n    from unittest.mock import call\n    def inner():\n"
+            "        nonlocal call\n        call = unknown\n    call()\n",
+            "from unittest.mock import call\ndel call\ncall()\n",
+            "from unittest.mock import call\nwith manager as call:\n    call()\n",
             "from unittest import mock\nmock.call = unknown\nmock.call()\n",
             "from unittest import mock\nsetattr(mock, 'call', unknown)\nmock.call()\n",
+            "from unittest import mock\napi = mock\napi.call = unknown\nmock.call()\n",
+            "from unittest import mock as first\nimport unittest.mock as second\n"
+            "second.call = unknown\nfirst.call()\n",
+            "from unittest import mock as first\nif flag:\n    import unittest.mock as second\n"
+            "    second.call = unknown\nfirst.call()\n",
             "from unittest.mock import call\n[call() for call in unknown]\n",
             "from unittest.mock import call\n[(call := unknown) for x in items]\ncall()\n",
             "from unittest.mock import call\ntry:\n    pass\nexcept Exception as call:\n    call()\n",
@@ -201,6 +223,7 @@ class SelectionTests(unittest.TestCase):
             "unknown.call()\n",
             "from unittest.mock import call\ninvoke = call\ninvoke()\n",
             "import subprocess\ninvoke = subprocess.run\ninvoke([])\n",
+            "from subprocess import run\n(invoke,) = [run]\ninvoke([])\n",
             "import subprocess\n(subprocess.run if flag else unknown)([])\n",
         ):
             with self.subTest(code=code):
@@ -223,6 +246,10 @@ class SelectionTests(unittest.TestCase):
             "from asyncio import run as drive\ndrive(callback())\n",
             "import importlib\nimportlib = unknown\nimportlib.import_module('ummanu.leaf')\n",
             "obj.import_module('ummanu.leaf')\n",
+            "import importlib\ndef f(importlib):\n    importlib.import_module('ummanu.leaf')\n",
+            "import importlib\nimportlib.import_module('.leaf', package)\n",
+            "__import__('leaf', level=1)\n",
+            "__import__('ummanu.leaf', **options)\n",
         ):
             with self.subTest(code=code):
                 self.assert_call_boundary(code, True)
@@ -244,6 +271,17 @@ class SelectionTests(unittest.TestCase):
                 self.assertNotIn("ummanu.unrelated", graph["tests.test_other"])
                 result = self.choose([("M", ("src/ummanu/leaf.py",))], before=sources, after=sources)
                 self.assertIn("tests/test_other.py", result[2]["unit"])
+
+    def test_base_and_candidate_keep_unsafe_twin_even_after_safe_identity_repair(self):
+        safe, unsafe = self.sources(), self.sources()
+        safe["tests/test_other.py"] = "from unittest.mock import call\ncall()\n"
+        unsafe["tests/test_other.py"] = "from subprocess import call\ncall([])\n"
+        for before, after in ((safe, unsafe), (unsafe, safe)):
+            mode, _, selected, why = self.choose([("M", ("src/ummanu/leaf.py",))], before, after)
+            self.assertEqual(mode, "affected")
+            self.assertIn("tests/test_other.py", selected["unit"])
+            self.assertEqual(why["tests/test_other.py"], ["conservative opaque consumer"])
+            self.assertEqual(self.choose([("M", ("tests/test_other.py",))], before, after)[0], "full")
 
     def test_invalid_diff_contract_refuses(self):
         for data in (b"M\0README.md", b"R100\0a\0", b"U\0a\0", b"M\0../escape.md\0"):

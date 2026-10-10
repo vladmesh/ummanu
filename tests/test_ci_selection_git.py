@@ -11,6 +11,9 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
+
+from scripts import ci_selection
 
 from scripts.ci_selection import (
     SelectionError,
@@ -85,18 +88,28 @@ class SelectionGitTests(unittest.TestCase):
                           "removed_graph_edges": sum(len(deps - new_graph[name]) for name, deps in old_graph.items()),
                           "added_graph_edges": sum(len(deps - old_graph[name]) for name, deps in new_graph.items())},
                          sort_keys=True))
+        self.assertGreater(sum(len(deps - new_graph[name]) for name, deps in old_graph.items()), 0)
         for path in ("src/ummanu/board/terminal_taxonomy.py", "src/ummanu/webfront/caddyfile.py",
                      "tests/test_web_front_cookie_order.py"):
             results = []
-            for analyzer in (original, __import__("scripts.ci_selection", fromlist=["select"])):
-                mode, reasons, selected, why = analyzer.select(grouped, [("M", (path,))], sources, sources)
+            for analyzer, graph, opaque in ((original, old_graph, old_opaque), (ci_selection, new_graph, new_opaque)):
+                # Reuse the actual graphs computed above, rather than repeatedly
+                # parsing this repository under coverage for each projection.
+                with patch.object(analyzer, "import_graph", return_value=(graph, opaque)):
+                    mode, reasons, selected, why = analyzer.select(grouped, [("M", (path,))], sources, sources)
                 results.append({"mode": mode, "reasons": reasons, "selected": selected, "explanations": why,
                                 "modules": sum(map(len, selected.values())), "owners": list(selected)})
             removed_members = {owner: sorted(set(results[0]["selected"].get(owner, []))
                                             - set(results[1]["selected"].get(owner, []))) for owner in grouped}
             added_members = {owner: sorted(set(results[1]["selected"].get(owner, []))
                                           - set(results[0]["selected"].get(owner, []))) for owner in grouped}
-            self.assertGreaterEqual(results[0]["modules"], results[1]["modules"], path)
+            if path.startswith("tests/"):
+                self.assertEqual([result["mode"] for result in results], ["full", "affected"])
+                self.assertIn(path, results[1]["selected"]["unit"])
+            else:
+                self.assertEqual([result["mode"] for result in results], ["affected", "affected"])
+                self.assertIn("tests/test_terminal_taxonomy.py" if "terminal_taxonomy" in path
+                              else "tests/test_web_front_cookie_order.py", results[1]["selected"]["unit"])
             print(json.dumps({"changed_path": path, "before": results[0], "after": results[1],
                               "removed_members_by_owner": removed_members, "added_members_by_owner": added_members},
                              sort_keys=True))
