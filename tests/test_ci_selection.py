@@ -75,6 +75,17 @@ class SelectionTests(unittest.TestCase):
             self.assertEqual(self.choose([(status, ("tests/test_other.py",))])[2],
                              {"unit": ["tests/test_other.py"]})
 
+    def test_package_documentation_and_field_reflection_do_not_import_modules(self):
+        sources = self.sources()
+        sources["tests/__init__.py"] = '"""Examples use ummanu.leaf and ummanu.middle."""\n'
+        sources["src/ummanu/__init__.py"] = 'def __getattr__(name):\n    return "metadata"\n'
+        sources["src/ummanu/unrelated.py"] += 'def field(obj):\n    return getattr(obj, "field", None)\n'
+        mode, _, selected, _ = self.choose([("M", ("src/ummanu/leaf.py",))], before=sources, after=sources)
+        self.assertEqual(mode, "affected")
+        self.assertEqual(selected, {"unit": ["tests/test_direct.py"],
+                                    "component": ["tests/test_transitive.py"]})
+        self.assertNotIn("tests/test_other.py", selected["unit"])
+
     def test_both_snapshots_preserve_removed_import_edges(self):
         after = self.sources()
         after["tests/helper.py"] = "VALUE = 0\n"

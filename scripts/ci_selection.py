@@ -142,11 +142,19 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
 
     for name, path in by_name.items():
         tree = ast.parse(sources[path], filename=path)
+        nodes = tuple(ast.walk(tree))
+        # Documentation is not an executable patch/import target. In particular,
+        # test package documentation must not turn every test into a consumer.
+        docstrings = {id(item.body[0].value) for item in nodes
+                      if isinstance(item, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                      and item.body and isinstance(item.body[0], ast.Expr)
+                      and isinstance(item.body[0].value, ast.Constant)
+                      and isinstance(item.body[0].value.value, str)}
         package = name if path.endswith("/__init__.py") else name.rpartition(".")[0]
         aliases = {alias.asname or alias.name: alias.name.rpartition(".")[2]
-                   for item in ast.walk(tree) if isinstance(item, (ast.Import, ast.ImportFrom))
+                   for item in nodes if isinstance(item, (ast.Import, ast.ImportFrom))
                    for alias in item.names}
-        for node in ast.walk(tree):
+        for node in nodes:
             if isinstance(node, ast.Import):
                 for alias in node.names:
                     if alias.name.startswith(("ummanu.", "tests.")) and alias.name not in graph:
@@ -168,7 +176,7 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
                         opaque.add(name)
                     else:
                         add(name, f"{prefix}.{alias.name}")
-            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
                 # Strings used for patch targets and literal dynamic imports are dependencies.
                 for target in re.findall(r"(?:ummanu|tests)(?:\.[A-Za-z0-9_]+)+", node.value):
                     add(name, target)
@@ -185,11 +193,8 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
                 # These consumers can inspect or execute code without a Python import edge.
                 if called in {"exec", "eval", "spec_from_file_location", "run_module", "run_path",
                               "read_text", "read_bytes", "open", "getsource", "source_trees",
-                              "Popen", "run", "call", "check_output", "check_call", "system",
-                              "getattr", "entry_points"}:
+                              "Popen", "run", "call", "check_output", "check_call", "system", "entry_points"}:
                     opaque.add(name)
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "__getattr__":
-                opaque.add(name)
         add(name, package)
     # Unknown dependencies are universal, never silently absent from the graph.
     for name in opaque:
@@ -218,7 +223,8 @@ def select(grouped: dict[str, list[str]], changes: list[tuple[str, tuple[str, ..
         return full("removed, renamed or type-changed Python topology")
     try:
         old_graph, old_opaque = import_graph(base_sources)
-        new_graph, new_opaque = import_graph(candidate_sources)
+        new_graph, new_opaque = ((old_graph, old_opaque) if base_sources is candidate_sources
+                                 else import_graph(candidate_sources))
     except (ValueError, SyntaxError, UnicodeError) as exc:
         return full(f"unsafe analysis: {exc}")
     changed = {module_name(p) for p in code}

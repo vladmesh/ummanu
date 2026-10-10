@@ -61,7 +61,7 @@ Git paths use NUL delimiters. Both rename paths participate in classification.
   infrastructure instead of choosing an empty set. Every push and manual dispatch is full,
   including documentation commits on main.
 
-The supported impact boundary is deliberately conservative. Source readers, reflection,
+The supported impact boundary is deliberately conservative. Source readers,
 subprocess execution, wildcard imports and nonliteral dynamic loading are opaque consumers.
 Opaque product modules depend on all product Python; opaque tests depend on all analyzed Python.
 Their transitive test consumers are therefore included even when no specific import edge is known.
@@ -70,7 +70,10 @@ silently omitted; it can select many more modules than the direct import closure
 promise to discover arbitrary execution through an unrecognized third-party loader, native code,
 an externally constructed callback or a new runtime mechanism. Extend the conservative boundary
 before relying on selection for such code; changes to shared selection infrastructure already
-fall back to full. Aliased recognized loader calls are included. Analysis never executes imports
+fall back to full. Aliased recognized loader calls are included. Docstrings are documentation,
+not executable import/patch targets; field `getattr` and module `__getattr__` do not add implicit
+import edges, while imports and recognized dynamic loaders inside their bodies are analyzed normally.
+Analysis never executes imports
 to try to infer their runtime behaviour.
 
 For example, `tests.test_ci_selection.SelectionTests` changes a pure `ummanu.leaf` consumed
