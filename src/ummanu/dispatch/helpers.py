@@ -270,6 +270,19 @@ def _round_done_report_body(audit: Any, reference: str, round_ids: set[str]) -> 
     return body
 
 
+def _round_worker_check(audit: Any, reference: str, round_ids: set[str]) -> dict[str, Any] | None:
+    """Immutable admission evidence from this round's accepted report, never its body."""
+    evidence = None
+    for event in audit.events(reference):
+        if str(event.get("request_id") or "") not in round_ids:
+            continue
+        data = event.get("data") if event.get("record_type") == "board.protocol_event" else event.get("payload")
+        if isinstance(data, dict) and data.get("marker") == "report:done":
+            value = data.get("worker_check")
+            evidence = value if isinstance(value, dict) else None
+    return evidence
+
+
 def _last_marker_body(task: dict[str, Any], marker: str) -> str | None:
     """Text of the most recent comment carrying this marker, with the marker line stripped."""
     body = None

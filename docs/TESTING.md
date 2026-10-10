@@ -86,6 +86,25 @@ coverage baseline. Its summary lists each suite as `success`, `product_failure`,
   infrastructure failure even if a product test also failed; the failure location stays in evidence;
 - cancelled work is never success; routing that skips a suite records `not_applicable`.
 
+Before reporting completion, inspect the check runs on the exact candidate SHA, including other
+workflow runs on that SHA. The dispatcher reads all instances of its selected check names; a green
+PR run does not supersede a failed or cancelled manual run with the same names. Cancelling a
+redundant current-candidate run can leave a failed `test` aggregate even after the PR run succeeds.
+Use the existing PR run when it supplies the required evidence. Let already-started runs finish;
+if a selected run was interrupted, rerun its failed/cancelled jobs and wait for their terminal
+results. Do not report completion while a selected check remains failed, cancelled or pending.
+The failed aggregate's preceding suite/coverage steps identify its cause; the final shell assertion
+alone does not establish a candidate test defect.
+
+Read-only inspection for this repository (replace `CANDIDATE_SHA` with the committed full SHA):
+
+```bash
+gh api --paginate repos/vladmesh/ummanu/commits/CANDIDATE_SHA/check-runs \
+  --jq '.check_runs[] | {name, status, conclusion, head_sha, details_url}'
+```
+
+This check does not mint a mechanical gate attestation or change the gate's selection policy.
+
 ## Control-host fast profile
 
     python3 scripts/ci_test_shards.py --fast
@@ -103,10 +122,23 @@ board, API, cloud or other credentials. A startup guard rejects network connecti
 other than Python and the read-only temporary-instance Git queries of the board seam, so live board/API
 use and Docker, VM, Ansible or provisioning commands fail loudly.
 
-Workers and reviewers start with focused `ummanu check <selector>` checks. Their permitted local
+Workers start with focused `ummanu check <selector>` checks. Their permitted local
 checks are the adapter-declared broad profile and its subsets; the fast runner above is not another
 worker validation command. When the task requires the local broad suite, run it once through the
 receipt wrapper and reuse its intact receipt for unchanged content.
+
+Before a fresh code `report:done`, every registered project declaring `broad_check` must supply an
+intact complete green receipt for its exact full declaration, candidate interpreter, import provenance
+and committed HEAD tree. The report writer reads evidence and never runs tests. A refusal writes no
+accepted report marker and leaves the card In progress; `report:blocked`, non-candidate completion
+and same-request report replay keep their existing contracts. Subsets write no full receipt.
+
+Reviewers inspect code, commits and existing worker/CI evidence without executing tests. Every
+`ummanu check` form, including `show`, `--reuse`, selectors and legacy overrides, refuses with 125
+before resolution or receipt lookup. Reviewer packets embed the admitted worker receipt, its summary,
+digest, artifact path, candidate SHA and content tree separately from exact-SHA mechanical gate
+attestation. Missing, none and noop gates attest no suite: name the gap in the verdict and request
+validation from the worker or CI. A worker receipt never becomes a CI gate attestation.
 
 ## Control-host local profile
 
@@ -205,18 +237,101 @@ and the declared candidate-local venv after setup. Resuming a materialized works
 files without rebuilding dependencies. Direct `pytest`, `python -m pytest` and `python -m unittest`
 refuse before runner/test import, with status 125 and one line naming `ummanu check <selector>`.
 This includes `python`, `python3` and absolute candidate-local declared interpreter paths. Ordinary Python,
-library imports of pytest/unittest and the Ummanu CLI continue to work. Native Ansible commands and
+library imports of pytest/unittest and other Ummanu CLI commands continue to work. Native Ansible commands and
 sudo in the head PATH refuse with one line directing execution to CI. The Docker guard's order,
 backend bindings and exact policy are unchanged. Standing roles receive no head guard PATH.
 
-Authorization belongs to the live module runner process launched by the receipt wrapper, and its
+Reviewer refusal takes precedence over wrapper ancestry. The guard reads the common role launcher's
+`BOARD_ROLE=reviewer` identity from the live process exec environment in `/proc` ancestry, including
+when a child clears its environment. A check argument, candidate adapter, inherited runtime.env value
+or prompt does not set that identity: `role_env` overwrites it from the bound launch role. Both new
+and supported retained review bring-up repair candidate-local startup hooks. Shared and external
+interpreter prefixes are never written. The role's `PYTHONPATH` carries only the workspace-owned
+`.ummanu-task-env/test-guard` startup directory for absolute external interpreters; it does not carry
+the product source tree. Candidate-local venv hooks continue to work when a child clears its environment.
+
+Worker authorization belongs to the live module runner process launched by the receipt wrapper, and its
 descendants, in that workspace. The hook checks Linux `/proc` ancestry for the exact provenance
 bootstrap digest and candidate import roots. Wrapper169's existing bootstrap is compatible; there
-is no ambient environment marker, permission file or cached PID. Native `shared` children retain
+is no wrapper permission environment marker, permission file or cached PID. Native `shared` children retain
 authorization through a fresh environment whitelist and `PYTHONPATH=""`. Sibling head commands,
 later commands and reparented children have no such ancestor. The hook does not replace the native
 runner's membership checks, fixture environment, marker families or budgets. Refusal is command
 feedback; it introduces no review/CI classification, retry or restart-budget handling.
+
+The acceptance boundary is the fresh report marker transaction: the writer validates the intact,
+complete green full receipt against the declared check set, interpreter, candidate imports and
+committed HEAD tree, then records a bounded admission snapshot with its SHA/tree binding.
+The full receipt stays in the existing workspace artifact; audit and packets contain no per-test or
+module timing, output or tail. `receipt_digest` identifies that original full artifact and is never
+recomputed from the compact snapshot. `snapshot_digest` is SHA-256 over the snapshot's canonical
+JSON (sorted keys, compact separators, UTF-8 with surrogateescape, excluding `snapshot_digest`).
+
+`admitted_check` enforces a 16,384-byte maximum for the canonical snapshot including its digest,
+exactly 15 top-level fields, the six-field module check set, and seven provenance fields with exactly
+two import roots. Paths, check-set strings/arguments and provenance strings each have a 2,048-byte
+limit; the exact argument vector has at most 64 entries. The generated summary is at most 512 bytes.
+Counts allow only `tests`, `skipped`, `failures`, `errors`, `expected_failures`, and
+`unexpected_successes`, each an integer from 0 through 2^63-1. Unknown fields are refused, rather
+than copied or truncated. No per-test list enters this bound. An oversized declared contract or
+provenance refuses before the report marker with the allowed worker wrapper command.
+
+Handoff, recovery and packets use the same canonical snapshot verifier: digest, complete/exit-zero/
+passed, exact check-set digest and import/environment provenance remain mandatory. Handoff also
+compares the freshly authorized snapshot digest with the immutable admission, covering the original
+SHA/tree, check set and artifact digest. Same-request replay retains that data without reading the card
+or checkout again. Before consuming a report, replaying a pending Validate move, gating a recovered
+Validate record or bringing up review, the dispatcher verifies durable candidate evidence against
+that admitted binding. Report handoff requires the exact admitted checkout; later gates/reviews read
+the immutable snapshot and verify its commit/tree and ancestry after machinery-owned base refreshes.
+The exact-SHA gate owns the refreshed tree. Recovery verifies first, freezes or confirms the worker once, saves retention,
+then performs the idempotent Validate move. A lost or changed receipt is an explicit refusal; reviewer
+packets also label an unavailable artifact even when the immutable admitted snapshot survives.
+
+Production activation requires a separate operation. Drain all pre-policy code report occurrences
+with outstanding effects, including staged/pending report writes and `validation_move_pending`
+continuations, and code Validate/review records for adapters declaring `broad_check`. Their released
+producers never recorded `worker_check`; old accepted events must remain unchanged and cannot be
+backfilled from report prose. Settle their current effects under the installed policy before upgrading,
+or park them for an explicit new worker round under the new policy. A new round needs a new request
+identity and full green receipt. Existing same-request historical replay remains available and does
+not create new admission authority. Drain existing reviewer heads before activation so future commands
+import the upgraded control-plane guard and receive regenerated packets. Native adapters that still
+omit `broad_check.module` must declare their actual full suite first; no discovery can supply it.
+
+Two live registered consumers have a separate unresolved precondition: `public-profile` and
+`ai-risk-decision-lab` both declare `interpreter: /usr/bin/python3`, `module: doctest`, and
+`import_package: doctest`. The public-profile args are `README.md`, `PLAN.md`, `content_plan.md`,
+`series/README.md`. The ai-risk-decision-lab args are `README.md`, `open-questions.md`,
+`research/funding-landscape.md`, `projects/risk-decision-lab/research/mit-data-recon.md`,
+`projects/risk-decision-lab/applications/manifund/draft.md`, and
+`projects/risk-decision-lab/applications/bluedot-rapid/draft.md`.
+These Markdown doctest declarations import the stdlib package outside the candidate. They produce
+no reusable candidate receipt under the existing provenance boundary. After activation, fresh
+code `report:done` for either project necessarily refuses; `report:blocked` remains available.
+Declaring a module alone does not resolve this precondition.
+
+The separate production operation must explicitly resolve both consumers through a supported
+candidate-owned check contract, or record an operational classification acknowledging that code
+completion remains impossible for them. Until then activation readiness is unresolved. Do not
+backfill accepted reports, exempt these projects, weaken provenance, or silently treat a docs-only
+declaration as code completion evidence. This code card changes neither live adapters nor card
+classification. Read-only precondition inspection, without executing any check:
+
+```bash
+activation_instance="${UMMANU_INSTANCE:-$HOME/ummanu-data/instance}"
+for activation_project in public-profile ai-risk-decision-lab; do
+  sed -n '/^id:/p; /^repo:/p; /^enabled:/p; /^adapter:/p' "$activation_instance/projects/$activation_project.yaml"
+  sed -n '/^broad_check:/,$p' "$activation_instance/adapters/$activation_project.yaml"
+done
+/usr/bin/python3 -P -c 'import importlib.util; print(importlib.util.find_spec("doctest").origin)'
+```
+
+The inspected bindings point to these same-named adapters; the result is the shapes and args above
+and an external stdlib `doctest.py` origin. Recheck the bindings and their named adapters before the
+operation; changing only the installed policy leaves both prerequisites unresolved.
+No deployment, service restart or executor registry write is part of this change. The natural live
+DoD5 card follows production activation; fixtures and candidate CI are not a delivered live packet proof.
 
 This is an accidental-command guard, like the Docker guard, not an isolation boundary against the
 interpreter's owner deliberately using `-S`, forging the bootstrap argv, or replacing startup files.
@@ -224,9 +339,9 @@ Every preparation path uses the same host ownership decision: the dispatcher-own
 is required; an additional declared venv is instrumented only if its prefix and site directory
 resolve inside the candidate. A normal venv executable symlink to system Python does not change
 ownership of its local prefix. External system/shared/live declarations are preserved and skipped
-as optional destinations. An intentional absolute command using such an external interpreter stays
-uninstrumented and is outside this candidate-local guard. This does not authorize direct tests:
-head checks must still use `ummanu check`. The installer independently refuses writes to external
+as write destinations. Their absolute commands receive the workspace startup hook through the
+role's import path. Deliberately suppressing startup or replacing that path can bypass this
+accidental-command guard; head checks must still use `ummanu check`. The installer refuses writes to external
 prefixes or escaped site directories, and failures installing the required workspace guard still
 fail preparation. Upgrade/live
 delivery is a separate observer step; these changes do not update production. Fast policy and fake

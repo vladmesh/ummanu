@@ -164,6 +164,12 @@ class StructuredArgumentParser(argparse.ArgumentParser):
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == "check":
+        from ummanu.runtime.test_guard import check_refusal
+
+        refusal = check_refusal()
+        if refusal is not None:
+            return refusal
     if argv and argv[0] == "automations":
         # The background agents own their argv, help and output: hand it over untouched, before
         # this parser can claim `--help` or reject an agent's own flags.

@@ -3382,6 +3382,11 @@ reported as what the next tick would do.
 Receipt ownership and travel are in [Receipt names](PROTOCOLS.md#receipt-names); broad-check handling in
 [Protocols](PROTOCOLS.md#broad-check-handling).
 
+These check commands are worker commands. Reviewer heads refuse every `ummanu check` form with
+125, including show and reuse, and read receipt snapshots from the packet or artifacts. A fresh code
+done report requires the full declared complete green receipt for committed HEAD; its immutable audit
+event retains the admission evidence. See [Testing](TESTING.md) for activation drain preconditions.
+
 ```bash
 python3 -m ummanu check broad --module tests.broad
 python3 -m ummanu check show --module tests.broad

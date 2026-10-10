@@ -441,6 +441,54 @@ class ReviewEvidenceTests(unittest.TestCase):
 
 
 class PacketHeaderTests(unittest.TestCase):
+    def test_review_packets_read_admitted_worker_receipt_with_or_without_exact_sha_gate(self):
+        import tempfile
+
+        from tests.support.completion_receipt import SHA, TREE, declared_receipt
+        from ummanu.broad_check import admission_snapshot
+
+        fixture = PacketFixture()
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        _, path, receipt = declared_receipt(root / "candidate", root / "instance")
+        evidence = admission_snapshot(receipt, candidate_sha=SHA, tree_sha=TREE, path=path)
+        path.unlink()
+        fixture.events[-1]["data"]["worker_check"] = evidence
+        host = self.host(fixture)
+        record = self.record()
+        record.report_generation = 3
+        for mode in ("github", "none", "noop", "missing"):
+            record.gate_attestation = {
+                "validated_sha": SHA, "base_sha": "c" * 40, "gate_mode": mode,
+                "required_checks": [{"name": "unit", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
+                "completed_at": "2026-10-10T00:00:00+00:00", "command_or_check_set_digest": "f" * 64,
+            } if mode != "missing" else {}
+            with self.subTest(mode=mode), mock.patch.object(host, "head_commit", return_value=SHA):
+                packet = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
+            self.assertIn("Reviewer heads must not run tests or any ummanu check", packet)
+            self.assertIn("request validation from the worker or CI", packet)
+            self.assertIn("Workers or CI perform required validation within these bounds", packet)
+            self.assertIn("Reviewers read that evidence and name gaps in the verdict", packet)
+            self.assertIn("Read the diff, commits", packet)
+            self.assertIn(evidence["receipt_digest"], packet)
+            self.assertIn(evidence["snapshot_digest"], packet)
+            self.assertIn(TREE, packet)
+            self.assertIn("complete/passed", packet)
+            self.assertIn("tests=2", packet)
+            self.assertIn("Worker receipt artifact is missing or changed", packet)
+            if mode == "github":
+                self.assertIn("## Mechanical gate attestation", packet)
+                self.assertIn("https://ci.invalid/1", packet)
+            else:
+                self.assertIn("No valid SHA-bound mechanical-gate receipt", packet)
+        evidence["exit_code"] = 1
+        packet = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
+        self.assertIn("Missing evidence: accepted worker report", packet)
+        fixture.events[-1]["data"].pop("worker_check")
+        packet = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
+        self.assertIn("Missing evidence: accepted worker report", packet)
+
     def host(self, fixture=None, contract=None):
         fixture = fixture or PacketFixture()
         host = object.__new__(CommandHostRuntime)
@@ -659,6 +707,7 @@ class PacketHeaderTests(unittest.TestCase):
         reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
         for text in (worker, reviewer):
             self.assertTrue(text.startswith("## Declared local checks and CI evidence boundary\n"))
+        for text in (worker,):
             self.assertLess(
                 text.index("Matching full receipt readback"), text.index(fixture.task["description"])
             )
@@ -671,6 +720,8 @@ class PacketHeaderTests(unittest.TestCase):
                 "check show --module tests.broad --default-interpreter .ummanu-task-env/venv/bin/python3",
                 text,
             )
+        self.assertLess(reviewer.index("Reviewer heads must not run tests"), reviewer.index(fixture.task["description"]))
+        self.assertIn("Read the diff, commits", reviewer)
         self.assertIn("<!-- report-round generation=3", worker)
         self.assertIn("<!-- observer-decision generation=3", worker)
         self.assertIn("previous_reviewed_sha: " + "b" * 40, reviewer)
@@ -784,9 +835,10 @@ class PacketHeaderTests(unittest.TestCase):
         reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
         self.assertEqual(reads, ["ummanu"])
         broad, show = host._broad_check_invocation("ummanu")
-        for text in (worker, reviewer):
+        for text in (worker,):
             self.assertIn("Matching explicit full-profile wrapper: " + broad, text)
             self.assertIn("Matching full receipt readback: " + show, text)
+        self.assertIn("Worker declared check: tests.broad", reviewer)
         self.assertIn("    " + broad, worker)
 
     def test_runner_owned_shared_and_pytest_headers_preserve_adapter_contract(self):
@@ -862,9 +914,12 @@ class PacketHeaderTests(unittest.TestCase):
                 )
                 host.catalog.broad_check_verdict.assert_called_once_with("ummanu")
                 broad, show = host._broad_check_commands(contract)
-                self.assertIn("Matching explicit full-profile wrapper: " + broad, document)
-                self.assertIn("Matching full receipt readback: " + show, document)
-                self.assertIn("Configuration gap: broad_check.local is missing", document)
+                if role == "worker":
+                    self.assertIn("Matching explicit full-profile wrapper: " + broad, document)
+                    self.assertIn("Matching full receipt readback: " + show, document)
+                    self.assertIn("Configuration gap: broad_check.local is missing", document)
+                else:
+                    self.assertIn("Reviewer heads must not run tests", document)
                 self.assertNotIn("Full declared profile (reuse):", document)
                 self.assertNotIn("Subset form (placeholder", document)
                 for command in (broad, show):

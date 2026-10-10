@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 from ummanu.broad_check import (
     BroadCheckError,
     CheckSpec,
+    admission_snapshot,
     candidate_import_refusal,
     receipt_path,
     recorded_result,
@@ -22,16 +24,88 @@ from ummanu.broad_check import (
     summarize,
     usable_receipt,
 )
-from ummanu.config import ConfigError, load_config
+from ummanu.config import ConfigError, _load_bindings, load_config
 from ummanu.projects.contract import (
     ContractUnusable,
     ModuleContract,
     module_contract,
 )
 from ummanu.projects.local_check import LocalProfile, PytestSelection
+from ummanu.runtime.launch_prefix import pythonpath_prefix
 from ummanu.runtime.paths import add_instance_argument
+from ummanu.runtime.role_env import WORKSPACE_ENV_DIR
+from ummanu.runtime.test_guard import check_refusal
 
 _GIT_TIMEOUT = 60
+
+
+def completion_check(project: str, root: Path, instance: Path) -> dict[str, object] | None:
+    """Admit a registered candidate's committed tree using its complete green receipt.
+
+    Read only. The report writer and dispatcher use this same decision; neither
+    executes tests. Projects without a broad declaration retain their contract.
+    No unregistered CLI default or discovery can supply completion evidence.
+    """
+    candidates = {project, project.replace("_", "-")}
+    bindings = [binding for binding in _load_bindings(instance / "projects") if binding.get("id") in candidates]
+    if not bindings:
+        # Do not let a corrupt canonical registration look like an unregistered card.
+        for candidate in candidates:
+            path = instance / "projects" / f"{candidate}.yaml"
+            if path.is_file():
+                load_config(path)
+                raise BroadCheckError("done_receipt_required", "project registration does not match the card")
+        return None
+    if len(bindings) != 1:
+        raise BroadCheckError("done_receipt_required", "ambiguous project registration")
+    binding = bindings[0]
+    if not isinstance(binding, dict) or not binding.get("adapter"):
+        raise BroadCheckError("done_receipt_required", "registered project has no usable adapter")
+    adapter = load_config(instance / "adapters" / f"{binding['adapter']}.yaml")
+    if isinstance(adapter, dict) and "broad_check" not in adapter:
+        return None
+    default = str(Path(WORKSPACE_ENV_DIR) / "bin/python3")
+    command = pythonpath_prefix() + " " + shlex.join([sys.executable, "-P", "-m", "ummanu", "check", "broad", "--reuse",
+                          "--default-interpreter", default])
+    try:
+        contract = module_contract(binding, instance=instance, project_root=root,
+                                   default_interpreter=default)
+        arguments = [sys.executable, "-P", "-m", "ummanu", "check", "broad", "--reuse",
+                     "--module", contract.module]
+        arguments.extend(f"--module-arg={arg}" for arg in contract.args)
+        if not contract.interpreter_declared:
+            arguments.extend(("--default-interpreter", default))
+        arguments.extend(("--root", str(root), "--instance", str(instance)))
+        command = pythonpath_prefix() + " " + shlex.join(arguments)
+        repo = binding.get("repo")
+        if not isinstance(repo, str) or not _same_repository(root, Path(repo).expanduser()):
+            raise BroadCheckError("done_receipt_required", "workspace is not this registered project's checkout")
+        if not contract.module:
+            raise BroadCheckError("done_receipt_required", "broad_check.module is missing; declare the full check set")
+        args = argparse.Namespace(root=str(root), instance=str(instance), default_interpreter=default,
+                                  check_command="broad", selectors=[], module=None, command=None,
+                                  module_arg=[])
+        resolved = _spec(args, contract=contract)
+        lookup = usable_receipt(root, resolved.spec)
+        receipt = lookup.authorized()
+        result = lookup.authorized_result()
+        if receipt is None or result is None:
+            raise BroadCheckError("done_receipt_required", lookup.reason)
+        if result.exit_code != 0:
+            raise BroadCheckError("done_receipt_required", "full declared receipt is RED")
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD", "HEAD^{tree}"],
+                              capture_output=True, text=True, check=False, timeout=_GIT_TIMEOUT)
+        lines = head.stdout.splitlines()
+        if head.returncode or len(lines) != 2:
+            raise BroadCheckError("done_receipt_required", "committed HEAD/tree is unavailable")
+        if receipt["content_identity"] != {"tree_sha": lines[1]}:
+            raise BroadCheckError("done_receipt_required", "receipt does not cover committed HEAD tree")
+        return admission_snapshot(receipt, candidate_sha=lines[0], tree_sha=lines[1], path=lookup.path)
+    except (ContractUnusable, BroadCheckError) as exc:
+        message = exc.message
+        raise BroadCheckError("done_receipt_required", f"{message}; worker wrapper: {command}") from exc
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BroadCheckError("done_receipt_required", f"receipt/HEAD unavailable: {exc}; worker wrapper: {command}") from exc
 
 # The import package this command falls back to for a checkout that matches NO registered project.
 # This is the CLI's own default, not a project contract, and it lives here rather than in
@@ -73,6 +147,9 @@ def add_check_subcommands(subparsers) -> None:
 
 
 def run_check(args: argparse.Namespace) -> int:
+    refusal = check_refusal()
+    if refusal is not None:
+        return refusal
     if args.check_command == "show":
         return run_check_show(args)
     if args.check_command == "broad":
@@ -129,7 +206,7 @@ def _fail(exc: BroadCheckError) -> int:
     return 2
 
 
-def _spec(args: argparse.Namespace) -> ResolvedCheck:
+def _spec(args: argparse.Namespace, *, contract: ModuleContract | None = None) -> ResolvedCheck:
     """Resolve runtime once and validate the complete profile or one declared selector.
 
     Registered profiles accept their declared full argv or a validated selector. Legacy manual
@@ -137,7 +214,7 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
     """
     if args.module_arg and not args.module:
         raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
-    contract = _module_contract(
+    contract = contract or _module_contract(
         Path(args.root),
         Path(args.instance),
         default_interpreter=args.default_interpreter,
@@ -350,6 +427,9 @@ def _git_common_dir(root: Path) -> Path | None:
 
 def run_check_broad(args: argparse.Namespace) -> int:
     """Run the check and hand back its own exit status, never a status of our own invention."""
+    refusal = check_refusal()
+    if refusal is not None:
+        return refusal
     root = Path(args.root)
     try:
         resolved = _spec(args)
@@ -447,6 +527,9 @@ def _run_subset(args: argparse.Namespace, resolved: ResolvedCheck) -> int:
 
 
 def run_check_show(args: argparse.Namespace) -> int:
+    refusal = check_refusal()
+    if refusal is not None:
+        return refusal
     try:
         resolved = _spec(args)
         lookup = usable_receipt(Path(args.root), resolved.spec)

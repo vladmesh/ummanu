@@ -16,6 +16,54 @@ from ummanu.runtime import role_env, test_guard
 
 
 class TestGuardTests(unittest.TestCase):
+    def test_role_launcher_overwrites_inherited_and_runtime_file_role(self):
+        with (mock.patch.object(role_env, "load_env_file", return_value={"BOARD_ROLE": "reviewer"}),
+              mock.patch.object(role_env, "_docker_bindings", return_value={})):
+            self.assertEqual(role_env.runtime_env("worker", base_env={"BOARD_ROLE": "reviewer"})["BOARD_ROLE"], "worker")
+            self.assertEqual(role_env.runtime_env("reviewer", base_env={"BOARD_ROLE": "worker"})["BOARD_ROLE"], "reviewer")
+
+    def test_reviewer_launch_identity_survives_child_environment_and_wrapper_ancestry(self):
+        records = {"/proc/30/environ": b"BOARD_ROLE=worker\0", "/proc/20/environ": b"BOARD_ROLE=reviewer\0"}
+        with (mock.patch.object(test_guard.os, "getpid", return_value=30),
+              mock.patch.object(Path, "read_bytes", autospec=True, side_effect=lambda path: records[str(path)]),
+              mock.patch.object(Path, "read_text", return_value="30 (child) S 20 0"),
+              mock.patch.dict("os.environ", {}, clear=True)):
+            self.assertTrue(test_guard.reviewer_head())
+            records["/proc/20/environ"] = b"BOARD_ROLE=worker\0"
+            with mock.patch.object(Path, "read_text", return_value="20 (worker) S 1 0"):
+                self.assertFalse(test_guard.reviewer_head())
+
+    def test_all_reviewer_check_forms_refuse_before_parser_resolution_runner_or_reuse(self):
+        from io import StringIO
+
+        from ummanu import check_commands
+        from ummanu.cli import main
+
+        forms = ([], ["tests.test_one"], ["test_one.py::Case::test_one"],
+                 ["broad", "--reuse"], ["show"], ["broad", "--command", "anything"],
+                 ["--unknown"], ["--help"], ["--module", "pytest"])
+        with (mock.patch.object(test_guard, "reviewer_head", return_value=True),
+              mock.patch.object(check_commands, "_spec", side_effect=AssertionError("resolved")),
+              mock.patch.object(check_commands, "usable_receipt", side_effect=AssertionError("reused")),
+              mock.patch("sys.stderr", StringIO()), mock.patch("sys.stdout", StringIO())):
+            for form in forms:
+                with self.subTest(form=form):
+                    self.assertEqual(main(["check", *form]), 125)
+            for handler in (check_commands.run_check, check_commands.run_check_broad, check_commands.run_check_show):
+                self.assertEqual(handler(SimpleNamespace()), 125)
+
+    def test_reviewer_hook_refuses_even_a_real_wrapper_permission(self):
+        with mock.patch.object(test_guard.sys, "addaudithook") as add:
+            test_guard.install("/candidate", "digest")
+        audit = add.call_args.args[0]
+        with (mock.patch.object(test_guard, "reviewer_head", return_value=True),
+              mock.patch.object(test_guard, "authorized", return_value=True) as authorized,
+              mock.patch.object(test_guard.os, "write"),
+              mock.patch.object(test_guard.os, "_exit", side_effect=SystemExit(125)),
+              self.assertRaises(SystemExit)):
+            audit("cpython.run_module", ("pytest",))
+        authorized.assert_not_called()
+
     def test_authority_requires_exact_bootstrap_and_workspace_roots(self) -> None:
         root = Path("/candidate")
         digest = hashlib.sha256(_PROVENANCE_BOOTSTRAP.encode()).hexdigest()
@@ -99,6 +147,29 @@ class TestGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 test_guard.install_environment(root, local)
             self.assertEqual(list(site.iterdir()), [])
+
+    def test_workspace_startup_path_is_local_and_role_bound_without_production_sources(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch) / "candidate"
+            root.mkdir()
+            python = root / role_env.WORKSPACE_ENV_DIR / "bin/python3"
+            python.parent.mkdir(parents=True)
+            python.symlink_to("/usr/bin/python3")  # Never executed in this seam.
+            test_guard.install_workspace(root)
+            startup = root / test_guard.WORKSPACE_STARTUP_DIR
+            with mock.patch.object(role_env, "load_env_file", return_value={}):
+                env = role_env.runtime_env("reviewer", base_env={"PYTHONPATH": "/production/src"}, workspace=root)
+            self.assertEqual(env["PYTHONPATH"], str(startup))
+            self.assertEqual(env["BOARD_ROLE"], "reviewer")
+            self.assertTrue((startup / "sitecustomize.py").is_file())
+            foreign = Path(scratch) / "foreign"
+            foreign.mkdir()
+            other = Path(scratch) / "other"
+            other.mkdir()
+            (other / ".ummanu-task-env").symlink_to(foreign)
+            with self.assertRaises(ValueError):
+                test_guard.install_workspace(other)
+            self.assertEqual(list(foreign.iterdir()), [])
 
 
 class HostGuardOwnershipTests(unittest.TestCase):

@@ -92,6 +92,30 @@ def handle_worker_report(
     ref = task["ref"]
     continuation = record.worker_continuation
     if marker == "report:done":
+        try:
+            runtime.host.verify_worker_result(task, record)
+        except HostError as exc:
+            unconfirmed = runtime._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
+            if unconfirmed is not None:
+                return unconfirmed
+            attempt_accounting.terminal_effect(runtime,
+                task,
+                record,
+                target="blocked",
+                reason=f"worker result is not durable: {scrub_host_output(str(exc))}",
+                request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-result-blocked", ref),
+                terminal_state="blocked",
+                disposition="blocked",
+                blocked_reason="implementation",
+            )
+            records.pop(ref, None)
+            return {
+                "status": "blocked",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "reason": "worker result is not durable",
+            }
         if continuation.validation_move_pending:
             # Frozen and recorded before a tick died mid-move; the replay never wakes the worker.
             # The phase this report closed is the same one the dying tick accepted, so its
@@ -118,30 +142,6 @@ def handle_worker_report(
                 "pilot_ref": ref,
                 "attempt_id": attempt_id,
                 "to": "validate",
-            }
-        try:
-            runtime.host.verify_worker_result(task, record)
-        except HostError as exc:
-            unconfirmed = runtime._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
-            if unconfirmed is not None:
-                return unconfirmed
-            attempt_accounting.terminal_effect(runtime, 
-                task,
-                record,
-                target="blocked",
-                reason=f"worker result is not durable: {scrub_host_output(str(exc))}",
-                request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-result-blocked", ref),
-                terminal_state="blocked",
-                disposition="blocked",
-                blocked_reason="implementation",
-            )
-            records.pop(ref, None)
-            return {
-                "status": "blocked",
-                "step": "advance",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "reason": "worker result is not durable",
             }
         if has_candidate(task):
             current_sha = runtime.host.head_commit(record)

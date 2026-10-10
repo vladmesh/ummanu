@@ -2221,6 +2221,7 @@ class TaskWriter:
             if not legacy_owned:
                 raise
         marker_data = owned.data if owned is not None else {}
+        check_data = {}
         if owned is None and not legacy_owned:
             # This is the writer boundary for a worker report.  Bind the
             # report to the specification it actually answered now, rather
@@ -2230,6 +2231,17 @@ class TaskWriter:
             if kind == "done":
                 if has_candidate(current):
                     self._require_committed_workspace()
+                    from ummanu.broad_check import BroadCheckError
+                    from ummanu.check_commands import completion_check
+                    from ummanu.config import ConfigError
+
+                    try:
+                        evidence = completion_check(str(current.get("project") or ""),
+                                                    self.workspace or Path.cwd(), self.instance_dir)
+                    except (BroadCheckError, ConfigError) as exc:
+                        raise TaskError("done_receipt_required", str(exc), 3) from exc
+                    if evidence is not None:
+                        check_data = {"worker_check": evidence}
                 elif current.get("type") == "infra":
                     # A research/infra card has no candidate, so its checkout may hold uncommitted
                     # artifacts; an infra report carries its completion record instead.
@@ -2253,6 +2265,8 @@ class TaskWriter:
                 for name in ("description_sha256", "specification_revision")
                 if name in marker_data
             }
+            if "worker_check" in marker_data:
+                check_data = {"worker_check": marker_data["worker_check"]}
         return self._marker_write(
             action="reported",
             event_kind=EventKind.CARD_REPORTED,
@@ -2267,6 +2281,7 @@ class TaskWriter:
                 "body": body,
                 "body_sha256": _digest(body),
                 **specification_data,
+                **check_data,
                 "classification": classification_value.value if classification_value is not None else None,
             },
             fresh_admission=None,

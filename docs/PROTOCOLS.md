@@ -935,7 +935,8 @@ episode bound only to the new HeadRun, carrying the unchanged delivery id and ev
 The protocol names exactly two receipts:
 
 - A **worker-local broad receipt**, owned by the worker. It attests one local broad suite's result for
-  the current content, stays in that worker's workspace and never travels downstream.
+  the current content. Its artifact stays in the workspace; its admitted snapshot and SHA/tree binding
+  are retained in the immutable report event and reviewer packet as worker evidence.
 - A **dispatcher-owned exact-SHA gate receipt**, owned by the dispatcher. It attests completed
   terminal gate checks for one exact SHA and lifecycle stage, and travels with the active card to
   review, Assessment and the release audit.
@@ -1335,12 +1336,23 @@ this for every route, and a check is keyed by its structured check set (shape, m
 vector). A truncated or edited artifact, a result no run could have written, a killed or timed-out
 run, or a checkout with no resolvable identity attests nothing.
 
-The worker-local receipt never leaves the workspace and is never committed. Only an executed
+Fresh code `report:done` for every registered project declaring `broad_check` requires an intact complete
+green receipt for the exact full declaration, interpreter, imports and committed HEAD tree. Admission
+never runs tests and refuses before the accepted marker when evidence is missing or mismatched.
+The report event keeps a canonical admission snapshot of at most 16 KiB with its own digest,
+candidate SHA/tree, exact check set, provenance, green status and bounded counts/summary. The original
+full receipt digest and artifact path bind the snapshot to the workspace artifact; timing and output
+remain there. Handoff, recovery and packets use the same snapshot verifier. Same-request replay
+uses that immutable event without rereading changed card or checkout state. Blocked and non-candidate
+completion contracts are unchanged. See [Testing](TESTING.md) for recovery ordering and activation drain.
+
+The worker-local artifact never leaves the workspace and is never committed. Its admitted snapshot
+is read-only review evidence. Only an executed
 local/GitHub gate with a valid dispatcher-owned exact-SHA gate receipt is reusable evidence
-downstream. A none/noop gate or missing receipt attests no broad suite, so the role runs or requests
-appropriate validation. Reviewers inspect changed code and invariants but do not repeat an attested
-broad command on the same SHA without a recorded `rerun_reason`; targeted reproduction stays
-appropriate for a new blocker, uncovered external behaviour, or security/data-loss risk. Re-review
+downstream as a mechanical gate attestation. A none/noop gate or missing receipt attests no broad suite.
+Reviewers inspect changed code, commits, invariants and worker/CI evidence without running tests or
+any `ummanu check` form, including show and reuse. They name missing evidence in the verdict and
+request necessary validation from the worker or CI. Re-review
 packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path
 delta.
 
@@ -1348,7 +1360,8 @@ Worker and reviewer shells run with `workspace/.ummanu-task-env/venv/bin` first.
 declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev]` install supplies the
 project runtime there. Adapter setup runs outside both virtualenvs, and an explicit relative
 broad-check interpreter may select the adapter's own `.venv`. The role environment removes the
-launcher's production `PYTHONPATH`. The module receipt records the actual interpreter, environment
+launcher's production `PYTHONPATH` and binds only the workspace-owned test-guard startup directory
+for external candidate interpreters. Reviewer refusal precedes wrapper authorization. The module receipt records the actual interpreter, environment
 prefix and import origin; an origin outside the candidate is a refusal. One control-plane renderer
 makes every head-visible Ummanu protocol, report, verdict, `check broad` and `check show` command
 name the absolute production interpreter, `-P`, and registered production `src`. A fit broad contract
@@ -2016,14 +2029,14 @@ python3 -P -m ummanu sprint close-result --ref sprint:ID --event-id evt_ID
 
 ### Control-host local runs
 
-Worker and reviewer packets permit only the project's adapter-declared broad check and subsets
+Reviewers read code and worker/CI evidence without test execution. Worker packets permit only the project's adapter-declared broad check and subsets
 locally. Integration shards, Docker/container runs, stands, provisioning and network-heavy checks
 run in CI only, except for exact vectors in the sprint's creation-only `local_run_exceptions` field.
 Development convenience, an acceptance criterion and missing/none/noop gate receipts grant no
 additional authority. An excessive local heavy run is a non-blocking observation, never grounds
 for RED. Exclude its results from validation evidence, even if tests passed; CI or an allowed
 local check supplies that evidence. Review verdicts depend on code and valid evidence, and
-reviewers follow these bounds for their own verification. The observer does not order rework or
+reviewers request missing validation from the worker or CI. The observer does not order rework or
 charge the budget for such a run alone. Historical verdicts remain in the audit and are not
 reopened. Missing required valid evidence or a code defect can still block release. Receipt reuse
 and mandatory dispatcher-owned exact-SHA CI gates still apply.

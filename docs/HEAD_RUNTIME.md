@@ -7,6 +7,12 @@ only a marker on old durable records, which stay readable and are never launched
 
 ## Worker and reviewer Docker guard
 
+Reviewer test policy is independent of Docker exceptions: reviewers inspect code and existing
+worker/CI evidence without running tests or any `ummanu check` form. The role launcher binds the
+role identity read through `/proc` exec ancestry. Candidate-local startup hooks and a workspace-owned
+startup import directory cover candidate and external Python without changing shared prefixes.
+See [Testing](TESTING.md) for admission, supported recovery and production activation preconditions.
+
 The shared role launcher puts a product-owned executable named `docker` before native Docker
 for workers and reviewers, in the role environment and again after the login shell reads its
 profiles. Workspace Python and Ruff still come from `.ummanu-task-env/venv`. The guard uses

@@ -20,8 +20,8 @@ is needed, a real Definition-of-Done gap remains, or a security/data-loss flag n
 
 Evidence for every acceptance criterion comes from CI or the adapter-declared local profile.
 For criteria outside that profile, read the corresponding CI shard and report; do not request local
-integration, packaging, direct pytest/unittest or backend probes. Worker and reviewer packets list
-the permitted wrapper commands and candidate interpreter. A missing profile is a configuration gap,
+integration, packaging, direct pytest/unittest or backend probes. Worker packets list
+the permitted wrapper commands and candidate interpreter; reviewers read evidence without test runs. A missing profile is a configuration gap,
 not permission to discover another suite. Refusal125 is command feedback, never RED or a budget event.
 An earlier excessive local run alone remains non-blocking; exclude its results and preserve historical
 verdicts. A new test in a local module that uses containers, network, sleep or exceeds its native local
@@ -397,7 +397,7 @@ At Assessment, read the structured evidence rather than repeating the mechanics:
 
 When a valid executed exact-SHA receipt exists, do not rerun its routine broad suite or broad negative
 probes. If it does not exist (including none/noop), do not infer that a broad suite passed: run or request
-appropriate validation. For a concrete claim, prefer a focused reviewer retry or one targeted check and
+appropriate validation from the worker or CI. Reviewers read evidence without test runs. For a concrete claim, prefer one targeted worker check and
 record why it was necessary.
 
 A card does not have to close a Definition of Done item that was named in advance: what matters is the
