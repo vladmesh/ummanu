@@ -165,6 +165,7 @@ class SelectionTests(unittest.TestCase):
                 with self.subTest(code=code):
                     self.assert_call_boundary(code, opaque)
         self.assert_call_boundary("from unittest import mock\nmock.call('argument')\n", False)
+        self.assert_call_boundary("def f(run):\n    return run.to_json()\n", False)
         # Arguments are still visited; expectation construction cannot hide execution.
         self.assert_call_boundary("from unittest.mock import call\ncall(open('source.py'))\n", True)
 

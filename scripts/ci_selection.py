@@ -36,6 +36,17 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
     invalid = set()
     wildcard = False
 
+    def leaves(node):
+        # Identity belongs to the callable's terminal name, not to identifiers
+        # used as receivers/data (a record named run does not execute code).
+        if isinstance(node, ast.Name):
+            return {node.id}
+        if isinstance(node, ast.Attribute):
+            return {node.attr}
+        if isinstance(node, ast.Call):
+            return set()  # nested calls are collected independently
+        return set().union(*(leaves(child) for child in ast.iter_child_nodes(node)))
+
     class Collector(ast.NodeVisitor):
         def __init__(self):
             self.scope = None
@@ -198,10 +209,9 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
         previous = {key: set(value) for key, value in aliases.items()}
         previous_invalid = set(invalid)
         for target, value in assignments:
-            leaves = {item.id if isinstance(item, ast.Name) else item.attr
-                      for item in ast.walk(value) if isinstance(item, (ast.Name, ast.Attribute))}
-            possible = leaves & (OPAQUE_CALLS | DYNAMIC_CALLS)
-            for leaf in leaves:
+            names = leaves(value)
+            possible = names & (OPAQUE_CALLS | DYNAMIC_CALLS)
+            for leaf in names:
                 possible.update(aliases.get(leaf, set()) & (OPAQUE_CALLS | DYNAMIC_CALLS))
             for item in ast.walk(target):
                 if isinstance(item, ast.Name):
@@ -234,10 +244,9 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
     result = {}
     for call, scope in calls:
         func = call.func
-        leaves = {item.id if isinstance(item, ast.Name) else item.attr
-                  for item in ast.walk(func) if isinstance(item, (ast.Name, ast.Attribute))}
-        possible = set(leaves)
-        for leaf in leaves:
+        names = leaves(func)
+        possible = set(names)
+        for leaf in names:
             possible.update(aliases.get(leaf, set()))
         result[id(call)] = resolve(func, scope), possible
     return result
