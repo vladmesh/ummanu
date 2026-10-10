@@ -237,10 +237,11 @@ def call_identities(tree: ast.AST, package: str) -> dict[int, tuple[str | None, 
                 possible.update(aliases.get(leaf, set()) & (OPAQUE_CALLS | DYNAMIC_CALLS))
             for bound in bound_names(target):
                 aliases.setdefault(bound, set()).update(possible)
-                if bound in invalid:
-                    # A write through a value alias can mutate the imported
-                    # namespace too. Refuse all spellings of that namespace.
-                    collector.invalidate_receiver(value)
+            # Mutation propagation is separate from bindings: an attribute or
+            # container slot can hold the namespace without binding its receiver
+            # to the value's callable spelling.
+            if any(item.id in invalid for item in ast.walk(target) if isinstance(item, ast.Name)):
+                collector.invalidate_receiver(value)
         if aliases == previous and invalid == previous_invalid:
             break
     invalid_imports = {identity for bound in invalid for identity in imported.get(bound, set())}

@@ -137,28 +137,33 @@ effectiveness, not an executed affected-source PR or a wall-clock speedup. This 
 PR itself requires the full manifest, and leaves the genuine affected-source acceptance proof
 and final-main controlled-load measurement to their later authorized work.
 
-The [CI comparison at candidate `00be5dde`](https://github.com/vladmesh/ummanu/actions/runs/38087678713/job/114317521490)
-used source snapshot `00be5dded5075bc02787e52b32268612b41a8099`, tree
-`35497803184b6a98f52aac0746a6e09323c357b5`, for both analyzers. It removed 740 obsolete
+The [repaired CI comparison at candidate `74977cd0`](https://github.com/vladmesh/ummanu/actions/runs/38091522011/job/114328788730)
+used source snapshot `74977cd08e300d86609087fae26eccfbbb8d7fbf`, tree
+`7a6c295565934a6a30744aaaeddbd7632ab4df81`, for both analyzers. It removed 740 obsolete
 graph edges from the proven `unittest.mock.call` at line 93 of `test_web_front_cookie_order.py`.
-That historical candidate added 2,568 edges and four opaque modules:
+Conservative handling of actual value aliases added 2,206 edges and three opaque modules:
 `tests.test_dispatcher_sprint_admission`, `tests.test_sprint_guard_outside_sprint`,
-`tests.test_sprint_listing_budget` and `ummanu.dispatch.observer`. Opaque manifest modules
-were 219 before and 221 after; opaque product modules were 149 before and 150 after.
-The observer opacity in that candidate was an assignment-target defect: `record.run = ...`
+and `tests.test_sprint_listing_budget`. Opaque manifest modules were 219 before and 221 after;
+opaque product modules were 149 before and 149 after (387 product graph identities including
+package ancestors). Total test opacity and total edges did not decrease. The comparison prints
+the added aliases' potential call identities as well as the removed identity.
+
+The prior candidate `fb8a8d68` made `ummanu.dispatch.observer` opaque through an
+assignment-target defect: `record.run = ...`
 incorrectly treated `record` as a bound value alias and tainted the unrelated proven
-`owner_events.record` call. The repair separates bound names from mutated receivers and
-adds the observer source change to the CI comparison. The historical counts above must
-not be treated as repaired measurements. The existing
-CI comparison prints the added aliases' potential call identities as well as the removed identity.
+`owner_events.record` call. That defect forced an observer-only source change to full 294/294;
+it was not unresolved API identity. The repair separates bound names from mutated receivers:
+observer is nonopaque, and its projected change remains affected 291/294, matching the original
+analyzer. Its membership and reasons are included in the same-snapshot comparison.
 
 | Projected single-module change | Original mode/modules | Refined mode/modules |
 | --- | --- | --- |
 | `src/ummanu/board/terminal_taxonomy.py` | affected, 291/294 | affected, 291/294 |
 | `src/ummanu/webfront/caddyfile.py` | affected, 291/294 | affected, 291/294 |
+| `src/ummanu/dispatch/observer.py` | affected, 291/294 | affected, 291/294 |
 | `tests/test_web_front_cookie_order.py` | full, 294/294 | affected, 291/294 |
 
-All nine owners remain included. Neither product projection removes or adds membership:
+All nine owners remain included. None of the three product projections removes or adds membership:
 the cookie-order test still consumes `ummanu.webfront.commands`, whose source/subprocess
 dependencies remain opaque. For the changed-test projection, the removed modules are
 `tests/test_provider_models.py` and `tests/test_hermetic_source_tree.py` under unit, and
@@ -167,6 +172,9 @@ is added. The full fallback reason for that test becomes the ordinary base/candi
 closure reason, with `changed test` for the consumer itself. These data show a bounded
 false-positive repair and a small changed-test membership improvement, not product-source
 acceleration. The unresolved consumers remain blockers to substantial selection gains.
+The observer projection likewise retains the base/candidate closure reason; its existing
+`tests/test_dispatcher_observer.py` consumer remains under integration-heads with
+`conservative opaque consumer` as its selected reason.
 
 Runner and aggregators independently regenerate the plan from the exact checkout/base/event and
 require byte-equivalent JSON data. A manually edited subset, wrong event/base/SHA, duplicate or

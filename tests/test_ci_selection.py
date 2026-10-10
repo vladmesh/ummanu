@@ -268,6 +268,12 @@ class SelectionTests(unittest.TestCase):
         self.assert_call_boundary(
             "from unittest import mock\nnamespace = [vars(mock)]\n"
             "namespace[0]['call'] = unknown\nmock.call()\n", True)
+        for target, receiver in (("holder.namespace", "holder.namespace"),
+                                 ("holder[0]", "holder[0]")):
+            code = ("from unittest import mock\n"
+                    f"{target} = mock\nvars({receiver})['call'] = unknown\nmock.call()\n")
+            with self.subTest(code=code):
+                self.assert_call_boundary(code, True)
 
     def test_real_source_dynamic_subprocess_and_async_consumers_remain_opaque(self):
         for code in (
