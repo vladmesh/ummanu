@@ -79,7 +79,8 @@ to try to infer their runtime behaviour.
 Call identity preserves import namespaces in lexical module, function, class and
 comprehension scopes. A single direct scope-body import with no competing binding can
 prove an alias; parameters, assignments/deletions, conditional imports and ambiguous
-receivers refuse that proof. Methods resolve enclosing names outside the class namespace.
+receivers refuse that proof. Methods, nested classes and comprehension bodies resolve enclosing
+names outside the class namespace; the first comprehension iterable uses its enclosing scope.
 Wildcard imports, global/nonlocal writes and explicit namespace mutation invalidate proof
 conservatively, including mutation through another alias of the imported namespace.
 Value aliases retain hazardous spellings but do not establish safe identity.
@@ -89,7 +90,9 @@ Calls inside its arguments are still analyzed. Other imported APIs with the same
 unknown receivers, source/file reads (including temporary files), subprocesses and entry
 points remain conservative. Literal dynamic imports require a proven `importlib.import_module`
 or builtin `__import__` identity; an ambiguous loader stays opaque even with a literal argument.
-Relative dynamic names, nonzero/unknown import levels and argument expansion stay opaque.
+Relative dynamic names, nonzero/unknown import levels, nonempty/unknown `__import__` fromlists
+and argument expansion stay opaque. A proven literal loader alias uses its API identity even
+when the alias is spelled `call` or `open`.
 `asyncio.run` remains opaque: its identity alone proves neither the origin nor the dependencies
 of an arbitrary awaitable/callback. This refinement does not infer callback targets, receiver
 types, arbitrary third-party/native execution or runtime monkeypatching through external code.
@@ -98,8 +101,7 @@ This safety boundary limits effectiveness. The historical independent ummanu-205
 [PR #714](https://github.com/vladmesh/ummanu/pull/714), candidate `c3b51bf1113bf66dd13d4903041556d35615c903`,
 found 219 of 294 manifest test modules and 149 of 386 product modules opaque. Its offline graph
 analysis selected 280–293 of 294 test modules and all nine owners for single-module nonopaque
-product-source changes;
-opaque source changes required full fallback. This is safe over-selection, with practically no
+product-source changes; opaque source changes required full fallback. This is safe over-selection, with practically no
 code-PR wall-clock gain at that snapshot, not evidence of useful acceleration. The docs-only path
 avoids suite execution independently of this limitation.
 
@@ -123,6 +125,33 @@ every selected reason for `terminal_taxonomy.py`, `webfront/caddyfile.py` and th
 effectiveness, not an executed affected-source PR or a wall-clock speedup. This infrastructure
 PR itself requires the full manifest, and leaves the genuine affected-source acceptance proof
 and final-main controlled-load measurement to their later authorized work.
+
+The [CI comparison at candidate `00be5dde`](https://github.com/vladmesh/ummanu/actions/runs/38087678713/job/114317521490)
+used source snapshot `00be5dded5075bc02787e52b32268612b41a8099`, tree
+`35497803184b6a98f52aac0746a6e09323c357b5`, for both analyzers. It removed 740 obsolete
+graph edges from the proven `unittest.mock.call` at line 93 of `test_web_front_cookie_order.py`.
+Conservative value-alias handling added 2,568 edges and four opaque modules:
+`tests.test_dispatcher_sprint_admission`, `tests.test_sprint_guard_outside_sprint`,
+`tests.test_sprint_listing_budget` and `ummanu.dispatch.observer`. Opaque manifest modules
+were 219 before and 221 after; opaque product modules were 149 before and 150 after.
+Thus obsolete links decreased, but total opacity and total edges did not. The existing
+CI comparison prints the added aliases' potential call identities as well as the removed identity.
+
+| Projected single-module change | Original mode/modules | Refined mode/modules |
+| --- | --- | --- |
+| `src/ummanu/board/terminal_taxonomy.py` | affected, 291/294 | affected, 291/294 |
+| `src/ummanu/webfront/caddyfile.py` | affected, 291/294 | affected, 291/294 |
+| `tests/test_web_front_cookie_order.py` | full, 294/294 | affected, 291/294 |
+
+All nine owners remain included. Neither product projection removes or adds membership:
+the cookie-order test still consumes `ummanu.webfront.commands`, whose source/subprocess
+dependencies remain opaque. For the changed-test projection, the removed modules are
+`tests/test_provider_models.py` and `tests/test_hermetic_source_tree.py` under unit, and
+`tests/test_agent_prompt_transport.py` under component; no owner disappears and no module
+is added. The full fallback reason for that test becomes the ordinary base/candidate
+closure reason, with `changed test` for the consumer itself. These data show a bounded
+false-positive repair and a small changed-test membership improvement, not product-source
+acceleration. The unresolved consumers remain blockers to substantial selection gains.
 
 Runner and aggregators independently regenerate the plan from the exact checkout/base/event and
 require byte-equivalent JSON data. A manually edited subset, wrong event/base/SHA, duplicate or

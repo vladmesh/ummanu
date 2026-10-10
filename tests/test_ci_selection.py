@@ -204,17 +204,17 @@ class SelectionTests(unittest.TestCase):
             "from unittest.mock import call\ncall = unknown\ncall()\n",
             "from unittest.mock import call\ndef f():\n    call()\n    call = unknown\n",
             "from unittest.mock import call\ndef f():\n    global call\n    call = unknown\ncall()\n",
-            "def outer():\n    from unittest.mock import call\n    def inner():\n"
-            "        nonlocal call\n        call = unknown\n    call()\n",
+            ("def outer():\n    from unittest.mock import call\n    def inner():\n"
+             "        nonlocal call\n        call = unknown\n    call()\n"),
             "from unittest.mock import call\ndel call\ncall()\n",
             "from unittest.mock import call\nwith manager as call:\n    call()\n",
             "from unittest import mock\nmock.call = unknown\nmock.call()\n",
             "from unittest import mock\nsetattr(mock, 'call', unknown)\nmock.call()\n",
             "from unittest import mock\napi = mock\napi.call = unknown\nmock.call()\n",
-            "from unittest import mock as first\nimport unittest.mock as second\n"
-            "second.call = unknown\nfirst.call()\n",
-            "from unittest import mock as first\nif flag:\n    import unittest.mock as second\n"
-            "    second.call = unknown\nfirst.call()\n",
+            ("from unittest import mock as first\nimport unittest.mock as second\n"
+             "second.call = unknown\nfirst.call()\n"),
+            ("from unittest import mock as first\nif flag:\n    import unittest.mock as second\n"
+             "    second.call = unknown\nfirst.call()\n"),
             "from unittest.mock import call\n[call() for call in unknown]\n",
             "from unittest.mock import call\n[(call := unknown) for x in items]\ncall()\n",
             "from unittest.mock import call\ntry:\n    pass\nexcept Exception as call:\n    call()\n",
@@ -251,6 +251,8 @@ class SelectionTests(unittest.TestCase):
             "import importlib\nimportlib.import_module('.leaf', package)\n",
             "__import__('leaf', level=1)\n",
             "__import__('ummanu.leaf', **options)\n",
+            "__import__('ummanu', fromlist=names)\n",
+            "__import__('ummanu', fromlist=['leaf'])\n",
         ):
             with self.subTest(code=code):
                 self.assert_call_boundary(code, True)
@@ -259,8 +261,11 @@ class SelectionTests(unittest.TestCase):
         for code in (
             "import importlib as loader\nloader.import_module('ummanu.leaf')\n",
             "from importlib import import_module as load\nload('ummanu.leaf')\n",
+            "from importlib import import_module as call\ncall('ummanu.leaf')\n",
             "from builtins import __import__ as load\nload('ummanu.leaf')\n",
+            "from builtins import __import__ as open\nopen('ummanu.leaf')\n",
             "__import__('ummanu.leaf')\n",
+            "__import__('ummanu.leaf', fromlist=(), level=0)\n",
             "def f():\n    from importlib import import_module as load\n    load('ummanu.leaf')\n",
         ):
             with self.subTest(code=code):

@@ -14,7 +14,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import ci_selection
-
 from scripts.ci_selection import (
     SelectionError,
     build_plan,
@@ -79,12 +78,26 @@ class SelectionGitTests(unittest.TestCase):
                                 for node in ast.walk(tree) if isinstance(node, ast.Call)
                                 and calls[id(node)][0] == "unittest.mock.call"]
             self.assertTrue(identities[name], name)
+        added_calls = {}
+        for name in sorted(new_opaque - old_opaque):
+            path = next(path for path in sources
+                        if path.removesuffix(".py").replace("/", ".").removeprefix("src.") == name)
+            tree = ast.parse(sources[path])
+            calls = call_identities(tree, name.rpartition(".")[0])
+            added_calls[name] = [{"line": node.lineno, "identity": calls[id(node)][0],
+                                  "possible": sorted(calls[id(node)][1] &
+                                                     (ci_selection.OPAQUE_CALLS | ci_selection.DYNAMIC_CALLS))}
+                                 for node in ast.walk(tree) if isinstance(node, ast.Call)
+                                 and calls[id(node)][1] & (ci_selection.OPAQUE_CALLS | ci_selection.DYNAMIC_CALLS)
+                                 and calls[id(node)][0] != "unittest.mock.call"]
         print("Identity comparison; committed source projection, not natural affected-source PR evidence")
         print(json.dumps({"candidate_sha": candidate, "candidate_tree": git(root, "rev-parse", "HEAD^{tree}"),
                           "original_analyzer_sha": baseline, "source_snapshot_sha": candidate,
+                          "manifest_modules": len(manifest), "product_modules": len(products),
                           "opaque_manifest_before_after": [len(old_opaque & manifest), len(new_opaque & manifest)],
                           "opaque_product_before_after": [len(old_opaque & products), len(new_opaque & products)],
                           "removed_opaque_identities": identities, "added_opaque_modules": sorted(new_opaque - old_opaque),
+                          "added_opaque_potential_calls": added_calls,
                           "removed_graph_edges": sum(len(deps - new_graph[name]) for name, deps in old_graph.items()),
                           "added_graph_edges": sum(len(deps - old_graph[name]) for name, deps in new_graph.items())},
                          sort_keys=True))

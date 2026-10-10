@@ -418,11 +418,15 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
                 # its arguments. This exception is about identity, not spelling.
                 if identity == "unittest.mock.call":
                     continue
-                if identity:
+                if identity in {"importlib.import_module", "builtins.__import__"}:
+                    possible = {identity.rsplit(".", 1)[-1]}
+                elif identity:
                     possible.add(identity.rsplit(".", 1)[-1])
                 if possible & DYNAMIC_CALLS:
                     levels = ([node.args[4]] if len(node.args) > 4 else []) + [
                         item.value for item in node.keywords if item.arg == "level"]
+                    fromlists = ([node.args[3]] if len(node.args) > 3 else []) + [
+                        item.value for item in node.keywords if item.arg == "fromlist"]
                     if (identity in {"importlib.import_module", "builtins.__import__"}
                             and node.args and isinstance(node.args[0], ast.Constant)
                             and isinstance(node.args[0].value, str)
@@ -430,7 +434,10 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
                             and not any(isinstance(arg, ast.Starred) for arg in node.args)
                             and not any(item.arg is None for item in node.keywords)
                             and (identity != "builtins.__import__" or all(
-                                isinstance(level, ast.Constant) and level.value == 0 for level in levels))):
+                                isinstance(level, ast.Constant) and level.value == 0 for level in levels))
+                            and (identity != "builtins.__import__" or all(
+                                isinstance(items, (ast.List, ast.Tuple)) and not items.elts
+                                for items in fromlists))):
                         add(name, node.args[0].value)
                     else:
                         opaque.add(name)
