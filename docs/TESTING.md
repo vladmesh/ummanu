@@ -19,14 +19,18 @@ Dispatcher-owned exact-SHA GitHub CI is the complete test contract. It validates
 
 `tests/ci-shards.txt` owns the taxonomy: every top-level `tests/test_*.py` occurs exactly once, under
 one suite name. Unknown names, missing files, stale or duplicate entries and empty suites make the
-manifest invalid before any suite starts. When changing the runner or manifest, run:
+manifest invalid before any suite starts. On the control host, check a runner or manifest change
+through the declared wrapper:
 
-    python3 -m unittest -v tests.test_ci_shards
-    python3 scripts/ci_test_shards.py --check
+    ummanu check tests/test_ci_shards.py
+    ummanu check tests/test_broad_suite.py
 
-`unit` is the in-process suite and should finish in about three minutes in CI. A module that builds a
-virtualenv or runs pip, serves real HTTP on loopback, waits out a real wall-clock cadence or replays
-minutes of recorded PTY output belongs in `component`, `runtime-component` or `packaging`. A
+`unit` contains isolated product and protocol checks; `component` covers direct adapters with temporary
+state. Real virtualenv preparation, service sockets, process-group lifecycles, wall-clock waits and
+multi-component recovery or dispatcher flows belong in the existing CI-only suites according to their
+domain. Fake provider executables and an in-memory board do not make a real service/process integration
+a unit test. CI still enforces 5 seconds per test and 90 seconds per module in `unit` and `component`;
+the local warning above 5 seconds does not change the verdict. A
 repository-wide AST check parses through `tests/source_trees.py`, so each file is parsed once per module.
 
 ## Required setup
@@ -99,8 +103,10 @@ board, API, cloud or other credentials. A startup guard rejects network connecti
 other than Python and the read-only temporary-instance Git queries of the board seam, so live board/API
 use and Docker, VM, Ansible or provisioning commands fail loudly.
 
-Start with focused checks and `--fast`. When a task or repository contract requires the local broad
-suite, run the broad profile once through the receipt wrapper.
+Workers and reviewers start with focused `ummanu check <selector>` checks. Their permitted local
+checks are the adapter-declared broad profile and its subsets; the fast runner above is not another
+worker validation command. When the task requires the local broad suite, run it once through the
+receipt wrapper and reuse its intact receipt for unchanged content.
 
 ## Control-host local profile
 
@@ -146,6 +152,29 @@ The module set is exactly `unit` + `component` from `scripts/ci_test_shards.py::
 The existing validator checks all CI ownership for duplicate, stale, missing or unclaimed modules and
 empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
 CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
+
+The routed profile measured on the control host on 2026-10-10 contains 141 modules and 2,644 tests:
+92.254 seconds through the sequential module receipt wrapper (89.354 seconds in the native runner),
+complete/passed with two existing skips, at observed host load 0.90–1.35. This is a measurement,
+with a 100-second target at load at most 2; the current candidate's full receipt supplies its exact
+duration, content tree, count and import provenance. The saved pre-routing run was 282.311 seconds
+for 160 modules and 3,337 tests; the card also records earlier 681/693-second runs. The old approximately
+77-second estimate is not the current promise.
+
+All moved checks remain mandatory in the same nine-suite CI matrix: interpreter preparation and
+cleanup journals run in `integration-dispatcher`; real PO sockets, turns and role launches in
+`integration-heads`; process locks, child cleanup and native doctor execution in `runtime-component`;
+snapshot export/recovery and bulk restore in `integration-recovery`; native CLI flows in
+`integration-board`; installation, rename and web-process upgrade flows in `packaging`. The real
+process/checkout receipt classes are in `tests/test_broad_check_process.py` (`integration-dispatcher`),
+sharing the temporary checkout fixture with `tests/test_broad_check.py`. Local receipt integrity,
+result invariants, timing, composition, manifest refusal and subset-without-receipt checks remain.
+No test assertions, CI budgets, skips, coverage evidence or manifest/receipt formats change.
+
+The example adapter is an operator-installable fragment. Existing live declarations of
+`tests.broad` with `unit` + `component` continue to resolve membership from the candidate manifest;
+no runner or receipt migration is needed. Updating the live adapter's timing comment is a separate
+operator operation after merge, not part of worker validation.
 
 Runner-owned profiles delegate membership and node validation to the declared broad runner. They
 need no module map. Except for pytest below, a selector appends to `broad_check.args`; `selector_args` supplies either an empty

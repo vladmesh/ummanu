@@ -1,4 +1,9 @@
 # Candidate settings for a later operator installation; this file does not update live state.
+# Sequential tests.broad measurement, 2026-10-10: 141 modules, 2644 tests, 92.254s
+# through the receipt wrapper (89.354s native runner), complete/passed, two existing skips.
+# Observed control-host load 0.90–1.35; target <=100s at load <=2. Read the current
+# candidate's receipt for exact timing and content identity. See docs/TESTING.md.
+# Local membership remains unit + component; all seven other suites are mandatory CI-only.
 setup:
   commands: ["true"]
 smoke:
