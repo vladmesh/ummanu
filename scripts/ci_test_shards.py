@@ -9,6 +9,7 @@ import dataclasses
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import signal
@@ -579,6 +580,9 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
             raise EvidenceError("invalid report counts")
         if any(type(n) is not int or n < 0 for n in counts.values()):
             raise EvidenceError("invalid count values")
+        duration = data["duration_seconds"]
+        if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
+            raise EvidenceError("invalid suite duration")
         if data.get("schema_version") == 2:
             if not re.fullmatch(r"[0-9a-f]{64}", data.get("selection_digest", "")):
                 raise EvidenceError("invalid selection digest")
@@ -589,6 +593,13 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
                     raise EvidenceError("invalid module membership")
             if data["outcome"] == "success" and not _timing.valid_observation(data.get("timing")):
                 raise EvidenceError("invalid successful timing observation")
+            if data["outcome"] == "success":
+                timed = data["timing"]["tests"]
+                native = data["timing"]["native_outcomes"]
+                if (counts["collected"] != len(timed) + sum(r["phase"] == "load" for r in native)
+                        or counts["passed"] != sum(r["outcome"] == "passed" for r in timed)
+                        or counts["skipped"] != sum(r["outcome"] == "skipped" for r in [*timed, *native])):
+                    raise EvidenceError("counts do not match timing execution records")
         elif data.get("selection_digest") is not None:
             raise EvidenceError("schema 1 cannot attest a selection plan")
         if not data.get("suite") or not re.fullmatch(r"[0-9a-f]{40,64}", data.get("candidate_sha", "")):
@@ -801,7 +812,9 @@ def _validate_coverage_datum(path: Path) -> None:
     try:
         data = CoverageData(basename=str(path))
         data.read()
-        data.measured_files()
+        measured = data.measured_files()
+        if not measured or not data.has_arcs() or not any(data.arcs(name) for name in measured):
+            raise CoverageError(f"raw coverage lacks measured branch data at {path}")
     except (CoverageException, OSError, ValueError) as exc:
         raise CoverageError(f"unreadable or incompatible raw coverage datum at {path}: {exc}") from exc
 

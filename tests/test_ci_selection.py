@@ -142,10 +142,10 @@ class SelectionTests(unittest.TestCase):
                                ("selected", {}), ("event", "pull_request"), ("schema_version", 99)):
                 invalid = {**expected, key: value}
                 path.write_text(json.dumps(invalid))
-                with patch("scripts.ci_selection.build_plan", return_value=expected):
-                    with self.assertRaisesRegex(SelectionError, "differs"):
-                        read_plan(Path(tmp), path, self.grouped(), candidate_sha=SHA,
-                                  base_sha="", event="push", ref="refs/heads/main")
+                with (patch("scripts.ci_selection.build_plan", return_value=expected),
+                      self.assertRaisesRegex(SelectionError, "differs")):
+                    read_plan(Path(tmp), path, self.grouped(), candidate_sha=SHA,
+                              base_sha="", event="push", ref="refs/heads/main")
 
     def test_full_manifest_cannot_be_hidden_by_selection(self):
         from scripts.ci_test_shards import SUITES
@@ -230,6 +230,8 @@ class ExecutionSelectionTests(unittest.TestCase):
             original = json.loads(report.read_text())
             for key, value in (("candidate_sha", "b" * 40), ("suite", "component"),
                                ("schema_version", 1),
+                               ("duration_seconds", -1),
+                               ("counts", {**original["counts"], "passed": 999}),
                                ("selected_modules", ["tests.foreign"]), ("executed_modules", []),
                                ("executed_modules", ["tests.test_selected_fixture"] * 2),
                                ("selection_digest", "d" * 64), ("outcome", "not_applicable"),

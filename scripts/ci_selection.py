@@ -92,7 +92,7 @@ def snapshot(root: Path, sha: str) -> dict[str, str]:
         if not path.endswith(".py"):
             continue
         mode, kind, oid, raw_size = metadata.split()
-        if mode != b"100644" or kind != b"blob":
+        if mode not in {b"100644", b"100755"} or kind != b"blob":
             raise SelectionError(f"unsafe Python object: {path}")
         objects.append((path, oid))
         total_size += int(raw_size)

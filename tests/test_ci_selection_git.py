@@ -11,7 +11,15 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from scripts.ci_selection import SelectionError, build_plan, read_plan, select, snapshot, summary, validation_result
+from scripts.ci_selection import (
+    SelectionError,
+    build_plan,
+    read_plan,
+    select,
+    snapshot,
+    summary,
+    validation_result,
+)
 from scripts.ci_test_shards import SUITES, aggregate_coverage, aggregate_evidence, load_manifest
 from tests.support.git import git
 
@@ -129,6 +137,23 @@ class SelectionGitTests(unittest.TestCase):
                 with self.assertRaises(SelectionError):
                     read_plan(root, path, load_manifest(root), **kwargs)
 
+    def test_executable_python_is_analyzed_and_symlink_topology_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = self.fixture(root)
+            path = root / "src/ummanu/leaf.py"
+            path.chmod(0o755)
+            path.write_text("VALUE = 2\n")
+            candidate = self.commit(root)
+            self.assertEqual(self.plan(root, base, candidate)["mode"], "affected")
+            self.assertIn("src/ummanu/leaf.py", snapshot(root, candidate))
+            path.unlink()
+            path.symlink_to("__init__.py")
+            candidate = self.commit(root)
+            self.assertEqual(self.plan(root, base, candidate)["mode"], "full")
+            with self.assertRaisesRegex(SelectionError, "unsafe Python object"):
+                snapshot(root, candidate)
+
     def test_real_subset_execution_coverage_and_checkout_evidence(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as artifacts:
             root, output = Path(tmp), Path(artifacts)
@@ -173,3 +198,12 @@ class SelectionGitTests(unittest.TestCase):
             raw.write_bytes(b"corrupt sqlite")
             with redirect_stdout(StringIO()):
                 self.assertEqual(aggregate_coverage(root, coverage_dir, output / "bad", candidate, base, plan), 3)
+            from coverage import CoverageData
+
+            raw.unlink()
+            empty = CoverageData(basename=str(raw))
+            empty.add_arcs({"src/ummanu/leaf.py": []})
+            empty.write()
+            self.assertTrue(raw.is_file())
+            with redirect_stdout(StringIO()):
+                self.assertEqual(aggregate_coverage(root, coverage_dir, output / "empty", candidate, base, plan), 3)
