@@ -126,6 +126,7 @@ class BroadSuiteManifestFailureTests(unittest.TestCase):
             (root / "src/ummanu/projects").mkdir(parents=True)
             shutil.copy(REPO_ROOT / "src/ummanu/projects/test_timing.py", root / "src/ummanu/projects")
             shutil.copy(REPO_ROOT / "scripts" / "ci_test_shards.py", root / "scripts")
+            shutil.copy(REPO_ROOT / "scripts" / "ci_selection.py", root / "scripts")
             shutil.copy(REPO_ROOT / "tests" / "broad.py", root / "tests")
             (root / "tests" / "__init__.py").write_text("", encoding="utf-8")
             manifest = root / "tests" / "ci-shards.txt"

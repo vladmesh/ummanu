@@ -22,15 +22,13 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TextIO
 
-try:
-    from scripts import ci_selection
-except ModuleNotFoundError:  # Direct script invocation starts with scripts/ on sys.path.
-    _selection_path = Path(__file__).resolve().with_name("ci_selection.py")
-    _selection_spec = importlib.util.spec_from_file_location(f"{__name__}._selection", _selection_path)
-    if _selection_spec is None or _selection_spec.loader is None:
-        raise ImportError(f"selection helper unavailable: {_selection_path}")
-    ci_selection = importlib.util.module_from_spec(_selection_spec)
-    _selection_spec.loader.exec_module(ci_selection)
+# Import-by-path consumers must use the helper beside their candidate runner.
+_selection_path = Path(__file__).resolve().with_name("ci_selection.py")
+_selection_spec = importlib.util.spec_from_file_location(f"{__name__}._selection", _selection_path)
+if _selection_spec is None or _selection_spec.loader is None:
+    raise ImportError(f"selection helper unavailable: {_selection_path}")
+ci_selection = importlib.util.module_from_spec(_selection_spec)
+_selection_spec.loader.exec_module(ci_selection)
 
 # The installed wrapper imports this file by path to validate the candidate manifest.
 # Resolve its stdlib-only collector from that same candidate, even before an upgrade.
