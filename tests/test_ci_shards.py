@@ -514,7 +514,7 @@ class TimingImportIdentityTests(unittest.TestCase):
             (root / "src/ummanu/projects").mkdir(parents=True)
             script = root / "scripts/ci_test_shards.py"
             script.write_text(Path(runner.__file__).read_text())
-            script.with_name("ci_selection.py").write_text(Path(runner.ci_selection.__file__).read_text())
+            script.with_name("ci_selection.py").write_text(Path(runner._selection_helper().__file__).read_text())
             helper = root / "src/ummanu/projects/test_timing.py"
             helper.write_text(Path(runner._timing.__file__).read_text() + '\nIMPLEMENTATION_ID = "candidate"\n')
             record = root / "provenance.json"

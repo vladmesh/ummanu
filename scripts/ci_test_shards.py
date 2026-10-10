@@ -23,13 +23,23 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TextIO
 
-# Import-by-path consumers must use the helper beside their candidate runner.
-_selection_path = Path(__file__).resolve().with_name("ci_selection.py")
-_selection_spec = importlib.util.spec_from_file_location(f"{__name__}._selection", _selection_path)
-if _selection_spec is None or _selection_spec.loader is None:
-    raise ImportError(f"selection helper unavailable: {_selection_path}")
-ci_selection = importlib.util.module_from_spec(_selection_spec)
-_selection_spec.loader.exec_module(ci_selection)
+# Full manifest readers do not need impact analysis. Load it only at a CI consumer
+# boundary, using the helper beside this candidate runner rather than an installed copy.
+_selection_module = None
+
+
+def _selection_helper():
+    global _selection_module
+    if _selection_module is None:
+        path = Path(__file__).resolve().with_name("ci_selection.py")
+        spec = importlib.util.spec_from_file_location(f"{__name__}._selection", path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"selection helper unavailable: {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _selection_module = module
+    return _selection_module
+
 
 # The installed wrapper imports this file by path to validate the candidate manifest.
 # Resolve its stdlib-only collector from that same candidate, even before an upgrade.
@@ -570,7 +580,7 @@ def _read_evidence(report_dir: Path) -> SuiteEvidence:
         raise EvidenceError("evidence exceeds intake bound")
     try:
         data = json.loads(required["report.json"].read_text(encoding="utf-8"),
-                          object_pairs_hook=ci_selection.json_object)
+                          object_pairs_hook=_selection_helper().json_object)
         if data.get("schema_version") not in {EVIDENCE_SCHEMA_VERSION, 2}:
             raise EvidenceError("unsupported report schema")
         if data.get("outcome") not in OUTCOMES:
@@ -737,7 +747,7 @@ def aggregate_evidence(evidence_dir: Path, needs_result: str, plan: dict | None 
             if plan:
                 expected = modules(required[evidence.suite])
                 if (evidence.candidate_sha != plan["candidate_sha"]
-                        or evidence.selection_digest != ci_selection.plan_digest(plan)
+                        or evidence.selection_digest != _selection_helper().plan_digest(plan)
                         or evidence.selected_modules != expected or evidence.executed_modules != expected):
                     raise EvidenceError("wrong SHA, plan or selected/executed module membership")
                 if evidence.outcome == "success":
@@ -767,7 +777,7 @@ def aggregate_evidence(evidence_dir: Path, needs_result: str, plan: dict | None 
             outcomes[suite] = "infrastructure_failure"
     lines = ["## Required CI test aggregate", "", *[f"- `{suite}`: `{outcomes[suite]}`" for suite in SUITES]]
     if plan:
-        lines.insert(0, ci_selection.summary(plan))
+        lines.insert(0, _selection_helper().summary(plan))
     lines.extend(f"- Invalid evidence: {detail}" for detail in invalid)
     print("\n".join(lines))
     if invalid:
@@ -966,7 +976,7 @@ def aggregate_coverage(
         if not raw_data:
             if not plan or plan["mode"] != "docs-only":
                 raise CoverageError("no applicable coverage without a validated docs-only plan")
-            print(ci_selection.summary(plan))
+            print(_selection_helper().summary(plan))
             print("- Coverage: not applicable to validated docs-only selection")
             return 0
         for path in raw_data:
@@ -1025,7 +1035,7 @@ def aggregate_coverage(
             "schema_version": 1,
             "candidate_sha": candidate_sha,
             "selection_mode": plan["mode"] if plan else "full",
-            "selection_digest": ci_selection.plan_digest(plan) if plan else None,
+            "selection_digest": _selection_helper().plan_digest(plan) if plan else None,
             "selected": plan["selected"] if plan else None,
             "coverage_scope": "selected modules" if plan and plan["mode"] == "affected" else "full profile",
             "source_roots": list(COVERAGE_SOURCE_ROOTS),
@@ -1289,7 +1299,7 @@ def run_suite_with_evidence(root: Path, suite_name: str, report_dir: Path, candi
                 sys.path.pop(0)
     try:
         if plan:
-            evidence.selection_digest = ci_selection.plan_digest(plan)
+            evidence.selection_digest = _selection_helper().plan_digest(plan)
             evidence.selected_modules = modules(plan["selected"].get(suite_name, []))
         _write_evidence(report_dir, evidence, log)
     except OSError as exc:
@@ -1336,19 +1346,19 @@ def main(argv: list[str] | None = None) -> int:
         try:
             grouped = load_manifest(root)
             if args.select:
-                plan = ci_selection.build_plan(root, grouped, args.candidate_sha, args.base_sha,
+                plan = _selection_helper().build_plan(root, grouped, args.candidate_sha, args.base_sha,
                                                args.event, args.event_ref)
                 encoded = json.dumps(plan, sort_keys=True, indent=2) + "\n"
-                if len(encoded.encode()) > ci_selection.MAX_PLAN_BYTES:
-                    raise ci_selection.SelectionError("selection plan exceeds bound")
+                if len(encoded.encode()) > _selection_helper().MAX_PLAN_BYTES:
+                    raise _selection_helper().SelectionError("selection plan exceeds bound")
                 args.selection_plan.parent.mkdir(parents=True, exist_ok=True)
                 args.selection_plan.write_text(encoded, encoding="utf-8")
-                print(ci_selection.summary(plan))
+                print(_selection_helper().summary(plan))
                 if os.environ.get("GITHUB_OUTPUT"):
                     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                         output.write(f"suites={json.dumps(list(plan['selected']))}\nmode={plan['mode']}\n")
                 return 0
-            plan = ci_selection.read_plan(root, args.selection_plan, grouped,
+            plan = _selection_helper().read_plan(root, args.selection_plan, grouped,
                                           candidate_sha=args.candidate_sha, base_sha=args.base_sha,
                                           event=args.event, ref=args.event_ref)
         except (OSError, ValueError) as exc:
@@ -1360,7 +1370,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             results = json.loads(args.job_results)
             print(f"Applicable validation results: {results}")
-            return 0 if ci_selection.validation_result(plan, results) else 3
+            return 0 if _selection_helper().validation_result(plan, results) else 3
         except (ValueError, TypeError):
             return 3
     if args.summary:
