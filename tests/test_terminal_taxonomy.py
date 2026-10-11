@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import UTC, datetime
 
@@ -67,6 +68,73 @@ class TerminalTaxonomyTests(unittest.TestCase):
                 {"terminal_taxonomy": {"version": 1, "disposition": "blocked"}},
                 disposition="blocked",
             )
+
+    def test_supported_integer_versions_read_and_roundtrip(self) -> None:
+        expected = normalize_terminal_taxonomy(
+            disposition="blocked", blocked_reason="wrong_task_definition"
+        )
+        for version in (1, 2):
+            with self.subTest(version=version):
+                record = expected.to_record()
+                record["version"] = version
+                if version == 1:
+                    del record["budget_class"]
+                taxonomy = read_terminal_taxonomy(
+                    {"terminal_taxonomy": json.loads(json.dumps(record))}, disposition="blocked"
+                )
+                self.assertEqual(taxonomy, expected)
+                serialized = taxonomy.to_record()
+                self.assertIs(type(serialized["version"]), int)
+                self.assertEqual(serialized["version"], 2)
+                self.assertEqual(
+                    read_terminal_taxonomy({"terminal_taxonomy": serialized}, disposition="blocked"),
+                    expected,
+                )
+
+    def test_malformed_json_versions_raise_typed_validation_with_complete_schemas(self) -> None:
+        for schema_version in (1, 2):
+            for version in (True, False, 1.0, 2.0, "1", "2", None, [], {}, 0, 3, -1):
+                with self.subTest(schema_version=schema_version, version=version):
+                    record = normalize_terminal_taxonomy(
+                        disposition="blocked", blocked_reason="infrastructure"
+                    ).to_record()
+                    if schema_version == 1:
+                        del record["budget_class"]
+                    record["version"] = version
+                    with self.assertRaisesRegex(TerminalTaxonomyValidationError, "version"):
+                        read_terminal_taxonomy(
+                            {"terminal_taxonomy": json.loads(json.dumps(record))}, disposition="blocked"
+                        )
+
+    def test_invalid_version_is_rejected_before_field_selection(self) -> None:
+        for version in (2.0, [], {}, 3):
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(TerminalTaxonomyValidationError, "version"),
+            ):
+                read_terminal_taxonomy({"terminal_taxonomy": {"version": version}}, disposition="blocked")
+
+    def test_typed_event_boundary_rejects_unhashable_and_boolean_versions(self) -> None:
+        for version in ([], False):
+            with self.subTest(version=version):
+                record = normalize_terminal_taxonomy(
+                    disposition="blocked", blocked_reason="infrastructure"
+                ).to_record()
+                del record["budget_class"]
+                record["version"] = version
+                with self.assertRaisesRegex(TerminalTaxonomyValidationError, "version"):
+                    Event(
+                        event_id="evt-bad-version",
+                        kind=EventKind.CARD_BLOCKED,
+                        entity_kind=EntityKind.CARD,
+                        ref="ummanu-211",
+                        actor=Actor("dispatcher", "dispatcher"),
+                        reason="blocked",
+                        occurred_at=datetime(2026, 10, 11, tzinfo=UTC),
+                        source_state="in_progress",
+                        target_state="blocked",
+                        data={"terminal_taxonomy": json.loads(json.dumps(record))},
+                    )
 
     def test_forward_reslice_keeps_its_disposition_and_charges_blocked(self) -> None:
         taxonomy = read_terminal_taxonomy(
