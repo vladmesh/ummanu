@@ -399,7 +399,7 @@ class SourceLayoutTests(unittest.TestCase):
         offenders: list[str] = []
         for path in (ROOT / "tests").rglob("*.py"):
             tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in source_trees.walk(tree):
+            for node in source_trees.imports(tree):
                 module = node.module if isinstance(node, ast.ImportFrom) else None
                 if module and (module == "tests.test" or module.startswith("tests.test_")):
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
