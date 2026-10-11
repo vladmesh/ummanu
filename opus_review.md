@@ -4,7 +4,7 @@
 
 ## Дельта 2026-10-11: поставка #719 на main `0c5e79a986ca669c8d03937e62cd95f38918c36d`
 
-[PR #719](https://github.com/vladmesh/ummanu/pull/719) смёржен в main на `0c5e79a986ca669c8d03937e62cd95f38918c36d`. Exact-head CI [38142276775](https://github.com/vladmesh/ummanu/actions/runs/38142276775) — **success**: lint, typecheck, все девять suite owners и итоговый `test`. Post-merge CI сверяется отдельно; результат PR CI его не заменяет. Ветка аудита синхронизирована с новым main без мержа самого PR #668.
+[PR #719](https://github.com/vladmesh/ummanu/pull/719) смёржен в main на `0c5e79a986ca669c8d03937e62cd95f38918c36d`. Exact-head CI [38142276775](https://github.com/vladmesh/ummanu/actions/runs/38142276775) — **success**: lint, typecheck, все девять suite owners и итоговый `test`. [Post-merge CI 38143221510](https://github.com/vladmesh/ummanu/actions/runs/38143221510) — **success** на merge-коммите `0c5e79a`: lint, typecheck, все suite owners и aggregate `test` зелёные. Это самостоятельное подтверждение main, не только candidate. Ветка аудита синхронизирована с новым main без мержа самого PR #668.
 
 | ID | Новый статус | Проверенный scope и остаток |
 |---|---|---|
