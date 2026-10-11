@@ -431,37 +431,49 @@ def _freeze_heads(
             excluded.append(ref)
             continue
         intent = launch_intent(record)
+        unresolved_role = ""
         if intent:
             role = str(intent.get("role") or WORKER_ROLE)
             if stop_launch_intent(runtime, record, intent, role) is not None:
-                # The host would not promise that head is gone, so the intent stays on disk with
-                # its identity and the tick's own recovery keeps owning it. Counting it stopped
-                # here would have resume launch a second head beside a live one.
-                continue
-            # A rework's reserved round outlives the head it never got: the round the red result
-            # closed is over, and the resume relaunches into the one the intent reserved.
-            keep_reserved_round(runtime, record, intent)
-            if role == REVIEW_ROLE:
-                record.paused_reviewer_at = now
-                stopped_reviewer.append(ref)
+                # An unconfirmed launch still owns its head: never mark that role stopped or
+                # stop it a second time by a weaker identity. The other role is independent;
+                # a failed reviewer launch must not leave a known worker running under freeze.
+                unresolved_role = role
             else:
-                record.paused_worker_at = now
-                stopped_worker.append(ref)
-        if record.review_handle or record.review_leaf or record.review_pid_file:
+                # A rework's reserved round survives the head that never started.
+                keep_reserved_round(runtime, record, intent)
+                if role == REVIEW_ROLE:
+                    record.paused_reviewer_at = now
+                    stopped_reviewer.append(ref)
+                else:
+                    record.paused_worker_at = now
+                    stopped_worker.append(ref)
+        if unresolved_role != REVIEW_ROLE and (
+            record.review_handle or record.review_leaf or record.review_pid_file
+        ):
             try:
                 end_review_pane(runtime.host, record, STOPPED_BY_OPERATOR)
             except HostError:
-                continue
-            record.paused_reviewer_at = now
-            stopped_reviewer.append(ref)
-        if record.handle or record.worker_leaf or record.worker_pid_file:
+                # Keep the reviewer's identity and pause stamp untouched. Worker stop is
+                # still owed, whether or not the reviewer host answered.
+                pass
+            else:
+                record.paused_reviewer_at = now
+                if ref not in stopped_reviewer:
+                    stopped_reviewer.append(ref)
+        if unresolved_role != WORKER_ROLE and (
+            record.handle or record.worker_leaf or record.worker_pid_file
+        ):
             try:
                 runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_OPERATOR)
             except HostError:
-                continue
-            forget_role_head(record, WORKER_ROLE)
-            record.paused_worker_at = now
-            stopped_worker.append(ref)
+                # Keep the worker's identity so resume cannot launch beside it.
+                pass
+            else:
+                forget_role_head(record, WORKER_ROLE)
+                record.paused_worker_at = now
+                if ref not in stopped_worker:
+                    stopped_worker.append(ref)
     return stopped_worker, stopped_reviewer, excluded
 
 

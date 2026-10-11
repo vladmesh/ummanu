@@ -332,6 +332,8 @@ class ObserverRecord:
     launched_at: float = 0.0
     last_action: str = ""
     last_action_at: float = 0.0
+    # Work-state explanation, independent of idle/deferred/stop lifecycle reasons.
+    state_reason: str = ""
     deferred_reason: str = ""
     stopped_reason: str = ""
     paused_at: float = 0.0
@@ -384,6 +386,7 @@ class ObserverRecord:
             "launched_at": self.launched_at,
             "last_action": self.last_action,
             "last_action_at": self.last_action_at,
+            "state_reason": self.state_reason,
             "deferred_reason": self.deferred_reason,
             "stopped_reason": self.stopped_reason,
             "paused_at": self.paused_at,
@@ -428,6 +431,7 @@ class ObserverRecord:
             launched_at=_float(payload.get("launched_at")),
             last_action=str(payload.get("last_action") or ""),
             last_action_at=_float(payload.get("last_action_at")),
+            state_reason=str(payload.get("state_reason") or ""),
             deferred_reason=str(payload.get("deferred_reason") or ""),
             stopped_reason=str(payload.get("stopped_reason") or ""),
             paused_at=_float(payload.get("paused_at")),
@@ -530,6 +534,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "sprint": ref,
                 "head": record.head,
                 "state": record.state,
+                "state_reason": record.state_reason,
                 "workspace": record.workspace,
                 "handle": record.handle,
                 "leaf": record.leaf,
@@ -842,6 +847,7 @@ def _reconcile_open_sprint(
             # The sprint is open again and the head that was to be stopped is still the head of
             # this sprint: the pending stop is moot, so the record reads as running once more.
             record.state = "running"
+            record.state_reason = ""
             record.stopped_reason = ""
             record.paused_at = 0.0
         if record.launch_next_at and record.state not in {"deferred", "launching", "pending"}:
@@ -2168,12 +2174,15 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
 
 
 def _set_observer_state(record: ObserverRecord, state: str, *, reason: str = "") -> None:
-    """Update an externally readable work state without touching lifecycle ownership fields."""
-    if record.state == state and (not reason or record.idle_reason == reason):
+    """Keep work state and reason without turning repeated ticks into new transitions."""
+    if record.state == state and record.state_reason == reason:
         return
+    changed_state = record.state != state
     record.state = state
-    record.last_action = state
-    record.last_action_at = time.time()
+    record.state_reason = reason
+    if changed_state:
+        record.last_action = state
+        record.last_action_at = time.time()
 
 
 def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> None:
@@ -2182,6 +2191,7 @@ def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> No
         return
     now = time.time()
     record.state = "idle-grace"
+    record.state_reason = reason
     record.idle_since = since
     record.idle_reason = reason
     record.last_action = "idle-grace"
@@ -2220,6 +2230,7 @@ def _abandon_launch_intent(runtime: Any, ref: str, record: ObserverRecord) -> No
     """
     attempt = record.pending_launch
     record.state = "pending"
+    record.state_reason = ""
     record.pending_launch = 0
     if not attempt:
         return
@@ -2280,6 +2291,7 @@ def _adopt_launch_intent(
     record.head_possible = True
     record.abandoned_handle = False
     record.state = "running"
+    record.state_reason = ""
     record.last_action = "adopted"
     record.last_action_at = now
     record.deferred_reason = ""
@@ -2705,6 +2717,7 @@ def _launch_observer(
     record.head_possible = True
     record.workspace_live = True
     record.state = "running"
+    record.state_reason = ""
     record.launched_at = now
     record.last_action = "relaunched" if relaunch else "launched"
     record.last_action_at = now
@@ -2792,6 +2805,7 @@ def _bind_codex_provider_ingress(
 
     def block(evidence: dict[str, Any]) -> None:
         record.state = "blocked"
+        record.state_reason = ""
         record.deferred_reason = (
             "Codex provider fan-out policy blocked observer: "
             f"{evidence.get('state') or 'unknown'}; {evidence.get('reason') or 'provider event observed'}"
@@ -2918,6 +2932,7 @@ def _write_launch_intent(
     # the intent is a bound head: the flag belongs to the launch, not to its confirmation.
     record.bound = True
     record.state = "launching"
+    record.state_reason = ""
     record.launched_at = now
     record.last_action = "launching"
     record.last_action_at = now
@@ -2947,6 +2962,7 @@ def _clear_launch_intent(record: ObserverRecord, *, head_possible: bool) -> None
     record.pending_launch = 0
     record.head_possible = head_possible
     record.state = "pending"
+    record.state_reason = ""
 
 
 def _observer_launch_backoff(attempts: int) -> int:
@@ -2999,10 +3015,12 @@ def _defer(
     record.head = record.head or head
     if policy_refusal:
         record.state = "blocked"
+        record.state_reason = ""
         retry = False
         action = "codex-fanout-policy-blocked"
     elif not keep_state:
         record.state = "deferred"
+        record.state_reason = ""
     if retry:
         record.launch_attempts += 1
         delay = _observer_launch_backoff(record.launch_attempts)
@@ -3109,6 +3127,7 @@ def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
     """Keep the head on the books after a refused stop, handle included, so the retry can find it."""
     now = time.time()
     record.state = state
+    record.state_reason = reason
     record.stopped_reason = reason
     record.last_action = "stop-failed"
     record.last_action_at = now
@@ -3223,6 +3242,7 @@ def _mark_stopped_by_pause(record: ObserverRecord, reason: str) -> None:
     record.leaf = ""
     record.abandoned_handle = False
     record.state = STATE_STOPPED_BY_PAUSE
+    record.state_reason = reason
     record.stopped_reason = reason
     record.paused_at = now
     record.last_action = "stopped-by-pause"
@@ -3316,6 +3336,7 @@ def resume_observers(payload: dict[str, Any]) -> list[str]:
         if record.state not in (STATE_STOPPED_BY_PAUSE, STATE_PAUSE_STOP_PENDING):
             continue
         record.state = "pending"
+        record.state_reason = ""
         record.paused_at = 0.0
         record.stopped_reason = ""
         resumed.append(ref)
