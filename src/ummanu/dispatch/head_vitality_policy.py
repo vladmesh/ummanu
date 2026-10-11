@@ -20,7 +20,7 @@ DECISION_VERSION = 1
 
 
 class RecoveryIntent(StrEnum):
-"""What the dispatcher may intend for one head, as of one tick."""
+    """What the dispatcher may intend for one head, as of one tick."""
 
     #: Nothing earned: keep watching. Wired.
     OBSERVE = "observe"
@@ -97,7 +97,7 @@ def deterministic_reason_class(reason: str) -> DeterministicReasonClass | None:
 
 @dataclass(frozen=True)
 class RecoveryThresholds:
-"""Response window and deterministic-refusal count thresholds.
+    """Response window and deterministic-refusal count thresholds.
 
     The response window spans multiple ticks; repeated authoritative refusals
     trigger operator escalation after the configured bound."""
@@ -133,7 +133,7 @@ DEFAULT_RECOVERY_THRESHOLDS = RecoveryThresholds(
 
 @dataclass(frozen=True)
 class RecoveryDecision:
-"""One policy ruling: the intent, the rung to persist, and the audit trail."""
+    """One policy ruling: the intent, the rung to persist, and the audit trail."""
 
     intent: RecoveryIntent
     rung: int
@@ -154,7 +154,7 @@ class RecoveryDecision:
 
 
 def apply_rung_state(episode: VitalityEpisode, decision: RecoveryDecision) -> VitalityEpisode:
-"""Write a decision's rung state back onto the episode, purely."""
+    """Write a decision's rung state back onto the episode, purely."""
     return replace(
         episode,
         recovery_rung=decision.rung,
@@ -169,7 +169,7 @@ def decide_recovery(
     now: float,
     thresholds: RecoveryThresholds = DEFAULT_RECOVERY_THRESHOLDS,
 ) -> RecoveryDecision:
-"""Choose a pure, idempotent recovery intent for this tick.
+    """Choose a pure, idempotent recovery intent for this tick.
 
     Retained and ordinary healthy/unknown/dead verdicts observe; SuspectedStall
     may nudge once; Suspended advances a single-span SIGCONT, response-window,
@@ -256,7 +256,7 @@ def _decide_deterministic(
     thresholds: RecoveryThresholds,
     cls: DeterministicReasonClass,
 ) -> RecoveryDecision:
-"""Count identical authoritative refusals and escalate fast past the limit."""
+    """Count identical authoritative refusals and escalate fast past the limit."""
     seen = int(episode.deterministic_refusals or 0)
     if isinstance(previous_rung_state, VitalityEpisode):
         # The caller may pass the fresher episode as both arguments (reduce-then-decide on
