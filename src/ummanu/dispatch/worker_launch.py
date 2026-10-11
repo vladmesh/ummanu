@@ -1,13 +1,6 @@
 """Worker bring-up and headless-worker recovery for the production dispatcher.
 
-The Ready-card claim boundary ends with a durable DispatcherRecord.  This module owns the next
-bounded responsibility: turn that durable claim into one running worker, recover the same bring-up
-after a crash, and replace a provably headless worker on its retained checkout.
-
-Later worker/report, red-continuation, gate, review and merge state machines deliberately remain on
-DispatcherRuntime.  The runtime is passed as a collaborator until those adjacent responsibilities
-are extracted; launch persistence, host operations and durable state stay on their existing narrow
-dispatch package boundaries.
+Keep intents and durable state at their existing dispatch boundaries.
 """
 
 from __future__ import annotations
@@ -93,22 +86,8 @@ def _tree_state_label(dirty: Any) -> str:
 def _headless_episode_token(record: DispatcherRecord) -> str:
     """The id discriminator that separates one headless episode of a card from the next.
 
-    A card with no dispatcher record does not get a minted attempt id: production ticks it under the
-    constant `production_adopt_attempt_id(ref)`, the same string for that card forever
-    (`dispatch/production.py`). So an attempt-scoped request id is a *card*-scoped one here, and a
-    second episode would replay the first episode's committed event instead of moving the board —
-    the tick reporting a transition that did not happen (secretary-1544 round 5).
-
-    The stamp this returns is dispatcher-owned and episode-scoped in both directions. It is written
-    once, when the episode is first observed, and it survives every tick of that episode, so a tick
-    that died between the board move and its own bookkeeping replays onto the same id and moves
-    nothing twice. It does not survive the episode, because the refusal drops the record with it, so
-    the next return of the same card mints a new one and gets its own move.
-
-    Two parts, because neither alone is enough. The wall clock is what a replay must not disturb,
-    but it has a resolution and two episodes of a fast-moving card could land inside it. The card's
-    comment count cannot: a refusal writes its own move and reason onto the card, so the next
-    episode is stamped strictly higher whatever the clock says.
+    Persist the timestamp/comment-baseline stamp through retries, but change it across distinct
+    episodes.
     """
     episode = record.worker_headless.episode
     since = episode.since if episode is not None else 0.0
@@ -119,9 +98,7 @@ def _headless_episode_token(record: DispatcherRecord) -> str:
 def _headless_worker(record: DispatcherRecord) -> bool:
     """Whether this card owes a worker that nothing on the record can name or reach.
 
-    Not an absence of health: an absence of *identity*. A record here has no pane, no leaf, no
-    heartbeat path and no launch intent, so there is nothing for a watchdog to observe, nudge or
-    replace, and nothing that could ever answer the report the tick would otherwise wait for.
+    Missing worker identity is different from a temporarily unhealthy head.
     """
     continuation = record.worker_continuation
     return not (
@@ -435,12 +412,7 @@ def bring_up_worker_head(
     blocked_action: str,
     blocked_request_suffix: str = "",
 ) -> tuple[LaunchedHead | None, dict[str, Any] | None]:
-    """Relaunch this card's worker in its own workspace, under the intent already on disk.
-
-    The blocked transition is named rather than handed in whole, because the action token is
-    where the outcome's class becomes durable: only the shared classifier below decides which
-    of the two tokens this relaunch writes.
-    """
+    """Relaunch this card's worker in its own workspace, under the intent already on disk."""
     ref = task["ref"]
     try:
         runtime._require_head_ready(record.head)
@@ -535,27 +507,7 @@ def resolve_headless_worker(
 ) -> dict[str, Any] | None:
     """Settle a card standing in an active execution state with no worker at all.
 
-    The situation this closes (secretary-1544, field evidence codegen-orchestrator-1232): a card
-    is returned from Blocked straight into In progress. `_adopt` rebuilds a record from the
-    board, finds no heartbeat to bind, and — because the board claim is the old one — the audit
-    holds no claim event for the freshly synthesised attempt either, so the record settled
-    ``adopted`` with an empty handle and the tick waited for a report from a worker that was
-    stopped hours ago. Returns None when this card is not in that situation.
-
-    Exactly one of three things is durably established before the card is left active:
-
-    * a verified live worker identity — bound by `_adopt` from the worker's own heartbeat, in
-      which case this is never reached;
-    * a replacement launch intent bound to the retained workspace and its exact candidate,
-      written to disk before the host is called and adopted by the next tick if this one dies;
-    * a refusal that puts the card back in Blocked with a named recovery error.
-
-    This path has no launch intent and no delivery receipt to consult — an adopted record is
-    rebuilt from the board, and there is no evidence of what any head was ever handed. What it
-    rests on instead is the board's own consumed report markers and the retained checkout's
-    TASK.md round record: a checkout whose document belongs to a round the board has already
-    consumed a report for owes no worker work, and relaunching over it would either redo an
-    answered round or invent a document for one nobody opened.
+    Reuse request id within an episode; do not duplicate transitions or synthesize reports.
     """
     ref = task["ref"]
     if not _headless_worker(record):
