@@ -1,5 +1,17 @@
 # opus_review — аудит репозитория `vladmesh/ummanu`
 
+## Дельта 2026-10-12: ARCH-01 PO/automation prose, #729 на main `0c9bdd0048a82e84f336a4b1fb0c6b2e3a174c4e`
+
+[PR #729](https://github.com/vladmesh/ummanu/pull/729) смёржен (squash) из exact head `3ad5dae3965077c5efd1e7eadf4152ae69c460e8`. [Exact-head CI #38179563334](https://github.com/vladmesh/ummanu/actions/runs/38179563334) **completed/success**: CI selection, lint, typecheck, все девять suite owners и aggregate `test` — 13 зелёных checks. Отдельный [post-merge main CI #38180468414](https://github.com/vladmesh/ummanu/actions/runs/38180468414) также **completed/success**: полный push-профиль, все девять suites, lint, typecheck и aggregate `test` — 13 зелёных checks.
+
+**ARCH-01 ◐:** сокращены **55 docstrings**: `po/service.py` — 13 (−7 512 символов), `po/runner.py` — 15 (−4 774), `automations/runtime/dispatch.py` — 27 (−13 218). Итого **−25 504 символа, −310 строк net**. Посимвольное сравнение вне docstring literals и AST без docstrings идентичны main #728; tree опубликованного candidate совпадает с проверенным локальным деревом `af54b7e9cbf985c44e0206a66eca96f2ce34081b`. Сохранены FIFO/request-id replay, recovery/process identity, restart, fail-closed dispatch, registry snapshot и владение report-карточками. Runtime statements, imports, signatures, prompts и CLI help не менялись.
+
+**Локальная проверка:** Ruff 0.16.4 и `git diff --check` прошли. Broad через receipt wrapper завершился на системном Python: 2 689 tests, 13 failures, 57 errors, 7 skips; процессные проверки не читают child PID в `/proc`, privilege/emulation этого окружения отличается от обычного Linux. Первая попытка на portable Python остановилась на отсутствующем `fcntl.F_SEAL_SEAL`. Это не green local receipt. Role-skills audit видит отсутствующие installed destinations в непровиженном clone; исходные main-файлы также не проходят Ruff format, форматирование исполняемого кода не добавлялось. Полный exact-head CI выше подтверждён отдельно.
+
+ARCH-01 по остальным модулям остаётся частичным; DEC, TDEAD-07 и поведенческие остатки этим PR не закрываются. Ветка аудита merge-синхронизирована с main #729. **#668 оставить открытым, не мёржить.** Исторический §12 production evidence побайтно неизменен.
+
+---
+
 ## Дельта 2026-10-11: ARCH-01 dispatch prose и CI test fixture, #728 на main `18a859df9dfec4b9ffc84f9ee9972cf431db095b`
 
 [PR #728](https://github.com/vladmesh/ummanu/pull/728) смёржен (squash) в `main` из exact head `a54a3f36f2997189a384993ac5e318de86f039f2`. [CI #38176132736](https://github.com/vladmesh/ummanu/actions/runs/38176132736) **completed/success**: lint, typecheck, девять suite owners, aggregate `test`. Отдельный [post-merge main CI #38176863641](https://github.com/vladmesh/ummanu/actions/runs/38176863641) отслеживается как другая квитанция.
@@ -133,7 +145,7 @@
 | Видимость стоимости тестов | ✅ timing-часть существующего issue:e515244ce9d2e3417b1e | [#708](https://github.com/vladmesh/ummanu/pull/708), `190bd745`: `projects/test_timing.py:142/249`, `tests/broad.py:106`, `scripts/ci_test_shards.py:421/424` сохраняют native timing; локально >5 с/test предупреждает, CI unit/component >5 с/test или >90 с/module отказывает. Запрет лишних тестов в prompts остаётся открытым (§6.4) |
 | Полная квитанция перед code report:done; reviewer без прогонов | ✅ согласованный scope sprint:1488 | [#713](https://github.com/vladmesh/ummanu/pull/713), `d8e86b94`: `tasks.py:2234`, `check_commands.py:42/89/101` проверяют complete green receipt на committed tree, `runtime/test_guard.py:43/110` отказывает reviewer. [#704](https://github.com/vladmesh/ummanu/pull/704), `c42b02b7`, и [#705](https://github.com/vladmesh/ummanu/pull/705), `e29a0467`, ограничивают local selectors/прямые runners. Это не закрытие всех старых gate/flake issues; docs-проекты с doctest имеют отдельный issue:db00f10a6b16e2ab5b1f |
 | CI-01 | Исходные ✅ #674/#678 сохранены; новый selective-CI scope поставлен, выигрыш для code PR открыт | [#714](https://github.com/vladmesh/ummanu/pull/714), `af07e5c2`, #715/#717/#718: `ci_selection.py:208/259`, `ci.yml:59` выбирают affected или docs-only; main всегда full. Реальная выборка PR717 и новые CI-рычаги только в §8.4 / issue:7ba9a9f32675119f8149 |
-| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | DEC-04 ◐ (#725 state/prompt, #726 audit/event helpers); ARCH-01 ◐ (#721/#723/#724/#728); остальные DEC открыты | Доменные импорты config, TaskError в tasks и barrel board проверены, граф дополняет ARCH-04 (§4.1). #725/#726 вынесли durable observer state, чистые prompt renderers и audit/event helpers; общий persist с launch и outcome сокращение остаются. Рефакторинг ради CI не рекомендован |
+| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | DEC-04 ◐ (#725 state/prompt, #726 audit/event helpers); ARCH-01 ◐ (#721/#723/#724/#728/#729); остальные DEC открыты | Доменные импорты config, TaskError в tasks и barrel board проверены, граф дополняет ARCH-04 (§4.1). #725/#726 вынесли durable observer state, чистые prompt renderers и audit/event helpers; общий persist с launch и outcome сокращение остаются. Рефакторинг ради CI не рекомендован |
 | BUG-04/05/24, CON-02/05/07/08/10–15, DOC-08/10/15, DEAD-* и прочие остатки | Без нового полного закрытия | В diff к main нет реализации прежних структурных/compatibility scopes; DOC-08 всё ещё имеет исходную фразу в `packaging/memory/product-ummanu/sprints-and-reservations.md:9`. Поддержку legacy API не снимать по отсутствию вызова. Новая capacity-находка только ссылкой на board (§7, CON-19) |
 
 Другие поставки учтены без выдуманных закрытий ID: #698 (`ed9fd528`) исправляет исполнение
@@ -877,7 +889,7 @@ job-секунд и не двигает критический путь. Выи�
 
 ### 5.8 Сжатие прозы как отдельная «декомпозиция» — ARCH-01
 
-**◐ Статус:** #675 (`runtime`, −138 тыс.), #676 (`web`/`webproto`, −211 тыс.), #721 (vitality, −37 123), #723 (`observer`/`launch`/`gate`, −25 140) , #724 (`tasks`/`sprints`, −24 239) и #728 (`dispatch/host`/`types`/`worker_launch`, −31 847) поставили очередные срезы без изменения исполняемого кода. Для #721/#723/#724/#728 подтверждено точное совпадение источника вне docstrings (у #723 — с отдельной сортировкой одного импорта), полный exact-head CI зелёный. Зоны `runtime` (кроме `po`/`automations`) и `web`/`webproto` закрыты только в объёме тех поставок; другие подсистемы и дальнейшая проза остаются.
+**◐ Статус:** #675 (`runtime`, −138 тыс.), #676 (`web`/`webproto`, −211 тыс.), #721 (vitality, −37 123), #723 (`observer`/`launch`/`gate`, −25 140), #724 (`tasks`/`sprints`, −24 239), #728 (`dispatch/host`/`types`/`worker_launch`, −31 847) и #729 (`po/service`/`runner`, `automations/runtime/dispatch`, −25 504) поставили срезы без изменения исполняемого кода. Для #721/#723/#724/#728/#729 подтверждено точное совпадение источника вне docstrings (у #723 — с отдельной сортировкой одного импорта), полный exact-head CI зелёный. Зоны `runtime`, `web`/`webproto` и PO/automation runtime закрыты только в объёме названных поставок; другие модули и дальнейшая проза остаются.
 
 **Это самый крупный рычаг.** Рекомендуемое правило:
 - docstring модуля и функции — инвариант и контракт в 1–3 строки плюс ссылка на раздел docs;
