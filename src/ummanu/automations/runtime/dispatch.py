@@ -1,57 +1,11 @@
-"""Singleton head driver, shared by every triggered-agent (curator, retro, steward).
+"""Drive one supervised local-PTY head per triggered agent under its run lock.
 
-One agent = at most one live head, held under a supervisor of this product's own (`local-pty`).
-On a trigger (after precheck passes, under the run lock) a tick resolves which head this agent
-gets and then does exactly one of these:
-
-  * the resolution names a `local-pty` head -> raise it under its supervisor with its skill
-  * ...and this role's head is still working -> the supervisor refuses, dispatch nothing
-  * the resolution names no `local-pty` head  -> fail closed: raise nothing, record why, exit 1
-
-`local-pty` is the one backend. There is no pane lifecycle here any more (A20, secretary-1720):
-no warm reuse, no `/clear`, no ghost-tab reap, no idle probe, no watchdog restart and no finalizer
-trailer. Every one of those existed to cope with the dead pty Orca keeps as a tab in its session
-store; a supervisor leaves none behind, so a tick is one head raised with its own skill and the run
-ends when that head exits. Nothing in `ummanu.automations` reaches Orca, and
-`tests/test_architecture.py` keeps it that way.
-
-Fail closed, in one place. A tick whose resolution does not name a usable `local-pty` head has no
-`HeadSpec` a supervisor could raise, so `_resolve_launch` refuses it with `NoSupervisedHead` and
-`_tick` hands the refusal to `_fail_closed`. The causes are: the head registry would not load, no
-profile is routed to the role, the profile will not make a `HeadSpec`, the profile names a runtime
-other than `local-pty`, and the command will not render. The refusal is decided before a command is
-built, so it creates no steward report card; `_fail_closed` records one `runs.jsonl` entry
-(`action="no-supervised-head"`, `result="error"`, the reason), prints the reason to stderr and the
-tick exits 1, which the systemd unit records as a failed run. A paused pipeline is not a refusal:
-it still exits 0 with `action="paused"`.
-
-The resolution is decided off one reading of the registry. `run()`'s tick takes a
-`RegistrySnapshot` once, and the routed profile, its fallback chain and the resolved profile's
-runtime all come out of that one reading, so an ordinary profile publication landing mid-tick
-cannot make the tick act on two different registries.
-
-The head outlives the tick that raised it; `AgentState.save_head_run` is what a later tick reaches
-it through, and handing that record back to `start` is what makes a bring-up over a head that is
-still working a refusal (`HEAD_BUSY`) rather than a second head. A failed-closed tick changes
-nothing: it raises no head and stops none, leaves `head_run.json` and `active_report.json` as they
-are and closes no report. A head an earlier tick raised finishes its turn under its own supervisor,
-and the next tick with a usable profile finds it through `head_run.json` as usual. A head that
-finished its turn and stayed up idle is retired by the next tick (`_retire_idle_head`), so a role is
-not held off duty by a head with nothing left to do.
-
-One role, one owner of its head. A `terminal_handle.json` left over from the retired pane backend
-names a pane as this role's owner. The fence is the file's existence, not its parsed content, so an
-empty, unreadable or handle-less record fences too. This driver never deletes it and never raises a
-head beside it: the tick refuses with `action="supervised-owner-conflict"` and exits 1 until an
-operator has confirmed that pane is gone and removed the file.
-
-A report card belongs to a head, so stopping the head is what closes it. The steward's report card
-is created by the render of the skill that names it and is written by the head that render is
-launched with; `active_report.json` is which card that is and which head has it. That card, and the
-card a tick built but never handed to a head, are one tick-long obligation with one place that
-discharges it: `_TickReports`, entered by `run()` around the whole tick, so every terminal path of
-`_tick` — bring-up, busy-skip, every fail-closed bail, every raise — leaves through it. A refused
-tick holds still: it discharges nothing standing, not even an ownerless report.
+Resolve one registry snapshot before rendering a command/report. Unusable profiles fail
+closed: record the reason, exit 1, preserve existing heads/reports. Pause exits 0. Persist
+head_run for later ticks; working heads refuse duplicate bring-up. Retire only positively
+quiescent idle heads through guarded stop. Any terminal_handle.json fences launch until
+operator removal, regardless of content. _TickReports owns created/inherited obligations
+on every exit; refused ticks hold existing state still. See docs/OPERATIONS.md.
 """
 
 from __future__ import annotations
@@ -116,12 +70,7 @@ class DispatchCommand:
 
 
 class StewardReportBoard(Protocol):
-    """The report-card surface the head driver actually needs.
-
-    It is deliberately narrower than either board implementation.  A future
-    composition root may pass Ummanu's canonical adapter without making the
-    triggered-agent runtime import Ummanu back.
-    """
+    """The narrow report-card port required by the triggered-agent head driver."""
 
     def create_report(self, *, project: str, title: str, slug: str) -> str: ...
 
@@ -129,10 +78,9 @@ class StewardReportBoard(Protocol):
 
 
 class NoSupervisedHead(Exception):
-    """This tick has no `local-pty` head to raise, and `reason` says which cause it was.
+    """Resolution/render refusal before launch, naming the missing usable local-PTY head.
 
-    Raised only by the resolution and the render, before any head exists, and caught only by
-    `_tick`, which hands it to `_fail_closed`. It never escapes a tick.
+    _tick catches it and delegates to _fail_closed; it never escapes a tick.
     """
 
     def __init__(self, reason: str) -> None:
@@ -151,16 +99,11 @@ def _load_spec(agent: str) -> dict:
 
 
 def _pipeline_paused() -> bool:
-    """Whether the pipeline-wide pause flag (triggered-agents-281, agents/pipeline/pause.py) is
-    set — checked first thing in a tick, before the registry is read, so a paused pipeline never
-    spends a token on steward/curator/retro either: none of them carry an in-flight card of their
-    own the way a worker/reviewer head does, so pause has no "let it finish its cycle" case here in
-    either mode, soft or hard. Lazy import, same reason as the lazy imports elsewhere in this
-    module — this module is imported at process start by every agent, so a top-level import back
-    into agents.pipeline would risk a circular import the first time either side changes its own
-    imports. Any failure is a pause: dispatching while an operator's stop condition cannot be read
-    is worse than deferring one tick. The warning goes to the service log every affected tick
-    until the state is repaired."""
+    """Read pipeline pause before the registry; any read failure also pauses dispatch.
+
+    Both pause modes defer standing agents. Warn on unreadable ticks; import lazily to avoid
+    a process-start cycle with the pipeline package.
+    """
     try:
         from ..agents.pipeline import pause as pipeline_pause
 
@@ -175,16 +118,9 @@ def _pipeline_paused() -> bool:
 
 @dataclass(frozen=True)
 class RegistrySnapshot:
-    """The head registry as one tick read it, once.
+    """One registry reading for routing, health fallback and runtime resolution in a tick.
 
-    A tick asks the registry which profile this agent is routed to, which profile of its fallback
-    chain health resolves it onto, and what runtime that profile names. An ordinary profile
-    publication is atomic but not instantaneous relative to a scheduled tick, so the reading is
-    taken once and every one of those questions is answered from it.
-
-    `registry` is `None` when the registry could not be read at all, and `error` then says why.
-    Such a tick fails closed: with no registry there is no profile, and with no profile no spec a
-    supervisor could raise a head from.
+    Unreadable registry is None with its error and requires fail-closed dispatch.
     """
 
     registry: Any | None
@@ -206,14 +142,9 @@ def _registry_snapshot() -> RegistrySnapshot:
 
 
 def _preferred_head(agent: str, spec: dict, snapshot: RegistrySnapshot | None = None) -> str | None:
-    """The head this agent launches on: the selected registry's role default for it.
+    """Resolve the role default from the tick snapshot, with spec.head as last resort.
 
-    The spec's own `head` is the last resort for a registry that routes this role nowhere, and it
-    goes through the registry's own resolution. A resolution refusal reaches the caller: a spec
-    naming a head the registry does not define is a dispatch that must not happen.
-
-    `snapshot` is the tick's one reading of the registry (`RegistrySnapshot`), so this answer and
-    the resolution's cannot come from two different registries.
+    Propagate undefined-profile refusal; routing and launch share the same snapshot.
     """
     registry = (_registry_snapshot() if snapshot is None else snapshot).registry
     if registry is None:
@@ -239,11 +170,9 @@ class _RegistryCatalog:
 
 
 def _head_health(registry: Any) -> HeadHealth:
-    """The installation's one resource-health cache, the one the production dispatcher probes into.
+    """Use the shared resource-health TTL cache and launch_allowed vocabulary.
 
-    A standing agent reads readiness through the same `ummanu.head_health` TTL cache and status
-    vocabulary as a card head, so a resource is probed once per window for both and "red" means
-    one thing: not `launch_allowed`. `unknown` stays launchable, as it is for cards.
+    Standing/card heads share probes; unknown remains launchable.
     """
     return HeadHealth(_RegistryCatalog(registry), _installation_data_dir())
 
@@ -260,13 +189,7 @@ def _head_fallback(registry: Any, head: str) -> list[str] | None:
 
 @dataclass(frozen=True)
 class LaunchResolution:
-    """Which head this agent gets this tick: a profile whose head a supervisor can hold.
-
-    A resolution, not a dispatch, and it exists before any report card does. The card is created by
-    the render that names it in the skill, so everything this tick decides about the head — above
-    all whether there is one it may raise — is decided on the resolution, before a card exists to
-    be left behind.
-    """
+    """The usable supervised head selected before rendering creates any report card."""
 
     #: The role's skill text as its spec has it, with no `--card` argument yet.
     skill: str
@@ -278,16 +201,10 @@ class LaunchResolution:
 def _resolve_launch(
     agent: str, variant: str | None = None, snapshot: RegistrySnapshot | None = None
 ) -> LaunchResolution:
-    """Resolve this agent's head against this run's live resource health, or refuse.
+    """Resolve a local-PTY profile against live health using the tick snapshot.
 
-    The head comes from `_preferred_head` and resolves through the same registry machinery a
-    worker or reviewer head gets. Every way that fails to end on a `local-pty` profile whose
-    command renders raises `NoSupervisedHead` naming the cause; there is no bare-`claude`
-    fallback, because a launch with no usable profile has no spec to raise a supervised head from.
-
-    `variant` reads `skill` from `spec["variants"][variant]` instead of the top-level one.
-
-    `snapshot` is the tick's one reading of the registry.
+    Raise NoSupervisedHead on resolution/render failure; no bare-CLI fallback. variant selects
+    spec["variants"][variant].skill instead of the top-level skill.
     """
     snapshot = _registry_snapshot() if snapshot is None else snapshot
     spec = _load_spec(agent)
@@ -325,12 +242,9 @@ def _render_launch(
     resolution: LaunchResolution,
     card_ref: str | None = None,
 ) -> tuple[str, str, bool]:
-    """(skill, launch command, prompt-after-start) for a resolution, or `NoSupervisedHead`.
+    """Return skill, launch command and prompt-after-start, or NoSupervisedHead.
 
-    `card_ref` appends `--card <ref>` to the skill text BEFORE it is handed to the head, so the
-    augmented text is what actually gets sent rather than landing outside the quoted prompt. It is
-    the whole reason rendering is a separate step from resolving: a card is younger than the head
-    it names, and every question this tick asks about the head is older than the card.
+    Append card_ref to the skill before quoting/sending the prompt, after head resolution.
     """
     skill = f"{resolution.skill} --card {card_ref}" if card_ref else resolution.skill
     try:
@@ -354,9 +268,9 @@ def _launch_cmd(
     card_ref: str | None = None,
     snapshot: RegistrySnapshot | None = None,
 ) -> tuple[str, str, str, bool, dict]:
-    """(skill, full launch command, resolved head profile, prompt-after-start, profile data) from
-    the agent's automation.toml: `_resolve_launch` and then `_render_launch`, for a caller that
-    wants both halves at once. Raises `NoSupervisedHead` where either of them does.
+    """Resolve then render: skill, command, profile name, prompt-after-start and profile data.
+
+    Propagate NoSupervisedHead from either step.
     """
     resolution = _resolve_launch(agent, variant, snapshot)
     skill, launch, after_start = _render_launch(agent, resolution, card_ref)
@@ -366,11 +280,9 @@ def _launch_cmd(
 def _steward_report_card(
     agent: str, variant: str | None, *, report_board: StewardReportBoard | None = None
 ) -> str | None:
-    """Create the steward's own wake-up report card (project ummanu, non-code type,
-    straight into In progress, already claimed by itself — through the supplied
-    Ummanu-owned report-board port)
-    right before a dispatch actually reaches the head. None for every agent but steward
-    (triggered-agents-255): the rest keep their existing dispatch untouched.
+    """Create a claimed, non-code ummanu steward report in In progress through the report-board port.
+
+    Only steward creates one, immediately before dispatch reaches the head; others return None.
     """
     if agent != "steward":
         return None
@@ -387,14 +299,9 @@ def _steward_report_card(
 
 
 def _ensure_head_ready(ws: str, cmd: DispatchCommand, *, role: str = "service") -> None:
-    """Prepare `ws` for the head about to be raised in it, on that head's own adapter.
+    """Prepare the workspace with its head adapter before supervisor start.
 
-    The first-run question an adapter asks is the one thing that can make a fresh head never come
-    up at all, and which question it is depends on the adapter, so this is the one place that
-    branches on it, right before the supervisor starts the head. The two failure modes differ
-    deliberately: Claude's preparation stays best-effort, while the Codex preflight is a hard
-    precondition — without the trust entry the head cannot reach readiness — and it raises before
-    any head is started.
+    Claude preparation is best-effort; Codex trust preflight is mandatory and raises before launch.
     """
     if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
         spec = HeadSpec.from_profile(str(cmd.profile or role), cmd.head_profile)
@@ -503,12 +410,7 @@ def _release_steward_report(
     *,
     report_board: StewardReportBoard | None = None,
 ) -> None:
-    """Close a steward report card whose tick turned out to dispatch nothing after all.
-
-    The card is created by the same call that renders the skill naming it, so a tick cannot know
-    it will refuse until it holds one. Leaving it open would park a report in progress that no head
-    is ever going to write, so it is closed with the reason it went unused.
-    """
+    """Close a tick's unwritten steward report with the reason no head received it."""
     if not cmd.card_ref:
         return
     state.clear_active_report(cmd.card_ref)
@@ -531,13 +433,9 @@ def _escalate_steward_preflight_failure(
     *,
     report_board: StewardReportBoard | None = None,
 ) -> None:
-    """Put a steward report card in front of a human when its workspace could not be prepared.
+    """Block a steward report when workspace preflight fails before launch.
 
-    The preflight fails before any head is started, so no head has seen this card. Closing it as
-    Done would record a sweep that never ran, and the condition — an untrusted repository root, a
-    codex config the launcher may not rewrite — does not heal on its own, so the card goes to
-    Blocked with the preflight's reason. A card that cannot even be moved leaves its reason in the
-    run log rather than raising over the real cause.
+    If moving the card fails, log the reason without masking the preflight cause.
     """
     if not cmd.card_ref:
         return
@@ -571,13 +469,9 @@ def _release_standing_report(
     *,
     report_board: StewardReportBoard | None = None,
 ) -> None:
-    """Close the steward report card in `active_report.json` whose writer is no longer recorded.
+    """Close the active steward report whose head is no longer recorded.
 
-    The card belongs to the head recorded as this role's owner, not to the tick that finds it.
-    With no such head left, nobody is going to write it, so it is closed with the reason.
-
-    Nothing for a role with no reporting contract: only a steward dispatch ever records a
-    reference here, so for curator and retro this reads an empty record and returns.
+    Other roles have no reporting contract and leave an empty record untouched.
     """
     reference = (state.load_active_report() or {}).get("reference")
     if not reference:
@@ -595,24 +489,11 @@ def _release_standing_report(
 
 
 class _TickReports:
-    """Everything one tick owes a steward report card, and the one place that discharges it.
+    """Own the rendered report and any standing report inherited by stopping its head.
 
-    A tick owes two cards, and neither of them used to have a single owner in this module. One is
-    its own: `command` creates a report card as it renders the skill that names it, so a tick that
-    turns out to dispatch nothing after all is holding a report nobody will ever write.
-    The other was already standing when the tick began — the card in `active_report.json`, being
-    written by the head this role already had — and a tick that stops that head inherits it.
-
-    Both are discharged through this object, and `run()` enters it once around the whole tick, so
-    every terminal path of the tick leaves through `__exit__`: the bring-up, the busy-skip, the
-    stop of a standing owner, every fail-closed bail and every raise. The question is
-    never "did this branch remember" but "what is still outstanding", which is the only form of it
-    a branch cannot get wrong by being added later.
-
-    A tick builds at most one command, so at most one card is ever this tick's own. Handing it to
-    a head (`taken`) is what settles it; so is closing it (`undispatched`), recording a dispatch
-    that failed after the head was up (`failed`), and escalating a workspace that could not hold a
-    head at all (`preflight_failed`). Anything still unsettled when the tick ends is closed here.
+    run enters once around the tick; every exit discharges outstanding obligations. At most one
+    command/report is created. taken, undispatched, failed and preflight_failed settle it; close
+    anything unsettled at exit, preserving hold_still for refused ticks.
     """
 
     NOTHING_DISPATCHED = (
@@ -648,13 +529,10 @@ class _TickReports:
         return False
 
     def command(self, variant: str | None, resolution: LaunchResolution) -> DispatchCommand:
-        """This tick's dispatch command, and the card it carries, recorded as outstanding.
+        """Render the command and record its steward report as outstanding.
 
-        The one spot that creates the steward's report card, so every real dispatch carries one and
-        a tick that dispatches nothing never does. It is reached only once the resolution has named
-        a `local-pty` head whose command renders, so a failed-closed tick creates no card. The
-        render is repeated here with the card in the skill; should that one refuse after all, the
-        card is closed unwritten before the refusal goes on to `_fail_closed`.
+        Create only after usable local-PTY resolution; re-render with its card in the skill. If that
+        render refuses, close the unwritten card before propagating to _fail_closed.
         """
         card_ref = _steward_report_card(self.agent, variant, report_board=self.report_board)
         self.cmd = DispatchCommand(resolution.skill, "", resolution.profile, card_ref)
@@ -696,14 +574,10 @@ class _TickReports:
         self.settled = True
 
     def _close_an_orphan(self) -> None:
-        """The backstop under the above: a report with no owner left anywhere.
+        """Close an active report only with neither head_run nor terminal_handle recording its writer.
 
-        `active_report.json` names a card and its writer at once, and the writer of a live head is
-        recorded in `head_run.json` — or, left over from the retired pane backend and never removed
-        by this driver, `terminal_handle.json`, which counts whenever the file exists. A tick that
-        ends with a report standing and neither record standing has lost that card's writer, and the
-        card is closed here rather than left in progress for a later tick to overwrite. A refused
-        tick (`hold_still`) skips this: it changes nothing it found.
+        Any terminal_handle.json existence counts as ownership. A refused hold_still tick preserves
+        standing reports; other roles have no report contract.
         """
         if self.hold_still:
             return
@@ -741,13 +615,9 @@ class LocalPtyDispatchError(RuntimeError):
 
 
 def _local_pty_runtime() -> Any:
-    """This driver's supervised backend, built through the product's one name-to-backend mapping.
+    """Build the supervised backend through the shared product mapping.
 
-    The run root is the installation's own `heads/` directory — the same one the Ummanu
-    dispatcher supervises its heads under — so a host keeps one place where a supervised head
-    lives and one place an operator looks for it. The launch-identity reader is the product's
-    single one, which is what lets a later tick ask whether the head an earlier tick started is
-    still running.
+    Use the installation heads/ root and canonical launch-identity reader, shared with dispatch.
     """
     return build_head_runtime(
         LOCAL_PTY_RUNTIME,
@@ -783,12 +653,9 @@ HEAD_PID_FILE_NAME = "head.pid"
 
 @dataclass(frozen=True)
 class _StandingPromptTransport:
-    """What a standing head's skill prompt is handed to the supervised backend with.
+    """Deliver a standing skill through the supervised backend without a before_send hook.
 
-    The supervised backend owns the delivery — settle, type, submit on its own, confirm a turn —
-    and reads only one thing off a caller's transport: the `before_send` hook it runs before the
-    first byte (a retained worker's resume, a Codex provider-source binding). A standing head needs
-    neither, so it carries none.
+    The backend owns settling, typing, submitting and turn confirmation.
     """
 
     before_send: Callable[[], Any] | None = None
@@ -800,13 +667,9 @@ _STANDING_PROMPT_TRANSPORT = _StandingPromptTransport()
 def _fail_closed(
     agent: str, state: AgentState, event: str, reports: _TickReports, refusal: NoSupervisedHead
 ) -> int:
-    """The one place a tick with no supervised head to raise ends: nothing raised, reason recorded.
+    """Record no-supervised-head/error with cause, print stderr and return nonzero.
 
-    One `runs.jsonl` entry — `action="no-supervised-head"`, `result="error"` and the specific
-    cause — and the same reason on stderr, and a nonzero exit, which the systemd unit records as a
-    failed run. Nothing else changes: no head is raised or stopped, `head_run.json` and
-    `active_report.json` stay as they are and no report is closed. The tick created no report card
-    of its own: the refusal is decided before one is built.
+    Raise/stop no head, create/close no report, and preserve head_run.json and active_report.json.
     """
     reports.hold_still = True
     state.log_run(event, action=NO_SUPERVISED_HEAD, result="error", error=refusal.reason)
@@ -817,19 +680,10 @@ def _fail_closed(
 def _retire_idle_head(
     agent: str, runtime: Any, prior: dict | None, state: AgentState, event: str, reports: _TickReports
 ) -> None:
-    """End the head an earlier tick raised once its turn is over and it has sat idle since.
+    """Retire only a positively quiescent live head idle for IDLE_HEAD_GRACE_SECONDS.
 
-    A tick is one head raised with its own skill, and the run is meant to end when that head exits.
-    An adapter whose head does not exit after its turn (Codex's TUI keeps its composer open) left
-    the head up with nothing to do, and the bring-up below refused every later tick over it
-    (`supervised-busy-skip head_already_up`) until someone stopped it by hand.
-
-    Only a head the supervisor positively reads as quiet is ended: alive, no turn open, no delivery
-    in flight, and nothing new in its journal for `IDLE_HEAD_GRACE_SECONDS`. The stop is the
-    runtime's own `stop_if_quiescent`, so a turn that starts between this look and the stop refuses
-    it. Anything else — a working head, an unreadable record, a refused stop — changes nothing,
-    and the bring-up decides as before. A steward report the retired head was writing is closed,
-    because no head is writing it any more.
+    Require no open turn/delivery or new journal activity. stop_if_quiescent guards concurrent
+    turns; unreadable/busy/refused stops change nothing. Close a retired steward report.
     """
     if not prior:
         return
@@ -893,13 +747,10 @@ def _forget_stopped_head(runtime: Any, run: HeadRun) -> None:
 def _retire_refused_head(
     agent: str, registry: Any, state: AgentState, event: str, reports: _TickReports
 ) -> None:
-    """A previous head whose provider refused its turn: resource red, head retired (ummanu-108).
+    """Retire a provider-refused head and mark its resource red before resolving a replacement.
 
-    Read before the tick resolves its head, so the resolution walks past the refusing resource to
-    the other family. The resource stays red until the reset the provider named (else a bounded
-    backoff); the head is stopped rather than left to sit out the idle grace, because it can do
-    nothing more. The role's durable state (its watermark, its report card) is what the next head
-    resumes from. Anything unreadable changes nothing.
+    Use its reset or bounded backoff; the next head resumes durable state. Unreadable evidence
+    changes nothing.
     """
     from ummanu.dispatch.provider_failure import provider_failure_for_persisted_run
 
@@ -965,15 +816,10 @@ def _supervised_bring_up(
     *,
     reports: _TickReports | None = None,
 ) -> int:
-    """Raise this role's head under a supervisor of this product's own, with its skill.
+    """Launch the supervised head with its skill and read the typed backend receipt.
 
-    Ephemeral by construction: a tick is one head raised with its own skill and the run ends when
-    that head exits. Every outcome below is read from the backend's own typed receipt.
-
-    The head outlives the tick. What the next tick needs to reach it — its run id, workspace and
-    spec — is written to this agent's state directory as the receipt recorded it, and handing that
-    record back to `start` is what makes a second bring-up over a working head a refusal
-    (`HEAD_BUSY`, `head_already_up`, made before anything is spawned) rather than a second head.
+    Persist run id/workspace/spec for later ticks. Passing that owner to start refuses an already
+    working head with HEAD_BUSY before spawning another.
     """
     reports = _TickReports(agent, state, event) if reports is None else reports
     try:
@@ -1067,19 +913,10 @@ def run(
     *,
     report_board: StewardReportBoard | None = None,
 ) -> int:
-    """`variant` selects a differently-scheduled mode of the same agent: a different prompt from
-    `_resolve_launch`, and its own runs.jsonl event name so the two wake-up kinds stay
-    distinguishable in the agent's own telemetry.
+    """Run one locked tick with report obligations settled by _TickReports on every exit.
 
-    `cleanup_only` is the gate's call on a precheck skip (`scripts/ummanu-agent-gate.sh`). It
-    is a no-op for every agent: its subject was a pane a finished run left behind, and a supervised
-    head's supervisor reaps its own process. It returns before `AgentState` is built or the run lock
-    taken, so a precheck skip stays a zero-side-effect exit 0 and cannot contend the lock. It is
-    still accepted because the systemd units pass it.
-
-    The tick itself is `_tick`, and this is what stands around it: the run lock, and the one place
-    a tick's obligations to a steward report card are discharged. `_TickReports` is entered here
-    and every way `_tick` can end — every return, every raise — leaves through it.
+    variant selects prompt/telemetry. cleanup_only returns 0 before state/lock creation: the
+    supervisor reaps heads, while systemd callers retain the accepted option.
     """
     if cleanup_only:
         return 0
@@ -1100,12 +937,10 @@ def _tick(
     event: str,
     reports: _TickReports,
 ) -> int:
-    """One dispatch tick, under the run lock and inside `reports`.
+    """Dispatch under the run lock and reports scope in contract order.
 
-    The order is the contract. The registry is read once and the head resolved out of that one
-    reading; a resolution that names no usable `local-pty` head ends the tick in `_fail_closed`;
-    a pane still recorded as this role's head refuses it; and only then is a command built, because
-    building one creates the steward's report card. A tick that refuses therefore never holds one.
+    Read registry once, resolve or fail closed, fence any recorded pane owner, then render the
+    command/report. A tick refused before rendering creates no report.
     """
     if _pipeline_paused():
         state.log_run(event, action="paused")
