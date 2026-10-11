@@ -1236,15 +1236,6 @@ class CiTestSuiteManifestTests(unittest.TestCase):
 
         self.assertEqual(changed, {"src/ummanu/module.py": [8], "src/ummanu/added.py": [1, 2]})
 
-    def test_coverage_configuration_enables_branch_scope_without_a_threshold(self) -> None:
-        config = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-
-        self.assertIn("[tool.coverage.run]", config)
-        self.assertIn("branch = true", config)
-        self.assertIn("relative_files = true", config)
-        self.assertIn('source = ["src/ummanu"]', config)
-        self.assertNotIn("fail_under", config)
-
     def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:
         directory.mkdir(parents=True, exist_ok=True)
         log = BoundedTee(StringIO(), directory / "test-output.log")

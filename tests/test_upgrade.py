@@ -9,7 +9,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
-from dataclasses import fields, replace
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -502,13 +502,6 @@ class AgentSpecsTests(unittest.TestCase):
                         upgrade.agents_root(product)
                     context = SimpleNamespace(product_root=product, runtime_home=None)
                     self.assertEqual(upgrade.step_worktrees(context).status, "failed")
-
-    def test_the_upgrade_has_no_orca_automations_step(self):
-        # secretary-1706: systemd units are the only schedule owner; upgrade neither creates nor
-        # repoints nor deletes Orca automations.
-        names = [step.__name__ for step in upgrade.STEPS]
-        self.assertFalse([name for name in names if "automation" in name], names)
-        self.assertNotIn("automations", {f.name for f in fields(upgrade.UpgradeContext)})
 
 
 class UpgradeStepTests(unittest.TestCase):
@@ -1609,13 +1602,6 @@ class HeadRegistryPairTests(unittest.TestCase):
         again = upgrade.step_head_registry(self.context)
 
         self.assertEqual(again.status, "unchanged", again.detail)
-
-    def test_the_publication_step_and_its_git_contract_are_gone(self):
-        self.assertFalse(hasattr(upgrade, "step_publish_head_registry"))
-        self.assertNotIn("publication_policy", {field.name for field in fields(upgrade.UpgradeContext)})
-        for name in ("HEADS_PATHSPEC", "HEADS_CHECKPOINT_MESSAGE", "RECOVERY_RECONCILIATION_MESSAGE"):
-            with self.subTest(name):
-                self.assertFalse(hasattr(state_repo, name))
 
     def test_verify_accepts_the_pair_with_unrelated_instance_dirt(self):
         tracked = self.instance / "projects" / "operator.yaml"

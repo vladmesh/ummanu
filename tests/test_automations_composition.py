@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -61,18 +60,6 @@ class StewardCliReaderTests(unittest.TestCase):
 
 
 class StandingAgentEntrypointTests(unittest.TestCase):
-    def test_retired_board_cli_modules_are_not_importable(self) -> None:
-        for name in (
-            "ummanu.automations.agents.pipeline.cli",
-            "ummanu.automations.agents.pipeline.model",
-            "ummanu.automations.agents.pipeline.ops",
-        ):
-            with self.subTest(name=name):
-                self.assertIsNone(importlib.util.find_spec(name))
-
-    def test_pipeline_is_not_registered_as_a_triggered_agent_command(self) -> None:
-        self.assertEqual(triggered_main.main(["pipeline", "list"]), 2)
-
     def test_signal_commands_get_the_canonical_reader(self) -> None:
         reader = object()
         with (

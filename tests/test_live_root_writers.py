@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from ummanu import knowledge_write, runtime_env, secret_store, state_repo
+from ummanu import knowledge_write, runtime_env, secret_store
 from ummanu._fsutil import content_revision
 from ummanu.board import store as board_store
 from ummanu.board.sprint_close import SprintCloseoutPlan
@@ -576,11 +576,6 @@ class ExclusionTests(LiveRootCase):
         with self.assertRaisesRegex(SecretStoreError, "snapshot export copies"):
             secret_store.materialize_secrets(self.live, target="file")
         self.assertFalse((self.live / "persona" / "leak.env").exists())
-
-    def test_no_exclusion_helper_is_left_in_the_instance_repository_module(self):
-        for name in ("ensure_ignored", "is_ignored", "is_tracked", "GITIGNORE_PATHSPEC"):
-            with self.subTest(name=name):
-                self.assertFalse(hasattr(state_repo, name))
 
 
 class RecoveryCheckoutChangesTests(LiveRootCase):

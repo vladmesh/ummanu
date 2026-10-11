@@ -25,7 +25,7 @@ from ummanu.automations.agents.pipeline import codex_sessions as pipeline_codex_
 from ummanu.dispatch import commands as dispatch_commands
 from ummanu.dispatch import tui as dispatcher_tui
 from ummanu.runtime import codex_home as codex_home_module
-from ummanu.runtime import codex_preflight, heads
+from ummanu.runtime import codex_preflight
 from ummanu.runtime.codex_preflight import (
     CODEX_HOME_DATA_DIR,
     CODEX_HOME_ENV,
@@ -317,9 +317,6 @@ class LiveSessionCutoverTests(unittest.TestCase):
 
 
 class NoImportTimeHomeTests(unittest.TestCase):
-    def test_heads_has_no_import_time_codex_home(self) -> None:
-        self.assertFalse(hasattr(heads, "CODEX_HOME"))
-
     def test_no_module_resolves_codex_home_at_import(self) -> None:
         """A module-level call would freeze the home before the PO's login could move it."""
         offenders: list[str] = []

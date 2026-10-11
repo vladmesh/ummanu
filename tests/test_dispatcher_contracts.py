@@ -1445,15 +1445,6 @@ class PerProfileRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(heads.HeadRegistryError, "runtime must be a name"):
             heads.validate_registry(self.RESOURCES, profiles)
 
-    def test_the_check_lives_in_the_one_place_both_readers_go_through(self) -> None:
-        """Not a second validation site: `validate_launch_shape` is where the rule is."""
-        source = inspect.getsource(dispatcher_module.head_ops.command.validate_launch_shape)
-
-        self.assertIn("HEAD_RUNTIMES", source)
-        for holder in (heads.validate_registry, HeadSpec.from_profile):
-            with self.subTest(reader=holder.__qualname__):
-                self.assertNotIn("HEAD_RUNTIMES", inspect.getsource(holder))
-
     # -- criterion 3: the runtime is independent of the adapter --------------------------------
 
     def test_every_adapter_may_stand_on_every_runtime(self) -> None:

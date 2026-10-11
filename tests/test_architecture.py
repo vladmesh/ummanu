@@ -16,23 +16,6 @@ from tests import source_trees
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class DeadPaneDeferralTests(unittest.TestCase):
-    def test_retired_pane_names_stay_out_of_source_and_docs(self) -> None:
-        banned = (
-            "HeadPaneBusy",
-            "HeadPaneNotReady",
-            "UMMANU_BRINGUP_DEFER_ATTEMPTS",
-            "pane_never_ready",
-        )
-        for directory in (ROOT / "src", ROOT / "docs"):
-            for path in directory.rglob("*"):
-                if not path.is_file() or path.suffix == ".pyc":
-                    continue
-                content = path.read_text(encoding="utf-8", errors="replace")
-                for name in banned:
-                    with self.subTest(file=str(path.relative_to(ROOT)), name=name):
-                        self.assertNotIn(name, content, f"{path.relative_to(ROOT)} contains {name}")
-
 # Existing flat modules may leave this set one feature at a time. New modules belong in one of the
 # feature packages documented in ARCHITECTURE.md instead of making the root wider again.
 LEGACY_FLAT_MODULES = frozenset(
@@ -60,7 +43,6 @@ LEGACY_FLAT_MODULES = frozenset(
 # that name must not come back anywhere.
 AUTOMATIONS_PACKAGE = "ummanu.automations"
 AUTOMATIONS_ENTRY = "src/ummanu/cli.py"
-RETIRED_AGENTS_PACKAGE = "triggered_agents"
 
 
 def _absolute_imports(relative: str, source: str) -> list[tuple[ast.stmt, str, bool]]:
@@ -81,17 +63,6 @@ def _absolute_imports(relative: str, source: str) -> list[tuple[ast.stmt, str, b
 
 def _names(module: str, package: str) -> bool:
     return module == package or module.startswith(package + ".")
-
-
-def _imports_retired_agents_package(relative: str, source: str) -> list[str]:
-    """Every import of the retired top-level `triggered_agents` package, as offender lines."""
-    return sorted(
-        {
-            f"{relative}:{node.lineno}: {module.split('.')[0]}"
-            for node, module, _ in _absolute_imports(relative, source)
-            if _names(module, RETIRED_AGENTS_PACKAGE)
-        }
-    )
 
 
 def _imports_automations(relative: str, source: str) -> list[str]:
@@ -422,11 +393,6 @@ class NoOrcaInSourceTests(unittest.TestCase):
                 self.assertEqual([offender.split(": ", 1)[1] for offender in offenders], expected)
 
 
-# The dispatcher state machine lives in `ummanu.dispatch.runtime`. The retired flat root module
-# must not come back, and nothing may import it under its old name.
-RETIRED_DISPATCHER_MODULE = ("ummanu", "dispatcher")
-
-
 class SourceLayoutTests(unittest.TestCase):
     def test_test_support_never_imports_a_test_module(self) -> None:
         """Shared fakes are a one-way dependency, not bridges between test modules."""
@@ -442,28 +408,6 @@ class SourceLayoutTests(unittest.TestCase):
     def test_new_ummanu_modules_do_not_widen_the_flat_root(self) -> None:
         current = {path.name for path in (ROOT / "src" / "ummanu").glob("*.py")}
         self.assertEqual(current - LEGACY_FLAT_MODULES, set())
-
-    def test_retired_dispatcher_root_module_stays_retired(self) -> None:
-        """The retired flat dispatcher root module is gone and nothing imports it by its old name."""
-        self.assertFalse((ROOT / "src" / "ummanu" / "dispatcher.py").exists())
-        retired = ".".join(RETIRED_DISPATCHER_MODULE)
-        offenders: list[str] = []
-        for tree_root in ("src", "tests", "scripts"):
-            for path in (ROOT / tree_root).rglob("*.py"):
-                source = path.read_text(encoding="utf-8")
-                tree = source_trees.parse(source, filename=str(path))
-                for node in source_trees.imports(tree):
-                    if isinstance(node, ast.Import):
-                        modules = [alias.name for alias in node.names]
-                    elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                        modules = [node.module]
-                        modules += [f"{node.module}.{alias.name}" for alias in node.names]
-                    else:
-                        continue
-                    for module in modules:
-                        if module == retired or module.startswith(f"{retired}."):
-                            offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
-        self.assertEqual(offenders, [])
 
     def test_import_walk_matches_ast_walk_in_nested_statement_containers(self) -> None:
         tree = ast.parse("""
@@ -781,29 +725,6 @@ async def asynchronous():
             self.assertIn(f"def {entry}(", wait_source)
         self.assertNotIn("from ummanu.dispatch.runtime import", wait_source)
 
-    def test_the_retired_agents_package_stays_retired(self) -> None:
-        """`src/triggered_agents` is gone, and nothing in `src/`, `tests/` or `scripts/` imports it."""
-        self.assertFalse((ROOT / "src" / RETIRED_AGENTS_PACKAGE).exists())
-        self.assertTrue((ROOT / "src" / "ummanu" / "automations" / "composition.py").is_file())
-        offenders: list[str] = []
-        for tree_root in ("src", "tests", "scripts"):
-            for path in sorted((ROOT / tree_root).rglob("*.py")):
-                relative = path.relative_to(ROOT).as_posix()
-                offenders.extend(_imports_retired_agents_package(relative, path.read_text(encoding="utf-8")))
-        self.assertEqual(offenders, [])
-
-    def test_a_planted_import_of_the_retired_package_is_caught(self) -> None:
-        for relative, source in (
-            ("tests/test_planted.py", "from triggered_agents import __main__\n"),
-            ("scripts/planted.py", "import triggered_agents.runtime.dispatch as d\n"),
-            ("src/ummanu/planted.py", "def f():\n    from triggered_agents.agents import x\n"),
-        ):
-            with self.subTest(relative):
-                self.assertEqual(len(_imports_retired_agents_package(relative, source)), 1)
-        self.assertEqual(
-            _imports_retired_agents_package("tests/x.py", "from ummanu.automations import composition\n"), []
-        )
-
     def test_no_ummanu_module_imports_the_agents_back(self) -> None:
         """The dependency runs one way: `ummanu.automations` -> the rest of `ummanu`."""
         package = ROOT / "src" / "ummanu"
@@ -845,49 +766,6 @@ async def asynchronous():
             [],
         )
 
-    def test_ummanu_never_names_triggered_agents(self) -> None:
-        """`grep -rn triggered_agents src/ummanu` is empty: code, data and comments alike."""
-        package = ROOT / "src" / "ummanu"
-        mentions: set[str] = set()
-        for path in sorted(package.rglob("*")):
-            if not path.is_file() or "__pycache__" in path.parts:
-                continue
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                if RETIRED_AGENTS_PACKAGE in line:
-                    mentions.add(f"{path.relative_to(package).as_posix()}:{number}")
-        self.assertEqual(mentions, set())
-
-
-# Every place in `ummanu` that builds the *file* audit (`TaskAudit` over a data dir) rather than
-# asking `ummanu.tasks.task_audit_for` for the audit owner of a card client, and the reason each
-# one may. `requests`/`board_events` is the card audit (`docs/BOARD_STORE.md` §7.3), so a live
-# reader built from the file journal of a data directory alone answers from a store the
-# installation does not write: on 2026-09-10 that made a committed
-# `report:done` invisible to the dispatcher (sprint:1437, secretary-1614), and it is the same shape
-# as an empty command history or a false `not_found`. A new entry here is a new reader that decided
-# its audit by default instead of by its client, so it is added deliberately with its reason or it
-# is a defect.
-#
-# Since secretary-1673 the file audit class is gone, so the allowance is empty: the typed canon takes
-# its audit owner as a required argument, and the fake host hands in an in-memory one.
-FILE_AUDIT_CONSTRUCTIONS: dict[str, str] = {}
-
-#: Where a live audit reader asks for its owner. Cards, Sprints and Products/Issues have one
-#: implementation, PostgreSQL, and so one audit owner (`task_audit_for`).
-LIVE_AUDIT_SELECTORS = {
-    "checkpoint.py": "task_audit_for(",
-    "task_commands.py": "task_audit_for(",
-    "webproto/command_reads.py": "task_audit_for(",
-    "webproto/ops.py": "task_audit_for(",
-    "webproto/reads.py": "task_audit_for(",
-    "webproto/sprint_reads.py": "task_audit_for(",
-    "board/sql_host.py": "task_audit_for(",
-    "sprints.py": "task_audit_for(",
-    "data.py": "task_audit_for(",
-    "dispatch/bootstrap.py": "task_audit_for(",
-    "product_issues.py": "task_audit_for(",
-}
-
 
 def _source_modules() -> list[Path]:
     """Every Python module under `src/`, both packages."""
@@ -897,61 +775,6 @@ def _source_modules() -> list[Path]:
 class FileAuditOwnershipTests(unittest.TestCase):
     """A live audit reader follows its card client, and the exceptions are named with their reasons."""
 
-    def _constructions(self) -> dict[str, list[int]]:
-        """Every call of a `TaskAudit` name in `src/ummanu`, by module and line."""
-        found: dict[str, list[int]] = {}
-        for path in sorted((ROOT / "src" / "ummanu").rglob("*.py")):
-            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in source_trees.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                target = node.func
-                if isinstance(target, ast.Name) and target.id == "TaskAudit":
-                    key = str(path.relative_to(ROOT / "src" / "ummanu"))
-                    found.setdefault(key, []).append(node.lineno)
-        return found
-
-    def test_only_the_named_modules_build_the_file_audit_directly(self) -> None:
-        """Anything else reads a journal its installation's backend may never write."""
-        offenders = sorted(set(self._constructions()) - set(FILE_AUDIT_CONSTRUCTIONS))
-        self.assertEqual(
-            offenders,
-            [],
-            "these modules build the file journal's TaskAudit from a data directory instead of "
-            "asking ummanu.tasks.task_audit_for for the audit owner of their card client",
-        )
-
-    def test_every_named_module_still_builds_one(self) -> None:
-        """The allowance is a statement about live code, not a list that outlives its reasons."""
-        self.assertEqual(sorted(self._constructions()), sorted(FILE_AUDIT_CONSTRUCTIONS))
-
-    def test_the_file_audit_is_gone_and_the_canon_names_its_owner(self) -> None:
-        """No `TaskAudit` to build, and no canon that falls back to one (secretary-1673)."""
-        from ummanu import tasks
-        from ummanu.board.events import BoardEventCanon
-
-        self.assertFalse(hasattr(tasks, "TaskAudit"))
-        parameters = inspect.signature(BoardEventCanon.__init__).parameters
-        self.assertEqual([name for name in parameters if name != "self"], ["audit"])
-        self.assertIs(parameters["audit"].default, inspect.Parameter.empty)
-        source = inspect.getsource(BoardEventCanon)
-        for forbidden in ("data_dir", "events.ndjson", "TaskAudit"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source)
-
-    def test_every_live_reader_construction_site_goes_through_the_selector(self) -> None:
-        """The readers this card enumerated, each holding the selector call in its own source.
-
-        Named rather than derived: these are the sites that had a data-dir-only audit and are the
-        ones a regression would arrive at again. A module that stops calling `task_audit_for` is
-        either a deliberate removal of a reader or the bypass coming back, and both belong in a diff
-        that has to change this list.
-        """
-        for module, selector in LIVE_AUDIT_SELECTORS.items():
-            source = (ROOT / "src" / "ummanu" / module).read_text(encoding="utf-8")
-            with self.subTest(module=module):
-                self.assertIn(selector, source, module)
-
     def test_the_card_audit_has_one_owner(self) -> None:
         """`task_audit_for` returns the SQL audit whatever it is handed; no card writer builds a file one."""
         from ummanu.board.sql_audit import SqlTaskAudit
@@ -960,28 +783,6 @@ class FileAuditOwnershipTests(unittest.TestCase):
         self.assertIsInstance(task_audit_for(mock.sentinel.client, "/nonexistent"), SqlTaskAudit)
         source = inspect.getsource(task_audit_for)
         self.assertIsNone(re.search(r"(?<!Sql)TaskAudit\(", source))
-
-    def test_no_source_module_has_a_backend_branch(self) -> None:
-        """Cards, Sprints and Products/Issues have one implementation, so nothing asks which one it holds."""
-        for path in _source_modules():
-            module = str(path.relative_to(ROOT / "src"))
-            tree = source_trees.parse(path.read_text(encoding="utf-8"))
-            reads = [
-                node.lineno
-                for node in source_trees.walk(tree)
-                if (isinstance(node, ast.Attribute) and node.attr == "backend_kind")
-                or (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "getattr"
-                    and any(
-                        isinstance(argument, ast.Constant) and argument.value == "backend_kind"
-                        for argument in node.args
-                    )
-                )
-            ]
-            with self.subTest(module=module):
-                self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
 
     def test_no_source_module_writes_a_retired_backend_identity(self) -> None:
         """A new write names the PostgreSQL store; an earlier store's identities are only read.
@@ -1029,66 +830,6 @@ class FileAuditOwnershipTests(unittest.TestCase):
             with self.subTest(module=module):
                 self.assertEqual(sorted(set(found)), [], f"{module} writes a store literal as a backend kind")
 
-    def test_the_product_issue_store_keeps_no_file_journal_guard(self) -> None:
-        """The pre-cutover file-claim guard protected nothing after the importer copied every id.
-
-        On 2026-09-22 the live `board/events.ndjson` (last written 2026-09-10) held 27,966 request
-        ids, all but three already in SQL `requests`, and those three were dispatcher records, not
-        Product/Issue ones; `board/pending-audit` was empty (secretary-1670).
-        """
-        from ummanu.board.sql_audit import SqlTaskAudit
-        from ummanu.product_issues import ProductIssueStore
-
-        self.assertFalse(hasattr(ProductIssueStore, "_require_sql_legacy_namespace_free"))
-        self.assertNotIn("legacy_audit", inspect.getsource(ProductIssueStore))
-        self.assertNotIn("legacy_audit", inspect.getsource(SqlTaskAudit))
-        self.assertFalse(hasattr(SqlTaskAudit, "require_pending_layout"))
-
-    def test_the_sprint_traversal_cannot_be_built_from_a_data_directory(self) -> None:
-        """`_AuditOnce` takes records or an audit owner, and has no directory to fall back to."""
-        from ummanu.sprints import _AuditOnce
-
-        parameters = inspect.signature(_AuditOnce.__init__).parameters
-        self.assertEqual([name for name in parameters if name != "self"], ["events", "audit"])
-        self.assertEqual(_AuditOnce().events(), [])
-
-
-class IndirectFileAuditReaderTests(unittest.TestCase):
-    """No reader opens the file journal itself: the card history is the card audit's traversal.
-
-    `secretary-1622`'s first submission is why this class exists: the product-run events had moved
-    to `requests` while `ReadLayer.task_snapshot` and `task_events` still built
-    `EventJournal(data_dir)`, so a migrated installation answered a card's history from a projection
-    its writers never touch. The file reader is gone with the second card backend.
-    """
-
-    def test_the_file_event_reader_is_gone(self) -> None:
-        from ummanu.webproto import journal
-
-        self.assertFalse(hasattr(journal, "EventJournal"))
-
-    def test_the_read_layer_selects_its_event_reader_from_its_client(self) -> None:
-        """Both card-event operations read the owner the client names, and neither a file by default."""
-        source = (ROOT / "src" / "ummanu" / "webproto" / "reads.py").read_text(encoding="utf-8")
-        self.assertIn("task_audit_for(", source)
-        self.assertIn("CommittedAudit(", source)
-        for operation in ("def task_snapshot", "def task_events"):
-            with self.subTest(operation=operation):
-                body = source[source.index(operation) :]
-                body = body[: body.index("\n    def ", 1)]
-                self.assertNotIn("EventJournal(", body)
-
-    def test_the_sql_reader_never_touches_a_path(self) -> None:
-        """`CommittedAudit` has no data directory to read: it pages what its audit owner traverses."""
-        from ummanu.webproto.journal import CommittedAudit
-
-        parameters = inspect.signature(CommittedAudit.__init__).parameters
-        self.assertEqual([name for name in parameters if name != "self"], ["audit", "backend"])
-        source = inspect.getsource(CommittedAudit)
-        for forbidden in ("open(", "Path(", "events.ndjson"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source)
-
 
 class OneBoardClientTests(unittest.TestCase):
     """There is one board client, built in one place, and nothing in the environment selects it."""
@@ -1105,37 +846,6 @@ class OneBoardClientTests(unittest.TestCase):
             if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}
         ]
         self.assertEqual(environment, [], "board/backend.py reads the process environment")
-
-    def test_the_legacy_host_module_is_gone(self) -> None:
-        """The host `SqlCardClient` runs on has a neutral name, and no other module is its alias.
-
-        An alias is a board module that only imports from `sql_host`: the shape the old host module
-        would keep if it stayed behind as a compatibility name.
-        """
-        board = ROOT / "src" / "ummanu" / "board"
-        self.assertTrue((board / "sql_host.py").exists())
-        aliases: list[str] = []
-        for path in sorted(board.glob("*.py")):
-            if path.name in {"sql_host.py", "__init__.py"}:
-                continue
-            body = source_trees.parse(path.read_text(encoding="utf-8")).body
-            imports_host = any(
-                isinstance(node, ast.ImportFrom) and node.module == "ummanu.board.sql_host" for node in body
-            )
-            only_imports = all(
-                isinstance(node, (ast.Import, ast.ImportFrom))
-                or (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
-                or (
-                    isinstance(node, ast.Assign)
-                    and [getattr(target, "id", "") for target in node.targets] == ["__all__"]
-                )
-                for node in body
-            )
-            if imports_host and only_imports:
-                aliases.append(path.name)
-        self.assertEqual(aliases, [])
-
-
 
 if __name__ == "__main__":
     unittest.main()

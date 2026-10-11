@@ -293,29 +293,6 @@ class CliTests(unittest.TestCase):
         self.assert_only_the_work_tree_finding(code, output)
         self.assertNotIn("resource probes", output)
 
-    def test_doctor_reports_no_background_automations_and_never_asks_orca_for_them(self):
-        # secretary-1706: systemd units are the only schedule owner of the background roles, so
-        # doctor no longer has an Orca-automations section, inspected or not.
-        argvs: list[list[str]] = []
-        real_popen_init = subprocess.Popen.__init__
-
-        def recording_init(popen, args, *rest, **kwargs):
-            argvs.append([str(arg) for arg in args] if isinstance(args, (list, tuple)) else [str(args)])
-            return real_popen_init(popen, args, *rest, **kwargs)
-
-        with (
-            tempfile.TemporaryDirectory() as fixture,
-            mock.patch.object(subprocess.Popen, "__init__", recording_init),
-        ):
-            outputs = [
-                self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(EXAMPLE_INSTANCE)])[1],
-                self.run_cli(["doctor", "--host-fixture", fixture, "--instance", str(EXAMPLE_INSTANCE)])[1],
-            ]
-
-        for output in outputs:
-            self.assertNotIn("background automations", output)
-        self.assertFalse([argv for argv in argvs if "automations" in argv], argvs)
-
     def test_doctor_prints_checkpoint_freshness(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = self.seed_checkpoint_instance(

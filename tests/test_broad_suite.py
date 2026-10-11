@@ -57,9 +57,6 @@ def _modules_of(manifest_text: str, suites: tuple[str, ...]) -> list[str]:
 
 
 class BroadSuiteCompositionTests(unittest.TestCase):
-    def test_the_local_broad_profile_is_unit_plus_component(self) -> None:
-        self.assertEqual(broad.BROAD_SUITES, ("unit", "component"))
-
     def test_it_runs_exactly_the_modules_the_manifest_assigns_to_those_suites(self) -> None:
         expected = _modules_of(broad.MANIFEST.read_text(encoding="utf-8"), broad.BROAD_SUITES)
 

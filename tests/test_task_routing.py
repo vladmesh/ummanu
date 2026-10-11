@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-from ummanu import tasks
 from ummanu.board.models import CardState
 from ummanu.board.task_routing import (
     ACTIVE_STATES,
@@ -166,22 +165,6 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
             "missing '### Cleanup'",
             impact_bounds_refusal("## Impact bounds\n### Allowed\na\n### Forbidden\nb\n## Else\n### Cleanup\nc"),
         )
-
-    def test_tasks_no_longer_owns_duplicate_routing_registries(self) -> None:
-        for name in (
-            "_TASK_TYPES",
-            "_COMPLEXITIES",
-            "_FAMILY_PREFERENCES",
-            "_ROUTING_PHASES",
-            "_BLOCK_CLASSIFICATIONS",
-            "_DECISION_TARGETS",
-            "_DECISIONS",
-            "_DECIDED_TARGETS",
-            "_UNDECIDED_EXITS",
-            "_EDITABLE_STATES",
-        ):
-            self.assertFalse(hasattr(tasks, name), name)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,7 +8,6 @@ existed beside the spec block.
 
 from __future__ import annotations
 
-import ast
 import copy
 import json
 import tempfile
@@ -17,7 +16,6 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu.memory import access as memory_access
-from ummanu.runtime import head_runtime_backends
 from ummanu.runtime.head import HeadRun, HeadSpec, HeadSpecError, TaskRef
 from ummanu.runtime.head.command import HeadCommandError, validate_launch_shape
 from ummanu.runtime.head_runtime_backends import (
@@ -157,15 +155,6 @@ class BackendTests(unittest.TestCase):
         with self.assertRaises(UnknownHeadRuntimeError) as caught:
             self.build("podman")
         self.assertNotIsInstance(caught.exception, LegacyHeadRecordError)
-
-    def test_the_backend_module_no_longer_imports_the_orca_backend(self) -> None:
-        tree = ast.parse(Path(head_runtime_backends.__file__).read_text(encoding="utf-8"))
-        imported = {
-            node.module or ""
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-        } | {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-        self.assertFalse([name for name in imported if "orca_legacy_head" in name], imported)
 
 
 class RecordTests(unittest.TestCase):

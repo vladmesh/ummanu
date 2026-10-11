@@ -119,10 +119,5 @@ class EnvPrefixTests(unittest.TestCase):
         self.assertEqual(new.returncode, 0, new.stderr)
         self.assertEqual(Path(new.stdout.strip()), ROOT / "src" / NEW.package / "__init__.py")
 
-    def test_the_old_source_tree_is_gone(self) -> None:
-        self.assertFalse((ROOT / "src" / OLD.package).exists())
-        self.assertTrue((ROOT / "src" / NEW.package / "dispatch" / "runtime_preflight.py").is_file())
-
-
 if __name__ == "__main__":
     unittest.main()

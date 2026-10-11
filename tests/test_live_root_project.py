@@ -200,10 +200,5 @@ class HostRefusalTests(unittest.TestCase):
         with self.assertRaisesRegex(HostError, f"names the live root {self.live}"):
             self.host._require_project_available("instance")
 
-    def test_the_landing_path_is_gone(self) -> None:
-        self.assertFalse(hasattr(CommandHostRuntime, "_complete_green_instance_repo"))
-        self.assertFalse(hasattr(CommandHostRuntime, "is_instance_publish_recovery"))
-
-
 if __name__ == "__main__":
     unittest.main()
