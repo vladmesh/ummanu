@@ -580,9 +580,6 @@ class CardStoreClient(SqlCardClient):
                 (_epoch(moved) if moved is not None else None, int(key)),
             )
 
-    def close_card(self, key: int) -> None:
-        self._arrange("closeTask", task_id=key)
-
     def comments(self, key: int) -> list[dict[str, Any]]:
         return list(self._arrange("getAllComments", task_id=key))
 
