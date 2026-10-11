@@ -2,7 +2,65 @@
 
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
-## Статус на 2026-10-08 (main `488b2818704e4bc0d42910fab20f3829bb804dc5`)
+## Статус на 2026-10-11 (main `b612ad3a564a03986502f8ef4c9b4e61b669b13d`, #718)
+
+Аудит прочитан целиком и сверен с main после sprint:1488. Ветка #668 подтянула этот main
+обычным merge; сам PR остаётся открытым и не предназначен для мержа. Предыдущая сверка
+`488b2818` / #695 сохранена ниже как история. Ссылки без иной ревизии в новых дополнениях
+относятся к `b612ad3a`; исходные размеры, line ranges и production-наблюдения не пересняты.
+§12 сохранён побайтно. ✅ закрывает только названное обязательство, ◐ оставляет явный остаток.
+
+Сверены исходники, определения тестов, diff #696–#718, отчёты ummanu-220/221 и board.
+Тесты, `ummanu check` и workflow вручную не запускались. Замеры ниже взяты из уже
+сохранённых артефактов с указанием их дерева; они не аттестуют новый head этого audit PR.
+
+### Матрица новой сверки
+
+| Пункт | Статус на новом main | Доказательство / остаток |
+|---|---|---|
+| INEF-01/07, лишняя публикация no-effect cleanup retry | ◐; ✅ это конкретное обязательство | [#696](https://github.com/vladmesh/ummanu/pull/696), merge `3e4d3ab4`, fix `092e5392`: `dispatch/cleanup.py:2502` публикует `heads_stopped` с исходом, а `:2515` сохраняет обязательную запись до Git/workspace effects. Регрессии в `test_bounded_cleanup_replay.py`. Git identity перед cache hit (`cleanup.py:1493`) и безусловная запись state (`runtime.py:947`) остаются |
+| INEF-01/07/13, атрибуция остаточных затрат | ✅ инструмент, не сами неэффективности | [#699](https://github.com/vladmesh/ummanu/pull/699), `b5595d6c`, и [#700](https://github.com/vladmesh/ummanu/pull/700), `d915334c`: `tick_telemetry.py:98/109/141` считает exclusive stages и unclassified remainder; `production.py:177`, `cleanup.py:1493`, `release_lifecycle.py:267` ставят их на реальные участки. Production latency этой сверкой не измерялась |
+| Cleanup ownership после замены attempt | ✅ отдельная safety-поставка; общие INEF-01/07 не закрыты | [#703](https://github.com/vladmesh/ummanu/pull/703), `963fbd58`: `cleanup.py:2052` не трогает claim преемника, `:2492` подтверждает остановку старых runs под повторным admission, `:2541` делает handoff терминальным. `test_owned_cleanup.py` содержит сценарии замены attempt |
+| BUG-15/17/18/19, CON-03/04/06/17/18, INEF-03 | Открыты | `wait_vitality.py:1077` передаёт previous provider cursor без run guard, `:633` отбрасывает intent; `observer.py:2170` не присваивает reason; `gate_lifecycle.py:866` возвращает старый episode; `pause_ops.py:453` пропускает worker; `production.py:1115` ограждает только status=blocked, `claim.py:627` ищет unsuffixed IDs. Телеметрия эти правила не исправила |
+| BUG-12 / DUP-C4 | Открыты | `tasks.py:1906` пишет record_type/production marker обычного create; `:5951` в repair-helper этих полей для operation не добавляет. SQL read default для record_type не возвращает touches_production. Историческое отсутствие repair в §12 не закрывает расхождение |
+| TEST-01/02, TDUP/TORG, BUG-22 | ◐; закрыт конкретный local-profile scope sprint:1488 | [#712](https://github.com/vladmesh/ummanu/pull/712), `38f1a7c2`: process-проверки вынесены в `test_broad_check_process.py`, владельцы в `ci-shards.txt` сохранены; `tests/broad.py:22/67` берёт только unit+component. Финальный main имеет полный зелёный замер ≤100 с (ниже). Общая декомпозиция `test_dispatcher.py`, root-only/timing и повторы не выполнены; качество тестов и AST reuse вынесены в §6.4, без второго списка |
+| Видимость стоимости тестов | ✅ timing-часть существующего issue:e515244ce9d2e3417b1e | [#708](https://github.com/vladmesh/ummanu/pull/708), `190bd745`: `projects/test_timing.py:142/249`, `tests/broad.py:106`, `scripts/ci_test_shards.py:421/424` сохраняют native timing; локально >5 с/test предупреждает, CI unit/component >5 с/test или >90 с/module отказывает. Запрет лишних тестов в prompts остаётся открытым (§6.4) |
+| Полная квитанция перед code report:done; reviewer без прогонов | ✅ согласованный scope sprint:1488 | [#713](https://github.com/vladmesh/ummanu/pull/713), `d8e86b94`: `tasks.py:2234`, `check_commands.py:42/89/101` проверяют complete green receipt на committed tree, `runtime/test_guard.py:43/110` отказывает reviewer. [#704](https://github.com/vladmesh/ummanu/pull/704), `c42b02b7`, и [#705](https://github.com/vladmesh/ummanu/pull/705), `e29a0467`, ограничивают local selectors/прямые runners. Это не закрытие всех старых gate/flake issues; docs-проекты с doctest имеют отдельный issue:db00f10a6b16e2ab5b1f |
+| CI-01 | Исходные ✅ #674/#678 сохранены; новый selective-CI scope поставлен, выигрыш для code PR открыт | [#714](https://github.com/vladmesh/ummanu/pull/714), `af07e5c2`, #715/#717/#718: `ci_selection.py:208/259`, `ci.yml:59` выбирают affected или docs-only; main всегда full. Реальная выборка PR717 и новые CI-рычаги только в §8.4 / issue:7ba9a9f32675119f8149 |
+| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | Открыты / прежний частичный статус ARCH-01 | Доменные импорты config, TaskError в tasks и барель board проверены; новый граф дополняет ARCH-04 (§4.1). Новые leaf modules не закрывают структурные разрезы. Рефакторинг ради CI не рекомендован |
+| BUG-04/05/24, CON-02/05/07/08/10–15, DOC-08/10/15, DEAD-* и прочие остатки | Без нового полного закрытия | В diff к main нет реализации прежних структурных/compatibility scopes; DOC-08 всё ещё имеет исходную фразу в `packaging/memory/product-ummanu/sprints-and-reservations.md:9`. Поддержку legacy API не снимать по отсутствию вызова. Новая capacity-находка только ссылкой на board (§7, CON-19) |
+
+Другие поставки учтены без выдуманных закрытий ID: #698 (`ed9fd528`) исправляет исполнение
+standing memory-bound shell wrapper; #706/#710 (`5b9188e3`/`4fd962cd`) сохраняют
+round-bound blocker dispositions и GREEN predecessor в review packets
+(`dispatch/review_packet.py`, `state.py:888`); #701/#709/#711 улучшают AST traversal,
+journal fixtures и их CI ownership. Эти changes не равны выполнению всего slot 5/16.
+
+### Сохранённое evidence sprint:1488
+
+Sprint закрыт 2026-10-11. `ummanu sprint show --ref sprint:1488` и completion ummanu-214
+дают финальный main `b612ad3a`, tree `127d19a04089cd77c4d22b03c5f106d177c9245d`:
+142 модуля unit+component, 2 681 тест, 2 skips, complete/passed/exit 0,
+96,648 с wrapper и 93,693 с native runner, sequential, 1-min load 1,01–1,51.
+Прочитан файл `po/upgrade-report/ummanu-214/receipt-broad-62f6379358523d0b.json`;
+его SHA-256 `d97187448fca8162f7fbdb33c7cc316a55a6a44eb18433015c196f1649147e8e`,
+receipt_digest `371e27d2f9c1725729705b5a5e9b3a3c665046f8ac6833b6b716082b22739d95`.
+Это сохранённый operator measurement, не новый локальный прогон аудитора.
+`docs/TESTING.md:299` / [#718](https://github.com/vladmesh/ummanu/pull/718) отдельно
+публикует датированный замер ummanu-212 (95,692 с на `2aab7040`); числа относятся к разным деревьям.
+
+[Полный post-merge CI 38101574608](https://github.com/vladmesh/ummanu/actions/runs/38101574608)
+на `b612ad3a`: success, все девять владельцев; closeout спринта фиксирует
+8 000 collected, 7 989 passed, 11 skips, 0 errors. Production activation подтверждена
+чужими сохранёнными артефактами ummanu-214/closeout; новый live acceptance здесь не выполнялся.
+
+Текущая очередь определяется board, а не арифметикой PR из плана §10 от 8 октября.
+Поведенческие остатки slot 5 сохраняют приоритет. Структурные разрезы §5/§10 остаются
+кандидатами, с поправкой ummanu-220 (§4.1); отдельный рефакторинговый спринт ради CI не нужен.
+Новая работа по тестам маршрутизирована в существующий issue (§6.4), по CI в §8.4.
+Ни одна из исследовательских нарезок этой актуализацией не поставлена и не создана на board.
+
+## Историческая сверка на 2026-10-08 (main `488b2818704e4bc0d42910fab20f3829bb804dc5`)
 
 Сверка выполнена по исходникам и тестам текущего main, а не по названиям PR. Девять PR
 #684–#692 действительно влиты. Во время проверки main уже включал #693–#695; они тоже
@@ -441,7 +499,7 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | ARCH-01 ◐ | P1 | весь `src/` | ◐ #675/#676: `runtime`, `web`, `webproto` сжаты (−349 тыс. символов, проза `src` 23,3 %); `local_pty_head.py` теперь 33 %, `webproto/lifecycle.py` — см. §2.1. Остальные файлы из списка не тронуты. Исходно: комментарии и docstring — 26,7 % символов. Худшие файлы: `local_pty_head.py` 52 %, `head_vitality_policy.py` 56 %, `head_vitality_guard.py` 52 %, `head_health.py` 51 %, `webproto/lifecycle.py` 57 %, `dispatch/types.py` 70 %, `projects/contract.py` 54 %. Ссылки на карточки и инциденты: 74 в зоне dispatch A, 51 в ядре задач, 71 в web | −450…650 тыс. символов в `src` | нулевой для runtime; тесты, которые ищут текст в исходниках, — см. §10 | M–L, механически, по файлам | Ф/О |
 | ARCH-02 | P1 | `tasks.py` | 51 импорт приватных имён `ummanu.tasks` из других модулей (`sprints.py:89-101`, `product_issues.py:19-28`, `task_restore.py` — 14 имён, `board/sql_host.py:45-55`) | `tasks.py` стал библиотекой утилит: любому потребителю `_text`/`_digest` приходится открывать 286 тыс. символов | S | S | Ф |
 | ARCH-03 | P2 | весь `src/` | 336 функционально-локальных импортов. `task_restore.py`: 23 из 24 не нужны — `import ummanu.tasks` не загружает `task_restore` (проверено по `sys.modules`). В `po_cards.py:158-236` 6 локальных импортов модулей, уже импортированных в шапке (`:90-92`). Повторные локальные импорты в `host.py:1827,2422,3027,3845`, `local_pty_head.py:3320,3372` (на `8e79450`: `:2638,2690`), `po/service.py:901` | Шум и ложные сигналы «здесь цикл» | S (каждый проверять тестом импорта) | S | Ф |
-| ARCH-04 | P2 | `board` | `board` импортирует `tasks`/`sprints`/`product_issues` (`sql_host.py:45-55`; `done_retention.py:9`, `steward_reports.py:8`, `reference_repair.py:15`, `normalized_checkpoint.py:10`). Ещё 14 локальных `from ummanu.tasks import TaskError` | Инверсия слоёв, циклы | S: перенести `TaskError` (`tasks.py:159`, 8 строк) в `board/errors.py` и реэкспортировать | S | Ф |
+| ARCH-04 | P2 | `board` | `board` импортирует `tasks`/`sprints`/`product_issues` (`sql_host.py:45-55`; `done_retention.py:9`, `steward_reports.py:8`, `reference_repair.py:15`, `normalized_checkpoint.py:10`). Ещё 14 локальных `from ummanu.tasks import TaskError`. Новая сверка и граф: §4.1 | Инверсия слоёв, циклы; CI-выигрыш разреза не доказан | S: исходный перенос `TaskError`; актуальный шов ядра без обязательного barrel re-export в §4.1 | S | Ф |
 | ARCH-05 | P2 | `board` | Модули не в своём пакете: `owner_event_commands.py` (CLI), `done_retention.py`, `steward_reports.py` (их импортирует только `automations/composition.py`), `import_order.py` (импортирует только `task_restore.py`) | ≈14 тыс. символов лишнего контекста `board` | S | S | Ф |
 | ARCH-06 ◐ #678 (config/затронутые paths; без mass import rewrite) | P2 | `pyproject.toml` / ruff | Ruff isort без `combine-as-imports`: каждый `as`-импорт отдельным оператором. `host.py` — 123 строки, `runtime.py` — 107, `worker_launch.py` — 57; в зоне dispatch B 655 строк импортов | ≈−400…500 строк, чисто механически | нулевой | S | Ф/О |
 | ARCH-07 | P2 | `dispatch/runtime.py`, `host.py` | 31 «compatibility re-export» (`runtime.py:20-22,41-64,155-165`; `host.py:166-167`). AST-скан всех импортов и атрибутных обращений в src/tests/scripts не нашёл ни одного потребителя | ≈−45 строк, меньше ложных путей | нулевой | S | Ф |
@@ -455,10 +513,44 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | ARCH-15 | P2 | dispatch | 17 «утиных» проб `getattr(runtime.host, "...", None)` под тестовые фейки (`observer.py:1640,1859,2059,2778`, `worker_launch.py:284`, `host.py:439,1487,2210,2782` и др.). У реального host эти атрибуты есть всегда | Мёртвые fallback-ветки, неуверенность при чтении | M (фейки придётся дополнить) | M | Ф/Г |
 | ARCH-16 ✅ | P2 | web | ✅ #677: единая политика source-read spans; ниже исходная находка. Два противоположных правила перехвата ошибок источников: фиксированный кортеж `SOURCE_FAILURES` (`reads`, `sprint_reads`) и «span ловит всё» (`pause_reads`, `command_reads`). Следствие — BUG-07 | Нестабильная деградация дашборда | S | S | Ф |
 | ARCH-17 | P3 | `po/service.py` | `PoService.pump` держит `_lock` сервиса и `_lock` runner во время `spawn_head` (до 20 с + systemd-run), а `submit()` вызывает `pump()` прямо в своём потоке | Сериализация всех PO-операций | M | M | Ф/Г (влияние) |
-| CI-01 ✅ #678 | P1 | `.github/workflows/ci.yml` | Исходные проблемы закрыты #674/#678: pinned Ruff по изменённым paths, cache/concurrency, permissions, shared setup; unit без memory-extra, typecheck/lint в общем гейте | Исходный эффект: отсутствовал lint gate; лишние зависимости CI | S | S | Ф |
+| CI-01 ✅ #678; selective-CI остаток открыт | P1 | `.github/workflows/ci.yml` | Исходные проблемы закрыты #674/#678: pinned Ruff по изменённым paths, cache/concurrency, permissions, shared setup; unit без memory-extra, typecheck/lint в общем гейте. Поставка sprint:1488 и новые рычаги без дубля: §8.4 | Исходный эффект: отсутствовал lint gate; лишние зависимости CI; code-PR ускорение ещё не достигнуто | S | S | Ф |
 | TEST-01 | P1 | tests | `test_dispatcher.py`: 725 тыс. символов; `setUpModule:195` требует Docker для всех 27 классов, хотя 12 из них Postgres не используют (например, `DispatcherGateTests` — 86 тестов, только git) | Самый большой файл ≈181 тыс. токенов; лишний Docker-шард | S–M | M | Ф |
 | TEST-02 | P2 | tests | 38 копий `git(cwd,*args)` при готовом `tests/support/git.py:7`. 8 копий `_dead_pid` с двумя стратегиями. 7 копий `_alive`, 5 — `_kill`. 20 литералов `"version: 1\nname: test\n"`. 8 копий setUp диспетчера | ≈1 400 строк повторов | S | M | Ф |
 | DOC-01 | P1 | docs | `PROTOCOLS.md` 365 тыс., `OPERATIONS.md` 220 тыс. — монолиты. ≈90–100 тыс. символов закрытой истории. Разделы дописываются в конец файла вне структуры (`PROTOCOLS.md:4710-4964`, `BOARD_STORE.md:1297`, `OPERATIONS.md:3199`) | −30 % объёма docs; −80…95 % контекста на один вопрос | M (37 тестов читают текст docs; рантайм цитирует заголовки) | L | Ф/О |
+
+### 4.1 Дополнение ARCH-04: связность и шов слоя ядра (2026-10-11)
+
+Источник: [ummanu-220/report.md](https://github.com/vladmesh/ummanu-instance/blob/main/state/knowledge/reports/ummanu-220/report.md),
+[graph.json](https://github.com/vladmesh/ummanu-instance/blob/main/state/knowledge/reports/ummanu-220/graph.json),
+main `b612ad3a`. Это дополнение существующего ARCH-04 и его связи с DEC-01, не новая
+копия находки. Проверены `tasks.py:150` (TaskError), `config.py:29–30` (sprints/tasks),
+`board/sql_host.py:48–51` (cleanup/sprints/tasks), `sprints.py:61` (CleanupJournal),
+`board/__init__.py:70–128` (ленивый re-export SqlBoardHost и прочих верхних владельцев).
+
+Граф отчёта: 386 модулей продукта; крупнейшие SCC top-level импортов 24/15/10,
+с ленивыми импортами 160, со строковыми targets и package edges селектора 225.
+Последнее число не означает runtime import failure на 225 модулях: это цикл зависимостей
+в указанной статической модели. В graph.json поле `edges` содержит только прямые imports/lazy
+без package ancestors; оно не равно графу, на котором посчитано 225. Код селектора
+`scripts/ci_selection.py:139/175` действительно добавляет ancestors и строковые targets.
+
+По graph.json медиана замыкания теста составляет 277 модулей; 278 из 294 manifest-модулей имеют замыкание >200.
+Цепочка через board barrel проверяется непосредственно в коде, но часть связности предметная:
+`board/models.py` валидирует Event через terminal taxonomy, CLI/host служат roots композиции,
+а тесты с подпроцессом продукта по смыслу широкие. Перенос любого импортируемого символа
+в отдельный файл не делает такую зависимость лишней.
+
+Минимальный шов M дополняет прежнее предложение перенести TaskError: ошибки ядра,
+reference_lock/bulk_lane/CleanupJournal ниже board; config без доменных imports с вызовом
+валидаторов у callers; board без `__getattr__`/re-export; named architecture guard на границы.
+Это предложение, не поставка: модель даёт SCC 225 → 59, closure board.models 276 → 5,
+config 276 → 4; ориентир 2–3 карточки, а не массовый split всех больших файлов.
+
+Рефакторинг ради CI не окупается: лучший реалистичный сценарий отчёта даёт лишь −1,4 %
+job-секунд и не двигает критический путь. Выигрыш для ориентации/ревью правдоподобен,
+но корреляции 39 карточек не доказывают причинности; конфликтов всего два sync на 200 merge.
+Поэтому §5/§10 не являются новым согласованным рефакторинговым спринтом. CI-следствие
+и маршрутизация в issue:7ba9a9f32675119f8149 описаны только в §8.4.
 
 ## 5. Предложения по декомпозиции гигантских файлов, классов и функций
 
@@ -926,6 +1018,81 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | TDUP-04 | `Recording` (`web_fakes.py:10` ≡ `test_web_transport_dashboard.py:34`); `FakeHeadRuntime` (`test_web_run_protocol.py:126` ≈ `test_web_transport.py:132`); `open_sprint` (`test_tasks.py:64` ≡ `fakes/tasks.py:22`); `drop_cards` (`test_sprints.py:60` ≡ `fakes/sprints.py:45`); `board_injected` (`webproto_sprint_fixtures.py:127-142` ≈ `fakes/sprints.py:299-315`); setUp `test_checkpoint.py:104` ≡ `test_knowledge_write.py:48`; `fast_key_params` ×2; `stop_everything` ×2 | — | ≈200 строк |
 | TDUP-05 | Проза в тестах: docstring 762 тыс. + комментарии 338 тыс. (≈275 тыс. токенов); 3 357 ссылок на тикеты и даты; 126 docstring длиной ≥ 9 строк | Ограничить docstring теста формулировкой правила и одной ссылкой | −250…350 тыс. символов |
 | TORG-01 | Помощники лежат в трёх местах: 28 модулей в корне `tests/`, `tests/fakes/` (7), `tests/support/` (3) | Правило: инфраструктура → `support/`, двойники → `fakes/`; в корне только `test_*.py`, `__init__.py`, `broad.py` | контекст |
+| TDEAD-07 | Лишние и текстовые проверки; актуальная инвентаризация ниже | issue:e515244ce9d2e3417b1e; 204 строки ummanu-221 проверены по определениям в main, предложения ещё не реализованы | Меньше ложных падений и шума ревью |
+| TEST-03 | Неполный общий AST reuse между guard'ами; поправка к ummanu-221 ниже | Кэш #684 существует внутри test_architecture; другие scans его обходят, teardown сбрасывает его между модулями | Повторная стоимость parse/walk, а не отсутствие любого кэша |
+
+#### TDEAD-07: «левые» тесты, существующий issue и нарезка
+
+Источник: [ummanu-221/report.md](https://github.com/vladmesh/ummanu-instance/blob/main/state/knowledge/reports/ummanu-221/report.md),
+[tests.csv](https://github.com/vladmesh/ummanu-instance/blob/main/state/knowledge/reports/ummanu-221/tests.csv),
+[cards.tsv](https://github.com/vladmesh/ummanu-instance/blob/main/state/knowledge/reports/ummanu-221/cards.tsv).
+Весь backlog уже дополнен на board в issue:e515244ce9d2e3417b1e; здесь только итог и
+проверка кода, без переписывания issue. Отчёт заявляет 7 938 test functions в 298 файлах.
+Повторная статическая сверка `b612ad3a` даёт 294 top-level test-файла, все 294 есть в
+manifest, и 7 938 непосредственных test-функций/методов (7 960 при ast.walk с вложенными
+определениями). Число функций отчёта воспроизводится, число файлов 298 не подтверждено.
+Все 204 file/class/test/line итогового CSV сопоставлены
+с AST того же main, расхождений нет; решения 80/47/77 и нарезка воспроизводятся из CSV.
+
+Предложено удалить 80, переписать на поведение 47, оставить 77, включая 55 named
+architecture guards. Эти решения не означают, что 127 изменений уже сделаны.
+Проверенные примеры: `test_architecture.py:393` пинит allowlist-константу при отдельной
+проверке её соответствия живому коду (`:345`); `:548` и `test_worker_card_comments.py:424`
+сравнивают порядок calls через текст исходника; `test_po_service.py:1785` ищет порядок
+receipt/start через getsource. Последние требуют лога вызовов при исполнении поведения,
+а не простого удаления. `test_checkpoint_run.py:75` ищет отсутствие текста checkpoint;
+замена должна наблюдать отсутствие самого вызова. Архитектурные границы сохраняются:
+`test_local_pty_head_runtime.py:2221/2241` охраняют substrate/build seam, не формулировку docs.
+
+Нарезка CSV (delete / rewrite; по одному предложенному PR на строку, L1a…L10):
+
+| Карточка исследования | Scope | Delete / rewrite |
+|---|---|---|
+| L1a | Architecture absence/tautology | 18 / 0 |
+| L1b | Dispatch back-edge guards и смешанные проверки порядка | 0 / 11 |
+| L2 | Retired host/upgrade names | 12 / 1 |
+| L3 | Retired board/runtime и дубли | 10 / 1 |
+| L4 | Skill/prompt text; рабочие CLI contracts оставить | 14 / 3 |
+| L5 | Docs text | 10 / 2 |
+| L6 | Web sprint/pause | 7 / 5 |
+| L7 | Web run/front | 6 / 3 |
+| L8 | Head packet wording | 0 / 11 |
+| L9 | Порядок действий через поведение | 1 / 5 |
+| L10 | Config/source pins | 2 / 5 |
+
+Итого 80 / 47, 11 нарезок; `cards.tsv` задаёт ownership, включая line-specific
+исключения L1b. Части TDEAD-04 (head_health duplicate) входят в L3, поэтому старый пункт
+не порождает ещё одну карточку; повторы helpers TDUP и старые fixtures TDEAD остаются
+своими scope. Качество новых tests в worker/reviewer prompts всё ещё не ограничено
+соответствующим запретом; timing-часть issue поставлена #708 и отмечена в матрице выше.
+
+По JUnit main run 38101574608 предложение снимает ≈14 с из 1 706 с CI (0,8 %),
+по сохранённым per-test timings ummanu-214 ≈7,5 с из ≈92,9 с local broad.
+Это сумма длительностей удаляемых тестов, не обещание такого ускорения wrapper
+96,648 с; импорты остающихся модулей и критический путь не исчезают.
+
+#### TEST-03: общий AST reuse, без повторного закрытия #684
+
+Шесть дорогих оставленных guard'ов из ummanu-221: backend build site (5,9 с CI),
+embedding imports (4,7), substrate consumers (4,3), honest Orca allowlist (4,2),
+test-support imports (3,6), single-home definitions (2,6). Вместе с соседним Orca scan
+и skill-command scan исследование относит сюда ≈30 с CI / ≈15 с local broad.
+Embedding guard находится в CI-only `test_recovery_host_steps.py:173`; его CI-время
+нельзя целиком приписать local broad.
+
+Поправка после чтения кода: утверждение «общего кэша AST нет, все шесть заново парсят
+src» слишком сильное. `tests/source_trees.py:29/44/80` уже кеширует parse/walk и clear;
+`test_architecture.py:253/449/1215` пользуется им для allowlist, support imports и
+single-home. `tearDownModule:1340` очищает кэш. А два guard'а
+`test_local_pty_head_runtime.py:2230/2253` и embedding guard
+`test_recovery_host_steps.py:177` всё ещё вызывают ast.parse напрямую в обход кэша.
+Повторные whole-tree чтения/обходы и reuse между этими модулями не устранены.
+
+Остаток: общий read-only source index для guard'ов с явным lifecycle кэша, тем же
+инвариантом и безопасным сбросом между разными деревьями/фикстурами. Делать отдельным
+bounded scope существующего issue:e515244ce9d2e3417b1e, не вторым AST-cache engine
+рядом с source_trees. Экономия в отчёте является оценкой: без нового замера нельзя
+выдать все ≈30/15 с за устранимую стоимость parsing или гарантированный выигрыш.
 
 ## 7. Расхождения схем, API, событий и конфигурации
 
@@ -949,6 +1116,12 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 | CON-16 ✅ #680 | `data-manifest.json` | **Текущий контракт:** descriptive inventory фиксированных путей; редактирование components не перемещает данные. Пример/schema/docs согласованы, legacy manifests читаются. **Исходное расхождение:** блок `components` валидируется, но не читается (`data.py:66`). В примере `facts: memory/facts`, а код пишет `state/memory/facts` | schema/generated-manifest regression; custom-path configuration не добавлялась | P3 | Ф |
 | CON-17 | Blocked-reason gate | `merge_terminal_reason` классифицирует по подстроке `"gate"` (`release_lifecycle.py:44-48`). Нечитаемый merge-gate на пути review — `merge-gate-blocked` → `gate` (`review_verdict.py:360`), а на пути release — `release-failed-blocked` → `implementation` (`release_lifecycle.py:372`) | — | P3 | Ф (намеренность — Г) |
 | CON-18 | Политика восстановления | Эскалация детерминированного отказа срабатывает в фазе gate (`gate_lifecycle.py:796`), но на тике HealthyQuiet/HealthyActive `_run_recovery_policy` (`wait_vitality.py:591-629`) сохраняет `rung=4` и молча теряет намерение ESCALATE. `RecoveryIntent.NUDGE` (rung 1) никогда не исполняется через политику | — | P2 | Ф (непреднамеренность — Г) |
+
+Статус capacity, дополнение 2026-10-11: CON-19 уже записан в
+issue:546b738187a8b0a7b1ef. Проверено `tasks.py:3598/3610/3681`:
+global claim cap=3, одна active code-карточка на project; `dispatch/claim.py:706`
+cap не передаёт. Настройка code_concurrency и видимость ожидания слота остаются вопросом
+этого issue; его спецификация здесь не дублируется.
 
 ## 8. Документация против реализации; возможности сжатия
 
@@ -1017,6 +1190,48 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
   - повторный setup-python/pip заменён composite action #678; checkout остаётся отдельным шагом каждого job;
   - `e2e-synthetic.yml` назван временным (sprint:1469).
 - **`scripts/ummanu-agent-gate.sh`** на каждый пропущенный тик запускает `dispatch --cleanup-only`, который его же комментарий называет «no-op exit 0 for every agent»: лишний процесс Python на каждый тихий тик.
+
+#### CI-01: selective CI после sprint:1488 и рычаги ummanu-220
+
+Scope selective CI поставлен #714/#715 и проверен естественным PR #717; #718 публикует
+датированный local-profile measurement. `scripts/ci_selection.py:208–259` строит
+консервативное замыкание base/candidate; `ci.yml:59–67` запускает только владельцев из плана,
+docs-only имеет ноль suites, push main полный. Это не новый закрытый performance ID.
+Backlog уже существует в issue:7ba9a9f32675119f8149, дополнен ummanu-220; related
+issue:4224875dd82d356b0a98 сохраняется. Точный анализатор ummanu-208 / PR716 брошен,
+его proposed точность не является поставленным контрактом.
+
+Реальный [PR717 CI 38098456255](https://github.com/vladmesh/ummanu/actions/runs/38098456255)
+выбрал и выполнил 291 из 294 модулей во всех девяти владельцах. По статическому разложению
+ummanu-220 (`pr717.json`) 278 из них достигаются imports, непрозрачность добавляет 13.
+Selector explanation `conservative opaque consumer` (`ci_selection.py:251`) выбирается
+по приоритету правила, поэтому 219 таких labels не доказывают 219 исключительно opaque
+зависимостей. `board/models.py`, board barrel и upper-layer imports сверены в §4.1.
+
+По модели 20 PR #691–#717 (`history.json`) 19 full: 7 shared/config/non-Python,
+3 manifest-only, 9 changed opaque module. В текущем коде `module_name` (`:73`)
+не принимает `tests/ci-shards.txt`; full fallback на unknown path (`:223`) подтверждён.
+Выигрыша по code-PR wall-clock практически нет; docs-only ускорение реально поставлено.
+
+Оставшиеся CI-рычаги (предложения отчёта, не выполненные фиксы):
+
+- P1: отдельное проверяемое правило для diff `tests/ci-shards.txt`, выбирать изменённые
+  entries с их владельцами; отдельно правило для changed opaque test. Любая неоднозначность
+  membership/ownership должна по-прежнему приводить к full/refusal. В модели 3 из 20 PR
+  выходят из full, но секунды почти не меняются. Нынешний selector этих правил не содержит.
+- Разбить тяжёлых владельцев `integration-dispatcher` и `runtime-component` на jobs.
+  Сейчас matrix key только suite (`ci.yml:66–68`); внутреннего partition нет.
+  Сохранённый полный run даёт 463,6 и ≈378 с соответственно, `test_dispatcher.py` один
+  ≈150 с. По моделированию отчёта разрез только первого упирается во второй; обоих даёт
+  критический путь ≈240 с на каждом PR, включая full. Это прогноз balancing, не замер
+  будущего workflow; oversized модули и CI evidence/aggregate ownership требуют явного дизайна.
+- Карта путей допустима только с отдельным решением о post-merge discovery пропусков:
+  сценарий отчёта экономит 23 % job-секунд, но пропускает 107–111 imports-consumers на
+  6 из 7 замапленных PR. Не выдавать это за безопасный drop-in selector.
+
+Источники и ограничения: ummanu-220/report.md, history.json, pr717.json, durations.json,
+main CI 38101574608; секунды прошлых PR смоделированы по JUnit текущего main.
+Рефакторинг ради CI не назначается: структурный шов уже описан один раз в ARCH-04 (§4.1).
 
 ## 9. Явные баги и явные неэффективности
 
@@ -1223,7 +1438,13 @@ CLI (cli.py + *_commands.py) — оператор и головы агентов
 - #683: candidate `a64d5a053c06a73588940d44cee344a26d358afd`, exact-SHA CI run `37527062690` — **success**: lint, typecheck, unit, component/runtime-component, integration-dispatcher/board/heads/recovery/memory, packaging и агрегат `test`.
 - #683 merge/main: `72f7849478882ec160b1f305463a0e545ea0bd04`; post-merge CI run `37528487367` — **success**: lint, typecheck, все suites и агрегат `test` зелёные. Scope #683: 8 файлов, без CON-13/14/15 и без расширения в provider fallback #682.
 
-## 10. Пересобранный план на 2026-10-08 (отсчёт с #677)
+## 10. План от 2026-10-08 (исторический бюджет, отсчёт с #677)
+
+Поправка 2026-10-11: ниже сохранена прежняя группировка и её расчёт PR, не текущая
+очередь и не обязательство открыть рефакторинговый спринт. Новая матрица в начале
+аудита имеет приоритет; умозрительные разрезы ограничены выводом ummanu-220 (§4.1),
+нарезка тестового качества находится в §6.4, CI-остаток в §8.4. Утверждение «не повторять
+AST cache #684» означает не реализовывать его заново; TEST-03 описывает непокрытый reuse.
 
 **Бюджет уточнён владельцем 2026-10-06:** 15–17 реализационных PR **с текущего момента**,
 начиная с web-блока #677. Ранее влитые #669–#676 и открытый PR с этим отчётом #668 в этот бюджет
