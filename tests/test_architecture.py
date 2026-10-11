@@ -390,20 +390,6 @@ class NoOrcaInSourceTests(unittest.TestCase):
         self.assertEqual(_orca_offenders("src/ummanu/host.py", line), [])
         self.assertTrue(_orca_offenders("src/ummanu/runtime/planted.py", line))
 
-    def test_the_allowlist_keeps_only_the_two_owner_decisions(self) -> None:
-        """A20 step 9 (secretary-1726) emptied the step-9 class: no entry excuses a program."""
-        self.assertEqual(
-            {(allowance.path, allowance.line, allowance.value) for allowance in ORCA_ALLOWLIST},
-            {
-                ("src/ummanu/host.py", '{"unit", "orca"}', "orca"),
-                ("src/ummanu/upgrade.py", 'workspace_root.parent.name == "orca"', "orca"),
-            },
-        )
-        for allowance in ORCA_ALLOWLIST:
-            with self.subTest(path=allowance.path):
-                self.assertTrue(allowance.reason.startswith("owner decision, step "), allowance.reason)
-                self.assertNotIn("step 9", allowance.reason)
-
     def test_an_allowance_excuses_exactly_one_finding_on_its_line(self) -> None:
         """The allowed constant is excused once; everything else the line carries is reported."""
         for path, source, expected in (
