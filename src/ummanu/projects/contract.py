@@ -166,6 +166,8 @@ class ModuleContract:
     module: str = ""
     args: tuple[str, ...] = ()
     interpreter_declared: bool = True
+    local: dict[str, Any] | None = None
+    collection_roots: tuple[str, ...] | None = None
 
     def as_dict(self) -> dict[str, str]:
         if self.reason:
@@ -371,6 +373,18 @@ def _declared_contract(
             adapter_name,
             f"adapter {adapter_name!r} declares broad-check arguments that are not a list of strings",
         )
+    local = configured.get("local")
+    collection_roots = (
+        tuple(configured["collection_roots"]) if "collection_roots" in configured else None
+    )
+    if local is not None:
+        from ummanu.broad_check import BroadCheckError
+        from ummanu.projects.local_check import validate_declaration
+
+        try:
+            validate_declaration(local, module, args)
+        except BroadCheckError as exc:
+            return ContractVerdict.as_refused(BROAD_CHECK_INCOMPLETE, adapter_name, exc.message)
     # An omitted interpreter is not an incomplete contract, it is the common case. PR #329 made the
     # check subprocess prepends the candidate workspace's own import roots to `sys.path` before it
     # imports the project. The dispatcher may supply its reserved candidate interpreter for the
@@ -396,6 +410,8 @@ def _declared_contract(
                 module=module,
                 args=args,
                 interpreter_declared=False,
+                local=local,
+                collection_roots=collection_roots,
             ),
             adapter_name,
         )
@@ -417,7 +433,14 @@ def _declared_contract(
                 f"adapter {adapter_name!r} names interpreter {interpreter!r}, which the adapter "
                 "schema resolves from the candidate workspace; no candidate workspace exists yet, "
                 "so the tree that will run the check is the only side that can answer this",
-                declared_contract=ModuleContract(interpreter, import_package, module=module, args=args),
+                declared_contract=ModuleContract(
+                    interpreter,
+                    import_package,
+                    module=module,
+                    args=args,
+                    local=local,
+                    collection_roots=collection_roots,
+                ),
             )
         # Preserve a venv symlink: resolving it loses its site paths.
         interpreter = str(Path(workspace).resolve() / interpreter_path)
@@ -428,7 +451,11 @@ def _declared_contract(
             f"could not start configured interpreter {interpreter!r}: it is not an executable file",
         )
     return ContractVerdict.as_fit(
-        ModuleContract(interpreter, import_package, module=module, args=args), adapter_name
+        ModuleContract(
+            interpreter, import_package, module=module, args=args, local=local,
+            collection_roots=collection_roots,
+        ),
+        adapter_name,
     )
 
 

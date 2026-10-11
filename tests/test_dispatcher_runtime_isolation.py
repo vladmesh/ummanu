@@ -13,18 +13,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.fakes.dispatcher import FakeHost
 from ummanu.broad_check import load_receipt, receipt_path, run_broad_check
 from ummanu.dispatch import gate_lifecycle
-from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner
-from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
-from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from ummanu.dispatch.runtime_provenance import RuntimeProvenance
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.gate_receipt import AcceptedGreenGate, mint_gate_receipt
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.runtime_provenance import RuntimeProvenance
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import HostError
-from tests.fakes.dispatcher import FakeHost
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 
 def _observation(classification: str = "valid") -> RuntimeProvenance:
@@ -614,7 +614,8 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             workspace = Path(tmp) / "task"
             workspace.mkdir()
             host = CommandHostRuntime(  # type: ignore[arg-type]
-                SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
+                SimpleNamespace(adapter=lambda project: {}), Path(tmp), mode="real",
+                production_runtime=_Runtime([_observation()]),
             )
             order: list[str] = []
             task = {"ref": "ummanu-1", "project": "ummanu", "routing": {}}

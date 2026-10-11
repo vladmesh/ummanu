@@ -1,0 +1,3 @@
+#!/bin/sh
+# Use the role's workspace interpreter; its startup guard runs before pytest imports.
+exec python3 -m pytest "$@"

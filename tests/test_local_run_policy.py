@@ -291,7 +291,6 @@ class LocalRunPacketTests(unittest.TestCase):
                         self.assertEqual(self.reader.show.call_count, 1)
                     self.reader.show.side_effect = None
 
-
     def test_worker_packet_names_the_receipt_in_the_owned_namespace(self) -> None:
         """secretary-1920: the packet points where `check broad` writes in a dispatcher workspace."""
         worker, _ = self.packets()

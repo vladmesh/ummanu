@@ -37,8 +37,8 @@ from ummanu.runtime.head import (
     DeliverReceipt,
     StartReceipt,
     StopReceipt,
+    operations as head_ops,
 )
-from ummanu.runtime.head import operations as head_ops
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.tasks import TaskReader, TaskWriter
 
@@ -620,6 +620,10 @@ class RecordingReviewHost(CommandHostRuntime):
 
     def _install_workspace_pycache_prefix(self, root: Path, environment: Path, *, required: bool) -> None:
         """The stubbed `_run` creates no venv, so there is no site-packages to hold the startup file."""
+        return None
+
+    def _install_workspace_test_guards(self, root: Path, *, project: str = "") -> None:
+        """Transport fixtures create no candidate interpreter and execute no test commands."""
         return None
 
     def _transport_preflight(

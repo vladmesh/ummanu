@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -79,6 +80,29 @@ class TriggeredDispatchTests(unittest.TestCase):
         self.assertNotIn("UMMANU_MEMORY_ACCESS_TOKEN=", command)
         self.assertNotIn("env $(", command, "the bearer must not become an argv entry")
         self.assertIn('export "$grant"', command)
+
+    def test_scheduled_memory_launch_runs_a_command_led_by_env_assignments(self):
+        # The rendered head command starts with installation assignments
+        # (`TA_RUNTIME_ENV_FILE=... UMMANU_INSTANCE=... python3 ...`). A bare `exec` in the launch
+        # wrapper took the first assignment for the program and the head exited 127 every tick.
+        data_dir = Path(self.tmp.name) / "data"
+        out = Path(self.tmp.name) / "out.txt"
+        spec = HeadSpec(profile_id="test", adapter="codex")
+        head = f'UMMANU_TEST_BINDING=bound /bin/sh -c \'printf "%s|%s" "$UMMANU_TEST_BINDING" "$G" > {out}\''
+        with mock.patch.object(dispatch, "_installation_data_dir", return_value=data_dir):
+            run = dispatch._standing_memory_run("curator", spec, self.workspace, "curator-run")
+            command = dispatch._memory_bound_launch("curator", run, head)
+        grant = command.split("grant=", 1)[1]
+        self.assertIn("ummanu.memory.grant_env", grant)
+        # Swap only the grant producer for a stub so the wrapper itself is what runs.
+        command = command.replace("python3 -m ummanu.memory.grant_env", "echo G=granted; : ", 1)
+
+        result = subprocess.run(
+            ["/bin/sh", "-c", command], capture_output=True, text=True, timeout=30, check=False
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(out.read_text(encoding="utf-8"), "bound|granted")
 
     def test_unreadable_pause_state_blocks_dispatch_and_is_reported(self) -> None:
         output = io.StringIO()

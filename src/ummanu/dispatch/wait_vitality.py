@@ -52,6 +52,7 @@ from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
     request_token as _request_token,
 )
+from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.types import STOPPED_BY_WATCHDOG, HostError
 from ummanu.dispatch.watchdog import (
     HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
@@ -92,11 +93,12 @@ def wait_watchdog(
         }
     runtime_reason = ""
     try:
-        status = (
-            runtime.host.review_status(task, record)
-            if kind == "review"
-            else runtime.host.worker_status(task, record)
-        )
+        with tick_stage("observation"):
+            status = (
+                runtime.host.review_status(task, record)
+                if kind == "review"
+                else runtime.host.worker_status(task, record)
+            )
     except Exception as exc:  # noqa: BLE001 - provider status has no narrower exception contract.
         # Orca may be down or between reconnects. That is no evidence this head died, so do not
         # restart it; it also cannot prove progress, so the ordinary wait ceiling stays.
@@ -115,9 +117,10 @@ def wait_watchdog(
     # stall reading below (secretary-1799): a head idle at its prompt after a 401 is not late, it
     # was refused, and the answer is the next head of its chain, not a nudge, a respawn into the
     # same provider or Blocked. Decided on the tick that first sees the turn's end.
-    provider_outcome = _provider_failure_outcome(
-        runtime, task, record, records, payload, attempt_id, kind=kind
-    )
+    with tick_stage("provider"):
+        provider_outcome = _provider_failure_outcome(
+            runtime, task, record, records, payload, attempt_id, kind=kind
+        )
     if provider_outcome is not None:
         return provider_outcome
     activity = status.get("last_activity")
@@ -129,16 +132,17 @@ def wait_watchdog(
             setattr(record, f"{kind}_progress_at", progress_at)
             runtime.save_records(payload, records)
     now = time.time()
-    episode = reduce_and_store_vitality_episode(runtime,
-        task,
-        record,
-        records,
-        payload,
-        status,
-        kind=kind,
-        now=now,
-        answer_owed_since=answer_owed_since_for_wait(record, kind),
-    )
+    with tick_stage("vitality"):
+        episode = reduce_and_store_vitality_episode(runtime,
+            task,
+            record,
+            records,
+            payload,
+            status,
+            kind=kind,
+            now=now,
+            answer_owed_since=answer_owed_since_for_wait(record, kind),
+        )
     # THE DECISION IS THE VERDICT (S1-4): the persisted episode -- reduced from this
     # very tick's observations on every shape the status carries, including the
     # not-live ones -- chooses between waiting, nudging and recovering. The old
@@ -146,20 +150,22 @@ def wait_watchdog(
     # taken only when the reduction actually saw death (``Dead``), and a terminal
     # that vanished while the heartbeat stays live is decided by evidence, not by
     # the inventory.
-    return _decide_wait_by_verdict(runtime,
-        task,
-        record,
-        records,
-        payload,
-        attempt_id,
-        kind=kind,
-        status=status,
-        episode=episode,
-        now=now,
-        runtime_reason=runtime_reason,
-        activity=activity,
-        progress_at=progress_at,
-    )
+    with tick_stage("lifecycle"):
+        decided = _decide_wait_by_verdict(runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            kind=kind,
+            status=status,
+            episode=episode,
+            now=now,
+            runtime_reason=runtime_reason,
+            activity=activity,
+            progress_at=progress_at,
+        )
+    return decided
 
 
 def _decide_wait_by_verdict(

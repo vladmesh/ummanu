@@ -57,6 +57,18 @@ Missing Git proof does not erase independently recorded head ownership. The
 owner settles that exact head through its lifecycle and reports the unproven
 workspace as preserved. Failed or mismatched head settlement remains pending.
 
+A live replacement card attempt admits only its predecessor's recorded heads:
+the card id/ref/project, worker, recorded workspace identity and distinct nonempty
+attempt ids must agree with the successor's dispatcher record and owned intent.
+Replay uses the recorded-only scope fence, never shared role PID files or successor
+scopes, and revalidates the specific successor before checkpointing stop proof.
+Its preserved, verified terminal outcome `attempt-replaced` records both attempt ids in `progress.handoff`;
+`claim_settled` completes only the predecessor's obligation and releases no current
+claim. Workspace, ref, environment and green gate evidence stay with the successor.
+Later replay cannot reclaim them even after the successor record disappears.
+This clears only that old head obligation from launch admission, allowing the
+existing Blocked-to-Validate reviewer retry over the retained candidate.
+
 Before removal, the owner verifies canonical paths, catalog binding, common-dir,
 registration, Git admin path/file, inode, branch and exact HEAD. It preserves
 tracked, untracked and ignored author work and unpublished commits. Only prompt

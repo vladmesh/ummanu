@@ -1,0 +1,3 @@
+#!/bin/sh
+printf '%s\n' 'head-guard: ansible refused; execution only in CI' >&2
+exit 125

@@ -6,7 +6,8 @@ changes behaviour on words in the owner's message:
 `SLEEP` keeps the turn running with a child in its process group, `GATE` keeps it running until the
 file `$FAKE_LOG.gate` exists, `FAIL` exits non-zero, `SILENT` exits zero without a final answer,
 `NOPERSIST` makes Claude save no conversation. While the file `$FAKE_LOG.quota-<cli>` exists, that
-CLI refuses every turn with its provider's own spent-usage-limit message, as the real one does.
+CLI refuses every turn with its provider's own spent-usage-limit message, as the real one does; Codex's
+names a reset (`codex_quota_wall`) three days after the refusal, so it never expires with the calendar.
 
 Each also says which model it ran the way the real CLI does: Claude's result object keys `modelUsage`
 by the full id (`FAKE_CLAUDE_RESOLVED` of the alias it was given, the session's own model first and a
@@ -17,6 +18,7 @@ set, so a test never writes into a real Codex home.
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import time
 
@@ -86,8 +88,27 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
                   "modelUsage": {resolved: {"outputTokens": 7}, "claude-haiku-4-5": {"outputTokens": 1}}}))
 """
 
+
+def codex_quota_wall(now: float):
+    """The reset the fake Codex names when it refuses at `now`: three days on, a local wall minute."""
+    from datetime import datetime, timedelta
+    return (datetime.fromtimestamp(now) + timedelta(days=3)).replace(second=0, microsecond=0)
+
+
+def codex_quota_message(now: float) -> str:
+    """Codex's spent-usage-limit refusal at `now`, worded as the real CLI words it (local time)."""
+    reset = codex_quota_wall(now)
+    month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[reset.month - 1]
+    suffix = "th" if 11 <= reset.day <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(reset.day % 10, "th")
+    meridiem = "PM" if reset.hour >= 12 else "AM"
+    return ("You\u2019ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase "
+            f"more credits or try again at {month} {reset.day}{suffix}, {reset.year} "
+            f"{reset.hour % 12 or 12}:{reset.minute:02d} {meridiem}.")
+
+
 FAKE_CODEX = r"""#!/usr/bin/env python3
 import json, os, subprocess, sys, time
+""" + inspect.getsource(codex_quota_wall) + inspect.getsource(codex_quota_message) + r"""
 prompt = sys.stdin.read()
 argv = sys.argv[1:]
 log = os.environ["FAKE_LOG"]
@@ -100,8 +121,7 @@ thread = argv[-2] if resume else "019a-fake-thread"
 out = argv[argv.index("-o") + 1]
 print(json.dumps({"type": "thread.started", "thread_id": thread}), flush=True)
 if os.path.exists(log + ".quota-codex"):
-    message = ("You\u2019ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase "
-               "more credits or try again at Oct 9th, 2026 9:11 PM.")
+    message = codex_quota_message(time.time())
     print(json.dumps({"type": "error", "message": message}), flush=True)
     print(json.dumps({"type": "turn.failed", "error": {"message": message}}), flush=True)
     sys.exit(1)

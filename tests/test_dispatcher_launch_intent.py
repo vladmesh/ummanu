@@ -40,9 +40,11 @@ from tests.observer_identity import bind_observer
 from tests.production_runtime_fixtures import registered_production_runtime
 from tests.sql_backend_fixtures import card_store
 from ummanu._fsutil import file_lock
-from ummanu.dispatch import host as dispatcher_host_module
-from ummanu.dispatch import launch as dispatcher_launch
-from ummanu.dispatch import worker_continuation as dispatcher_worker_continuation
+from ummanu.dispatch import (
+    host as dispatcher_host_module,
+    launch as dispatcher_launch,
+    worker_continuation as dispatcher_worker_continuation,
+)
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.gate_receipt import GateReceipt, TerminalCheck
 from ummanu.dispatch.git_workspace import GitWorkspaceManager
@@ -92,8 +94,7 @@ from ummanu.projects.contract import (
     ModuleContract,
 )
 from ummanu.projects.integration_base import resolve_integration_base
-from ummanu.routing_journal import RoutingHeadSnapshot
-from ummanu.routing_journal import attempts as routing_attempts
+from ummanu.routing_journal import RoutingHeadSnapshot, attempts as routing_attempts
 from ummanu.runtime.codex_preflight import codex_provider_source_descriptor
 from ummanu.runtime.head import (
     HEAD_ALIVE,
@@ -103,8 +104,8 @@ from ummanu.runtime.head import (
     HeadCommand,
     StartReceipt,
     StopReceipt,
+    operations as head_ops,
 )
-from ummanu.runtime.head import operations as head_ops
 from ummanu.runtime.head.command import with_pid_heartbeat
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.prompt_document import NUDGE_MAX_BYTES
@@ -3337,6 +3338,8 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
             production_runtime=registered_production_runtime(self.data_dir),
         )
         self.host._prepare_workspace_environment = lambda *args, **kwargs: None  # type: ignore[method-assign]
+        # This launch-intent fixture deliberately creates no workspace Python environment.
+        self.host._install_workspace_test_guards = lambda *args, **kwargs: None  # type: ignore[method-assign]
         self.host._require_workspace_environment = lambda workspace: None  # type: ignore[method-assign]
 
     def catalog(self):

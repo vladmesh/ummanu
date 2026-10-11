@@ -21,8 +21,10 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import ClassVar
@@ -30,7 +32,14 @@ from unittest import mock
 from urllib.parse import urlencode
 
 from tests.fakes.upgrade import FakeUnitInstaller
-from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
+from tests.po_cli_fakes import (
+    FAKE_CLAUDE,
+    FAKE_CODEX,
+    codex_quota_message,
+    codex_quota_wall,
+    eventually,
+    unscoped_test_launch,
+)
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints, sprint_client
 from tests.web_fakes import Recording
 from ummanu import upgrade
@@ -72,6 +81,7 @@ from ummanu.po.sprints import (
 from ummanu.runtime.head.local_pty.client import LocalPtySpawnError
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError
+from ummanu.runtime.provider_errors import is_quota_text, reset_time
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import (
     NOTHING_WRITTEN,
@@ -2664,8 +2674,10 @@ class ProviderFallbackTests(ServiceFixture):
         self.assertEqual(self.settled(session_id, 1).state, po_store.COMPLETED)
         Path(str(self.log) + ".quota-codex").touch()
 
+        before = time.time()
         service.submit(session_id=session_id, text="What next?", request_id="m-2")
         turn = self.settled(session_id, 2)
+        after = time.time()
 
         self.assertEqual(turn.state, po_store.COMPLETED, turn.reason)
         session = self.store().session(session_id)
@@ -2678,8 +2690,27 @@ class ProviderFallbackTests(ServiceFixture):
         self.assertIn("refused this turn", answer[2])
         health = self.health()["openai-sub"]
         self.assertEqual(health["status"], "exhausted")
+        # Held to the reset Codex named at its refusal, three days on to the minute, not a backoff.
         self.assertGreater(health["until"], health["checked_at"] + 86400)
+        self.assertGreaterEqual(health["until"], codex_quota_wall(before).timestamp())
+        self.assertLessEqual(health["until"], codex_quota_wall(after).timestamp())
         self.assertEqual([call["cli"] for call in self.calls()], ["codex", "codex", "claude"])
+
+    def test_the_fake_codex_reset_stays_ahead_of_any_day_it_refuses_on(self) -> None:
+        # ummanu-159: a fixed "Oct 9th, 2026 9:11 PM" was less than a day ahead after Oct 8 21:11
+        # and in the past after Oct 9 21:11. The reset is local wall time, as the parser reads it.
+        cases = (
+            (datetime(2026, 10, 8, 21, 30, 45), "Oct 11th, 2026 9:30 PM", datetime(2026, 10, 11, 21, 30)),
+            (datetime(2026, 10, 10, 9, 5), "Oct 13th, 2026 9:05 AM", datetime(2026, 10, 13, 9, 5)),
+            (datetime(2027, 12, 30, 0, 7), "Jan 2nd, 2028 12:07 AM", datetime(2028, 1, 2, 0, 7)),
+        )
+        for now, named, reset in cases:
+            with self.subTest(now=now):
+                message = codex_quota_message(now.timestamp())
+                self.assertIn(f"try again at {named}.", message)
+                self.assertTrue(is_quota_text(message))
+                self.assertEqual(reset_time(message, now=now.timestamp()), reset.timestamp())
+                self.assertGreater(reset.timestamp(), now.timestamp() + 86400)
 
     def test_a_claude_session_out_of_quota_falls_over_to_codex(self) -> None:
         service = self.service(models=MODELS)

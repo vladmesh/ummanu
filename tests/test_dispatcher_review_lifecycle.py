@@ -334,6 +334,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
+        self.card_audit = task_audit_for(card_store(self, dispatcher_seed()))
         _clear_env(self, "UMMANU_DISPATCHER_REVIEW_COMMAND")
         _clear_env(self, "UMMANU_DISPATCHER_PROMPT_DIR")
         os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
@@ -378,6 +379,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
     def test_the_head_receives_a_bounded_pointer_and_never_the_review(self) -> None:
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
 
         host.start_review(self.task, self._record())
 
@@ -395,6 +397,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
     def test_the_document_holds_the_whole_review_outside_the_checkout(self) -> None:
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
 
         host.start_review(self.task, self._record())
 
@@ -425,6 +428,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         (self.workspace / "src.py").write_text("print('candidate')\n", encoding="utf-8")
         before = self._checkout_contents()
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
 
         host.start_review(self.task, self._record())
 
@@ -434,6 +438,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
     def test_a_retry_rewrites_the_same_document_and_sends_a_fresh_nudge(self) -> None:
         """The pointer always names the round's current task, so a retry cannot review a stale one."""
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
         host.start_review(self.task, self._record())
         first = list(host.pointers())
 
@@ -451,6 +456,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
     def test_a_second_round_gets_its_own_document(self) -> None:
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
         record = self._record()
         record.review_baseline = 1
 
@@ -463,6 +469,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         """A bring-up whose head is up and did not take its prompt keeps the head, and the next
         tick's retry is delivered to that same run at the same document, never to a replacement."""
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
         host.backend.start_failure = head_ops.HeadSpawnAborted("the prompt did not start a turn", run=None)  # type: ignore[arg-type]
 
         with self.assertRaises(HeadLaunchAborted) as caught:
@@ -489,6 +496,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         """An unprompted reviewer would sit at its prompt forever; the caller's infrastructure
         retry is the right answer to a launch that never started."""
         host = NudgingReviewHost(self.root)
+        host.audit = self.card_audit
         with (
             mock.patch.object(
                 dispatcher_host_module,
@@ -1830,6 +1838,7 @@ class ReviewPaneTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
+        self.card_audit = task_audit_for(card_store(self, dispatcher_seed()))
         _clear_env(self, "UMMANU_DISPATCHER_REVIEW_COMMAND")
         os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
         self.task = {
@@ -1861,6 +1870,7 @@ class ReviewPaneTests(unittest.TestCase):
     def test_the_worker_is_shut_down_once_the_reviewer_is_up(self) -> None:
         """Nothing else stops the worker head from editing the checkout mid-review."""
         host = RecordingReviewHost(self.root)
+        host.audit = self.card_audit
 
         launch = host.start_review(self.task, self._record())
 
@@ -1871,6 +1881,7 @@ class ReviewPaneTests(unittest.TestCase):
 
     def test_a_reviewer_that_did_not_come_up_leaves_the_worker_alone(self) -> None:
         host = RecordingReviewHost(self.root)
+        host.audit = self.card_audit
         host.backend.start_failure = head_ops.HeadSpawnFailed("the reviewer never started")
 
         with self.assertRaises(HostError):

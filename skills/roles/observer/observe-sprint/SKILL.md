@@ -18,6 +18,25 @@ no broad suite: run or request appropriate validation when the decision needs it
 as an escalation when evidence is absent or contradictory, a RED/Blocked finding is high risk, a reslice
 is needed, a real Definition-of-Done gap remains, or a security/data-loss flag needs a targeted check.
 
+Evidence for every acceptance criterion comes from CI or the adapter-declared local profile.
+For criteria outside that profile, read the corresponding CI shard and report; do not request local
+integration, packaging, direct pytest/unittest or backend probes. Worker packets list
+the permitted wrapper commands and candidate interpreter; reviewers read evidence without test runs. A missing profile is a configuration gap,
+not permission to discover another suite. Refusal125 is command feedback, never RED or a budget event.
+An earlier excessive local run alone remains non-blocking; exclude its results and preserve historical
+verdicts. A new test in a local module that uses containers, network, sleep or exceeds its native local
+budget is a code defect: require «перенести в интеграционный шард». Preserve codegen's native
+0.5s/test and 240s CPU limits. Ummanu local tests warn at >5s without changing the suite verdict;
+CI unit/component fails at >5s/test or >90s/module, including class/module fixture cost.
+
+In a rework decision, address every prior stable blocker ID. State which findings you accept,
+reject or defer; give an issue ref for deferral and a precise quotation usable in the next worker
+report. Workers report fixed IDs with repair commits, observer-rejected IDs with your exact decision
+quotation, and deferred IDs with issue refs and your decision. Fixed is a reported claim for independent
+review, not automatic GREEN. Missing or ambiguous evidence stays unknown/unresolved. Observer-rejected
+findings may return only as non-blocking observations. A new re-review blocker requires changed delta,
+new external behavior or security/data-loss evidence; do not suppress real new high-risk findings.
+
 Your memory is the sprint entity and the live board, not the transcript. Anything not written there
 disappears when the head restarts.
 
@@ -378,7 +397,7 @@ At Assessment, read the structured evidence rather than repeating the mechanics:
 
 When a valid executed exact-SHA receipt exists, do not rerun its routine broad suite or broad negative
 probes. If it does not exist (including none/noop), do not infer that a broad suite passed: run or request
-appropriate validation. For a concrete claim, prefer a focused reviewer retry or one targeted check and
+appropriate validation from the worker or CI. Reviewers read evidence without test runs. For a concrete claim, prefer one targeted worker check and
 record why it was necessary.
 
 A card does not have to close a Definition of Done item that was named in advance: what matters is the

@@ -135,6 +135,8 @@ def read_terminal_taxonomy(data: Any, *, disposition: str | None) -> TerminalTax
     if not isinstance(raw, dict):
         raise TerminalTaxonomyValidationError("terminal taxonomy has an unsupported field set")
     version = raw.get("version")
+    if type(version) is not int or version not in {_TERMINAL_TAXONOMY_V1, TERMINAL_TAXONOMY_VERSION}:
+        raise TerminalTaxonomyValidationError("terminal taxonomy has an unsupported version")
     fields = {
         "version",
         "disposition",
@@ -146,7 +148,7 @@ def read_terminal_taxonomy(data: Any, *, disposition: str | None) -> TerminalTax
         fields.add("budget_class")
     if set(raw) != fields:
         raise TerminalTaxonomyValidationError("terminal taxonomy has an unsupported field set")
-    if version not in {_TERMINAL_TAXONOMY_V1, TERMINAL_TAXONOMY_VERSION} or raw["provenance"] != "forward":
+    if raw["provenance"] != "forward":
         raise TerminalTaxonomyValidationError("terminal taxonomy has an unsupported version or provenance")
     taxonomy = normalize_terminal_taxonomy(
         disposition=raw["disposition"], blocked_reason=raw["source_evidence"]

@@ -27,6 +27,7 @@ machinery-owned attestation that travels downstream, this one is a worker's own 
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -333,8 +334,8 @@ def _git(
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
+            check=False,
             text=True,
             timeout=_GIT_TIMEOUT,
             env=None if env is None else {**os.environ, **env},
@@ -561,10 +562,14 @@ def run_broad_check(
     stream: IO[str] | None = None,
     env: Mapping[str, str] | None = None,
     timeout_seconds: float | None = None,
+    record_receipt: bool = True,
 ) -> tuple[int, dict[str, object]]:
     """Run one broad check, keep its combined output visible, and write its receipt.
 
-    Returns the process's own exit status alongside the receipt, so the receipt never becomes a
+    A selector uses record_receipt=False: the same process observation stays in memory, and
+    neither the receipt namespace nor a full-round artifact is touched.
+
+    Returns the process's own exit status alongside the observation, so the receipt never becomes a
     second, softer answer to what the check decided.
     """
     spec = as_spec(check)
@@ -573,8 +578,9 @@ def run_broad_check(
     root = Path(root)
     if not root.is_dir():
         raise BroadCheckError("missing_root", f"{root} is not a directory")
-    target = receipt_path(root, spec)
-    _assert_ignored(root, target)
+    target = receipt_path(root, spec) if record_receipt else None
+    if target is not None:
+        _assert_ignored(root, target)
     environment = dict(os.environ if env is None else env)
     if spec.attests_provenance:
         environment = _normalize_pythonpath_for_child(environment)
@@ -583,6 +589,9 @@ def run_broad_check(
     with tempfile.TemporaryDirectory(prefix="ummanu-broad-check-") as scratch:
         # Keep provenance outside the workspace whose contents the receipt names.
         record = Path(scratch) / "provenance.json" if spec.attests_provenance else None
+        environment.pop("UMMANU_TEST_TIMING_RECORD", None)
+        if record is not None:
+            environment["UMMANU_TEST_TIMING_RECORD"] = str(record.with_name("timing.json"))
         return _run_and_record(
             spec,
             root=root,
@@ -622,7 +631,7 @@ def _run_and_record(
     spec: CheckSpec,
     *,
     root: Path,
-    target: Path,
+    target: Path | None,
     record: Path | None,
     environment: dict[str, str],
     sink: IO[str],
@@ -677,21 +686,22 @@ def _run_and_record(
         process.kill()
         exit_code = process.wait()
         incomplete_reason = incomplete_reason or f"runner interrupted: {type(exc).__name__}"
-        _write_receipt(
-            target,
-            _build_payload(
-                spec=spec,
-                root=root,
-                identity=identity,
-                provenance=_read_provenance(record, root),
-                started_at=started_at,
-                duration=time.monotonic() - started,
-                exit_code=exit_code,
-                tail=tail,
-                parsed=scanner.finish(),
-                incomplete_reason=incomplete_reason,
-            ),
-        )
+        if target is not None:
+            _write_receipt(
+                target,
+                _build_payload(
+                    spec=spec,
+                    root=root,
+                    identity=identity,
+                    provenance=_read_provenance(record, root),
+                    started_at=started_at,
+                    duration=time.monotonic() - started,
+                    exit_code=exit_code,
+                    tail=tail,
+                    parsed=_with_timing(scanner.finish(), record, incomplete=True),
+                    incomplete_reason=incomplete_reason,
+                ),
+            )
         raise
     finally:
         if process.stdout is not None:
@@ -708,11 +718,28 @@ def _run_and_record(
         duration=time.monotonic() - started,
         exit_code=exit_code,
         tail=tail,
-        parsed=scanner.finish(),
+        parsed=_with_timing(scanner.finish(), record, incomplete=bool(incomplete_reason)),
         incomplete_reason=incomplete_reason,
     )
-    _write_receipt(target, payload)
+    if target is not None:
+        _write_receipt(target, payload)
     return exit_code, payload
+
+
+def _with_timing(parsed: dict[str, object], record: Path | None, *, incomplete: bool) -> dict[str, object]:
+    from ummanu.projects.test_timing import valid_observation
+
+    observation: dict[str, object] = {"status": "unavailable", "tests": [], "modules": {}}
+    if record is not None:
+        try:
+            data = json.loads(record.with_name("timing.json").read_text(encoding="utf-8"))
+            if valid_observation(data):
+                observation = data
+        except (OSError, ValueError):
+            pass
+    if incomplete:
+        observation["status"] = "incomplete"
+    return {**parsed, "timing": observation}
 
 
 def _build_payload(
@@ -888,6 +915,11 @@ def load_receipt(path: Path) -> dict[str, object] | None:
         payload = json.loads(raw)
     except json.JSONDecodeError:
         return None
+    return intact_receipt(payload)
+
+
+def intact_receipt(payload: object) -> dict[str, object] | None:
+    """Validate the complete workspace artifact, including its original digest."""
     if not isinstance(payload, dict):
         return None
     digest = payload.get("receipt_digest")
@@ -1039,7 +1071,7 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     if receipt.get("status") != _STATUS_COMPLETE:
         reason = str(receipt.get("incomplete_reason") or "run did not finish")
         return ReceiptLookup(False, f"run did not finish: {reason}", receipt, path)
-    refusal = candidate_import_refusal(receipt, root, expected_package=spec.import_package)
+    refusal = receipt_provenance_refusal(receipt, root, spec)
     if refusal:
         return ReceiptLookup(False, refusal, receipt, path)
     recorded = receipt.get("content_identity")
@@ -1055,12 +1087,126 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     return ReceiptLookup(True, "receipt describes this exact content", receipt, path)
 
 
+def receipt_provenance_refusal(receipt: Mapping[str, object], root: Path, spec: CheckSpec) -> str:
+    """One import/environment boundary for full artifacts and bounded admission evidence."""
+    refusal = candidate_import_refusal(receipt, root, expected_package=spec.import_package)
+    if refusal:
+        return refusal
+    provenance = receipt["project_provenance"]
+    workspace = str(root.resolve())
+    if (receipt.get("cwd") != workspace or provenance.get("cwd") != workspace
+            or provenance.get("import_roots") != candidate_import_roots(root)):
+        return "receipt is for a different checkout/import roots"
+    # Keep executable symlinks intact: two venvs may link to the same system Python
+    # while supplying different dependencies. Compare the spelling Python observed.
+    interpreter = spec.interpreter
+    if not Path(interpreter).is_absolute():
+        interpreter = os.path.abspath(root / interpreter)
+    if provenance.get("python") != interpreter:
+        return "receipt interpreter provenance differs from the declared interpreter"
+    prefix = Path(interpreter).parent.parent
+    if (prefix / "pyvenv.cfg").is_file() and provenance.get("environment_prefix") != str(prefix):
+        return "receipt interpreter environment differs from the declared environment"
+    return ""
+
+
+ADMISSION_MAX_BYTES = 16 * 1024
+_TEXT_MAX_BYTES = 2048
+_COUNT_KEYS = ("tests", "skipped", "failures", "errors", "expected_failures", "unexpected_successes")
+_PROVENANCE_KEYS = ("origin", "python", "environment_prefix", "cwd", "imported_package", "imported_project", "import_roots")
+_ADMISSION_KEYS = {"schema", "candidate_sha", "tree_sha", "path", "receipt_digest", "check_set",
+                   "command_or_check_set_digest", "cwd", "project_provenance", "status", "exit_code",
+                   "verdict", "counts", "summary", "snapshot_digest"}
+
+
+def _admission_text(value: object, limit: int = _TEXT_MAX_BYTES) -> bool:
+    return isinstance(value, str) and bool(value) and len(value.encode("utf-8", "surrogateescape")) <= limit
+
+
+def _admission_summary(counts: dict[str, object]) -> str:
+    return "complete/passed; exit=0" + "".join(f"; {key}={counts[key]}" for key in _COUNT_KEYS if key in counts)
+
+
+def admission_snapshot(receipt: dict[str, object], *, candidate_sha: str, tree_sha: str, path: Path) -> dict[str, object]:
+    """Compact writer evidence after completion_check authorizes the intact full artifact.
+
+    The original digest identifies that artifact; snapshot_digest seals this separate,
+    bounded decision record. No output, timing arrays or arbitrary parsed fields enter it.
+    """
+    parsed = receipt["parsed"] if isinstance(receipt["parsed"], dict) else {}
+    counts = {key: parsed[key] for key in _COUNT_KEYS if key in parsed}
+    provenance = receipt["project_provenance"]
+    evidence = {"schema": "worker-admission-v1", "candidate_sha": candidate_sha, "tree_sha": tree_sha,
+                "path": str(path), "receipt_digest": receipt["receipt_digest"],
+                "check_set": receipt["check_set"], "command_or_check_set_digest": receipt["command_or_check_set_digest"],
+                "cwd": receipt["cwd"], "project_provenance": {key: provenance.get(key) for key in _PROVENANCE_KEYS},
+                "status": receipt["status"], "exit_code": receipt["exit_code"], "verdict": receipt["verdict"],
+                "counts": counts, "summary": _admission_summary(counts)}
+    evidence["snapshot_digest"] = check_set_digest(evidence)
+    if admitted_check(evidence) is None:
+        raise BroadCheckError("done_receipt_required", "green admission snapshot is invalid or exceeds bounded field/16 KiB limits")
+    # Detach nested fields from the loaded artifact before writing immutable audit data.
+    return copy.deepcopy(evidence)
+
+
+def admitted_check(evidence: object) -> dict[str, object] | None:
+    """Read a previously admitted immutable snapshot without re-deciding current config/tree."""
+    if not isinstance(evidence, dict) or set(evidence) != _ADMISSION_KEYS:
+        return None
+    if (evidence["schema"] != "worker-admission-v1" or evidence["status"] != "complete"
+            or type(evidence["exit_code"]) is not int or evidence["exit_code"] != 0 or evidence["verdict"] != "passed"):
+        return None
+    for key in ("candidate_sha", "tree_sha", "receipt_digest", "command_or_check_set_digest", "snapshot_digest"):
+        size = r"(?:[0-9a-f]{40}|[0-9a-f]{64})" if key in {"candidate_sha", "tree_sha"} else r"[0-9a-f]{64}"
+        if not isinstance(evidence[key], str) or not re.fullmatch(size, evidence[key]):
+            return None
+    try:
+        if not all(_admission_text(evidence[key]) for key in ("path", "cwd")):
+            return None
+        if not Path(evidence["path"]).is_absolute() or not Path(evidence["cwd"]).is_absolute():
+            return None
+        counts = evidence["counts"]
+        if (not isinstance(counts, dict) or not set(counts) <= set(_COUNT_KEYS)
+                or any(type(value) is not int or not 0 <= value <= 2**63 - 1 for value in counts.values())):
+            return None
+        if not _admission_text(evidence["summary"], 512) or evidence["summary"] != _admission_summary(counts):
+            return None
+        check = evidence["check_set"]
+        if not isinstance(check, dict) or set(check) != {"schema", "shape", "module", "args", "interpreter", "import_package"}:
+            return None
+        args = check["args"]
+        if (not isinstance(args, list) or len(args) > 64
+                or any(not isinstance(arg, str) or len(arg.encode("utf-8", "surrogateescape")) > _TEXT_MAX_BYTES for arg in args)
+                or not all(_admission_text(check[key]) for key in ("module", "interpreter", "import_package"))):
+            return None
+        spec = CheckSpec.for_module(check["module"], args, interpreter=check["interpreter"], import_package=check["import_package"])
+        if check != spec.check_set or evidence["command_or_check_set_digest"] != spec.digest:
+            return None
+        provenance = evidence["project_provenance"]
+        if not isinstance(provenance, dict) or set(provenance) != set(_PROVENANCE_KEYS):
+            return None
+        roots = provenance["import_roots"]
+        if (not isinstance(roots, list) or len(roots) != 2 or not all(_admission_text(root) for root in roots)
+                or not all(_admission_text(provenance[key]) for key in _PROVENANCE_KEYS if key != "import_roots")):
+            return None
+        canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if len(canonical.encode("utf-8", "surrogateescape")) > ADMISSION_MAX_BYTES:
+            return None
+        if evidence["snapshot_digest"] != check_set_digest({key: value for key, value in evidence.items() if key != "snapshot_digest"}):
+            return None
+        if receipt_provenance_refusal(evidence, Path(evidence["cwd"]), spec):
+            return None
+    except (BroadCheckError, OSError, ValueError, UnicodeError):
+        return None
+    return evidence
+
+
 def summarize(receipt: Mapping[str, Any]) -> str:
     """One-screen rendering for a report body, so nobody reruns a suite to quote it."""
     parsed = receipt.get("parsed")
     counts = ""
     if isinstance(parsed, Mapping) and parsed:
-        counts = ", ".join(f"{key}={value}" for key, value in sorted(parsed.items()))
+        counts = ", ".join(f"{key}={value}" for key, value in sorted(parsed.items()) if key != "timing")
     identity = receipt.get("content_identity")
     tree = identity.get("tree_sha", "") if isinstance(identity, Mapping) else ""
     provenance = receipt.get("project_provenance")
@@ -1083,9 +1229,15 @@ def summarize(receipt: Mapping[str, Any]) -> str:
         f"- imported project: {imported or '(unresolved)'}",
         f"- tree_sha: {tree or '(unresolved)'}",
         f"- started_at: {receipt.get('started_at', '')} ({receipt.get('duration_seconds', 0)}s)",
-        f"- exit_code: {receipt.get('exit_code', '')} ({receipt.get('status', '')}"
-        f"/{receipt.get('verdict', '')})",
+        (
+            f"- exit_code: {receipt.get('exit_code', '')} ({receipt.get('status', '')}"
+            f"/{receipt.get('verdict', '')})"
+        ),
     ]
     if counts:
         lines.append(f"- parsed: {counts}")
+    from ummanu.projects.test_timing import summary
+
+    timing = parsed.get("timing", {}) if isinstance(parsed, Mapping) else {}
+    lines.append(summary(timing))
     return "\n".join(lines)

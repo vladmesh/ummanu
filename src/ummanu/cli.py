@@ -164,6 +164,12 @@ class StructuredArgumentParser(argparse.ArgumentParser):
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
+    if argv and argv[0] == "check":
+        from ummanu.runtime.test_guard import check_refusal
+
+        refusal = check_refusal()
+        if refusal is not None:
+            return refusal
     if argv and argv[0] == "automations":
         # The background agents own their argv, help and output: hand it over untouched, before
         # this parser can claim `--help` or reject an agent's own flags.
@@ -838,6 +844,10 @@ def _print_tick_measurements(dispatcher: dict[str, Any]) -> None:
         print(f"last tick card {card['ref']}: {_duration_text(card.get('ms'))}, records {records}, "
               f"flushes {card.get('save_records', 0)}, cleanup intents {card.get('cleanup_intent_writes', 0)} "
               f"({card.get('cleanup_bytes_written', 0)} bytes), state saves {card.get('production_state_saves', 0)}")
+        if card.get("stages"):
+            # Exclusive, so they add up to the card's time; a card recorded before stages has none.
+            print(f"last tick card {card['ref']} stages: "
+                  + ", ".join(f"{name} {_duration_text(ms)}" for name, ms in card["stages"].items()))
 
 
 def _duration_text(value: float | None) -> str:

@@ -121,9 +121,20 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.assertEqual(self.record.state, "validate")
         self.assertEqual(self.record.report_generation, 3)
         self.assertEqual(self.runtime.writer.move.call_args.kwargs["request_id"], first_request)
-        self.runtime.host.verify_worker_result.assert_called_once()
+        self.assertEqual(self.runtime.host.verify_worker_result.call_count, 2)
         self.runtime.host.retain_worker.assert_called_once()
         self.assertEqual(self.accounting.record_attempt_usage.call_count, 2)
+
+    def test_pending_validate_recovery_refuses_lost_completion_evidence(self):
+        from ummanu.dispatch.types import HostError
+
+        self.record.worker_continuation.begin_retention(1.0)
+        self.runtime.host.verify_worker_result.side_effect = HostError("worker receipt missing")
+        outcome = self.handle("report:done")
+        self.assertEqual(outcome["status"], "blocked")
+        self.runtime.writer.move.assert_not_called()
+        self.runtime.host.retain_worker.assert_not_called()
+        self.accounting.terminal_effect.assert_called_once()
 
     def test_unconfirmed_stop_refuses_report_terminal_effects(self) -> None:
         refused = {"status": "degraded", "action": "head-stop-unconfirmed"}

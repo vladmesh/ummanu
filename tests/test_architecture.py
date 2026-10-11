@@ -464,18 +464,45 @@ class SourceLayoutTests(unittest.TestCase):
         offenders: list[str] = []
         for tree_root in ("src", "tests", "scripts"):
             for path in (ROOT / tree_root).rglob("*.py"):
-                tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
-                for node in source_trees.walk(tree):
-                    modules: list[str] = []
+                source = path.read_text(encoding="utf-8")
+                tree = source_trees.parse(source, filename=str(path))
+                for node in source_trees.imports(tree):
                     if isinstance(node, ast.Import):
                         modules = [alias.name for alias in node.names]
                     elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                         modules = [node.module]
                         modules += [f"{node.module}.{alias.name}" for alias in node.names]
+                    else:
+                        continue
                     for module in modules:
                         if module == retired or module.startswith(f"{retired}."):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
         self.assertEqual(offenders, [])
+
+    def test_import_walk_matches_ast_walk_in_nested_statement_containers(self) -> None:
+        tree = ast.parse("""
+import top
+def function():
+    if True:
+        from package import name
+    try:
+        with manager():
+            import nested
+    except Exception:
+        import handled
+    finally:
+        import final
+    match value:
+        case 1:
+            import matched
+    class Nested:
+        import class_body
+async def asynchronous():
+    async for value in values:
+        import async_body
+""")
+        expected = {id(node) for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))}
+        self.assertEqual({id(node) for node in source_trees.imports(tree)}, expected)
 
     def test_dispatcher_claim_flow_is_package_owned(self) -> None:
         dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(

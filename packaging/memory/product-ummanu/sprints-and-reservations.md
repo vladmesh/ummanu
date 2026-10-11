@@ -11,7 +11,9 @@ An optional observer follows sprint-level progress and decisions. It does not re
 
 Use sprint comments for durable communication about the sprint. Keep goals, Definition of Done, decisions, and blockers specific enough that another role can act on them without reconstructing context from a conversation.
 
-Worker and reviewer local checks on the control host are limited to the project's adapter broad
+Reviewers inspect code and worker/CI evidence without test runs; every `ummanu check` form, including
+show and receipt reuse, refuses for a reviewer head. Missing evidence is named in the verdict and
+requested from the worker or CI. Worker local checks on the control host are limited to the project's adapter broad
 check and its subsets. Integration shards, Docker/container runs, stands, provisioning and
 network-heavy checks belong in CI. Exceptions come only from the sprint's creation-only
 `local_run_exceptions` list of `{project, argv, rationale}` entries, scoped to registered projects

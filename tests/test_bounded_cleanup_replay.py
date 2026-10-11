@@ -45,6 +45,7 @@ from ummanu.dispatch.cleanup import (
     PUBLICATION_RESERVE,
     REPLAY_ALLOWANCE,
     RETRY_COOLDOWN,
+    CleanupJournal,
     CleanupOwner,
 )
 from ummanu.dispatch.host import CommandHostRuntime
@@ -721,6 +722,144 @@ class BoundedCleanupReplayTests(unittest.TestCase):
             measured["deferred"] = {"elapsed_s": round(elapsed, 3), **self.counts(owner.last_replay),
                                     "writes": owner.last_replay["writes"]}
         print("representative journal: " + json.dumps(measured, sort_keys=True))
+
+    # -- ummanu-150: the no-effect preserved retry -----------------------------------------------------
+
+    def preserved_without_ownership(self):
+        """The observed shape (ummanu-149, seq 81249): a closed card's preserved obligation with no
+        attempt, identity, workspace or head, retained with its card's Git residue, due again."""
+        fixture = self.fixture
+        fixture.task["closed"] = True
+        key = fixture.legacy_close_intent()
+        first = self.owner.replay_one(key)
+        self.assertEqual(first["status"], "preserved", first["reason"])
+        self.assertIn("no attempt ownership was recorded", first["reason"])
+        self.assertEqual((first.get("identity"), first["heads"]), (None, []))
+        self.assertNotIn("attempt_id", first["record"])
+        self.clock.advance(RETRY_COOLDOWN)
+        return key
+
+    def publications(self):
+        """Every completed journal publication, at the one file replacement every write goes through."""
+        native = cleanup_module._replace_file
+        published: list[str] = []
+
+        def replace(path, body):
+            native(path, body)
+            published.append(str(Path(path).relative_to(self.owner.journal.path)))
+        return mock.patch.object(cleanup_module, "_replace_file", side_effect=replace), published
+
+    def test_a_no_effect_preserved_retry_publishes_its_reservation_outcome_and_cursor_only(self):
+        fixture = self.fixture
+        key = self.preserved_without_ownership()
+        before = owned_fixtures.obligations(self.owner.journal)
+        due = self.clock.now
+        residue = (git(fixture.repo, "rev-parse", "refs/heads/pipeline/sample-1"),
+                   git(fixture.repo, "worktree", "list", "--porcelain"))
+        patch, published = self.publications()
+        ticks = []
+        with patch:
+            # 90 s of production ticks ten seconds apart, each a cold process with its own owner.
+            for second in range(0, 91, 10):
+                self.clock.now = due + second
+                self.owner = CleanupOwner(fixture.runtime)
+                entry, _, _ = self.production_cleanup_phase()
+                ticks.append({"at": second, **entry["cleanup"], "counters": {
+                    name: entry["counters"].get(name, 0) for name in ("cleanup_intent_writes", "cleanup_bytes_written")}})
+        # The reservation, the outcome and the cursor: no checkpoint between them, nothing after.
+        self.assertEqual(published, ["intents/" + key + ".json"] * 2 + ["meta.json"], ticks)
+        first, *later = ticks
+        self.assertEqual(self.counts(first), {"due": 1, "attempted": 1, "deferred": 0, "skipped": 0,
+                                              "busy": 0, "lost": 0, "unread": 0})
+        self.assertEqual(first["cursor"], "advanced")
+        self.assertEqual({name: first["writes"][name] for name in ("intent", "meta", "generated")},
+                         {"intent": 2, "meta": 1, "generated": 0})
+        # The tick's own counters: the global intent-only counter and every byte of all three.
+        self.assertEqual(first["counters"], {"cleanup_intent_writes": 2,
+                                             "cleanup_bytes_written": first["writes"]["bytes"]})
+        for tick in later:
+            # Cooling until its due time: neither attempted nor read as due, and the cursor is not rewritten.
+            self.assertEqual((tick["due"], tick["attempted"], tick["cursor"]), (0, 0, "unchanged"), tick)
+            self.assertEqual(tick["writes"], {"intent": 0, "meta": 0, "generated": 0, "bytes": 0})
+        intent = self.owner.journal.intent(key)
+        # The same truthful outcome, nothing granted: verified preserved by current facts this attempt.
+        self.assertEqual(owned_fixtures.obligations(self.owner.journal), {
+            **before, "meta.json": self.owner.journal.path.joinpath("meta.json").read_bytes()})
+        self.assertEqual(intent["retry"], {"last_attempt_at": due, "next_attempt_at": due + RETRY_COOLDOWN})
+        self.assertEqual(self.owner.journal.replay_cursor(), key)
+        self.assertEqual(intent["status"], "preserved")
+        for flag in ("heads_stopped", "claim_settled", "preservation_verified"):
+            self.assertTrue(intent["progress"][flag], flag)
+        self.assertNotIn("terminal", intent["progress"])
+        # No effect on the card's residue or any head.
+        self.assertEqual(fixture.stops, [])
+        self.assertTrue(fixture.workspace.is_dir())
+        self.assertEqual((git(fixture.repo, "rev-parse", "refs/heads/pipeline/sample-1"),
+                          git(fixture.repo, "worktree", "list", "--porcelain")), residue)
+        print("no-effect preserved retry, 90 s: " + json.dumps(ticks, sort_keys=True))
+
+    def test_a_crash_between_the_reservation_and_the_outcome_keeps_the_hour_and_revokes_settlement(self):
+        fixture = self.fixture
+        key = self.preserved_without_ownership()
+        due = self.clock.now
+
+        class Crash(BaseException):
+            """The process dies: no handler of the replay records anything after it."""
+
+        patch, published = self.publications()
+        with patch, mock.patch.object(CleanupOwner, "_settle_without_identity", side_effect=Crash), \
+                self.assertRaises(Crash):
+            self.replay()
+        # Only the reservation is durable; the stopped (empty) heads were never published as settled.
+        self.assertEqual(published, ["intents/" + key + ".json"])
+        reloaded = CleanupOwner(fixture.runtime)
+        intent = reloaded.journal.intent(key)
+        self.assertEqual((intent["status"], intent["reason"]), ("pending", ""))
+        self.assertFalse(intent["progress"]["heads_stopped"])
+        self.assertFalse(intent["progress"]["preservation_verified"])
+        self.assertNotIn("terminal", intent["progress"])
+        self.assertEqual(intent["retry"], {"last_attempt_at": due, "next_attempt_at": due + RETRY_COOLDOWN})
+        self.assertIn("has not verified head settlement", reloaded.journal.admission_refusal(fixture.task["ref"]))
+        # Every caller waits out the hour, after a reload too, and writes nothing.
+        stored = journal_bytes(reloaded.journal)
+        self.clock.advance(RETRY_COOLDOWN - 1)
+        self.assertEqual(self.replay(CleanupOwner(fixture.runtime))[0], [])
+        self.assertEqual(CleanupOwner(fixture.runtime).replay_one(key)["status"], "pending")
+        self.assertEqual(journal_bytes(reloaded.journal), stored)
+        # At its due time a reloaded owner proves the preservation again from current facts.
+        self.clock.advance(1)
+        result, _ = self.replay(CleanupOwner(fixture.runtime))
+        self.assertEqual([item["status"] for item in result], ["preserved"], result and result[0]["reason"])
+        self.assertTrue(result[0]["progress"]["preservation_verified"])
+        self.assertTrue(result[0]["progress"]["heads_stopped"])
+        self.assertEqual(fixture.stops, [])
+
+    def test_an_ownership_change_during_a_no_effect_retry_refuses_its_settlement(self):
+        """Without the checkpoint after the stop, the claim admission is the first barrier to see a
+        producer's change; it refuses, and the producer's obligation is kept, pending, unsettled."""
+        fixture = self.fixture
+        key = self.preserved_without_ownership()
+        native = CleanupOwner._settle_without_identity
+        settled = []
+
+        def changed(owner, intent, current):
+            stored = owner.journal.intent(key)
+            stored["record"] = {"worker": "producer-worker"}
+            CleanupJournal(fixture.data).save({"intents": {key: stored}})
+            return native(owner, intent, current)
+        with mock.patch.object(CleanupOwner, "_settle_without_identity", autospec=True, side_effect=changed), \
+                mock.patch.object(CleanupOwner, "_settle_claim_admitted", autospec=True,
+                                  side_effect=lambda owner, intent: settled.append(intent)):
+            result, _ = self.replay()
+        # The claim admission refused before its settlement; the outcome's commit refused to publish.
+        self.assertEqual(result[0]["status"], "pending")
+        self.assertIn("ownership changed while work was unlocked", result[0]["reason"])
+        intent = CleanupOwner(fixture.runtime).journal.intent(key)
+        self.assertEqual(intent["record"], {"worker": "producer-worker"})
+        self.assertEqual(intent["status"], "pending")
+        for flag in ("heads_stopped", "preservation_verified"):
+            self.assertFalse(intent["progress"][flag], flag)
+        self.assertEqual(settled, [])
 
     # -- the 20k-entry ignored .venv against the allowance --------------------------------------------
 

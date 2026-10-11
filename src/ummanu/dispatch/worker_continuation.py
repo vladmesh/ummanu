@@ -191,6 +191,8 @@ def begin_red_transition(
     """
     ref = task["ref"]
     baseline = len(task.get("comments") or [])
+    if not decision:
+        record.report_decision_id = ""
     # The round this transition opens is reserved here, with the intent and before the move:
     # completion must read that generation rather than compute it, or a re-entered completion
     # hands one rework round two generations. The observer's instruction is frozen in the same

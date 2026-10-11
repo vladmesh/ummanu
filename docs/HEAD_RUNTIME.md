@@ -7,6 +7,12 @@ only a marker on old durable records, which stay readable and are never launched
 
 ## Worker and reviewer Docker guard
 
+Reviewer test policy is independent of Docker exceptions: reviewers inspect code and existing
+worker/CI evidence without running tests or any `ummanu check` form. The role launcher binds the
+role identity read through `/proc` exec ancestry. Candidate-local startup hooks and a workspace-owned
+startup import directory cover candidate and external Python without changing shared prefixes.
+See [Testing](TESTING.md) for admission, supported recovery and production activation preconditions.
+
 The shared role launcher puts a product-owned executable named `docker` before native Docker
 for workers and reviewers, in the role environment and again after the login shell reads its
 profiles. Workspace Python and Ruff still come from `.ummanu-task-env/venv`. The guard uses
@@ -180,7 +186,16 @@ continuation and reviewer launch prompts are `PromptHandoff`s (`runtime/head/han
 - Telemetry: each card's `handoff_ms` (what its handoffs really cost) and bounded
   `{stage, subject, ms, allowed_ms, outcome}` entries (`cards[].handoffs`); the tick's
   `handoff` entry carries the allowance and what the pass spent. A card's `ms` less its
-  `handoff_ms` is its non-handoff cost (gate, board, provider probes, documents).
+  `handoff_ms` is its non-handoff cost (gate, board, provider probes, documents). `cards[].stages`
+  splits the same `ms` by where it was spent (`tick_telemetry.CARD_STAGES`: the fresh board read,
+  provider ingress, report, observation, provider failure, vitality, lifecycle, and each record
+  flush apart from its card reads, workspace identity, journal publication, ownership-lock wait and
+  state write), each millisecond once, the rest as `unclassified`. A release, decided or automatic,
+  first taken or replayed, splits further at its effect sites: the fresh release gate and its e2e
+  stage, the production runtime fence, the remote merge, the checkout refresh and activation, the
+  landed-commit read and watch, completion evidence, teardown and the terminal move, with an
+  Assessment advance's own rest as `assessment`. Handoffs are spent inside those
+  stages and are not subtracted from them. A card recorded before stages existed has none: unknown.
 
 ## The runtime default
 

@@ -14,12 +14,12 @@ from ummanu.board.completion_evidence import (
     research_report_refusal,
 )
 from ummanu.dispatch import attempt_accounting, e2e_stage, post_merge, release_activation
+from ummanu.dispatch.decision_pointer import decision_pointer
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.helpers import scrub_host_output
 from ummanu.dispatch.production_checkout import ProductionActivationRefused
-from ummanu.dispatch.decision_pointer import decision_pointer
-from ummanu.dispatch.state import DispatcherRecord
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
+from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
+from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.types import GateTransportError, HostError, MergeLanding
 from ummanu.knowledge_write import (
     KnowledgeError,
@@ -120,23 +120,25 @@ def block_merge_path(
 ) -> dict[str, Any]:
     """A merge path that cannot finish leaves the card Blocked with its heads down."""
     ref = task["ref"]
-    runtime.host.stop(record)
-    attempt_accounting.terminal_effect(runtime, 
-        task,
-        record,
-        target="blocked",
-        reason=reason,
-        decision=decision,
-        request_id=request_id or _attempt_request_id(record.attempt_id or attempt_id, action, ref),
-        terminal_state="blocked",
-        disposition="blocked",
-        verdict=record.worker_continuation.verdict_outcome
-        if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
-        else "missing",
-        blocked_reason=merge_terminal_reason(action),
-    )
-    records.pop(ref, None)
-    runtime.save_records(payload, records)
+    with tick_stage("release_teardown"):
+        runtime.host.stop(record)
+    with tick_stage("release_terminal"):
+        attempt_accounting.terminal_effect(runtime, 
+            task,
+            record,
+            target="blocked",
+            reason=reason,
+            decision=decision,
+            request_id=request_id or _attempt_request_id(record.attempt_id or attempt_id, action, ref),
+            terminal_state="blocked",
+            disposition="blocked",
+            verdict=record.worker_continuation.verdict_outcome
+            if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
+            else "missing",
+            blocked_reason=merge_terminal_reason(action),
+        )
+        records.pop(ref, None)
+        runtime.save_records(payload, records)
     return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": outcome}
 
 
@@ -161,6 +163,20 @@ def transfer_research_report(
     """
     if task.get("type") != "research":
         return None
+    with tick_stage("release_evidence"):
+        return _transfer_research_report(runtime, task, record, records, payload, attempt_id, step=step)
+
+
+def _transfer_research_report(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    step: str,
+) -> dict[str, Any] | None:
     ref = task["ref"]
     generation = str(record.report_generation)
     source = Path(record.workspace) / RESEARCH_REPORT_DIR
@@ -247,37 +263,36 @@ def release_parked(
     # The release audit's e2e stage reads the gate itself and binds to the SHA it validated: a SHA with
     # a green run (or one reconciled to it by a base-only move) is not dispatched again, and one without
     # waits for its own run first. The gate result it read is accepted below, once.
-    e2e = e2e_stage.run_stage(
-        runtime,
-        task,
-        record,
-        records,
-        payload,
-        attempt_id,
-        step="assessment",
-        gate=lambda: read_release_gate(runtime, task, record, records, payload, attempt_id),
-    )
+    def gate() -> tuple[dict[str, Any] | None, GateResult | None]:
+        with tick_stage("release_gate"):
+            return read_release_gate(runtime, task, record, records, payload, attempt_id)
+
+    with tick_stage("release_e2e"):
+        e2e = e2e_stage.run_stage(
+            runtime, task, record, records, payload, attempt_id, step="assessment", gate=gate
+        )
     if isinstance(e2e, dict):
         return e2e
     if e2e is None:
-        outcome, result = read_release_gate(runtime, task, record, records, payload, attempt_id)
+        outcome, result = gate()
         if outcome is not None:
             return outcome
         reconciliation = None
     else:
         result, reconciliation = e2e.result, e2e.reconciliation
     assert result is not None
-    blocked = gate_lifecycle.accept_green_gate(
-        runtime,
-        task,
-        record,
-        records,
-        payload,
-        attempt_id,
-        result,
-        stage="release",
-        e2e_reconciliation=reconciliation,
-    )
+    with tick_stage("release_gate"):
+        blocked = gate_lifecycle.accept_green_gate(
+            runtime,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            result,
+            stage="release",
+            e2e_reconciliation=reconciliation,
+        )
     if blocked is not None:
         return blocked
     return release_effect(runtime,
@@ -413,19 +428,22 @@ def release_effect(
     """
     ref = task["ref"]
     if record.activation_recovery is not None:
-        return release_activation.resume_refused_activation(
-            runtime, task, record, records, payload, attempt_id
-        )
+        with tick_stage("release_terminal"):
+            return release_activation.resume_refused_activation(
+                runtime, task, record, records, payload, attempt_id
+            )
     release_merge: dict[str, Any] | None = None
     if has_candidate(task):
         try:
+            # Its runtime fence, delivery, refresh and landed-commit read are each their own stage.
             landing = runtime.host.complete_green(task, record)
         except ProductionActivationRefused as exc:
             # Delivered to the remote, not activated on production: its own reason, one operation
             # for the PO, and the card Blocked (secretary-1824).
-            return release_activation.block_refused_activation(
-                runtime, task, record, records, payload, attempt_id, exc, step=step
-            )
+            with tick_stage("release_terminal"):
+                return release_activation.block_refused_activation(
+                    runtime, task, record, records, payload, attempt_id, exc, step=step
+                )
         except HostError as exc:
             # A rejected merge must land the card in Blocked rather than escape the tick: an
             # escaping error leaves the verdict standing and every later tick retries the merge.
@@ -441,14 +459,16 @@ def release_effect(
                 outcome="merge failed",
             )
         if isinstance(landing, MergeLanding):
-            watch = post_merge.open_watch(runtime, task, payload, landing, workspace=record.workspace)
-            runtime.save_records(payload, records)
-            release_merge = post_merge.release_merge_marker(watch)
+            with tick_stage("release_landed"):
+                watch = post_merge.open_watch(runtime, task, payload, landing, workspace=record.workspace)
+                runtime.save_records(payload, records)
+                release_merge = post_merge.release_merge_marker(watch)
     blocked = require_completion_evidence(runtime, task, record, records, payload, attempt_id, step=step)
     if blocked is not None:
         return blocked
     try:
-        cleanup_receipt = runtime.host.teardown(record)
+        with tick_stage("release_teardown"):
+            cleanup_receipt = runtime.host.teardown(record)
     except HostError as exc:
         # Cleanup is a provenance boundary, not best effort. A mismatch keeps the checkout and
         # prevents Done so the next tick cannot repeatedly run an already-failed release path.
@@ -465,20 +485,21 @@ def release_effect(
             step=step,
             outcome="release cleanup refused",
         )
-    attempt_accounting.terminal_effect(runtime, 
-        task,
-        record,
-        target="done",
-        reason=move_reason,
-        decision=decision,
-        request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
-        terminal_state="done",
-        disposition="release",
-        verdict=verdict,
-        release_merge=release_merge,
-    )
-    records.pop(ref, None)
-    runtime.save_records(payload, records)
+    with tick_stage("release_terminal"):
+        attempt_accounting.terminal_effect(runtime,
+            task,
+            record,
+            target="done",
+            reason=move_reason,
+            decision=decision,
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
+            terminal_state="done",
+            disposition="release",
+            verdict=verdict,
+            release_merge=release_merge,
+        )
+        records.pop(ref, None)
+        runtime.save_records(payload, records)
     return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done",
             **({"cleanup": cleanup_receipt} if isinstance(cleanup_receipt, dict) else {})}
 
@@ -501,6 +522,20 @@ def require_completion_evidence(
     """
     if has_candidate(task):
         return None
+    with tick_stage("release_evidence"):
+        return _require_completion_evidence(runtime, task, record, records, payload, attempt_id, step=step)
+
+
+def _require_completion_evidence(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+    *,
+    step: str,
+) -> dict[str, Any] | None:
     missing = missing_completion_evidence(runtime.reader.show(task["ref"]))
     if not missing:
         return None

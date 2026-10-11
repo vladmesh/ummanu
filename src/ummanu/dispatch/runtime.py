@@ -103,7 +103,7 @@ from ummanu.dispatch.state import (
     now_rfc3339,
     outcome_terminal_path as _outcome_terminal_path,
 )
-from ummanu.dispatch.tick_telemetry import tick_count
+from ummanu.dispatch.tick_telemetry import tick_count, tick_stage, tick_stage_entering
 from ummanu.dispatch.types import (
     STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
@@ -411,13 +411,15 @@ class DispatcherRuntime:
         # adoption reads a heartbeat, not after a mismatched session was attributed to this card.
         record = records.get(ref)
         if record is not None:
-            fanout = self.poll_codex_provider_ingress(record, records, payload, reference=ref)
+            with tick_stage("ingress"):
+                fanout = self.poll_codex_provider_ingress(record, records, payload, reference=ref)
             if fanout is not None:
                 return fanout
         # A record carrying a launch intent is a bring-up whose tick did not live to record its
         # outcome. It is settled before anything else: until it is, neither "this card has a head"
         # nor "this card is headless" is known, and the wrong answer gives one workspace two heads.
-        pending_launch = _resolve_launch_intent(self, task, records, payload)
+        with tick_stage("launch"):
+            pending_launch = _resolve_launch_intent(self, task, records, payload)
         if pending_launch is not None:
             return pending_launch
         if task["state"] == "ready":
@@ -546,31 +548,36 @@ class DispatcherRuntime:
                     if not mismatch:
                         record.state = "claim_verified"
                         self.save_records(payload, records)
-                        return _launch_worker_after_claim(self, task, record, records, payload)
+                        with tick_stage("launch"):
+                            return _launch_worker_after_claim(self, task, record, records, payload)
         if record.worker_continuation.red_transition_pending:
             # An open red transition outranks everything else. The board move may or may not have
             # committed before its tick died, so it is finished against the board as it is now.
             return _complete_red_transition(self, task, record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
-            return _launch_worker_after_claim(self, task, record, records, payload)
-        marker = _worker_report_marker(self, task, record, records, payload, attempt_id)
-        recovered = _recover_worker_continuation(
-            self, task, record, records, payload, attempt_id, marker=marker
-        )
-        if recovered is not None:
-            return recovered
-        reported = _handle_worker_report(
-            self, task, record, records, payload, attempt_id, marker=marker
-        )
+            with tick_stage("launch"):
+                return _launch_worker_after_claim(self, task, record, records, payload)
+        with tick_stage("report"):
+            marker = _worker_report_marker(self, task, record, records, payload, attempt_id)
+            recovered = _recover_worker_continuation(
+                self, task, record, records, payload, attempt_id, marker=marker
+            )
+            if recovered is not None:
+                return recovered
+            reported = _handle_worker_report(
+                self, task, record, records, payload, attempt_id, marker=marker
+            )
         if reported is not None:
             return reported
         # Before any wait: a card cannot wait for a report from a worker no record can name. The
         # watchdog below observes a head; this decides whether there is one to observe at all.
-        headless = _resolve_headless_worker(self, task, record, records, payload, attempt_id)
+        with tick_stage("headless"):
+            headless = _resolve_headless_worker(self, task, record, records, payload, attempt_id)
         if headless is not None:
             return headless
         # A comment that landed mid-round reaches the live worker now, not at the next round.
-        commented = _deliver_worker_comments(self, task, record, records, payload, attempt_id)
+        with tick_stage("comments"):
+            commented = _deliver_worker_comments(self, task, record, records, payload, attempt_id)
         if commented is not None:
             return commented
         watchdog = _wait_watchdog(self, task, record, records, payload, attempt_id, kind="worker")
@@ -599,7 +606,8 @@ class DispatcherRuntime:
             except HostError as exc:
                 return self._block_unresumable(task, records, payload, attempt_id, "review", exc)
             records[ref] = record
-        verdict = _advance_review_verdict(self, task, record, records, payload, attempt_id)
+        with tick_stage("report"):
+            verdict = _advance_review_verdict(self, task, record, records, payload, attempt_id)
         if verdict is not None:
             return verdict
         # Mechanical gate: a fresh report clears the cheap CI/local gate before the expensive
@@ -610,15 +618,18 @@ class DispatcherRuntime:
             and record.state not in ("review_starting", "reviewing")
             and record.gate_state != "green"
         ):
-            gated = _run_gate(self, task, record, records, payload, attempt_id)
+            with tick_stage("gate"):
+                gated = _run_gate(self, task, record, records, payload, attempt_id)
             if gated is not None:
                 return gated
         if not review_required(task) and record.state not in ("review_starting", "reviewing"):
             # `review: skipped`: no reviewer for any kind. The accepted report takes the path a green
             # verdict takes, which for a code card still re-reads the gate and merges on release.
-            return _park_green_verdict(self, task, record, records, payload, attempt_id, reviewed=False)
+            with tick_stage("lifecycle"):
+                return _park_green_verdict(self, task, record, records, payload, attempt_id, reviewed=False)
         if record.state == "review_starting":
-            return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
+            with tick_stage("launch"):
+                return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
         if record.state != "reviewing":
             if record.worker_continuation.retained and not self.host.worker_retained_alive(record):
                 # The record remembers a suspended worker the host cannot confirm is frozen.
@@ -632,7 +643,8 @@ class DispatcherRuntime:
             launch_request = _review_launch_request_id(ref, record.review_baseline)
             if self.audit.committed_event(launch_request) is not None:
                 record.state = "review_starting"
-                return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
+                with tick_stage("launch"):
+                    return _recover_review_launch(self, task, records, record, attempt_id, payload=payload)
             attempt_accounting.persist_outcome_round_context(self, task, record, phase="review")
             self.writer.comment(
                 role="dispatcher",
@@ -642,9 +654,10 @@ class DispatcherRuntime:
                 request_id=launch_request,
             )
             record.state = "review_starting"
-            return _start_review(
-                self, task, records, record, attempt_id, action="review-started", payload=payload
-            )
+            with tick_stage("launch"):
+                return _start_review(
+                    self, task, records, record, attempt_id, action="review-started", payload=payload
+                )
         watchdog = _wait_watchdog(self, task, record, records, payload, attempt_id, kind="review")
         if watchdog is not None:
             return watchdog
@@ -919,16 +932,19 @@ class DispatcherRuntime:
     def save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         """Flush the dispatcher records into the production state."""
         tick_count("save_records")
-        if isinstance(self.host, CommandHostRuntime) and self.host.mode == "real":
-            for ref, record in records.items():
-                if record.workspace:
-                    # The card is read only when the journal is: an unchanged cleanup projection
-                    # needs neither the board nor the journal.
-                    self.cleanup.remember_record(ref, record, functools.partial(self.reader.show, ref))
-        with ownership_lock(self.data_dir):
-            self.production_state.put_records(payload, records)
-            payload["last_tick_at"] = now_rfc3339()
-            self.production_state.save(payload)
+        with tick_stage("flush"):
+            if isinstance(self.host, CommandHostRuntime) and self.host.mode == "real":
+                for ref, record in records.items():
+                    if record.workspace:
+                        # The card is read only when the journal is: an unchanged cleanup projection
+                        # needs neither the board nor the journal.
+                        self.cleanup.remember_record(
+                            ref, record, functools.partial(_flush_card_read, self.reader, ref)
+                        )
+            with tick_stage_entering("flush_lock", ownership_lock(self.data_dir)), tick_stage("flush_write"):
+                self.production_state.put_records(payload, records)
+                payload["last_tick_at"] = now_rfc3339()
+                self.production_state.save(payload)
 
     def _adopt(self, task: dict[str, Any], attempt_id: str) -> DispatcherRecord:
         worker = task.get("claim", {}).get("worker") or _worker_id(task)
@@ -1027,6 +1043,11 @@ class DispatcherRuntime:
         if task.get("state") != "validate":
             return False
         return self.audit.committed_event(_review_launch_request_id(task["ref"], review_baseline)) is not None
+
+
+def _flush_card_read(reader: TaskReader, reference: str) -> dict[str, Any]:
+    with tick_stage("flush_card_read"):
+        return reader.show(reference)
 
 
 def _review_launch_request_id(reference: str, review_baseline: int) -> str:

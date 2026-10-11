@@ -66,6 +66,8 @@ from ummanu.dispatch.helpers import (
     _legacy_worker_branch,
     _protocol_prerequisites_record_line,
     _round_record_line,
+    _round_report_ids,
+    _round_worker_check,
     _tail,
     safe_one_line as _safe_one_line,
     scrub_host_output,
@@ -102,6 +104,12 @@ from ummanu.dispatch.provider_failure import (
 from ummanu.dispatch.review import (
     command_terminal_status as _command_terminal_status,
 )
+from ummanu.dispatch.review_packet import (
+    ReviewEvidence,
+    data_block,
+    render_review_evidence,
+    resolve_review_evidence,
+)
 from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
 from ummanu.dispatch.state import (
     REVIEW_REJECTION_REASON,
@@ -111,6 +119,7 @@ from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
     request_token as _request_token,
 )
+from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.tui import (
     DELIVERY_ACCEPTED,
     READINESS_BUSY,
@@ -1018,6 +1027,7 @@ class CommandHostRuntime:
             self._prepare_workspace_environment(workspace, project=project)
             self._run_setup(project, workspace)
         self._require_workspace_environment(workspace)
+        self._install_workspace_test_guards(Path(workspace), project=project)
         self._clear_report_bodies(task["ref"])
         snapshot = local_run_snapshot or self.local_run_snapshot_for_round(
             task, WORKER_ROLE, generation, {}
@@ -1818,6 +1828,7 @@ class CommandHostRuntime:
             workspace.mkdir(parents=True, exist_ok=True)
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
+        self._require_worker_admission(task, record)
         self._prepare_workspace_environment(record.workspace, project=str(task["project"]))
         self._require_workspace_environment(record.workspace)
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
@@ -1921,6 +1932,8 @@ class CommandHostRuntime:
         self._refuse_legacy_record(record, "deliver to the reviewer of")
         if not record.workspace:
             raise HostError("review workspace is unavailable for a retained launch")
+        self._require_worker_admission(task, record)
+        self._prepare_workspace_environment(record.workspace, project=str(task["project"]))
         stored_run = intent.get("head_run")
         if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
             raise HostError("retained reviewer launch has no durable head run")
@@ -2082,6 +2095,7 @@ class CommandHostRuntime:
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         self._require_production_runtime("candidate-gate-before")
+        self._require_worker_admission(task, record)
         if record.workspace:
             self._decide_workspace_environment_ownership(record.workspace)
         result = _gate_check(self, task, record)
@@ -2108,6 +2122,54 @@ class CommandHostRuntime:
         )
         if durability_dirt(completed.stdout):
             raise HostError("worker reported done with uncommitted changes")
+        from ummanu.broad_check import BroadCheckError, admitted_check
+        from ummanu.check_commands import completion_check
+        from ummanu.config import ConfigError
+
+        try:
+            project = str(task.get("project") or "")
+            evidence = completion_check(project, workspace, self.catalog.instance_dir) if project else None
+            if evidence is not None:
+                accepted = admitted_check(_round_worker_check(
+                    self._card_audit(), task["ref"],
+                    _round_report_ids(record.workspace, record.attempt_id, task["ref"], record.report_generation),
+                ))
+                if accepted is None:
+                    raise HostError("accepted report has no worker admission evidence; drain pre-policy reports before activation")
+                if accepted["snapshot_digest"] != evidence["snapshot_digest"]:
+                    raise HostError("candidate/receipt differs from the immutable accepted report")
+        except (BroadCheckError, ConfigError) as exc:
+            raise HostError(f"worker completion evidence unavailable: {exc}") from exc
+
+    def _require_worker_admission(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        """Recovered Validate/review needs the original admission, not a new worker run.
+
+        The machinery may have merged the integration base since report acceptance.
+        Its exact-SHA gate owns that resulting tree; worker evidence remains bound
+        to the admitted commit and is never upgraded into a gate attestation.
+        """
+        if self.mode == "noop" or not has_candidate(task):
+            return
+        project = str(task.get("project") or "")
+        if not project or "broad_check" not in self.catalog.adapter(project):
+            return
+        from ummanu.broad_check import admitted_check
+
+        accepted = admitted_check(_round_worker_check(
+            self._card_audit(), task["ref"],
+            _round_report_ids(record.workspace, record.attempt_id, task["ref"], record.report_generation),
+        ))
+        if accepted is None:
+            raise HostError("required immutable worker admission evidence is missing or damaged; drain pre-policy records before activation")
+        sha = str(accepted.get("candidate_sha") or "")
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+            raise HostError("worker admission has no exact candidate SHA")
+        tree = self._run(["git", "-C", record.workspace, "rev-parse", f"{sha}^{{tree}}"],
+                         "worker admitted tree").stdout.strip()
+        if tree != accepted.get("tree_sha"):
+            raise HostError("worker admitted commit does not match its receipt tree")
+        self._run(["git", "-C", record.workspace, "merge-base", "--is-ancestor", sha, "HEAD"],
+                  "worker admission ancestry")
 
     def retained_workspace_state(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
         """Describe the retained worker checkout of a card recovered without a live head.
@@ -2237,7 +2299,8 @@ class CommandHostRuntime:
         post-merge CI watch, or None when nothing was merged (noop mode, no workspace, automerge off):
         a release that merged nothing wakes the observer on its Done as before.
         """
-        self._require_production_runtime("release-before")
+        with tick_stage("release_runtime"):
+            self._require_production_runtime("release-before")
         if self.mode == "noop" or not record.workspace:
             return None
         self._decide_workspace_environment_ownership(record.workspace)
@@ -2256,16 +2319,17 @@ class CommandHostRuntime:
             except ProductionActivationRefused as exc:
                 # The pull request is merged; only the production activation was refused.
                 exc.landing = MergeLanding(
-                    sha=pr_merge_commit(self._run, branch, Path(record.workspace)),
+                    sha=self._landed_pr_commit(record, branch),
                     base=base,
                     path="github-pr",
                     ci=ci,
                     branch=branch,
                 )
                 raise
-            self._require_production_runtime("release-after")
+            with tick_stage("release_runtime"):
+                self._require_production_runtime("release-after")
             return MergeLanding(
-                sha=pr_merge_commit(self._run, branch, Path(record.workspace)),
+                sha=self._landed_pr_commit(record, branch),
                 base=base,
                 path="github-pr",
                 ci=ci,
@@ -2279,19 +2343,22 @@ class CommandHostRuntime:
         # (secretary-1541), and pushing a card that declared one onto `main` anyway would land an
         # increment on a branch it was never validated against.
         project = task["project"]
-        self._remote_git_checked(
-            project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
-        )
-        self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
+        with tick_stage("release_merge"):
+            self._remote_git_checked(
+                project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
+            )
         try:
-            self._advance_checkout(repo, f"origin/{base}")
+            with tick_stage("release_refresh"):
+                self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
+                self._advance_checkout(repo, f"origin/{base}")
         except ProductionActivationRefused as exc:
             # The push landed; only the production activation was refused.
             exc.landing = MergeLanding(
                 sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci
             )
             raise
-        self._require_production_runtime("release-after")
+        with tick_stage("release_runtime"):
+            self._require_production_runtime("release-after")
         return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
 
     def _advance_checkout(self, repo: Path, ref: str) -> None:
@@ -2309,12 +2376,18 @@ class CommandHostRuntime:
     def _pushed_branch_head(self, record: DispatcherRecord, branch: str) -> str:
         """The commit a `branch:base` push just landed. A non-fast-forward push is rejected, so after
         a successful one the base is exactly this branch head."""
-        try:
-            return self._run(
-                ["git", "-C", record.workspace, "rev-parse", branch], "post-merge landed commit"
-            ).stdout.strip()
-        except HostError:
-            return ""
+        with tick_stage("release_landed"):
+            try:
+                return self._run(
+                    ["git", "-C", record.workspace, "rev-parse", branch], "post-merge landed commit"
+                ).stdout.strip()
+            except HostError:
+                return ""
+
+    def _landed_pr_commit(self, record: DispatcherRecord, branch: str) -> str:
+        """The merge commit a pull request merge just landed, or "" when it cannot be read yet."""
+        with tick_stage("release_landed"):
+            return pr_merge_commit(self._run, branch, Path(record.workspace))
 
     def _require_pr_base(self, record: DispatcherRecord, branch: str, base: str) -> None:
         """Refuse the merge unless the open pull request for `branch` targets `base`.
@@ -2352,8 +2425,9 @@ class CommandHostRuntime:
         (secretary-1541). A pull request still pointing somewhere else — a card branch a stale PR was
         opened against — is refused here rather than merged into a branch nothing releases from.
         """
-        self._require_pr_base(record, branch, base)
-        self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
+        with tick_stage("release_merge"):
+            self._require_pr_base(record, branch, base)
+            self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         default_branch = self.catalog.project_default_branch(task["project"])
         # `gh pr merge` is the irreversible delivery boundary. Refreshing this checkout afterwards is
@@ -2361,10 +2435,11 @@ class CommandHostRuntime:
         # ff-only impossible: never report an already-merged card as failed because it did not apply.
         try:
             refresh_branch = base if base == default_branch else default_branch
-            self._remote_git_checked(
-                task["project"], repo, ["fetch", "origin", refresh_branch], "post-merge fetch"
-            )
-            self._advance_checkout(repo, f"origin/{refresh_branch}")
+            with tick_stage("release_refresh"):
+                self._remote_git_checked(
+                    task["project"], repo, ["fetch", "origin", refresh_branch], "post-merge fetch"
+                )
+                self._advance_checkout(repo, f"origin/{refresh_branch}")
         except ProductionActivationRefused:
             raise
         except HostError:
@@ -2968,6 +3043,7 @@ class CommandHostRuntime:
             # A venv made ready before the startup file existed stays acceptable; it gains the file
             # here when its layout allows, and keeps working without it otherwise.
             self._install_workspace_pycache_prefix(root, environment, required=False)
+            self._install_workspace_test_guards(root, project=project)
             return
         self._run(
             [self.production_runtime.interpreter, "-m", "venv", str(environment)],
@@ -2988,6 +3064,47 @@ class CommandHostRuntime:
         except RuntimeError as exc:
             raise HostError(f"workspace Python environment readiness could not be written: {exc}") from None
         self._require_workspace_environment(workspace)
+        self._install_workspace_test_guards(root, project=project)
+
+    def _install_workspace_test_guards(self, root: Path, *, project: str = "") -> None:
+        if self.mode == "noop":
+            return
+        from ummanu.runtime.test_guard import install_environment, install_workspace
+
+        environments = [self._workspace_environment(root)]
+        if project:
+            declaration = self.catalog.adapter(project).get("broad_check", {})
+            interpreter = declaration.get("interpreter") if isinstance(declaration, dict) else None
+            if interpreter:
+                path = Path(interpreter)
+                path = path if path.is_absolute() else root / path
+                # Setup may not have created the adapter-owned venv yet. Worker
+                # preparation repeats this step after setup; retained environments
+                # take this same path without rebuilding their dependencies.
+                if path.is_file() and path.parent.name == "bin":
+                    # Resolve the bin directory, not the executable symlink: a
+                    # local venv normally links Python to its system binary.
+                    # External declarations remain supported, but are never
+                    # optional destinations for candidate guard writes.
+                    try:
+                        prefix = path.parent.resolve(strict=True).parent
+                        sites = [site for site in prefix.glob("lib/python3*/site-packages") if site.is_dir()]
+                        eligible = (
+                            prefix.is_relative_to(root.resolve(strict=True))
+                            and (prefix / "pyvenv.cfg").is_file()
+                            and len(sites) == 1
+                            and sites[0].resolve(strict=True).is_relative_to(prefix)
+                        )
+                    except (OSError, RuntimeError, ValueError):
+                        eligible = False
+                    if eligible:
+                        environments.append(prefix)
+        try:
+            install_workspace(root)
+            for environment in dict.fromkeys(environments):
+                install_environment(root, environment)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HostError(f"workspace test guard unavailable: {exc}") from None
 
     def _install_workspace_pycache_prefix(self, root: Path, environment: Path, *, required: bool) -> None:
         """Point every interpreter of the owned venv at the owned bytecode cache.
@@ -4107,18 +4224,10 @@ class CommandHostRuntime:
         no evidence that the interpreter or imports will be usable there. Two empty strings mean
         no usable suite declaration is available, which the caller reports in words.
         """
-        if not project:
-            return "", ""
-        try:
-            verdict = self.catalog.broad_check_verdict(project)
-        except (HostError, DispatcherError):
-            # Rendering a task document never fails over a registry question. A project whose
-            # binding or adapter cannot be read reaches the worker with the honest wording below,
-            # and the refusal itself is the preflight's to report, not this packet's.
-            return "", ""
-        contract = verdict.contract if verdict.fit else None
-        if verdict.undecidable and verdict.question == UNDECIDABLE_RELATIVE_INTERPRETER:
-            contract = verdict.declared_contract
+        return self._broad_check_commands(self._packet_check_contract(project))
+
+    def _broad_check_commands(self, contract: Any) -> tuple[str, str]:
+        """Render commands from the same resolved declaration as the packet header."""
         if contract is None or not contract.module:
             return "", ""
         broad_arguments = ["check", "broad", "--reuse", "--module", contract.module]
@@ -4135,6 +4244,143 @@ class CommandHostRuntime:
             self._control_plane_command(*broad_arguments),
             self._control_plane_command(*show_arguments),
         )
+
+    def _packet_check_contract(self, project: str) -> Any:
+        """Share the adapter verdict with all packet command renderers."""
+        if not project:
+            return None
+        try:
+            verdict = self.catalog.broad_check_verdict(project)
+        except (HostError, DispatcherError):
+            # Rendering a task document never fails over a registry question. A project whose
+            # binding or adapter cannot be read reaches the worker with the honest wording below,
+            # and the refusal itself is the preflight's to report, not this packet's.
+            return None
+        contract = verdict.contract if verdict.fit else None
+        if verdict.undecidable and verdict.question == UNDECIDABLE_RELATIVE_INTERPRETER:
+            contract = verdict.declared_contract
+        return contract
+
+    def _check_header(self, project: str) -> list[str]:
+        """First lines of both packets, before any user-authored task text."""
+        return self._render_check_header(self._packet_check_contract(project))
+
+    def _review_check_header(self, project: str) -> list[str]:
+        contract = self._packet_check_contract(project)
+        return [
+            "## Declared local checks and CI evidence boundary", "",
+            "Reviewer heads must not run tests or any ummanu check, including show or --reuse (refusal125).",
+            "Read the diff, commits, acceptance criteria, worker receipt artifacts and exact-SHA CI evidence.",
+            "Name missing evidence in the verdict; request validation from the worker or CI.",
+            f"Worker declared check: {contract.module if contract else '(configuration unavailable)'}",
+            "Worker-local receipts attest content and imports; only machinery-owned gate receipts attest exact-SHA CI.",
+            "",
+        ]
+
+    def _worker_check_packet(self, task: dict[str, Any], record: DispatcherRecord | None, sha: str) -> list[str]:
+        from ummanu.broad_check import load_receipt
+        from ummanu.dispatch.review_packet import data_block
+
+        lines = ["## Worker completion receipt", ""]
+        if record is None:
+            return lines + ["Missing evidence: no worker round is bound to this review.", ""]
+        from ummanu.broad_check import admitted_check
+
+        evidence = admitted_check(_round_worker_check(
+            self._card_audit(), task["ref"],
+            _round_report_ids(record.workspace, record.attempt_id, task["ref"], record.report_generation),
+        ))
+        if evidence is None:
+            return lines + ["Missing evidence: accepted worker report carries no full-profile admission receipt.", ""]
+        lines += ["Immutable worker report evidence (not a mechanical gate attestation):",
+                  *data_block(json.dumps(evidence, sort_keys=True, indent=2))]
+        if evidence.get("candidate_sha") != sha:
+            lines += ["Worker receipt covers the admitted SHA; the mechanical gate must attest the current candidate after any base refresh."]
+        path = evidence.get("path")
+        artifact = load_receipt(Path(path)) if isinstance(path, str) else None
+        if artifact is None or artifact.get("receipt_digest") != evidence.get("receipt_digest"):
+            lines += ["Worker receipt artifact is missing or changed; the immutable admitted snapshot above remains audit evidence."]
+        return lines + [""]
+
+    def _render_check_header(self, contract: Any) -> list[str]:
+        from ummanu.broad_check import BroadCheckError
+        from ummanu.projects.local_check import PytestSelection
+
+        lines = ["## Declared local checks and CI evidence boundary", ""]
+        if contract is None or not contract.module:
+            return lines + [
+                "Configuration gap: no usable adapter-declared local profile. Obtain CI evidence",
+                "and report the gap; do not use repository discovery or direct pytest/unittest.",
+                "",
+            ]
+        default = (
+            []
+            if contract.interpreter_declared
+            else ["--default-interpreter", str(Path(WORKSPACE_ENV_DIR) / "bin" / "python3")]
+        )
+        broad, show = self._broad_check_commands(contract)
+        lines += [
+            f"Matching explicit full-profile wrapper: {broad}",
+            f"Matching full receipt readback: {show}",
+            f"Candidate check interpreter: {contract.interpreter if contract.interpreter_declared else default[-1]}",
+        ]
+        roots = ()
+        gap = ""
+        if contract.local is None:
+            gap = "broad_check.local is missing"
+        elif contract.module == "pytest":
+            try:
+                roots = PytestSelection.resolve(contract.args, contract.collection_roots).roots
+            except BroadCheckError as exc:
+                gap = exc.message
+        if gap:
+            lines += [
+                f"Configuration gap: {gap}; bare check and module/node selector forms are unavailable.",
+                "Use the declared legacy broad/show commands above; do not guess collection roots",
+                "or use repository discovery or direct pytest/unittest.",
+            ]
+        else:
+            lines += [
+                f"Full declared profile (reuse): {self._control_plane_command('check', '--reuse', *default)}"
+            ]
+            selectors = (
+                ("<declared-collection-path>", "<declared-collection-path>::<test-node>")
+                if roots
+                else (
+                    ("<runner-owned-module-selector>", "<runner-owned-node-selector>")
+                    if contract.local.get("membership") == "runner"
+                    else (
+                        "<declared-unit-or-component-module>",
+                        "<declared-unit-or-component-file.py>::<class>::<test>",
+                    )
+                )
+            )
+            lines += [
+                f"Subset form (placeholder, replace with an allowed selector): {self._control_plane_command('check', *default, '--', selector)}"
+                for selector in selectors
+            ]
+            if roots:
+                lines += [
+                    f"Declared pytest collection roots: {list(roots)!r}; wrapper preserves declared options/markers."
+                ]
+            elif contract.local.get("membership") == "runner":
+                lines += [
+                    "Runner owns selector forwarding through -- and its declared selector_args; do not bypass it."
+                ]
+            else:
+                lines += ["Manifest membership is unit + component; other shards are CI-only."]
+        return lines + [
+            "Every AC needs declared local-profile evidence or its corresponding CI shard and report.",
+            "Respect native runner budgets, including codegen's 0.5s/test and 240s CPU limits.",
+            "Ummanu local tests warn at >5s; CI unit/component fails at >5s/test or >90s/module.",
+            "Real integration/packaging/runtime/backend/network/container evidence is CI-only here.",
+            "Never run direct pytest/unittest or expand the local profile to satisfy an AC.",
+            "Fresh code report:done requires an intact complete green full declared receipt for committed HEAD tree.",
+            "Subsets are permitted during work; reuse the full receipt for an unchanged validated tree.",
+            "A valid executed dispatcher-owned exact-SHA gate suppresses routine broad reruns;",
+            "none/noop/missing receipts attest no suite. Subsets and refusal125 do not alter full receipts.",
+            "",
+        ]
 
     def _control_plane_command(self, *arguments: str) -> str:
         """Render one head-visible Ummanu command on the production control-plane boundary."""
@@ -4267,7 +4513,8 @@ class CommandHostRuntime:
         sections = [
             "## Control-host local-run rule",
             "",
-            "On the control host, workers and reviewers may run locally only the project's",
+            "Reviewer heads read evidence and never run tests, including any ummanu check form.",
+            "On the control host, workers may run locally only the project's",
             "adapter-declared broad check and subsets of that check. Integration shards,",
             "Docker/container runs, stands, provisioning and network-heavy checks run in CI only,",
             "unless the exact command/argument vector is expressly covered below by this sprint's",
@@ -4277,7 +4524,12 @@ class CommandHostRuntime:
             "and a head's judgement never grant exceptions. An exception grants only its exact argv.",
             "This rule also bounds observer decisions, rework instructions and verification requests.",
             "Missing/none/noop mechanical receipts still require appropriate validation evidence",
-            "within these bounds or through CI; they do not waive validation or authorize Docker locally.",
+            "supplied by workers within these bounds or by CI.",
+            "Reviewers read that evidence and name gaps in the verdict. Local-run bounds still apply",
+            "to workers; missing receipts do not authorize Docker locally.",
+            "Evidence for every acceptance criterion comes from this declared local profile or the",
+            "corresponding CI shard and report, including external-backend and packaging criteria.",
+            "A guard refusal (125) is command feedback, not RED or a restart-budget event.",
             "",
             "## Applicable sprint local_run_exceptions",
             "",
@@ -4367,8 +4619,22 @@ class CommandHostRuntime:
             "",
             *_interrupted_command_section(record),
         ]
-        decision, review_red = self._select_revision_bound_worker_feedback(task, decision)
-        prerequisites = self._validated_worker_prerequisites(task, decision, protocol_prerequisites)
+        feedback = self._select_revision_bound_worker_feedback(
+            task,
+            decision,
+            attempt=attempt_id,
+            generation=generation,
+            previous=record.previous_blockers if record else "",
+            decision_id=record.report_decision_id if record else "",
+            review_id=(record.previous_review_id or ("" if record.report_decision_id else None)) if record else None,
+        )
+        decision, review_red = feedback.decision, feedback.findings
+        prerequisites = self._validated_worker_prerequisites(
+            task,
+            decision,
+            protocol_prerequisites,
+            decision_id=feedback.decision_id,
+        )
         if decision:
             # Rendered above the findings it was made on, and named as the thing to follow.
             sections += [
@@ -4396,23 +4662,23 @@ class CommandHostRuntime:
             ]
         if review_red and decision:
             sections += [
-                "## Reviewer findings, as supporting context (previous submission was RED)",
+                f"## Reviewer findings, as supporting context (previous submission was {feedback.verdict.upper()})",
                 "",
                 "These are the findings the decision above was made on. They are context for it,",
                 "not the instruction: a finding the decision rejects or narrows is settled by the",
                 "decision, not by the wording here. Do NOT re-report the same commit unchanged:",
                 "",
-                review_red,
+                *data_block(review_red),
                 "",
             ]
-        elif review_red:
+        elif review_red and feedback.verdict == "red":
             sections += [
                 "## Reviewer verdict to address (previous submission was RED)",
                 "",
                 "Your last commit was reviewed and rejected. Fix these findings before reporting",
                 "done again — do NOT re-report the same commit unchanged:",
                 "",
-                review_red,
+                *data_block(review_red),
                 "",
             ]
         # The board keeps every gate-red comment of every attempt; this round inherits one only when
@@ -4439,14 +4705,32 @@ class CommandHostRuntime:
                 gate_red,
                 "",
             ]
-        broad_command, show_command = self._broad_check_invocation(str(task.get("project") or ""))
+        check_contract = self._packet_check_contract(str(task.get("project") or ""))
+        broad_command, show_command = self._broad_check_commands(check_contract)
         sections += self._local_run_section(task, local_run_policy=local_run_policy)
+        sections += [
+            "## Prior blocker dispositions in the worker report",
+            "",
+            "List every applicable prior stable ID on its own line using these report forms:",
+            "BLOCKER-<id>: fixed; commit: <repair SHA>",
+            "BLOCKER-<id>: observer-rejected; observer quote: <exact applicable decision quotation>",
+            "BLOCKER-<id>: deferred; issue: issue:<ref>; observer quote: <exact applicable decision quotation>",
+            "These are placeholders. Quote the observer verbatim on a single line, include its",
+            "source event and the same blocker ID (and issue ref for deferral) in the quotation.",
+            "Never derive rejection from reviewer prose. Fixed is a reported",
+            "claim requiring independent review. Missing, conflicting or unbound evidence stays",
+            "unknown/unresolved; preserve all IDs and explain that gap. Give exact candidate SHA,",
+            "actual role environment/hook, artifact paths, command/status/count/import provenance,",
+            "full receipt hashes and relevant CI links; distinguish fixtures, projections and delivered packets.",
+            "",
+            *(render_review_evidence(feedback) if feedback.findings or feedback.historical or feedback.decision else []),
+        ]
         if broad_command:
             broad_invocation = [f"    {broad_command}", ""]
             show_invocation = f"`{show_command}` and quote its summary"
         else:
             broad_invocation = [
-                "Configuration gap: this project's adapter supplies no usable declared broad module.",
+                "Configuration gap: this project's adapter supplies no usable declared local profile/module.",
                 "No exact local broad command can be named. Do not select a module yourself, invent",
                 "a placeholder invocation or use repository-wide discovery. Report the configuration",
                 "gap and the validation evidence available through CI or the declared exceptions.",
@@ -4456,6 +4740,10 @@ class CommandHostRuntime:
             show_invocation = "When the adapter declares a suite, use its matching `check show` command and quote its summary"
         sections += [
             "## Check-cost contract",
+            "",
+            "Before fresh code report:done, obtain a complete green full declared profile receipt",
+            "for the committed HEAD tree. Missing, RED, incomplete or mismatched receipts refuse",
+            "admission without running tests. Subsets never satisfy completion. Reuse unchanged content.",
             "",
             "During development, run the smallest relevant checks first. Run at most one local broad",
             "suite for this report generation and unchanged content when it is actually useful; name any",
@@ -4590,7 +4878,7 @@ class CommandHostRuntime:
             worker_comments_record_line(comments),
             "",
         ]
-        return "\n".join(sections)
+        return "\n".join([*self._render_check_header(check_contract), *sections])
 
     def worker_comments(self, task: dict[str, Any]) -> tuple[WorkerComment, ...]:
         """The PO, owner and observer comments this card's worker is handed, oldest first.
@@ -4612,30 +4900,24 @@ class CommandHostRuntime:
         return self.audit
 
     def _select_revision_bound_worker_feedback(
-        self, task: dict[str, Any], decision: str
-    ) -> tuple[str, str | None]:
-        """Select only review/decision instructions bound to this description revision.
-
-        The board keeps comments forever, while `TASK.md` must only carry instructions for the
-        specification it renders. Missing, malformed, or non-unique bindings intentionally
-        produce no historical instruction; the current card description remains the work item.
-        """
-        events = self._card_audit().events(str(task.get("ref") or ""))
-        description = str(task.get("description") or "")
-        revision = specification_revision(events, description)
-        if not revision:
-            return "", None
-        digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
-        decision = CommandHostRuntime._canonical_decision_binding(decision)
-        if decision:
-            if not self._bound_marker_body(task, events, "decision:rework", revision, digest, decision):
-                return "", None
-            review = self._bound_marker_body(task, events, "review:red", revision, digest)
-            return decision, review
-        return "", self._bound_marker_body(task, events, "review:red", revision, digest)
+        self, task: dict[str, Any], decision: str, *, attempt: str,
+        generation: int, previous: str = "",
+        decision_id: str = "", review_id: str | None = None,
+    ) -> ReviewEvidence:
+        """One round/spec resolution for both worker instructions and reviewer evidence."""
+        return resolve_review_evidence(
+            task, self._card_audit().events(task["ref"]), attempt=attempt,
+            generation=generation, decision=decision, previous=previous,
+            decision_id=decision_id, review_id=review_id,
+        )
 
     def _validated_worker_prerequisites(
-        self, task: dict[str, Any], decision: str, expected: tuple[str, ...]
+        self,
+        task: dict[str, Any],
+        decision: str,
+        expected: tuple[str, ...],
+        *,
+        decision_id: str,
     ) -> tuple[ProtocolArtifact, ...]:
         """Read only the structured declaration bound to the decision rendered for this round."""
         if not decision:
@@ -4645,6 +4927,8 @@ class CommandHostRuntime:
         revision = specification_revision(events, description)
         digest = hashlib.sha256(description.encode("utf-8")).hexdigest()
         for event in reversed(events):
+            if event.get("event_id") != decision_id:
+                continue
             data = event.get("data") if isinstance(event.get("data"), dict) else event.get("payload")
             if not isinstance(data, dict) or data.get("marker") != "decision:rework":
                 continue
@@ -4764,9 +5048,10 @@ class CommandHostRuntime:
             "or an allowed local check supplies that evidence. Judge the code and valid evidence.",
             "The observer does not order rework or charge the budget for such a run alone.",
             "Preserve historical verdicts in the audit; do not reopen them under this rule.",
-            "Apply the same local-run bounds to every verification you perform; obtain evidence",
-            "through CI when those bounds require it. Missing required valid evidence or a code",
-            "defect can still block release.",
+            "Workers or CI perform required validation within these bounds. Reviewers read the",
+            "evidence and report missing required valid evidence or code defects in the verdict.",
+            "Apply the same local-run bounds to worker checks. Reviewers request evidence from workers or CI.",
+            "Missing required valid evidence or a code defect can still block release.",
             "",
             "## No subagents",
             "",
@@ -4777,6 +5062,13 @@ class CommandHostRuntime:
             "A red verdict must list every blocker you have found in this round. Prefix each with a",
             "stable `BLOCKER-<short-slug>` id so a re-review can close it without rediscovering it.",
             "Do not hold blockers back for a later round and do not widen the scope on the next one.",
+            "An observer-rejected prior blocker may appear only as a non-blocking observation.",
+            "On re-review, a new blocker requires changed delta, new external behavior, or a",
+            "security/data-loss finding. State the concrete violated invariant and stable ID now.",
+            "A new test in a local-profile module that starts a container, accesses the network,",
+            "sleeps or exceeds the native local budget blocks with this exact repair instruction:",
+            "перенести в интеграционный шард. Distinguish that code defect from an earlier head's",
+            "excessive local run, which remains a non-blocking observation with evidence excluded.",
             "",
             "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
             "criterion or operational invariant, material assumptions, whether this branch introduced",
@@ -4801,6 +5093,10 @@ class CommandHostRuntime:
             "evidence: it can encode the same wrong assumption as the code under review. Say which",
             "real behaviour you verified and how. If no end-to-end check against the real backend",
             "was possible, write plainly that it was not done and which assumption stays unverified.",
+            "In the verdict give the exact candidate SHA, actual REVIEW.md and role environment/hook",
+            "paths and hashes, worker wrapper commands/status/count/import provenance, full receipt",
+            "hashes and CI links. Name each pending evidence item. A fixture or offline projection",
+            "does not prove delivery of this candidate's packet to a head that started before it.",
             "",
             "Post exactly one review verdict through the ummanu task protocol:",
             *_body_file_instructions(body_file),
@@ -4810,25 +5106,24 @@ class CommandHostRuntime:
         ]
         if not has_candidate(task):
             # No candidate: no branch, diff or gate to point at. A re-review keeps only the blockers.
-            if record and record.previous_blockers:
+            if record and (record.previous_blockers or record.report_decision):
                 sections[4:4] = [
                     "## Re-review packet",
                     "",
                     "Previous blockers (close or explicitly retain these stable IDs):",
-                    _safe_one_line(record.previous_blockers, limit=2000),
+                    *self._prior_review_evidence(task, record),
                     "",
                 ]
-            return "\n".join(sections)
+            return "\n".join([*self._review_check_header(str(task.get("project") or "")), *sections])
         if attestation:
             sections[4:4] = [
                 "## Mechanical gate attestation",
                 "",
                 render_receipt(attestation),
                 "",
-                "Independently inspect the diff, acceptance criteria and invariants. The attested broad",
-                "check above already passed on this exact SHA: do not rerun that broad command or suite on",
-                "the same SHA unless you record a concrete `rerun_reason`. A focused reproduction is allowed",
-                "for a new blocker, an uncovered external behaviour, or a security/data-loss high-risk need.",
+                "Independently inspect the diff, commits, acceptance criteria and invariants using this evidence.",
+                "Do not run broad, focused, pytest, unittest or any ummanu check, including receipt readback.",
+                "Request necessary additional validation from the worker or CI and name the gap in the verdict.",
                 "Mandatory CI and the exact-SHA pre-merge gate remain machinery-owned and are not waived.",
                 "",
             ]
@@ -4839,7 +5134,8 @@ class CommandHostRuntime:
                 "No valid SHA-bound mechanical-gate receipt is available. Independently inspect the diff,",
                 "acceptance criteria and invariants; mandatory CI and exact-SHA pre-merge checks remain",
                 "machinery-owned. Do not claim that a broad suite was attested. This includes none/noop",
-                "gates: run appropriate focused or broad validation when the review needs that evidence.",
+                "gates. Name missing evidence in the verdict; request validation from the worker or CI.",
+                "Do not run broad, focused, pytest, unittest or any ummanu check, including show or reuse.",
                 "",
             ]
         if record and record.preferred_head:
@@ -4856,22 +5152,32 @@ class CommandHostRuntime:
                 "entitled to have, not an invitation to grade the head.",
                 "",
             ]
-        if record and record.previous_reviewed_sha:
+        if record and (record.previous_reviewed_sha or record.report_decision or record.previous_blockers):
             sections[4:4] = [
                 "## Re-review packet",
                 "",
-                f"previous_reviewed_sha: {_safe_one_line(record.previous_reviewed_sha)}",
+                f"previous_reviewed_sha: {_safe_one_line(record.previous_reviewed_sha) or 'unknown/unresolved'}",
                 f"current_sha: {_safe_one_line(current_sha) or '(unavailable)'}",
                 "Changed paths / delta from the prior review:",
                 self._review_delta(record, record.previous_reviewed_sha, current_sha),
                 "Previous blockers (close or explicitly retain these stable IDs):",
-                _safe_one_line(record.previous_blockers, limit=2000)
-                or "(legacy verdict had no structured blocker IDs)",
+                *self._prior_review_evidence(task, record),
                 "Review this delta, the closure of prior blockers and collateral impact; do not restart",
                 "from the original base unless a concrete suspicion requires the historical diff.",
                 "",
             ]
-        return "\n".join(sections)
+        sections[4:4] = self._worker_check_packet(task, record, current_sha)
+        return "\n".join([*self._review_check_header(str(task.get("project") or "")), *sections])
+
+    def _prior_review_evidence(self, task: dict[str, Any], record: DispatcherRecord) -> list[str]:
+        evidence = self._select_revision_bound_worker_feedback(
+            task, record.report_decision, attempt=record.attempt_id,
+            generation=record.report_generation,
+            previous=record.previous_blockers,
+            decision_id=record.report_decision_id,
+            review_id=record.previous_review_id or ("" if record.report_decision_id else None),
+        )
+        return render_review_evidence(evidence)
 
     def _review_delta(self, record: DispatcherRecord, previous: str, current: str) -> str:
         """A small re-review packet; failure to read it is evidence, never a broad test fallback."""
