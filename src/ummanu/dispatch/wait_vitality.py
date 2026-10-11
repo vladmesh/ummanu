@@ -363,17 +363,23 @@ def _decide_wait_by_verdict(
         # path may act against what the evidence calls alive. A recovered suspension
         # lands here too; the policy's rung reset rides the same recovery decision,
         # persisted back onto this same role's episode slot.
-        _run_recovery_policy(runtime,
+        # A healthy-looking verdict can still carry a deterministic terminal
+        # refusal.  Do not silently persist ESCALATE_OPERATOR as rung 4 while
+        # returning an ordinary wait: report the earned operator escalation.
+        policy_outcome = recovery_policy_outcome(runtime,
             task,
             record,
             records,
             payload,
+            attempt_id,
             episode=episode,
             kind=kind,
             now=now,
         )
         setattr(record, f"{kind}_waiting_since", now)
         runtime.save_records(payload, records)
+        if policy_outcome is not None:
+            return policy_outcome
         return plain_wait()
     # Unverifiable, or no episode at all: nothing strong answered, so the honest
     # answer is that nobody knows. The plan forbids KILLING such a run -- and the
@@ -1074,7 +1080,7 @@ def reduce_and_store_vitality_episode(
         run_id=run_id,
         previous_cursor=(
             (previous.evidence_cursors or {}).get(_SnapshotSource.PROVIDER_CURSOR.value, "")
-            if previous is not None
+            if previous is not None and previous.run_id == run_id
             else ""
         ),
         previous_child_cursor=(

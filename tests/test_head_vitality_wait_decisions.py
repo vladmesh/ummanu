@@ -18,6 +18,7 @@ from unittest import mock
 
 from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
 from ummanu.dispatch import wait_vitality as wait_vitality_module
+from ummanu.dispatch.head_vitality_episode import VitalityEpisode, VitalityVerdict
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.watchdog import idle_stall_seconds, stall_seconds
 from ummanu.dispatch.worker_lifecycle import head_run_binding
@@ -247,6 +248,31 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(outcome["status"], "ok")
         episode = self._pilot_record()["worker_vitality_episode"]
         self.assertEqual(episode["verdict"], "healthy_active")
+
+    def test_healthy_verdict_with_terminal_refusal_surfaces_operator_escalation(self) -> None:
+        """An authoritative refusal must not disappear after rung 4 is persisted.
+
+        Healthy PID evidence is not a reason to suppress a deterministic launch
+        refusal carried on the same episode.  The policy escalates without stopping
+        or replacing the head; the tick must report that escalation.
+        """
+        run_id = self._pilot_record()["worker_head_run"]["run_id"]
+        episode = VitalityEpisode(
+            run_id=run_id,
+            verdict=VitalityVerdict.HEALTHY_QUIET,
+            reason="authentication_rejected",
+            deterministic_refusals=2,
+        )
+        self.host.worker_status_result = dict(RUNNING_STATUS)
+        with mock.patch.object(wait_vitality_module, "_reduce_vitality", return_value=episode):
+            outcome = self.tick()
+        self.assertEqual(outcome["status"], "degraded")
+        self.assertEqual(outcome["action"], "worker-deterministic-refusal-escalated")
+        self.assertEqual(outcome["recovery"]["intent"], "escalate_operator")
+        record = self._pilot_record()
+        self.assertEqual(record["worker_vitality_episode"]["recovery_rung"], 4)
+        self.assertEqual(record["worker_respawns"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
 
     def test_healthy_quiet_renews_the_window_and_waits(self) -> None:
         outcome = self._decide_with(dict(RUNNING_STATUS))
