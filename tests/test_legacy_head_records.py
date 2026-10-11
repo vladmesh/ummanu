@@ -52,8 +52,10 @@ GRANT = {
             "provider_schema_verdict": "",
             "provider_source": {
                 "baseline": [
-                    "/home/dev/ummanu-data/codex-home/sessions/2026/09/24/"
-                    "rollout-2026-09-24T08-40-14-01a0d292-8b60-78e0-bdc1-9dbe28652227.jsonl"
+                    (
+                        "/home/dev/ummanu-data/codex-home/sessions/2026/09/24/"
+                        "rollout-2026-09-24T08-40-14-01a0d292-8b60-78e0-bdc1-9dbe28652227.jsonl"
+                    )
                 ],
                 "head_run_fingerprint": "172529ff471f9a656fb02b0cc6df1c07",
                 "kind": "codex_session_event_jsonl",
@@ -148,9 +150,11 @@ class BackendTests(unittest.TestCase):
 
     def test_a_legacy_record_is_refused_by_a_typed_error_and_never_falls_back(self) -> None:
         for name in (ORCA_LEGACY_RUNTIME, ""):
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(LegacyHeadRecordError, "legacy Orca record.*never launched"):
-                    self.build(name)
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(LegacyHeadRecordError, "legacy Orca record.*never launched"),
+            ):
+                self.build(name)
         self.assertTrue(issubclass(LegacyHeadRecordError, UnknownHeadRuntimeError))
         with self.assertRaises(UnknownHeadRuntimeError) as caught:
             self.build("podman")

@@ -22,10 +22,8 @@ from unittest import mock
 
 from ummanu.automations.agents.curator import discover
 from ummanu.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
-from ummanu.dispatch import commands as dispatch_commands
-from ummanu.dispatch import tui as dispatcher_tui
-from ummanu.runtime import codex_home as codex_home_module
-from ummanu.runtime import codex_preflight
+from ummanu.dispatch import commands as dispatch_commands, tui as dispatcher_tui
+from ummanu.runtime import codex_home as codex_home_module, codex_preflight
 from ummanu.runtime.codex_preflight import (
     CODEX_HOME_DATA_DIR,
     CODEX_HOME_ENV,

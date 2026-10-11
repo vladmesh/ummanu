@@ -44,20 +44,22 @@ from tests.retired_board import legacy_runtime_lines
 from tests.support.managed_venv import guarded_product_env, managed_product_root
 from ummanu import upgrade
 from ummanu.automations.runtime import dispatch
-from ummanu.dispatch import attempt_accounting as dispatcher_attempt_accounting
-from ummanu.dispatch import claim as dispatcher_claim
-from ummanu.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
-from ummanu.dispatch import host as dispatcher_host_module
-from ummanu.dispatch import launcher as dispatcher_launcher
-from ummanu.dispatch import observer as dispatcher_observer
-from ummanu.dispatch import production as dispatcher_production
-from ummanu.dispatch import release_lifecycle as dispatcher_release_lifecycle
-from ummanu.dispatch import review as dispatcher_review
-from ummanu.dispatch import runtime as dispatcher_module
-from ummanu.dispatch import wait_vitality as dispatcher_wait_vitality
-from ummanu.dispatch import worker_continuation as dispatcher_worker_continuation
-from ummanu.dispatch import worker_launch as dispatcher_worker_launch
-from ummanu.dispatch import worker_report as dispatcher_worker_report
+from ummanu.dispatch import (
+    attempt_accounting as dispatcher_attempt_accounting,
+    claim as dispatcher_claim,
+    gate_lifecycle as dispatcher_gate_lifecycle,
+    host as dispatcher_host_module,
+    launcher as dispatcher_launcher,
+    observer as dispatcher_observer,
+    production as dispatcher_production,
+    release_lifecycle as dispatcher_release_lifecycle,
+    review as dispatcher_review,
+    runtime as dispatcher_module,
+    wait_vitality as dispatcher_wait_vitality,
+    worker_continuation as dispatcher_worker_continuation,
+    worker_launch as dispatcher_worker_launch,
+    worker_report as dispatcher_worker_report,
+)
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.git_workspace import GitWorkspaceManager
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
@@ -399,9 +401,11 @@ class HostBehaviourContractTests(unittest.TestCase):
         backend = _RecordingBackend(LOCAL_PTY_RUNTIME)
         real._head_runtimes[LOCAL_PTY_RUNTIME] = backend
         record = self._supervised_record()
-        with mock.patch.object(GitWorkspaceManager, "teardown") as removal:
-            with self.assertRaisesRegex(HostError, "no durable cleanup owner"):
-                real.teardown(record)
+        with (
+            mock.patch.object(GitWorkspaceManager, "teardown") as removal,
+            self.assertRaisesRegex(HostError, "no durable cleanup owner"),
+        ):
+            real.teardown(record)
         self.assertEqual(backend.calls, [])
         removal.assert_not_called()
         self.fake.teardown(record)

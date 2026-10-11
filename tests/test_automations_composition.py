@@ -14,8 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu import cli as ummanu_cli
-from ummanu.automations import __main__ as triggered_main
-from ummanu.automations import composition
+from ummanu.automations import __main__ as triggered_main, composition
 from ummanu.automations.agents.retro import cli as retro_cli
 from ummanu.automations.agents.steward import cli as steward_cli
 from ummanu.board.steward_reports import StewardReportBoard

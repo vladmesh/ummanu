@@ -264,9 +264,11 @@ class KnowledgeDirectoryAtomicityTests(LiveRootCase):
                 raise OSError("rename failed")
             return real(source, destination)
 
-        with mock.patch.object(knowledge_write.os, "replace", side_effect=fail_on_move_in):
-            with self.assertRaises(KnowledgeError):
-                self.write()
+        with (
+            mock.patch.object(knowledge_write.os, "replace", side_effect=fail_on_move_in),
+            self.assertRaises(KnowledgeError),
+        ):
+            self.write()
 
         self.assert_unchanged()
 
@@ -551,12 +553,12 @@ class ExclusionTests(LiveRootCase):
             self.assertIn("snapshot export copies", board_store.findings(self.live)[0])
 
     def test_the_installation_key_is_refused_once_the_allowlist_would_export_it(self):
-        with mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params):
-            with (
-                mock.patch.object(export_allowlist, "SNAPSHOT_ALLOWLIST", (*SNAPSHOT_ALLOWLIST, "secrets/*.key")),
-                self.assertRaisesRegex(SecretStoreError, "export allowlist"),
-            ):
-                initialize_store(self.live, phrase=PHRASE, actor="tester")
+        with (
+            mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params),
+            mock.patch.object(export_allowlist, "SNAPSHOT_ALLOWLIST", (*SNAPSHOT_ALLOWLIST, "secrets/*.key")),
+            self.assertRaisesRegex(SecretStoreError, "export allowlist"),
+        ):
+            initialize_store(self.live, phrase=PHRASE, actor="tester")
         self.assertFalse(self.secrets.exists())
 
     def test_materialize_refuses_a_target_the_export_would_copy(self):
