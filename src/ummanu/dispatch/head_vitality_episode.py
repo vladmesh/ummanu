@@ -79,7 +79,7 @@ class VitalityVerdict(StrEnum):
 
 @dataclass(frozen=True)
 class VitalityThresholds:
-"""Quiet durations for suspected/confirmed stall, dark-source aging and child activity.
+    """Quiet durations for suspected/confirmed stall, dark-source aging and child activity.
 
     Dark sources cannot postpone suspicion indefinitely; child-only movement
     cannot keep a silent head healthy without a bound. Destructive permission
@@ -138,7 +138,7 @@ def _finite_timestamp(value: Any, name: str) -> float:
 
 @dataclass(frozen=True)
 class VitalityEpisode:
-"""One run's vitality conclusion, durable enough to survive the dispatcher."""
+    """One run's vitality conclusion, durable enough to survive the dispatcher."""
 
     run_id: str
     verdict: VitalityVerdict = VitalityVerdict.UNVERIFIABLE
@@ -310,7 +310,7 @@ class VitalityEpisode:
 
     @classmethod
     def from_json(cls, payload: Any) -> VitalityEpisode:
-"""Read one episode back, refusing damaged evidence instead of normalising it."""
+        """Read one episode back, refusing damaged evidence instead of normalising it."""
         if not isinstance(payload, dict):
             raise HeadVitalityError("a vitality episode is read from an object")
         if type(payload.get("version")) is not int or payload.get("version") != EPISODE_VERSION:
@@ -396,7 +396,7 @@ def reduce_vitality(
     answer_owed_since: float = 0.0,
     adapter: str = "",
 ) -> VitalityEpisode:
-"""Purely fold one tick of source snapshots into one run's episode.
+    """Purely fold one tick of source snapshots into one run's episode.
 
     Duplicate source observations collapse to the latest reading. `retained`
     distinguishes dispatcher-held SIGSTOP; `answer_owed_since` begins a new
@@ -867,7 +867,7 @@ def _idle_turn_stall(
     answer_owed_since: float,
     child_advancing: bool,
 ) -> tuple[VitalityVerdict, VitalityEpisode, list[str]] | None:
-"""Judge an idle, completed supervisor turn only for supported adapters with
+    """Judge an idle, completed supervisor turn only for supported adapters with
     a journal answer and a caller-declared outstanding answer.
 
     Charge quiet time from the latest idle start, owed-answer time or nudge.
@@ -933,7 +933,7 @@ def recovery_outlook(
     now: float,
     thresholds: VitalityThresholds = DEFAULT_VITALITY_THRESHOLDS,
 ) -> dict[str, Any]:
-"""Summarize the episode's observed sources, quiet duration and next action."""
+    """Summarize the episode's observed sources, quiet duration and next action."""
     if not isinstance(episode, VitalityEpisode) or not isinstance(thresholds, VitalityThresholds):
         return {"quiet_seconds": 0.0, "dark_sources": [], "next_deadline": None, "note": ""}
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
@@ -990,7 +990,7 @@ def recovery_outlook(
 def _resolve_run_id(
     previous: VitalityEpisode | None, snapshots: Sequence[VitalitySnapshot]
 ) -> tuple[str, list[str]]:
-"""Pick the run this reduction speaks about, and name the foreign runs it drops."""
+    """Pick the run this reduction speaks about, and name the foreign runs it drops."""
     run_ids = sorted({snapshot.run_id for snapshot in snapshots})
     chosen = previous.run_id if previous is not None and previous.run_id in run_ids else run_ids[0]
     return chosen, [name for name in run_ids if name != chosen]
@@ -1029,7 +1029,7 @@ def _freeze_stall_clocks(episode: VitalityEpisode, now: float, *, retained: bool
 
 
 def _quiet_reference(episode: VitalityEpisode) -> float:
-"""The instant this episode's current quiet began: what every threshold is measured from."""
+    """The instant this episode's current quiet began: what every threshold is measured from."""
     return max(episode.last_progress_at, episode.quiet_since, episode.child_progress_at) or episode.started_at
 
 
@@ -1079,7 +1079,7 @@ def _unfreeze_if_resumed(
 
 
 def interrupted_command_note(episode: Any, run_id: str) -> str:
-"""The factual line a respawned successor gets about its predecessor's running command."""
+    """The factual line a respawned successor gets about its predecessor's running command."""
     if not isinstance(episode, VitalityEpisode) or not run_id or episode.run_id != str(run_id):
         return ""
     command = episode.last_child_command.strip()
