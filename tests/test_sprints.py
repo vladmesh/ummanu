@@ -276,9 +276,11 @@ class SprintOwnershipTests(SprintFixture):
             decisions=KEEP_THE_ISSUE_OPEN,
         )
 
-        with mock.patch.object(sprints, "next_reference", return_value="sprint:900"):
-            with self.assertRaisesRegex(TaskError, "sprint:900") as raised:
-                self._create(goal="collides", request_id="collides")
+        with (
+            mock.patch.object(sprints, "next_reference", return_value="sprint:900"),
+            self.assertRaisesRegex(TaskError, "sprint:900") as raised,
+        ):
+            self._create(goal="collides", request_id="collides")
 
         self.assertEqual(raised.exception.code, "sprint_conflict")
         self.assertEqual(SprintReader(self.client).show("sprint:900")["goal"], taken["goal"])  # type: ignore[arg-type]
@@ -1922,15 +1924,17 @@ class SprintTests(SprintFixture):
             request_id="terminal-done-move",
         )
 
-        with mock.patch.object(TaskWriter, "archive", side_effect=TaskError("live_work", "live worker", 3)):
-            with self.assertRaises(TaskError) as raised:
-                self.writer.close(
-                    role="po",
-                    actor="operator",
-                    reference=ref,
-                    request_id="terminal-close",
-                    decisions=KEEP_THE_ISSUE_OPEN,
-                )
+        with (
+            mock.patch.object(TaskWriter, "archive", side_effect=TaskError("live_work", "live worker", 3)),
+            self.assertRaises(TaskError) as raised,
+        ):
+            self.writer.close(
+                role="po",
+                actor="operator",
+                reference=ref,
+                request_id="terminal-close",
+                decisions=KEEP_THE_ISSUE_OPEN,
+            )
 
         self.assertEqual(raised.exception.code, "live_work")
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
@@ -2975,9 +2979,11 @@ class SprintSingleWriterGuardTests(SprintBackendFixture, unittest.TestCase):
                 request_id="override-recorded-once",
             )
 
-        with mock.patch.object(self.tasks.audit, "append", side_effect=OSError("disk full")):
-            with self.assertRaisesRegex(TaskError, "audit repair") as pending:
-                override_move()
+        with (
+            mock.patch.object(self.tasks.audit, "append", side_effect=OSError("disk full")),
+            self.assertRaisesRegex(TaskError, "audit repair") as pending,
+        ):
+            override_move()
         self.assertEqual(pending.exception.code, "audit_pending")
         self.assertEqual(self.tasks.reader.show(card["ref"])["state"], "ready")
 
