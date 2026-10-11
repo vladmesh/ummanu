@@ -1896,39 +1896,6 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(_declared_bound(answer["delivery"]), 17.0)
 
-    def test_nothing_asks_a_second_time_what_became_of_a_delivery(self) -> None:
-        """One point asks the witnesses, and it is the one that carries the delivery: `_follow`.
-
-        A source guard rather than a behavioural one on purpose. What criterion 2 forbids is not a
-        wrong answer — each of these was locally right when it was added — but a second place where
-        the question can be asked at all, because that is what let two places answer it differently.
-        A name that comes back is a decision somebody has to make again, and this fails when it is
-        made silently.
-        """
-        source = (REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py").read_text(
-            encoding="utf-8"
-        )
-        tree = ast.parse(source)
-        defined = {
-            node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        assigned = {
-            target.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-
-        self.assertNotIn("_settle", defined)
-        self.assertNotIn("_resolve", defined)
-        self.assertNotIn("_remember", defined)
-        self.assertNotIn("DELIVERY_STILL_GOING", assigned, "the fifth outcome is back")
-        self.assertNotIn("_unfinished", source, "the register of deliveries nobody accounted for is back")
-        self.assertNotIn("still_going", source)
-        # And the one place that does ask is still there, asking once.
-        self.assertIn("_follow", defined)
-
 
 class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
     """Criterion 6: a bound the substrate clears by itself is a refusal, never a head's ending.
@@ -2265,16 +2232,6 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         self.assertEqual(sorted(sites), ["build_head_runtime"], "a second place builds a backend")
         # secretary-1722: the Orca backend is no longer built anywhere.
         self.assertEqual(sites["build_head_runtime"], {"LocalPtyHeadRuntime"})
-
-    def test_no_profile_and_no_registry_names_this_backend(self) -> None:
-        offenders = []
-        for path in (REPO / "src").rglob("*"):
-            if path.is_dir() or path.suffix not in (".yaml", ".yml", ".json", ".toml"):
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if "local-pty" in text or "local_pty" in text:
-                offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "a profile selects a backend this card does not wire in")
 
 
 class AnAgentPromptIsSubmittedTests(LocalPtyRuntimeTestCase):

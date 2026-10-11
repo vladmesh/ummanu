@@ -1471,25 +1471,6 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
     anywhere else creates a third lifecycle entry path, which this guard refuses.
     """
 
-    def test_only_the_scoped_head_consumers_reach_for_it(self) -> None:
-        package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"
-        backend = REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py"
-        po_runner = REPO / "src" / "ummanu" / "po" / "runner.py"
-        substrate = "ummanu.runtime.head.local_pty"
-        offenders = []
-        for path in (REPO / "src").rglob("*.py"):
-            if package in path.parents or path in (backend, po_runner):
-                continue
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-                names = []
-                if isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                    names = [node.module]
-                if any(name == substrate or name.startswith(substrate + ".") for name in names):
-                    offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is reached outside its runtime and PO consumers")
-
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""
         package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"

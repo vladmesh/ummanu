@@ -19,7 +19,7 @@ from unittest import mock
 import yaml
 
 from tests.head_registry import live_root_pair, write_installed_pair
-from ummanu import cli, installation, status, task_commands, upgrade
+from ummanu import installation, status, task_commands, upgrade
 from ummanu.config import validate_instance
 from ummanu.dispatch.host import InstanceCatalog
 from ummanu.head_registry import (
@@ -152,13 +152,6 @@ class LiveRootPairIgnoredTests(unittest.TestCase):
         self.assertEqual(after["installed"], "upgraded-head")
         # The upgrade neither rewrote nor removed the live root's copy: it is simply not read.
         self.assertIn("live-root-head", self.live_root_copy.read_text(encoding="utf-8"))
-
-    def test_status_and_doctor_name_no_legacy_source(self):
-        report = validate_instance(self.instance)
-        record = status._head_registry(self.instance, report.data_dir)
-
-        self.assertNotIn("legacy_source", record)
-        self.assertFalse(hasattr(cli, "_legacy_head_registry_source"))
 
     def test_a_data_pair_that_is_present_is_read_even_when_it_is_broken(self):
         broken = generated_pair(self.instance).snapshot

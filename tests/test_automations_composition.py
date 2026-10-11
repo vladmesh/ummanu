@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -15,8 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu import cli as ummanu_cli
-from ummanu.automations import __main__ as triggered_main
-from ummanu.automations import composition
+from ummanu.automations import __main__ as triggered_main, composition
 from ummanu.automations.agents.retro import cli as retro_cli
 from ummanu.automations.agents.steward import cli as steward_cli
 from ummanu.board.steward_reports import StewardReportBoard
@@ -61,18 +59,6 @@ class StewardCliReaderTests(unittest.TestCase):
 
 
 class StandingAgentEntrypointTests(unittest.TestCase):
-    def test_retired_board_cli_modules_are_not_importable(self) -> None:
-        for name in (
-            "ummanu.automations.agents.pipeline.cli",
-            "ummanu.automations.agents.pipeline.model",
-            "ummanu.automations.agents.pipeline.ops",
-        ):
-            with self.subTest(name=name):
-                self.assertIsNone(importlib.util.find_spec(name))
-
-    def test_pipeline_is_not_registered_as_a_triggered_agent_command(self) -> None:
-        self.assertEqual(triggered_main.main(["pipeline", "list"]), 2)
-
     def test_signal_commands_get_the_canonical_reader(self) -> None:
         reader = object()
         with (

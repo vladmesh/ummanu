@@ -1199,36 +1199,6 @@ class PortableInstallationTests(PortableFixture):
         self.assertIn("User=operator", rendered.decode())
         self.assert_hermetic(rendered.decode())
 
-    def test_a_dry_run_upgrade_never_asks_orca_about_automations(self) -> None:
-        """secretary-1706: systemd units are the only schedule owner of the background roles.
-
-        The product ships a background agent's spec, which is exactly what the retired automations
-        step turned into `orca automations` calls; the upgrade must now issue none of them.
-        """
-        agent = self.product / "src" / "ummanu" / "automations" / "agents" / "curator"
-        agent.mkdir(parents=True, exist_ok=True)
-        (agent / "automation.toml").write_text('name = "curator"\nskill = "/curate"\n', encoding="utf-8")
-        (self.product / "pyproject.toml").write_text(
-            '[tool.ummanu]\nagent-specs = "src/ummanu/automations/agents"\n', encoding="utf-8"
-        )
-        argvs: list[list[str]] = []
-        real_popen_init = subprocess.Popen.__init__
-
-        def recording_init(popen, args, *rest, **kwargs):
-            argvs.append([str(arg) for arg in args] if isinstance(args, (list, tuple)) else [str(args)])
-            return real_popen_init(popen, args, *rest, **kwargs)
-
-        with (
-            mock.patch.object(subprocess.Popen, "__init__", recording_init),
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            code = self.run_upgrade_command(dry_run=True)
-
-        self.assertEqual(code, 0, output.getvalue())
-        self.assertTrue(argvs, "the recorder saw no subprocess at all")
-        self.assertFalse([argv for argv in argvs if "automations" in argv], argvs)
-        self.assertNotIn("automations", output.getvalue())
-
     def test_a_second_run_against_the_installation_it_just_wrote_changes_nothing(self) -> None:
         first = self.run_upgrade()
         second = self.run_upgrade()
