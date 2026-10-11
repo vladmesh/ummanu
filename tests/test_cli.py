@@ -732,21 +732,6 @@ class CliTests(unittest.TestCase):
         self.assertIn("ummanu data init: could not write data manifest", output)
         self.assertNotIn("Traceback", output)
 
-    def _raw_dump_instance(self, tmpdir: str) -> Path:
-        instance_dir = Path(tmpdir) / "instance"
-        data_dir = Path(tmpdir) / "ummanu-data"
-        instance_dir.mkdir()
-        (instance_dir / "instance.yaml").write_text(
-            "version: 1\n"
-            "name: example\n"
-            f"data_dir: {data_dir}\n"
-            "offsite:\n"
-            "  instance_remote: git@example.invalid:x/y.git\n",
-            encoding="utf-8",
-        )
-        self.run_cli(["data", "init", "--instance", str(instance_dir)])
-        return instance_dir
-
     def test_export_commands_report_bad_data_dir_without_traceback(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
