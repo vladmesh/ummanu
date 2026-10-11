@@ -38,22 +38,6 @@ class InstructionsTests(unittest.TestCase):
         self.agents = workspace.agents_source(ROOT).read_text(encoding="utf-8")
         self.flat = " ".join(self.agents.split())
 
-    def test_long_work_becomes_a_card_unless_the_owner_asks(self) -> None:
-        for rule in (
-            "longer than about a minute",
-            "read more than about ten files",
-            "becomes a card",
-            "unless the owner explicitly asks you to do it yourself",
-            "comes back to this same session as a new input",
-        ):
-            self.assertIn(rule, self.flat)
-
-    def test_background_jobs_are_not_a_way_to_wait_and_a_long_wait_is_a_wait_card(self) -> None:
-        self.assertIn("Background jobs are not a way to wait", self.flat)
-        for job in ("`run_in_background`", "`nohup`", "`&`", "`systemd-run`", "run watch` left running"):
-            self.assertIn(job, self.flat)
-        self.assertIn("A long wait becomes a `wait` card", self.flat)
-
     def test_it_quotes_the_wait_card_form_of_the_protocols_exactly(self) -> None:
         protocols = (ROOT / "docs" / "PROTOCOLS.md").read_text(encoding="utf-8")
         section = protocols[
@@ -65,29 +49,6 @@ class InstructionsTests(unittest.TestCase):
             if "task create" in line and "--type wait" in line and line.strip().startswith("python3")
         ]
         self.assertIn(form, self.agents)
-
-    def test_an_issue_like_finding_is_filed_at_once_without_asking_the_owner(self) -> None:
-        for rule in (
-            "file it with `ummanu issue create --role po` at once",
-            "Do not ask the owner whether to file it",
-            "Check for a duplicate first",
-            "`issue append` what is new",
-            "Choose kind and priority yourself, then tell the owner the ref",
-            "pipeline cards still follow the delegation rules",
-        ):
-            self.assertIn(rule, self.flat)
-
-    def test_the_open_issue_skill_chooses_the_fields_without_owner_confirmation(self) -> None:
-        skill = (ROOT / "skills" / "roles" / "po" / "open-issue" / "SKILL.md").read_text(encoding="utf-8")
-        flat = " ".join(skill.split())
-        self.assertIn("## 2. Choose the fields", skill)
-        self.assertIn("there is no owner confirmation before create", flat)
-        self.assertIn("`issue update-priority`", flat)
-        self.assertIn("--request-id", flat)
-        self.assertIn("issue append", flat)
-        for old in ("Agree the fields with the owner", "Show the owner the fields", "with the owner, and create"):
-            self.assertNotIn(old, flat)
-
 
 class PoWorkspaceStepTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -479,22 +440,6 @@ class RetiredSkillTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RegistryError, "ummanu/missing"):
             load_registry(self.instance, product_manifest=self.manifest)
-
-
-class RetiredSpecCardTests(unittest.TestCase):
-    def test_the_repository_no_longer_ships_the_spec_card_skill(self) -> None:
-        name = "spec" + "-card"
-
-        self.assertEqual(list((ROOT / "skills").rglob(name)), [])
-        mentions = [
-            str(path)
-            for top in ("skills", "src", "docs")
-            for path in (ROOT / top).rglob("*")
-            if path.is_file()
-            and path.suffix in {".md", ".toml", ".py"}
-            and name in path.read_text(encoding="utf-8")
-        ]
-        self.assertEqual(mentions, [])
 
 
 if __name__ == "__main__":

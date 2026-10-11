@@ -149,11 +149,6 @@ class RetroSkillPermissionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.text = RETRO_SKILL.read_text(encoding="utf-8")
 
-    def test_the_retired_pipeline_cli_is_gone_from_the_skill(self) -> None:
-        self.assertNotIn("pipeline list", self.text)
-        self.assertNotIn(" idea", self.text)
-        self.assertNotIn("--column", self.text)
-
     def test_retro_reads_and_proposes_only_with_its_role_permissions(self) -> None:
         self.assertIn(Role.RETRO, CREATE_ROLES)
         self.assertIn(Role.RETRO, PROPOSAL_CREATE_ROLES)

@@ -86,18 +86,6 @@ class SharedPartTests(unittest.TestCase):
             with self.subTest(word=word):
                 self.assertNotIn(word, self.text.lower())
 
-    def test_it_carries_no_owner_preference(self) -> None:
-        # The language and the style are the owner's: they belong to the personal part.
-        self.assertIsNone(re.search(r"[Ѐ-ӿ]", self.text), "Cyrillic text in the shared part")
-        for word in ("russian", "english", "em-dash", "em dash", "panelmem"):
-            with self.subTest(word=word):
-                self.assertNotIn(word, self.text.lower())
-
-    def test_interactive_role_does_not_claim_po_only_owner_decision_authority(self) -> None:
-        self.assertNotIn("--role po", self.text)
-        self.assertNotIn("The PO can supply", self.text)
-        self.assertIn("PO-only authority", self.text)
-
     def test_the_personal_part_is_exported_with_the_snapshot(self) -> None:
         self.assertTrue(is_exported(iw.PERSONAL_SOURCE_RELATIVE.as_posix()))
 

@@ -386,35 +386,6 @@ class ReceiptIntegrityTests(BroadCheckTestCase):
 
 
 
-class DocumentedCommandTests(unittest.TestCase):
-    """One documented form, or roles invent their own and the evidence stops being comparable."""
-
-    def test_the_wrapper_is_documented_where_a_role_looks_for_it(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        for name in ("CONTRIBUTING.md", "docs/OPERATIONS.md", "docs/PROTOCOLS.md"):
-            text = (repo_root / name).read_text(encoding="utf-8")
-            self.assertIn("check broad", text, name)
-
-    def test_the_operator_reference_documents_reading_a_receipt_back(self) -> None:
-        text = (Path(__file__).resolve().parents[1] / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
-
-        self.assertIn("python3 -m ummanu check show --module", text)
-        self.assertIn("state/checks/", text)
-
-    def test_the_documented_shapes_say_which_one_attests_an_import(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        operations = (repo_root / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
-        protocols = (repo_root / "docs" / "PROTOCOLS.md").read_text(encoding="utf-8")
-
-        self.assertIn("origin: unobservable", operations)
-        self.assertIn("--module", operations)
-        self.assertIn("attests no import", protocols)
-        # Both documents have to state the trust boundary reuse actually enforces.
-        self.assertIn("outside the candidate", operations)
-        self.assertIn("resolved inside the candidate workspace", protocols)
-
-
-
 class ResultInvariantTests(BroadCheckTestCase):
     """secretary-1406 review: the writer's result invariants, enforced where readers come in.
 

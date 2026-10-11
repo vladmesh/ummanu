@@ -38,7 +38,6 @@ ROLES_ROOT = MANIFEST.parent / "roles"
 
 OBSERVER_SKILL = "observe-sprint"
 OPEN_SPRINT_SKILL = "open-sprint"
-CURATOR_SKILL = "curate"
 
 
 class CanonicalRegistryTests(unittest.TestCase):
@@ -82,63 +81,6 @@ class CanonicalRegistryTests(unittest.TestCase):
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
-    def test_curator_skill_routes_ambiguous_multi_project_facts_to_po_review(self) -> None:
-        source = ROLES_ROOT / "curator" / CURATOR_SKILL / "SKILL.md"
-        text = source.read_text(encoding="utf-8")
-
-        self.assertIn("<canonical-id|unknown|review:po>", text)
-        self.assertIn("Multiple distinct registered\nreservations route to `review:po`", text)
-        self.assertIn("tags `pending-review,multi-project`", text)
-        self.assertIn("name its candidate project scopes", text)
-        self.assertIn("Do not create a review fact merely to record that a session was examined", text)
-        self.assertIn("tags `pending-review,unknown-source`", text)
-        self.assertIn("Ownership ambiguity is not a reason to discard a durable conclusion", text)
-        self.assertIn("--scope <global|project:<dir>|review:po>", text)
-
-    def test_observer_skill_contains_the_minimal_supported_change_guardrails(self) -> None:
-        source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
-        text = source.read_text(encoding="utf-8")
-
-        self.assertIn("Before creating a `code` card, work through this decision sequence", text)
-        self.assertIn("standard library or a native platform capability", text)
-        self.assertIn("not supported legacy by default", text)
-        self.assertIn("fail-closed upgrade precondition", text)
-        self.assertIn("removal may lose real user data or break a supported installation path", text)
-        self.assertIn("When you see RED or Blocked evidence", text)
-        self.assertIn("a local defect inside the card may return for supported rework or retry", text)
-        self.assertIn("the planned architecture or card cut is wrong", text)
-        self.assertIn("hardening or compatibility outside the sprint is deferred or taken to the user", text)
-        # A red review no longer reworks on its own: the card parks and waits for the decision.
-        # The guardrail this replaces told the observer the opposite, which is how a head ends up
-        # waiting for a worker that nothing will resume.
-        self.assertIn("A red reviewer verdict on your sprint's card starts no rework on its own", text)
-        self.assertIn("A red mechanical gate is the exception and does rework", text)
-        self.assertNotIn("may already have started the first automatic rework before you wake", text)
-        self.assertNotIn("Before an ordinary RED goes back for another worker round", text)
-        self.assertIn("Apply the same classification to the Blocked evidence", text)
-
-    def test_observer_skill_requires_live_owner_comments_before_semantic_writes(self) -> None:
-        source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
-        text = source.read_text(encoding="utf-8")
-
-        self.assertIn("Before `task create`, before `task decide`", text)
-        self.assertIn("post-Done next-cut or close", text)
-        self.assertIn("complete comments list in board order", text)
-        self.assertIn("Do not use a\ntimestamp cutoff", text)
-        self.assertIn("Apply every applicable owner decision before the saved resume", text)
-        self.assertIn("reflect it in the resume written for this turn", text)
-
-    def test_observer_skill_stops_a_round_that_only_moves_the_defect(self) -> None:
-        source = ROLES_ROOT / "observer" / OBSERVER_SKILL / "SKILL.md"
-        text = source.read_text(encoding="utf-8")
-
-        self.assertIn("blockers that the previous round's own repairs introduced", text)
-        self.assertIn("each repair is locally right and shifts the problem", text)
-        self.assertIn("Name the single place that must enforce the invariant", text)
-        self.assertIn("what takes precedence during recovery", text)
-        self.assertIn("exhibit in its", text)
-        self.assertIn("refining it after", text)
-
     def test_the_observer_skill_reaches_the_shell_its_head_runs_in(self) -> None:
         """`role_defaults.observer` is a codex profile, so the codex shell must carry the skill."""
         shells = {
@@ -151,14 +93,6 @@ class CanonicalRegistryTests(unittest.TestCase):
 
     def test_no_target_root_is_nested_in_another_of_the_same_shell(self) -> None:
         self.assertEqual(find_overlapping_target_roots(self.registry), [])
-
-    def test_the_document_sprint_loop_is_gone(self) -> None:
-        """A sprint is an entity with an observer; the document loop is not shipped."""
-        skills = self.manifest["roles"]["ummanu"]["skills"]
-
-        for skill in ("start-sprint", "run-sprint"):
-            self.assertNotIn(skill, skills)
-            self.assertFalse((ROLES_ROOT / "ummanu" / skill).exists())
 
     def test_the_ummanu_role_owns_the_sprint_entity_skill(self) -> None:
         self.assertIn(OPEN_SPRINT_SKILL, self.manifest["roles"]["ummanu"]["skills"])

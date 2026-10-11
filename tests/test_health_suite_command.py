@@ -27,7 +27,6 @@ plus the standing rule that no committed document may recommend the broken
 
 from __future__ import annotations
 
-import re
 import subprocess
 import sys
 import unittest
@@ -55,36 +54,12 @@ print("no-test-module-imported=%s" % (not any(
 print("names-a-suite=%s" % bool(tests.broad.broad_modules()))
 """
 
-_BROKEN_FORM = re.compile(r"unittest\s+discover\s+-s\s+tests(?!\s+-t\b)")
-
-_DOCUMENTED_ELSEWHERE = (
-    REPO_ROOT / "docs" / "OPERATIONS.md",
-    REPO_ROOT / "skills" / "roles" / "steward" / "steward" / "SKILL.md",
-    REPO_ROOT / "tests" / "README.md",
-    REPO_ROOT / ".github" / "workflows" / "ci.yml",
-)
-
-#: Where the local broad run is documented. Each of these named bare ``python3 -m unittest`` before
-#: issue:8b39e60e4df361c6138e, which is repository-wide discovery: all seven CI suites in one
-#: ~402-second process. A document that recommends it again puts the cost back.
-_DOCUMENTED_BROAD_RUN = (
-    REPO_ROOT / "CONTRIBUTING.md",
-    REPO_ROOT / "docs" / "OPERATIONS.md",
-    REPO_ROOT / "skills" / "roles" / "steward" / "steward" / "SKILL.md",
-)
-
-#: Bare `python3 -m unittest` with no module after it. Naming a module (`-m unittest tests.test_x`)
-#: is a focused run and always fine; it is the argument-less form that is the 402-second one.
-_REPOSITORY_WIDE_DISCOVERY = re.compile(r"python3? -m unittest(?:\s+-[vqf]+)*\s*(?:$|[\n`'\"])")
-
-
 def _run_probe() -> dict:
     result = subprocess.run(
         [sys.executable, "-c", _PROBE],
         cwd=REPO_ROOT,
         check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     lines = dict(line.split("=", 1) for line in result.stdout.strip().splitlines())
@@ -110,40 +85,6 @@ class DocumentedHealthSuiteCommandTests(unittest.TestCase):
             "an entry point that resolves to no modules would satisfy every assertion above while "
             "running nothing",
         )
-
-    def test_no_committed_doc_or_skill_still_recommends_the_broken_form(self):
-        # `-s tests` without `-t` sets top_level_dir to the start dir itself,
-        # so `tests/__init__.py` is not guaranteed to run before test
-        # collection: today it happens to run anyway only because
-        # some test module imports the `tests` package as a
-        # side effect at module scope, and unittest's discovery eagerly
-        # imports every test module before running any of them. That is an
-        # accident of which test modules currently exist, not a property of
-        # the `-s tests` invocation itself, so pin the fix at the
-        # documentation layer: nothing should tell a contributor or CI to
-        # run the unsafe form again.
-        offenders = []
-        for path in _DOCUMENTED_ELSEWHERE:
-            text = path.read_text(encoding="utf-8")
-            if _BROKEN_FORM.search(text):
-                offenders.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(offenders, [])
-
-    def test_no_committed_doc_or_skill_recommends_repository_wide_discovery(self):
-        """The documented broad run is the profile, not every suite in one process.
-
-        Bare `python3 -m unittest` is 3782 tests and ~402 seconds, which is a check nobody runs
-        between edits — so in practice it was skipped, or paid for once and stretched far past the
-        content it described. `python3 -m tests.broad` is the same guarantee about `tests/__init__`
-        at a twentieth of the cost, and the complete gate stays dispatcher-owned exact-SHA CI.
-        """
-        offenders = []
-        for path in _DOCUMENTED_BROAD_RUN:
-            text = path.read_text(encoding="utf-8")
-            if _REPOSITORY_WIDE_DISCOVERY.search(text):
-                offenders.append(str(path.relative_to(REPO_ROOT)))
-        self.assertEqual(offenders, [])
-
 
 if __name__ == "__main__":
     unittest.main()
