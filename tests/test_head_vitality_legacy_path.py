@@ -142,14 +142,6 @@ class LegacyPathTests(unittest.TestCase):
             },
         }
 
-    def run_worker_to_validate_and_review(self) -> None:
-        """Claim, report done, pass the default green gate, start the reviewer."""
-        self.tick()
-        self.report_done()
-        self.assertEqual(self.tick()["to"], "validate")
-        self.assertEqual(self.tick()["action"], "review-started")
-
-
 class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
     """issue:b5195041abbc3ec28243: the idle fence read the screen, not the transcript.
 
