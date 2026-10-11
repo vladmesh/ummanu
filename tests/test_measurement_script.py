@@ -242,6 +242,12 @@ class MeasurementScriptTests(AgainstAStubDashboard):
     def setUp(self) -> None:
         super().setUp()
         self.enterContext(mock.patch.object(measure, "POLL_INTERVAL_SECONDS", self.TOKEN_INTERVAL_SECONDS))
+        # These cases verify routes, responses and verdicts, not scheduler precision.
+        # A 50 ms token interval on a busy CI runner can miss the production
+        # 100 ms start tolerance despite correct application behavior. Retain
+        # the minimum poll count, but test strict cadence with the unmodified
+        # three-second clock in CadenceAndLaunchTests below.
+        self.enterContext(mock.patch.object(measure, "CADENCE_TOLERANCE_SECONDS", float("inf")))
 
     # -- read-only ---------------------------------------------------------------------------
 
@@ -499,6 +505,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             mock.patch.object(fresh, "po_cookie", return_value="ummanu_po=deadbeef"),
             mock.patch.object(fresh, "WARM_REQUESTS", 2),
             mock.patch.object(fresh, "POLL_INTERVAL_SECONDS", self.TOKEN_INTERVAL_SECONDS),
+            mock.patch.object(fresh, "CADENCE_TOLERANCE_SECONDS", float("inf")),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
         ):
