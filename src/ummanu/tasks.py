@@ -164,12 +164,8 @@ MASQUERADE = (Role.PO, "observer")
 
 
 def admit_role(role: Role | str, actor: str, allowed: Collection[Role | str]) -> Role:
-    """The role check every role-taking sprint, task and issue write makes before anything else.
-
-    Two refusals, in this order. A PO write whose actor is the observer is `role_masquerade`, whatever
-    the operation would otherwise admit: that check lives here and nowhere else, so a writer entry
-    point that admits its role through this function cannot skip it. Then a role outside `allowed` is
-    `role_forbidden`. Neither reads or writes anything.
+    """The role check every role-taking sprint, task and issue write makes before
+    anything else. Two refusals, in this order.
     """
     if str(role) == MASQUERADE[0].value and str(actor or "").strip() == MASQUERADE[1]:
         raise TaskError(
@@ -335,12 +331,8 @@ def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def specification_revision(events: Iterable[dict[str, Any]], description: str) -> str:
-    """Return the durable event id of the description the card currently exposes.
-
-    A digest identifies content, but not an edit that returns a card to earlier text. The latest
-    create/edit event which wrote the current digest is therefore the revision boundary. Legacy,
-    malformed, or divergent history deliberately has no boundary: callers that would otherwise
-    replay an instruction must fail closed.
+    """Return the durable event id of the description the card currently exposes. A
+    digest identifies content, but not an edit that returns a card to earlier text.
     """
     current_digest = _digest(description)
     latest: dict[str, Any] | None = None
@@ -379,14 +371,11 @@ def _po_card_create_refusal(
     activation_operation: bool = False,
     execution: bool = False,
 ) -> str:
-    """Why a `decision`/`operation`/`wait` card cannot be created as asked, or `""`.
-
-    The PO service executes a decision or operation card in a turn of its sprint's PO session: it
-    needs that sprint, unless the PO cuts it inside a PO turn (`origin`), where the session of that turn
-    executes it (secretary-1792). The dispatcher advances a wait card itself; the observer cuts one only
-    for its own sprint, the PO in a sprint or outside every sprint, and the dispatcher one for a code
-    card's e2e run (secretary-1795), in that card's sprint or in none. None of them has a head, a
-    reviewer, a checkout or a live impact of its own to declare.
+    """Explain refusal to create a decision, operation or wait card, or return an empty
+    reason. Decision/operation cards require a sprint PO session unless created within
+    a PO turn (`origin`). Wait cards may be created by the observer for its own sprint,
+    by PO, or by the dispatcher for e2e; these kinds have no worker, reviewer, checkout
+    or live-impact declaration.
     """
     waits = kind == TaskType.WAIT.value
     # The dispatcher cuts a code card's e2e wait, the decision a spent e2e budget needs
@@ -543,10 +532,10 @@ def post_merge_ci_fact(event: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def is_dispatcher_hotfix(event: dict[str, Any]) -> bool:
-    """Whether an event is the dispatcher's create of a sprint `hotfix` card (secretary-1807).
-
-    The dispatcher cuts one for a red after-merge e2e run in the open sprint of the newest card that
-    run covered; the sprint's observer wakes on it the way it wakes on a Blocked card of the sprint.
+    """Whether an event is the dispatcher's create of a sprint `hotfix` card. The
+    dispatcher cuts one for a red after-merge e2e run in the open sprint of the newest
+    card that run covered; the sprint's observer wakes on it the way it wakes on a
+    Blocked card of the sprint.
     """
     if str(event.get("kind") or "") != "created" or str(event.get("outcome") or "") != "success":
         return False
@@ -569,16 +558,10 @@ def is_merged_release(event: dict[str, Any]) -> bool:
 
 
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
-    """Whether a card transition needs a new observer decision.
-
-    Deliberately small, because it drives both wake delivery and resume freshness: a broad
-    "successful event" rule turns every piece of machinery telemetry — the observer's own decision
-    included — into another observer turn.
-
-    This is the one place the post-merge rule lives: a Done that a dispatcher release-with-merge
-    produced is not a wake, and the post-merge CI result recorded for that merge is. Every other
-    Done — a research or infra card, a release that merged nothing, a manual PO or steward Done —
-    wakes as before.
+    """Decide whether a card transition wakes the observer or invalidates resume
+    freshness. Ignore machine telemetry and observer decisions; a merged release's Done
+    is not a wake, but its post-merge CI result is. Other Done transitions remain
+    wakes.
     """
     if str(event.get("ref") or "") not in linked_refs:
         return False
@@ -769,10 +752,9 @@ class TaskReader:
         return [self._normalize(row, columns, swimlanes, metadata[_task_number(row)], comments=None) for row in rows]
 
     def _attach_origin_returns(self, cards: list[dict[str, Any]]) -> None:
-        """Fill each delegated card's `origin.returns` from its outbox rows, in one read (secretary-1792).
-
-        The outbox (`board/origin_outbox.py`) is the one record of what a card owes its origin session
-        and what was delivered. A client with no outbox, or a store before 0022, leaves them empty.
+        """Fill each delegated card's `origin.returns` from its outbox rows, in one
+        read. The outbox (`board/origin_outbox.py`) is the one record of what a card
+        owes its origin session and what was delivered.
         """
         delegated = [card for card in cards if isinstance(card.get("origin"), dict)]
         if not delegated:
@@ -787,12 +769,10 @@ class TaskReader:
             card["origin"]["returns"] = [row.to_json() for row in rows.get(card["ref"], [])]
 
     def steward_reports_in_progress(self, project: str) -> list[dict[str, Any]]:
-        """Return the small, durable report view a steward dispatch needs.
-
-        This intentionally is not a second public Card list: callers get only the
-        identity, freshness timestamp and report marker needed to decide whether a
-        steward sweep is already running.  The board vocabulary exposes metadata per task,
-        so all candidate metadata is fetched in one batch rather than one call per row.
+        """Return the small, durable report view a steward dispatch needs. This
+        intentionally is not a second public Card list: callers get only the identity,
+        freshness timestamp and report marker needed to decide whether a steward sweep
+        is already running.
         """
         project_id, columns, _ = self._board()
         in_progress_id = next(
@@ -827,11 +807,9 @@ class TaskReader:
     def steward_signal_cards(
         self, *, states: set[str] | None = None, project: str | None = None
     ) -> list[dict[str, Any]]:
-        """Return the bounded operational card view used by steward anomaly reads.
-
-        This is deliberately narrower than :meth:`list`: it exposes only the
-        active-card fields a watchdog needs and keeps raw board rows private.
-        Metadata is fetched once for the active board snapshot, never per card.
+        """Return the bounded operational card view used by steward anomaly reads. This
+        is deliberately narrower than :meth:`list`: it exposes only the active-card
+        fields a watchdog needs and keeps raw board rows private.
         """
         if states is not None and (unknown := states - set(_STATE_BY_COLUMN.values())):
             raise TaskError("validation", f"unknown task states: {sorted(unknown)}", 2)
@@ -866,11 +844,8 @@ class TaskReader:
         return cards
 
     def done_retention_candidates(self) -> list[dict[str, Any]]:
-        """Return the deliberately small view used by Done-retention cleanup.
-
-        The cleanup is allowed one active-board snapshot and one metadata batch.
-        It must not infer an age for incomplete board rows, so an unusable
-        ``date_moved`` is represented as ``None`` for the caller to skip.
+        """Return the deliberately small view used by Done-retention cleanup. The
+        cleanup is allowed one active-board snapshot and one metadata batch.
         """
         project_id, columns, _ = self._board()
         done_id = next((identifier for identifier, title in columns.items() if title == "Done"), None)
@@ -900,11 +875,8 @@ class TaskReader:
 
     def export(self) -> list[dict[str, Any]]:
         """Return the complete legacy checkpoint projection in bounded board reads.
-
         Checkpoints retain the established board schema while reading it through the
-        canonical Ummanu transport.  Metadata and comments are per task in the board
-        vocabulary, so both are requested in one batch for the whole board rather than
-        once per card.
+        canonical Ummanu transport.
         """
         # The installed head registry remains the authority for legacy effective-head values;
         # this is deliberately not a dependency on pipeline board operations or its export CLI.
@@ -983,10 +955,7 @@ class TaskReader:
 
     def restore_snapshot(self) -> dict[str, dict[str, Any]]:
         """Read every active or archived card as a normalized, authoritative snapshot.
-
-        Recovery uses this after its setup writes and again for final parity.  The
-        board rows are one read and metadata/comments share bounded JSON-RPC posts;
-        unlike ``show`` this never grows a pair of HTTP reads per card.
+        Recovery uses this after its setup writes and again for final parity.
         """
         project_id, columns, swimlanes = self._board()
         rows = [row for row in all_project_cards(self.client, project_id) if isinstance(row, dict)]
@@ -1132,13 +1101,9 @@ class TaskReader:
 
 
 def task_audit_for(client: Any, data_dir: str | os.PathLike[str] | None = None) -> Any:
-    """The audit owner of a card client: `requests`/`board_events` (docs/BOARD_STORE.md §7.3).
-
-    Cards have one implementation, so their audit has one owner.  The file journal under
-    `<data>/board` is not a card audit owner any more: building one beside a card client read a
-    journal nobody writes, which is how on 2026-09-10 a worker's `report:done` committed in SQL was
-    never seen and the worker was declared stalled (sprint:1437, secretary-1614).  `data_dir` is
-    accepted and ignored so the callers that still hand one in need not know that.
+    """Use the card client's `requests`/`board_events` audit, not an independent file
+    journal. `data_dir` is retained for caller compatibility but ignored; SQL-backed
+    card events must never be read from an unrelated file journal.
     """
     from ummanu.board.sql_audit import SqlTaskAudit
 
@@ -1203,12 +1168,10 @@ class TaskWriter:
         return values
 
     def _redact_for_board(self, text: str) -> str:
-        """Remove credentials before they reach either board or audit history.
-
-        An interrupted archive keeps its retry body locally and every board comment is exported into the
-        checkpoint, so scrubbing happens at the protocol boundary and both copies receive the same safe
-        text. An explicit role-env override selects its external file, so ``UMMANU_RUNTIME_ENV_FILE``
-        and ``TA_RUNTIME_ENV_FILE`` are scrubbed too.
+        """Remove credentials before they reach either board or audit history. An
+        interrupted archive keeps its retry body locally and every board comment is
+        exported into the checkpoint, so scrubbing happens at the protocol boundary and
+        both copies receive the same safe text.
         """
         # Delay this import to avoid the config/sprints import cycle.
         return redact(
@@ -1256,14 +1219,10 @@ class TaskWriter:
         request_id: str | None = None,
         restoring: bool = False,
     ) -> dict[str, Any]:
-        """Create an ordinary task through the released admission contract.
-
-        `wait` carries a wait card's create flags (`run`, `run_id`, `card`, `states`, `until`,
-        `deadline`, `returns`, `transient_window`); every other kind takes none of them.
-
-        `origin` is the PO turn the create runs in, `{session, request}` (secretary-1792): the CLI
-        reads it from the turn's environment for `--role po` only, and any other role is refused one.
-        It is written once, here, and part of the create's request identity.
+        """Create a task under admission rules. Only `wait` accepts wait-specific
+        fields (`run`, `run_id`, `card`, `states`, `until`, `deadline`, `returns`,
+        `transient_window`). PO-only `origin={session, request}` participates in create
+        identity and is rejected for other roles.
         """
         return self._create(
             role=role,
@@ -1806,12 +1765,9 @@ class TaskWriter:
         description: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create the steward's accounting artifact directly in In progress.
-
-        The generic create transaction owns its reference reservation, staged
-        identity and staged-claim recovery.  This narrow facade only supplies
-        the invariant report shape; it never creates a temporary Ready card and
-        deliberately does not require a sprint.
+        """Create the steward's accounting artifact directly in In progress. The
+        generic create transaction owns its reference reservation, staged identity and
+        staged-claim recovery.
         """
         return self._create(
             role="steward",
@@ -1962,11 +1918,10 @@ class TaskWriter:
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
-        """One role comment on a card. `owner` comments too, on any card, always as actor `owner`.
-
-        The owner is not a board role (it moves nothing and creates nothing); its comment is how it
-        answers a card the PO handed to it (`handover`), and the dispatcher reads it back by its
-        `owner` marker.
+        """One role comment on a card. `owner` comments too, on any card, always as
+        actor `owner`. The owner is not a board role (it moves nothing and creates
+        nothing); its comment is how it answers a card the PO handed to it
+        (`handover`), and the dispatcher reads it back by its `owner` marker.
         """
         if str(role) == OWNER_ROLE:
             role, actor = OWNER_ROLE, OWNER_ROLE
@@ -2046,9 +2001,7 @@ class TaskWriter:
 
     def accept_owner_comment(self, *, actor: str, reference: str, event_id: str) -> dict[str, Any]:
         """Released owner-comment follow-ups: settle their real answer before delivery.
-
-        Only the dispatcher's recovery path uses this adapter. The owner audit marker and
-        exact body digest must match a comment after the current audited handover.
+        Only the dispatcher's recovery path uses this adapter.
         """
         role = self._role("dispatcher", {Role.DISPATCHER}, actor=actor)
         identity = {"owner_comment": event_id}
@@ -2117,10 +2070,10 @@ class TaskWriter:
         fact: dict[str, Any],
         request_id: str,
     ) -> dict[str, Any]:
-        """Record a release's post-merge CI result as one dispatcher comment on the card.
-
-        The comment carries the fact in its event payload, which is what the observer wake predicate
-        reads (`post_merge_ci_fact`); the body is the same fact for a human reading the card.
+        """Record a release's post-merge CI result as one dispatcher comment on the
+        card. The comment carries the fact in its event payload, which is what the
+        observer wake predicate reads (`post_merge_ci_fact`); the body is the same fact
+        for a human reading the card.
         """
         role = self._role("dispatcher", COMMENT_ROLES, actor=actor)
         if str(fact.get("result") or "") not in POST_MERGE_CI_RESULTS:
@@ -2150,10 +2103,10 @@ class TaskWriter:
             return ""
 
     def _require_committed_workspace(self) -> None:
-        """Refuse a done report from a dirty checkout.
-
-        The worker runs the protocol from its own workspace, so failing here lets it commit and retry
-        inside the same session instead of learning from the dispatcher that its card went to blocked.
+        """Refuse a done report from a dirty checkout. The worker runs the protocol
+        from its own workspace, so failing here lets it commit and retry inside the
+        same session instead of learning from the dispatcher that its card went to
+        blocked.
         """
         if self.workspace is not None:
             workspace: Path = self.workspace
@@ -2184,12 +2137,9 @@ class TaskWriter:
         classification: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """A worker's report, and for a blocked one the kind of blocker it hit.
-
-        The classification is required rather than offered: an external fact and a wrong task definition
-        are repaired by different people. Two values and no free text, so repeated blocks from one head
-        are countable. Its payload is staged as one typed Card occurrence which renders the
-        `classification:` line, deliberately not card metadata that could disagree with the event.
+        """A worker's report, and for a blocked one the kind of blocker it hit. The
+        classification is required rather than offered: an external fact and a wrong
+        task definition are repaired by different people.
         """
         role = self._role(role, {Role.WORKER}, actor=actor)
         body = self._redact_for_board(body)
@@ -2298,20 +2248,11 @@ class TaskWriter:
         request_id: str | None = None,
         po_session: str = "",
     ) -> dict[str, Any]:
-        """The PO completes a `decision`/`operation` card it answered in its turn.
-
-        `po_session` is the PO session whose turn runs the command (the CLI reads it from
-        `UMMANU_PO_SESSION`), recorded in the completion transition's data as `po_session`. It
-        permits nothing: it is the proof a delegated card's result return reads (secretary-1792).
-
-        One Card transition In progress -> Done whose reason is the rendered completion record; the
-        transition writes that record as the PO's comment inside its own transaction, so the
-        `[completion:<kind>]` comment and the Done land together or not at all. The request id makes
-        it idempotent: a repeat answers the recorded transition and writes nothing, and the same id
-        with another record is a conflict. Every refusal is decided before anything is written.
-
-        The sprint guard is not asked: this is the PO executing the card its sprint's dispatcher
-        submitted to it, not the PO's escape-hatch move of a sprint's card.
+        """Complete an In progress delegated card in one transaction: the
+        `[completion:<kind>]` comment and Done transition commit together. `po_session`
+        is recorded as return evidence, not permission. Request-id retries are
+        idempotent; conflicting records are refused before writing. This delegated
+        completion does not use the ordinary sprint move guard.
         """
         role = self._role(role, {Role.PO}, actor=actor)
         if kind not in PO_COMPLETION_MARKERS:
@@ -2397,19 +2338,11 @@ class TaskWriter:
         request_id: str | None = None,
         po_session: str = "",
     ) -> dict[str, Any]:
-        """The PO hands an In progress `decision`/`operation` card to the owner (secretary-1761).
-
-        `po_session`, the session whose turn runs the command, is recorded in the handover record's
-        payload as `po_session`, as `complete` records it (secretary-1792); it permits nothing.
-
-        One write: the `waiting_owner` mark on the card (`board.owner_handover`) and a PO comment
-        `[handover:owner]` with the reason, the required unread owner event and predecessor PO-wait
-        settlement, in the transaction of one `handed_to_owner` audit record. They land together
-        or not at all. The card stays In progress. The request id makes it
-        idempotent: a repeat answers the recorded handover and writes nothing, and the same id with
-        another card or reason is refused. Every refusal (role, recipient, reason, kind, column, a
-        mark already there) is decided before anything is written; the card ones are decided on the
-        card as read inside that transaction.
+        """Hand a delegated card to the owner, preserving In progress. The
+        `waiting_owner` mark, `[handover:owner]` comment, unread owner event, prior
+        PO-wait settlement and `handed_to_owner` audit commit atomically. Record
+        `po_session` as evidence, not authority. Retries are idempotent; conflicting
+        requests and invalid state are rejected before writing.
         """
         role = self._role(role, {Role.PO}, actor=actor)
         if to != OWNER:
@@ -2491,13 +2424,10 @@ class TaskWriter:
         reason: str,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Cancel a pending wait card: the PO, or the observer of the card's own sprint (secretary-1790).
-
-        One write: the `wait_cancel` field (who, when, why) and a `[wait:cancel]` comment with the
-        reason, in the transaction of one `wait_cancelled` audit record. The card does not move here:
-        the dispatcher freezes `cancelled` as the wait's result on its next tick, delivers it to every
-        return address and then Blocks the card, as it does every other outcome. A wait whose result
-        is already frozen is not cancelled; that result stands. Idempotent under the request id.
+        """Cancel an unfrozen wait as PO or its sprint-bound observer. Atomically
+        record `wait_cancel`, `[wait:cancel]` and `wait_cancelled`; do not move the
+        card. The dispatcher publishes `cancelled` and Blocks it on the next tick. A
+        frozen result wins; request-id replay is idempotent.
         """
         role = self._role(role, {Role.PO, Role.OBSERVER}, actor=actor)
         reason = self._redact_for_board(reason).strip()
@@ -2552,12 +2482,10 @@ class TaskWriter:
         return self._write(WAIT_CANCELLED, role, actor, reference, request_id, payload, mutation, identity=identity)
 
     def record_wait_state(self, *, role: str, actor: str, reference: str, state: str) -> None:
-        """The dispatcher's one write of a wait card's `wait_state` (secretary-1790).
-
-        A state field, not an event: the dispatcher rewrites it only when what it knows changed (a
-        new observation or error, the frozen result, a delivery record), and it carries no audit
-        record of its own. The result it freezes and every delivery it records are what the audit
-        records elsewhere (the terminal move, the dependents' comments, the PO input).
+        """The dispatcher's one write of a wait card's `wait_state`. A state field, not
+        an event: the dispatcher rewrites it only when what it knows changed (a new
+        observation or error, the frozen result, a delivery record), and it carries no
+        audit record of its own.
         """
         self._role(role, {Role.DISPATCHER}, actor=actor)
         task = self.reader.show(reference)
@@ -2567,12 +2495,10 @@ class TaskWriter:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values={wait_card.WAIT_STATE: state})
 
     def record_po_return(self, *, role: str, actor: str, reference: str, state: str) -> None:
-        """The dispatcher's one write of a delegated card's `po_return` (secretary-1792).
-
-        A state field like `wait_state`: the session it handed a decision/operation card to, the
-        successors of the origin's line, and one record per terminal transition whose result it
-        returned. The delivery itself is recorded elsewhere (the PO input, the owner event). The
-        origin (`po_origin`) is not touched here or anywhere after create.
+        """The dispatcher's one write of a delegated card's `po_return`. A state field
+        like `wait_state`: the session it handed a decision/operation card to, the
+        successors of the origin's line, and one record per terminal transition whose
+        result it returned.
         """
         self._role(role, {Role.DISPATCHER}, actor=actor)
         task = self.reader.show(reference)
@@ -2612,12 +2538,9 @@ class TaskWriter:
                              values={execution_field.PO_EXECUTION: offered.text()})
 
     def record_e2e_state(self, *, role: str, actor: str, reference: str, state: str) -> None:
-        """The dispatcher's one write of a code card's `e2e` run records (secretary-1795).
-
-        A state field like `wait_state`: the intent of each dispatch (written before the call), the
-        run it identified, its wait card and the wait's frozen result. The effects it leads to (the
-        wait card's create, the card's rework or Blocked move, the dispatcher's comments) carry their
-        own audit records.
+        """The dispatcher's one write of a code card's `e2e` run records. A state field
+        like `wait_state`: the intent of each dispatch (written before the call), the
+        run it identified, its wait card and the wait's frozen result.
         """
         self._role(role, {Role.DISPATCHER}, actor=actor)
         task = self.reader.show(reference)
@@ -2632,13 +2555,9 @@ class TaskWriter:
     def record_e2e_intent(
         self, *, role: str, actor: str, reference: str, state: str, sprint: str, dispatch_id: str
     ) -> dict[str, Any]:
-        """Write a dispatch intent, charging the run to the card's sprint first (secretary-1796).
-
-        One transaction: the conditional charge on the sprint row (`e2e_used = e2e_used + 1` only while
-        `e2e_used < e2e_budget`) and the card's `e2e` field with the intent in it. When the budget has
-        no run left nothing is written, and the answer says so (`charged: false`, with the budget and
-        the runs used). A card outside every sprint (`sprint` empty) is not charged here: its per-card
-        cap is counted from its own records, and the intent is written as by `record_e2e_state`.
+        """Write e2e intent and conditionally charge a sprint's remaining run budget in
+        one transaction; when exhausted, return `charged: false` without writes. An
+        unsprinted card is governed by its own cap, not a sprint charge.
         """
         self._role(role, {Role.DISPATCHER}, actor=actor)
         task = self.reader.show(reference)
@@ -2702,14 +2621,10 @@ class TaskWriter:
         carrier: str,
         expected: dict[str, e2e_record.AfterMergeMark | None] | None = None,
     ) -> dict[str, Any]:
-        """Write an after-merge e2e run's intent on every card it covers, charged first (secretary-1807).
-
-        One transaction for the whole run: the charge, then each covered card's `e2e` field (`states`,
-        the new text per card; the carrier's holds the run record). With `sprint` the run is charged to
-        that sprint as `record_e2e_intent` charges one, under the carrier's name. Without it the run is
-        charged to every covered card's own cap: each is read here, and when any of them has no run
-        left nothing at all is written and the answer names them (`charged: false`, `spent`). All
-        charged together, or none.
+        """Atomically charge an after-merge e2e run and write intent to all covered
+        cards. Charge the sprint budget when present; otherwise enforce every covered
+        card's own cap. If any cap is exhausted, write nothing and return `charged:
+        false` with `spent`.
         """
         self._role(role, {Role.DISPATCHER}, actor=actor)
         if carrier not in states:
@@ -2839,10 +2754,7 @@ class TaskWriter:
     def after_merge_disposition_admission(self, *, role: str, actor: str, carrier: str,
                                          run: e2e_record.E2eRun) -> Iterator[bool]:
         """Keep current obligation ownership locked through operation create/recovery.
-
         Historical runs retain their evidence and cleanup without a new question.
-        The existing owns_mark rule and released empty-dispatch precedence are
-        the same ones used when applying a disposition; superseded work is inert.
         """
         from ummanu.board.e2e_disposition import owns_mark
 
@@ -2905,12 +2817,9 @@ class TaskWriter:
 
     def reconcile_after_merge_disposition(self, *, role: str, actor: str, carrier: str,
                                           dispatch_id: str) -> dict[str, Any]:
-        """Read native PO completion and atomically persist receipt plus covered obligations.
-
-        Queue contents are a recoverable projection, never completion authority.
-        The locks serialize PO completion and re-merges against this consumption;
-        no charge or grant occurs here. Missing evidence clears a dead holder with
-        a neutral reason; degraded reads roll back and can be tried again.
+        """Read native PO completion and atomically persist receipt plus covered
+        obligations. Queue contents are a recoverable projection, never completion
+        authority.
         """
         from ummanu.board.e2e_disposition import disposition_effect, owns_mark
         from ummanu.sprints import SprintReader
@@ -3072,15 +2981,11 @@ class TaskWriter:
         add: int | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Raise the e2e cap of one code card outside every sprint, on the owner's word (secretary-1796).
-
-        The sprint's `sprint e2e-budget`, for a card no open sprint budgets: role `po` only, and only with
-        `authorized_by`, the event id of an owner-role comment on this card's e2e budget decision card
-        made after its handover whose one answer line is `e2e budget: raise <N>`
-        (`e2e_budget.authorized_raise`): the raise is that N, and `add`, when given, has to equal it. It
-        is appended to the
-        card's `e2e_cap` field in the transaction of one `e2e_cap_raised` audit record naming that
-        event. One authorizing comment raises once; everything is refused before anything is written.
+        """Raise an unsprinted code card's e2e cap as PO only, with `authorized_by`
+        pointing to an eligible post-handover owner comment containing `e2e budget:
+        raise <N>`. The requested increment must equal N; commit cap and audit
+        atomically. Each authorizing event can be consumed once, with refusals before
+        writes.
         """
         role = self._role(role, {Role.PO}, actor=actor)
         if add is not None and (isinstance(add, bool) or not isinstance(add, int) or add < 1):
@@ -3167,16 +3072,10 @@ class TaskWriter:
         protocol_prerequisites: Iterable[str] = (),
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Record what to do with a parked card, apart from the move that does it.
-
-        The decision and its effect are two facts. Recording the decision first is what makes it
-        checkable, because the move out of Assessment refuses to carry one that is not on the card.
-
-        The observer decides, and nobody else; a PO that has to intervene moves the card with
-        `--sprint-override` and a reason. The same sprint reservation guard `move` carries applies here
-        and answers about the caller as well as the card: the caller's sprint is the one the dispatcher
-        launched its head for, carried in the head's environment, so the binding rather than the actor
-        id distinguishes one sprint's observer from another's.
+        """Record the observer's decision for a parked card separately from its move;
+        leaving Assessment requires the recorded decision. Only the sprint-bound
+        observer may decide. PO intervention uses an explicit sprint override, and
+        normal reservation/identity guards still apply.
         """
         role = self._role(role, {Role.OBSERVER}, actor=actor)
         body = self._redact_for_board(body)
@@ -3322,11 +3221,8 @@ class TaskWriter:
         payload: dict[str, Any],
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Append one routing telemetry record for the card.
-
-        Journal-only: the board holds no per-attempt routing history, so this write has no backend
-        mutation. The event still goes through the normal pending/commit path, which makes it idempotent
-        per request id and carries it into the recovery checkpoint.
+        """Append one routing telemetry record for the card. Journal-only: the board
+        holds no per-attempt routing history, so this write has no backend mutation.
         """
         role = self._role(role, {Role.DISPATCHER}, actor=actor)
         phase = _text(payload.get("phase"))
@@ -3359,12 +3255,8 @@ class TaskWriter:
         data: OutcomeRoundContext | Mapping[str, object],
         request_id: str,
     ) -> dict[str, Any]:
-        """Persist one exact forward source identity before its consumer runs.
-
-        This is journal-only. The dispatcher carries the typed value; the
-        historical dictionary exists only at this audit compatibility boundary.
-        Raw mappings remain accepted for released callers and are normalized
-        once through the same model.
+        """Persist one exact forward source identity before its consumer runs. This is
+        journal-only.
         """
         role = self._role(role, {Role.DISPATCHER}, actor=actor)
         try:
@@ -3399,23 +3291,11 @@ class TaskWriter:
         reason: str,
         request_id: str,
     ) -> dict[str, Any]:
-        """Append one durable ``attempt.usage`` occurrence for a finished worker or review phase.
-
-        Journal-only, like routing telemetry: what a phase cost is not a board mutation, and the
-        card carries no field it could disagree with. Unlike routing it is a typed protocol event,
-        so the schema is checked at this boundary and the audit export exposes it without any
-        marker prose to parse.
-
-        The request id names one occurrence and owns it. A replay — a re-entered tick, a dispatcher
-        recovering the same acceptance — commits the event that already owns the id rather than a
-        freshly computed one, so a later read of a changed session file can neither add a second
-        occurrence nor overwrite the first.
-
-        Two durability steps, and the caller is told which one it reached. The exact occurrence is
-        staged first, so a card cannot advance past a finished phase with nothing owed for it; the
-        append then publishes it. An append that fails leaves the staged obligation, which is what
-        ``finish_attempt_usage`` completes later — nothing is recomputed from a session file that has
-        moved on. A stage that fails is an audit failure, and the caller has to treat it as one.
+        """Stage then append one immutable, schema-validated `attempt.usage` audit
+        occurrence, keyed by request id. Retries reuse the staged event rather than
+        recomputing changed session data. Failed append remains staged for
+        `finish_attempt_usage`; failed staging is an audit error. This is journal-only,
+        not a board mutation.
         """
         role = self._role(role, {Role.DISPATCHER}, actor=actor)
         if not request_id.strip():
@@ -3471,17 +3351,9 @@ class TaskWriter:
         return {"action": "attempt_usage", "event_id": event.event_id, "replayed": replayed}
 
     def finish_attempt_usage(self, *, role: str, reference: str = "") -> int:
-        """Publish staged ``attempt.usage`` occurrences: this card's, or every card's.
-
-        The recovery half of the durability order above. It finishes the exact staged record rather
-        than a re-derived one, so a session file that has grown since cannot change what the phase
-        was accounted for, and it is idempotent: a record already appended is simply gone from the
-        pending set.
-
-        Without a ``reference`` it takes the whole pending set. That is the form the production tick
-        calls, because the card whose phase is owed an account may have gone Blocked or Done and be
-        nowhere the tick would otherwise look. A record that cannot be published is left exactly
-        where it is and stays owed.
+        """Publish exact staged `attempt.usage` records, never recomputing them from
+        session files. Without `reference`, process all pending cards, including
+        Blocked/Done. Publishing is idempotent; failed records stay pending.
         """
         role = self._role(role, {Role.DISPATCHER}, actor="")
         canon = self.board_host.canon
@@ -3509,11 +3381,8 @@ class TaskWriter:
         reason: str,
         request_id: str,
     ) -> dict[str, Any]:
-        """Stage then append one immutable observational terminal occurrence.
-
-        This writer intentionally has no board effect.  Its caller is required
-        to call it only after the lifecycle owner has confirmed the terminal
-        move; a retry can only append the exact staged object.
+        """Stage then append one immutable observational terminal occurrence. This
+        writer intentionally has no board effect.
         """
         role = self._role(role, {Role.DISPATCHER}, actor=actor)
         if not request_id.strip():
@@ -3898,12 +3767,11 @@ class TaskWriter:
         return moved
 
     def _dispatcher_wait_edge_refusal(self, task: dict[str, Any], source: str, target: str) -> str:
-        """Why the dispatcher may not take one of its two wait edges here, or `""` (secretary-1790).
-
-        In progress -> Done is a wait card's `target_reached`, once its result is frozen; Ready ->
-        Blocked is a card held by a wait card (`blocked_by`) that ended another way, or the hotfix
-        card the dispatcher itself cut for a red after-merge e2e run that no open sprint and no PO
-        origin owns (secretary-1807). The dispatcher takes neither edge for any other card.
+        """Why the dispatcher may not take one of its two wait edges here, or `""`. In
+        progress -> Done is a wait card's `target_reached`, once its result is frozen;
+        Ready -> Blocked is a card held by a wait card (`blocked_by`) that ended
+        another way, or the hotfix card the dispatcher itself cut for a red after-merge
+        e2e run that no open sprint and no PO origin owns.
         """
         if (source, target) == ("in_progress", "done"):
             result = wait_card.wait_state(task).result if is_wait(task) else None
@@ -3928,10 +3796,10 @@ class TaskWriter:
     def _steward_needs_human(
         self, task: dict[str, Any], *, role: str, target: str, reason: str, moved: dict[str, Any]
     ) -> None:
-        """The steward's report card went Blocked carrying "Needs a human": one `needs_owner` event.
-
-        This move is the one place that fact is decided (the steward skill, step 5, moves its report
-        card to Blocked with that section as the reason), so the event is written here, once per move.
+        """The steward's report card went Blocked carrying "Needs a human": one
+        `needs_owner` event. This move is the one place that fact is decided (the
+        steward skill, step 5, moves its report card to Blocked with that section as
+        the reason), so the event is written here, once per move.
         """
         if role != Role.STEWARD.value or target != CardState.BLOCKED.value or not _is_steward_report(task):
             return
@@ -4018,11 +3886,11 @@ class TaskWriter:
         reason: str,
         role: str,
     ) -> Callable[[Any], None]:
-        """The board work a migrated Card state edge still owes once its column effect lands.
-
-        Handed to the adapter so it runs inside the transition's transaction: it completes before the
-        event commits, and an incomplete one leaves the exact pending typed record that both a retry and
-        :meth:`reconcile` know how to finish.
+        """The board work a migrated Card state edge still owes once its column effect
+        lands. Handed to the adapter so it runs inside the transition's transaction: it
+        completes before the event commits, and an incomplete one leaves the exact
+        pending typed record that both a retry and :meth:`reconcile` know how to
+        finish.
         """
 
         def finish(_entity: Any) -> None:
@@ -4079,18 +3947,11 @@ class TaskWriter:
         po_session: str | None = None,
         finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
-        """Run one state edge through the typed adapter and its shared journal.
-
-        The sprint the card belongs to is not passed here: the adapter reads the live card to authorize
-        the edge anyway. `finish` carries this writer's remaining board work into the same transaction.
-
-        `_mutation()` is that transaction, and this is the single place both edges cross it: `move`
-        and `claim` reach the adapter only through here, so the staged request row, the column
-        effect, the caller's `finish` work and the committed event are one transaction wherever the
-        backend has transactions (§7.1).  Without transactions `_mutation()` is nothing at all and every
-        half-applied state below stays exactly as it is, with its `recover_*` entry point; on
-        PostgreSQL a failure after the move rolls the move back with the claim, which is why §7.3
-        lists that class of state as one this backend does not have.
+        """Run claim/move through the typed adapter, combining request staging, board
+        effect, `finish` work and committed audit inside `_mutation()` when the backend
+        is transactional. The adapter reads the live sprint binding itself.
+        Nontransactional backends retain partial-state recovery; PostgreSQL rolls all
+        effects back together.
         """
         try:
             with reference_lock(self.data_dir, reference), (
@@ -4162,16 +4023,10 @@ class TaskWriter:
         decision: str,
         role: str,
     ) -> None:
-        """A card leaves Assessment on a decision somebody recorded, or it does not leave.
-
-        Two rules binding different callers. A supplied decision has to be real and has to agree with
-        where the card is going, whoever passes it: each decision has exactly one destination. Needing a
-        decision at all is the dispatcher's rule, because the dispatcher performs decisions; the PO's
-        move is the escape hatch, already recorded as a sprint override.
-
-        `blocked` without a decision stays open even for the dispatcher: the steward's stale escalation
-        and the dispatcher's own failure paths reach it without anyone deciding, and a card that cannot
-        be blocked is a card nothing can rescue. The observer has no exit from Assessment at all.
+        """Require every supplied Assessment decision to exist and match the
+        destination. Dispatcher exits require a decision; PO moves use sprint override.
+        Blocked without a decision is allowed for failure/escalation; observers cannot
+        move cards out of Assessment.
         """
         if decision and decision not in DECISION_VALUES:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(DECISION_VALUES))}", 2)
@@ -4228,10 +4083,7 @@ class TaskWriter:
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Revise a card's spec in place instead of piling corrections into comments.
-
-        The audit event chains old and new content digests. Cards with an active attempt (In progress /
-        Validate) are not editable: the running head works from a TASK.md snapshot, so a mid-flight
-        revision must go through preempt/requeue, not a silent spec swap.
+        The audit event chains old and new content digests.
         """
         role = self._role(role, EDIT_ROLES, actor=actor)
         title = self._redact_for_board(title) if title is not None else None
@@ -4347,23 +4199,10 @@ class TaskWriter:
         review_head: str | None,
         sprint: dict[str, Any] | None = None,
     ) -> tuple[str | None, str | None]:
-        """The single place a card's worker and reviewer profile is held to its sprint's pins.
-
-        Every write of those two card fields comes through here, so the constraint has one door:
-        `create` cuts a card (a first card, a later one, or one recreated after a rework or a
-        reslice) and `edit` revises one before it is claimed. Both pass what they are about to
-        write and use what comes back; a guard the second door walked past would not be a
-        constraint at all. What the dispatcher later records in `resolved_head` is not a third
-        door: it launches what the card declares here, and records which profile it launched.
-
-        `None` is a field this call does not write and is returned untouched. `""` is a caller
-        that asks for no profile of its own, and under a pin it becomes the pinned profile rather
-        than something a default resolves later — the card carries the profiles it runs on exactly
-        as it always has. A different profile is refused by name.
-
-        A role the sprint pins nothing on is untouched, which is every sprint opened until now. A
-        field that is there but unreadable is corruption, and a card is not written under a
-        constraint nobody can read.
+        """Enforce a sprint's worker/reviewer profile pins for both create and edit;
+        dispatcher launch uses the declared profile. `None` means no field write, empty
+        string inherits a pin, and a conflicting profile is refused. Unpinned roles
+        remain unchanged; unreadable pin metadata fails closed.
         """
         from ummanu.sprint_observer import EXECUTOR_FIELDS, EXECUTOR_PINNED, EXECUTOR_UNSET
 
@@ -4433,12 +4272,10 @@ class TaskWriter:
     def _refuse_unpinned_reviewer_on_skipped(
         self, *, sprint_ref: str, review_head: str, sprint: dict[str, Any] | None = None
     ) -> None:
-        """Refuse a caller-named reviewer on a card whose review is skipped, unless the sprint pins it.
-
-        The review choice decides whether review runs and the sprint pin decides who reviews, so a
-        skipped card may carry the pinned reviewer, applied by the pin or named explicitly. Only a
-        reviewer the caller chose on its own contradicts `skipped`. The pin is read through
-        `_sprint_executor_pins`, the one door for it.
+        """Refuse a caller-named reviewer on a card whose review is skipped, unless the
+        sprint pins it. The review choice decides whether review runs and the sprint
+        pin decides who reviews, so a skipped card may carry the pinned reviewer,
+        applied by the pin or named explicitly.
         """
         if not review_head:
             return
@@ -4453,10 +4290,10 @@ class TaskWriter:
             )
 
     def _sprint_entity(self, reference: str) -> dict[str, Any]:
-        """The sprint a card names, read here only to answer what it pins.
-
-        A sprint that cannot be read fails closed: the alternative is writing a profile onto a card
-        whose constraint nobody could check, which is the one outcome the pin exists to prevent.
+        """The sprint a card names, read here only to answer what it pins. A sprint
+        that cannot be read fails closed: the alternative is writing a profile onto a
+        card whose constraint nobody could check, which is the one outcome the pin
+        exists to prevent.
         """
         from ummanu.sprints import SprintReader
 
@@ -4472,13 +4309,10 @@ class TaskWriter:
     def open_sprints_reserving(
         self, project: str, *, linked_sprint: dict[str, Any] | None = None
     ) -> list[str]:
-        """The open sprints that reserve `project`, each verified against the sprint board.
-
-        One answer for the write guard and the dispatcher's admission. The local index says which
-        sprints to ask about and is seeded from the board when it has never been written; every
-        sprint it names is then read live, and the index follows what was read. Anything that
-        cannot be read raises `SprintReservationUnverifiable` naming the sprint (`""` for the
-        seeding read): both callers fail closed on it, each in its own words.
+        """Read the local reservation index and verify every named sprint against the
+        live board; seed a missing index. Unreadable reservations raise
+        `SprintReservationUnverifiable`, failing closed for both write and dispatch
+        admission.
         """
         from ummanu.sprints import (
             SprintReader,
@@ -4527,20 +4361,11 @@ class TaskWriter:
         steward_report: bool = False,
         po_card: bool = False,
     ) -> dict[str, str]:
-        """Authorize one create/move/edit against the caller and the open-sprint reservation index.
-
-        Two questions, in this order. Who is writing: a caller of role `observer` names the sprint it
-        was launched for, and a write about any other sprint's card is refused as the identity failure
-        it is. Then what is being written: which open sprint reserves the card's project. A PO write
-        of a card linked to no sprint is not the holding sprint's and passes once the index is
-        verified; the dispatcher's admission decides whether such a card runs. So does a steward
-        write of its own report card (`steward_report`, the caller's reading of the create or of
-        the card's recorded marker), which is the steward's accounting, never a sprint's work. A PO
-        create of a `decision` or `operation` card (`po_card`) is the sprint's own channel to its PO
-        and needs no override either: it touches no branch the sprint owns.
-
-        The identity half is fail-closed. A head that carries no binding cannot prove which sprint it is
-        the observer of, and an unprovable caller is refused rather than admitted.
+        """Authorize a create/move/edit by first verifying the observer's launch-bound
+        sprint identity, then the live project reservation. An unbound/mismatched
+        observer fails closed. Verified exceptions: unsprinted PO cards, steward
+        reports and PO-created delegated decision/operation cards; normal dispatcher
+        admission remains separate.
         """
         self._guard_observer_identity(
             role=role,
@@ -4640,14 +4465,9 @@ class TaskWriter:
         request_id: str,
         reference: str,
     ) -> None:
-        """Refuse a write of role `observer` that is not about the caller's own sprint.
-
-        The binding is the launcher's, carried in the head's own environment: the reservation index says
-        which sprint holds the card, and this says which sprint the caller is.
-
-        The two refusals are separate codes because they are separate failures — a missing binding is a
-        head nobody bound, a mismatch is a bound head reaching outside its sprint — and neither is
-        `role_forbidden`. A card that names no sprint is left to the reservation guard below.
+        """Require the observer's launch-bound sprint to match the card's sprint.
+        Missing binding and mismatched binding are distinct refusals, neither a generic
+        role denial; unsprinted cards use the reservation guard.
         """
         if role != "observer":
             return
@@ -4690,12 +4510,10 @@ class TaskWriter:
         request_id: str,
         reference: str,
     ) -> None:
-        """Record the granted single-writer override before the operation it authorizes runs.
-
-        A generic control-plane record like the denial, not part of the Card's typed event: the event
-        describes the lifecycle edge, this describes the authority the writer used. Written before the
-        operation stages or effects anything, so an override that could not be recorded does not happen.
-        The derived request id keeps it off the operation's own retry key.
+        """Record the granted single-writer override before the operation it authorizes
+        runs. A generic control-plane record like the denial, not part of the Card's
+        typed event: the event describes the lifecycle edge, this describes the
+        authority the writer used.
         """
         override_request_id = _sprint_guard_override_request_id(request_id)
         if self.audit.committed_event(override_request_id) is not None:
@@ -4783,10 +4601,10 @@ class TaskWriter:
         request_id: str,
         protocol_prerequisites: tuple[str, ...],
     ) -> None:
-        """Persist the denied rework without mutating its parked card.
-
-        The derived audit key lets the observer correct the instruction and reuse the decision
-        request identity: a refusal is evidence, not an authoritative decision or worker outcome.
+        """Persist the denied rework without mutating its parked card. The derived
+        audit key lets the observer correct the instruction and reuse the decision
+        request identity: a refusal is evidence, not an authoritative decision or
+        worker outcome.
         """
         refusal_request_id = _artifact_ownership_refusal_request_id(request_id)
         data = {
@@ -4834,11 +4652,9 @@ class TaskWriter:
         request_id: str | None = None,
         sprint_close: str = "",
     ) -> dict[str, Any]:
-        """Archive one card: the PO's write, and a step of a sprint close in the closer's name.
-
-        `sprint_close` names the sprint whose close this archive is a step of. Only there is the
-        observer admitted, and only as the observer that sprint's close was admitted for: the card
-        guard checks that binding again against the sprint the close names.
+        """Archive one card: the PO's write, and a step of a sprint close in the
+        closer's name. `sprint_close` names the sprint whose close this archive is a
+        step of.
         """
         role = self._role(role, {Role.PO, Role.OBSERVER} if sprint_close else {Role.PO}, actor=actor)
         reason = self._redact_for_board(reason)
@@ -4900,11 +4716,7 @@ class TaskWriter:
         request_id: str | None = None,
     ) -> dict[str, Any]:
         """Close one proven-old Done episode without using the PO archive path.
-
-        ``date_moved`` identifies the episode, rather than merely the card.  A
-        reopen or a move away and back to Done therefore turns an old candidate
-        into a harmless skip before a close can be sent.  Pending records retain
-        that proof and can retry a lost reply only for the same episode.
+        ``date_moved`` identifies the episode, rather than merely the card.
         """
         expected_date_moved = _positive_int(expected_date_moved) or 0
         if not expected_date_moved:
@@ -5082,11 +4894,10 @@ class TaskWriter:
         require_assessment: bool = False,
         fresh_admission: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """Send a control-plane marker through the typed host transaction.
-
-        The command supplies its semantic fields once; the host stages them as an immutable event and
-        derives the board comment from that event, so a retry never has a second representation to
-        drift from.
+        """Send a control-plane marker through the typed host transaction. The command
+        supplies its semantic fields once; the host stages them as an immutable event
+        and derives the board comment from that event, so a retry never has a second
+        representation to drift from.
         """
         request_id = request_id or str(uuid.uuid4())
         if require_assessment:
@@ -5189,21 +5000,17 @@ class TaskWriter:
 
     @property
     def _transactional(self) -> bool:
-        """Whether `_mutation()` is a real transaction on this backend, asked in one place.
-
-        The boundary and the refusal it produces have to agree about this, so they read the same
-        predicate rather than each deciding for itself.
+        """Whether `_mutation()` is a real transaction on this backend, asked in one
+        place. The boundary and the refusal it produces have to agree about this, so
+        they read the same predicate rather than each deciding for itself.
         """
         return getattr(self.client, "transaction", None) is not None
 
     @contextlib.contextmanager
     def _mutation(self) -> Iterator[None]:
-        """One transaction per protocol mutation, where the backend has transactions (§7.1).
-
-        For a client without transactions this is nothing at all: stage a record,
-        apply one effect, confirm it, commit the record.  On PostgreSQL the claim, the card effect
-        and the event are statements of one transaction, which is why `BoardEventPending` and the
-        `recover_*` entry points have nothing to do there (§7.3).
+        """One transaction per protocol mutation, where the backend has transactions
+        (§7.1). For a client without transactions this is nothing at all: stage a
+        record, apply one effect, confirm it, commit the record.
         """
         scope = getattr(self.client, "transaction", None)
         try:
@@ -5223,21 +5030,11 @@ class TaskWriter:
             ) from cause
 
     def _post_effect_refusal(self, subject: str) -> TaskError:
-        """The refusal a mutation inside `_mutation()` owes when it fails after its board effect.
-
-        One sentence used to carry two different facts, and only one of them can be true at a time.
-        Where `_mutation()` is nothing — a client without transactions — the effect may well have landed while its
-        record did not, and *"backend write committed; audit repair is required"* with exit status
-        4 is exactly that fact: it is what `BoardEventPending`, the pending record and the
-        `recover_*` entry points exist for, and none of it changes.
-
-        Where `_mutation()` is a real transaction, the same failure has already rolled the effect
-        back together with the staged request (§7.1), so that sentence would be false in both
-        halves: nothing was committed and nothing is owed.  A caller that believed it would wait
-        for a repair `SqlTaskAudit.reconcile` can never perform — it answers `(0, 0)` because there
-        is nothing staged — and would treat a retry with the same request id as a resumption when
-        the rollback has made it a first attempt.  So there the caller gets an ordinary refusal
-        that carries no repair obligation, which is what §7.3 means by the state not existing.
+        """Distinguish rollback from partial write on mutation failure.
+        Nontransactional backends may commit a board effect without its audit and must
+        report repair-required status 4. A transactional backend rolls back both
+        effects and staged requests, so it returns an ordinary refusal without a
+        phantom repair obligation.
         """
         if not self._transactional:
             return TaskError("audit_pending", "backend write committed; audit repair is required", 4)
@@ -5421,12 +5218,9 @@ class TaskWriter:
 
     @ownership_recovery
     def _finish_pending_transition(self, event: dict[str, Any]) -> None:
-        """Finish one typed pending Card transition: prove it, clean up, then commit it.
-
-        A typed pending record is read as the transition it declares rather than guessed from a payload.
-        The adapter proves the exact target on the board and never repeats a move; the metadata reset
-        runs only once that target is live, so a transition whose effect was lost cannot strip a card's
-        claim, and the event is published only after the reset is complete.
+        """Finish one typed pending Card transition: prove it, clean up, then commit
+        it. A typed pending record is read as the transition it declares rather than
+        guessed from a payload.
         """
         transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
         target = str(transition.get("target") or "")

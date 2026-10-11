@@ -2,6 +2,14 @@
 
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
+## Дельта 2026-10-11: неповеденческий ARCH-01 в tasks/sprints, #724 на main `6e9370e646668310c928b8b662b114c32f919590`
+
+[PR #724](https://github.com/vladmesh/ummanu/pull/724) смёржен (squash) в `main`. [Exact-head CI #38161090568](https://github.com/vladmesh/ummanu/actions/runs/38161090568) **completed/success** на `707a75f887995fb66d8199049f1066cf4f0c332c`: lint, typecheck, все девять suites и aggregate `test`. Post-merge main CI подтверждается отдельно, не приравнивать его к проверкам candidate.
+
+**ARCH-01 ◐, следующая поставка без изменения исполняемого кода:** сжаты 99 длинных docstrings в двух модулях: `src/ummanu/tasks.py` — 58 (−15 055 символов), `src/ummanu/sprints.py` — 41 (−9 184 символа). Суммарно **−24 239 символов**; masked triple-quoted-string сравнение подтвердило полную идентичность исходников за пределами docstrings. Контракты idempotency, request replay, audit ownership, транзакционной записи и repair, observer identity, sprint reservations, профилей и e2e run budget сохранены в кратком виде. Исполняемые statements, imports, сигнатуры и конфигурация не менялись.
+
+Вместе с #721 и #723 три новые поставки ARCH-01 сократили прозу на **86 502 символа**. ARCH-01 остаётся **частичным**: остались другие зоны `dispatch`, `runtime/po/automations`, `tasks`/sprint-adjacent modules, installation и документация. Это не закрывает DEC-01/04, TDEAD-07/L1a, CON-04/06/17 или INEF-03. Аудит #668 остаётся открытым, не мёржить; исторический production §12 не изменён.
+
 ## Дельта 2026-10-11: неповеденческое сжатие ARCH-01, #723 на main `440de534077477c5f73af040f5004689dc5ee4b7`
 
 [PR #723](https://github.com/vladmesh/ummanu/pull/723) смёржен (squash) в `main`. [Exact-head CI #38157455452](https://github.com/vladmesh/ummanu/actions/runs/38157455452) **success** на `8fa3c793923c80df702aa973a95a1e17c14bab65`: lint, typecheck, девять suites и aggregate test. GitHub некоторое время отдавал для завершившейся board job устаревший статус in_progress, но шаги suite/evidence/complete job — success; workflow completed/success. Post-merge main CI проверяется отдельно.
@@ -85,7 +93,7 @@
 | Видимость стоимости тестов | ✅ timing-часть существующего issue:e515244ce9d2e3417b1e | [#708](https://github.com/vladmesh/ummanu/pull/708), `190bd745`: `projects/test_timing.py:142/249`, `tests/broad.py:106`, `scripts/ci_test_shards.py:421/424` сохраняют native timing; локально >5 с/test предупреждает, CI unit/component >5 с/test или >90 с/module отказывает. Запрет лишних тестов в prompts остаётся открытым (§6.4) |
 | Полная квитанция перед code report:done; reviewer без прогонов | ✅ согласованный scope sprint:1488 | [#713](https://github.com/vladmesh/ummanu/pull/713), `d8e86b94`: `tasks.py:2234`, `check_commands.py:42/89/101` проверяют complete green receipt на committed tree, `runtime/test_guard.py:43/110` отказывает reviewer. [#704](https://github.com/vladmesh/ummanu/pull/704), `c42b02b7`, и [#705](https://github.com/vladmesh/ummanu/pull/705), `e29a0467`, ограничивают local selectors/прямые runners. Это не закрытие всех старых gate/flake issues; docs-проекты с doctest имеют отдельный issue:db00f10a6b16e2ab5b1f |
 | CI-01 | Исходные ✅ #674/#678 сохранены; новый selective-CI scope поставлен, выигрыш для code PR открыт | [#714](https://github.com/vladmesh/ummanu/pull/714), `af07e5c2`, #715/#717/#718: `ci_selection.py:208/259`, `ci.yml:59` выбирают affected или docs-only; main всегда full. Реальная выборка PR717 и новые CI-рычаги только в §8.4 / issue:7ba9a9f32675119f8149 |
-| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | Открыты / прежний частичный статус ARCH-01 | Доменные импорты config, TaskError в tasks и барель board проверены; новый граф дополняет ARCH-04 (§4.1). Новые leaf modules не закрывают структурные разрезы. Рефакторинг ради CI не рекомендован |
+| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | Структурные разрезы открыты; ARCH-01 ◐ (#721/#723/#724) | Доменные импорты config, TaskError в tasks и barrel board проверены; граф дополняет ARCH-04 (§4.1). Сжатие 99 docstrings в `tasks.py`/`sprints.py` (#724, −24 239 символов) не закрывает DEC-01/04. Рефакторинг ради CI не рекомендован |
 | BUG-04/05/24, CON-02/05/07/08/10–15, DOC-08/10/15, DEAD-* и прочие остатки | Без нового полного закрытия | В diff к main нет реализации прежних структурных/compatibility scopes; DOC-08 всё ещё имеет исходную фразу в `packaging/memory/product-ummanu/sprints-and-reservations.md:9`. Поддержку legacy API не снимать по отсутствию вызова. Новая capacity-находка только ссылкой на board (§7, CON-19) |
 
 Другие поставки учтены без выдуманных закрытий ID: #698 (`ed9fd528`) исправляет исполнение
@@ -826,7 +834,7 @@ job-секунд и не двигает критический путь. Выи�
 
 ### 5.8 Сжатие прозы как отдельная «декомпозиция» — ARCH-01
 
-**◐ Статус:** #675 (`runtime`, −138 тыс. символов прозы), #676 (`web`/`webproto`, −211 тыс.) и #721 (четыре vitality-модуля, −37 123 символа) применили сжатие без изменения исполняемого кода; исходные проверки #675/#676 включали AST-эквивалентность, #721 проверил побайтовое совпадение вне docstrings и полный CI. Строки «`runtime`» и «`web`/`webproto`» таблицы ниже выполнены (для `runtime` — без `po`/`automations`); остальные зоны открыты.
+**◐ Статус:** #675 (`runtime`, −138 тыс.), #676 (`web`/`webproto`, −211 тыс.), #721 (vitality, −37 123), #723 (`observer`/`launch`/`gate`, −25 140) и #724 (`tasks`/`sprints`, −24 239) поставили очередные срезы без изменения исполняемого кода. Для #721/#723/#724 подтверждено точное совпадение источника вне docstrings (у #723 — с отдельной сортировкой одного импорта), полный exact-head CI зелёный. Зоны `runtime` (кроме `po`/`automations`) и `web`/`webproto` закрыты только в объёме тех поставок; другие подсистемы и дальнейшая проза остаются.
 
 **Это самый крупный рычаг.** Рекомендуемое правило:
 - docstring модуля и функции — инвариант и контракт в 1–3 строки плюс ссылка на раздел docs;
@@ -840,7 +848,7 @@ job-секунд и не двигает критический путь. Выи�
 | vitality-кластер и `dispatch/gate.py` | −40…60 тыс. | |
 | `runtime`/`po`/`automations` | −100…150 тыс. | |
 | `web`/`webproto` | ≈−120 тыс. | |
-| Ядро задач | −40…60 тыс. | |
+| Ядро задач | исходная оценка −40…60 тыс. | ◐ #724: `tasks.py`/`sprints.py` −24 239 символов; остальные зоны открыты |
 | Установка | −20…30 тыс. | |
 | **Итого `src`** | **≈−450…650 тыс. символов** | ≈−110…160 тыс. токенов |
 
