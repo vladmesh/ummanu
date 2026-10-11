@@ -15,10 +15,11 @@ from unittest import mock
 
 from tests.fakes.dispatcher import FakeHost
 from ummanu.broad_check import load_receipt, receipt_path, run_broad_check
-from ummanu.dispatch import gate_lifecycle
+from ummanu.dispatch import gate_lifecycle, production, wait_vitality
 from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.gate_receipt import AcceptedGreenGate, mint_gate_receipt
+from ummanu.dispatch.head_vitality_episode import VitalityEpisode
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.runtime_provenance import RuntimeProvenance
 from ummanu.dispatch.state import DispatcherRecord
@@ -92,6 +93,71 @@ class _Host(CommandHostRuntime):
     def _run_json(self, args: list[str]) -> dict:
         self.effects.append("remove")
         return {}
+
+
+
+class TickVitalityContractTests(unittest.TestCase):
+    """Run identity, blind gate observations and same-cycle Blocked fences."""
+
+    def test_provider_baseline_is_scoped_to_the_current_head_run(self) -> None:
+        # A successor must never be measured against its predecessor's cursor:
+        # that first new-run observation is a baseline, not progress evidence.
+        for previous_id, expected_cursor in (("old-run", ""), ("new-run", "before")):
+            with self.subTest(previous_id=previous_id):
+                record = _record()
+                record.worker_head_run = {"run_id": "new-run"}
+                record.worker_vitality_episode = VitalityEpisode(
+                    run_id=previous_id, evidence_cursors={"provider_cursor": "before"}
+                )
+                runtime = SimpleNamespace(
+                    owner="operator", writer=SimpleNamespace(comment=mock.Mock()),
+                    save_records=mock.Mock()
+                )
+                with (
+                    mock.patch.object(wait_vitality, "_snapshots_from_status", return_value=[]) as snapshots,
+                    mock.patch.object(
+                        wait_vitality, "_reduce_vitality",
+                        return_value=VitalityEpisode(run_id="new-run")
+                    ),
+                ):
+                    wait_vitality.reduce_and_store_vitality_episode(
+                        runtime, {"ref": "example-1"}, record, {"example-1": record},
+                        {}, {"pid_status": {"state": "live-match"}},
+                        kind="worker", now=100.0,
+                    )
+                self.assertEqual(snapshots.call_args.kwargs["previous_cursor"], expected_cursor)
+
+    def test_gate_no_observation_never_replays_stale_recovery_episode(self) -> None:
+        record = _record()
+        old = VitalityEpisode(run_id="past-run")
+        record.worker_vitality_episode = old
+        host = SimpleNamespace(mode="real", worker_status=mock.Mock(return_value={"reason": "unavailable"}))
+        runtime = SimpleNamespace(host=host)
+        with mock.patch.object(gate_lifecycle, "_reduce_and_store_vitality_episode") as reduce:
+            episode = gate_lifecycle._worker_vitality_for_gate(
+                runtime, {"ref": "example-1"}, record, {"example-1": record}, {}
+            )
+        self.assertIsNone(episode)
+        self.assertIs(record.worker_vitality_episode, old)
+        reduce.assert_not_called()
+
+    def test_blocked_transition_fences_sprint_and_project_in_same_tick(self) -> None:
+        card = {"ref": "example-1", "sprint": "sprint:1", "project": "example"}
+        for outcome, should_fence in (
+            ({"status": "blocked"}, True),
+            ({"status": "ok", "to": "blocked"}, True),
+            ({"status": "ok", "to": "validate"}, False),
+            ({"status": "degraded", "to": "blocked"}, False),
+        ):
+            with self.subTest(outcome=outcome):
+                with mock.patch.object(production, "_production_tick_active", return_value=outcome):
+                    outcomes, errors, scopes = production._advance_active(
+                        SimpleNamespace(), {}, {}, [card]
+                    )
+                self.assertEqual(outcomes, [outcome])
+                self.assertEqual(errors, [])
+                self.assertEqual(scopes["sprints"], {"sprint:1"} if should_fence else set())
+                self.assertEqual(scopes["projects"], {"example"} if should_fence else set())
 
 
 class DispatcherRuntimeIsolationTests(unittest.TestCase):
