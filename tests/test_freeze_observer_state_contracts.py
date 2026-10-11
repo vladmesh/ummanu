@@ -8,7 +8,7 @@ from unittest import mock
 
 from ummanu import status
 from ummanu.dispatch import observer, pause_ops
-from ummanu.dispatch.launch import WORKER_ROLE
+from ummanu.dispatch.launch import REVIEW_ROLE, WORKER_ROLE
 from ummanu.dispatch.types import STOPPED_BY_OPERATOR, HostError
 
 
@@ -68,7 +68,7 @@ class FreezeRoleIsolationTests(unittest.TestCase):
 
     def test_failed_reviewer_launch_intent_still_attempts_worker_stop(self) -> None:
         with (
-            mock.patch.object(pause_ops, "launch_intent", return_value={"role": "reviewer"}),
+            mock.patch.object(pause_ops, "launch_intent", return_value={"role": REVIEW_ROLE}),
             mock.patch.object(pause_ops, "stop_launch_intent", return_value="not stopped"),
             mock.patch.object(pause_ops, "end_review_pane") as end_review,
             mock.patch.object(pause_ops, "keep_reserved_round") as keep_round,
@@ -101,7 +101,7 @@ class FreezeRoleIsolationTests(unittest.TestCase):
 
     def test_a_stopped_launch_is_counted_once_even_if_an_old_handle_remains(self) -> None:
         with (
-            mock.patch.object(pause_ops, "launch_intent", return_value={"role": "reviewer"}),
+            mock.patch.object(pause_ops, "launch_intent", return_value={"role": REVIEW_ROLE}),
             mock.patch.object(pause_ops, "stop_launch_intent", return_value=None),
             mock.patch.object(pause_ops, "keep_reserved_round"),
             mock.patch.object(pause_ops, "end_review_pane"),
