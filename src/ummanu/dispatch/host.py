@@ -293,9 +293,7 @@ _PREPARED_SOURCE_IDENTITY_KEYS = (
 def _blocked_actions_and_their_infrastructure_twins(*actions: str) -> tuple[str, ...]:
     """Each blocked action and the token its infrastructure-classified form writes.
 
-    A card blocked by a bring-up now names the outcome's class in the action it wrote, so the
-    requeue that brings it back to Ready has to recognise both forms as its own block: recognising
-    only the historical one would leave a re-run looking like a fresh claim over a live attempt.
+    Pair blocked outcomes with their infrastructure-classified tokens for replay.
     """
     seen: dict[str, None] = {}
     for action in actions:
@@ -312,12 +310,7 @@ def _same_repo(first: Path, second: Path) -> bool:
 
 
 def live_root_project_refusal(catalog: Any, project: str) -> str:
-    """Why `project` may not run a card because its repository is the live root, or "" when it may.
-
-    The live root is configuration the exporter cuts, not a code project: no card branch lands in
-    it (docs/OPERATIONS.md, "Changing installation config"). A project the catalog cannot look up
-    is not answered here; the preflights that need the binding fail on it in their own words.
-    """
+    """Why `project` may not run a card because its repository is the live root, or "" when it may."""
     instance_dir = getattr(catalog, "instance_dir", None)
     if not project or instance_dir is None:
         return ""
@@ -411,12 +404,7 @@ class InstanceCatalog:
     def broad_check_verdict(self, project: str) -> ContractVerdict:
         """This project's broad-check contract as one of the three named states (secretary-1458).
 
-        The rules are `projects.contract`'s, the same implementation the worker's own
-        `ummanu check broad --module` resolves through, so a card is never handed out on a
-        contract the worker would then refuse. Reading the binding and the adapter beside it is
-        all this costs: no workspace, no head, no process. There is no candidate workspace at this
-        point, so `workspace=None`: a question that needs one comes back as `undecidable` with its
-        name on it rather than as an approval this side is not entitled to give.
+        Use projects.contract as the single authority; unknown contracts are not approvals.
         """
         return _decide_broad_check_contract(
             self.binding(project), instance=self.instance_dir or Path("."), workspace=None
@@ -430,11 +418,7 @@ class InstanceCatalog:
     def integration_base(self, project: str, override: str | None) -> str:
         """Where this card's increment lands: its PR base, history range, receipt base and merge.
 
-        A card may override it only with a branch the project declares it integrates into — its
-        default branch, or one of the binding's `integration_bases`. Anything else, a predecessor's
-        `pipeline/*` card branch above all, is refused here with the reason on it (secretary-1541):
-        opening a release pull request into a branch the project's workflows do not trigger for
-        produces zero check-runs, which is indistinguishable from checks that have not appeared yet.
+        Apply one integration base to PR, receipt, history and merge.
         """
         binding = self.binding(project)
         declared = binding.get("integration_bases")
@@ -450,13 +434,7 @@ class InstanceCatalog:
             ) from None
 
     def workspace_seed(self, project: str, task: dict[str, Any]) -> str:
-        """The git ref this card's checkout is cut from.
-
-        A reslice successor inherits its predecessor's unreleased content, so it starts from that
-        candidate — `workspace.seed_ref`, a card branch or the exact object id that was assessed.
-        A card with no seed starts from its integration base, which is what every card did before
-        this field existed and what every ordinary card still does.
-        """
+        """The git ref this card's checkout is cut from."""
         workspace = task.get("workspace") if isinstance(task.get("workspace"), dict) else {}
         seed = str((workspace or {}).get("seed_ref") or "").strip()
         if not seed:
@@ -496,11 +474,7 @@ class InstanceCatalog:
             raise HostError(str(exc)) from None
 
     def _resolved_head(self, head: str) -> str:
-        """The profile in this snapshot that serves a head id somebody else wrote down: that id.
-
-        An id this snapshot does not define — one the installation has since retired — is refused
-        by name rather than routed to another profile.
-        """
+        """The profile in this snapshot that serves a head id somebody else wrote down: that id."""
         profiles = self._heads.get("profiles")
         try:
             return _resolve_head_id(head, profiles if isinstance(profiles, dict) else {})
@@ -529,9 +503,7 @@ class InstanceCatalog:
     ) -> str:
         """The head the card was claimed with, for a card the dispatcher is picking back up.
 
-        The head is decided once, at claim. Re-reading the override or the role default here would
-        hand the rest of a running attempt to whatever the board says now, so a head that has since
-        left `heads.yaml` stops the attempt instead of substituting today's default.
+        Retain claim-time head identity; never substitute today's default.
         """
         claimed = (task.get("routing") or {}).get(key)
         if not claimed:
@@ -650,13 +622,7 @@ class InstanceCatalog:
             raise HostError(str(exc)) from None
 
     def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
-        """Pre-answer the first-run questions a head's CLI would otherwise put to an operator.
-
-        Every codex head runs as a TUI and is asked about directory trust before it will take a prompt,
-        whatever its role; a head launched into an untrusted root sits on the dialog, never answers
-        the readiness probe and never receives its prompt. This runs before the head is started:
-        trust, then head, then readiness, then delivery.
-        """
+        """Pre-answer the first-run questions a head's CLI would otherwise put to an operator."""
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
@@ -696,12 +662,7 @@ class InstanceCatalog:
 
 @dataclass(frozen=True)
 class DispatcherHeadTransport:
-    """What this dispatcher hands a head's backend beside a prompt: who the head is and its hook.
-
-    The backend owns delivery itself (`local-pty` types into the pty it supervises); what it reads
-    here is `before_send`, the one step it performs on the dispatcher's behalf after admission and
-    before the prompt is typed. There is no pane for this dispatcher to deliver into or close.
-    """
+    """What this dispatcher hands a head's backend beside a prompt: who the head is and its hook."""
 
     runtime: CommandHostRuntime
     workspace: str = ""
@@ -723,20 +684,13 @@ _head_runtime_name = head_runtime_name
 def _runtime_writes_launch_identity(runtime: Any) -> bool:
     """Whether this backend writes a head's launch-identity heartbeat itself.
 
-    Exactly one layer owns that writer for a head. `local-pty`'s supervisor wraps the command it is
-    handed, so a command this dispatcher had wrapped as well `exec`s the inner writer, which exits,
-    and the head never runs (secretary-1698). Only a backend that says it does not write it has this
-    dispatcher wrap the command instead.
+    Exactly one layer owns the launch-identity heartbeat.
     """
     return bool(getattr(runtime, "writes_launch_identity", False))
 
 
 def _launch_command(runtime: Any, command: str, pid_file: str, identity: dict[str, str]) -> str:
-    """The command a head's backend is handed: wrapped by this dispatcher only when it owns the writer.
-
-    Either way the record lands at `pid_file` with `identity`: `start` is handed that `pid_file`,
-    and a backend that writes the identity itself spells it from the same run, role and task.
-    """
+    """The command a head's backend is handed: wrapped by this dispatcher only when it owns the writer."""
     if _runtime_writes_launch_identity(runtime):
         return command
     return _with_pid_heartbeat(command, pid_file, identity=identity)
@@ -745,11 +699,7 @@ def _launch_command(runtime: Any, command: str, pid_file: str, identity: dict[st
 def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
     """The run a record names at a workspace-scoped stop, or `None` when it names none.
 
-    Workspace cleanup reads the run itself rather than a lifecycle run rebuilt around the record:
-    the per-role builders invent a fresh identity for a field that holds nothing, and a stop has to
-    act on the head that was actually raised or on nothing at all. So a field that is empty,
-    unparseable, or carries no run id is `None` here — that is a workspace with no head of that
-    role, not a head to go looking for.
+    Stop by the durable run identity, not the current profile.
     """
     if subject is None:
         return None
@@ -767,8 +717,7 @@ def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
 def _interrupted_command_section(record: DispatcherRecord | None) -> list[str]:
     """The one factual line a respawned head gets about the command its predecessor was running.
 
-    ``respawn_interrupted_command`` is set by the wait watchdog's respawn for exactly the bring-up
-    it performs (secretary-1692) and is never persisted, so no other launch renders it.
+    Only ephemeral respawn context; never persist it.
     """
     line = _safe_one_line(getattr(record, "respawn_interrupted_command", "") or "", limit=600)
     if not line:
@@ -909,12 +858,7 @@ class CommandHostRuntime:
         pid_file: str,
         run_id: str,
     ) -> head_ops.HeadRun:
-        """Attest this bring-up's run, then hand it the source its launch was prepared with.
-
-        The worker and reviewer launch path only.  The observer bring-up has its own delivery
-        contour and keeps calling `preflight_codex_run` directly, so this repair cannot change what
-        an observer launch hands its handoff.
-        """
+        """Attest this bring-up's run, then hand it the source its launch was prepared with."""
         return self._retain_prepared_provider_source(
             self.preflight_codex_run(
                 head,
@@ -929,19 +873,7 @@ class CommandHostRuntime:
     def _retain_prepared_provider_source(self, attested: head_ops.HeadRun) -> head_ops.HeadRun:
         """Keep the pre-pane provider source this exact run was already prepared with.
 
-        One launch preflights twice: once to fix the intent on disk, and once here, inside the host
-        call that opens the pane.  Both attestations must run — workspace trust is a hard pre-pane
-        requirement and is rechecked by the second — but only the first descriptor is durable. It is
-        the one the ingress binds its session against and the one a recovery reads, while the second
-        enumerates the session root again and legitimately sees whatever journals other heads opened
-        in between.  Handing that second baseline back as this run's source is what made a rework
-        relaunch fail its own handoff with two conflicting unbound descriptors for one HeadRun.
-
-        Retention is fenced on the exact run: the prepared descriptor is kept only when it names this
-        run id, spec, workspace, role, task ref and pid file, and describes the same source identity
-        and root.  Anything else stays the fresh attestation and is refused downstream as the
-        identity conflict it is, and a source already bound to a session is preserved rather than
-        replaced by a new unbound one.
+        Retain only exact run/spec/workspace/role/task/pid/source identity; preserve bound sources.
         """
         ingress = self._codex_provider_ingresses.get(attested.run_id)
         prepared = ingress.run if ingress is not None else self._prepared_provider_runs.get(attested.run_id)
@@ -1115,13 +1047,9 @@ class CommandHostRuntime:
         )
 
     def observer_workspace(self, reference: str) -> str:
-        """Where one sprint observer runs. Its own directory, never a card workspace and never the
-        interactive ummanu session's checkout: the observer reads reports and slices cards, it
-        owns no branch of the project it watches.
+        """Where one sprint observer runs.
 
-        A plain detached `git worktree` of the observer repo under `<data_dir>/workspaces/observers/`
-        (secretary-1705). The launch intent and `prepare_observer` both ask this, so they name the
-        same path; after launch the recorded path decides.
+        Use the dedicated managed observer worktree, never the card checkout.
         """
         token = _request_token(reference)
         if self.mode == "noop":
@@ -1133,11 +1061,7 @@ class CommandHostRuntime:
         return Path(self.data_dir) / GIT_WORKSPACES_DIR / OBSERVER_WORKSPACE_DIR
 
     def _is_git_observer_workspace(self, workspace: str) -> bool:
-        """Whether an observer workspace is one this host made, read from its recorded path alone.
-
-        Exactly `<data_dir>/workspaces/observers/<token>`. A recorded path anywhere else — an Orca
-        worktree under `~/orca/workspaces/observers/` — is a legacy record (`_refuse_legacy_observer`).
-        """
+        """Whether an observer workspace is one this host made, read from its recorded path alone."""
         if self.mode == "noop" or not workspace:
             return False
         path = _resolved_path(Path(workspace))
@@ -1230,14 +1154,7 @@ class CommandHostRuntime:
         heartbeat_run_id: str = "",
         recorded_workspace: str = "",
     ) -> dict[str, Any]:
-        """Bring one observer up in the dedicated observer repository.
-
-        Sprint repositories are canonical source roots and reservations are project ids. Neither
-        is the repository authority for this process: the observer worktree is cut from
-        ``observer_root_repo``. `recorded_workspace` is the path the launch intent recorded; without one it
-        is `observer_workspace(reference)`, which is what the intent computes, and it is cut with
-        `git worktree`. A recorded path this host did not make is a legacy record and is refused.
-        """
+        """Bring one observer up in the dedicated observer repository."""
         reference = str(sprint.get("ref") or "")
         self._require_cleanup_admission(reference)
         placed = recorded_workspace or self.observer_workspace(reference)
@@ -1416,15 +1333,7 @@ class CommandHostRuntime:
         }
 
     def stop_observer(self, record: Any) -> None:
-        """End one observer head and give back what its bring-up took.
-
-        Unconditional: a freeze, a closed sprint, a policy refusal and an emergency replacement all
-        mean "end this now", and none of them may be refused because the head happens to be busy.
-        What it owes the head runtime afterwards is the forgetting that the `stop` verb does for
-        itself — this teardown is the worktree removal, not that verb, and a runtime that lives
-        as long as the production loop would otherwise keep one epoch, one output mark and one
-        admission entry per head ever launched. A legacy observer record is refused, untouched.
-        """
+        """End one observer head and give back what its bring-up took."""
         if self.mode == "noop":
             return
         self._refuse_legacy_observer(record, "stop")
@@ -1441,12 +1350,7 @@ class CommandHostRuntime:
         self.head_runtime_for(observer_run).forget_head(observer_run.run_id)
 
     def _refuse_legacy_observer(self, record: Any, verb: str) -> None:
-        """Raise `LegacyDispatcherRecord` when this observer record was written on Orca.
-
-        Its recorded workspace is not the git worktree this host places, it names a pane handle and
-        no workspace at all (a record from before launch intents named one), or its persisted run
-        is a legacy record.
-        """
+        """Raise `LegacyDispatcherRecord` when this observer record was written on Orca."""
         if self.mode == "noop":
             return
         subject = f"the observer of {getattr(record, 'sprint', '') or 'an unnamed sprint'}"
@@ -1464,15 +1368,7 @@ class CommandHostRuntime:
     def observer_activity_epoch(self, record: Any) -> int:
         """This observer head's activity epoch, to hand back to a stop that must only run if quiet.
 
-        Per head, never the runtime's own counter: another sprint's observer doing something must
-        not make this one look busy.
-
-        Asked of the backend rather than of its memory where the backend can answer that way. A
-        runtime object lives for one tick, so `activity.epoch` alone reads an epoch of zero for
-        every head this process did not start; a backend whose head has a durable witness offers
-        `activity_epoch`, which recovers the real one before answering (secretary-1479). The
-        legacy backend has no such witness and no such method, and there it is `activity.epoch`
-        exactly as before — the fallback is the whole of what a backend without one can say.
+        Use the head's own activity epoch, not the runtime counter.
         """
         if self.mode == "noop":
             return 0
@@ -1486,18 +1382,7 @@ class CommandHostRuntime:
     def stop_observer_if_quiescent(
         self, record: Any, expected_activity_epoch: int, head_process_alive: bool
     ) -> bool:
-        """End this observer only while it is still quiet. False means it was not, and nothing ran.
-
-        The check and the teardown are one critical section inside the head runtime: this head's
-        epoch still where the caller saw it, the turn settled, admission closed, and only then the
-        teardown — so a delivery cannot land between deciding the head is finished and taking it
-        away. The worktree teardown is `stop_observer` unchanged, run only once the runtime's stop
-        succeeded: the runtime left admission closed, and this method holds the cleanup ownership
-        lock across both, so nothing can reopen the head in between.
-
-        Both facts come from the caller and neither is re-read here. `head_process_alive` is the
-        pid-heartbeat answer the caller already had.
-        """
+        """End this observer only while it is still quiet. False means it was not, and nothing ran."""
         if self.mode == "noop":
             return True
         observer_run = self._observer_lifecycle_run(record)
@@ -1537,12 +1422,7 @@ class CommandHostRuntime:
         return status
 
     def _observer_lifecycle_run(self, record: Any) -> head_ops.HeadRun:
-        """This observer as the head runtime addresses it: its own run, at the pane it is in.
-
-        The persisted run is preferred, because the turn leases and the activity epoch the runtime
-        keeps are per head and a fresh identity every tick would keep losing them. A record written
-        before that run existed still has a workspace and a pane, which is all an observation needs.
-        """
+        """This observer as the head runtime addresses it: its own run, at the pane it is in."""
         workspace = str(getattr(record, "workspace", "") or "")
         handle = str(getattr(record, "handle", "") or "")
         leaf = str(getattr(record, "leaf", "") or "")
@@ -1725,8 +1605,7 @@ class CommandHostRuntime:
     def observer_provider_failure(self, record: Any) -> dict[str, Any]:
         """Whether this observer's exact HeadRun ended its last turn on a provider error (ummanu-108).
 
-        Bound like `observer_provider_progress`: a persisted run naming another workspace or
-        sprint answers nothing. The reader is `provider_failure.provider_failure_for_run`.
+        Read provider failure only for the attested HeadRun.
         """
         if self.mode == "noop":
             return {"state": "unavailable", "reason": "noop host"}
@@ -1745,11 +1624,7 @@ class CommandHostRuntime:
         return _provider_failure_for_persisted_run(stored, local_pty_root=self._local_pty_root())
 
     def provider_failure(self, task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, Any]:
-        """Whether this role's exact HeadRun ended its last turn on a provider error (secretary-1799, ummanu-108).
-
-        Read-only, and bound like `provider_progress`: a persisted run that names another workspace,
-        card or role answers nothing. The reader is `provider_failure.provider_failure_for_run`.
-        """
+        """Whether this role's exact HeadRun ended its last turn on a provider error (secretary-1799, ummanu-108)."""
         if self.mode == "noop":
             return {"state": "unavailable", "reason": "noop host"}
         run = record.review_head_run if kind == "review" else record.worker_head_run
@@ -1768,22 +1643,13 @@ class CommandHostRuntime:
         return _provider_failure_for_persisted_run(run, local_pty_root=self._local_pty_root())
 
     def head_children(self, head_pid: int) -> dict[str, Any]:
-        """The live descendants of a head's heartbeat-proven pid, with their movement counters.
-
-        Read from ``/proc`` by ``runtime.head.children`` (secretary-1692); the vitality reducer
-        counts their CPU/IO movement as the head's activity while it waits on its own command.
-        """
+        """The live descendants of a head's heartbeat-proven pid, with their movement counters."""
         return read_head_children(head_pid)
 
     def supervisor_journal(
         self, _task: dict[str, Any], record: DispatcherRecord, kind: str
     ) -> dict[str, Any]:
-        """This role's head's turn and progress, read from its own supervisor's journal.
-
-        Read-only: a bounded tail of `heads/<run_id>/journal.jsonl` folded by the local-pty backend
-        (secretary-1739). The reading names the run it read, and `command_terminal_status` hands it
-        on only for the run the heartbeat proved.
-        """
+        """This role's head's turn and progress, read from its own supervisor's journal."""
         run = record.review_head_run if kind == "review" else record.worker_head_run
         return head_run_turn_reading(self._local_pty_root(), str((run or {}).get("run_id") or ""))
 
@@ -1800,12 +1666,7 @@ class CommandHostRuntime:
         _record: DispatcherRecord,
         _liveness: dict[str, Any],
     ) -> dict[str, str]:
-        """Advertise that this host has no safe provider recovery primitive.
-
-        An operator's raw interrupt can terminate a Codex provider session and a generic key chord
-        cannot prove which composer it affected, so the only permitted answer is this typed absence.
-        The dispatcher then takes its confirmed-stop fence before replacement.
-        """
+        """Advertise that this host has no safe provider recovery primitive."""
         return {
             "state": "unavailable",
             "reason": "no provider/terminal-safe continuation recovery capability is available",
@@ -1813,12 +1674,7 @@ class CommandHostRuntime:
 
     @lifecycle
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
-        """Bring the reviewer up as a second head inside the worker's own worktree.
-
-        Once the reviewer is up the worker is shut down and its commit pinned, so the reviewer
-        judges a checkout nothing else is still editing. What the reviewer is given is a nudge at a
-        document written outside the checkout, not the review itself.
-        """
+        """Bring the reviewer up as a second head inside the worker's own worktree."""
         self._require_project_available(str(task.get("project") or ""))
         self._refuse_legacy_record(record, "launch the reviewer of")
         if not record.workspace:
@@ -1901,8 +1757,7 @@ class CommandHostRuntime:
     def _fence_worker_for_reviewer(self, record: DispatcherRecord) -> None:
         """Make sure the worker cannot write the checkout the reviewer judges, or raise.
 
-        A retained worker is confirmed still suspended (its conversation is what a red verdict
-        continues), or provably gone; any other worker is shut down and the stop confirmed.
+        A reviewer may judge only after worker writes are provably fenced.
         """
         if record.worker_continuation.retained and self.worker_retained_vanished(record):
             # The retained worker is provably gone (its pid heartbeat resolves to a dead pid), so
@@ -1924,10 +1779,7 @@ class CommandHostRuntime:
     ) -> dict[str, Any]:
         """Retry the document nudge for the exact reviewer a busy launch intent retained.
 
-        A production handoff types into the reviewer only behind the writer fence: a retained worker
-        is confirmed suspended again on every pass, and any other worker is shut down unless this
-        launch's intent already records that stop (`LAUNCH_DELIVERY_WORKER_FENCED`). A fence that
-        cannot be made is a refusal, and nothing is typed.
+        Deliver to the exact retained reviewer only behind the worker fence.
         """
         self._refuse_legacy_record(record, "deliver to the reviewer of")
         if not record.workspace:
@@ -2012,10 +1864,7 @@ class CommandHostRuntime:
         return _command_terminal_status(self, task, record, kind="review")
 
     def stop_review(self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
-        """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
-        which on a red verdict means killing the checkout's terminals the worker is about to get
-        back. Closing the reviewer's own split leaf removes that pane and leaves the rest alone.
-        """
+        """End the reviewer's lifecycle alone."""
         if self.mode == "noop" or not (record.review_handle or record.review_leaf or record.review_pid_file):
             return
         self.stop_head(record, "review", initiator)
@@ -2144,9 +1993,7 @@ class CommandHostRuntime:
     def _require_worker_admission(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Recovered Validate/review needs the original admission, not a new worker run.
 
-        The machinery may have merged the integration base since report acceptance.
-        Its exact-SHA gate owns that resulting tree; worker evidence remains bound
-        to the admitted commit and is never upgraded into a gate attestation.
+        Retain original admission; do not upgrade recovery to gate attestation.
         """
         if self.mode == "noop" or not has_candidate(task):
             return
@@ -2172,14 +2019,7 @@ class CommandHostRuntime:
                   "worker admission ancestry")
 
     def retained_workspace_state(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
-        """Describe the retained worker checkout of a card recovered without a live head.
-
-        Read-only by construction: nothing here creates, re-seeds, resets or moves a branch. A
-        checkout that cannot be bound to this card is reported unbound with a typed reason, so the
-        caller refuses rather than recreating the work from base somewhere else (secretary-1544).
-        The four facts the recovery is allowed to rest on are the ones returned: the path, the
-        branch, whether the tree is dirty, and the exact candidate commit.
-        """
+        """Describe the retained worker checkout of a card recovered without a live head."""
         expected_branch = _legacy_worker_branch(task["ref"])
         workspace = record.workspace or self.restore_workspace(task, record.worker)
         state: dict[str, Any] = {
@@ -2253,12 +2093,7 @@ class CommandHostRuntime:
         return _resolved_path(Path(workspace)).is_relative_to(_resolved_path(orca_workspaces_root()))
 
     def _refuse_legacy_record(self, record: DispatcherRecord, verb: str) -> None:
-        """Raise `LegacyDispatcherRecord` when this card's record was written on Orca.
-
-        Its workspace is an Orca worktree (`_legacy_workspace`), or a head run it carries is a legacy
-        record. Asked before any launch, delivery, stop or teardown touches the record, so nothing of
-        it is ever driven, stopped through a pane or re-placed silently.
-        """
+        """Raise `LegacyDispatcherRecord` when this card's record was written on Orca."""
         if self.mode == "noop":
             return
         subject = f"the dispatcher record of {record.worker or record.head or 'an unnamed card'}"
@@ -2295,9 +2130,7 @@ class CommandHostRuntime:
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> MergeLanding | None:
         """Land the reviewed branch on the card's integration base and say what landed.
 
-        Returns the `MergeLanding` of each of the two merge paths, which the release turns into a
-        post-merge CI watch, or None when nothing was merged (noop mode, no workspace, automerge off):
-        a release that merged nothing wakes the observer on its Done as before.
+        Return MergeLanding only for a real integration-base merge; otherwise None.
         """
         with tick_stage("release_runtime"):
             self._require_production_runtime("release-before")
@@ -2362,12 +2195,7 @@ class CommandHostRuntime:
         return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
 
     def _advance_checkout(self, repo: Path, ref: str) -> None:
-        """Fast-forward a project checkout to `ref` after a merge.
-
-        The production checkout this dispatcher runs from moves only through
-        `production_checkout.advance`: the target's board schema first, then the code
-        (secretary-1824). Every other checkout keeps its plain fast-forward.
-        """
+        """Fast-forward a project checkout to `ref` after a merge."""
         if self.mode != "noop" and _same_repo(repo, Path(self.production_runtime.product_root)):
             production_checkout.advance(self._run, repo, ref, instance_dir=self.catalog.instance_dir)
             return
@@ -2390,11 +2218,7 @@ class CommandHostRuntime:
             return pr_merge_commit(self._run, branch, Path(record.workspace))
 
     def _require_pr_base(self, record: DispatcherRecord, branch: str, base: str) -> None:
-        """Refuse the merge unless the open pull request for `branch` targets `base`.
-
-        Unreadable is refused too: the delivery boundary is irreversible, and "the backend would not
-        say where this lands" is not evidence that it lands on the integration base.
-        """
+        """Refuse the merge unless the open pull request for `branch` targets `base`."""
         completed = self._run(
             ["gh", "pr", "view", branch, "--json", "baseRefName", "-q", ".baseRefName"],
             "merge pr base",
@@ -2410,20 +2234,10 @@ class CommandHostRuntime:
     def _merge_github_pr(
         self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str
     ) -> None:
-        """Land a github-CI project through its PR, then fast-forward the project's own checkout so the
-        next worktree bases on the merged tree.
+        """Land a github-CI project through its PR, then fast-forward the project's own checkout so the next
+        worktree bases on the merged tree.
 
-        gh honours branch protection and refuses to merge while required checks are unsatisfied. The
-        checkout tracks the project's default branch, not the card's base, and the refresh stays
-        best-effort: the card is already merged by then, so a failed refresh is not the card's failure.
-        The one exception is the production checkout's activation refusal (`ProductionActivationRefused`):
-        the checkout stayed where it was because the merged code moved its entrypoint or its schema was refused,
-        which is the release's to report, never a refresh to forget.
-
-        `gh pr merge` lands the pull request in *its own* base, whatever that is, so the base is read
-        back and required to be this card's integration base before the irreversible call is made
-        (secretary-1541). A pull request still pointing somewhere else — a card branch a stale PR was
-        opened against — is refused here rather than merged into a branch nothing releases from.
+        Verify PR base before merge; local refresh is best-effort except production activation refusal.
         """
         with tick_stage("release_merge"):
             self._require_pr_base(record, branch, base)
@@ -2456,8 +2270,7 @@ class CommandHostRuntime:
     def stop_workspace(self, record: DispatcherRecord) -> None:
         """Stop every head of this workspace and let a refusal reach the caller.
 
-        The confirmed twin of `stop`: a refused workspace stop is not evidence the head is gone, so a
-        path that opens a replacement afterwards must use this one. A legacy record is refused.
+        Propagate stop refusal before any replacement.
         """
         if self.mode == "noop" or not record.workspace:
             return
@@ -2482,14 +2295,7 @@ class CommandHostRuntime:
             )
 
     def _stop_recorded_heads(self, workspace: str, runs: Sequence[tuple[Any, str]]) -> None:
-        """Take one workspace's heads down, each by its own run's stop on the backend holding it.
-
-        The backend is chosen from the durable run the record names, never from the profile a later
-        registry would resolve. A supervised head owns no pane, so nothing about a worktree can end
-        it: a refusal is raised rather than absorbed, because the callers of this are exactly the
-        ones that go on to remove the worktree or open a replacement head. A workspace that names no
-        run has no head to stop: a bring-up that never got as far as a durable run raised nothing.
-        """
+        """Take one workspace's heads down, each by its own run's stop on the backend holding it."""
         for run, role in ((_durable_head_run(run), role) for run, role in runs):
             if run is None:
                 # Head exit and scope cleanup are separate. Even a settled HeadRun can
@@ -2550,9 +2356,7 @@ class CommandHostRuntime:
     def _confirm_settled_head(self, run: head_ops.HeadRun, role: str) -> None:
         """A stop of a head whose end was already confirmed keeps that receipt as the record.
 
-        Nothing is minted or committed: a fresh identity would name a head that was never launched
-        (secretary-1918). The pid file is still read through the settled run, so a live foreign
-        process there is fenced and this run, should it still be alive, is taken down.
+        Reuse confirmed-stop evidence; never mint a replacement identity.
         """
         self._guard_head_run(run, role)
         self._confirm_head_process_gone(run.pid_file, run=run, role=role)
@@ -2883,14 +2687,7 @@ class CommandHostRuntime:
         return {"status": result["status"], "reason": result["reason"], "progress": result["progress"]}
 
     def _fetch_seed(self, repo: Path, seed: str, *, project: str) -> str:
-        """Bring `seed` into the project checkout and return the start point a worktree is cut at.
-
-        A branch seed is fetched by name and cut at its remote-tracking ref, which is what every
-        card did before seeds existed. An exact object id — the predecessor candidate a reslice
-        successor inherits — is not a ref the remote will serve by name, so the whole remote is
-        fetched and the object is then required to be present: a seed that is not there is this
-        card's own contract failing, not a checkout to invent.
-        """
+        """Bring `seed` into the project checkout and return the start point a worktree is cut at."""
         if _is_exact_ref_sha(seed):
             self._remote_git_checked(project, repo, ["fetch", "origin"], "git fetch")
             try:
@@ -2995,12 +2792,7 @@ class CommandHostRuntime:
         return environment
 
     def _exclude_workspace_environment(self, root: Path) -> None:
-        """Keep everything the pipeline writes here out of this repository's candidate content.
-
-        Only the lines of `WORKSPACE_EXCLUDES` the file lacks are appended, after whatever it already
-        holds, so a set a crash left half-written is completed by the next bring-up. For a linked
-        worktree Git resolves this to the repository's shared exclude file.
-        """
+        """Keep everything the pipeline writes here out of this repository's candidate content."""
         located = self._run(
             ["git", "-C", str(root), "rev-parse", "--git-path", "info/exclude"],
             "workspace Git exclude",
@@ -3107,12 +2899,7 @@ class CommandHostRuntime:
             raise HostError(f"workspace test guard unavailable: {exc}") from None
 
     def _install_workspace_pycache_prefix(self, root: Path, environment: Path, *, required: bool) -> None:
-        """Point every interpreter of the owned venv at the owned bytecode cache.
-
-        Tests start child interpreters with environments built from scratch, which drop the head's
-        PYTHONPYCACHEPREFIX; the startup file in site-packages applies to them all the same. It is
-        written only into the venv's single site-packages resolving inside the owned namespace.
-        """
+        """Point every interpreter of the owned venv at the owned bytecode cache."""
         try:
             resolved = root.resolve(strict=True)
             namespace = (resolved / WORKSPACE_NAMESPACE).resolve(strict=True)
@@ -3146,11 +2933,7 @@ class CommandHostRuntime:
         return {row[3:] for row in status.split("\0") if row[:2] in {"??", "!!"}}
 
     def _record_install_output(self, root: Path, before: set[str]) -> None:
-        """Record what the editable install created in the source tree as exact generated bytes.
-
-        Only files that did not exist before the install are recorded, so the cleanup owner can tell
-        the dispatcher's own install output from author work. A later rewrite stops matching.
-        """
+        """Record what the editable install created in the source tree as exact generated bytes."""
         if self.mode != "real":
             return
         from ummanu.dispatch.cleanup import CleanupJournal
@@ -3260,8 +3043,7 @@ class CommandHostRuntime:
     ) -> LaunchedHead:
         """Bring one head up and hand back the pane together with the configuration it started with.
 
-        A `handoff` makes the launch prompt the resumable production one: a head that is up with its
-        prompt pending is a `HeadLaunchAborted` whose evidence names the stage, kept by its intent.
+        A failed bring-up after opening a pane carries its stage evidence.
         """
         if role in {WORKER_ROLE, REVIEW_ROLE, "reviewer"}:
             self._require_production_runtime(f"{role}-launch")
@@ -3454,11 +3236,7 @@ class CommandHostRuntime:
         )
 
     def _head_spec(self, head: str, adapter: str) -> HeadSpec:
-        """The launch shape the run is recorded with, degrading rather than failing a live bring-up.
-
-        A degraded spec is still a head this host raises itself, so it names `local-pty` rather than
-        taking the record rule a hand-built spec otherwise carries.
-        """
+        """The launch shape the run is recorded with, degrading rather than failing a live bring-up."""
         try:
             return HeadSpec.from_profile(head, self.catalog.head_profile(head))
         except (HeadSpecError, HostError, AttributeError, KeyError, TypeError):
@@ -3480,12 +3258,7 @@ class CommandHostRuntime:
     def _capture_launch_prompt_identity(
         self, run: head_ops.HeadRun, *, role: str, document: str
     ) -> head_ops.HeadRun:
-        """Attach the exact worker/reviewer document before a pane can observe it.
-
-        TASK.md is a mutable workspace projection, so routing may not read it after delivery.
-        The document digest is a required launch fact: a read failure aborts the bring-up before a
-        head can receive an instruction whose durable identity the dispatcher cannot record.
-        """
+        """Attach the exact worker/reviewer document before a pane can observe it."""
         if role not in {WORKER_ROLE, REVIEW_ROLE, "reviewer"} or not document:
             return run
         path = Path(document)
@@ -3613,39 +3386,19 @@ class CommandHostRuntime:
     def head_runtime(self) -> Any:
         """The backend a head with no runtime of its own is read on, for a caller with none to name.
 
-        Every operation of this dispatcher that acts on a head — including the workspace-scoped
-        cleanups, which choose from the durable run the record names — goes through
-        `head_runtime_for` instead. What is left on this property is the reading a caller outside
-        the lifecycle does when it wants the default backend as an object and has nothing to
-        resolve it from. That is the record rule (`RECORD_RUNTIME_WHEN_ABSENT`), not the profile
-        default: nothing here reads a profile.
+        Use the durable default when absent, not the profile default.
         """
         return self.head_runtime_for(None)
 
     def head_runtime_for(self, subject: Any = None) -> Any:
         """The backend this head is held by — the one place a `runtime` value becomes an object.
 
-        One resolver rather than a branch at each caller: every lifecycle site hands over the head
-        it is acting on (a `HeadRun`, a `HeadSpec`, or the name itself) and is handed back the
-        backend that head's profile named, so no caller has to know that there is more than one.
-        `None` is the operation that names no head at all and gets the record rule.
-
-        The value is read off the head rather than re-resolved from the registry, because the
-        registry can be repointed while a head is running: a head raised on one backend has to go
-        on being observed and stopped through that backend until it ends.
+        Observe, deliver and stop through its persisted backend.
         """
         return self._head_runtime_named(_head_runtime_name(subject))
 
     def _head_runtime_named(self, name: str) -> Any:
-        """Build — or hand back — the one instance of the backend called `name`.
-
-        An unknown name cannot arrive from a validated registry (`validate_launch_shape` refuses it
-        when the table loads), so reaching this refusal means a record or a caller invented one,
-        and it fails closed by name rather than falling back to a backend the head is not on. A
-        legacy Orca record (`orca-legacy`, or no runtime at all) is refused with
-        `LegacyDispatcherRecord`: no backend is built for it, so it is never launched, delivered to
-        or stopped.
-        """
+        """Build — or hand back — the one instance of the backend called `name`."""
         held = self._head_runtimes.get(name)
         if held is not None:
             return held
@@ -3663,12 +3416,7 @@ class CommandHostRuntime:
         return built
 
     def _local_pty_root(self) -> Path:
-        """Where this dispatcher's supervised heads keep their run directories.
-
-        Deliberately short and directly under the data directory: a run directory holds a Unix
-        socket, whose address the kernel bounds at about a hundred bytes, and the substrate refuses
-        an address it cannot fit rather than failing opaquely later.
-        """
+        """Where this dispatcher's supervised heads keep their run directories."""
         return self.data_dir / "heads"
 
     def _open_head_pane(
@@ -3680,12 +3428,7 @@ class CommandHostRuntime:
         env: Mapping[str, str] | None = None,
         launch_task: dict[str, Any] | None = None,
     ) -> head_ops.HeadRun:
-        """Bring a head up in a pane of its own, with no prompt delivered by the bring-up.
-
-        The observer is the one head whose delivery contour is its own: it opens the pane, then puts
-        its launch prompt in front of it through the same boundary, so that the two halves can be
-        accounted for separately. `start` with no pointer is exactly that pane and nothing else.
-        """
+        """Bring a head up in a pane of its own, with no prompt delivered by the bring-up."""
         receipt = self.head_runtime_for(run).start(
             run.spec,
             run.workspace,
@@ -3705,22 +3448,13 @@ class CommandHostRuntime:
         return receipt.run
 
     def _freeze_worker(self, record: DispatcherRecord) -> None:
-        """Shut the worker head down now that the reviewer is up, leaving the workspace untouched.
-
-        Nothing else stops the worker from editing the checkout mid-review. A worker adopted from a
-        launch intent has no pane handle, so the stop goes by its pid heartbeat instead.
-        """
+        """Shut the worker head down now that the reviewer is up, leaving the workspace untouched."""
         if self.mode == "noop" or not (record.handle or record.worker_leaf or record.worker_pid_file):
             return
         self.stop_head(record, "worker", STOPPED_BY_REVIEW_FREEZE)
 
     def retain_worker(self, record: DispatcherRecord) -> None:
-        """Suspend a completed worker without throwing its provider conversation away.
-
-        A missing or dead pid heartbeat is not safe to retain, and a head with no pane handle is not
-        retained at all: the caller falls back through the confirmed-stop and durable replacement path
-        rather than guessing that a pane is idle.
-        """
+        """Suspend a completed worker without throwing its provider conversation away."""
         if self.mode == "noop":
             raise HostError("noop runtime cannot retain a worker session")
         if not record.handle:
@@ -3782,11 +3516,7 @@ class CommandHostRuntime:
             raise HostError("retained worker session is no longer confirmably suspended")
 
     def worker_retained_vanished(self, record: DispatcherRecord) -> bool:
-        """Whether this card's retained worker is provably gone, so nothing is left to freeze.
-
-        Only the pid heartbeat's definitive death signal (`known and not alive`) counts; the ambiguous
-        `known: False` of a heartbeat that was never written stays on the confirm-or-freeze path.
-        """
+        """Whether this card's retained worker is provably gone, so nothing is left to freeze."""
         if self.mode == "noop" or not record.worker_continuation.retained:
             return False
         status = self._record_heartbeat_status(record, "worker")
@@ -3825,9 +3555,7 @@ class CommandHostRuntime:
         )
 
     def worker_takes_comments(self, record: DispatcherRecord) -> bool:
-        """Whether this card's worker is live, running and addressable, so a comment pointer can
-        reach it now. A suspended, exited or unaddressable worker is sent nothing: the next round's
-        TASK.md carries the comment instead (secretary-1768)."""
+        """Whether this card's worker is live, running and addressable, so a comment pointer can reach it now."""
         if self.mode == "noop" or not self._continuation_addressable(record):
             return False
         if not record.workspace or not Path(record.workspace).is_dir():
@@ -3841,12 +3569,7 @@ class CommandHostRuntime:
         return _heartbeat_is_live_match(status) and not status.get("stopped")
 
     def deliver_worker_comments(self, task: dict[str, Any], record: DispatcherRecord) -> None:
-        """Rewrite the live worker's TASK.md with the card's comments, then point it there.
-
-        The document is the round's own, re-rendered with the generation, decision and
-        prerequisites the record froze for it, so the only thing that changes under the worker is
-        the comments section. Its report bodies are not cleared: the round is not over.
-        """
+        """Rewrite the live worker's TASK.md with the card's comments, then point it there."""
         self._refuse_legacy_record(record, "deliver to the worker of")
         workspace = Path(record.workspace)
         if not workspace.is_dir():
@@ -3881,12 +3604,7 @@ class CommandHostRuntime:
     ) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.
 
-        A continuation with a production handoff (`WorkerContinuation.handoff`) is delivered through
-        it. Once that handoff has written to the worker (`handoff_started`, as the caller just read
-        it from `worker_handoff_started`, or read here when not given), a later call continues it:
-        the document is not rewritten, no report body is cleared and nothing is woken, because all
-        of that happened before the line it already typed. A handoff that is not finished raises a
-        `HostError` whose evidence names its stage (`handoff_pending_stage`).
+        An uncertain handoff retains the bound run and pending stage.
         """
         self._refuse_legacy_record(record, "resume the worker of")
         status = self._head_status(
@@ -3998,13 +3716,7 @@ class CommandHostRuntime:
         return self.mode != "noop"
 
     def worker_handoffs(self, record: DispatcherRecord) -> bool:
-        """Whether this card's retained worker takes its continuation as a production handoff.
-
-        Its head runtime decides: `local-pty`, the production runtime, reads a handoff's state off
-        the head (`handoff_floor`, `handoff_started`). A run that cannot be resolved here is still
-        treated as a production head: its handoff then waits for a floor rather than taking a flow
-        the production runtime never takes.
-        """
+        """Whether this card's retained worker takes its continuation as a production handoff."""
         if not self.head_handoffs():
             return False
         try:
@@ -4032,9 +3744,7 @@ class CommandHostRuntime:
     def worker_handoff_started(self, record: DispatcherRecord) -> str:
         """Whether this continuation's handoff has written to the worker: none, started, unknown, deferred.
 
-        Read from the worker supervisor's status (a write still in flight) and its journal above the
-        handoff's floor, inside the production handoff allowance (`handoff_started`). `deferred`
-        when the supervisor did not answer within it. `none` without a handoff.
+        Use bounded supervisor evidence: none, started, unknown or deferred.
         """
         handoff = record.worker_continuation.handoff
         if handoff is None or self.mode == "noop":
@@ -4061,8 +3771,7 @@ class CommandHostRuntime:
     ) -> None:
         """Point this card's live worker at one thing, through the head operation (secretary-1412).
 
-        With a `handoff` the delivery is the resumable production one: a handoff left pending keeps
-        the run it bound and raises with evidence naming its stage.
+        Keep uncertain handoff bound to its original run.
         """
         self._refuse_legacy_record(record, "deliver to the worker of")
         run = self.worker_lifecycle_run(record)
@@ -4136,12 +3845,7 @@ class CommandHostRuntime:
         *,
         local_run_policy: tuple[dict[str, Any] | None, bool] | None = None,
     ) -> tuple[Path, str]:
-        """This round's review task, on disk, and the one line that points a reviewer at it.
-
-        The text never travels through the pane; only a bounded pointer does. A retry re-renders the
-        same document at the same path, and a document that cannot be written stops the bring-up before
-        a pane is opened. Nothing here writes to or removes anything from the candidate checkout.
-        """
+        """This round's review task, on disk, and the one line that points a reviewer at it."""
         document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
         prompt = self._review_prompt(
             task, record.attempt_id, record.review_baseline, record=record,
@@ -4162,23 +3866,14 @@ class CommandHostRuntime:
         return (base / _request_token(reference) / name).resolve()
 
     def _clear_body_file(self, kind: str, reference: str, review_round: int) -> None:
-        """Drop the body file before launching the head that is supposed to write it.
-
-        The path is keyed on ref+round and heads are told to leave the file in place, so a respawned
-        head would inherit its predecessor's body; nothing downstream rejects a stale one. A missing
-        file at least fails loudly. Reports go through `_clear_report_bodies`.
-        """
+        """Drop the body file before launching the head that is supposed to write it."""
         try:
             Path(_body_file_path(kind, reference, review_round)).unlink(missing_ok=True)
         except OSError:
             pass
 
     def _clear_report_bodies(self, reference: str) -> None:
-        """Drop every report body file this card has, the round about to start included.
-
-        The rounds already over are cleared too: the task protocol answers an identical retry from its
-        committed event, and a leftover body file is how a retained conversation produces one.
-        """
+        """Drop every report body file this card has, the round about to start included."""
         sample = _body_file_path("report", reference, 0)
         directory, name = os.path.split(sample)
         prefix = name[: -len("0.md")]
@@ -4197,10 +3892,7 @@ class CommandHostRuntime:
                 pass
 
     def _worker_launch_prompt(self) -> str:
-        """Short pointer delivered to the worker head at launch. The full spec lives in TASK.md
-        (written next to the workspace root); duplicating it into the launch prompt would ship
-        the whole task twice. The head opens TASK.md itself and reports with the command there.
-        """
+        """Short pointer delivered to the worker head at launch."""
         return (
             "The full task is in TASK.md at the workspace root. Read it first and follow it. "
             "Do not spawn, create, delegate to, or manage subagents; perform the work in this "
@@ -4211,18 +3903,7 @@ class CommandHostRuntime:
     def _broad_check_invocation(self, project: str) -> tuple[str, str]:
         """The exact `check broad`/`check show` commands this project's contract resolves to.
 
-        Until issue:8b39e60e4df361c6138e there was nowhere for a project to say which suite its
-        broad check runs, so this packet printed the literal placeholder
-        `<this project's broad suite module>` and left the worker to guess. What it guessed, because
-        that is what every document said, was bare `python3 -m unittest`: repository-wide discovery,
-        every CI suite in one process, ~402s for Ummanu. A packet that names a command a worker
-        cannot run without inventing part of it is a packet that teaches the expensive habit.
-
-        The contract is read through the same `projects.contract` rules the preflight and the
-        worker's own resolution use. A declared relative interpreter remains an open question until
-        the worker holds its workspace; its validated suite can still be named here. Rendering is
-        no evidence that the interpreter or imports will be usable there. Two empty strings mean
-        no usable suite declaration is available, which the caller reports in words.
+        Resolve commands through the declared project contract, including missing-suite refusals.
         """
         return self._broad_check_commands(self._packet_check_contract(project))
 
@@ -4389,11 +4070,7 @@ class CommandHostRuntime:
         return f"{_PYTHONPATH_PREFIX} {interpreter} {_PYTHON_SAFE_PATH_FLAG} -m ummanu{suffix}"
 
     def _local_run_policy(self, task: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
-        """The same creation-only authority read for packets and ordinary head launches.
-
-        The launch snapshot is sufficient: sprint exceptions are immutable after creation.
-        Any malformed declaration invalidates the whole list before project filtering.
-        """
+        """The same creation-only authority read for packets and ordinary head launches."""
         from ummanu.board.local_run import parse_local_run_exceptions, parse_local_run_policy
 
         reference, project = task.get("sprint"), task.get("project")
@@ -4881,11 +4558,7 @@ class CommandHostRuntime:
         return "\n".join([*self._render_check_header(check_contract), *sections])
 
     def worker_comments(self, task: dict[str, Any]) -> tuple[WorkerComment, ...]:
-        """The PO, owner and observer comments this card's worker is handed, oldest first.
-
-        The card audit is read only when the card has such a comment at all: the keys come from
-        it, and most cards on most ticks have nothing to key.
-        """
+        """The PO, owner and observer comments this card's worker is handed, oldest first."""
         if not any(
             isinstance(comment, dict) and comment.get("marker") in WORKER_COMMENT_ROLES
             for comment in task.get("comments") or []
@@ -4952,10 +4625,7 @@ class CommandHostRuntime:
     def _canonical_decision_binding(body: str) -> str:
         """The one comparison form for raw observer decision bodies.
 
-        Audit records retain the body exactly as the observer submitted it, including a final
-        newline from a supported reason file.  Worker documents deliberately render the concise
-        form, so every revision-bound match must use this same form rather than accidentally
-        comparing rendered prose to raw audit content.
+        Preserve raw submitted bodies; normalize only for comparisons.
         """
         return body.strip()
 
@@ -5209,12 +4879,7 @@ class CommandHostRuntime:
         )
 
     def project_git_access(self, project: str) -> ProjectGitAccess:
-        """Bounded, non-mutating proof of a registered project's remote Git access, before a claim.
-
-        Asked of the project's own checkout, the one every card workspace is cut from, through the
-        same boundary and resolved Git child every later gate and release operation uses. A
-        project with no checkout yet is `not-applicable`: the bring-up already names that failure.
-        """
+        """Bounded, non-mutating proof of a registered project's remote Git access, before a claim."""
         if self.mode == "noop":
             return ProjectGitAccess("not-applicable", "unknown", "noop")
         try:
@@ -5242,15 +4907,7 @@ class CommandHostRuntime:
     def remote_git(
         self, project: str, checkout: str | Path, args: list[str], label: str
     ) -> subprocess.CompletedProcess[str]:
-        """Run one remote Git operation of a registered project's checkout and return Git's answer.
-
-        The one door the dispatcher's gate and release Git traffic walks through. The transport is
-        decided from the checkout's effective remote, after URL rewriting: GitHub HTTPS runs as the
-        resolved Git child with ambient helpers disabled and the managed credential selected;
-        local/file, SSH and non-HTTPS network URLs keep their explicit non-managed command; any
-        other HTTPS host is refused by name. A refused credential raises `ProjectGitAccessError`, a child that could not run or
-        timed out raises plain `HostError`, and every other non-zero exit is returned.
-        """
+        """Run one remote Git operation of a registered project's checkout and return Git's answer."""
         checkout = Path(checkout)
         execution = self._project_remote(project, checkout)
         if execution.transport in {"local", "ssh", "unmanaged"}:
@@ -5331,11 +4988,7 @@ HOST_COMMAND_TIMEOUT_SECONDS = 900
 def _run_bounded(args: list[str], cwd: Path | None) -> subprocess.CompletedProcess[str]:
     """Run one host child to completion, and on a timeout take its descendants down with it.
 
-    A plain ``subprocess.run`` timeout kills only the direct child: the test processes under a
-    ``bash -lc`` gate or adapter setup would keep running. The production tick's unit sets
-    ``KillMode=process`` so the local-pty heads it launches outlive it (secretary-1699), which means
-    the unit's control-group kill no longer sweeps them either. The child's own process group is
-    what bounds them now.
+    On timeout terminate the process group, not just its leader.
     """
     return _proc.run_isolated(args, cwd=cwd, timeout=HOST_COMMAND_TIMEOUT_SECONDS)
 
@@ -5360,14 +5013,7 @@ def _gate_attestation_for_prompt(
 
 
 def _continuation_note(generation: int = 0, decision: str = "") -> str:
-    """The discriminating tail of the continuation pointer: what a pointer cannot delegate.
-
-    The generation, because the retained conversation still holds the previous round's report
-    command in its own scrollback and a number is what makes a replayed one visibly wrong; and the
-    standing of the decision, because a pointer that only names a document leaves the conversation
-    to rank that document's sections itself. This is a tail, not a line: `NudgePointer.at_document`
-    builds it into the nudge with the document's absolute path and checks the ceiling over both.
-    """
+    """The discriminating tail of the continuation pointer: what a pointer cannot delegate."""
     note = f"Generation {generation}: use its report command, not an earlier turn's."
     if decision.strip():
         note += " Its observer decision outranks the findings below it."
@@ -5380,11 +5026,7 @@ def _takes_handoffs(backend: Any) -> bool:
 
 
 def _review_launch_handoff(intent: Any) -> PromptHandoff | None:
-    """The production handoff of a reviewer launch prompt, or None outside a production pass.
-
-    A reviewer head is raised for one launch prompt, so its handoff is the whole of that run's
-    journal (floor 0), opened when the launch intent was written before the spawn.
-    """
+    """The production handoff of a reviewer launch prompt, or None outside a production pass."""
     if active_budget() is None:
         return None
     opened = intent.get("at") if isinstance(intent, dict) else None
@@ -5424,12 +5066,7 @@ def _record_worker_delivery_evidence(
 
 
 def _report_nudge_prompt(generation: int, reference: str) -> str:
-    """What a worker that stopped working without reporting is told, once per round.
-
-    It opens no round and carries no instruction about the work. The generation is spelled out
-    because the conversation's own scrollback holds earlier rounds' commands. The last sentence is
-    the point: a commit, a push or a green test run is not a report.
-    """
+    """What a worker that stopped working without reporting is told, once per round."""
     card = f" for {reference}" if reference else ""
     return (
         f"The dispatcher is still waiting for the worker report of generation {generation}{card}, "
@@ -5449,11 +5086,7 @@ def _watchdog_kind(role: str) -> str:
 
 
 def _body_file_path(kind: str, reference: str, review_round: int) -> str:
-    """Where a head writes its report/verdict body. Outside the workspace on purpose: a stray file in
-    the worktree makes `git status` dirty, and the done-report check rejects that. The round is in
-    the name because heads are told to leave the file behind: without it round 2 starts on top of
-    round 1's body and a head that skips the write posts a stale verdict.
-    """
+    """Where a head writes its report/verdict body."""
     root = os.environ.get("UMMANU_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
     return f"{root}/ummanu-{kind}-{_request_token(reference)}-{_request_token(str(review_round))}.md"
 

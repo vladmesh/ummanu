@@ -1,5 +1,17 @@
 # opus_review — аудит репозитория `vladmesh/ummanu`
 
+## Дельта 2026-10-11: ARCH-01 dispatch prose и CI test fixture, #728 на main `18a859df9dfec4b9ffc84f9ee9972cf431db095b`
+
+[PR #728](https://github.com/vladmesh/ummanu/pull/728) смёржен (squash) в `main` из exact head `a54a3f36f2997189a384993ac5e318de86f039f2`. [CI #38176132736](https://github.com/vladmesh/ummanu/actions/runs/38176132736) **completed/success**: lint, typecheck, девять suite owners, aggregate `test`. Отдельный [post-merge main CI #38176863641](https://github.com/vladmesh/ummanu/actions/runs/38176863641) отслеживается как другая квитанция.
+
+**ARCH-01 ◐:** сокращены **90** docstrings в `dispatch/host.py` (78, −25 334 символа), `dispatch/types.py` (7, −2 875) и `dispatch/worker_launch.py` (5, −3 638), суммарно **−31 847 символов**. Посимвольная сверка вне docstrings на каждом исходнике идентична; runtime-код, API, импорты, сигнатуры и логика не изменены. Краткие инварианты replay, ownership, identity, stop/fence сохранены. Оставшиеся ARCH-01 и DEC-02 не закрыты.
+
+**CI flake, только тесты:** исходный docstring-only head `3ec1566` трижды краснел в `test_measurement_script.MeasurementScriptTests.test_a_fast_installation_meets_every_threshold_and_exits_zero`: ускоренный 50 ms token interval и продовый допуск ±100 ms физического старта зависели от runner scheduler jitter (+164/+124/+188 ms). `tests/test_measurement_script.py` теперь отключает проверку физических start-offsets (test-only `CADENCE_TOLERANCE_SECONDS=float("inf")`) только в тестах маршрутов, ответа и вердикта, сохраняя минимальное количество polls; также для отдельного proxy-module test. `CadenceAndLaunchTests` по-прежнему строго проверяет 3 s ±100 ms и отказы на опоздание/опережение; `scripts/measure_dashboard.py` и production threshold не изменены. Новый exact-head CI прошёл с первой попытки.
+
+Ветка аудита merge-синхронизирована с новым main. **#668 остаётся открытым, не мёржить.** §12 production evidence побайтно не трогался.
+
+---
+
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
 ## Дельта 2026-10-11: TDEAD-01/02/04/05, #727 на main `599857387b66a14bd85c2ee5679e4ee0daf207ce`
@@ -121,7 +133,7 @@
 | Видимость стоимости тестов | ✅ timing-часть существующего issue:e515244ce9d2e3417b1e | [#708](https://github.com/vladmesh/ummanu/pull/708), `190bd745`: `projects/test_timing.py:142/249`, `tests/broad.py:106`, `scripts/ci_test_shards.py:421/424` сохраняют native timing; локально >5 с/test предупреждает, CI unit/component >5 с/test или >90 с/module отказывает. Запрет лишних тестов в prompts остаётся открытым (§6.4) |
 | Полная квитанция перед code report:done; reviewer без прогонов | ✅ согласованный scope sprint:1488 | [#713](https://github.com/vladmesh/ummanu/pull/713), `d8e86b94`: `tasks.py:2234`, `check_commands.py:42/89/101` проверяют complete green receipt на committed tree, `runtime/test_guard.py:43/110` отказывает reviewer. [#704](https://github.com/vladmesh/ummanu/pull/704), `c42b02b7`, и [#705](https://github.com/vladmesh/ummanu/pull/705), `e29a0467`, ограничивают local selectors/прямые runners. Это не закрытие всех старых gate/flake issues; docs-проекты с doctest имеют отдельный issue:db00f10a6b16e2ab5b1f |
 | CI-01 | Исходные ✅ #674/#678 сохранены; новый selective-CI scope поставлен, выигрыш для code PR открыт | [#714](https://github.com/vladmesh/ummanu/pull/714), `af07e5c2`, #715/#717/#718: `ci_selection.py:208/259`, `ci.yml:59` выбирают affected или docs-only; main всегда full. Реальная выборка PR717 и новые CI-рычаги только в §8.4 / issue:7ba9a9f32675119f8149 |
-| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | DEC-04 ◐ (#725 state/prompt, #726 audit/event helpers); ARCH-01 ◐ (#721/#723/#724); остальные DEC открыты | Доменные импорты config, TaskError в tasks и barrel board проверены, граф дополняет ARCH-04 (§4.1). #725/#726 вынесли durable observer state, чистые prompt renderers и audit/event helpers; общий persist с launch и outcome сокращение остаются. Рефакторинг ради CI не рекомендован |
+| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | DEC-04 ◐ (#725 state/prompt, #726 audit/event helpers); ARCH-01 ◐ (#721/#723/#724/#728); остальные DEC открыты | Доменные импорты config, TaskError в tasks и barrel board проверены, граф дополняет ARCH-04 (§4.1). #725/#726 вынесли durable observer state, чистые prompt renderers и audit/event helpers; общий persist с launch и outcome сокращение остаются. Рефакторинг ради CI не рекомендован |
 | BUG-04/05/24, CON-02/05/07/08/10–15, DOC-08/10/15, DEAD-* и прочие остатки | Без нового полного закрытия | В diff к main нет реализации прежних структурных/compatibility scopes; DOC-08 всё ещё имеет исходную фразу в `packaging/memory/product-ummanu/sprints-and-reservations.md:9`. Поддержку legacy API не снимать по отсутствию вызова. Новая capacity-находка только ссылкой на board (§7, CON-19) |
 
 Другие поставки учтены без выдуманных закрытий ID: #698 (`ed9fd528`) исправляет исполнение
@@ -865,7 +877,7 @@ job-секунд и не двигает критический путь. Выи�
 
 ### 5.8 Сжатие прозы как отдельная «декомпозиция» — ARCH-01
 
-**◐ Статус:** #675 (`runtime`, −138 тыс.), #676 (`web`/`webproto`, −211 тыс.), #721 (vitality, −37 123), #723 (`observer`/`launch`/`gate`, −25 140) и #724 (`tasks`/`sprints`, −24 239) поставили очередные срезы без изменения исполняемого кода. Для #721/#723/#724 подтверждено точное совпадение источника вне docstrings (у #723 — с отдельной сортировкой одного импорта), полный exact-head CI зелёный. Зоны `runtime` (кроме `po`/`automations`) и `web`/`webproto` закрыты только в объёме тех поставок; другие подсистемы и дальнейшая проза остаются.
+**◐ Статус:** #675 (`runtime`, −138 тыс.), #676 (`web`/`webproto`, −211 тыс.), #721 (vitality, −37 123), #723 (`observer`/`launch`/`gate`, −25 140) , #724 (`tasks`/`sprints`, −24 239) и #728 (`dispatch/host`/`types`/`worker_launch`, −31 847) поставили очередные срезы без изменения исполняемого кода. Для #721/#723/#724/#728 подтверждено точное совпадение источника вне docstrings (у #723 — с отдельной сортировкой одного импорта), полный exact-head CI зелёный. Зоны `runtime` (кроме `po`/`automations`) и `web`/`webproto` закрыты только в объёме тех поставок; другие подсистемы и дальнейшая проза остаются.
 
 **Это самый крупный рычаг.** Рекомендуемое правило:
 - docstring модуля и функции — инвариант и контракт в 1–3 строки плюс ссылка на раздел docs;
