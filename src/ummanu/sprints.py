@@ -143,12 +143,9 @@ SPRINT_TERMINAL_STATUSES = {SprintState.CLOSED.value, SprintState.STOPPED.value}
 
 
 def public_current_task(status: str, stored: str | None) -> str | None:
-    """The current card a read output shows for a sprint: none for a closed one, else the stored one.
-
-    A closed sprint has no current card, whatever its row still holds (PO decision of 2026-09-26,
-    issue:002bce88). The stored value is untouched and every writer, the dispatcher and restore keep
-    reading it; only what `sprint show`, `sprint status` and `sprint list` print goes through here. A
-    stopped sprint may be resumed, so it keeps its card.
+    """The current card a read output shows for a sprint: none for a closed one, else
+    the stored one. A closed sprint has no current card, whatever its row still holds
+    (PO decision of 2026-09-26, issue:002bce88).
     """
     return None if status == SprintState.CLOSED.value else (stored or None)
 
@@ -173,13 +170,9 @@ def sprint_guard_index_initialized(data_dir: str | Path) -> bool:
 
 
 def require_active_sprint_projects(data_dir: str | Path) -> dict[str, list[str]]:
-    """The reserved-project index, or a refusal naming the file that could not answer.
-
-    :func:`active_sprint_projects` answers `{}` for an index that is missing, unreadable or of
-    another version, which is the right answer for the write guard -- nothing is reserved that
-    cannot be proven reserved. A *read* that reports which reservations a close released cannot use
-    it: "this sprint holds no project any more" and "nobody could read the index" are the opposite
-    answers, so this one refuses instead of flattening them together.
+    """Read the reserved-project index without confusing an unreadable index with an
+    empty one. Unlike admission's missing-index view, release-report reads refuse
+    unreadable/invalid data and name its file.
     """
     index = _read_guard_index(Path(data_dir) / _GUARD_INDEX)
     if index is None:
@@ -226,11 +219,9 @@ def _sprint_guard_index_lock(data_dir: str | Path):
 
 @contextmanager
 def sprint_admission_lock(data_dir: str | Path):
-    """Serialize every admission of an open sprint on this installation.
-
-    The rules for opening a sprint are reads of live state, so two writers that both check before
-    either writes would each see no open sprint and both create one. Held across the check and the
-    backend write, and nothing after it.
+    """Serialize every admission of an open sprint on this installation. The rules for
+    opening a sprint are reads of live state, so two writers that both check before
+    either writes would each see no open sprint and both create one.
     """
     with _exclusive_lock(Path(data_dir) / _ADMISSION_LOCK):
         yield
@@ -271,10 +262,8 @@ def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
 
 
 def open_sprint_limit(config: dict[str, Any] | None = None) -> int:
-    """How many sprints this installation may hold open, refusing to widen on bad input.
-
-    An absent, unreadable or malformed setting all answer one. This answers rather than raises, so
-    a malformed value cannot stop admission either; `open_sprint_limit_invalid` reports the refusal.
+    """How many sprints this installation may hold open, refusing to widen on bad
+    input. An absent, unreadable or malformed setting all answer one.
     """
     raw = config.get("open_sprint_limit") if isinstance(config, dict) else None
     if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
@@ -315,9 +304,9 @@ def instance_open_sprint_limit(instance: Path | None) -> int:
 
 def open_sprint_admission_error(rows: list[dict[str, Any]], *, limit: int) -> str | None:
     """Why this set of open sprints could not have been admitted, or None if it could.
-
-    A whole set is judged by admitting it one row at a time, in reference order, against the rows
-    already accepted: an export must not be a way to arrive at a pair `create` would have refused.
+    A whole set is judged by admitting it one row at a time, in reference order,
+    against the rows already accepted: an export must not be a way to arrive at a pair
+    `create` would have refused.
     """
     admissions = [SprintAdmission.from_document(row) for row in rows]
     admitted: list[SprintAdmission] = []
@@ -336,11 +325,10 @@ def _refuse_open_sprint(
     *,
     limit: int,
 ) -> None:
-    """Refuse a sprint this installation has no room, or no disjoint room, for.
-
-    Every collision the caller can act on is reported before the generic count refusal, because a
-    resource refusal names the sprint holding the resource while the count refusal distinguishes
-    none of them.
+    """Refuse a sprint this installation has no room, or no disjoint room, for. Every
+    collision the caller can act on is reported before the generic count refusal,
+    because a resource refusal names the sprint holding the resource while the count
+    refusal distinguishes none of them.
     """
     saturated = len(others) >= limit
     _refuse_shared_reservations(candidate.reservations, others)
@@ -383,15 +371,10 @@ def _refuse_shared_reservations(reservations: tuple[str, ...], others: list[Spri
 
 
 def _refuse_shared_resources(candidate: SprintAdmission, others: list[SprintAdmission]) -> None:
-    """The invariants that make a second open sprint safe, above the reservations.
-
-    Two open sprints may only exist while nothing they work on is shared: a different product, no
-    shared project reservation, and no repository tree either contains. Overlap includes nesting
-    and is judged on canonical paths; a stored root that is not already absolute is refused rather
-    than resolved here, because the tree it names would depend on the resolving process's cwd.
-
-    The candidate's own roots are judged before any pairwise comparison and whether or not another
-    sprint is open.
+    """Require concurrent open sprints to have distinct products, disjoint reservations
+    and nonoverlapping repository roots. Compare canonical absolute paths, including
+    containment; reject nonabsolute stored roots and validate the candidate even if it
+    is alone.
     """
     product = candidate.product
     ordered = sorted(others, key=lambda row: row.ref)
@@ -477,18 +460,10 @@ def _sprint_board(client: SqlCardClient, *, create: bool) -> int | None:
 
 
 class _AuditOnce:
-    """One committed-audit traversal shared by the sprint summaries of a single operation.
-
-    It never opens a store of its own. Either the caller has already walked the committed audit and
-    hands the records in (`events`), or it hands in the audit owner its own card client named
-    (`audit`), which is what `SprintReader` does. A traversal built from a data directory would be
-    the file journal whatever backend the reader is on, and beside a PostgreSQL client that journal
-    holds none of the events a resume-freshness verdict is judged against (`docs/BOARD_STORE.md`
-    §7.3) -- so there is no such construction to be made here.
-
-    With neither given there is nothing to read, and `events()` says so with an empty traversal: a
-    `SprintReader` built with no data directory has no audit at all, and
-    that reader's summaries have always been the ones that state no freshness.
+    """Share committed audit traversal supplied as `events` or owned by the provided
+    card client (`audit`). Never open an unrelated data-dir journal: SQL and file
+    backends have different audit owners. With neither source, return an empty
+    traversal.
     """
 
     def __init__(
@@ -501,10 +476,10 @@ class _AuditOnce:
         self._audit = audit
 
     def events(self, references: set[str] | None = None) -> list[dict[str, Any]]:
-        """The committed records of these refs; an audit owner is never read whole from here.
-
-        A walked audit is narrowed here; an audit owner is asked for the slice itself, so a
-        summary of one sprint reads that sprint's records and not the history (secretary-1658).
+        """The committed records of these refs; an audit owner is never read whole from
+        here. A walked audit is narrowed here; an audit owner is asked for the slice
+        itself, so a summary of one sprint reads that sprint's records and not the
+        history.
         """
         if self._events is not None:
             if references is None:
@@ -518,11 +493,10 @@ class _AuditOnce:
 
 
 def audit_traversal(events: list[dict[str, Any]]) -> _AuditOnce:
-    """A traversal over a committed audit somebody has already walked.
-
-    The journal is a source of its own, and a caller that has to be able to say *the journal*
-    refused -- rather than the board it is read beside -- walks it itself and passes the result to
-    `status_views`, which then opens nothing. `ummanu.webproto.sprint_reads` is that caller.
+    """A traversal over a committed audit somebody has already walked. The journal is a
+    source of its own, and a caller that has to be able to say *the journal* refused --
+    rather than the board it is read beside -- walks it itself and passes the result to
+    `status_views`, which then opens nothing.
     """
     return _AuditOnce(events=events)
 
@@ -725,11 +699,10 @@ class SprintReader:
 
     def linked_cards(self) -> dict[str, list[dict[str, Any]]]:
         """Every Pipeline card grouped by the sprint it is linked to, in one listing.
-
-        One pass for the whole installation, not one per sprint: `TaskReader.list` already reads the
-        board once and batches the metadata of every row, so a caller that needs the cards of many
-        sprints asks for this once and indexes it, exactly as `statuses` does. The Pipeline board is
-        read and never created -- `TaskReader` has no `create` -- so this stays a read.
+        One pass for the whole installation, not one per sprint: `TaskReader.list`
+        already reads the board once and batches the metadata of every row, so a caller
+        that needs the cards of many sprints asks for this once and indexes it, exactly
+        as `statuses` does.
         """
         linked: dict[str, list[dict[str, Any]]] = {}
         for card in select_cards(TaskReader(self.client)):
@@ -745,17 +718,9 @@ class SprintReader:
         headless: dict[str, dict[str, Any]] | None = None,
         audit: _AuditOnce | None = None,
     ) -> list[dict[str, Any]]:
-        """The status view of sprints that have already been read, over cards already listed.
-
-        No board call of its own: it is the assembling half of `statuses`, split out so a caller
-        that has to keep the two reads apart -- a protocol layer marking one source unavailable
-        without blanking the other -- can still get exactly this view rather than deriving a second
-        one beside it. The committed audit is consumed at most once for the whole call.
-
-        `audit` is that split taken one source further: a caller that has already walked the
-        committed journal -- and that has to be able to say *the journal* refused rather than the
-        board -- passes its own traversal in, and this call opens nothing. With none given the
-        journal is walked here, lazily, exactly as `statuses` has always walked it.
+        """Assemble statuses from preloaded sprint rows and cards without new board
+        reads. Consume committed audit at most once: use a supplied traversal when
+        provided, otherwise read it lazily.
         """
         audit = audit if audit is not None else _AuditOnce(audit=self.audit)
         result = []
@@ -776,14 +741,8 @@ class SprintReader:
         headless: dict[str, dict[str, Any]] | None = None,
         create: bool = False,
     ) -> list[dict[str, Any]]:
-        """Every sprint's status, reading each part of the board once for the whole call.
-
-        Asking `status` per sprint read the same things over and over: the sprint's metadata, its
-        comments, and the entire Pipeline listing with the metadata of every card on it - once per
-        sprint. That is what kept `ummanu status` around a minute on a live board with 72
-        sprints and 1119 cards. Nothing here is per sprint but the assembling: the sprint rows and
-        their metadata are one read each, the cards are one listing shared by every sprint, and the
-        committed audit is consumed at most once.
+        """Read sprint metadata, Pipeline cards and committed audit once per status
+        batch, then assemble each sprint's view without repeating these backend reads.
         """
         return self.status_views(
             select_sprints(self, create=create),
@@ -857,11 +816,10 @@ class SprintReader:
         *,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
-        """The freshness of a sprint's resume, read here and nowhere else.
-
-        An open sprint is judged against the significant linked-card events of the committed audit; a
-        closed or stopped sprint against its own record and nothing else, since that record is frozen
-        at the terminal transition. The returned shape is the same in every case.
+        """The freshness of a sprint's resume, read here and nowhere else. An open
+        sprint is judged against the significant linked-card events of the committed
+        audit; a closed or stopped sprint against its own record and nothing else,
+        since that record is frozen at the terminal transition.
         """
         if not resume:
             return {
@@ -1120,14 +1078,9 @@ class SprintWriter:
         observer: dict[str, Any] | None = None,
         status: str = "open",
     ) -> dict[str, Any]:
-        """Recreate one exported sprint row, without the rules for opening a sprint.
-
-        Not an admission: `restore` writes the real fields immediately after, and several restored
-        entities are written one after another, so this must not check or invent ownership.
-
-        Status and observer are written before the reference: the row becomes visible the moment its
-        reference lands, and between the two writes a reader would otherwise see an open sprint with no
-        observer — the one state the strict reader calls corrupt.
+        """Restore an exported sprint without new admission or ownership checks. Write
+        status/observer before publishing its reference so no reader sees an open
+        sprint with an absent observer.
         """
         request_id = request_id or str(uuid.uuid4())
         intent = self._create_intent(
@@ -1183,15 +1136,10 @@ class SprintWriter:
         local_run_exceptions: list[dict[str, Any]] | None = None,
         standing_decisions: list[dict[str, Any]] | None = None,
     ) -> SprintCreateIntent:
-        """The normalized request, which is both the replay key and the repair recipe.
-
-        A repeat of the same request id carrying a different intent is another operation and is refused
-        before any side effect. The observer is part of the staged intent for the same reason the
-        reservations are: a repair has to write the value the caller chose, not one it picks up later.
-
-        Repository roots are canonicalized here, where the operator declaring them is, so the absolute
-        root is what the row persists and a root this host cannot resolve is refused before any board
-        row, staged intent, metadata or audit event exists. Recovery canonicalizes nothing.
+        """Normalize and stage a replayable sprint request. Refuse identical request
+        ids with different intent before side effects; preserve declared observer and
+        reservations. Canonicalize roots at admission, never during recovery;
+        unresolved roots fail before writes.
         """
         goal = goal.strip()
         reference = reference.strip()
@@ -1258,10 +1206,9 @@ class SprintWriter:
         return tuple(_unique_strings(cleaned))
 
     def _check_po_channel(self, intent: SprintCreateIntent) -> None:
-        """Refuse a PO session that is not open and a production that is not a registered project.
-
-        Both are reads before anything is written, beside `_check_ownership`. Nothing is inferred
-        here: no session is guessed and no production is added that the caller did not name.
+        """Refuse a PO session that is not open and a production that is not a
+        registered project. Both are reads before anything is written, beside
+        `_check_ownership`.
         """
         if intent.po_session:
             state = self._po_session_state(intent.po_session)
@@ -1303,14 +1250,10 @@ class SprintWriter:
         *,
         executable: bool,
     ) -> dict[str, Any] | None:
-        """The observer value a create writes, refused here rather than at the backend.
-
-        An operator opening a sprint has to state one: absent, null, empty, `default` and `inherited`
-        are not interpretations this model has. Recovery reproduces whatever its export carried,
-        including the migration provenance of a closed row, which is not executable.
-
-        A declared profile is resolved against the installation's head registry: a sprint may not be
-        opened on a head that does not exist, or the fence would stop its projects on the first tick.
+        """Require an explicit valid observer declaration on sprint create;
+        absent/empty/default/inherited are invalid. Resolve named profiles against the
+        installed head registry. Restore may replay exported migration provenance
+        without treating it as runnable.
         """
         if observer is None:
             if executable:
@@ -1346,18 +1289,10 @@ class SprintWriter:
         return value
 
     def _executor_intent(self, *, worker: str | None, reviewer: str | None) -> dict[str, str | None]:
-        """The worker and reviewer pins a create writes, or `None` for the role it pins nothing on.
-
-        `None` is the operator saying nothing about the role, and it stays a pin nobody made: no
-        `role_defaults` value is read here, and no field is written for it. Everything else was
-        spelled deliberately and is held to the observer's standard — a profile of this
-        installation's head registry, refused at this boundary with the same error the observer's
-        own unknown profile is refused with, before any row exists.
-
-        `none` and the empty string are refused rather than folded into the absent state. `--observer
-        none` says a sprint runs without an observer, which is a way a sprint can run; a card that
-        runs without a worker is not, so the word means nothing here and answering it with silence
-        would turn a stated intention into a missing field.
+        """Validate optional worker/reviewer pins against the head registry before
+        creating a sprint. `None` means no pin and no default lookup; empty string or
+        `none` is invalid for worker/reviewer profiles. Keep observer-specific `none`
+        semantics distinct.
         """
         pins: dict[str, str | None] = {}
         profiles: set[str] | None = None
@@ -1455,11 +1390,9 @@ class SprintWriter:
             ) from None
 
     def _compensate_create(self, document: dict[str, Any]) -> bool:
-        """Take back the row of a create that never got as far as its reference.
-
-        The staged intent stays here either way: it is what a repeat resumes, and only the caller of a
-        refusal it will never repeat discards it. Returns whether the request now holds nothing on the
-        backend, which is what makes discarding its intent safe.
+        """Take back the row of a create that never got as far as its reference. The
+        staged intent stays here either way: it is what a repeat resumes, and only the
+        caller of a refusal it will never repeat discards it.
         """
         progress = document.get("progress") or {}
         task_id = progress.get("task_id")
@@ -1522,21 +1455,9 @@ class SprintWriter:
         return created_ref
 
     def _reference(self, document: dict[str, Any], board_id: int, *, admitted: bool) -> str:
-        """This request's sprint reference, allocated once and then remembered.
-
-        The reference is what publishes a sprint, so a create that stalled and is being repeated
-        writes the one it was already going to write rather than a second one allocated meanwhile.
-        A repeat that took its row back holds nothing, including this record, and allocates afresh.
-
-        An automatic reference used to be the row's own board id, which is not a record of what
-        the board handed out. Row ids trail the references by hundreds here, so on 2026-08-06 a new
-        sprint took `sprint:804` from a sprint closed in July and became unaddressable behind it.
-
-        Only an admitted create allocates. A restore is the one create that adopts a row it finds
-        under its reference, because that row is the one it exported and is putting back; a
-        reference invented here would let it adopt a row it has never seen. Restoring a sprint
-        therefore means naming it, and a restore without a reference is refused rather than given
-        somebody else's row.
+        """Allocate and persist the sprint reference exactly once per admitted create
+        so retries reuse it; rolled-back creates allocate anew. Restore requires an
+        explicit exported reference and may adopt only that row, never invent one.
         """
         intent = SprintCreateIntent.from_document(document["intent"])
         recorded = intent.reference or str(document.get("reference") or "")
@@ -1564,11 +1485,9 @@ class SprintWriter:
         *,
         admitted: bool,
     ) -> dict[str, Any]:
-        """The row this request created, creating it once when it has none yet.
-
-        A row counts as this request's own only when the staged progress names its task id, or, for
-        recovery, when nothing has been written for this reference yet. An admitted create never adopts
-        a row it merely shares a reference with.
+        """The row this request created, creating it once when it has none yet. A row
+        counts as this request's own only when the staged progress names its task id,
+        or, for recovery, when nothing has been written for this reference yet.
         """
         rows = [
             row
@@ -1686,9 +1605,8 @@ class SprintWriter:
         step: str,
     ) -> None:
         """Write one step of the sprint's fields once, and prove the backend kept it.
-
-        The board answers its metadata call with a boolean; anything other than `True` is a refusal. The
-        step is recorded durably, so a repair of a later step never rewrites an earlier one back.
+        The board answers its metadata call with a boolean; anything other than `True`
+        is a refusal.
         """
         progress = document.setdefault("progress", {})
         if progress.get(f"{step}_done"):
@@ -1765,12 +1683,8 @@ class SprintWriter:
             raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
 
     def _check_reference_claim(self, reference: str, staged_id: int | None) -> None:
-        """Refuse the reference this create is about to write when another sprint holds it.
-
-        Both paths pass through here. A stalled create holds nothing, including its reference, so
-        between its refusal and its repeat another sprint may legitimately open under that
-        reference; the repeat is not its owner. An allocated reference is only as free as the
-        enumeration it was counted from, and this is where that is proven against the backend.
+        """Refuse the reference this create is about to write when another sprint holds
+        it. Both paths pass through here.
         """
         board_id = _sprint_board(self.client, create=False)
         if board_id is None:
@@ -1801,11 +1715,8 @@ class SprintWriter:
         excluding_id: int | None = None,
     ) -> None:
         """Refuse a sprint this installation has no room, or no disjoint room, for.
-
-        Every collision the caller can act on is reported before the generic count refusal. A sprint is
-        left out of the scan only when it is proven to be the very row this transition is about — the
-        row `reopen` reads by reference, or the row a staged create recorded its task id for. A matching
-        reference alone proves nothing.
+        Every collision the caller can act on is reported before the generic count
+        refusal.
         """
         others = [
             sprint
@@ -1907,11 +1818,10 @@ class SprintWriter:
     def set_po_session(
         self, *, role: str, actor: str, reference: str, session_id: str, request_id: str
     ) -> dict[str, Any]:
-        """Record the PO session a sprint answers to now; the PO service's resolver is the one caller.
-
-        Not an edit of the sprint's contract: the resolver writes it only when the recorded session
-        no longer exists or is closed and it opened a fresh one. The request id makes a repeat the
-        same write.
+        """Record the PO session a sprint answers to now; the PO service's resolver is
+        the one caller. Not an edit of the sprint's contract: the resolver writes it
+        only when the recorded session no longer exists or is closed and it opened a
+        fresh one.
         """
         self._role(role, {"po"}, actor=actor)
         session_id = str(session_id or "").strip()
@@ -1939,12 +1849,9 @@ class SprintWriter:
         reason: str,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Add one production the sprint's operations may touch: the PO's decision, recorded (secretary-1769).
-
-        Role `po` only, on an open sprint, for a registered project, with a reason. It only adds: a
-        project the sprint already allows is a no-op that writes nothing and answers
-        `already_allowed`. Nothing else of the sprint's contract is changed here. The request id makes
-        a repeat the same write, and binds the sprint and the project.
+        """Add one production the sprint's operations may touch: the PO's decision,
+        recorded. Role `po` only, on an open sprint, for a registered project, with a
+        reason.
         """
         self._role(role, {"po"}, actor=actor)
         project = str(project or "").strip()
@@ -2102,16 +2009,10 @@ class SprintWriter:
         add: int | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
-        """Raise the sprint's e2e run budget by the runs the owner recorded (secretary-1796).
-
-        Role `po` only, on an open sprint, and only with `authorized_by`: the event id of an owner-role
-        comment on one of this sprint's e2e budget decision cards, made after that card was handed to
-        the owner, whose one answer line is `e2e budget: raise <N>` (`e2e_budget.authorized_raise`).
-        The raise is that N: `add`, when given, has to equal it. The PO applies the owner's answer; it
-        has no path to raise the budget on its own authority, and `e2e budget: no` authorizes nothing.
-        One authorizing comment raises once. Everything is refused before anything is written. The
-        request id defaults to one derived from the authorizing event, so a repeat is the same raise;
-        the audit record names the event and N.
+        """Raise an open sprint's e2e budget as PO only, using an eligible
+        post-handover owner comment `e2e budget: raise <N>` identified by
+        `authorized_by`. Increment must match N; `no` never authorizes. One event
+        raises once, with idempotent request id derived from that event.
         """
         self._role(role, {"po"}, actor=actor)
         if add is not None and (isinstance(add, bool) or not isinstance(add, int) or add < 1):
@@ -2345,11 +2246,10 @@ class SprintWriter:
         source_event_id: str,
         event: dict[str, Any],
     ) -> dict[str, Any]:
-        """Finish one hard charge and its stopped state as one host-owned effect.
-
-        The generic charge is the request owner and is staged first, but it may not publish until the
-        typed hard-stop occurrence has staged, persisted the computed budget plus stopped state, and
-        committed. A retry always drives that typed owner before publishing its charge.
+        """Finish one hard charge and its stopped state as one host-owned effect. The
+        generic charge is the request owner and is staged first, but it may not publish
+        until the typed hard-stop occurrence has staged, persisted the computed budget
+        plus stopped state, and committed.
         """
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         if (
@@ -2580,10 +2480,10 @@ class SprintWriter:
         reason: str = "",
         closeout: str = "",
     ) -> dict[str, Any]:
-        """Close a sprint on explicit typed decisions while preserving the durable JSON contract.
-
-        The PO closes any sprint; the observer closes the one it was launched for, and is refused
-        any other by the identity guard, outside the transaction so the refusal stays audited.
+        """Close a sprint on explicit typed decisions while preserving the durable JSON
+        contract. The PO closes any sprint; the observer closes the one it was launched
+        for, and is refused any other by the identity guard, outside the transaction so
+        the refusal stays audited.
         """
         self._role(role, {"po", "observer"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
@@ -2710,10 +2610,10 @@ class SprintWriter:
         return ProductIssueStore(self.client, data_dir=self.data_dir, instance=self.instance)
 
     def _declared_issue_states(self, declared: list[str]) -> dict[str, dict[str, Any]]:
-        """What every declared issue actually is, for the decisions to be matched against.
-
-        An installation without its instance directory cannot read Product/Issue records at all; a close
-        that needs to write one is refused for that separately.
+        """What every declared issue actually is, for the decisions to be matched
+        against. An installation without its instance directory cannot read
+        Product/Issue records at all; a close that needs to write one is refused for
+        that separately.
         """
         if self.instance is None:
             return {}
@@ -2731,12 +2631,9 @@ class SprintWriter:
         return states
 
     def _close_step_status(self, request_id: str) -> str:
-        """Whether one step of a close is done, half-written, or still to do.
-
-        The only proof that a step happened is its own derived request id carrying a committed event. A
-        pending event under that id is a step that reached the backend but not the journal and is
-        finished by driving the same id again — never by looking at the object and finding it already
-        in the shape the step wanted, which is somebody else's change as easily as this close's.
+        """Whether one step of a close is done, half-written, or still to do. The only
+        proof that a step happened is its own derived request id carrying a committed
+        event.
         """
         if self.audit.committed_event(request_id) is not None:
             return "done"
@@ -2930,11 +2827,9 @@ class SprintWriter:
         )
 
     def _check_closeout_is_writable(self, document: str, text: str, *, actor: str) -> None:
-        """Refuse a closeout this installation cannot write, before anything is written.
-
-        Asked here it names what is missing and leaves the sprint open; asked in the terminal phase,
-        the same refusal would be a transaction to repair. The rules are the knowledge writer's own
-        -- `check_knowledge_document` is its preflight, not a second copy of it.
+        """Refuse a closeout this installation cannot write, before anything is
+        written. Asked here it names what is missing and leaves the sprint open; asked
+        in the terminal phase, the same refusal would be a transaction to repair.
         """
         from ummanu.knowledge_write import KnowledgeError, check_knowledge_document
         from ummanu.state_repo import StateRepoError
@@ -2979,13 +2874,9 @@ class SprintWriter:
     def _check_close_decisions_are_writable(
         self, plan: SprintCloseDecisions, *, role: str, states: Mapping[str, str]
     ) -> None:
-        """Refuse a plan this installation cannot perform, before the transaction opens.
-
-        Every disposition move the plan would make is asked of `card_transition` for the closing
-        role, the table the dispose step's own move is checked against, so a close whose role may not
-        make one of its moves is refused whole, with nothing staged, instead of failing half-written
-        (`close_plan_forbidden`). A PO close moves under the sprint override and its every edge is
-        allowed; an observer's cannot take a card out of Assessment, which it decides instead.
+        """Preflight each planned close disposition against `card_transition` for the
+        closing role before any writes. Reject the whole plan if any edge is forbidden;
+        PO uses sprint override, observer cannot move cards out of Assessment.
         """
         from ummanu.sprint_close import ALREADY_CLOSED, ALREADY_MOVED, DISPOSITION_TARGETS, KEEP_OPEN
 
@@ -3321,13 +3212,9 @@ class SprintWriter:
         request_id: str | None = None,
         observer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Reopen a sprint that still satisfies every rule for an open sprint.
-
-        The other transition into `open`, so it runs the same admission order as `create` on the same
-        staged-intent primitive. The observer is decided again here and is never inherited: what the row
-        carries is either the value of the run that closed or migration provenance, and neither is a
-        decision about the run being opened now. It is written while the sprint is still closed, so the
-        row is never readable open under a value the reopening caller did not choose.
+        """Reopen through the same admission/staged-intent path as create. Require a
+        fresh explicit observer selection rather than inheriting a closed or migrated
+        value; write it before transitioning to open.
         """
         self._role(role, {"po"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
@@ -3467,12 +3354,10 @@ class SprintWriter:
         )
 
     def _guard_observer_identity(self, *, role: str, actor: str, reference: str, request_id: str) -> None:
-        """Refuse a sprint write of role `observer` that is not about the caller's own sprint.
-
-        The card guard's counterpart on the entity side, with the same two codes and the same
-        fail-closed rule: a head that names no sprint cannot be authenticated at all. The refusal is
-        audited under its own request id so it neither consumes the operation's retry key nor is
-        recorded twice on a retry.
+        """Refuse a sprint write of role `observer` that is not about the caller's own
+        sprint. The card guard's counterpart on the entity side, with the same two
+        codes and the same fail-closed rule: a head that names no sprint cannot be
+        authenticated at all.
         """
         if role != "observer":
             return
@@ -3640,10 +3525,9 @@ def _sprint_number(sprint: SprintWriteSnapshot | dict[str, Any] | None) -> int:
 
 
 def _is_sprint_row(raw: Any) -> bool:
-    """A row on the sprint board becomes a sprint when it carries a sprint reference.
-
-    A create writes the reference after the fields the sprint was admitted with, so a row still
-    without one is an unfinished create its own staged transaction repairs.
+    """A row on the sprint board becomes a sprint when it carries a sprint reference. A
+    create writes the reference after the fields the sprint was admitted with, so a row
+    still without one is an unfinished create its own staged transaction repairs.
     """
     return isinstance(raw, dict) and str(raw.get("reference") or "").startswith(SPRINT_REFERENCE_PREFIX)
 
@@ -3665,11 +3549,8 @@ def _close_step_request_id(request_id: str, step: str, reference: str) -> str:
 
 def canonical_repository_roots(paths: list[Any]) -> list[str]:
     """The absolute roots a declaration means, resolved where the caller declared them.
-
-    A relative root only names a tree next to the process that wrote it, so it is resolved once,
-    here, at declaration time. Resolving it later would answer against whichever process runs the
-    check, and two sprints sharing a tree would read as disjoint. A root this host cannot resolve
-    at all is refused rather than guessed at.
+    A relative root only names a tree next to the process that wrote it, so it is
+    resolved once, here, at declaration time.
     """
     roots: list[str] = []
     for raw in paths:
@@ -3692,9 +3573,9 @@ def canonical_repository_roots(paths: list[Any]) -> list[str]:
 
 def _scanned_roots(paths: list[Any], *, refusal: Callable[[str, str], TaskError]) -> list[Path]:
     """The stored roots of one sprint being scanned, or a refusal naming the bad value.
-
-    Fails closed on anything that is not already absolute: such a value is canonical to no host,
-    and resolving it here is exactly how two sprints sharing a working tree read as disjoint.
+    Fails closed on anything that is not already absolute: such a value is canonical to
+    no host, and resolving it here is exactly how two sprints sharing a working tree
+    read as disjoint.
     """
     roots: list[Path] = []
     for raw in paths:
@@ -3742,11 +3623,8 @@ def _timestamp(value: str) -> datetime | None:
 
 
 def _ownership(meta: dict[str, str]) -> dict[str, Any]:
-    """The sprint's product, issues and reservations, only where the row has them.
-
-    A sprint created before ownership existed carries none of the three keys. A reader answering
-    `""` and `[]` for it would put values on the entity nobody wrote, and the next checkpoint would
-    store them as if they were chosen.
+    """The sprint's product, issues and reservations, only where the row has them. A
+    sprint created before ownership existed carries none of the three keys.
     """
     result: dict[str, Any] = {}
     if "sprint_product" in meta:
@@ -3759,11 +3637,9 @@ def _ownership(meta: dict[str, str]) -> dict[str, Any]:
 
 
 def _observer(meta: dict[str, str]) -> dict[str, Any]:
-    """The sprint's declared observer, only where the row carries the field.
-
-    Three states stay apart, because their repairs differ: the key is missing, the key holds one of
-    the four tagged forms, or the key holds something else. The last is reported as `None` rather
-    than dropped, so a corrupt row does not pass for one that carries nothing.
+    """The sprint's declared observer, only where the row carries the field. Three
+    states stay apart, because their repairs differ: the key is missing, the key holds
+    one of the four tagged forms, or the key holds something else.
     """
     if OBSERVER_FIELD not in meta:
         return {}
