@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from ummanu import status
 from ummanu.dispatch import observer, pause_ops
 from ummanu.dispatch.launch import WORKER_ROLE
 from ummanu.dispatch.types import HostError, STOPPED_BY_OPERATOR
@@ -175,6 +176,13 @@ class ObserverStateReasonTests(unittest.TestCase):
             snapshot = observer.observer_snapshot(payload)
         self.assertEqual(snapshot[0]["state_reason"], "no pending work")
         self.assertEqual(snapshot[0]["idle_reason"], "no pending work")
+        with mock.patch.object(
+            observer, "observer_alive", return_value={
+                "alive": False, "pid_known": False, "reason": "not-running"
+            }
+        ):
+            status_rows = status._observers(payload)
+        self.assertEqual(status_rows[0]["state_reason"], "no pending work")
 
 
 if __name__ == "__main__":
