@@ -1,47 +1,9 @@
-"""The single destructive guard for the wait/watchdog path (card S1-4).
+"""Final safety guard for destructive wait/watchdog actions.
 
-Every watchdog-driven decision to stop, kill, respawn or replace a worker/review head
-funnels through :func:`assert_destructive_allowed` *after* the persisted
-``VitalityEpisode`` has spoken. This is the first production consumer of the
-head-vitality ladder, and it encodes the plan's asymmetry of cost: a false "working"
-costs an idle hour, a false kill loses a live round. The guard is the last fence between
-a verdict and a destructive action, so it trusts only what the reducer earned:
-
-  * ``HealthyActive``, ``HealthyQuiet``, ``Unverifiable`` and ``Suspended`` are refused --
-    a possibly-working, quiet-below-threshold, unobservable or merely SIGSTOPed head is
-    never touched. Suspension in particular is SIGCONT territory (S1-5), not kill
-    territory.
-  * A missing episode is refused: a destructive step nobody observed is a step taken on
-    memory nobody wrote. The fail-safe direction of every anomaly here is ``wait`` with
-    telemetry, never a silent no-op and never a kill.
-  * An episode naming another ``HeadRun`` is refused: after a respawn the record briefly
-    still carries the dead run's history, and acting on it would let one run's stall
-    verdict execute against its replacement.
-  * ``SuspectedStall`` never authorises destruction here either; policy gives it at most
-    one idempotent nudge, which the caller takes before ever asking this guard about a
-    destructive step. Reaching the guard with a suspicion is therefore refused too --
-    belt and braces, in case a future call site wires the ladder wrong.
-  * Only ``ConfirmedStall`` and ``Dead`` pass.
-
-One belt-and-braces rule narrows the first production release further. The reducer's
-pid-only aging arm (issue 656: bare process existence is not liveness) can confirm a
-stall for a head whose provider source *never answered at all*. Confirmation there rests
-on one channel only, so the guard additionally requires that the role's ordinary outer
-ceiling (the ``WORKER_REPORT_STALL_DEFAULT`` class, passed in by the caller) has also
-elapsed since the episode began accumulating evidence. A confirmed pid-only stall is
-therefore acted on strictly later than the old clock-only machinery would have acted,
-never earlier. Episodes that earned confirmation on witnessed strong quiet (a provider
-cursor that answered and is still answering) are not held back: that is the two-channel
-evidence the whole sprint exists to listen for. A source that answered and has since gone
-dark is held like a pid-only one (secretary-1543): the reducer now ages such an episode
-past ``dark_ceiling`` instead of freezing it, so the confirmation behind the destructive
-step again rests on one channel.
-
-Like the rest of ``ummanu.dispatch.head_vitality*`` this module is pure: it reads no
-clock, no file and no host, performs no I/O, and raises nothing. The caller owns ``now``,
-supplies the episode from the record, and turns a refusal into ``wait`` plus one
-idempotent telemetry comment.
-"""
+Refuse missing, foreign-run, healthy, unverifiable, suspended and suspected
+stall evidence. ConfirmedStall/Dead may pass only with current-run evidence;
+PID-only or currently dark progress requires the caller's outer stall ceiling.
+The guard performs no destructive action itself."""
 
 from __future__ import annotations
 
@@ -130,31 +92,9 @@ class GuardDecision:
 
 
 def _progress_source_answering(episode: VitalityEpisode) -> bool:
-    """Whether a progress source both ANSWERED for this episode and is still answering.
-
-    Witnessing is an answered channel, not a tracked one: a cursor on file means the
-    provider spoke and its later silence is a frozen outage. Merely being recorded dark
-    (``unavailable_since``) is not witnessing -- a provider that was never heard from
-    leaves the pid as the only witness, and issue 656's contract applies: the pid's own
-    sustained silence about progress is allowed to age, which is exactly how such
-    episodes can reach ``ConfirmedStall`` and why the outer-ceiling rule below exists
-    for them.
-
-    Since secretary-1543 a source that answered and has since gone dark is treated the
-    same way here. The reducer no longer freezes such an episode indefinitely -- past
-    ``dark_ceiling`` it ages on the pid alone, which is the fix -- so at the moment of a
-    destructive step the evidence behind that confirmation is again one channel, and it
-    earns the same outer-ceiling hold. Two-channel evidence means a progress source that
-    is answering NOW, not one that answered once.
-
-    "Not dark" is that present-tense fact rather than an inference from it, because the
-    reducer stamps ``unavailable_since`` for a witnessed progress source that produced no
-    snapshot on the tick as well as for one that answered UNAVAILABLE. A status shape with
-    no provider channel at all -- the exact live heartbeat with no matching pane, the
-    disconnected pane -- therefore reaches this test as dark, which is what it is; before
-    that stamp existed it reached here as two-channel evidence and let a live head with no
-    pane binding be respawned 15 minutes after its last provider advance.
-    """
+"""A progress source is a second witness only when it answered and is still
+    answering now. A dark or never-seen provider leaves PID-only evidence,
+    which requires the additional outer-ceiling hold before destruction."""
     witnessed = bool(set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES) or episode.last_progress_at > 0.0
     dark = bool(set(episode.unavailable_since) & _PROGRESS_SOURCE_NAMES)
     return witnessed and not dark
@@ -185,20 +125,11 @@ def assert_destructive_allowed(
     current_run_id: str = "",
     pid_only_outer_ceiling_seconds: float = 0.0,
 ) -> GuardDecision:
-    """Rule on one destructive step against the run's persisted vitality verdict.
+"""Rule on a destructive step against the persisted, current-run episode.
 
-    ``episode`` is the record's persisted ``VitalityEpisode`` (``None`` when this run was
-    never observed). ``action`` names the step for telemetry (``"worker-respawn"``,
-    ``"review-respawn"``, ``"worker-escalate"`` ...). ``current_run_id`` is the run the
-    caller believes it is acting on; when both it and the episode name runs, a mismatch
-    refuses. ``pid_only_outer_ceiling_seconds`` is the role's ordinary outer stall
-    ceiling, applied only to pid-only-earned confirmations as described in the module
-    docstring.
-
-    The function never raises: an episode that is not an episode is a missing episode,
-    and a malformed ``now`` would make every comparison meaningless, so it refuses like
-    any other unknown.
-    """
+    Missing/foreign/healthy/unknown/suspended/suspected evidence is refused;
+    a confirmed stall without a currently answering progress witness needs
+    the caller's ordinary outer stall ceiling."""
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
         return _refused(
             action,
