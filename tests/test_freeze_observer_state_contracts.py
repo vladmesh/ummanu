@@ -9,7 +9,7 @@ from unittest import mock
 from ummanu import status
 from ummanu.dispatch import observer, pause_ops
 from ummanu.dispatch.launch import WORKER_ROLE
-from ummanu.dispatch.types import HostError, STOPPED_BY_OPERATOR
+from ummanu.dispatch.types import STOPPED_BY_OPERATOR, HostError
 
 
 class FreezeRoleIsolationTests(unittest.TestCase):
