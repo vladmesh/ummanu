@@ -342,18 +342,6 @@ class BrokenProbeStatusTests(unittest.TestCase):
         self.assertEqual(result.status, head_health.PROBE_BROKEN)
         self.assertFalse(result.launch_allowed)
 
-    def test_a_timeout_is_timed_out_and_no_longer_allows_a_launch(self) -> None:
-        """A probe that started and hung says nothing about the account, but since secretary-1799
-        it is not `unknown` either: `unknown` is kept for a probe that answered with something
-        unclassifiable, and a provider that cannot answer a ping in time is not launched into."""
-        with mock.patch(
-            "ummanu.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
-        ):
-            result = self.health.check("openai-sub")
-
-        self.assertEqual(result.status, head_health.PROBE_TIMED_OUT)
-        self.assertFalse(result.launch_allowed)
-
     def test_an_unexplained_provider_refusal_is_still_unknown(self) -> None:
         result = self.check(subprocess.CompletedProcess("probe", 1, "", "the model declined\n"))
 

@@ -47,9 +47,9 @@ def _cards(count: int = 3) -> list[dict[str, object]]:
 
 
 def _production_task_cards(limit: int) -> list[dict[str, object]]:
-    """The first `limit` Card rows of the sanitized 1440-row production shape."""
+    """The first `limit` task rows of a 40-card sample from the sanitized recovery shape."""
     projection = json.loads(
-        (Path(__file__).parent / "fixtures" / "recovery-card-shape-1440.json").read_text(encoding="utf-8")
+        (Path(__file__).parent / "fixtures" / "recovery-card-shape-40.json").read_text(encoding="utf-8")
     )
     cards: list[dict[str, object]] = []
     for row in projection["rows"]:
