@@ -92,7 +92,7 @@ class GuardDecision:
 
 
 def _progress_source_answering(episode: VitalityEpisode) -> bool:
-"""A progress source is a second witness only when it answered and is still
+    """A progress source is a second witness only when it answered and is still
     answering now. A dark or never-seen provider leaves PID-only evidence,
     which requires the additional outer-ceiling hold before destruction."""
     witnessed = bool(set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES) or episode.last_progress_at > 0.0
@@ -125,7 +125,7 @@ def assert_destructive_allowed(
     current_run_id: str = "",
     pid_only_outer_ceiling_seconds: float = 0.0,
 ) -> GuardDecision:
-"""Rule on a destructive step against the persisted, current-run episode.
+    """Rule on a destructive step against the persisted, current-run episode.
 
     Missing/foreign/healthy/unknown/suspended/suspected evidence is refused;
     a confirmed stall without a currently answering progress witness needs
