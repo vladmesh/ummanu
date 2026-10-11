@@ -862,8 +862,10 @@ def _worker_vitality_for_gate(
         and not isinstance(status.get("provider_progress"), dict)
         and "idle" not in status
     ):
-        # Nothing was observed: no honest episode exists for this tick.
-        return record.worker_vitality_episode
+        # Nothing was observed this tick. Do not feed a previous episode back
+        # into recovery policy as fresh evidence (it may describe an old run).
+        # The persisted episode remains available to identity/destructive guards.
+        return None
     try:
         return _reduce_and_store_vitality_episode(runtime, 
             task,
