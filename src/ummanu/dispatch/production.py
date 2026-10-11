@@ -1112,7 +1112,12 @@ def _advance_active(
         except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
             errors.append(_unexpected_error(str(task.get("ref") or ""), exc))
             continue
-        if outcome.get("status") == "blocked":
+        # Legacy terminal paths report a committed board transition as
+        # {"status": "ok", "to": "blocked"}.  That is still a Blocked card:
+        # suppress claims in its sprint and project during this same tick.
+        if outcome.get("status") == "blocked" or (
+            outcome.get("status") == "ok" and outcome.get("to") == "blocked"
+        ):
             sprint_ref = str(task.get("sprint") or "")
             project = str(task.get("project") or "")
             if sprint_ref:
