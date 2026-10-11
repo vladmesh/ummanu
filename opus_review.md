@@ -2,6 +2,17 @@
 
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
+## Дельта 2026-10-11: неповеденческая чистка тестов, #722 на main `312c5065c093cf7a548878874e08ffdd009d6de0`
+
+[PR #722](https://github.com/vladmesh/ummanu/pull/722) смёржен (squash) в `main`. Exact-head [CI 38153527100](https://github.com/vladmesh/ummanu/actions/runs/38153527100) — **success**: lint, typecheck, девять suites и aggregate `test`. Post-merge main CI — отдельная проверка, не подменять CI candidate.
+
+**TDEAD-03 ✅ с исправлением инвентаризации:** удалены 13 неиспользуемых test helpers из `test_tasks`, `test_sprints`, `test_cli`, `test_head_vitality_legacy_path` и `sql_backend_fixtures`. Исторический список ошибочно называл `board_writes` мёртвым: метод имеет живой вызов в `test_tasks`, сохранён. Все остальные 13 определений не имеют иных вхождений своих имён в файлах-владельцах; GitHub code search дополнительно подтвердил ряд уникальных определений. Удаления не меняют runtime.
+
+**TDEAD-07/L1a ◐:** из `test_architecture.py` удалён только `test_the_allowlist_keeps_only_the_two_owner_decisions` — жёсткий pin двух конкретных Orca-исключений. Живой guard `test_each_allowlist_entry_still_excuses_a_real_line`, запреты на Orca и planted violations сохранены. Исторический L1a baseline — **18 delete**, поэтому остаются **17 предложений без независимой идентификации**. Исходный `ummanu-221/tests.csv` в `ummanu-instance` не открылся через доступную GitHub installation (404), остальные элементы L1a не удалялись на основании догадки. Матрица 80/47/77 ниже — снимок первоначального исследования, не текущие счётчики поставки.
+
+Всего в #722 удалено **14 определений, 199 строк** в шести тестовых файлах. Для прохождения Ruff в двух затронутых файлах дополнительно механически поправлены пять ранее существовавших lint-замечаний (комбинированные `with`, `capture_output`, незадействованная локальная переменная). Код продукта не менялся; assertions оставленных тестов не удалялись. Audit PR #668 по-прежнему не мёржить.
+
+
 ## Дельта 2026-10-11: неповеденческий ARCH-01, #721 на main `7ae2efdb16c08cb2557bdf47ed178b30033b18f8`
 
 [PR #721](https://github.com/vladmesh/ummanu/pull/721) смёржен (squash) в `main` на `7ae2efdb16c08cb2557bdf47ed178b30033b18f8`. Exact-head [CI 38150123690](https://github.com/vladmesh/ummanu/actions/runs/38150123690) завершился **success** на `e8d2101a7399d02e660c6733015c4e6d4eb1cf7c`: lint, typecheck, все девять тестовых suite owners и итоговый `test`. Это свидетельство PR candidate; post-merge main CI проверяется отдельно.
@@ -1046,7 +1057,7 @@ job-секунд и не двигает критический путь. Выи�
 |---|---|---|---|
 | TDEAD-01 | `tests/fixtures/recovery-order-groups.json` (26 КБ) | ноль ссылок | −26 КБ |
 | TDEAD-02 | `recovery-card-shape-1440.json` (247 КБ, 11 530 строк) | единственный вызов — `_production_task_cards(40)` (`test_bulk_card_restore.py:198`); первые 40 записей и есть 40 задач | −240 КБ (≈60 тыс. токенов, если агент его прочитает) |
-| TDEAD-03 | Мёртвые помощники: `test_tasks.py` (`board_batches` 160, `board_writes` 170, `assertCardCarriesNoMetadata` 218, `archive_card` 308, `board_refuses_once` 355, `board_drops_the_call_after` 386, `board_moves_the_card_after` 405, `_pending_typed_move` 960); `test_sprints.py` (`_reject_removal` 244, `_stall_create` 255, `_round_trips` 2442); `test_cli._raw_dump_instance` 735; `test_head_vitality_legacy_path.run_worker_to_validate_and_review` 156; `sql_backend_fixtures.close_card` 583 | ссылки только на определение (исключены `_*_refuses`, которые диспетчеризуются через `_faults`) | ≈200 строк |
+| TDEAD-03 | ✅ #722: 13 неиспользуемых тестовых helpers удалены; ошибочно помеченный `board_writes` оставлен, так как вызывается в `test_tasks.py` | По каждому удалённому имени в файле-владельце было только определение; #722 exact-head CI зелёный. Исторические номера строк устарели | −185 строк helpers (отдельно 14 строк L1a) |
 | TDEAD-04 | Тесты-дубли: `test_head_health.py:87` ≡ `:345` (тела идентичны) | — | 1 тест |
 | TDEAD-05 | `test_po_service.py`: `OutcomeUnknownTests(EndpointTests)` (858) и `AcceptanceAnswerTests(EndpointTests)` (971) наследуют 4 теста без переопределений | 8 лишних прогонов | время CI |
 | TDEAD-06 | `test_tasks.py:5383` `TypedMarkerRecoveryTests(RequestIdOwnershipTests)` повторно гоняет 11 Postgres-тестов | **Г**: наследование выглядит случайным | время CI |
@@ -1056,7 +1067,7 @@ job-секунд и не двигает критический путь. Выи�
 | TDUP-04 | `Recording` (`web_fakes.py:10` ≡ `test_web_transport_dashboard.py:34`); `FakeHeadRuntime` (`test_web_run_protocol.py:126` ≈ `test_web_transport.py:132`); `open_sprint` (`test_tasks.py:64` ≡ `fakes/tasks.py:22`); `drop_cards` (`test_sprints.py:60` ≡ `fakes/sprints.py:45`); `board_injected` (`webproto_sprint_fixtures.py:127-142` ≈ `fakes/sprints.py:299-315`); setUp `test_checkpoint.py:104` ≡ `test_knowledge_write.py:48`; `fast_key_params` ×2; `stop_everything` ×2 | — | ≈200 строк |
 | TDUP-05 | Проза в тестах: docstring 762 тыс. + комментарии 338 тыс. (≈275 тыс. токенов); 3 357 ссылок на тикеты и даты; 126 docstring длиной ≥ 9 строк | Ограничить docstring теста формулировкой правила и одной ссылкой | −250…350 тыс. символов |
 | TORG-01 | Помощники лежат в трёх местах: 28 модулей в корне `tests/`, `tests/fakes/` (7), `tests/support/` (3) | Правило: инфраструктура → `support/`, двойники → `fakes/`; в корне только `test_*.py`, `__init__.py`, `broad.py` | контекст |
-| TDEAD-07 | Лишние и текстовые проверки; актуальная инвентаризация ниже | issue:e515244ce9d2e3417b1e; 204 строки ummanu-221 проверены по определениям в main, предложения ещё не реализованы | Меньше ложных падений и шума ревью |
+| TDEAD-07 | ◐ #722: один доказанный L1a tautology-тест удалён, остальные по CSV ещё открыты | Исходная 204-позиционная инвентаризация ummanu-221 — baseline; 17 предложенных L1a удалений не подтверждены без недоступного CSV | Меньше хрупких pins, но не закрыт test-quality backlog |
 | TEST-03 | Неполный общий AST reuse между guard'ами; поправка к ummanu-221 ниже | Кэш #684 существует внутри test_architecture; другие scans его обходят, teardown сбрасывает его между модулями | Повторная стоимость parse/walk, а не отсутствие любого кэша |
 
 #### TDEAD-07: «левые» тесты, существующий issue и нарезка
@@ -1074,6 +1085,8 @@ manifest, и 7 938 непосредственных test-функций/мето
 
 Предложено удалить 80, переписать на поведение 47, оставить 77, включая 55 named
 architecture guards. Эти решения не означают, что 127 изменений уже сделаны.
+Из исходных 80 suggested deletions только одна L1a-позиция здесь подтверждённо
+удалена #722; остальные предложения не считать реализованными по снимку CSV.
 Проверенные примеры: `test_architecture.py:393` пинит allowlist-константу при отдельной
 проверке её соответствия живому коду (`:345`); `:548` и `test_worker_card_comments.py:424`
 сравнивают порядок calls через текст исходника; `test_po_service.py:1785` ищет порядок
@@ -1086,7 +1099,7 @@ receipt/start через getsource. Последние требуют лога �
 
 | Карточка исследования | Scope | Delete / rewrite |
 |---|---|---|
-| L1a | Architecture absence/tautology | 18 / 0 |
+| L1a | Architecture absence/tautology | 18 / 0 исходно; 1 удалён #722, 17 кандидатов требуют CSV |
 | L1b | Dispatch back-edge guards и смешанные проверки порядка | 0 / 11 |
 | L2 | Retired host/upgrade names | 12 / 1 |
 | L3 | Retired board/runtime и дубли | 10 / 1 |
