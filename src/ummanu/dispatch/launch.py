@@ -1,44 +1,14 @@
-"""Durable launch intent for the dispatcher-launched worker and reviewer heads.
+"""Durable launch intents for dispatcher worker and reviewer heads.
 
-Same contour as the observer's (`dispatch.observer`) and for the same reason: a head is a real
-process from the moment the host is asked for one, but `DispatcherRecord` only learns its
-workspace, pane and routing from the `save_records` at the end of the launch path.
+Write the role, reserved round/attempt, workspace and pid-file identity before
+asking the host to start a process. Resolve the intent before advancing the card:
+adopt a confirmed live pid, wait through heartbeat grace if unknown, and clean up
+a confirmed-dead or abandoned launch before retrying.
 
-So the launch is fixed on disk first. The intent names the role, the round and attempt it belongs
-to, the workspace the head runs in and the pid file it writes its heartbeat to. Workspace and pid
-file are path arithmetic over the card reference and the worker id, so both are known before the
-host answers, which is what lets the next tick settle "is the head of that launch alive" without
-the terminal handle the lost tick never persisted. The round is reserved here, before the host
-call, so an adoption resumes the rework rather than the round the red result closed.
-
-Resolution runs before anything else the tick would do with the card:
-
-  live pid    -> adopt it. The record becomes what the launch would have written, and no second
-                 head is launched.
-  no pid yet  -> leave the intent alone. A head that has just started has not written its
-                 heartbeat, and that is not evidence of death, so it waits out the same grace
-                 window every fresh head gets.
-  dead pid    -> the launch left nothing running. Whatever it may have left in the workspace is
-                 stopped, the intent is dropped, and the ordinary path relaunches — into the round
-                 the intent reserved, since a rework's round is over whether or not its head lived.
-
-The intent is held for the whole bring-up, not only up to the host call: the pane the host opened
-and the configuration it launched go into the intent, and only when the record has everything is
-the intent spent. Everything in that tail runs over a process that already exists, so a failure
-there is ambiguous rather than a launch that did not happen.
-
-State that cannot be written is a launch that does not happen: the caller answers a failed intent
-write by not touching the host at all. A bring-up that fails once its terminal is already up is
-reported as `HeadLaunchAborted` with the pane it opened, and the intent stays on disk carrying
-that handle.
-
-A head adopted this way usually has no pane handle, which is why `command_terminal_status` falls
-back to the pid heartbeat when a record carries no pane identity for its role, and why the
-heartbeat stays on the record as that role's identity (`worker_pid_file` / `review_pid_file`):
-every later stop goes through it when there is no pane to close.
-
-Nothing here assumes a stop worked. A head the host will not confirm gone keeps its record and
-its intent, and the tick returns `*-stop-unconfirmed` instead.
+Record the actual pane, launched profile and HeadRun while the intent remains.
+A failed state write prevents launch; a post-pane failure preserves the intent.
+Never treat a refused stop as complete or start a second head without resolving
+its predecessor.
 """
 
 from __future__ import annotations
@@ -152,11 +122,10 @@ def launch_delivery_state(evidence: Any) -> str:
 
 
 def launch_delivery_receipt(evidence: Any) -> dict[str, Any] | None:
-    """The durable delivery record for an intent, or None when no delivery was observed.
+    """Return durable delivery evidence, or None when delivery was not observed.
 
-    None is not "delivered": it is a bring-up that failed before a prompt existed, or a head whose
-    launch command carried its own prompt. Only a record the delivery boundary produced can either
-    authorise or refuse a claim, so only that one is written.
+None does not prove delivery: the launch may have failed before a prompt existed
+or the head may not have received it.
     """
     if delivery_receipt_state(evidence) == DELIVERY_RECEIPT_UNOBSERVED:
         return None
@@ -168,13 +137,10 @@ def launch_delivery_receipt(evidence: Any) -> dict[str, Any] | None:
 
 
 def undelivered_launch_delivery(intent: dict[str, Any]) -> dict[str, Any]:
-    """The evidence that this launch's pointer was never accepted, or `{}`.
+    """Evidence of an unaccepted launch delivery, or an empty mapping.
 
-    This is the one predicate adoption, recovery and the reviewer retry all ask, so that a live
-    pid, a writable pane and Orca's own `accepted`/`bytesWritten` cannot authorise on one path what
-    they are refused on another. `issue:6afc6644` is exactly the disagreement: the delivery
-    boundary got it right — blocked, unconfirmed, zero bytes written — and the next tick adopted
-    the retained launch as `reviewing` anyway because the pid was alive.
+Adoption, recovery and reviewer retry use the same boundary verdict; a live
+pid or writable pane never overrides a refused or unconfirmed prompt.
     """
     delivery = launch_delivery(intent)
     if not delivery:
@@ -224,11 +190,10 @@ def defer_launch_delivery(
 def defer_pending_launch_delivery(
     record: DispatcherRecord | None, evidence: dict[str, Any], *, worker_fenced: bool = False
 ) -> bool:
-    """Keep a launch whose production handoff is pending for the next tick; True if that changed it.
+    """Keep a pending production handoff for the next tick.
 
-    The attempt count stays as it was: a handoff in progress is neither a refused pointer nor a busy
-    pane, so it does not bring the launch closer to its replacement. `worker_fenced` records that the
-    host made the writer fence before the reviewer was given anything; once set it stays set.
+Do not count it as an unsuccessful delivery or pane busy retry.
+A persisted worker_fenced value remains set once the host established the fence.
     """
     intent = dict(launch_intent(record))
     if not intent:
@@ -276,12 +241,10 @@ def write_launch_intent(
     round_number: int | None = None,
     task: dict[str, Any] | None = None,
 ) -> str | None:
-    """Fix one bring-up on disk before the host is called. Returns the failure, or None.
+    """Persist a launch intent before invoking the host.
 
-    The record is left exactly as it was when the write fails. `round_number` is the round the head
-    being launched will belong to and has to be reserved here rather than after the host call: it is
-    the round an adoption resumes, and a rework recovered on the round its red verdict ended would
-    merge two rounds and their routing into one.
+A failed write leaves the record unchanged and prevents launch. Reserve the
+new round here so an interrupted rework cannot resume in its rejected round.
     """
     previous = dict(getattr(record, "launch_intent", None) or {})
     previous_workspace_settled = record.workspace_settled
@@ -353,18 +316,11 @@ def confirm_launch_intent(
     head_run: dict[str, Any] | None = None,
     delivery: dict[str, Any] | None = None,
 ) -> None:
-    """Put what the finished host call knows about the head into its intent, on disk.
+    """Persist the pane, actual launch snapshot and HeadRun after host bring-up.
 
-    The pane and the launch snapshot exist only once the host has answered, and everything the tick
-    still owes that head afterwards runs against a process that is already up and can refuse.
-    Writing them here lets a recovery adopt that head with the configuration it actually launched on.
-
-    `head_run` is written here too, into the intent and onto the record in one save, so there is no
-    window in which a tick can die leaving a head whose run nothing recorded and the next tick
-    reconstructs a fresh identity for the same process, losing an in-progress stop's initiator.
-
-    A refused write is not a problem: the pre-launch intent is already on disk and names the same
-    head.
+Save identity in both intent and record before further effects so recovery can
+adopt exactly the running head. The pre-launch intent remains sufficient if
+this write fails.
     """
     intent = dict(launch_intent(record))
     if not intent:
@@ -607,17 +563,11 @@ def mark_launch_aborted(
     record: DispatcherRecord,
     exc: HeadLaunchAborted,
 ) -> None:
-    """Keep the intent of a bring-up that failed with a pane already open.
+    """Keep the intent when bring-up fails after opening a pane.
 
-    The host could not promise that nothing of that head is running, so the intent survives with
-    whatever identity the failure carried; the next tick adopts the head or stops what is left of it.
-    A reviewer whose pre-send document nudge recorded busy retries that exact nudge first. A persist
-    that refuses is not a problem: the pre-launch intent already names the same pid file.
-
-    What the delivery boundary saw travels with the intent too. A bring-up that aborted *after* its
-    prompt was refused leaves a live head that never received it, and the next tick has nothing but
-    this record to tell that apart from a head that is working: the pane is writable and the pid is
-    alive in both cases.
+Preserve observed pane/pid and delivery evidence for the next tick: a live,
+writable head may still have received no prompt. An interrupted reviewer
+document nudge is retried under its original identity.
     """
     intent = dict(launch_intent(record))
     if not intent:
@@ -772,13 +722,10 @@ def classify_bring_up_failure(
     attempt_id: str,
     detail: str = "",
 ) -> BringUpFailure:
-    """The one place a bring-up failure becomes a class, a cause and its evidence.
+    """Classify bring-up failures with a typed cause and evidence.
 
-    `exc` is the failure as the host raised it; the reviewer's preflight has no exception to raise
-    (a resource that is not ready, a launch intent that could not be written) and passes None with
-    `detail` instead. A raise site that knows something the type cannot say — this card's checkout
-    is not the one its claim recorded — says it with `HostError(..., bring_up_cause=...)`, and an
-    unknown cause there is ignored rather than trusted.
+An exception or an explicit preflight refusal supplies the details. Accept
+only recognized HostError bring_up_cause values; unknown causes are not proof.
     """
     cause = ""
     if isinstance(exc, HeadLaunchAborted):
@@ -950,11 +897,11 @@ def resolve_launch_intent(
 
 
 def _retained_worker_kept_for_review(runtime: Any, record: DispatcherRecord, intent: dict[str, Any]) -> bool:
-    """Whether a reviewer adopted from a finished production handoff keeps the retained worker.
+    """Whether an adopted reviewer keeps its previously retained worker.
 
-    Only for a launch whose delivery a handoff carried (`defer_pending_launch_delivery`), and only
-    while the worker is provably gone or confirmably still suspended, the two cases `start_review`
-    itself accepts. A confirmation that fails is not a refusal here: the caller stops the worker.
+Only a completed production handoff qualifies, and only when the worker is
+confirmed stopped or still suspended. An inconclusive answer is handled by
+the caller's stop path.
     """
     if not launch_delivery(intent).get("handoff") or not record.worker_continuation.retained:
         return False
@@ -967,12 +914,10 @@ def _retained_worker_kept_for_review(runtime: Any, record: DispatcherRecord, int
 
 
 def keep_reserved_round(runtime: Any, record: DispatcherRecord, intent: dict[str, Any]) -> None:
-    """Carry the round a dropped worker intent reserved onto the record it was written over.
+    """Apply the round reserved by an abandoned worker launch intent.
 
-    A rework reserves the next round before the host call, while the record still carries the round
-    the red result closed. Dropping such an intent is not giving the reservation back: the round is
-    over either way, and without this the respawn runs the rework inside the round that rejected it.
-    Only for an intent that opens a round.
+A failed rework still consumes its reserved round; do not restart rework
+under the round whose red verdict initiated it.
     """
     if str(intent.get("role") or "") == REVIEW_ROLE:
         return
@@ -988,12 +933,10 @@ def keep_reserved_round(runtime: Any, record: DispatcherRecord, intent: dict[str
 def stop_launch_intent(
     runtime: Any, record: DispatcherRecord, intent: dict[str, Any], role: str
 ) -> str | None:
-    """End whatever a launch left behind and take its intent back. Returns the failure, or None.
+    """Stop a launch's residual head and remove its intent if confirmed.
 
-    The intent survives an unconfirmed stop: a head the host will not promise is gone must keep a
-    pointer, or a later requeue starts a second process in the same checkout. The identity is
-    whatever the launch got as far as recording — the pane, the heartbeat, and failing both the
-    workspace itself, which is all that can reach a head running without the heartbeat wrapper.
+Retain identity after a refused stop, avoiding a second process in the same
+workspace. Fall back from pane/heartbeat evidence to the owned workspace.
     """
     _remember_launch_identity(record, intent, role)
     handle = getattr(record, "review_handle" if role == REVIEW_ROLE else "handle", "")
@@ -1071,11 +1014,10 @@ def _adopt_launch_intent(
     role: str,
     step: str,
 ) -> dict[str, Any]:
-    """Take the head of a launch whose tick did not survive as this card's head for that role.
+    """Adopt an interrupted launch as this card's head for its role.
 
-    The run comes back first and the pane pointers are re-addressed on top of it: identity, lifecycle
-    and any initiator a stop already wrote are the launch's, while the handle, leaf and heartbeat are
-    only where that head is currently reachable. Nothing after this reconstructs a run over it.
+Restore the durable HeadRun first, then re-address pane, leaf and heartbeat.
+Do not reconstruct identity or overwrite an existing stop initiator.
     """
     ref = task["ref"]
     undelivered = undelivered_launch_delivery(intent)
@@ -1220,17 +1162,11 @@ def refuse_undelivered_launch(
     step: str,
     undelivered: dict[str, Any],
 ) -> dict[str, Any]:
-    """A launch whose pointer the composer never accepted is not a claim, however alive it is.
+    """Do not adopt a head whose prompt delivery was refused or unconfirmed.
 
-    Nothing of adoption happens here: no routing event, no `claimed`, no `review_starting`, no
-    `reviewing`, no worker freeze, and above all the intent is not spent. Clearing it is what turned
-    an undelivered reviewer into `waiting-review-verdict` for over an hour on `issue:6afc6644`, and
-    an undelivered worker into a successfully claimed head on `issue:2fdac531`.
-
-    The refusal is bounded, because a card that never moves is its own failure: past
-    `LAUNCH_DELIVERY_MAX_ATTEMPTS` the head is stopped through its own intent and the ordinary path
-    relaunches on a later tick. Stopping first is what keeps this from opening a second head beside
-    the first, and an unconfirmed stop keeps the intent rather than pretending the head is gone.
+No routing claim, reviewer transition, freeze or intent consumption occurs
+until delivery is accepted. After LAUNCH_DELIVERY_MAX_ATTEMPTS, stop through
+the intent before allowing a later relaunch; retain it when stop is unconfirmed.
     """
     attempts = int(undelivered.get("attempts") or 0)
     state = str(undelivered.get("state") or "")
@@ -1306,11 +1242,10 @@ def _record_adopted_routing(
     role: str,
     step: str,
 ) -> dict[str, Any] | None:
-    """Give the adopted head its routing record. Returns the tick's outcome when that write fails.
+    """Record routing for an adopted head, returning an outcome on failure.
 
-    The head an interrupted tick launched is a head that ran, so the round owes it the same routing
-    event every other bring-up writes. A journal that refuses keeps the intent: the head is adopted
-    again next tick and the routing retried then.
+Reconstruct the launch's durable routing identity rather than claiming a new
+head or discarding a recovered launch.
     """
     ref = task["ref"]
     run = intent.get("run") if isinstance(intent.get("run"), dict) else None
@@ -1335,10 +1270,10 @@ def _record_adopted_routing(
 
 
 def _persist_quietly(runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> bool:
-    """Flush the records mid-tick. False means this tick's own save is what carries them.
+    """Flush records during a launch/adoption tick.
 
-    Never raised at the caller: an adoption that is not persisted is repeated by the next tick from
-    the same intent, which is the same answer rather than a second head.
+When the flush fails, the tick's final save remains responsible; avoid
+raising a failure after an already running head was admitted.
     """
     try:
         runtime.save_records(payload, records)
