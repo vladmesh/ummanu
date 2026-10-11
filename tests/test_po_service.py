@@ -697,7 +697,7 @@ class _Direct:
         return self.service.request_restart(reason=reason)
 
 
-class EndpointTests(ServiceFixture):
+class EndpointSupport(ServiceFixture):
     def layer(self, client: PoServiceClient | None = None) -> PoLayer:
         return PoLayer(self.root, data_dir=self.data, store=self.store(), client=client, models=MODELS)
 
@@ -709,6 +709,8 @@ class EndpointTests(ServiceFixture):
         )
         return app, {"Cookie": f"{po_token.COOKIE_NAME}={cookie}"}
 
+
+class EndpointTests(EndpointSupport):
     def test_the_socket_is_private_and_one_service_serves_an_installation(self) -> None:
         service = self.service()
         with listening(service) as path:
@@ -874,7 +876,7 @@ class RequestIdReservationTests(ServiceFixture):
         )
 
 
-class OutcomeUnknownTests(EndpointTests):
+class OutcomeUnknownTests(EndpointSupport):
     """Review 5: a request written to the service whose answer is lost is not "nothing was written"."""
 
     def lose_the_reply(self):
@@ -987,7 +989,7 @@ def fail_once(target, name: str, when):
     return mock.patch.object(target, name, wrapper), failed
 
 
-class AcceptanceAnswerTests(EndpointTests):
+class AcceptanceAnswerTests(EndpointSupport):
     """Review 17: after acceptance a request is answered as accepted, and a refused form keeps its id."""
 
     def post(self, app, headers, route: str, fields: dict[str, str]):

@@ -1,0 +1,330 @@
+{
+  "version": 1,
+  "source": {
+    "kind": "sanitized normalized recovery shape",
+    "source_revision": "a7d9f3796e5a1cdbf36eb121070c7ec6ad05e50c",
+    "source_rows": 1440
+  },
+  "rows": [
+    {
+      "ordinal": 1,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "ai-risk-decision-lab",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 2,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 3
+    },
+    {
+      "ordinal": 3,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 2
+    },
+    {
+      "ordinal": 4,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 5,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 2
+    },
+    {
+      "ordinal": 6,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 7,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 2
+    },
+    {
+      "ordinal": 8,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 9,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 10,
+      "record_type": "task",
+      "closed": false,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 3
+    },
+    {
+      "ordinal": 11,
+      "record_type": "task",
+      "closed": true,
+      "column": "Ready",
+      "swimlane": "butler",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 12,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "butler",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 13,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 14,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 15,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 16,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 17,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 18,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 19,
+      "record_type": "task",
+      "closed": true,
+      "column": "Ready",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 20,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 21,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 22,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 23,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 24,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 25,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 26,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 27,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 28,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 6
+    },
+    {
+      "ordinal": 29,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 5
+    },
+    {
+      "ordinal": 30,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 4
+    },
+    {
+      "ordinal": 31,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 3
+    },
+    {
+      "ordinal": 32,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 2
+    },
+    {
+      "ordinal": 33,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 34,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 6
+    },
+    {
+      "ordinal": 35,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 5
+    },
+    {
+      "ordinal": 36,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 4
+    },
+    {
+      "ordinal": 37,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 3
+    },
+    {
+      "ordinal": 38,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 2
+    },
+    {
+      "ordinal": 39,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 1
+    },
+    {
+      "ordinal": 40,
+      "record_type": "task",
+      "closed": true,
+      "column": "Done",
+      "swimlane": "codegen-orchestrator",
+      "actual_position": 9
+    }
+  ]
+}
