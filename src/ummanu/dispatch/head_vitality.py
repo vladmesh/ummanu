@@ -1,43 +1,7 @@
-"""Head-vitality observation vocabulary: three independent axes on one identity-bound snapshot.
+"""Pure, run-bound vitality observation: Process, Turn and Progress axes.
 
-The dispatcher's destructive history (secretary-1063, the 2026-08 incidents behind cards
-codegen-orchestrator-1194..1197) came from collapsing several different questions into one boolean:
-"is the head working?". This module splits that question into the three independent axes of the
-head-vitality plan (`state/knowledge/plans/2026-08-21-head-vitality-runtime-orca-migration.md`,
-section "Observation") and turns the signals the codebase already produces into pure data:
-
-    Process  = Running | Suspended | Dead | Unknown      does a kernel process exist?
-    Turn     = Active | Idle | Unknown                   is a turn in flight?
-    Progress = Advancing | Quiet | Stagnant | Unknown    is the work moving?
-
-Nothing here decides anything. There is no threshold, no timer and no recovery ladder in this
-module: an observation reports facts, fusion forms suspicion, policy chooses intent, and only the
-runtime that owns delivery can make intervention safe. Keeping every producer dumb and pure is what
-lets later cards persist episodes and switch the watchdog without re-deriving these meanings at the
-call site.
-
-Invariants every consumer may rely on, and every builder below enforces:
-
-  * **A snapshot is bound to one ``HeadRun.run_id``.** A builder refuses to attach a reading to an
-    unnamed run, and a source whose own attestation names a *different* live run degrades to
-    ``Unknown``/``Unavailable`` -- never to ``Dead``, because "not mine" is not evidence of death.
-    A snapshot therefore never combines a new run's pid with an old run's provider cursor: each
-    builder stamps exactly the run it proved.
-  * **An unavailable source is not evidence of no progress.** Every failure mode maps to
-    ``Unknown`` plus ``SourceAvailability.UNAVAILABLE`` with a bounded reason. In particular a
-    single unchanged provider cursor is ``Quiet``, never ``Stagnant``: stagnation is a conclusion a
-    reducer draws over time, not something one observation can see.
-  * **Pane and terminal readings are advisory.** They fill the ``Turn`` axis alone, are stamped
-    with the ``pane_advisory`` source, and can never by themselves grant a stop capability --
-    readiness answers whether a pane will accept input, not whether the head behind it may be
-    killed. The local-pty supervisor journal (``supervisor_journal``, secretary-1739) is not a
-    pane reading: the supervisor that owns the head's pty opened and closed the turn it reports,
-    so its ``Turn`` is strong evidence. It never speaks to the ``Process`` axis.
-
-Adapters here are pure functions over plain values: the caller reads ``/proc``, the pid file, the
-provider journal or the pane inventory and passes the result in. The module performs no I/O and
-imports no runtime host, so a snapshot can be built in a unit test from a hand-written status dict
-and the producers' shapes can drift only through a failing test.
+Convert individual channel readings into snapshots; this module does not make
+recovery decisions. Unknown, absent or foreign evidence must not imply progress.
 """
 
 from __future__ import annotations
@@ -98,13 +62,7 @@ class TurnState(StrEnum):
 
 
 class ProgressState(StrEnum):
-    """Whether the work itself is seen to move, as of one instant.
-
-    ``STAGNANT`` exists in the vocabulary because the reducer needs somewhere to record a
-    stagnation conclusion, but no single-snapshot builder may ever produce it: one unchanged
-    cursor is ``QUIET``, and calling it stagnation is the six-hour-ceiling mistake this sprint
-    exists to remove.
-    """
+"""Whether the work itself is seen to move, as of one instant."""
 
     ADVANCING = "advancing"
     QUIET = "quiet"
@@ -146,14 +104,7 @@ class SnapshotSource(StrEnum):
 
 @dataclass(frozen=True)
 class VitalitySnapshot:
-    """One channel's reading of one head run at one instant.
-
-    Frozen so a snapshot can be stored on a dispatcher record, compared structurally in tests and
-    handed across tick boundaries without a reader being able to edit history in place. Axes the
-    producing channel cannot answer stay ``Unknown``: independence means a pid heartbeat that says
-    nothing about turns fills exactly one axis, and a consumer that wanted all three filled from
-    one source would be re-fusing the channels this module exists to keep apart.
-    """
+"""One channel's reading of one head run at one instant."""
 
     run_id: str
     source: SnapshotSource
@@ -228,12 +179,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_json(cls, payload: Any) -> VitalitySnapshot:
-        """Read one snapshot back, refusing shapes that would silently change its meaning.
-
-        Following ``DispatcherRecord``, a malformed payload raises instead of being repaired: a
-        snapshot that came back with a renamed axis or an unbound run is damaged evidence, and
-        quietly normalising it would let a later consumer act on words nobody wrote.
-        """
+"""Read one snapshot back, refusing shapes that would silently change its meaning."""
         if not isinstance(payload, dict):
             raise HeadVitalityError("a vitality snapshot is read from an object")
         # ``True == 1`` in Python, so an equality check alone would read a boolean version as a
@@ -279,15 +225,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pid_heartbeat(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
-        """Wrap one ``dispatch.watchdog.head_process_status`` answer.
-
-        The heartbeat is authoritative about the ``Process`` axis and about nothing else. Its
-        inconclusive states (file not yet written, unreadable, wrong version) are observations of a
-        broken channel, so they arrive ``Unknown``/``Unavailable`` with the distinct state named in
-        the reason rather than collapsed into one lie about the process. An identity mismatch is
-        fenced the same way: some *other* live process owns that heartbeat, which proves nothing
-        about this run and must never read as ``Dead``.
-        """
+"""Wrap one ``dispatch.watchdog.head_process_status`` answer."""
         if not isinstance(status, dict):
             return cls._unavailable(
                 run_id=run_id,
@@ -338,16 +276,7 @@ class VitalitySnapshot:
         previous_cursor: str = "",
         observed_at: float,
     ) -> VitalitySnapshot:
-        """Wrap one ``dispatch.tui.provider_progress_for_run`` answer against the earlier cursor.
-
-        ``previous_cursor`` is the opaque cursor of this exact run's previous snapshot of this
-        exact source (empty before the first observation). Only the admitted, bound evidence counts
-        as an answer: an unadmitted or foreign-bound reading is a channel problem and lands on
-        ``Unknown``/``Unavailable`` -- in particular it never becomes ``Quiet``, so a reducer can
-        never spend stall evidence on a source that went away. Movement and stillness are the only
-        two things one cursor pair can prove, and they map to ``Advancing`` and ``Quiet``;
-        deciding that quiet has lasted too long belongs to the episode reducer.
-        """
+"""Wrap one ``dispatch.tui.provider_progress_for_run`` answer against the earlier cursor."""
         if not isinstance(evidence, dict):
             return cls._unavailable(
                 run_id=run_id,
@@ -414,25 +343,10 @@ class VitalitySnapshot:
         previous_key: str = "",
         observed_at: float,
     ) -> VitalitySnapshot:
-        """Wrap one ``runtime.head.children.read_head_children`` answer against the earlier cursor.
+"""Wrap one descendant-tree reading against the previous aggregate CPU/I/O cursor.
 
-        Movement is measured over the WHOLE descendant tree (secretary-1692 round 2): the cursor
-        carries the reading's aggregate ``total_cpu_ms``/``total_io`` and the reading advances
-        when the aggregate grew by ``CHILD_CPU_ADVANCE_MS`` or ``CHILD_IO_ADVANCE_BYTES`` since
-        the previous reading. An aggregate that went DOWN (a descendant died and nobody in the
-        tree reaped it) is no advancement for that reading, never negative progress. Anything
-        less, including a live child whose counters are frozen, is ``Quiet``. The cursor is this
-        source's own format, parsed only here.
-
-        Only the described metadata is bounded: the cursor also keeps ``pid.start.cpu.io`` for
-        as many described descendants as fit, which is how a reading names the busiest mover.
-        The described descendant is that mover when this reading advanced (key ``m:...``), else
-        the mover already on file while it lives, else the YOUNGEST live descendant (key
-        ``y:...``) -- the likeliest foreground tool command, as opposed to helpers started with
-        the session. So any reading that saw a live descendant describes one. How long child
-        advancement may hold off a stall is the reducer's question
-        (``VitalityThresholds.child_activity_ceiling``), not this one's.
-        """
+        A decrease never counts as progress; describe a live descendant even
+        when counters are quiet. Child-only liveness is bounded by the reducer."""
         if not isinstance(evidence, dict) or str(evidence.get("state") or "") != "observed":
             detail = str(evidence.get("reason") or "") if isinstance(evidence, dict) else ""
             return cls._unavailable(
@@ -551,20 +465,9 @@ class VitalitySnapshot:
         previous_cursor: str = "",
         observed_at: float,
     ) -> VitalitySnapshot:
-        """Wrap one ``local_pty_head.head_run_turn_reading`` answer against the earlier cursor.
+"""Wrap one head-turn journal reading against its previous cursor.
 
-        Not advisory: the supervisor that owns the head's pty wrote this journal, and a turn it
-        opened on delivery and closed on quiet is the Turn axis a local-pty head had no other
-        source for. ``Turn`` is ``Active`` for an open turn and ``Idle`` for a closed one, with
-        ``turn_since`` saying since when. ``Progress`` compares the last ``provider.progressed``
-        sequence with this run's previous reading: a new one is ``Advancing``, the same one
-        ``Quiet``, and the first reading records it without an opinion.
-
-        Every value is normalised once, here (``_journal_reading``): a reading that is not
-        ``observed``, names another run, or carries a value its producer could not have written
-        is ``Unknown``/``Unavailable`` with a bounded reason. None of them is stall evidence, and
-        none of them is ``Dead`` -- this source never speaks to the Process axis.
-        """
+        Preserve run identity and distinguish a completed turn from progress."""
         reading, refusal = _journal_reading(evidence, run_id=run_id, observed_at=observed_at)
         if reading is None:
             return cls._unavailable(
@@ -605,20 +508,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pane_readiness(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
-        """Wrap one pane readiness answer (a status carrying `{"idle": bool}`).
-
-        No dispatcher status carries one since secretary-1723 removed the pane path from
-        ``command_terminal_status``; the snapshot stays readable for a persisted status that does.
-
-        Advisory by construction: the session manager answers whether a pane will take input, which
-        speaks to the ``Turn`` axis alone. A busy pane is a head possibly mid-turn, an idle pane is
-        a head between turns, and neither reading says anything about the process or the work --
-        which is why this source can never, alone, ground a stop decision. An unanswerable probe
-        (no status object, no usable flag) is ``Unknown`` and still advisory, carrying the
-        producer's own bounded refusal diagnostic in ``reason`` when it gave one -- a
-        deterministic launch failure such as ``terminal_split_source_not_found`` must stay
-        readable on the snapshot, because a recovery policy keys on exactly that class.
-        """
+"""Wrap a legacy pane readiness reading, without treating it as authoritative progress."""
         idle = status.get("idle") if isinstance(status, dict) else None
         if isinstance(idle, bool):
             turn = TurnState.IDLE if idle else TurnState.ACTIVE
@@ -680,13 +570,7 @@ _JOURNAL_SEQ_LIMIT = 2**53
 def _journal_reading(
     evidence: Any, *, run_id: str, observed_at: float
 ) -> tuple[tuple[TurnState, float, int] | None, str]:
-    """The one normaliser for a supervisor journal reading: ``(turn, since, progress_seq)``.
-
-    Returns ``(None, reason)`` for anything a caller must not act on: not an object, not
-    observed, another run, an unknown turn word, a time that is not a finite positive number no
-    later than the observation (plus ``JOURNAL_CLOCK_SKEW``), and a sequence that is not an int in
-    ``[0, 2**53]``. ``bool`` is refused wherever a number is expected, because ``True == 1``.
-    """
+"""The one normaliser for a supervisor journal reading: ``(turn, since, progress_seq)``."""
     if not isinstance(evidence, dict):
         return None, "supervisor journal reading is not an object"
     state = evidence.get("state")
@@ -776,18 +660,7 @@ def snapshots_from_status(
     previous_journal_cursor: str = "",
     observed_at: float,
 ) -> list[VitalitySnapshot]:
-    """Every snapshot one ``command_terminal_status`` answer supports, bound to ``run_id``.
-
-    The dispatcher's wait tick and any read-only observer of the same head must see the same
-    evidence, so the mapping from that status shape to this vocabulary lives here rather than at
-    each call site: a channel the status did not carry produces no snapshot at all, which is not
-    the same as a snapshot that reports its channel unavailable. An empty list therefore means
-    "nothing was observed" -- the noop host, a runtime that answered nothing -- and a caller may
-    not read it as evidence about the head.
-
-    Pure, like every other builder in this module: the caller has already made whatever host call
-    produced ``status``.
-    """
+"""Every snapshot one ``command_terminal_status`` answer supports, bound to ``run_id``."""
     if not isinstance(status, dict):
         return []
     snapshots: list[VitalitySnapshot] = []
