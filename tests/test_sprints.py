@@ -243,25 +243,6 @@ class SprintOwnershipTests(SprintFixture):
     def _refuse_metadata(self, field: str):
         return self._refuse_once("saveTaskMetadata", field)
 
-    def _reject_removal(self):
-        """Answer every `removeTask` the way a backend that keeps the row does."""
-        original = self.client.call
-
-        def refuse(method: str, **params: object) -> object:
-            if method == "removeTask":
-                return False
-            return original(method, **params)
-
-        return mock.patch.object(self.client, "call", side_effect=refuse)
-
-    def _stall_create(self, request_id: str, **kwargs) -> None:
-        """Leave one admitted create staged, repairable by its own request id."""
-        with self._refuse_metadata("sprint_goal"):
-            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
-                self._create(goal="rejected metadata", request_id=request_id, **kwargs)
-        self.assertEqual(pending.exception.code, "audit_pending")
-        self.assertEqual(self._events(), [])
-
     def test_an_automatic_reference_clears_every_number_the_board_handed_out(self) -> None:
         """The counter used to be the row's own id, which forgets what it already gave away.
 
@@ -2439,35 +2420,6 @@ class SprintAuditTraversalTests(SprintFixture):
 
     def _reader(self) -> SprintReader:
         return SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
-
-    @contextlib.contextmanager
-    def _round_trips(self):
-        """Count the board round trips a block performs, a batched read counting as the one it is."""
-        trips: list[str] = []
-        client = type(self.client)
-        original_call, original_batch = client.call, client.call_batch
-        batching = False
-
-        def counting_call(fake, method: str, **params: Any) -> Any:
-            if not batching:
-                trips.append(method)
-            return original_call(fake, method, **params)
-
-        def counting_batch(fake, calls: Any) -> Any:
-            nonlocal batching
-            calls = list(calls)
-            trips.append("batch:" + ",".join(sorted({method for method, _ in calls})))
-            batching = True
-            try:
-                return original_batch(fake, calls)
-            finally:
-                batching = False
-
-        with (
-            mock.patch.object(client, "call", counting_call),
-            mock.patch.object(client, "call_batch", counting_batch),
-        ):
-            yield trips
 
     def test_mass_sprint_status_reads_the_audit_once_for_one_and_for_many_sprints(self) -> None:
         open_ref = self._resumed("audit traversal")
