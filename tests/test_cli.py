@@ -44,8 +44,7 @@ def git(cwd: Path, *args: str) -> str:
         ["git", *args],
         cwd=cwd,
         check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     return result.stdout.strip()
@@ -135,7 +134,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("status: ok", output)
 
     def test_doctor_checks_live_host_by_default(self):
-        code, output = self.run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
+        _, output = self.run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertIn("host inventory: read-only", output)
         self.assertIn("mode: read-only", output)
