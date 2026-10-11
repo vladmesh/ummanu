@@ -18,24 +18,27 @@ from ummanu.dispatch.gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
+    _fingerprint as _gate_fingerprint,
+    reset_infrastructure_reruns as _reset_infrastructure_reruns,
+    validation_ci as _validation_ci,
 )
-from ummanu.dispatch.gate import _fingerprint as _gate_fingerprint
-from ummanu.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
-from ummanu.dispatch.gate import validation_ci as _validation_ci
 from ummanu.dispatch.gate_receipt import AcceptedGreenGate
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.helpers import _gate_red_repeat_count, scrub_host_output
-from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
+from ummanu.dispatch.state import (
+    DispatcherRecord,
+    PersistedGateReceipt,
+    attempt_request_id as _attempt_request_id,
+)
 from ummanu.dispatch.types import (
     STOPPED_BY_REPLACEMENT,
     GateTransportError,
     HostError,
     ProjectGitAccessError,
 )
-from ummanu.dispatch.wait_vitality import execute_recovery_intent as _execute_recovery_intent
-from ummanu.dispatch.wait_vitality import recovery_policy_outcome as _recovery_policy_outcome
 from ummanu.dispatch.wait_vitality import (
+    execute_recovery_intent as _execute_recovery_intent,
+    recovery_policy_outcome as _recovery_policy_outcome,
     reduce_and_store_vitality_episode as _reduce_and_store_vitality_episode,
 )
 from ummanu.dispatch.worker_continuation import begin_red_transition as _begin_red_transition
