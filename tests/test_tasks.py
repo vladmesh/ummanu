@@ -156,16 +156,6 @@ class BoardFixture:
     def board_call_count(self, method: str) -> int:
         return len(self.board_calls(method))
 
-    def board_batches(self) -> list[list[tuple[str, dict]]]:
-        """The batched reads the product posted — a wire observation, not an effect.
-
-        `SqlCardClient.call_batch` is `[self.call(...) for ...]`, one batch because there is no
-        round trip, so an assertion over this log proves no economy.  What an assertion can rest
-        on is the other log, `self.rpc`: which methods of the client interface the product
-        invoked, and how many times.
-        """
-        return self.rpc_batches
-
     def board_writes(self) -> list[str]:
         return [name for name, _params in self.rpc if name in self.WRITE_METHODS]
 
@@ -213,19 +203,6 @@ class BoardFixture:
 
     def card_extension(self, reference: str, key: str) -> object:
         return (self.card(reference).get("extensions") or {}).get("extra", {}).get(key)
-
-    def assertCardCarriesNoMetadata(self, reference: str) -> None:
-        """Nothing was stamped on the card: the model's own metadata fields are all unset."""
-        card = self.card(reference)
-        self.assertEqual(card["project"], "")
-        self.assertEqual(card["type"], "")
-        self.assertIsNone(card["record_type"])
-        self.assertIsNone(card["claim"]["worker"])
-        self.assertIsNone(card["sprint"])
-        # The swimlane is the board's own placement, not a metadata key anybody stamped.
-        self.assertEqual(
-            set((card.get("extensions") or {}).get("extra", {})) - {"swimlane"}, set()
-        )
 
     def card_exists(self, reference: str) -> bool:
         try:
@@ -304,9 +281,6 @@ class BoardFixture:
             self._board("closeTask", task_id=task_id)
         return task_id
 
-    def archive_card(self, reference: str) -> None:
-        self._board("closeTask", task_id=self.backend_id(reference))
-
     @contextlib.contextmanager
     def open_sprint(self, ref: str = "sprint:test", project: str = "ummanu"):
         """The open sprint every Ready card needs, and the row `tasks.sprint_ref` refers to (§3.3).
@@ -351,23 +325,6 @@ class BoardFixture:
             yield
 
     @contextlib.contextmanager
-    def board_refuses_once(self, method: str):
-        """The board rejects the first call of one method and serves every later one."""
-        served = self.client.call
-        refused = False
-
-        def call(name: str, /, **params: object) -> object:
-            nonlocal refused
-            if name == method and not refused:
-                refused = True
-                self.rpc.append((name, dict(params)))
-                raise self.refusal(method)
-            return served(name, **params)
-
-        with mock.patch.object(self.client, "call", side_effect=call):
-            yield
-
-    @contextlib.contextmanager
     def board_loses_reply(self, method: str):
         """The write lands and its reply does not: the caller cannot know it happened."""
         served = self.client.call
@@ -380,53 +337,6 @@ class BoardFixture:
 
         with mock.patch.object(self.client, "call", side_effect=call):
             yield
-
-    @contextlib.contextmanager
-    def board_drops_the_call_after(self, method: str):
-        """The next round trip after `method` is lost, which says nothing about `method` itself."""
-        served = self.client.call
-        armed = False
-
-        def call(name: str, /, **params: object) -> object:
-            nonlocal armed
-            if armed:
-                armed = False
-                raise TaskError("backend_unavailable", "the board is unavailable", 1)
-            result = served(name, **params)
-            if name == method:
-                armed = True
-            return result
-
-        with mock.patch.object(self.client, "call", side_effect=call):
-            yield
-
-    @contextlib.contextmanager
-    def board_moves_the_card_after(self, reference: str, state: str):
-        """Another writer moves the card onward between the move and the read back."""
-        served = self.client.call
-        raced = False
-
-        def call(name: str, /, **params: object) -> object:
-            nonlocal raced
-            result = served(name, **params)
-            if name == "moveTaskPosition" and not raced:
-                raced = True
-                row = self._board(
-                    "getTaskByReference", project_id=self.PROJECT_ID, reference=reference
-                )
-                self._board(
-                    "moveTaskPosition",
-                    project_id=self.PROJECT_ID,
-                    task_id=int(row["id"]),
-                    column_id=self.column_ids()[state],
-                    position=1,
-                    swimlane_id=int(row.get("swimlane_id") or 0),
-                )
-            return result
-
-        with mock.patch.object(self.client, "call", side_effect=call):
-            yield
-
 
 class TaskReaderTests(BoardFixture, CardStoreCase):
     """The reader's contract, over a real card store seeded with ``reader_seed``."""
@@ -998,27 +908,6 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.audit.committed_event("staged-once")["event_id"],
             staged[0]["event_id"],
         )
-
-    def _pending_typed_move(self, request_id: str, target: str = "ready") -> int:
-        """Leave the supported post-effect failure: the column moved, its event did not commit."""
-        self.place_card("ummanu-468", "in_progress")
-        with (
-            mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")),
-            self.assertRaisesRegex(TaskError, "audit repair"),
-        ):
-            self.writer.move(
-                role="dispatcher",
-                actor="d",
-                reference="ummanu-468",
-                target=target,
-                reason="",
-                request_id=request_id,
-            )
-        self.assertEqual(self.writer.reader.show("ummanu-468")["state"], target)
-        # The cleanup this edge owes the board runs inside the transition, so it is already
-        # complete when only the commit fails.
-        self.assertIsNone(self.card("ummanu-468")["claim"]["worker"])
-        return self.board_call_count("moveTaskPosition")
 
     def test_a_refused_card_edge_stages_no_typed_event(self) -> None:
         before = self.board_snapshot()
