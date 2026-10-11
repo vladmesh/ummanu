@@ -79,10 +79,10 @@ to try to infer their runtime behaviour.
 This safety boundary currently limits effectiveness. The independent ummanu-205 review of
 [PR #714](https://github.com/vladmesh/ummanu/pull/714), candidate `c3b51bf1113bf66dd13d4903041556d35615c903`,
 found 219 of 294 manifest test modules and 149 of 386 product modules opaque. Its offline graph
-analysis selected 280–293 of 294 test modules and all nine owners for nonopaque source changes;
-opaque source changes required full fallback. This is safe over-selection, with practically no
-code-PR wall-clock gain at that snapshot, not evidence of useful acceleration. The docs-only path
-avoids suite execution independently of this limitation.
+analysis selected 280–293 of 294 test modules and all nine owners per single-module nonopaque
+product-source change in that snapshot; opaque source changes required full fallback. This is safe
+over-selection, with practically no code-PR wall-clock gain at that snapshot, not evidence of useful
+acceleration. The docs-only path avoids suite execution independently of this limitation.
 
 For example, `tests.test_ci_selection.SelectionTests` changes a pure `ummanu.leaf` consumed
 directly by `tests.test_direct` and through `ummanu.middle` and `tests.helper` by
@@ -286,17 +286,32 @@ complete/passed with two existing skips, at observed host load 0.90–1.35. The 
 was 282.311 seconds for 160 modules and 3,337 tests; the card also records earlier 681/693-second runs. The old approximately
 77-second estimate is not the current promise.
 
-The later published observation is ummanu-205's final candidate
+The historical ummanu-205 observation was on its final candidate
 `c3b51bf1113bf66dd13d4903041556d35615c903` ([PR #714](https://github.com/vladmesh/ummanu/pull/714)),
 tree `e9997e9efe9e3a3d538921ea1086483b29370ab9`: 142 modules (125 unit + 17 component),
 2,677 tests and two existing skips, complete/passed, 98.670 seconds through the sequential wrapper
 and 96.706 seconds in the native runner. The saved worker receipt's module timings and that
 candidate's manifest confirm the module count. No host load was reported for this run; the
-historical load sample does not apply to it. The target remains 100 seconds at load at most 2,
-not an unconditional 98.670-second latency promise. This candidate observation is neither a
+historical load sample does not apply to it. This candidate observation is neither a
 final-main measurement nor final-main controlled-load acceptance, and its worker-local receipt
-is not a dispatcher gate attestation. Each candidate's own full receipt supplies its exact
-duration, content tree, count and import provenance.
+is not a dispatcher gate attestation.
+
+Operation ummanu-212 measured the full sequential profile on released main on 2026-10-11,
+SHA `2aab7040f2d80a1032001f4cb36379f247da47b4`, tree `6facf51f1052ea2ef70e3d0db16687f3a0e1bdf6`:
+142 modules (125 unit + 17 component), 2,681 tests and two existing skips, complete/passed/exit 0,
+95.692 seconds through the wrapper and 92.637 seconds in the native runner. The receipt spans
+01:04:18–01:05:54 UTC; 96 timestamped samples during that run record one-minute host load
+1.02–1.28, all at most 2. Interpreter, cwd and imports were inside `/home/dev/ummanu`;
+HEAD/tree stayed unchanged and the checkout stayed clean. Durable operator evidence is in
+`/home/dev/ummanu-data/po/upgrade-report/ummanu-212/`: `completion.md`, `check-argv.txt`,
+`check-times.txt`, `load-samples.txt` and `receipt-broad-62f6379358523d0b.json` (file SHA256
+`e98ed630996684353a4b0d478d85d60c1dff93e2f72c4de35736a67c63575630`, also in `receipt-sha256.txt`).
+The target is at most 100 seconds conditional on one-minute load at most 2. This saved measurement
+is not an unconditional latency promise, a receipt for a later candidate, a CI gate attestation
+or the final documentation-main acceptance measurement. Each candidate's own full receipt supplies
+its exact duration, content tree, count and import provenance. After the documentation merge,
+final released-head readiness, its controlled-load receipt and production generation are an
+operator closeout step; later timing variation does not replace this dated figure without evidence.
 
 All moved checks remain in the same nine-suite manifest and execute when selected, or on every
 full run: interpreter preparation and
@@ -311,8 +326,8 @@ No test assertions, CI budgets, skips, coverage evidence or manifest/receipt for
 
 The example adapter is an operator-installable fragment. Existing live declarations of
 `tests.broad` with `unit` + `component` continue to resolve membership from the candidate manifest;
-no runner or receipt migration is needed. Updating the live adapter's timing comment is a separate
-operator operation after merge, not part of worker validation.
+no runner or receipt migration is needed. Operation ummanu-212 updated the live adapter's timing
+comment to cite its measurement; live adapter updates remain separate operator work.
 
 Runner-owned profiles delegate membership and node validation to the declared broad runner. They
 need no module map. Except for pytest below, a selector appends to `broad_check.args`; `selector_args` supplies either an empty
