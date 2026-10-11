@@ -108,9 +108,11 @@ class TerminalTaxonomyTests(unittest.TestCase):
 
     def test_invalid_version_is_rejected_before_field_selection(self) -> None:
         for version in (2.0, [], {}, 3):
-            with self.subTest(version=version):
-                with self.assertRaisesRegex(TerminalTaxonomyValidationError, "version"):
-                    read_terminal_taxonomy({"terminal_taxonomy": {"version": version}}, disposition="blocked")
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(TerminalTaxonomyValidationError, "version"),
+            ):
+                read_terminal_taxonomy({"terminal_taxonomy": {"version": version}}, disposition="blocked")
 
     def test_typed_event_boundary_rejects_unhashable_and_boolean_versions(self) -> None:
         for version in ([], False):
