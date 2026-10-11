@@ -27,7 +27,6 @@ from ummanu.candidate_history import (
     repair_message,
 )
 from ummanu.dispatch.gate_receipt import is_exact_sha, mint_gate_receipt
-from ummanu.dispatch.state import DispatcherRecord, GatePrAuthorship, GatePublishedRef
 from ummanu.dispatch.helpers import (
     _last_marker_body,
     _legacy_worker_branch,
@@ -35,6 +34,7 @@ from ummanu.dispatch.helpers import (
     safe_one_line,
     scrub_host_output,
 )
+from ummanu.dispatch.state import DispatcherRecord, GatePrAuthorship, GatePublishedRef
 from ummanu.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
 
 # Pending CI has a bounded watchdog so missing checks cannot strand a card.
