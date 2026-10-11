@@ -332,6 +332,7 @@ def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
             "sprint": row["sprint"],
             "head": row["head"] or None,
             "state": row["state"],
+            "state_reason": row["state_reason"] or None,
             "alive": row["alive"],
             "pid_known": row["pid_known"],
             "launches": row["launches"],
