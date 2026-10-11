@@ -2,6 +2,20 @@
 
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
+## Дельта 2026-10-11: поставка #720 на main `6d3e39c6f5f8984369dd48d9e239005f9172271e`
+
+[PR #720](https://github.com/vladmesh/ummanu/pull/720) смёржен в main (squash) на `6d3e39c6f5f8984369dd48d9e239005f9172271e`. Exact-head CI [38148463408](https://github.com/vladmesh/ummanu/actions/runs/38148463408) — **success** на `cbfc804dc4009917a3abb40954122c11080f1074`: lint, typecheck, девять suite owners и итоговый `test` зелёные. Это подтверждение candidate; результат post-merge main отслеживается отдельно и не подменяется ссылкой на PR-run. Ветка аудита сохраняется открытой и не предназначена для мержа.
+
+| ID | Статус | Проверенный scope / ограничения |
+|---|---|---|
+| BUG-19 | ✅ #720 | `dispatch/pause_ops.py:_freeze_heads` пытается остановить worker даже при `HostError` от остановки reviewer или отказе остановки reviewer launch intent. У каждой роли независимое подтверждение, неуспешно остановленная сохраняет identity без `paused_*` stamp; в stop buckets нет дублирования `ref`. |
+| BUG-17 | ✅ #720 | `dispatch/observer.py` сохраняет `state_reason` отдельно от `idle_reason`, `deferred_reason` и `stopped_reason`. Поле проходит JSON round-trip с пустым значением для legacy records; доступно в `observer_snapshot` и `ummanu status`. Повтор одного состояния с той же причиной не меняет `last_action_at`, новая причина в том же состоянии не сбрасывает время входа в состояние. Прямые lifecycle-переходы очищают/назначают причину явно. |
+| Slot 5 | ◐ остаток | CON-04/06/17, INEF-03 и связанные конкретные DUP/DOC-09 пока открыты. BUG-15/17/18/19, CON-03/18 закрыты #719/#720. |
+
+**Следующий логичный scope:** CON-04 + INEF-03 — корректный lookup текущих request IDs в `dispatch/claim.py` и удаление доказанных лишних `committed_event` запросов при сохранении idempotency/admission, включая legacy/повторный claim и проверку количества вызовов. CON-06/17 брать отдельно, только после проверки оставшихся контрактов. Не смешивать это с масштабной декомпозицией dispatcher, bulk SQL или неопрофилированными оптимизациями.
+
+Ниже сохранена историческая дельта #719, включая перечень того, что было открыто **сразу после #719**, до поставки #720. Устаревшие строки §10 — датированный бюджет, не текущая очередь.
+
 ## Дельта 2026-10-11: поставка #719 на main `0c5e79a986ca669c8d03937e62cd95f38918c36d`
 
 [PR #719](https://github.com/vladmesh/ummanu/pull/719) смёржен в main на `0c5e79a986ca669c8d03937e62cd95f38918c36d`. Exact-head CI [38142276775](https://github.com/vladmesh/ummanu/actions/runs/38142276775) — **success**: lint, typecheck, все девять suite owners и итоговый `test`. [Post-merge CI 38143221510](https://github.com/vladmesh/ummanu/actions/runs/38143221510) — **success** на merge-коммите `0c5e79a`: lint, typecheck, все suite owners и aggregate `test` зелёные. Это самостоятельное подтверждение main, не только candidate. Ветка аудита синхронизирована с новым main без мержа самого PR #668.
