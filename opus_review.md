@@ -2,6 +2,14 @@
 
 > Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
+## Дельта 2026-10-11: неповеденческий DEC-04, #725 на main `55bc880081414487f98568c835bf1b1a0bf6c5f0`
+
+[PR #725](https://github.com/vladmesh/ummanu/pull/725) смёржен (squash) в `main`. [Exact-head CI #38164263752](https://github.com/vladmesh/ummanu/actions/runs/38164263752) **completed/success** на `6b12a34c2480f9e0511fc30e27eb556aa5a1d234`: lint, typecheck, девять suite owners и aggregate `test`. Первая итерация CI падала только на Ruff F401 для совместимых реэкспортов; явные `as name` исправили это, новая точная ревизия полностью зелёная. Post-merge main CI отслеживается отдельно.
+
+**DEC-04 ◐:** механически вынесены классы `ObserverDelivery`/`ObserverRecord`, JSON round-trip, load/put и delivery evidence summary в `dispatch/observer_state.py`; pure launch/sprint prompt renderers в `dispatch/observer_prompt.py`. `observer.py` стал **3618 → 3080 строк** (−538). Все существовавшие функции/классы экспортируются через прежний модуль. Патч-точки `_launch_observer` и `_reconcile_open_sprint`, wake/delivery launch, stop и аудит оставлены в исходном модуле. Исполняемые контракты, persisted JSON schema, политика промптов и тесты намеренно не менялись.
+
+**Остаток DEC-04:** выделение `observer_audit.py` и анализ общего `_persist_quietly` с `dispatch/launch.py`; snapshot/liveness остаются в `observer.py` ради динамического seam `observer_alive`. Помощник `_outcome` и прочее сжатие словарей не входят в #725, поскольку в них пришлось бы переписывать исполняемые ветви. DEC-04 пока не считать закрытым; CON-04/06/17, INEF-03 и TDEAD-07 не затронуты. Audit PR #668 оставить открытым и не мёржить, §12 historical production evidence не менять.
+
 ## Дельта 2026-10-11: неповеденческий ARCH-01 в tasks/sprints, #724 на main `6e9370e646668310c928b8b662b114c32f919590`
 
 [PR #724](https://github.com/vladmesh/ummanu/pull/724) смёржен (squash) в `main`. [Exact-head CI #38161090568](https://github.com/vladmesh/ummanu/actions/runs/38161090568) **completed/success** на `707a75f887995fb66d8199049f1066cf4f0c332c`: lint, typecheck, все девять suites и aggregate `test`. Post-merge main CI подтверждается отдельно, не приравнивать его к проверкам candidate.
@@ -93,7 +101,7 @@
 | Видимость стоимости тестов | ✅ timing-часть существующего issue:e515244ce9d2e3417b1e | [#708](https://github.com/vladmesh/ummanu/pull/708), `190bd745`: `projects/test_timing.py:142/249`, `tests/broad.py:106`, `scripts/ci_test_shards.py:421/424` сохраняют native timing; локально >5 с/test предупреждает, CI unit/component >5 с/test или >90 с/module отказывает. Запрет лишних тестов в prompts остаётся открытым (§6.4) |
 | Полная квитанция перед code report:done; reviewer без прогонов | ✅ согласованный scope sprint:1488 | [#713](https://github.com/vladmesh/ummanu/pull/713), `d8e86b94`: `tasks.py:2234`, `check_commands.py:42/89/101` проверяют complete green receipt на committed tree, `runtime/test_guard.py:43/110` отказывает reviewer. [#704](https://github.com/vladmesh/ummanu/pull/704), `c42b02b7`, и [#705](https://github.com/vladmesh/ummanu/pull/705), `e29a0467`, ограничивают local selectors/прямые runners. Это не закрытие всех старых gate/flake issues; docs-проекты с doctest имеют отдельный issue:db00f10a6b16e2ab5b1f |
 | CI-01 | Исходные ✅ #674/#678 сохранены; новый selective-CI scope поставлен, выигрыш для code PR открыт | [#714](https://github.com/vladmesh/ummanu/pull/714), `af07e5c2`, #715/#717/#718: `ci_selection.py:208/259`, `ci.yml:59` выбирают affected или docs-only; main всегда full. Реальная выборка PR717 и новые CI-рычаги только в §8.4 / issue:7ba9a9f32675119f8149 |
-| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | Структурные разрезы открыты; ARCH-01 ◐ (#721/#723/#724) | Доменные импорты config, TaskError в tasks и barrel board проверены; граф дополняет ARCH-04 (§4.1). Сжатие 99 docstrings в `tasks.py`/`sprints.py` (#724, −24 239 символов) не закрывает DEC-01/04. Рефакторинг ради CI не рекомендован |
+| ARCH-04, DEC-01/02/04/05/07; ARCH-01 | DEC-04 ◐ (#725: observer state/prompt extracted); ARCH-01 ◐ (#721/#723/#724); остальные DEC открыты | Доменные импорты config, TaskError в tasks и barrel board проверены, граф дополняет ARCH-04 (§4.1). #724 сократил docstrings ядра, #725 механически вынес durable observer state и чистые prompt renderers; observer audit/persist + outcome сокращение остаются. Рефакторинг ради CI не рекомендован |
 | BUG-04/05/24, CON-02/05/07/08/10–15, DOC-08/10/15, DEAD-* и прочие остатки | Без нового полного закрытия | В diff к main нет реализации прежних структурных/compatibility scopes; DOC-08 всё ещё имеет исходную фразу в `packaging/memory/product-ummanu/sprints-and-reservations.md:9`. Поддержку legacy API не снимать по отсутствию вызова. Новая capacity-находка только ссылкой на board (§7, CON-19) |
 
 Другие поставки учтены без выдуманных закрытий ID: #698 (`ed9fd528`) исправляет исполнение
@@ -731,12 +739,14 @@ job-секунд и не двигает критический путь. Выи�
 
 Ещё `transitions.py:79-202`: таблицу из 42 рёбер (124 строки) можно генерировать циклом с умолчанием и 15 исключениями (≈25 строк, −4 тыс.). Старый и новый dict сравнить тестом.
 
-### 5.4 `dispatch/observer.py` (3 603 строки, 160 тыс.) — DEC-04
+### 5.4 `dispatch/observer.py` (исходно 3 603 строки, 160 тыс.) — DEC-04
 
-**Чистые разрезы:**
-- `observer_state.py`: `ObserverDelivery`/`ObserverRecord`, JSON, load/put, snapshot (98–573, ≈475 строк);
-- `observer_prompt.py`: 3336–3592, чисто;
-- `observer_audit.py`: 3212–3333; общий `_persist_quietly` с `launch.py:1236`.
+**◐ Статус на #725 (main `55bc8800`):** `observer.py` 3618 → **3080 строк**, создан `observer_state.py` (341 строка) и `observer_prompt.py` (236 строк). Pure serialization и prompt renderers перенесены механически, сохранены старые импорты; exact-head CI полностью зелёный. Изменение import graph как таковое не объявляет решение ARCH-04.
+
+**Чистые разрезы и остаток:**
+- ✅ `observer_state.py`: `ObserverDelivery`/`ObserverRecord`, JSON, load/put, delivery evidence summary; `observer_snapshot`, `observer_alive` и host/liveness reads намеренно остались в `observer.py` для сохранения патч-точек.
+- ✅ `observer_prompt.py`: launch prompt, sprint context, owner comments/decisions, executor и production lines. `render_observer_wake_context` остался в `observer.py` и вызывает реэкспортированный `render_observer_prompt`.
+- ☐ `observer_audit.py`: stage/commit/discard/record events и общий `_persist_quietly` с `launch.py` — отдельный следующий scope при сохранении динамического разрешения локальных функций.
 
 **Связанное ядро.** Delivery и launch остаются вместе: `_fail_delivery` и `_replace_observer_for_no_progress` вызывают `_launch_observer` (`:1486`, `:1700`), а тот вызывает defer/stop. Если их разнести, вернутся локальные импорты. Тесты патчат `ummanu.dispatch.observer._launch_observer` и `_reconcile_open_sprint` строкой, поэтому вызывающие должны остаться в том же модуле.
 
