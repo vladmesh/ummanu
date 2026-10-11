@@ -7,7 +7,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ummanu.dispatch import observer, pause_ops
-from ummanu.dispatch.types import HostError, STOPPED_BY_OPERATOR, WORKER_ROLE
+from ummanu.dispatch.launch import WORKER_ROLE
+from ummanu.dispatch.types import HostError, STOPPED_BY_OPERATOR
 
 
 class FreezeRoleIsolationTests(unittest.TestCase):
