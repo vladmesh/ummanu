@@ -62,7 +62,7 @@ class TurnState(StrEnum):
 
 
 class ProgressState(StrEnum):
-"""Whether the work itself is seen to move, as of one instant."""
+    """Whether the work itself is seen to move, as of one instant."""
 
     ADVANCING = "advancing"
     QUIET = "quiet"
@@ -104,7 +104,7 @@ class SnapshotSource(StrEnum):
 
 @dataclass(frozen=True)
 class VitalitySnapshot:
-"""One channel's reading of one head run at one instant."""
+    """One channel's reading of one head run at one instant."""
 
     run_id: str
     source: SnapshotSource
@@ -179,7 +179,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_json(cls, payload: Any) -> VitalitySnapshot:
-"""Read one snapshot back, refusing shapes that would silently change its meaning."""
+        """Read one snapshot back, refusing shapes that would silently change its meaning."""
         if not isinstance(payload, dict):
             raise HeadVitalityError("a vitality snapshot is read from an object")
         # ``True == 1`` in Python, so an equality check alone would read a boolean version as a
@@ -225,7 +225,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pid_heartbeat(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
-"""Wrap one ``dispatch.watchdog.head_process_status`` answer."""
+        """Wrap one ``dispatch.watchdog.head_process_status`` answer."""
         if not isinstance(status, dict):
             return cls._unavailable(
                 run_id=run_id,
@@ -276,7 +276,7 @@ class VitalitySnapshot:
         previous_cursor: str = "",
         observed_at: float,
     ) -> VitalitySnapshot:
-"""Wrap one ``dispatch.tui.provider_progress_for_run`` answer against the earlier cursor."""
+        """Wrap one ``dispatch.tui.provider_progress_for_run`` answer against the earlier cursor."""
         if not isinstance(evidence, dict):
             return cls._unavailable(
                 run_id=run_id,
@@ -343,7 +343,7 @@ class VitalitySnapshot:
         previous_key: str = "",
         observed_at: float,
     ) -> VitalitySnapshot:
-"""Wrap one descendant-tree reading against the previous aggregate CPU/I/O cursor.
+        """Wrap one descendant-tree reading against the previous aggregate CPU/I/O cursor.
 
         A decrease never counts as progress; describe a live descendant even
         when counters are quiet. Child-only liveness is bounded by the reducer."""
@@ -465,7 +465,7 @@ class VitalitySnapshot:
         previous_cursor: str = "",
         observed_at: float,
     ) -> VitalitySnapshot:
-"""Wrap one head-turn journal reading against its previous cursor.
+        """Wrap one head-turn journal reading against its previous cursor.
 
         Preserve run identity and distinguish a completed turn from progress."""
         reading, refusal = _journal_reading(evidence, run_id=run_id, observed_at=observed_at)
@@ -508,7 +508,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pane_readiness(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
-"""Wrap a legacy pane readiness reading, without treating it as authoritative progress."""
+        """Wrap a legacy pane readiness reading, without treating it as authoritative progress."""
         idle = status.get("idle") if isinstance(status, dict) else None
         if isinstance(idle, bool):
             turn = TurnState.IDLE if idle else TurnState.ACTIVE
@@ -570,7 +570,7 @@ _JOURNAL_SEQ_LIMIT = 2**53
 def _journal_reading(
     evidence: Any, *, run_id: str, observed_at: float
 ) -> tuple[tuple[TurnState, float, int] | None, str]:
-"""The one normaliser for a supervisor journal reading: ``(turn, since, progress_seq)``."""
+    """The one normaliser for a supervisor journal reading: ``(turn, since, progress_seq)``."""
     if not isinstance(evidence, dict):
         return None, "supervisor journal reading is not an object"
     state = evidence.get("state")
@@ -660,7 +660,7 @@ def snapshots_from_status(
     previous_journal_cursor: str = "",
     observed_at: float,
 ) -> list[VitalitySnapshot]:
-"""Every snapshot one ``command_terminal_status`` answer supports, bound to ``run_id``."""
+    """Every snapshot one ``command_terminal_status`` answer supports, bound to ``run_id``."""
     if not isinstance(status, dict):
         return []
     snapshots: list[VitalitySnapshot] = []
