@@ -1,28 +1,9 @@
-"""Headless turns of the PO head: one Claude or Codex process per turn, in the PO workspace.
+"""Run PO turns as scoped local-PTY children of the installation PO service.
 
-Each turn uses the scoped local-pty supervisor, with the CLI's standard streams redirected to
-the turn's files and its own process group. The owner's
-message goes to the child on stdin; its stdout is kept raw in a file under
-``<data_dir>/po-runs/<session>/`` (outside the workspace the agent can write), and a waiter thread
-settles the turn when the process exits. Only the owner's message and the agent's final answer reach
-the feed in the board store (`ummanu.po.store`).
-
-The runner lives in the PO service (`ummanu.po.service`, unit `ummanu-po.service`), one per
-installation; the web never builds one.
-
-The CLIs own their conversation memory, addressed by their native flags:
-
-* Claude: turn 1 ``claude -p --session-id <uuid>`` with a uuid the ummanu chose at session
-  creation, later turns ``--resume <uuid>``; ``--output-format json`` carries the final answer.
-* Codex: turn 1 ``codex exec --json``, whose event stream names the ``thread_id`` the session then
-  keeps; later turns ``codex exec resume <thread_id>``. ``-o`` writes the final answer to a file.
-
-A session's reasoning effort is passed on every turn: ``--effort <level>`` to Claude,
-``-c model_reasoning_effort=<level>`` to Codex. A new session always has an explicit one; a session
-stored with the legacy ``default`` (opened before that rule) still resumes with no effort flag. What
-model a turn actually ran is kept on the turn: Claude's result object keys ``modelUsage`` by full
-model id, the session's own model first and any subagent's after it; Codex's event stream names no
-model, so it is read from the ``turn_context`` of the thread's rollout under ``$CODEX_HOME/sessions`` (``~/.codex`` by default).
+Keep raw output outside the writable workspace; publish owner input and final answers only.
+Claude resumes its session UUID; Codex stores/resumes its native thread id. Pass explicit
+effort each turn, preserving legacy default without a flag. Read resolved models from Claude
+modelUsage or Codex rollout turn_context. See docs/OPERATIONS.md.
 """
 
 from __future__ import annotations
@@ -108,10 +89,9 @@ def runs_dir(data_dir: Path | str) -> Path:
 
 
 def process_identity(pid: int) -> str | None:
-    """Boot id and kernel start time of a live process, or ``None`` when it cannot be read.
+    """Return live boot id/start time, or None if unreadable.
 
-    A PID alone names whatever process holds it now; with the start time it names the one process
-    the runner started, so a restart never kills a stranger that inherited the number.
+    Bind PID to this identity so recovery never kills a process that reused its number.
     """
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
@@ -142,15 +122,10 @@ def still_running(pid: int | None, identity: str | None) -> bool:
 def turn_environment(
     environ: Mapping[str, str] | None = None, *, interpreter: str | None = None
 ) -> dict[str, str]:
-    """The environment of a turn: the service's own, with the product runtime first on ``PATH``.
+    """Keep the service environment with its interpreter first on PATH and source on PYTHONPATH.
 
-    The PO workspace tells the head to run ``python3 -P -m ummanu``; with the service's ``PATH``
-    that is the system Python, which lacks the product's dependencies. The directory of the
-    interpreter running this process (the production runtime) goes first, so ``python3`` and the
-    ``ummanu`` console script resolve there, and the source this process imports goes first on
-    ``PYTHONPATH``, as the control-plane commands keep it importable. The turn writes the board as
-    the PO (`BOARD_ACTOR`, the actor every board command defaults to) unless the service was given
-    another name for it. Everything else is kept.
+    This resolves product commands with their dependencies. Default BOARD_ACTOR to PO unless
+    the service supplied another actor; preserve other entries.
     """
     env = dict(os.environ if environ is None else environ)
     env["BOARD_ACTOR"] = str(env.get("BOARD_ACTOR") or "").strip() or "po"
@@ -185,12 +160,7 @@ def claude_final_answer(stdout: str) -> tuple[str | None, str | None]:
 
 
 def claude_resolved_model(stdout: str) -> str | None:
-    """The session's own model from ``--output-format json``: the first ``modelUsage`` key.
-
-    Claude Code keys ``modelUsage`` by the full model id each model ran under (`claude-opus-5-5`, or
-    `claude-opus-5-5[1m]` with the long context), the session's model first and the models its
-    subagents ran after it.
-    """
+    """Return the first modelUsage key: the session's full Claude model id before subagent models."""
     for document in _json_documents(stdout):
         if not isinstance(document, dict) or document.get("type", "result") != "result":
             continue
@@ -448,11 +418,10 @@ class PoRunner:
     def _terminal(
         self, session_id: str, seq: int, proposed: dict[str, Any] | None, *, settle: bool = True,
     ) -> bool:
-        """Select intent, prove empty and commit that intent as one owner operation.
+        """Select intent, prove empty and commit under the owner lock.
 
-        The store's running-row transition remains the idempotency boundary. An owner
-        interruption overrides uncommitted intent, never an already terminal row.
-        The runner lock also serializes genuinely unscoped turns in this process.
+        The running-row transition is idempotent. Owner interruption overrides only uncommitted
+        intent; the runner lock also serializes unscoped turns.
         """
         with self._lock:
             owner = ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq))
@@ -515,10 +484,9 @@ class PoRunner:
         fingerprint: str | None = None,
         title: str | None = None,
     ) -> tuple[Session, bool]:
-        """`create_session` under a form's request id; the flag says whether this call created it.
+        """Claim a session under the form request id and report whether it was created.
 
-        `operation` and `fingerprint` bind the id to another operation that opens a session
-        (`PoStore.claim_session`); `title` is the new session's (the resolver's `sprint:<N>`).
+        operation/fingerprint bind alternate session-opening operations; title names the new session.
         """
         return self._create(
             cli,
@@ -633,14 +601,10 @@ class PoRunner:
         note: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> tuple[Turn, bool]:
-        """`send` under a form's request id; the flag says whether this call started the turn.
+        """Claim by request id; launch only a newly created turn after its transaction commits.
 
-        A request id that already started this send gets that turn back and no process, and one that
-        belongs to anything else is `RequestConflict` (`PoStore.claim_turn`): a CLI is launched only for
-        a turn this call created, after its transaction committed. `card` is the facts a dispatcher
-        input carries beside its text; they are part of what the id is bound to. `note` is the PO
-        service's own section after the text (an operation card's production rights): the prompt and
-        the feed carry it, the id does not bind it.
+        Replay returns the turn without spawning; different inputs raise RequestConflict. Card facts
+        bind the id. The service note reaches prompt/feed but does not bind the id.
         """
         return self._send(session_id, text, request_id, card, note, metadata)
 
@@ -759,12 +723,10 @@ class PoRunner:
         return process
 
     def session_environment(self, session: Session, seq: int | None = None) -> dict[str, str]:
-        """The environment of one of `session`'s turns: the runner's, naming the session (`PO_SESSION_ENV`).
+        """Name session and, when available, input request id in every launch environment.
 
-        Every launch goes through here: a new turn, a re-run at start, and a relaunch over a fresh
-        conversation. With the turn's `seq` it also names the request id of the input the turn answers
-        (`PO_REQUEST_ENV`), read from the store, so a re-run names the same one; a turn whose input
-        carried no request id, or a store that does not answer, leaves it unset.
+        New turns, recovery and conversation relaunch share this path. Missing request/store data
+        leaves PO_REQUEST_ENV unset; recovery otherwise preserves the request id.
         """
         environment = {key: value for key, value in self.env.items() if key != PO_REQUEST_ENV}
         environment[PO_SESSION_ENV] = session.session_id
@@ -785,10 +747,9 @@ class PoRunner:
     def _finish(
         self, session_id: str, seq: int, state: str, reason: str, *, resolved_model: str | None = None
     ) -> bool:
-        """`PoStore.finish_turn`, the one way this runner settles a turn failed or interrupted.
+        """Settle failed/interrupted turns through PoStore.finish_turn.
 
-        A turn it settled `failed` is told to `on_failed` once, here and nowhere else: every failure
-        path of the runner (a launch, a waiter, a re-run, a recovery) ends in this call.
+        Notify on_failed once for a turn settled failed, across every runner failure path.
         """
         return self._terminal(session_id, seq, {"state": state, "reason": reason, "resolved_model": resolved_model})
 
@@ -814,10 +775,9 @@ class PoRunner:
     def _abandon(
         self, session_id: str, seq: int, process: Any | None, reason: str
     ) -> None:
-        """Kill and reap a turn's process group, then settle the turn `failed` if the store answers.
+        """Kill/reap the process group, then settle failed if the store answers.
 
-        If it does not, the row stays `running` with no recorded process, and `recover()` settles
-        it (or re-runs it once) at the next start; there is nothing left alive for it to kill.
+        Otherwise recovery handles the running row without a recorded process on the next start.
         """
         if process is not None and ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq)) is None:
             _kill_group(process.pid)
@@ -868,22 +828,13 @@ class PoRunner:
         return self.store.turn(session_id, turn.seq)
 
     def recover(self, *, rerun: bool = False) -> list[Turn]:
-        """At service start: every `running` turn this runner does not own is settled, or re-run once.
+        """Settle or rerun each unowned running turn independently at service start.
 
-        A turn's own process is killed only while its PID still has the recorded identity, so a
-        reused PID is never hit. Without `rerun` every such turn is `interrupted`. With it (the PO
-        service's start) a turn is re-run once: the same prompt goes to the same CLI conversation
-        (Claude `--resume` once a turn of the session completed, else `--session-id` and
-        `_resume_instead`; Codex `exec resume` when its thread id is known). A turn found `running` that
-        already carries a re-run's reason was interrupted a second time and is settled `interrupted`,
-        never re-run again. A turn the owner stopped was settled by the stop and is never `running` here.
-
-        The re-run allowance (:meth:`PoStore.mark_rerun`) is spent only after everything the re-run
-        needs is loaded and its prompt written (:meth:`_prepare`); a store that fails before that
-        leaves the row as it was, for the next pass. A re-run whose launch fails after the allowance is
-        settled `failed` by `_abandon`, or by the next pass with the reason kept here. A row that
-        cannot be handled now is left for :meth:`orphaned_turns` to report; one bad row does not stop
-        the others.
+        Kill only its recorded process identity. Without rerun, settle interrupted; with it, resume
+        the same prompt/conversation once. A second interrupted rerun never launches again. Prepare
+        data/prompt before spending mark_rerun; preparation failure leaves the row retryable. Launch
+        failure after allowance settles failed via _abandon or the next pass. Unhandled rows remain
+        visible through orphaned_turns; one bad row does not prevent handling others.
         """
         recovered: list[Turn] = []
         for turn in self.store.running_turns():
@@ -1049,12 +1000,9 @@ class PoRunner:
     def _resume_instead(
         self, session: Session, seq: int, code: int, argv: list[str], files: TurnFiles
     ) -> Any | None:
-        """Relaunch as `--resume` when Claude says an earlier stopped or failed turn saved the conversation.
+        """Retry the same Claude turn with --resume only for an existing-session-id refusal.
 
-        Claude Code 2.1.270 answers `--session-id` over an existing conversation with
-        `Error: Session ID <uuid> is already in use.` and exit 1, and `--resume` over a missing one with
-        `No conversation found with session ID: <uuid>`. Only the first can follow a turn that never
-        completed, and it is retried here, inside the same turn.
+        A missing-conversation refusal does not qualify; no completed turn is required.
         """
         if session.cli != "claude" or code != 1 or "--session-id" not in argv:
             return None
@@ -1112,10 +1060,9 @@ class PoRunner:
     def _provider_failure(
         self, session: Session, code: int, files: TurnFiles, *, offset: int = 0, record: bool = False
     ) -> ProviderError | None:
-        """The provider refusal a failed turn ended on, read from the CLI's own output; else None.
+        """Read provider refusal from failed-turn output, or None.
 
-        With `record`, the CLI's resource is recorded red until the reset the provider named (else
-        a bounded backoff), in the same health cache the dispatcher reads.
+        With record, mark the resource red until its reset or bounded backoff.
         """
         try:
             stdout = files.stdout.read_bytes()[offset:].decode("utf-8", errors="replace")
@@ -1144,12 +1091,10 @@ class PoRunner:
         return failure
 
     def _fall_over(self, session: Session, seq: int, code: int, files: TurnFiles) -> tuple[Session, Any, int] | None:
-        """Rerun a turn its provider refused on the session's other CLI, inside the same turn.
+        """Retry a provider-refused turn on fallback_choice CLI/model/effort in a fresh conversation.
 
-        The session moves to the CLI, model and effort `fallback_choice` names (a fresh conversation
-        there), and the turn's own prompt is given again, prefixed with the session's recent feed so
-        the PO resumes from its durable state. Returns the new session, process and the stdout offset
-        the replacement's output starts at; None when there is nothing to fall over to.
+        Prefix the same prompt with recent durable feed. Return session, process and replacement
+        stdout offset, or None when fallback is unavailable.
         """
         if self.fallback_choice is None:
             return None
@@ -1263,11 +1208,9 @@ class PoRunner:
 
 
 def po_provider_error(cli: str, stdout: str, stderr: str) -> ProviderError | None:
-    """The provider refusal a PO turn's own output names (ummanu-108), or None.
+    """Read refusal from Claude error results, Codex error/turn.failed events, then stderr.
 
-    Claude `--output-format json`: a result object with `is_error`. Codex `exec --json`: an `error`
-    or `turn.failed` event. Then the stderr tail, where both CLIs print a refusal they could not
-    turn into an event. Only error records are read, never an answer.
+    Return None when absent; never interpret answer text as an error record.
     """
     texts: list[str] = []
     for document in _json_documents(stdout, whole=cli == "claude"):

@@ -1,44 +1,9 @@
-"""The PO service: the one owner of PO head turns on an installation (`ummanu po-serve`).
+"""Own PO turns through the local socket and durable per-session FIFO.
 
-`ummanu-po.service` runs it. It holds the installation's only :class:`~ummanu.po.runner.PoRunner`,
-so every turn process is a child in this unit's control group: a restart of the web touches none of
-them. Submitters (the web now, the dispatcher later) reach it only through its local socket
-(`ummanu.po.client`); none of them imports the runner.
-
-**Inputs.** A message is written to the durable queue (`ummanu.po.queue`, ``<data_dir>/po-queue/``)
-before the submitter is answered. The service takes inputs FIFO per session and runs at most one turn per
-session: an input for a session with a running turn waits in the queue, neither refused nor lost.
-Sessions run in parallel. An input leaves the queue only after its turn row exists
-(`PoStore.claim_turn` under the input's request id), so a crash between the claim and the removal is
-repaired by the next hand-over answering the same turn and creating nothing.
-
-**Start.** `PoRunner.recover(rerun=True)`: a turn left `running` whose process is gone is re-run once
-over the same CLI conversation with the same prompt, recorded on the row; a re-run found `running`
-again is settled `interrupted`; a still-living process with the recorded identity is killed first.
-Queued inputs are taken after that.
-
-**Restart for new process inputs.** An upgrade never kills a running turn: the PO itself runs
-`ummanu upgrade` inside a turn. The upgrade writes the restart marker and asks
-(`ummanu.po.client.request_restart`); :meth:`PoService.request_restart` is the rule. Idle, the
-service exits at once and `Restart=always` starts the new code. Busy, it starts no new turn (inputs
-keep queueing) and exits as soon as its last running turn settles. Each process writes its process
-receipt at start, before it takes the queue (``<data_dir>/po-service/process-receipt.json``: its pid,
-start ticks and systemd invocation, and the checkout's revision and input digests), so an upgrade can
-tell a service still running old code from a current one without trusting its own pull
-(`ummanu.upgrade.step_po`, secretary-1759).
-
-**Production rights.** A dispatcher's input carries its card's facts beside its text, and `submit`
-evaluates an operation card's own input against its sprint's `allowed_productions` when it queues it
-(:meth:`PoService._production_rule`, secretary-1764). This is the only place the rule is evaluated,
-and it refuses nothing (secretary-1769): it annotates. The input is queued as a normal turn with a
-production rights section beside its text (`QueuedInput.note`), which the turn's prompt carries: the
-sprint allows it, or the PO decides under the owner's standing rule and records the allowance
-(`sprint allow-production`) or hands the card to the owner itself.
-
-**A sprint's session.** `sprint_session` answers the live PO session of a sprint: the one the sprint
-recorded (`sprint create --po-session`) while it is open within its byte budget or busy, else a fresh
-one, opened once, seeded from durable native sprint context, announced in the sprint's comments and
-recorded last (:meth:`PoService.sprint_session`).
+Claim before removing an input; recover before pumping. Sessions run in parallel with one
+turn each. Restart drains turns and holds queued inputs for the next process. Production
+rights annotate operation inputs; sprint-session resolution is serialized and replayable.
+See docs/OPERATIONS.md and the method contracts below.
 """
 
 from __future__ import annotations
@@ -211,12 +176,9 @@ class PoService:
         return lines
 
     def _recover(self, *, tick: float = TICK_SECONDS) -> list[str]:
-        """One recovery pass; complete only when no `running` row is left without a waiter here.
+        """Retry incomplete recovery with bounded exponential delay.
 
-        An incomplete pass (a store that did not answer, a row that could not be prepared yet) is
-        retried with a doubling delay from `tick` up to `RECOVERY_MAX_DELAY_SECONDS`. Meanwhile the
-        sessions of the rows still `running` take no queued input — `pump` skips every session with a
-        running row — and every other session goes on.
+        Unowned running rows block only their sessions; other sessions keep pumping.
         """
         lines: list[str] = []
         with self._lock:
@@ -285,10 +247,9 @@ class PoService:
         self._wake.set()
 
     def fallback_choice(self, session: Session) -> tuple[str, str, str] | None:
-        """The other CLI a session's refused turn falls over to (ummanu-108): its first offered model.
+        """Return the other CLI's first model, preserving effort if offered, else its first effort.
 
-        The session's effort is kept when the other CLI offers it, else that CLI's first one, so a
-        `high` session continues at `high`. None when the other CLI offers no model.
+        Return None when that CLI offers no model.
         """
         try:
             models = self._model_list()
@@ -385,13 +346,9 @@ class PoService:
     # --- the endpoint's operations ----------------------------------------------------------
 
     def create_session(self, *, cli: str, model: str, effort: str = "", request_id: str) -> dict[str, Any]:
-        """One session per request id, reserved through :meth:`_reserve` like a message.
+        """Claim one session per request id with explicit, offered effort.
 
-        `effort` must be one offered for `cli` (`require_explicit_effort`); no effort, or `default`, is
-        refused with nothing written.
-
-        Accepted at the `claim_session` commit, or earlier when `_reserve` finds the id already made
-        this session; from then on the answer is the session (`handle`'s acceptance rule).
+        Acceptance starts at claim_session or its replay; later failure still answers the session.
         """
         request_id = _required(request_id, "request_id")
         model = str(model or "").strip()
@@ -428,14 +385,10 @@ class PoService:
         source: str = "web",
         card: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Queue one message durably, then answer; a request id answers what it already made.
+        """Queue durably before answering; replay identical id/session/text/card facts, reject conflicts.
 
-        The same id with the same session, text and card facts is a replay: the turn it became, or the
-        input still queued. The id bound to anything else is `RequestConflict` (:meth:`_reserve`). A
-        message into an unknown or closed session is refused with nothing queued. A dispatcher's input
-        carries its card's facts (`card`), and an operation card's own input is queued with the
-        production rule's note (:meth:`_production_rule`). It is queued and handed over at once when its
-        session is idle, and the answer says which.
+        Unknown/closed sessions write nothing. Operation inputs carry the production-rights note;
+        idle sessions hand over immediately, and the answer records whether they did.
         """
         request_id = _required(request_id, "request_id")
         session_id = _required(session_id, "session_id")
@@ -480,12 +433,10 @@ class PoService:
             return {**self._sent(session_id, request_id), "repeated": False}
 
     def _input_context(self, session_id: str, card: dict[str, Any]) -> tuple[dict[str, Any], str]:
-        """Select the delta before accepting, under the same serialized submit lock.
+        """Freeze the selected delta under the submit lock before acceptance.
 
-        The queued note freezes the selected bytes. Its metadata moves atomically
-        into the feed at claim; a crash in between leaves both with the same end.
-        Refusals before queue.put establish no boundary. Old frozen facts have
-        no delivery flag and neither consume nor reformat their comments.
+        Claim moves metadata atomically into the feed. Refusal creates no boundary; legacy frozen
+        facts neither consume nor reformat comments.
         """
         from ummanu.po.input_context import comment_position, comments_note
 
@@ -518,18 +469,10 @@ class PoService:
         return metadata, comments_note(sprint_ref, comments, start)
 
     def _production_rule(self, card: dict[str, Any] | None, request_id: str) -> str | None:
-        """The one place production rights are evaluated: the note an operation card's input is queued with.
+        """Annotate operation inputs with sprint allowance or the owner's standing decision rule.
 
-        It refuses nothing by the rule (secretary-1769). An `operation` card's own input gets
-        :func:`rights_note`: `none` and a production its sprint allows (`sprints.allowed_productions`)
-        say the sprint allows it; any other production is the PO's to decide under the owner's
-        standing rule, with the command that records the allowance. A decision card names no
-        production, and the owner's answer to a card handed to the owner is not evaluated again (the
-        owner decided): neither gets a note. An operation cut outside every sprint (an empty
-        `sprint_ref`, secretary-1792) has no allowance to read: its note says so, and the PO decides it
-        under the owner's standing rule. Facts that are missing or malformed, and a sprint that cannot
-        be read, refuse the input as `unavailable`: it is never executed without its verdict, and the
-        dispatcher repeats it.
+        Decision cards and owner answers get no note. Outside a sprint, the PO decides under the
+        standing rule. Missing/malformed facts or an unreadable sprint refuse as unavailable.
         """
         problem = facts_problem(card)
         if problem:
@@ -585,14 +528,10 @@ class PoService:
         text: str | None = None,
         card: dict[str, Any] | None = None,
     ) -> PoRequest | QueuedInput | None:
-        """The one request-id check of the service: what already owns `request_id`, or None when nothing does.
+        """Check installation-wide request-id ownership under the service lock.
 
-        A request id belongs to exactly one operation with fixed inputs, installation-wide, from the
-        moment it is acknowledged. Acknowledged means one of three places: a `po_requests` row (a
-        session or a turn exists), a message still pending in the queue, or a message the service set
-        aside in `refused/`. The same operation with the same inputs gets its record back (a replay);
-        anything else is `RequestConflict`. Every operation that takes a request id calls this while
-        holding the service lock, so nothing can take an id between this check and its own write.
+        po_requests, pending inputs and refused inputs all reserve ids. Identical operation/inputs
+        replay; different inputs raise RequestConflict before another write can claim the id.
         """
         known = self.store.request(request_id)
         if known is not None:
@@ -619,25 +558,12 @@ class PoService:
         return None
 
     def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]:
-        """The live PO session of a sprint: `{session_id, created}`.
+        """Return {session_id, created} under the service lock; reuse open sessions within budget or busy.
 
-        The sprint's recorded `po_session`, open and within its byte budget or busy,
-        is the answer (`created: false`, nothing written). An idle over-budget
-        session is replaced under the sprint/predecessor's deterministic request id;
-        callers bind to that successor in native po_requests. History remains open.
-        Null, missing from the store or closed, a fresh session is opened under `request_id` with the
-        recorded session's CLI, model and effort (or the new-session form's defaults when there is no
-        row); a recorded effort that is `default` (or no longer offered) gives way to the first effort
-        offered for that CLI, as does a session with no row, since a new session never opens on
-        `default`. The new session is titled with the sprint's ref (`sprint:<N>`). And then, in this
-        order: its seeding message is queued as its first input, the sprint gets a comment saying so,
-        and the sprint records the new session. The request id binds the sprint (`_reserve`), and each
-        later step has its own id derived from it, so a repeat of a request that failed part-way
-        finishes it and opens nothing, and a repeat of a finished one answers the same session. Resolves of one installation are serialized under the service lock
-        and read the sprint's session inside it, so two resolves for one sprint open one session.
-
-        Accepted from the session's claim on; it is answered only once the sprint records the session,
-        so a failure in between is `outcome_unknown` and its repeat completes it.
+        Replace idle over-budget sessions under the sprint/predecessor id without closing history.
+        Missing/closed sessions use request_id and recorded CLI/model/effort, with current defaults
+        and explicit offered effort as needed. Claim accepts; queue seed, comment, then record the
+        session using derived ids. Partial failure is outcome_unknown; replay completes those steps.
         """
         request_id = _required(request_id, "request_id")
         sprint_ref = _required(sprint_ref, "sprint_ref")
@@ -721,11 +647,9 @@ class PoService:
         self, sprints: SprintSessions, sprint: SprintRecord, session_id: str, request_id: str,
         *, rollover: tuple[str, dict[str, Any]] | None = None,
     ) -> None:
-        """The steps after a resolver's session exists; each is skipped when done, the record last.
+        """Finish seeding and announcement idempotently, recording the session last.
 
-        The sprint still naming its previous session is what says the steps are not finished yet,
-        and that previous session is what the seed and the comment talk about. A sprint that names
-        another open session already was re-seeded by another resolve: it is left as it is.
+        The previous session identifies unfinished work; leave a different open successor untouched.
         """
         if sprint.po_session == session_id:
             return
@@ -921,11 +845,9 @@ class PoService:
         }
 
     def request_restart(self, *, reason: str = "") -> dict[str, Any]:
-        """The upgrade rule: restart now only while no turn runs, else defer it to the first idle moment.
+        """Restart after answering if idle, else defer until running turns settle.
 
-        The marker (written by the requester, `ummanu.po.client.request_restart`) holds the queue
-        from here on, so a deferred restart is not starved by new inputs; they stay queued and the new
-        process takes them. Idle, the service exits once this answer is sent.
+        The requester's marker holds new inputs in the queue so they cannot starve the restart.
         """
         with self._lock:
             if not self.marker.exists():
@@ -949,10 +871,9 @@ class PoService:
     # --- the wire ---------------------------------------------------------------------------
 
     def handle(self, request: Any) -> dict[str, Any]:
-        """One decoded request to one answer document; never raises.
+        """Answer one decoded request without raising.
 
-        An operation that takes a request id runs inside :meth:`_answer_id_operation`, the one place
-        that decides what such a request is answered once it may have been accepted.
+        Request-id operations use _answer_id_operation to preserve the acceptance decision.
         """
         try:
             if not isinstance(request, dict) or not isinstance(request.get("op"), str):
@@ -978,19 +899,10 @@ class PoService:
     def _answer_id_operation(
         self, method: Callable[..., dict[str, Any]], fields: dict[str, Any]
     ) -> dict[str, Any]:
-        """The one wrapper around every operation that takes a request id.
+        """Preserve request acceptance across failures.
 
-        The operation reports its progress on an :class:`_Acceptance` (`_accepting` right before the
-        write that accepts the request, `_accepted` with the answer it already knows right after). The
-        answer then follows one rule, whatever failed:
-
-        - nothing failed: the operation's own answer;
-        - a failure after acceptance (an enrichment read, the queue pump): the answer known at
-          acceptance — the message queued under its id, or the session — never a refusal;
-        - a failure during the accepting write itself, which may have committed: `outcome_unknown`,
-          whose client-side meaning is "repeat the same request";
-        - a failure before it: a refusal, marked `nothing_written` only for the refusals known to
-          have written nothing (validation, a request-id conflict, an unknown or closed session).
+        Return the known answer after acceptance, outcome_unknown during a possibly committed write,
+        and a refusal before acceptance. Mark nothing_written only for known no-write refusals.
         """
         acceptance = _Acceptance()
         token = _ACCEPTANCE.set(acceptance)
