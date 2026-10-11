@@ -1,60 +1,9 @@
-"""The recovery policy: intents over a persisted episode, and nothing else (card S1-5).
+"""Pure recovery-intent policy over a persisted VitalityEpisode.
 
-Where :mod:`head_vitality` turns one channel reading into facts and
-:mod:`head_vitality_episode` folds them into a verdict over time, this module is the plan's
-third layer ("Recovery policy"): it consumes **only** a ``VitalityEpisode`` -- never raw
-signals, never a pane API, never a host -- and answers one question per tick:
-
-    what should the dispatcher *intend* to do about this head right now?
-
-It executes nothing by itself. The returned :class:`RecoveryDecision` names an intent from
-:class:`RecoveryIntent`; the caller (the dispatcher) executes it under the existing destructive
-guard, which remains the last fence between any intent and any signal or stop. The policy can
-never kill: no rung below, and no input shape, produces a stop/kill intent -- the most forceful
-thing here is ``escalate_operator``, which asks a human and touches nothing.
-
-The ladder this card implements (plan sections "Recovery policy" and "Sprint 1"; everything
-beyond these rungs is Sprint 2+ scope and exists only as vocabulary)::
-
-    SuspectedStall   -> observe / at most ONE idempotent nudge        (rung 1)
-    Retained         -> observe, and NOTHING else: no rung at all
-    Suspended        -> identity-fenced SIGCONT once per span         (rung 2)
-                       -> response window                             (rung 3)
-                       -> operator escalation if still suspended      (rung 4)
-    ConfirmedStall   -> the existing S1-4 recovery path, unchanged    (no new rungs)
-
-Rung state lives on the episode itself: ``recovery_rung`` (reserved since S1-2), plus the
-sibling persisted fields ``recovery_span_started_at`` (the freeze stamp of the span those
-rungs were climbed in) and ``deterministic_refusals``. They ride the episode's existing
-serialisation, so a dispatcher restart resumes the same rung instead of restarting the ladder,
-and records written before this card load unchanged with all three at zero.
-
-Two invariants the whole card rests on:
-
-  * **Idempotency per suspension span.** A suspension span is identified by the reducer's own
-    freeze stamp (``stall_frozen_since``): it starts when the kernel first shows the process
-    parked and clears when it runs again. Every SIGCONT-rung decision keys on that stamp.
-    Within one span the policy returns the same rung without re-firing; across spans it
-    restarts; when the verdict recovers entirely, rung state resets to 0. Repeated identical
-    observations are therefore free -- exactly what makes the policy safe to call from every
-    tick, on the wait path and in the gate phase alike.
-
-  * **Deterministic reasons are not heuristic evidence.** The plan: "Одинаковый
-    эвристический reason N раз не является доказательством. Быстро перескакивать ранги могут
-    только авторитетные детерминированные классы". A refusal reason in
-    :data:`DETERMINISTIC_TERMINAL_REASONS` (invalid configuration, missing executable,
-    authentication rejected, resource exhausted, ...) is an authoritative fact about THIS
-    attempt: retrying cannot succeed because retrying does not change the world. After
-    ``thresholds.deterministic_refusal_limit`` such refusals the policy returns
-    ``escalate_operator`` immediately -- the codegen-orchestrator-1194 class, which burned 49
-    minutes and 45 identical retries before a human looked. A reason NOT on the allowlist,
-    however often it repeats, earns only ordinary observation: heuristics climb the ladder on
-    real quiet time, never on their own repetition.
-
-Like every module in ``ummanu.dispatch.head_vitality*`` this one is pure: no clock, no I/O,
-no exceptions on hostile input -- malformed arguments degrade to ``observe``, the safest
-intent, with the problem named in the decision's reason.
-"""
+A suspected stall may earn an idempotent nudge; an intentional Retained state
+never earns recovery. Suspension uses one identity-fenced SIGCONT per span,
+then a response window and operator escalation. Deterministic refusals can
+escalate early. This policy never stops/kills a head or performs I/O."""
 
 from __future__ import annotations
 
@@ -71,13 +20,7 @@ DECISION_VERSION = 1
 
 
 class RecoveryIntent(StrEnum):
-    """What the dispatcher may intend for one head, as of one tick.
-
-    The full plan ladder is spelled as vocabulary even though this card wires only part of
-    it: naming the missing rungs now keeps later cards from reinterpreting the enum (and the
-    persisted rung numbers) instead of extending it. Only the intents marked "wired" are ever
-    produced by :func:`decide_recovery` today.
-    """
+    """What the dispatcher may intend for one head, as of one tick."""
 
     #: Nothing earned: keep watching. Wired.
     OBSERVE = "observe"
@@ -154,24 +97,10 @@ def deterministic_reason_class(reason: str) -> DeterministicReasonClass | None:
 
 @dataclass(frozen=True)
 class RecoveryThresholds:
-    """The response window and refusal bound this policy owns.
+    """Response window and deterministic-refusal count thresholds.
 
-    ``response_window_seconds`` defaults to five minutes. Three considerations set that
-    scale. Lower bound: the window must outlast several dispatcher tick cadences (production
-    ticks land roughly every 30-60s), so a resumed head gets multiple ticks to show life --
-    one tick of provider quiet after resume must not read as failure. Upper bound: it must
-    stay far below the six-hour ceilings whose uncritical application produced fe04011b;
-    the point of the rung is that a stopped head reaches a human in minutes. And the
-    incident itself: the fe04011b worker sat in `T` for 27 minutes and resumed losslessly on
-    SIGCONT -- five minutes bounds the unattended span well under that while leaving a
-    resuming head ample room. Like ``VitalityThresholds`` these are comparability choices,
-    not authority: the env knob at the call site owns whatever production needs.
-
-    ``deterministic_refusal_limit`` is small (3) on purpose: a deterministic refusal is
-    already known-authoritative, so two confirmations that it repeats identically are
-    plenty; the count exists to absorb a single probe mislabelling itself, not to re-run
-    the 45-retry incident at smaller scale.
-    """
+    The response window spans multiple ticks; repeated authoritative refusals
+    trigger operator escalation after the configured bound."""
 
     response_window_seconds: float
     deterministic_refusal_limit: int
@@ -204,14 +133,7 @@ DEFAULT_RECOVERY_THRESHOLDS = RecoveryThresholds(
 
 @dataclass(frozen=True)
 class RecoveryDecision:
-    """One policy ruling: the intent, the rung to persist, and the audit trail.
-
-    ``rung`` names the ladder position this decision leaves the head at; the caller persists
-    it (with its sibling span/refusal state) by storing the episode the policy returned via
-    :func:`apply_rung_state`. ``reason`` is bounded operator-facing prose; ``detail`` carries
-    structured fields (the deterministic class, the span stamp, the window expiry) for
-    telemetry.
-    """
+    """One policy ruling: the intent, the rung to persist, and the audit trail."""
 
     intent: RecoveryIntent
     rung: int
@@ -232,13 +154,7 @@ class RecoveryDecision:
 
 
 def apply_rung_state(episode: VitalityEpisode, decision: RecoveryDecision) -> VitalityEpisode:
-    """Write a decision's rung state back onto the episode, purely.
-
-    Rung, span key and refusal count ride the episode's own serialisation (S1-2 reserved
-    ``recovery_rung``; this card added the siblings), so persisting the record is the whole
-    write. ``updated_at`` is left alone: it belongs to the reducer's observation story, and
-    the policy is not an observation.
-    """
+    """Write a decision's rung state back onto the episode, purely."""
     return replace(
         episode,
         recovery_rung=decision.rung,
@@ -253,38 +169,12 @@ def decide_recovery(
     now: float,
     thresholds: RecoveryThresholds = DEFAULT_RECOVERY_THRESHOLDS,
 ) -> RecoveryDecision:
-    """Choose one recovery intent for one tick, from the episode alone.
+    """Choose a pure, idempotent recovery intent for this tick.
 
-    ``episode`` is the freshly reduced ``VitalityEpisode`` for the current run (``None``
-    when this tick observed nothing). ``previous_rung_state`` is the episode as the policy
-    last saw it -- the caller passes the pre-decision episode it loaded from the record, so
-    idempotency reads what was actually persisted rather than what this call just produced.
-    ``now`` is epoch seconds owned by the caller. The function never raises and never
-    touches anything.
-
-    Verdict -> intent, per the ladder in the module docstring:
-
-    * ``Retained`` -> ``observe``, rung state cleared, before anything else is consulted.
-    * ``HealthyActive`` / ``HealthyQuiet`` / ``Unverifiable`` / ``Dead`` -> ``observe`` with
-      rung state reset to zero. Health needs no intent; death and unobservability belong to
-      the S1-4 paths (the watchdog's reclaim, the operator escalation), which run before this
-      policy at the call site. A recovered suspension lands here too: its span is over, so a
-      future suspension starts the ladder fresh.
-    * ``SuspectedStall`` -> ``nudge`` at rung 1. The single idempotent nudge a suspicion
-      earns is spent by the S1-4 wait-tick arm (``_prompt_worker_report``); routing the
-      verdict through the policy keeps that behaviour byte-identical while making the rung
-      table complete.
-    * ``Retained`` -> ``observe`` at rung zero, unconditionally. A process the dispatcher is
-      deliberately holding suspended is not a head awaiting recovery, so no rung -- SIGCONT
-      least of all -- may be earned over it.
-    * ``Suspended`` -> the SIGCONT rungs, keyed on the freeze span (see
-      :func:`_decide_suspended`): one identity-fenced SIGCONT per span, a response window
-      after it, operator escalation -- never kill -- when the window expires.
-    * A deterministic refusal class on the episode's reason outranks the verdict ladder: at
-      ``thresholds.deterministic_refusal_limit`` identical authoritative refusals the policy
-      returns ``escalate_operator`` immediately (the 1194 contract), skipping the retry
-      ladder. Below the limit it observes and counts.
-    """
+    Retained and ordinary healthy/unknown/dead verdicts observe; SuspectedStall
+    may nudge once; Suspended advances a single-span SIGCONT, response-window,
+    operator-escalation ladder. Identical deterministic refusals can escalate
+    independently. Rung history comes from the previously persisted episode."""
     if not isinstance(episode, VitalityEpisode):
         return _previous_or_observe(previous_rung_state, "no persisted episode to decide from")
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
@@ -366,15 +256,7 @@ def _decide_deterministic(
     thresholds: RecoveryThresholds,
     cls: DeterministicReasonClass,
 ) -> RecoveryDecision:
-    """Count identical authoritative refusals and escalate fast past the limit.
-
-    The count is the episode's own ``deterministic_refusals`` plus this sighting. It is NOT
-    keyed to the suspension span: a launch-refusal loop is not a suspension story, and a
-    resumed head does not retroactively un-refuse the command that refused. The count DOES
-    reset whenever the episode stops carrying a deterministic reason (the ordinary verdict
-    arm above returns ``refusals=0``): evidence of a changed attempt supersedes the old
-    count, exactly as real progress ends a stall episode.
-    """
+    """Count identical authoritative refusals and escalate fast past the limit."""
     seen = int(episode.deterministic_refusals or 0)
     if isinstance(previous_rung_state, VitalityEpisode):
         # The caller may pass the fresher episode as both arguments (reduce-then-decide on

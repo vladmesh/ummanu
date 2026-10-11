@@ -1,70 +1,8 @@
-"""The persisted vitality episode: hysteresis over snapshots, and nothing else.
+"""Pure reducer of run-bound vitality snapshots into a persisted episode.
 
-Where :mod:`head_vitality` turns one channel reading into facts, this module folds successive
-snapshots of one ``HeadRun`` into a *conclusion over time* -- the ``VitalityEpisode`` of the
-head-vitality plan ("Vitality reducer"): a verdict, the timestamps that justify it, the per-source
-cursors that prove advancement, and the sources that went dark. ``reduce_vitality`` is the only
-place conclusions live, and it is a pure function: same
-inputs in, same episode out, no I/O, no clock. The caller owns ``now``, which is what keeps the
-reducer testable against the historical incidents and replayable from a persisted record.
-
-Verdict ladder, in the plan's vocabulary::
-
-    HealthyActive   strong evidence of advancement right now
-    HealthyQuiet    alive, no advancement observed yet, below every threshold
-    Suspended       the kernel has the process parked on a stop signal (NOT a stall)
-    Retained        the same parked process, held there by the dispatcher's OWN retention
-    SuspectedStall  strong quiet has outlived ``suspect_after``
-    ConfirmedStall  strong quiet has additionally outlived ``confirm_after``
-    Dead            the heartbeat names a gone or unreaped process
-    Unverifiable    no strong channel answered; nothing may be concluded
-
-Decisions this module deliberately does NOT make: it never stops, signals or replaces
-anything, and it treats the two thresholds as description, not authority. It neither sets nor
-reads ``recovery_rung`` and its sibling policy fields (they exist for the recovery-policy card,
-S1-5, and ride every reduction untouched); until that policy wired in behind them, episodes are
-recorded and logged by the caller -- stored and consulted only through the decision paths the
-later cards define.
-
-The invariants encoded here (each pinned by a named test):
-
-  * snapshots naming another run never touch an episode; a wholesale identity change starts a
-    fresh episode rather than splicing a new run's facts into an old run's history;
-  * ``Dead`` and ``Suspended`` outrank everything else on their axis; suspension freezes the
-    stall clocks instead of feeding them;
-  * a parked process whose card carries a confirmed retention reduces to ``Retained``, not to
-    ``Suspended``: the caller passes that intent in as ``retained=``, so the one fact "the
-    process is in ``T``" stops having two owners with opposite intentions (secretary-1539). Death
-    still outranks it -- a retained head that is provably gone is ``Dead``, not ``Retained`` --
-    and a retention whose process is running again is not ``Retained`` either, so the caller's
-    own "no longer confirmably suspended" failure still fires;
-  * advancement from any non-advisory source ends a suspected or confirmed episode immediately;
-  * an unavailable source freezes its evidence and never counts as no-progress; with every strong
-    source dark the truthful verdict is ``Unverifiable`` -- except that an already-confirmed
-    episode is not quietly laundered back to health by its observers going blind;
-  * that freeze is BOUNDED (secretary-1543): a progress source known to this episode and not
-    answering holds the stall clock for at most ``thresholds.dark_ceiling``, after which the
-    episode ages on the pid's own sustained "running, and nothing else" exactly as a run whose
-    progress source never answered at all. A live pid is never indefinite evidence of liveness;
-  * a source does not have to SAY it is unavailable to be dark: a progress source this episode has
-    heard from that produces no snapshot on a tick is stamped dark too, because the status shapes
-    for a live head whose pane the inventory lost carry a heartbeat and no provider channel at all;
-  * a rejected report the head has not answered, followed by an advisory turn seen to END, raises
-    ``HealthyQuiet`` to ``SuspectedStall`` at once (``answer_owed_since``): the pair is an
-    explicit signal, not something a ceiling eventually notices;
-  * advisory pane readings corroborate in ``basis`` and can never drive a stall verdict;
-  * a head's child processes whose CPU or IO counters move hold the head ``HealthyActive``
-    while it is itself silent (secretary-1692), but only for ``thresholds.child_activity_ceiling``
-    measured from the head's own last progress; a child with frozen counters, a child past the
-    ceiling and no child at all leave the ordinary quiet rules exactly as they were;
-  * a head whose supervisor journal shows its turn ENDED, while the caller declares it still owes
-    its answer, is judged by one rule, ``_idle_turn_stall`` (secretary-1739): suspected
-    ``idle_turn_suspect_after`` and confirmed ``idle_turn_confirm_after`` after the idle turn
-    began, and child processes do not hold it healthy; an open journal turn keeps every rule above;
-  * quiet accumulates from ``last_progress_at`` (or episode start), not from the last tick, so
-    irregular ticks cannot stretch or shrink a stall;
-  * confirmation is sticky: only real progress, suspension, death or an identity change ends it.
-"""
+The episode preserves verdict, source evidence, cursors and quiet-time history
+across ticks. The caller supplies time, retention and answer-owed context;
+reduction neither performs I/O nor authorizes destructive action."""
 
 from __future__ import annotations
 
@@ -141,58 +79,11 @@ class VitalityVerdict(StrEnum):
 
 @dataclass(frozen=True)
 class VitalityThresholds:
-    """The quiet durations at which suspicion begins and confirmation follows.
+    """Quiet durations for suspected/confirmed stall, dark-source aging and child activity.
 
-    Defaults are chosen against the ceilings the dispatcher already lives with, for comparability
-    rather than authority: ``suspect_after`` equals ``IDLE_STALL_DEFAULT`` (secretary-1063's
-    five-minute readiness-idle window) -- the point where today's machinery first treats idleness
-    as actionable -- and ``confirm_after`` doubles it, echoing the watchdog's principle that a
-    destructive-looking conclusion wants its evidence separated in time. Both are far below the
-    six-hour worker-report ceiling whose uncritical application produced the codegen-orchestrator
-    incidents. Nothing in this module enforces these numbers on a decision: they parameterise a
-    shadow verdict, and a later policy card owns whatever the production numbers turn out to be.
-
-    ``dark_ceiling`` is the one number this vocabulary makes load-bearing for a real recovery
-    (secretary-1543), so it is argued rather than borrowed. It bounds how long a progress source
-    that is *known to this episode and not answering* may freeze the stall clock. Before this
-    card the freeze was unbounded: on ``issue:7bff833fef6d9d9b404d`` (2026-08-30) a Codex head
-    with no bound provider baseline sat ``healthy_quiet`` for 65+ minutes behind a live PID, with
-    no wake, no replacement and no terminal outcome. Lower bound on the number: it must outlast a
-    genuine provider-startup window, and secretary-1542 measured one on real Codex v0.152.1 --
-    minutes, during which Orca answers ``tui-idle`` satisfied and the output cursor never moves,
-    so nothing else distinguishes a starting head from a settled one. Upper bound: it must stay
-    far below the six-hour worker-report ceiling whose uncritical application produced the
-    codegen-orchestrator incidents, and it must leave the wake early enough to be worth having.
-    Two ``IDLE_STALL_DEFAULT`` (ten minutes) sits between them: a dark-and-quiet head earns its
-    first conversational nudge at ``max(dark_ceiling, suspect_after)`` -- ten minutes instead of
-    never -- while nothing destructive happens before ``suspect_after + confirm_after`` of quiet
-    AND the guard's own outer ceiling (:mod:`head_vitality_guard`).
-
-    ``child_activity_ceiling`` (secretary-1692) bounds how long a head that is itself silent may
-    be held healthy by its child processes' CPU or IO alone, measured from the head's own last
-    progress. Lower bound: the longest single command a worker legitimately runs in the
-    foreground -- two integration shards under ``timeout 580`` each (secretary-1665) or one
-    broad suite, i.e. up to roughly twenty minutes -- with room for a slow host. Upper bound: a
-    hung child that spins (a busy-looping test, a retry loop) must still be caught in the same
-    hour, far below the six-hour report ceiling. Forty-five minutes sits between them; past it
-    the child's movement is ignored and the ordinary ladder runs from the last child advancement
-    it accepted, so such a head is suspected at about 50 and confirmed at about 60 minutes.
-
-    ``idle_turn_suspect_after`` and ``idle_turn_confirm_after`` (secretary-1739) are the idle-turn
-    stall, and unlike the pair above both are measured from ONE instant: when the head's journal
-    turn became idle. The shape they judge is not "quiet while working" but "finished and
-    silent": the supervisor closed the turn after two seconds with no terminal output at all, the
-    run's adapter is one whose TUI animates while a tool runs (``IDLE_TURN_ADAPTERS``, where a
-    closed turn is a head at its prompt), and the head still owes the dispatcher its report or
-    verdict. Nothing is running to wait for, so the quiet ladder's fifteen minutes protect
-    nothing here.
-    Lower bound: the dispatcher's own latency in accepting an answer the head just wrote (one
-    tick, about a minute) plus room for a delivery that is about to land. Upper bound: the card
-    asks that a stall be confirmed in minutes, at most ten. Suspicion at five minutes spends the
-    one report nudge (whose delivery opens a turn and restarts this clock); confirmation at ten
-    reaches the recovery path. A head whose journal turn is open keeps the quiet ladder and the
-    child-process hold exactly as before.
-    """
+    Dark sources cannot postpone suspicion indefinitely; child-only movement
+    cannot keep a silent head healthy without a bound. Destructive permission
+    belongs to the separate guard."""
 
     suspect_after: float
     confirm_after: float
@@ -247,14 +138,7 @@ def _finite_timestamp(value: Any, name: str) -> float:
 
 @dataclass(frozen=True)
 class VitalityEpisode:
-    """One run's vitality conclusion, durable enough to survive the dispatcher.
-
-    Frozen and structurally compared like ``VitalitySnapshot``: an episode is written between
-    ticks, read back by the next one, and handed to a future policy card that must be able to
-    trust it verbatim. ``suspected_since``/``confirmed_since`` carry the *computed* onset of each
-    phase (quiet-reference plus threshold, not the tick that happened to observe the crossing),
-    because ticks are irregular while the quiet they sampled is not.
-    """
+    """One run's vitality conclusion, durable enough to survive the dispatcher."""
 
     run_id: str
     verdict: VitalityVerdict = VitalityVerdict.UNVERIFIABLE
@@ -426,13 +310,7 @@ class VitalityEpisode:
 
     @classmethod
     def from_json(cls, payload: Any) -> VitalityEpisode:
-        """Read one episode back, refusing damaged evidence instead of normalising it.
-
-        Same contract as ``VitalitySnapshot.from_json``: a payload outside this vocabulary is a
-        damaged record, and quietly repairing it would let a later consumer act on words nobody
-        wrote. Records written before this field existed are handled by ``DispatcherRecord``,
-        which maps their absence to ``None`` -- no episode, no claim.
-        """
+        """Read one episode back, refusing damaged evidence instead of normalising it."""
         if not isinstance(payload, dict):
             raise HeadVitalityError("a vitality episode is read from an object")
         if type(payload.get("version")) is not int or payload.get("version") != EPISODE_VERSION:
@@ -518,42 +396,11 @@ def reduce_vitality(
     answer_owed_since: float = 0.0,
     adapter: str = "",
 ) -> VitalityEpisode:
-    """Fold one tick's snapshots into the run's episode, purely and deterministically.
+    """Purely fold one tick of source snapshots into one run's episode.
 
-    ``previous`` is the persisted episode for the run (``None`` before the first). ``snapshots``
-    are this tick's observations, in any order -- duplicates collapse to each source's latest
-    reading. The function never reads a clock, a file or a host: everything it concludes is a
-    function of its arguments, which is what makes a persisted episode replayable and its tests
-    able to reproduce historical incidents tick by tick.
-
-    ``retained`` is the caller's declaration that this run is parked on a stop signal the
-    dispatcher itself sent and still holds (a confirmed ``WorkerContinuation`` retention). It is
-    an INPUT, not an observation: the reducer cannot tell an intentional SIGSTOP from a hostile
-    one, and guessing is what let the watchdog SIGCONT a retained worker out from under the gate
-    (secretary-1539). It changes exactly one thing -- a suspended reading becomes ``Retained``
-    instead of ``Suspended`` -- and nothing else about the fold.
-
-    ``answer_owed_since`` is the other caller-declared fact (secretary-1543): the instant the
-    dispatcher put a question to this head that it has not answered. The wait tick declares it
-    for a worker before its report is accepted and a reviewer before its verdict -- the bring-up
-    or delivery that opened the phase, or a rejected done report, whichever is later
-    (``wait_vitality.answer_owed_since_for_wait``) -- and every other caller passes 0.0. Like
-    ``retained`` it is an INPUT: the reducer cannot see the board. It feeds two rules. The
-    idle-turn stall (``_idle_turn_stall``, secretary-1739) judges a head whose supervisor journal
-    shows its turn ended, never charging it with idleness from before the question. And when the
-    head owes an answer that no
-    progress has followed AND the advisory Turn axis has been seen to END a turn since the
-    question was put (``active`` then ``idle``), a ``HealthyQuiet`` verdict is raised to
-    ``SuspectedStall`` at once instead of waiting out the quiet thresholds: a head that took its
-    turn, ended it and answered nothing is not quiet-below-threshold, it is finished and silent.
-    The advisory reading still cannot convict on its own -- with no owed answer it stays exactly
-    as weightless as before -- and it can never raise anything but ``HealthyQuiet``, so it lowers
-    no verdict and launders no confirmation.
-
-    ``adapter`` is the run's ``HeadRun.spec.adapter``, declared by the caller like the two above.
-    The idle-turn rule applies only to an adapter in ``IDLE_TURN_ADAPTERS``; any other value,
-    including the empty default, leaves every rule exactly as it was before that rule existed.
-    """
+    Duplicate source observations collapse to the latest reading. `retained`
+    distinguishes dispatcher-held SIGSTOP; `answer_owed_since` begins a new
+    obligation and bounds idle-turn stall evidence. No I/O or implicit clock."""
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
         raise HeadVitalityError("reduce_vitality needs a finite now")
     now = float(now)
@@ -1020,31 +867,12 @@ def _idle_turn_stall(
     answer_owed_since: float,
     child_advancing: bool,
 ) -> tuple[VitalityVerdict, VitalityEpisode, list[str]] | None:
-    """THE IDLE-TURN STALL RULE (secretary-1739): the one place a finished, silent head is judged.
+    """Judge an idle, completed supervisor turn only for supported adapters with
+    a journal answer and a caller-declared outstanding answer.
 
-    It decides only when all four hold: the run's adapter is in ``IDLE_TURN_ADAPTERS`` (the caller
-    hands ``None`` otherwise), the ``supervisor_journal`` snapshot answered, it says the head's
-    turn is ``Idle``, and the caller declares an owed answer (``answer_owed_since`` > 0: a worker
-    before its report is accepted, a reviewer before its verdict). Otherwise it returns ``None``
-    and the ordinary arms decide exactly as before -- an open turn keeps the quiet ladder and the
-    child hold, and a head that owes nothing (the gate phase) is not judged here.
-
-    The idle turn is charged from ``reference``, the latest of: the journal's own idle start (the
-    last ``turn.finished``, or a later ``input.accepted``/``turn.started``, so the delivery that
-    resumes a continued worker restarts the clock), the instant the answer became owed (a head is
-    never charged with idleness from before it was asked), and a nudge's ``quiet_since``. From
-    there it climbs to ``SuspectedStall`` at ``idle_turn_suspect_after`` and ``ConfirmedStall`` at
-    ``idle_turn_confirm_after``, both measured from that one instant.
-
-    Child processes do NOT hold it: a head at its prompt is not running the command its children
-    are, and a child that keeps moving there is a helper, not the head's work
-    (``child-not-holding-idle-turn`` in ``basis``). Nor does a turn ending launder a stall the
-    episode already holds (an open turn that went quiet long enough to be suspected, then closed):
-    that verdict stands (``stall-stands``) unless the dispatcher has restarted the head since it
-    began -- a new owed answer or a nudge's ``quiet_since`` -- which is what a restart means
-    everywhere else in this module. Advancement, death and suspension are decided by the arms
-    above this one and never reach it.
-    """
+    Charge quiet time from the latest idle start, owed-answer time or nudge.
+    Child activity cannot excuse an idle turn; existing stall evidence remains
+    unless a newer question/nudge resets that interval."""
     if (
         journal is None
         or journal.availability is not SourceAvailability.AVAILABLE
@@ -1105,16 +933,7 @@ def recovery_outlook(
     now: float,
     thresholds: VitalityThresholds = DEFAULT_VITALITY_THRESHOLDS,
 ) -> dict[str, Any]:
-    """What an operator needs to read off one episode: what is dark, how long, what happens next.
-
-    Pure like everything else here, and derived from the same arithmetic the reducer uses, so the
-    deadline a human is shown is the instant the next reduction will actually act on. It answers
-    for one episode only: it starts nothing, and it never re-observes anything.
-
-    ``next_deadline`` is ``None`` where the ladder has no further vitality rung to climb -- a
-    confirmed stall (the recovery path owns it), a suspended or retained process (the clocks are
-    frozen by the stop signal), death, and a verdict nobody could reach.
-    """
+    """Summarize the episode's observed sources, quiet duration and next action."""
     if not isinstance(episode, VitalityEpisode) or not isinstance(thresholds, VitalityThresholds):
         return {"quiet_seconds": 0.0, "dark_sources": [], "next_deadline": None, "note": ""}
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
@@ -1171,14 +990,7 @@ def recovery_outlook(
 def _resolve_run_id(
     previous: VitalityEpisode | None, snapshots: Sequence[VitalitySnapshot]
 ) -> tuple[str, list[str]]:
-    """Pick the run this reduction speaks about, and name the foreign runs it drops.
-
-    Snapshots naming another run are dropped with a ``basis`` note rather than raising: one stale
-    reading in a batch must not poison the reduction, and the builders have already fenced
-    identity at the source. When *every* snapshot agrees on a run other than the episode's, that
-    is an identity change -- a respawned head -- and it starts a fresh episode instead of leaving
-    the old one permanently starved.
-    """
+    """Pick the run this reduction speaks about, and name the foreign runs it drops."""
     run_ids = sorted({snapshot.run_id for snapshot in snapshots})
     chosen = previous.run_id if previous is not None and previous.run_id in run_ids else run_ids[0]
     return chosen, [name for name in run_ids if name != chosen]
@@ -1217,14 +1029,7 @@ def _freeze_stall_clocks(episode: VitalityEpisode, now: float, *, retained: bool
 
 
 def _quiet_reference(episode: VitalityEpisode) -> float:
-    """The instant this episode's current quiet began: what every threshold is measured from.
-
-    The later of the last observed advancement, the last conversational restart
-    (``quiet_since``) and the last accepted child-process advancement (``child_progress_at``,
-    secretary-1692), falling back to the episode's start before either has happened. A nudge
-    that restarts the clock therefore buys the head the grace its own comment promises, without
-    erasing the progress history an operator reads (secretary-1543).
-    """
+    """The instant this episode's current quiet began: what every threshold is measured from."""
     return max(episode.last_progress_at, episode.quiet_since, episode.child_progress_at) or episode.started_at
 
 
@@ -1274,12 +1079,7 @@ def _unfreeze_if_resumed(
 
 
 def interrupted_command_note(episode: Any, run_id: str) -> str:
-    """The factual line a respawned successor gets about its predecessor's running command.
-
-    Taken from the last child reading kept on ``run_id``'s own episode (secretary-1692): empty
-    when there is no such episode, when it names another run, or when its last reading described
-    no live child. The command was redacted and bounded when it was read.
-    """
+    """The factual line a respawned successor gets about its predecessor's running command."""
     if not isinstance(episode, VitalityEpisode) or not run_id or episode.run_id != str(run_id):
         return ""
     command = episode.last_child_command.strip()
