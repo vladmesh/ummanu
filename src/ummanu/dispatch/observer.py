@@ -1,45 +1,14 @@
-"""Observer-head lifecycle: one head per open sprint, reconciled by the production tick.
+"""Observer lifecycle: one head per open sprint, reconciled each production tick.
 
-An observer is a dispatcher-launched role beside worker and reviewer, with its own head profile,
-workspace, terminal handle and role-scoped environment. It never claims a card and never appears
-in a card record, so the per-project claim gate and the card cycle are untouched.
+Open sprints launch or retain their observer; confirmed-dead heads may be replaced,
+and closed sprints are stopped. Observers never claim cards.
 
-The tick reconciles the observer records against the sprint board on every run:
+Persist launch intent before calling the host, and stage lifecycle events before
+their effects. Keep ambiguous or refused stops and failed post-pane launches
+addressable; do not equate an unreadable heartbeat with death.
 
-  open sprint, live pid    -> nothing
-  open sprint, dead pid    -> relaunch, counted as a relaunch in the record and in the audit log
-  open sprint, no record   -> launch
-  closed or gone sprint    -> stop the head and drop the record
-
-A bring-up that fails once its terminal is already up is not a headless sprint: the host hands
-the handle back with the failure (`ObserverLaunchAborted`), the record keeps it marked as an
-abandoned handle, and the next tick closes that terminal before opening the replacement. A stop
-the host refused is not a stop either: the record stays `stop-pending` and `observer_stopped` is
-written only once the terminal is actually gone.
-
-Every lifecycle event is staged on disk before the host call it describes and committed to the
-log after it, the same order `TaskWriter` uses for a card. Storage that refuses the commit does
-not propagate: the staged copy is what the stale-staged settlement settles later, the record is
-written regardless, and the outcome says `audit: pending`.
-
-The record itself is fixed the same way. A launch intent — sprint, generation, head, attempt,
-workspace and pid file — is written into the production state and flushed to disk *before*
-`prepare_observer` is called, so state that cannot be written costs the sprint a tick rather
-than putting a second head on it, and a tick that dies mid-launch leaves an intent the next tick
-resolves from the pid file.
-
-Liveness is the same pid heartbeat the worker and reviewer get. A pid file that does not exist
-yet is not evidence of death: an unknown pid counts as alive for a short grace window. Neither is
-one that cannot be read: the relaunch above is made on positive death — a readable record whose
-process is gone — because a bring-up made on an unreadable one is how a second head ends up beside
-a live one. That relaunch does not wait for a card event; an empty queue is a reason not to wake a
-head that is there, not a reason to leave an open sprint without one.
-
-The acknowledgement deadline says how long one sent delivery may stay unacknowledged before it
-is sent again; it is armed by the delivery and never compared against the age of the event. A
-current Codex HeadRun uses its own persisted provider cursor while the pane is non-idle: fresh
-progress outranks `tui-idle`. The legacy turn ceiling remains only for observers with no
-attested provider source.
+Sent deliveries use an acknowledgement deadline. Bound provider evidence wins
+over pane idleness; the legacy turn ceiling applies only without attested source.
 """
 
 from __future__ import annotations
@@ -180,21 +149,11 @@ class ObserverWakeLiveness(WorkerContinuationLiveness):
 
 @dataclass(frozen=True)
 class QuietStopJudgement:
-    """One tick's finding that a head is finished, as the conditional stop is owed it.
+    """Evidence for a conditional observer stop at the tick's decision point.
 
-    The head runtime decides on its own whether a head may be taken down for a replacement, but two
-    of the facts it decides on are not its to read, and both belong to the moment the tick made up
-    its mind rather than to the moment the stop is performed:
-
-      * `activity_epoch` — this head's own epoch as the tick read it. Read later it would already
-        contain whatever the head did after the judgement, and the comparison would be against
-        itself;
-      * `head_process_alive` — the pid-heartbeat evidence that made the tick decide at all. The
-        runtime cannot produce it: Orca answers about panes, and a pane says `busy` both for a
-        working head and for the wrapper shell a dead one leaves behind.
-
-    They are one value so that neither can be passed without the other, and so that a caller cannot
-    read them a tick apart.
+Capture both the head's activity epoch and pid-heartbeat liveness together.
+A later read could miss intervening activity; a pane's busy state cannot
+distinguish a working head from a dead head's leftover shell.
     """
 
     activity_epoch: int
@@ -466,12 +425,10 @@ def put_observers(payload: dict[str, Any], observers: dict[str, ObserverRecord])
 
 
 def observer_head_status(record: ObserverRecord) -> dict[str, Any]:
-    """This record's launch identity as the product's one reader classifies it.
+    """Read this observer's launch identity once, retaining its liveness classification.
 
-    Separated from `observer_alive` because a tick that has to decide whether to bring a head up
-    needs more than the boolean: "not alive" covers both a record that says the process is gone
-    and a record nobody can read, and only the first of those is evidence a replacement may be
-    started on. One read answers both questions, so the two never disagree within a tick.
+A missing or unreadable identity is not positive evidence of death; only a
+confirmed-dead process permits a replacement.
     """
     return head_run_process_status(
         record.pid_file or observer_pid_file(record.sprint),
@@ -483,15 +440,11 @@ def observer_head_status(record: ObserverRecord) -> dict[str, Any]:
 
 
 def observer_head_is_dead(status: dict[str, Any]) -> bool:
-    """Whether this launch identity is positively dead, so a replacement may be brought up.
+    """Whether the observer's recorded process is positively dead.
 
-    Only `dead` counts: the record was readable, it named a pid, and that pid is gone or unreaped
-    on this boot. Missing, half-written, unreadable and legacy pid-only records are inconclusive
-    and deliberately answer False — a bring-up on unreadable evidence is how a second head ends up
-    beside a live one, which is the same asymmetry `LocalPtyHeadRuntime.start` keeps at the other
-    end of this decision (secretary-1468). An identity mismatch is left out for a different
-    reason: the pid names a live foreign process, and `stop_observer_head` refuses to signal or
-    replace over one, so reading it as death would only defer forever.
+Require a readable identity naming a pid that is gone or unreaped on this boot.
+Missing, partial, unreadable, legacy pid-only and foreign live identities do
+not authorize a replacement.
     """
     return heartbeat_is_dead(status)
 
@@ -499,13 +452,10 @@ def observer_head_is_dead(status: dict[str, Any]) -> bool:
 def observer_alive(
     record: ObserverRecord, *, now: float | None = None, status: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Whether the head recorded here is still running, and on what evidence.
+    """Observer liveness with its evidence.
 
-    `known: False` means the pid file is not readable, which a head that has just been launched has
-    not written yet. That is not death, so it reads as alive until the grace window has passed.
-
-    `status` is the already-read classification, for a caller that also needs the state behind the
-    boolean; left out, this reads it itself.
+An unreadable pid file is inconclusive, not death; a new head is treated as
+alive during its grace period. Reuse a supplied status when available.
     """
     now = time.time() if now is None else now
     status = observer_head_status(record) if status is None else status
@@ -592,11 +542,10 @@ def observer_wake_max_attempts() -> int:
 def reconcile_observers(
     runtime: Any, payload: dict[str, Any], *, pause_mode: str = ""
 ) -> list[dict[str, Any]]:
-    """Bring the observer heads in line with the open sprints. Returns the tick's outcomes.
+    """Reconcile observer heads with open sprints.
 
-    Nothing happens when there is neither an open sprint nor a tracked observer. A fenced sprint is
-    still reconciled: the fence stops the sprint's *cards* and clears only once an observer has been
-    adopted, which is this pass, so excluding it would fence the sprint permanently.
+Keep fenced sprints in reconciliation: their card fence cannot clear until
+their observer has been adopted. No tracked heads and no open sprints is a no-op.
     """
     observers = load_observers(payload)
     try:
@@ -653,11 +602,10 @@ _BROUGHT_UP = frozenset({"observer-launched", "observer-relaunched"})
 
 
 def _dead_launch(record: ObserverRecord | None) -> int | None:
-    """The launch count of this record's head when it is positively dead at the start of the tick, else None.
+    """Return the launch count if this observer is confirmed dead at tick start.
 
-    Read before the tick's reconcile, with the same reader the reconcile uses (`observer_head_is_dead`):
-    a head this tick then does not bring back up is a dead observer without relaunch (secretary-1770).
-    A head stopped on purpose (a pause, a pending stop) is not a dead one.
+Use the same liveness classifier as reconciliation, before it mutates records.
+Deliberate stops and pending stops are not deaths.
     """
     if (
         record is None
@@ -1530,16 +1478,11 @@ def _wake_pending(ref: str, record: ObserverRecord) -> dict[str, Any]:
 
 
 def _redelivery_reason(status: dict[str, Any], delivery: ObserverDelivery, *, now: float) -> str:
-    """Why an active delivery is sent again, or an empty string to keep waiting for its deadline.
+    """Return the reason to redeliver, or empty text while awaiting acknowledgement.
 
-    The head being idle is the first reason and does not wait the deadline out. Idle evidence is the
-    readiness signal plus a readable `last_activity`; a pane whose activity cannot be read says
-    nothing about whether a turn ended, so it is not idle here.
-
-    A delivery still in `DELIVERY_INTENT` is a third case: the tick died between persisting the
-    intent and confirming the prompt landed, so a ready pane may simply be one that never received
-    it. Only a delivery known to have been sent is redelivered on idleness; the deadline covers the
-    other one.
+An observed idle head with readable activity may receive a known-sent batch
+again immediately. A pending DELIVERY_INTENT may never have reached the pane;
+its deadline, not idle state alone, controls retry.
     """
     if now >= delivery.deadline:
         return (
@@ -1582,18 +1525,11 @@ def _observer_provider_source(
 
 
 def _observer_has_provider_liveness_contract(record: ObserverRecord) -> bool:
-    """Whether this record must use run-bound provider progress for its event wake.
+    """Whether this wake must use run-bound provider progress.
 
-    A bound episode alone is not the contract. An episode is opened at every delivery boundary,
-    for any adapter, while a current Codex or Claude observer launch takes a pre-pane baseline.
-    A historical head whose run carries no provider source binding at all therefore
-    answers `unavailable` to every probe, and the unavailable branch of the wake has no ladder
-    that could end it: the batch is never delivered, the head is never judged dead, and the tick
-    reports degraded forever (sprint:1406, 2026-08-26, 69 ticks and counting).
-
-    The binding itself is still what fails closed: a run that carries a source keeps the contract
-    through `wake_liveness.bound` even after that source is damaged, so a lost journal can never
-    downgrade the wake to screen liveness.
+Current bound runs retain this contract even when their telemetry breaks;
+never fall back to screen liveness after losing a previously bound source.
+Legacy runs without a provider binding take the separate unbound path.
     """
     _run, _source, source_present = _observer_provider_source(record)
     if source_present:
@@ -1846,12 +1782,10 @@ def _adopt_precontract_unbound_observer(
 
 
 def _observer_wake_ceiling_seconds(record: ObserverRecord) -> int:
-    """How long this head may hold a batch while never being seen ready for input.
+    """Allowed hold time for a head never observed ready for input.
 
-    Zero for a head whose exact provider cursor is admitted: it is judged on provider progress by
-    the bounded no-progress ladder, not on the clock. Every other head is on a clock, because
-    nothing else can end its wait — and which clock is the difference between a head nobody was
-    ever able to watch and a head whose own telemetry failed to bind.
+An admitted provider cursor uses the bounded no-progress policy instead.
+Other heads use the appropriate clock for unavailable or unbound telemetry.
     """
     if record.wake_liveness.admitted:
         return 0
@@ -1861,11 +1795,10 @@ def _observer_wake_ceiling_seconds(record: ObserverRecord) -> int:
 
 
 def _turn_ceiling_overrun(delivery: ObserverDelivery, ceiling: int, *, now: float) -> str:
-    """Why a head that is never ready for input has held this batch too long, or an empty string.
+    """Return why an unready head has held a batch too long, or empty text.
 
-    Not the acknowledgement deadline under another name: that one ends a silence on a head standing
-    at its prompt, this one ends a delivery held by a head that still looks busy, which is why it is
-    much longer — below the longest legitimate turn it would tear down an observer that is working.
+This ceiling covers a busy-looking head; it is longer than the acknowledgement
+deadline for a head standing at its prompt.
     """
     if delivery.stage == DeliveryStage.IDLE:
         return ""
@@ -1891,11 +1824,10 @@ def _wake_for_event(
     record: ObserverRecord,
     event: dict[str, Any],
 ) -> dict[str, Any]:
-    """Deliver one immutable event batch to a completed observer queue.
+    """Deliver an immutable event batch to the observer queue.
 
-    A delivery already on the head is repeated for one of two reasons, and never because the event
-    itself has aged: the head was seen idle without acknowledging the batch, or its acknowledgement
-    deadline ran out. A head never seen idle is ended by the turn ceiling instead.
+Repeat a sent delivery only when the head is demonstrably idle without an
+acknowledgement or its acknowledgement deadline expired; event age is not a trigger.
     """
     now = time.time()
     delivery = record.delivery
@@ -2222,11 +2154,10 @@ def _bring_up_request_id(ref: str, generation: str, attempt: int) -> str:
 
 
 def _abandon_launch_intent(runtime: Any, ref: str, record: ObserverRecord) -> None:
-    """Close the books on an intent whose head could not be found alive.
+    """Settle an intent whose head cannot be found alive.
 
-    An attempt the log already carries is spent, so the next bring-up is a relaunch with its own
-    request id; an attempt that never got past its pending copy is retried as itself. Either way the
-    record still says a terminal may be up, so the relaunch closes the workspace first.
+An already committed attempt is spent; a pending-only attempt retries under
+its original identity. Close possible workspace residue before relaunch.
     """
     attempt = record.pending_launch
     record.state = "pending"
@@ -2253,12 +2184,10 @@ def _adopt_launch_intent(
     ref: str,
     record: ObserverRecord,
 ) -> dict[str, Any] | None:
-    """Resolve a launch whose tick died before it could record the outcome.
+    """Recover an interrupted observer launch.
 
-    A readable live pid is this sprint's head, adopted with the attempt number the intent reserved.
-    A head that has not written its pid yet is left as it is inside the grace window — killing one
-    that is still starting would cut the sprint's one continuous session. Anything else returns None
-    and the caller relaunches, closing whatever the intent left in the workspace first.
+Adopt a readable live pid with the reserved attempt. Wait through the initial
+heartbeat grace period; otherwise clean up intent residue before relaunch.
     """
     liveness = observer_alive(record)
     if liveness.get("identity_mismatch"):
@@ -2313,15 +2242,10 @@ def _adopt_launch_intent(
 
 
 def observer_decision(runtime: Any, sprint: dict[str, Any]) -> dict[str, Any]:
-    """What this sprint's observer metadata says to run. Raises rather than guessing.
+    """Resolve the observer profile declared by this sprint.
 
-    Two answers, and no third:
-
-          `head`   the sprint declares one concrete profile, and the registry has it
-          `none`   the sprint declares that it runs without an observer
-
-    There is no path back to the role default. `ObserverMetadataError` for an open row whose value is
-    missing, unreadable, provenance rather than a declaration, or a profile the registry lacks.
+Accept an existing registered head or an explicit 'none'. Never fall back to
+role defaults; reject absent, unreadable, provenance-only or unknown metadata.
     """
     value = executable_observer(sprint)
     if value["kind"] == KIND_NONE:
@@ -2415,25 +2339,12 @@ def _launch_observer(
     pending_event: dict[str, Any] | None = None,
     head: str = "",
 ) -> dict[str, Any]:
-    """Bring up one head for one sprint, on the profile that sprint declares.
+    """Launch the sprint's declared observer profile.
 
-    `head` is decided by the caller from the sprint's own metadata, so nothing between the
-    declaration and the launch can substitute another profile.
-
-    `conditional_stop` says which of the two stops the previous head gets, and the caller owns that
-    choice because only the caller knows why it is replacing the head:
-
-      * `True` — the rotation: the tick read the head, judged it finished, and is opening its
-        successor. A delivery must not slip in between that judgement and the pane closing, so the
-        stop carries the `judgement` the tick made — this head's epoch and its pid-heartbeat
-        liveness, both read *at* the judgement — and a head that has done something since is left
-        alone and the relaunch parks for a tick;
-      * `False` — an emergency replacement: the head stopped answering its wakes, or it is up and
-        making no provider progress. Those replacements exist precisely because the head is stuck,
-        and a conditional stop would refuse them for being stuck. The head is ended unconditionally.
-
-    A conditional stop with no judgement to make it on would be neither, so it is refused as the
-    programming error it is rather than being quietly made unconditional.
+For ordinary rotation use the captured activity-epoch/liveness judgement to
+conditionally stop the predecessor; any new work defers replacement.
+Emergency replacement stops unconditionally. A conditional stop without its
+judgement is a programming error.
     """
     if conditional_stop and judgement is None:
         raise TypeError("a conditional stop is made on the judgement that asked for it")
@@ -2877,17 +2788,11 @@ def _write_launch_intent(
     *,
     launch_head: str = "",
 ) -> str | None:
-    """Fix this launch on disk before the host is called. Returns the failure, or None on success.
+    """Persist the observer launch intent before calling the host.
 
-    `head` is the declared profile the record keeps; `launch_head` is the profile actually raised
-    when a provider fallback substituted one (ummanu-108). The preflight run, and so the wake
-    liveness episode bound to it, are the launched profile's: an episode bound to a head that is
-    not running would reject every provider observation of the one that is.
-
-    The workspace and pid file are asked of the host rather than taken from its answer: they are
-    path arithmetic over the sprint reference, and the answer is exactly what a tick that dies
-    mid-launch never sees. The intent also says the workspace may become a registered git
-    worktree, which outlives the launch, and the stop is what gives it back.
+Keep the declared profile and the actual fallback launch profile separate.
+Bind the provider episode to the profile that will run; compute workspace/pid
+identity before the host responds so interrupted launches remain recoverable.
     """
     previous = record.to_json()
     now = time.time()
@@ -3003,12 +2908,10 @@ def _defer(
     keep_state: bool = False,
     retry: bool = True,
 ) -> dict[str, Any]:
-    """Park a launch without losing the sprint or damaging an existing record.
+    """Defer launch while preserving the current sprint and intent.
 
-    Only the deferral fields are written, so the next tick retries from the same state. `keep_state`
-    leaves even the state alone, for a record whose unresolved launch intent is the one thing the
-    next tick must still see. Failed launches use a persisted exponential deadline; a deliberate
-    drain is retried when the drain ends.
+Change only deferral fields (or preserve state entirely with keep_state).
+Failed launches back off exponentially; deliberate drains retry after drain.
     """
     record = record or ObserverRecord(sprint=ref)
     policy_refusal = reason.startswith("codex-fanout-policy:")
@@ -3111,11 +3014,10 @@ def _stop_observer(
 
 
 def _observer_activity_epoch(runtime: Any, record: ObserverRecord) -> int:
-    """This head's activity epoch as the head runtime holds it, for a conditional stop to compare.
+    """Read the runtime's activity epoch for a conditional stop.
 
-    Zero when the host cannot answer, which is the same value a head the runtime has never seen
-    has: a stop compares it against what the runtime holds now, so an unknowable epoch refuses the
-    conditional stop rather than widening it into an unconditional one.
+Use zero if unavailable, making the conditional stop fail closed rather than
+turning it into an unconditional stop.
     """
     try:
         return int(runtime.host.observer_activity_epoch(record))
@@ -3138,33 +3040,12 @@ def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
 def stop_observer_head(
     runtime: Any, record: ObserverRecord, *, judgement: QuietStopJudgement | None = None
 ) -> bool:
-    """Stop one observer head. True when nothing of it is left running.
+    """Stop an observer; return false when the host cannot confirm removal.
 
-    False means the host refused the request and the head must be assumed alive, so the caller keeps
-    the record and retries.
-
-    `judgement` picks which of the two stops this is, and the choice belongs to the caller because
-    only the caller knows why it is stopping:
-
-      * left out — "end this head now". A freeze, a sprint that is no longer open or no longer
-        declares an observer, a head that predates the sprint binding, a provider-policy refusal, an
-        operator, and the two emergency replacements — a head that refused every wake it was given,
-        and a head making no provider progress. None of them may be refused because the head happens
-        to look busy; the last two are taken down *for* looking busy while doing nothing, so making
-        their stop conditional would be refusing them for their own reason;
-      * given — "end this head *if it is still quiet*". The rotation before a relaunch is the one
-        that has to say this: it decided the head was finished, and between that decision and the
-        pane closing a delivery must not slip in. Both facts in the judgement were read when that
-        decision was made, not here. The head runtime compares the epoch, and for a head the
-        judgement found alive it also asks the backend about the turn it is still holding; then it
-        closes admission and stops, all under its own lock, so none of it can come apart. A head
-        that turns out not to be quiet is refused here and the caller defers.
-
-    The liveness half of the judgement is what keeps that refusal from being permanent. A head that
-    died mid-turn keeps its lease, and its pane — the wrapper shell Orca leaves behind, or no pane
-    at all — answers the runtime's probe with `busy`, which is also what a working head answers.
-    Handing the runtime the pid-heartbeat fact instead of leaving it to read a pane is what lets the
-    replacement of a dead head happen at all.
+Ordinary rotation supplies a judgement with activity epoch and pid liveness:
+the runtime checks the same head is still quiet under its lock. Emergency,
+operator, freeze and policy stops are unconditional. Preserve the record for
+any refused stop, including a live or indeterminate head.
     """
     if not _needs_teardown(record):
         return True
@@ -3250,12 +3131,10 @@ def _mark_stopped_by_pause(record: ObserverRecord, reason: str) -> None:
 
 
 def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Retry the stops the host refused. Returns one row per pending stop it tried.
+    """Retry pending observer stops, returning one classified result per attempt.
 
-    The reconciliation pass does not run while the pipeline is frozen, so without this a head the
-    freeze failed to stop would sit alive and unattended until the resume. Each row carries a
-    `status` like any other action outcome, so a stop refused again reads as a `degraded` action
-    rather than failing silently into a row nobody classified.
+Run this path even when production reconciliation is frozen. Repeated refusal
+must be visible as degraded instead of silently leaving a head running.
     """
     observers = load_observers(payload)
     pending = {
