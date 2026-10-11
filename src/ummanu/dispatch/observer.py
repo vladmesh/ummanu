@@ -24,13 +24,13 @@ from ummanu.codex_provider_events import CodexProviderSourceError
 from ummanu.dispatch.heartbeat import sprint_task
 from ummanu.dispatch.launch import merge_launch_head_run
 from ummanu.dispatch.observer_prompt import (
-    OBSERVER_PROMPT_FILE,
+    OBSERVER_PROMPT_FILE as OBSERVER_PROMPT_FILE,
     OBSERVER_SKILL,
-    _executor_lines,
+    _executor_lines as _executor_lines,
     _observer_comments,
-    _observer_sprint_context,
-    _production_lines,
-    observer_launch_prompt,
+    _observer_sprint_context as _observer_sprint_context,
+    _production_lines as _production_lines,
+    observer_launch_prompt as observer_launch_prompt,
     render_observer_prompt,
 )
 from ummanu.dispatch.observer_state import (
@@ -39,9 +39,9 @@ from ummanu.dispatch.observer_state import (
     ObserverRecord,
     ObserverWakeLiveness,
     QuietStopJudgement,
-    _float,
-    _int,
-    delivery_evidence_summary,
+    _float as _float,
+    _int as _int,
+    delivery_evidence_summary as delivery_evidence_summary,
     load_observers,
     put_observers,
 )
