@@ -13,12 +13,9 @@ over pane idleness; the legacy turn ceiling applies only without attested source
 
 from __future__ import annotations
 
-import json
 import time
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
 from typing import Any
 
 from ummanu.board import owner_events
@@ -26,6 +23,28 @@ from ummanu.board.tick_snapshot import select_sprints
 from ummanu.codex_provider_events import CodexProviderSourceError
 from ummanu.dispatch.heartbeat import sprint_task
 from ummanu.dispatch.launch import merge_launch_head_run
+from ummanu.dispatch.observer_prompt import (
+    OBSERVER_PROMPT_FILE,
+    OBSERVER_SKILL,
+    _executor_lines,
+    _observer_comments,
+    _observer_sprint_context,
+    _production_lines,
+    observer_launch_prompt,
+    render_observer_prompt,
+)
+from ummanu.dispatch.observer_state import (
+    DeliveryStage,
+    ObserverDelivery,
+    ObserverRecord,
+    ObserverWakeLiveness,
+    QuietStopJudgement,
+    _float,
+    _int,
+    delivery_evidence_summary,
+    load_observers,
+    put_observers,
+)
 from ummanu.dispatch.post_merge import render_fact, wake_facts
 from ummanu.dispatch.state import now_rfc3339, request_token
 from ummanu.dispatch.tui import (
@@ -46,7 +65,6 @@ from ummanu.dispatch.watchdog import (
 from ummanu.dispatch.worker_lifecycle import (
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
-    WorkerContinuationLiveness,
     head_run_binding,
 )
 from ummanu.infra.env import positive_int
@@ -55,20 +73,16 @@ from ummanu.runtime import head as head_ops
 from ummanu.runtime.codex_preflight import CodexFanoutRecordingError
 from ummanu.runtime.role_env import observer_binding
 from ummanu.sprint_observer import (
-    EXECUTOR_FIELDS,
     KIND_HEAD,
     KIND_NONE,
     REASON_UNKNOWN_PROFILE,
     ObserverMetadataError,
     executable_observer,
-    pinned_executor,
 )
 from ummanu.tasks import TaskError, is_significant_observer_event
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"
-OBSERVER_PROMPT_FILE = "SPRINT.md"
-OBSERVER_SKILL = "observe-sprint"
 
 # Pane readiness is the positive signal for the next durable event delivery.
 OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS = 30 * 60
@@ -128,300 +142,6 @@ class ObserverLaunchAborted(HostError):
         self.run = dict(run or {})
         self.evidence = dict(evidence or {})
 
-
-class DeliveryStage(str, Enum):
-    """The durable state of one observer event-delivery batch."""
-
-    IDLE = "idle"
-    WAITING_FOR_IDLE = "waiting_for_idle"
-    DELIVERY_INTENT = "delivery_intent"
-    AWAITING_ACK = "awaiting_ack"
-    RETRY_DEFERRED = "retry_deferred"
-
-
-class ObserverWakeLiveness(WorkerContinuationLiveness):
-    """The exact-run provider-progress episode for one observer event batch.
-
-    Records no provider text and is never rebound from a workspace scan: a new observer HeadRun
-    opens a new episode, while a recovered episode accepts only the binding it already names.
-    """
-
-
-@dataclass(frozen=True)
-class QuietStopJudgement:
-    """Evidence for a conditional observer stop at the tick's decision point.
-
-Capture both the head's activity epoch and pid-heartbeat liveness together.
-A later read could miss intervening activity; a pane's busy state cannot
-distinguish a working head from a dead head's leftover shell.
-    """
-
-    activity_epoch: int
-    head_process_alive: bool
-
-
-@dataclass
-class ObserverDelivery:
-    """One causal delivery cursor, independent of observer process lifecycle.
-
-    `through_event` is fixed before a terminal send or replacement launch, and events appended after
-    the intent are deliberately left for the next batch.
-    """
-
-    stage: DeliveryStage = DeliveryStage.IDLE
-    acknowledged_through: str = ""
-    acknowledged_delivery_id: str = ""
-    acknowledged_resume_id: str = ""
-    pending_from: str = ""
-    delivery_id: str = ""
-    method: str = ""
-    through_event: str = ""
-    # Legacy resume cursors fail closed until the acknowledgement deadline.
-    resume_cursor: str = ""
-    resume_cursor_known: bool = True
-    sent_at: float = 0.0
-    # Busy-head holds are bounded even before a prompt is delivered.
-    held_since: float = 0.0
-    deadline: float = 0.0
-    attempts: int = 0
-    next_at: float = 0.0
-    reason: str = ""
-    # Cumulative observer-wake evidence is distinct from per-batch retries and card-head counters.
-    wake_attempts: int = 0
-    wake_failures: int = 0
-    launch_delivery_attempts: int = 0
-    launch_delivery_failures: int = 0
-    last_failure_reason: str = ""
-    last_failure_at: float = 0.0
-    last_failure_method: str = ""
-    # Store content-free evidence for the last attempted wake, never its prompt.
-    last_evidence: dict[str, Any] = field(default_factory=dict)
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "stage": self.stage.value,
-            "acknowledged_through": self.acknowledged_through,
-            "acknowledged_delivery_id": self.acknowledged_delivery_id,
-            "acknowledged_resume_id": self.acknowledged_resume_id,
-            "pending_from": self.pending_from,
-            "delivery_id": self.delivery_id,
-            "method": self.method,
-            "through_event": self.through_event,
-            "resume_cursor": self.resume_cursor,
-            "resume_cursor_known": self.resume_cursor_known,
-            "sent_at": self.sent_at,
-            "held_since": self.held_since,
-            "deadline": self.deadline,
-            "attempts": self.attempts,
-            "next_at": self.next_at,
-            "reason": self.reason,
-            "wake_attempts": self.wake_attempts,
-            "wake_failures": self.wake_failures,
-            "launch_delivery_attempts": self.launch_delivery_attempts,
-            "launch_delivery_failures": self.launch_delivery_failures,
-            "last_failure_reason": self.last_failure_reason,
-            "last_failure_at": self.last_failure_at,
-            "last_failure_method": self.last_failure_method,
-            "last_evidence": dict(self.last_evidence),
-        }
-
-    @classmethod
-    def from_json(cls, payload: Any) -> ObserverDelivery:
-        if not isinstance(payload, dict):
-            return cls()
-        try:
-            stage = DeliveryStage(str(payload.get("stage") or DeliveryStage.IDLE.value))
-        except ValueError:
-            stage = DeliveryStage.IDLE
-        return cls(
-            stage=stage,
-            acknowledged_through=str(payload.get("acknowledged_through") or ""),
-            acknowledged_delivery_id=str(payload.get("acknowledged_delivery_id") or ""),
-            acknowledged_resume_id=str(payload.get("acknowledged_resume_id") or ""),
-            pending_from=str(payload.get("pending_from") or ""),
-            delivery_id=str(payload.get("delivery_id") or ""),
-            method=str(payload.get("method") or ""),
-            through_event=str(payload.get("through_event") or ""),
-            resume_cursor=str(payload.get("resume_cursor") or ""),
-            resume_cursor_known=bool(payload.get("resume_cursor_known", True)),
-            sent_at=_float(payload.get("sent_at")),
-            held_since=_float(payload.get("held_since")),
-            deadline=_float(payload.get("deadline")),
-            attempts=_int(payload.get("attempts")),
-            next_at=_float(payload.get("next_at")),
-            reason=str(payload.get("reason") or ""),
-            wake_attempts=_int(payload.get("wake_attempts")),
-            wake_failures=_int(payload.get("wake_failures")),
-            launch_delivery_attempts=_int(payload.get("launch_delivery_attempts")),
-            launch_delivery_failures=_int(payload.get("launch_delivery_failures")),
-            last_failure_reason=str(payload.get("last_failure_reason") or ""),
-            last_failure_at=_float(payload.get("last_failure_at")),
-            last_failure_method=str(payload.get("last_failure_method") or ""),
-            last_evidence=(
-                dict(payload["last_evidence"]) if isinstance(payload.get("last_evidence"), dict) else {}
-            ),
-        )
-
-
-@dataclass
-class ObserverRecord:
-    """One observer head as the dispatcher last left it."""
-
-    sprint: str
-    # Per-record identity prevents a recreated sprint from replaying its predecessor's requests.
-    generation: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    head: str = ""
-    workspace: str = ""
-    handle: str = ""
-    # Orca may reissue handles; leafId remains the stable PTY identity.
-    leaf: str = ""
-    pid_file: str = ""
-    launches: int = 0
-    # A nonzero launch attempt marks a bring-up whose tick did not survive.
-    pending_launch: int = 0
-    # Keep possible terminals until a stop confirms they are gone.
-    head_possible: bool = False
-    # Workspace registration can outlive a failed bring-up without a head.
-    workspace_live: bool = False
-    # An aborted launch terminal is not a working observer and must be closed.
-    abandoned_handle: bool = False
-    # Only launch-time binding proves an observer may write for its sprint.
-    bound: bool = False
-    state: str = "pending"
-    launched_at: float = 0.0
-    last_action: str = ""
-    last_action_at: float = 0.0
-    # Work-state explanation, independent of idle/deferred/stop lifecycle reasons.
-    state_reason: str = ""
-    deferred_reason: str = ""
-    stopped_reason: str = ""
-    paused_at: float = 0.0
-    # The last time the pane was confirmed ready explains why a live head is waiting for a card
-    # event.
-    idle_since: float = 0.0
-    idle_reason: str = ""
-    # The event cursor is dispatcher-owned state. A resume entry stays its established six-field
-    # document; this delivery machine carries the causal acknowledgement for its fixed batch.
-    delivery: ObserverDelivery = field(default_factory=ObserverDelivery)
-    # Launch failures are retried on the same bounded schedule as terminal nudges.  They are
-    # separate because a sprint can be headless without having a linked-card event to wake for.
-    launch_attempts: int = 0
-    launch_next_at: float = 0.0
-    run: dict[str, Any] = field(default_factory=dict)
-    # `run` is routing telemetry.  This is the actual runtime HeadRun used to bind the heartbeat.
-    head_run: dict[str, Any] = field(default_factory=dict)
-    # Exact-HeadRun provider progress for an event delivery held by this observer.  A missing or
-    # malformed value is historical/unknown, never permission to bind today's workspace journal.
-    wake_liveness: ObserverWakeLiveness = field(default_factory=ObserverWakeLiveness)
-    # The terminal episode of the immediately retired HeadRun.  This is audit-only: all decisions
-    # use ``wake_liveness``, which is always bound to the current HeadRun after a replacement.
-    retired_wake_liveness: dict[str, Any] = field(default_factory=dict)
-    # The profile actually running when a provider fallback put the observer on another head of the
-    # declared profile's chain (ummanu-108); empty when it runs on the declared `head` itself.
-    fallback_head: str = ""
-
-    def to_json(self) -> dict[str, Any]:
-        value = self._json()
-        if self.fallback_head:
-            value["fallback_head"] = self.fallback_head
-        return value
-
-    def _json(self) -> dict[str, Any]:
-        return {
-            "sprint": self.sprint,
-            "generation": self.generation,
-            "head": self.head,
-            "workspace": self.workspace,
-            "handle": self.handle,
-            "leaf": self.leaf,
-            "pid_file": self.pid_file,
-            "launches": self.launches,
-            "pending_launch": self.pending_launch,
-            "head_possible": self.head_possible,
-            "workspace_live": self.workspace_live,
-            "abandoned_handle": self.abandoned_handle,
-            "bound": self.bound,
-            "state": self.state,
-            "launched_at": self.launched_at,
-            "last_action": self.last_action,
-            "last_action_at": self.last_action_at,
-            "state_reason": self.state_reason,
-            "deferred_reason": self.deferred_reason,
-            "stopped_reason": self.stopped_reason,
-            "paused_at": self.paused_at,
-            "idle_since": self.idle_since,
-            "idle_reason": self.idle_reason,
-            "delivery": self.delivery.to_json(),
-            "launch_attempts": self.launch_attempts,
-            "launch_next_at": self.launch_next_at,
-            "run": dict(self.run),
-            "head_run": dict(self.head_run),
-            "wake_liveness": self.wake_liveness.to_json(),
-            "retired_wake_liveness": dict(self.retired_wake_liveness),
-        }
-
-    @classmethod
-    def from_json(cls, payload: dict[str, Any]) -> ObserverRecord:
-        run = payload.get("run")
-        delivery = ObserverDelivery.from_json(payload.get("delivery"))
-        return cls(
-            sprint=str(payload.get("sprint") or ""),
-            generation=str(payload.get("generation") or "") or uuid.uuid4().hex[:12],
-            head=str(payload.get("head") or ""),
-            workspace=str(payload.get("workspace") or ""),
-            handle=str(payload.get("handle") or ""),
-            leaf=str(payload.get("leaf") or ""),
-            pid_file=str(payload.get("pid_file") or ""),
-            launches=_int(payload.get("launches")),
-            pending_launch=_int(payload.get("pending_launch")),
-            # A record written before this field existed carries a handle when a head is up, so
-            # the handle is what it falls back to rather than a blanket "nothing is running".
-            head_possible=bool(payload.get("head_possible", bool(payload.get("handle")))),
-            # Likewise: a record written before this field existed names a workspace only once a
-            # bring-up has been through it, and the host reads Orca to tell a registered one from
-            # a path it never learned about.
-            workspace_live=bool(payload.get("workspace_live", bool(payload.get("workspace")))),
-            abandoned_handle=bool(payload.get("abandoned_handle")),
-            # No default beyond False: a record written before this field existed describes a head
-            # launched without a binding, and reading it as bound is exactly the head that would be
-            # left running and refused on every write.
-            bound=bool(payload.get("bound")),
-            state=str(payload.get("state") or "pending"),
-            launched_at=_float(payload.get("launched_at")),
-            last_action=str(payload.get("last_action") or ""),
-            last_action_at=_float(payload.get("last_action_at")),
-            state_reason=str(payload.get("state_reason") or ""),
-            deferred_reason=str(payload.get("deferred_reason") or ""),
-            stopped_reason=str(payload.get("stopped_reason") or ""),
-            paused_at=_float(payload.get("paused_at")),
-            idle_since=_float(payload.get("idle_since")),
-            idle_reason=str(payload.get("idle_reason") or ""),
-            delivery=delivery,
-            launch_attempts=_int(payload.get("launch_attempts")),
-            launch_next_at=_float(payload.get("launch_next_at")),
-            run=dict(run) if isinstance(run, dict) else {},
-            head_run=(dict(payload["head_run"]) if isinstance(payload.get("head_run"), dict) else {}),
-            wake_liveness=ObserverWakeLiveness.from_json(payload.get("wake_liveness")),
-            retired_wake_liveness=(
-                dict(payload["retired_wake_liveness"])
-                if isinstance(payload.get("retired_wake_liveness"), dict)
-                else {}
-            ),
-            fallback_head=str(payload.get("fallback_head") or ""),
-        )
-
-
-def load_observers(payload: dict[str, Any]) -> dict[str, ObserverRecord]:
-    raw = payload.get("observers")
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        str(ref): ObserverRecord.from_json(record) for ref, record in raw.items() if isinstance(record, dict)
-    }
-
-
-def put_observers(payload: dict[str, Any], observers: dict[str, ObserverRecord]) -> None:
-    payload["observers"] = {ref: record.to_json() for ref, record in sorted(observers.items())}
 
 
 def observer_head_status(record: ObserverRecord) -> dict[str, Any]:
@@ -1323,32 +1043,6 @@ def _count_delivery_failure(
     delivery.last_failure_method = _delivery_subject(method)
     if evidence:
         delivery.last_evidence = dict(evidence)
-
-
-def delivery_evidence_summary(delivery: Any) -> str:
-    """One line of delivery evidence for the head that has to report it, or an empty string.
-
-    Deliberately counts and a reason, never a retry instruction: redelivery is the dispatcher's, and
-    a head reading this is reporting history. It reads its numbers defensively because a host seam
-    may hand it any record shape.
-    """
-    wake_failures = _int(getattr(delivery, "wake_failures", 0))
-    launch_failures = _int(getattr(delivery, "launch_delivery_failures", 0))
-    attempts = _int(getattr(delivery, "wake_attempts", 0)) + _int(
-        getattr(delivery, "launch_delivery_attempts", 0)
-    )
-    failures = wake_failures + launch_failures
-    if not attempts and not failures:
-        return ""
-    line = (
-        f"observer delivery so far: {attempts} attempt(s), {failures} failed "
-        f"({wake_failures} wake, {launch_failures} launch)"
-    )
-    reason = str(getattr(delivery, "last_failure_reason", "") or "")
-    if reason:
-        method = str(getattr(delivery, "last_failure_method", "") or "observer-wake")
-        line += f"; last failure ({method}): {reason}"
-    return line
 
 
 def _defer_delivery(
@@ -3352,185 +3046,6 @@ def _first_path(delivery: dict[str, Any]) -> str:
     return str(paths[0]) if paths else ""
 
 
-def render_observer_prompt(
-    sprint: dict[str, Any],
-    *,
-    skill_path: str = "",
-    delivery: ObserverDelivery | None = None,
-) -> str:
-    """The observer's launch document: the sprint entity, and the skill that says what to do.
-
-    Data and one pointer. How a sprint is led belongs to the role skill alone, because two texts
-    about the same job drift apart and the head then follows the stale one.
-    """
-    ref = str(sprint.get("ref") or "")
-    repositories = [str(repo) for repo in (sprint.get("repositories") or [])]
-    current = str(sprint.get("current_task") or "")
-    budget = sprint.get("budget") if isinstance(sprint.get("budget"), dict) else {}
-    marker = (
-        (delivery.delivery_id, delivery.through_event)
-        if delivery is not None and delivery.delivery_id and delivery.through_event
-        else ("", "")
-    )
-    # Counted, never charged: the host failing to bring a card up is not the card spending the
-    # sprint's restart budget, and the observer still has to see how often it happened.
-    uncharged = budget.get("uncharged") if isinstance(budget.get("uncharged"), dict) else {}
-    infrastructure = int(uncharged.get("infrastructure_blocked") or 0)
-    sections = [
-        f"# Sprint {ref}",
-        "",
-        "## No subagents",
-        "",
-        "Run this observer turn in this head only. Do not spawn, create, delegate to, or manage",
-        "subagents or child agents. Use ordinary tools directly when needed.",
-        "",
-        f"You are the observer head of this sprint. Your instructions are the `{OBSERVER_SKILL}`",
-        "role skill and nothing else in this file:",
-        "",
-        f"- {skill_path or OBSERVER_SKILL}",
-        "",
-        "Read it first. Everything below is the sprint entity as the board holds it right now; the",
-        "live copy is `python3 -P -m ummanu sprint show --ref " + ref + "`.",
-        "",
-        "## Reference",
-        "",
-        ref or "(unknown sprint reference)",
-        "",
-        "## Goal",
-        "",
-        str(sprint.get("goal") or "(empty sprint goal)"),
-        "",
-        "## Definition of Done",
-        "",
-        str(sprint.get("definition_of_done") or "(empty definition of done)"),
-        "",
-        "## Repositories",
-        "",
-        "\n".join(f"- {repo}" for repo in repositories) or "- (none recorded)",
-        "",
-        "## Status",
-        "",
-        str(sprint.get("status") or "(unknown)"),
-        "",
-        "## Executors",
-        "",
-        *_executor_lines(sprint),
-        "",
-        "## PO session",
-        "",
-        str(sprint.get("po_session") or "(none recorded)"),
-        "",
-        "## Allowed productions",
-        "",
-        *_production_lines(sprint),
-        "",
-        "## Current card",
-        "",
-        current or "(none)",
-        "",
-        "## Budget",
-        "",
-        f"total {int(budget.get('total') or 0)} restart events recorded so far",
-        "Signal threshold reached." if budget.get("signal_reached") else "Signal threshold not reached.",
-        "Hard threshold reached." if budget.get("hard_reached") else "Hard threshold not reached.",
-        *(
-            [f"{infrastructure} infrastructure bring-up outcomes recorded, charged to no threshold."]
-            if infrastructure
-            else []
-        ),
-        "",
-        *_observer_sprint_context(sprint),
-    ]
-    if marker[0]:
-        sections.extend(
-            [
-                "## Pending delivery acknowledgement",
-                "",
-                f"delivery_id: {marker[0]}",
-                f"through_event: {marker[1]}",
-                "",
-            ]
-        )
-    evidence = delivery_evidence_summary(delivery) if delivery is not None else ""
-    if evidence:
-        # A replacement head has no memory of the wakes its predecessor never received, and the
-        # closing resume is written by whichever head is up at the end. The counts come with the
-        # document so that head can report them instead of reporting zero.
-        sections.extend(
-            [
-                "## Delivery evidence",
-                "",
-                evidence,
-                "",
-                "Report these counts in your closing resume; do not retry delivery yourself.",
-                "",
-            ]
-        )
-    return "\n".join(sections)
-
-
-def _observer_sprint_context(sprint: dict[str, Any]) -> list[str]:
-    """Render all live comments in board order, then the subordinate saved resume."""
-    comments = _observer_comments(sprint)
-    lines = [
-        "## Standing owner decisions",
-        "",
-        "Apply these explicit entries before the saved resume. Latest production answer per project wins;",
-        "the latest e2e grant/refusal controls admission. Grants add once; a refusal stops new runs even with budget room.",
-        "Use only the latest advance consent for each action and scope, within max_uses and recorded operation uses.",
-        "Free prose grants nothing; advance consent does not increase budget or grant production permissions.",
-        "Do not ask the owner again for a covered decision or manufacture a new owner decision.",
-        "Read IDs and quotations with `sprint show`; the PO records answers with `sprint record-owner-decisions`.",
-        "",
-        json.dumps(sprint.get("owner_decisions") or [], ensure_ascii=False, indent=2),
-        "",
-        "## Live sprint comments",
-        "",
-        "This is the complete current comment list in board order, with no timestamp cutoff. Apply",
-        "every applicable PO/owner decision before evaluating the saved resume or its",
-        "`next_safe_step`; the resume is continuity context, not authority over an owner decision.",
-        "",
-    ]
-    if not comments:
-        lines.extend(["(none)", ""])
-    for index, comment in enumerate(comments, 1):
-        row = comment if isinstance(comment, dict) else {}
-        body = str(row.get("body") or "")
-        owner = body == "[po]" or body.startswith("[po]\n")
-        label = " (applicable PO/owner decision)" if owner else ""
-        lines.extend(
-            [
-                f"### Comment {index}{label}",
-                "",
-                f"created_at: {row.get('created_at') or '(unknown)'!s}",
-                "",
-                body or "(empty comment body)",
-                "",
-            ]
-        )
-    resume = sprint.get("resume") if isinstance(sprint.get("resume"), dict) else None
-    lines.extend(
-        [
-            "## Saved observer resume",
-            "",
-            "Apply the owner decisions above first. If this resume conflicts with one, revise the plan",
-            "and reflect that decision in the next resume instead of following stale `next_safe_step`.",
-            "",
-            json.dumps(resume, ensure_ascii=False, indent=2) if resume is not None else "(none)",
-            "",
-        ]
-    )
-    return lines
-
-
-def _observer_comments(sprint: dict[str, Any]) -> list[Any]:
-    """Distinguish a loaded empty comment list from context that was never loaded."""
-    comments = sprint.get("comments")
-    if "comments" not in sprint or not isinstance(comments, list):
-        raise TaskError("backend_error", "live sprint comments are unavailable", 1)
-    return comments
-
-
 def render_observer_wake_context(
     sprint: dict[str, Any],
     *,
@@ -3562,56 +3077,3 @@ def render_observer_wake_context(
     return lead + "\n\n" + render_observer_prompt(sprint, delivery=delivery)
 
 
-def _production_lines(sprint: dict[str, Any]) -> list[str]:
-    """The registered projects whose production this sprint's operations may touch, as created."""
-    productions = [str(project) for project in sprint.get("allowed_productions") or []]
-    return [f"- {project}" for project in productions] or [
-        "- (none: this sprint's operations may touch no production)"
-    ]
-
-
-def _executor_lines(sprint: dict[str, Any]) -> list[str]:
-    """What the owner fixed about who runs this sprint's cards, and where the choice is yours.
-
-    Both roles are always printed, and the unpinned one is printed as the freedom it is. A section
-    that simply left the role out would read to the head as "there is no reviewer here", which is
-    the one thing the absent field never means.
-    """
-    lines = []
-    for role in EXECUTOR_FIELDS:
-        profile = pinned_executor(sprint, role)
-        lines.append(
-            f"- {role}: pinned to head profile `{profile}`. Every card you cut for this sprint runs "
-            f"its {role} on it, and a card asking for another profile is refused."
-            if profile
-            else f"- {role}: not pinned. The owner fixed no {role} profile for this sprint, so you "
-            f"choose one per card under the current rules — not a sprint that runs without a {role}."
-        )
-    # The reviewer head says who reviews, never whether: that is the card's stored review choice.
-    lines.append(
-        "- review: whether a card is reviewed at all is its `review` choice, not the reviewer head. "
-        "It defaults to required for `code` and skipped for `research` and `infra`; "
-        "`--review skipped` or `--review required` on the card overrides the default. A skipped "
-        "card launches no reviewer; a skipped code card still runs the gate and merges on release."
-    )
-    return lines
-
-
-def observer_launch_prompt() -> str:
-    """Short pointer handed to the head on its command line; the document is in the workspace."""
-    return (
-        f"You are the sprint observer. The sprint is in {OBSERVER_PROMPT_FILE} at the workspace "
-        f"root. Read it first, then follow the `{OBSERVER_SKILL}` role skill. Do not spawn, "
-        "create, delegate to, or manage subagents; perform the observer turn in this head only."
-    )
-
-
-def _int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _float(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0
