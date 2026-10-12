@@ -1,4 +1,4 @@
-"""The transition's board steps against PostgreSQL: dump, restore, translate, count (RENAME.md §T2).
+"""The transition's board steps against PostgreSQL: dump, restore, translate, count (RENAME.md §T3).
 
 CI integration shard only: two isolated Compose stores, the source seeded through the product's own
 writers, the target restored from the transition's dump and translated. Every product name comes

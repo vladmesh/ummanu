@@ -156,7 +156,7 @@ is refused. The script receives `--canon`, `--export`, `--target-db`, `--model` 
 product indexer and ignore both overrides.
 
 Heads run on `local-pty`, which ships with the product: no host-owned head runtime is installed,
-ordered after or reported (A20 step 9, [Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)).
+ordered after or reported (A20 step 9, [Head runtime](HEAD_RUNTIME.md#orca-migration-history)).
 
 ## Data plane
 

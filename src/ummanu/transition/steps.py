@@ -1,4 +1,4 @@
-"""The twelve steps of `docs/RENAME.md` §T3, each a plan (what it would touch) and an apply.
+"""The installation transition (`docs/RENAME.md` §T3): twelve steps, each a plan and an apply.
 
 Every apply is idempotent and returns the facts its journal record keeps; a fact the rollback
 needs is recorded *before* the action it describes, so an interrupted step still leaves it.

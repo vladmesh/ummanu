@@ -198,3 +198,93 @@ An unscoped historical exit has no causal OOM evidence and gains no invented
 `memory_limit` reason. This code does not retroactively manufacture scopes or
 claim recursive scope proof for a legacy process-group stop. Installed drain,
 limits and recovery evidence remain a separate authorized PO operation.
+
+## Runtime scopes in host reconciliation
+
+`runtime.local_pty_head.runtime_scope_inventory(data_dir, units)` is the supported read-only
+projection of `ScopedHeadLifecycle` ownership. Upgrade's host step, reconcile plan/apply and
+doctor/status consume it through host inventory. The selected installation's canonical `heads`,
+`po-heads` and `webproto/heads` directories are the authority; PO turn symlinks are recovery
+pointers and are never followed to discover ownership. There is no additional registry or owner
+format. The lifecycle's `validate_owner` is shared with its existing `read_owner`.
+
+`ScopedHeadLifecycle.persist` durably admits identity before the launcher exists. Under that same
+owner lock, `launch_until_started` checks the caller's generation and sends the admitted identity
+through its existing exec gate. EOF still prevents native work, and release still follows durable
+launcher PID and boot/start recording. The gated child checks the actual unit, run directory,
+run/role/task/workspace argv. It supplies a digest of that admitted identity as the native scope's
+`Description`, and carries the identity itself through the existing sealed environment descriptor.
+Inherited environment cannot supply or override this binding; no environment values enter the
+native description. Bootstrap still establishes group OOM protection and drops privileges before
+reading the sealed environment.
+
+Before forking the head, the supervisor consumes that sealed identity and reacquires admission.
+It compares the actual supervisor identity, canonical directory, current owner, live launcher,
+native scope description and cgroup. It fsyncs `scope.bound` in the existing supervisor journal,
+including the admitted generation/workspace/canonical launch root and native InvocationID, monotonic activation
+and cgroup device/inode, then fsyncs the directory and forks while admission remains held. A crash
+before the binding leaves inspection unavailable; a crash after binding but before `run.started`
+leaves independently inspectable native ownership. Head and launcher death do not erase binding
+while descendants keep the same native scope alive. There is no new journal file, owner, registry
+or host recovery authority.
+
+The projection anchors directories and regular owner/journal/heartbeat files without following
+symlinks, reads under the existing owner lock, validates run-derived unit/directory identity and
+compares every claimed identity field to the launch binding. Its recorded root and directory must
+be exactly the discovered `heads`, `po-heads` or `webproto/heads` path under the selected data root;
+no installation root is guessed from a basename. The journal's binding must also match
+the native description digest, boot, InvocationID, activation and cgroup inode. A forged journal
+and matching substituted owner cannot borrow the unchanged native digest. An old attestation
+cannot lend identity to a new invocation. A subsequent `run.started` must have matching
+run/role/task/socket and heartbeat boot/start evidence; duplicate starts for one binding refuse.
+Sequential attested generations can reuse a journal, but only its latest binding can prove the
+current incarnation. Missing, damaged, duplicate, unreadable or substituted evidence refuses
+recognition. The complete observed name set survives collection. Every name, including a
+previously disappeared ownerless name, is freshly inspected before effects; genuine native
+absence is an observed disappearance, never a lifecycle cleanup receipt.
+
+Apply revalidates the projection before effects and rejects changed generation, launch identity,
+directory, cgroup inode or systemd invocation. Recognized scopes appear separately in status and
+reconcile/upgrade diagnostics. They are excluded from packaged missing/unmanaged comparisons,
+never added to desired state or the managed manifest, and never enabled, stopped, rendered or
+deleted by host reconciliation. Closed admission with cleanup pending retains the same runtime
+owner; lock contention or insufficient native evidence makes inspection unavailable. Admission,
+termination, descendant cleanup and empty proof remain `ScopedHeadLifecycle` responsibilities.
+Unknown scopes still conflict and explicit foreign unit handling is unchanged.
+Removing a packaged service named in a preserved scope's native `BindsTo` dependency is also
+refused before effects: disabling that service would otherwise stop the scope indirectly.
+A lifecycle-completed scope with verified empty membership can remain visible until systemd
+collects it. Its completed flag is reported truthfully; a completed owner with populated
+membership is a refusal. Host inspection never records or clears the lifecycle's empty proof.
+
+Released 1879/64c42d7/1902 launches have no generation/workspace attestation. Their journal and
+heartbeat prove some launch fields but cannot prove the owner generation or retained workspace;
+the live launcher argv also lacks generation. They therefore remain actionable unavailable even
+when live, admission-closed or empty but still natively loaded. No retrospective attestation,
+adoption, whitelist or owner rewrite establishes availability. Their existing lifecycle retains
+termination, recovery and recursive empty-proof responsibility. After ordinary settlement and
+fresh native absence, host inspection can omit that name without writing a receipt. Genuinely
+unscoped old heads are outside scope inventory and retain their existing runtime contract.
+
+The already-running 64c42d7 PO caller passes generation in its existing outer launcher argv. A
+later PO operation executes the newly delivered launcher from product source, which preserves
+that generation across the gate and produces new binding before persistent PO itself restarts.
+This is the bootstrap: the upgrading PO remains live and attested throughout dry-run/apply. New
+worker/reviewer/observer and other-project launches use the same crossing. Overlapping old scoped
+heads lacking evidence require their own normal lifecycle settlement or handoff, not host stop
+authority or a global all-heads drain. A genuinely unscoped old observer can remain live. Card
+worker and reviewer settlement uses normal review/release ownership before the new operation. A remaining
+uncertain scope causes refusal, not an invented compatibility exemption. No user data is deleted
+to establish this boundary.
+
+`tests/test_runtime_scope_inventory.py` exercises the supported host step and doctor inventory
+with disposable ownership/native fixtures. The CI-only self-upgrade case in
+`tests/test_head_scope_backend.py` runs those consumers inside a real PO-like system scope and
+then proves ordinary owned lifecycle settlement. It uses the actual released scope argv emitter,
+a newly executed launcher, a harmless head and temporary instance,
+data and packaged units. It also reads native host inventory with a reconciled empty packaged
+catalogue and the real systemd installer, so native dry-run and apply must preserve their only
+live resource without any installer effect, with native doctor and status preservation.
+Packaged-fixture effects are recorded separately. A second required native case exits both head
+and launcher while a detached descendant remains, checks retained binding and substitution
+refusals through the public inventory and host apply, then settles through the lifecycle.

@@ -171,7 +171,7 @@ the task and agent lifecycle.
 ### Open questions
 
 - Settled in A20 (sprint:1459 and sprint:1461): the minimal in-house backend, `local-pty`, replaced
-  the session manager heads ran in before (Orca); see [Head runtime](HEAD_RUNTIME.md).
+  the session manager heads ran in before (Orca); see [Head runtime](HEAD_RUNTIME.md#orca-migration-history).
 - Whether there is a real need for a public extension API.
 
 ## Milestone 6. First supported release

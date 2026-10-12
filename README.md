@@ -15,8 +15,8 @@ mutable and derived runtime state lives in a local data directory. Install and r
 - [Vision](docs/VISION.md) — what the appliance is for and who it is for
 - [Roadmap](docs/ROADMAP.md) — product states, milestones and open questions
 - [Architecture](docs/ARCHITECTURE.md) — storage boundary, runtime flow, security model
-- [Head runtime](docs/HEAD_RUNTIME.md) — the one head runtime, `local-pty`, and the A20 record of how it replaced Orca
-- [Head scopes](docs/HEAD_SCOPES.md) — head scope ownership, memory limits and memory exits
+- [Head runtime](docs/HEAD_RUNTIME.md): runtime defaults, Docker guard, progress journal and prompt handoffs
+- [Head scopes](docs/HEAD_SCOPES.md): scope ownership, memory exits and host reconciliation
 - [Head vitality](docs/HEAD_VITALITY.md) — observation axes, snapshots and their invariants
 - [Outcome lineage](docs/PROTOCOLS.md#outcome-lineage) — durable round handoffs between worker and reviewer launches
 - [Board store](docs/BOARD_STORE.md) — board read/write inventory and the PostgreSQL schema
@@ -26,7 +26,7 @@ mutable and derived runtime state lives in a local data directory. Install and r
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
 - [Testing](docs/TESTING.md) — CI suite taxonomy and local test boundaries
-- [Rename](docs/RENAME.md) — the rename to `ummanu`: inventory of the old name and the transition design
+- [Old-name policy](docs/RENAME.md): allowed historical names and the entrypoint activation guard
 
 ## Install
 
