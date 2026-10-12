@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping
-from datetime import datetime
 from typing import Any
 
-from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.extension_bag import card_bag
+from ummanu.board.sql_rows import parse_rfc3339
 
 WAITING_OWNER = "waiting_owner"
 WAITING_OWNER_REASON = "waiting_owner_reason"
@@ -31,7 +31,7 @@ OWNER_ANSWER_RECORDED = "owner_answer_recorded"
 def attention_record(task: Mapping[str, Any], key: str) -> dict[str, Any] | None:
     """Read the board's answer or escalation; these records are written with their audit."""
     try:
-        value = json.loads(str(_bag(task).get(key) or "null"))
+        value = json.loads(str(card_bag(task).get(key) or "null"))
     except ValueError:
         return None
     return value if isinstance(value, dict) else None
@@ -68,29 +68,21 @@ def mark_values(since: str, reason: str, by: str) -> dict[str, str]:
     return {WAITING_OWNER: since, WAITING_OWNER_REASON: reason, WAITING_OWNER_BY: by}
 
 
-def _bag(task: Mapping[str, Any]) -> Mapping[str, Any]:
-    extensions = task.get("extensions")
-    bag = extensions.get(EXTENSION_BAG) if isinstance(extensions, Mapping) else None
-    return bag if isinstance(bag, Mapping) else {}
-
-
 def carries_mark_fields(task: Mapping[str, Any]) -> bool:
     """Whether any of the three fields is on the card, well-formed or not."""
-    bag = _bag(task)
+    bag = card_bag(task)
     return any(str(bag.get(key) or "") for key in MARK_KEYS)
 
 
 def waiting_owner(task: Mapping[str, Any]) -> dict[str, str] | None:
     """The card's mark as `{since, reason, by}`, or None when it carries no well-formed one."""
-    bag = _bag(task)
+    bag = card_bag(task)
     since = str(bag.get(WAITING_OWNER) or "").strip()
     reason = str(bag.get(WAITING_OWNER_REASON) or "").strip()
     by = str(bag.get(WAITING_OWNER_BY) or "").strip()
     if not (since and reason and by):
         return None
-    try:
-        datetime.fromisoformat(since)
-    except ValueError:
+    if parse_rfc3339(since) is None:
         return None
     return {"since": since, "reason": reason, "by": by}
 

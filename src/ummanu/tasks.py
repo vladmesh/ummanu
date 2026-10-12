@@ -93,6 +93,7 @@ from ummanu.board.roles import (
     PROPOSAL_CREATE_ROLES,
     Role,
 )
+from ummanu.board.sql_rows import now as utc_now, rfc3339
 from ummanu.board.task_routing import (
     ACTIVE_STATES,
     BLOCK_CLASSIFICATION_VALUES,
@@ -2538,7 +2539,7 @@ class TaskWriter:
                     sprint_ref=sprint,
                     task_ref=reference,
                     dispatch_id=dispatch_id,
-                    at=datetime.now(UTC).isoformat(),
+                    at=_charge_time(),
                 )
                 if not charge.get("charged"):
                     return charge
@@ -2632,7 +2633,7 @@ class TaskWriter:
                     sprint_ref=sprint,
                     task_ref=carrier,
                     dispatch_id=dispatch_id,
-                    at=datetime.now(UTC).isoformat(),
+                    at=_charge_time(),
                 )
                 if not charge.get("charged"):
                     return charge
@@ -5647,7 +5648,16 @@ def _digest(value: str) -> str:
 
 
 def _now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return rfc3339(utc_now())
+
+
+def _charge_time() -> str:
+    """When an e2e run is charged to a sprint: the one written form, kept to the microsecond.
+
+    Charges read back ordered by `charged_at` (`sql_sprints._e2e_charges`), so two in one second
+    keep their order only at full precision.
+    """
+    return rfc3339(utc_now(), microseconds=True)
 
 
 def _revision(task: dict[str, Any]) -> str:
@@ -5812,7 +5822,7 @@ def _rfc3339(value: Any) -> str | None:
     seconds = _positive_int(value)
     if seconds is None:
         return None
-    return datetime.fromtimestamp(seconds, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return rfc3339(datetime.fromtimestamp(seconds, UTC))
 
 
 def _normalize_comment(comment: dict[str, Any]) -> dict[str, Any]:

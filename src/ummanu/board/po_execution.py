@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ummanu.board.po_origin import _json_field
+from ummanu.board.extension_bag import bag_json
 
 PO_EXECUTION = "po_execution"
 PURPOSES = frozenset({"e2e_budget", "e2e_disposition"})
@@ -72,7 +72,7 @@ class PoExecution:
 
 
 def assignment(task: Mapping[str, Any]) -> PoExecution | None:
-    raw = _json_field(task, PO_EXECUTION)
+    raw = bag_json(task, PO_EXECUTION)
     if raw is None:
         return None
     return PoExecution.from_document(raw)

@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 import threading
 import uuid
 from collections.abc import Callable, Iterable, Sequence
@@ -12,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from ummanu.board.audit_contract import is_protocol_event
-from ummanu.board.events import BoardEventCanon, MutationEventTransaction
+from ummanu.board.events import BoardEventCanon, MutationEventTransaction, event_id
 from ummanu.board.host import Create, MutationResult, Replace, TransitionRequest
 from ummanu.board.models import BoardEntity, EntityKind, Event, EventKind
 from ummanu.board.transitions import (
@@ -315,25 +313,21 @@ class FakeBoardHost:
         unrelated occurrence.  Digesting the request id together with the operation keeps a
         genuine same-request replay on its original id and separates everything else.
         """
-        payload = json.dumps(
-            {
-                "request_id": request_id,
-                "kind": kind.value,
-                "entity_kind": entity.kind.value,
-                "ref": entity.ref,
-                "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
-                "reason": operation.reason,
-                "related_refs": list(operation.related_refs.refs),
-                "source": self.read(operation.kind, operation.ref).state.value
-                if isinstance(operation, TransitionRequest)
-                else None,
-                "target": operation.target.value if isinstance(operation, TransitionRequest) else None,
-                "data": _supplement_data(operation),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+        identity = {
+            "request_id": request_id,
+            "kind": kind.value,
+            "entity_kind": entity.kind.value,
+            "ref": entity.ref,
+            "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
+            "reason": operation.reason,
+            "related_refs": list(operation.related_refs.refs),
+            "source": self.read(operation.kind, operation.ref).state.value
+            if isinstance(operation, TransitionRequest)
+            else None,
+            "target": operation.target.value if isinstance(operation, TransitionRequest) else None,
+            "data": _supplement_data(operation),
+        }
+        return event_id(identity)
 
     @staticmethod
     def _require_same_operation(
@@ -373,7 +367,7 @@ def _supplement_data(operation: Create | Replace | TransitionRequest) -> dict[st
         data = {}
     if isinstance(operation, TransitionRequest):
         if not isinstance(operation.data, dict):
-            raise ValueError("transition data must be an object")
+            raise ValueError("transition data must be an object")  # noqa: TRY004 - transition payload refusals are ValueError
         overlap = set(data).intersection(operation.data)
         if overlap:
             raise ValueError(f"transition data collides with supplement: {sorted(overlap)!r}")

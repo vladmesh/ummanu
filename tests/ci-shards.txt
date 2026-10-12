@@ -16,6 +16,7 @@ component tests/test_runtime_scope_inventory.py
 unit tests/test_dead_pane_history.py
 unit tests/test_codex_home_launch_config.py
 unit tests/test_board_identity.py
+unit tests/test_board_rows.py
 runtime-component tests/test_agent_state_lock.py
 integration-board tests/test_audit_backend_canon.py
 integration-heads tests/test_attempt_usage.py
@@ -222,6 +223,7 @@ unit tests/test_sprint_write.py
 unit tests/test_local_run_policy.py
 integration-board tests/test_sprints_sql_backend.py
 integration-board tests/test_sql_board_bulk_reads.py
+integration-board tests/test_board_bulk_writes_backend.py
 integration-board tests/test_sql_card_reconnect_backend.py
 integration-board tests/test_po_reconnect_backend.py
 unit tests/test_sql_card_reconnect.py

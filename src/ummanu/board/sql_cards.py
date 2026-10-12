@@ -46,6 +46,13 @@ from ummanu.board import schema_gate
 from ummanu.board.backend import card_transport_key, record_key_kind
 from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.sql_product_issues import ProductIssueRecords
+from ummanu.board.sql_rows import (
+    epoch as _epoch,
+    grouped as _grouped,
+    now as _now,
+    parse_rfc3339,
+    rfc3339 as _rfc3339,
+)
 from ummanu.board.sql_sprints import SqlSprintRecords
 from ummanu.board.store import BoardStoreCredentials
 from ummanu.board.task_routing import live_impact_flag
@@ -74,6 +81,25 @@ _COLUMN_ID_BY_STATE = {
     "done": 7,
 }
 _STATE_BY_COLUMN_ID = {identifier: state for state, identifier in _COLUMN_ID_BY_STATE.items()}
+
+
+def _column_state(column_id: Any) -> str:
+    """The store state a board column id names, refused by name for a column the board lacks."""
+    try:
+        return _STATE_BY_COLUMN_ID[int(column_id)]
+    except (KeyError, TypeError, ValueError):
+        raise SqlCardError(
+            f"the Pipeline board has no column {column_id!r}; its columns are "
+            + ", ".join(f"{identifier} ({title})" for identifier, title in BOARD_COLUMNS)
+        ) from None
+
+
+def _state_column(ref: str, state: Any) -> int:
+    """The board column of a stored state, refused by name for a state no column shows."""
+    try:
+        return _COLUMN_ID_BY_STATE[state]
+    except (KeyError, TypeError):
+        raise SqlCardError(f"card {ref} is in state {state!r}, which no Pipeline board column shows") from None
 
 #: The one virtual board this client serves.  The store has no second board; a name that is not
 #: this one (or the sprint board's) is not found.
@@ -222,12 +248,6 @@ def _text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
-def _epoch(value: datetime | None) -> str:
-    if value is None:
-        return ""
-    return str(int(value.timestamp()))
-
-
 def _ensure_project_row(client: SqlCardClient, project_id: str) -> None:
     """Insert a missing `projects` row with the id only, inside the caller's transaction (§3.1)."""
     client._execute(
@@ -236,25 +256,12 @@ def _ensure_project_row(client: SqlCardClient, project_id: str) -> None:
     )
 
 
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
 def _timestamp(value: Any) -> datetime | None:
-    text = _text(value).strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
+    """A written time as an aware UTC moment; one that names no zone is read as UTC."""
+    parsed = parse_rfc3339(value)
+    if parsed is None:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-
-
-def _rfc3339(value: datetime | None) -> str:
-    if value is None:
-        return ""
-    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 #: The per-record reads `call_batch` answers set-based rather than call by call.
@@ -267,17 +274,6 @@ def _batch_key(task_id: Any) -> Any:
         return int(task_id)
     except (TypeError, ValueError):
         return task_id
-
-
-def _grouped(rows: Iterable[tuple[Any, ...]]) -> dict[Any, list[Any]]:
-    """Rows keyed by their first column, each group in the order the statement returned it.
-
-    A group holds the bare second column when a row has two columns, else the remaining tuple.
-    """
-    groups: dict[Any, list[Any]] = {}
-    for owner, *rest in rows:
-        groups.setdefault(owner, []).append(rest[0] if len(rest) == 1 else tuple(rest))
-    return groups
 
 
 def _task_number_of(ref: str) -> int:
@@ -986,7 +982,7 @@ class SqlCardClient:
             "reference": ref,
             "title": _text(title),
             "description": _text(description),
-            "column_id": _COLUMN_ID_BY_STATE[state],
+            "column_id": _state_column(ref, state),
             "position": position,
             "swimlane_id": self._lane_id(lane),
             "date_creation": _epoch(created),
@@ -1151,6 +1147,7 @@ class SqlCardClient:
                 title=title, description=description, reference=reference
             )
         number = _task_number_of(reference)
+        state = _column_state(column_id)
         lane = self._lane_name(swimlane_id)
         extensions: dict[str, Any] = {EXTENSION_BAG: {"swimlane": lane}} if lane else {}
         now = _now()
@@ -1163,8 +1160,8 @@ class SqlCardClient:
                 number,
                 title,
                 description or "",
-                _STATE_BY_COLUMN_ID[int(column_id)],
-                self._next_position(_STATE_BY_COLUMN_ID[int(column_id)]),
+                state,
+                self._next_position(state),
                 json.dumps(extensions),
                 now,
                 now,
@@ -1214,8 +1211,8 @@ class SqlCardClient:
             raise SqlCardError(
                 "a Sprint, Product or Issue has no Pipeline card column to move to"
             )
+        state = _column_state(column_id)
         ref = self._ref_of(task_id)
-        state = _STATE_BY_COLUMN_ID[int(column_id)]
         lane = self._lane_name(swimlane_id)
         self._execute(
             "UPDATE tasks SET state = %s, position = %s, updated_at = %s, date_moved = %s, "
@@ -1405,34 +1402,38 @@ class SqlCardClient:
             params.append(_now())
             params.append(ref)
             self._execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE task_ref = %s", tuple(params))
-        for key in bag_removals:
+        if bag_removals:
+            # One statement for every key the bag drops: jsonb `-` takes the whole text[] at once.
             self._execute(
                 "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
-                f"'{{{EXTENSION_BAG}}}', coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) - %s, true) "
+                f"'{{{EXTENSION_BAG}}}', coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) - %s::text[], true) "
                 "WHERE task_ref = %s",
-                (key, ref),
+                (bag_removals, ref),
             )
         self._commit_unless_nested()
         return True
 
     def _write_link(self, ref: str, key: str, text: str) -> None:
         """The three metadata keys that are satellite rows rather than a column (§3.5)."""
+        # Each list is one INSERT over `unnest`, so a link list costs two statements at any length.
+        parts = [part.strip() for part in text.split(",") if part.strip()]
         if key == "retry_heads":
             self._execute("DELETE FROM task_retry_heads WHERE task_ref = %s", (ref,))
-            for ordinal, head in enumerate(part for part in text.split(",") if part.strip()):
+            if parts:
                 self._execute(
-                    "INSERT INTO task_retry_heads (task_ref, ordinal, head) VALUES (%s, %s, %s)",
-                    (ref, ordinal, head.strip()),
+                    "INSERT INTO task_retry_heads (task_ref, ordinal, head) "
+                    "SELECT %s, ordinal - 1, head FROM unnest(%s::text[]) WITH ORDINALITY AS h(head, ordinal)",
+                    (ref, parts),
                 )
         elif key == "blocked_by":
             self._execute("DELETE FROM task_dependencies WHERE task_ref = %s", (ref,))
-            for value in (part.strip() for part in text.split(",") if part.strip()):
-                if value == ref:
-                    continue
+            depends_on = [value for value in parts if value != ref]
+            if depends_on:
                 self._execute(
                     "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) "
-                    "SELECT %s, %s, (SELECT task_ref FROM tasks WHERE task_ref = %s)",
-                    (ref, value, value),
+                    "SELECT %s, d.value, t.task_ref FROM unnest(%s::text[]) WITH ORDINALITY AS d(value, ordinal) "
+                    "LEFT JOIN tasks t ON t.task_ref = d.value ORDER BY d.ordinal",
+                    (ref, depends_on),
                 )
         elif key == "supersedes":
             self._execute("DELETE FROM task_supersessions WHERE task_ref = %s", (ref,))
@@ -1446,12 +1447,12 @@ class SqlCardClient:
                 )
         elif key == "issues":
             self._execute("DELETE FROM task_issues WHERE task_ref = %s", (ref,))
-            for value in (part.strip() for part in text.split(",") if part.strip()):
-                issue_id = value.removeprefix("issue:")
+            if parts:
                 self._execute(
                     "INSERT INTO task_issues (task_ref, issue_id) "
-                    "SELECT %s, issue_id FROM issues WHERE issue_id = %s",
-                    (ref, issue_id),
+                    "SELECT %s, i.issue_id FROM unnest(%s::text[]) WITH ORDINALITY AS w(issue_id, ordinal) "
+                    "JOIN issues i ON i.issue_id = w.issue_id ORDER BY w.ordinal",
+                    (ref, [value.removeprefix("issue:") for value in parts]),
                 )
 
     # --- the sprint e2e run budget (0023, secretary-1796) ----------------------------------
@@ -1503,18 +1504,28 @@ class SqlCardClient:
             self._commit_unless_nested()
             return comment_id
         ref = self._ref_of(task_id)
+        written = _now()
+        if created_at:
+            written = _timestamp(created_at)
+            if written is None:
+                raise SqlCardError(f"a comment on {ref} names created_at {created_at!r}, which is not a time")
         first = content.splitlines()[0] if content else ""
         marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
         rows = self._query(
             "INSERT INTO task_comments (task_ref, marker, body, created_at) "
             "VALUES (%s, %s, %s, %s) RETURNING comment_id",
-            (ref, marker, content, _timestamp(created_at) if created_at else _now()),
+            (ref, marker, content, written),
         )
         self._commit_unless_nested()
         return int(rows[0][0])
 
 
     def _rpc_removeTask(self, *, task_id: int) -> bool:
+        """Drop a Sprint row; the store removes nothing else (a card is closed, not removed)."""
+        kind = record_key_kind(task_id) or ("card" if card_transport_key(task_id) is not None else None)
+        if kind != "sprint":
+            named = f"{kind} key {task_id!r}" if kind else f"{task_id!r}, which is no transport key"
+            raise SqlCardError(f"removeTask removes only a Sprint, not {named}")
         result = self.sprints.remove(int(task_id))
         self._commit_unless_nested()
         return result

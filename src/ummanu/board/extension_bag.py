@@ -9,6 +9,8 @@ is the one rule that reads such a record.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
 from typing import Any
 
 EXTENSION_BAG = "extra"
@@ -16,6 +18,24 @@ EXTENSION_BAG = "extra"
 #: Top-level markers that sit beside the bag rather than in it (docs/BOARD_STORE.md §3.10): an
 #: imported row's note of the fields the retired board never gave it.  They are not metadata.
 EXTENSION_MARKERS = ("board_never_named",)
+
+
+def card_bag(task: Mapping[str, Any]) -> Mapping[str, Any]:
+    """A card document's bag, or an empty one when the card carries none or a malformed one."""
+    extensions = task.get("extensions")
+    bag = extensions.get(EXTENSION_BAG) if isinstance(extensions, Mapping) else None
+    return bag if isinstance(bag, Mapping) else {}
+
+
+def bag_json(task: Mapping[str, Any], key: str) -> Any:
+    """A bag field holding JSON, decoded; an object is taken as is and unreadable text is None."""
+    raw = card_bag(task).get(key)
+    if isinstance(raw, Mapping):
+        return raw
+    try:
+        return json.loads(str(raw or ""))
+    except ValueError:
+        return None
 
 
 def fold_extension_bags(extensions: Any) -> dict[str, Any]:

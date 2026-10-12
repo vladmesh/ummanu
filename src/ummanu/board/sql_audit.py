@@ -38,12 +38,13 @@ import hashlib
 import json
 import threading
 from collections.abc import Callable, Iterable, Iterator
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from ummanu.board import budget_candidates, origin_outbox
 from ummanu.board.audit_contract import is_protocol_event, require_claim
 from ummanu.board.models import EntityKind, Event, EventKind
+from ummanu.board.sql_rows import now as _now, rfc3339
 
 #: Every `kind` a `board_events` row may carry (§3.12).  A record whose kind is outside it is a
 #: generic audit record and stays in its `requests` row.
@@ -99,13 +100,9 @@ def _advisory_key(text: str) -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
 def _stamp(value: Any) -> str:
     if isinstance(value, datetime):
-        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return rfc3339(value)
     return str(value or "")
 
 
@@ -556,7 +553,7 @@ class SqlTaskAudit:
         refusal = {
             "reason": outcome["reason"],
             "staged_at": outcome["staged_at"],
-            "settled_at": settled.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "settled_at": rfc3339(settled),
             "settled_by": "stale-audit-settlement",
         }
         self._execute(
