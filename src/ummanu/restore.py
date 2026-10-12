@@ -32,7 +32,6 @@ from ummanu.board.backend import CARD, SPRINT, board_client, entity_number
 from ummanu.board.extension_bag import EXTENSION_BAG, fold_extension_bags
 from ummanu.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
-    enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
     positive_int as _positive_int,
 )
 from ummanu.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions

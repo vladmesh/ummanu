@@ -100,7 +100,6 @@ def pr_merge_commit(run: Callable[..., Any], branch: str, cwd: Path) -> str:
 
 
 def open_watch(
-    runtime: Any,
     task: dict[str, Any],
     payload: dict[str, Any],
     landing: MergeLanding,

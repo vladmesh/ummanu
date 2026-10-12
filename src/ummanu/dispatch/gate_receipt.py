@@ -134,13 +134,6 @@ class AcceptedGreenGate:
             receipt = None
         return cls(receipt, receipt is not None)
 
-    @property
-    def valid(self) -> bool:
-        return self.policy_valid
-
-    def persisted_payload(self) -> dict[str, object]:
-        return self.receipt.as_dict() if self.receipt else {}
-
 
 def mint_gate_receipt(
     *,

@@ -245,13 +245,13 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         with (mock.patch.object(release_lifecycle, "transfer_research_report", return_value=None),
               mock.patch.object(release_lifecycle, "release_effect", return_value={"action": "released"}) as effect):
             release_lifecycle.release_parked(self.runtime, self.task, self.record, self.records,
-                                             self.payload, "tick", reason=body)
+                                             self.payload, "tick")
         reason = effect.call_args.kwargs["move_reason"]
         self.assertIn("[decision:release]", reason)
         self.assertNotIn(body, reason)
         with mock.patch.object(assessment_decision, "attempt_accounting", self.accounting):
             assessment_decision.reslice_parked(self.runtime, self.task, self.record, self.records,
-                                               self.payload, "tick", reason=body)
+                                               self.payload, "tick")
         move = self.accounting.terminal_effect.call_args.kwargs
         self.assertEqual((move["decision"], move["target"]), ("reslice", "blocked"))
         self.assertIn("[decision:reslice]", move["reason"])

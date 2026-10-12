@@ -247,7 +247,7 @@ PUSH_MAIN = "on:\n  pull_request:\n  push:\n    branches: [main]\njobs: {}\n"
 def _watch(payload: dict, *, ci: str = "github", workspace: str = "", sha: str = SHA, now: float = 1000.0) -> dict:
     landing = MergeLanding(sha=sha, base="main", path="github-pr", ci=ci, branch=BRANCH)
     task = {"ref": REF, "project": "sample", "sprint": SPRINT}
-    return post_merge.open_watch(SimpleNamespace(), task, payload, landing, workspace=workspace, now=now)
+    return post_merge.open_watch(task, payload, landing, workspace=workspace, now=now)
 
 
 def _significant(events: list[dict]) -> list[dict]:

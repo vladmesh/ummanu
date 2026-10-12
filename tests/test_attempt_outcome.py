@@ -576,7 +576,6 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
                     self.reader.show(CARD_REF),
                     record,
                     terminal_state="blocked",
-                    disposition="blocked",
                     taxonomy=normalize_terminal_taxonomy(disposition="blocked", blocked_reason="provider"),
                     terminal_path=record.outcome_terminal_path,
                 )

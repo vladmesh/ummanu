@@ -259,7 +259,7 @@ Board identity rows (live counts):
 | `packaging/systemd/*` | 18 + README | rename (§4) |
 | `examples/instance/instance.yaml` (7) | | rename |
 | `tests/` | 281 files, 10 010 occurrences; fixtures build fake installs named `secretary`, `secretary-data` | rename, except card refs (R), `secretary-instance` (I) and the binary fixture (R) |
-| `scripts/*.py` (`check_memory_mcp_restore_e2e.py` 29, `measure_dashboard.py` 16, `repro_local_pty_retained_continuation.py` 13, others) | | rename |
+| `scripts/*.py` (`measure_dashboard.py` 16, others) | | rename |
 
 ### 8. GitHub
 

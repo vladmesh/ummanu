@@ -66,7 +66,6 @@ class ProgressState(StrEnum):
 
     ADVANCING = "advancing"
     QUIET = "quiet"
-    STAGNANT = "stagnant"
     UNKNOWN = "unknown"
 
 
@@ -93,7 +92,6 @@ class SnapshotSource(StrEnum):
     PID_HEARTBEAT = "pid_heartbeat"
     PROVIDER_CURSOR = "provider_cursor"
     PANE_ADVISORY = "pane_advisory"
-    EXECUTION_RECEIPT = "execution_receipt"
     # The head's own child processes, read from /proc (secretary-1692): a head blocked on a long
     # foreground command is silent everywhere else while its child works.
     EXECUTION_CHILD = "execution_child"

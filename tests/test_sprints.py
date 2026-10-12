@@ -21,6 +21,7 @@ from tests.sprint_close_fixtures import (
 )
 from ummanu import sprints
 from ummanu.board.models import EntityKind
+from ummanu.board.sprint_read import BUDGET_UNCHARGED_EVENT_TYPES, BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.steward_reports import StewardReportBoard
 from ummanu.cli import main
@@ -36,8 +37,6 @@ from ummanu.sprint_observer import (
 )
 from ummanu.sprints import (
     BUDGET_EVENT_TYPES,
-    BUDGET_UNCHARGED_EVENT_TYPES,
-    BUDGET_UNCHARGED_INFRASTRUCTURE,
     SprintReader,
     SprintWriter,
     active_sprint_projects,

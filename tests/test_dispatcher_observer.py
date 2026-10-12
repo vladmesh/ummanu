@@ -36,6 +36,7 @@ from tests.production_runtime_fixtures import registered_production_runtime
 from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.sql_backend_fixtures import card_store
+from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import BOARD_ID
 from ummanu.dispatch import observer_fence as dispatcher_observer_fence
@@ -110,7 +111,6 @@ from ummanu.runtime.role_env import (
 )
 from ummanu.sprint_observer import encode_observer, head_choice
 from ummanu.sprints import (
-    BUDGET_UNCHARGED_INFRASTRUCTURE,
     SprintReader,
     SprintWriter,
 )

@@ -124,11 +124,11 @@ def _advance_assessment(
         )
     if decision == "reslice":
         return reslice_parked(
-            runtime, task, record, records, payload, attempt_id, reason=reason
+            runtime, task, record, records, payload, attempt_id,
         )
 
     return release_lifecycle.release_parked(
-        runtime, task, record, records, payload, attempt_id, reason=reason
+        runtime, task, record, records, payload, attempt_id,
     )
 
 
@@ -229,8 +229,6 @@ def reslice_parked(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     attempt_id: str,
-    *,
-    reason: str,
 ) -> dict[str, Any]:
     """End the attempt and leave a resliced card Blocked for a fresh cut."""
     ref = task["ref"]

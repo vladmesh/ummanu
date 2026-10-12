@@ -133,8 +133,6 @@ from ummanu.dispatch.tui import (
 )
 from ummanu.dispatch.types import (
     STOPPED_BY_DISPATCHER,
-    STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
-    STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REVIEW_FREEZE,
     DispatcherError,
     HeadLaunchAborted,
@@ -3381,14 +3379,6 @@ class CommandHostRuntime:
             head_run=dict(head_run or {}),
             fallback_reason=fallback_reason,
         )
-
-    @property
-    def head_runtime(self) -> Any:
-        """The backend a head with no runtime of its own is read on, for a caller with none to name.
-
-        Use the durable default when absent, not the profile default.
-        """
-        return self.head_runtime_for(None)
 
     def head_runtime_for(self, subject: Any = None) -> Any:
         """The backend this head is held by — the one place a `runtime` value becomes an object.

@@ -234,8 +234,6 @@ def release_parked(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     attempt_id: str,
-    *,
-    reason: str,
 ) -> dict[str, Any]:
     """Perform a release decision: re-check the mechanical state, then merge."""
     from ummanu.dispatch import gate_lifecycle
@@ -460,7 +458,7 @@ def release_effect(
             )
         if isinstance(landing, MergeLanding):
             with tick_stage("release_landed"):
-                watch = post_merge.open_watch(runtime, task, payload, landing, workspace=record.workspace)
+                watch = post_merge.open_watch(task, payload, landing, workspace=record.workspace)
                 runtime.save_records(payload, records)
                 release_merge = post_merge.release_merge_marker(watch)
     blocked = require_completion_evidence(runtime, task, record, records, payload, attempt_id, step=step)

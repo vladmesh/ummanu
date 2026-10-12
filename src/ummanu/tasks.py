@@ -43,12 +43,8 @@ from ummanu.board.host import MarkerComment, MutationResult, TransitionRequest
 from ummanu.board.legacy_codec import (
     TASK_KNOWN_METADATA as _KNOWN_METADATA,
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
-    enum_or_default as _enum_or_default,  # noqa: F401 - released private compatibility alias
-    enum_or_none as _enum_or_none,  # noqa: F401 - released private compatibility alias
     nonnegative_int as _nonnegative_int,
-    null_if_empty as _null_if_empty,  # noqa: F401 - released private compatibility alias
     positive_int as _positive_int,
-    split_heads as _split_heads,  # noqa: F401 - released private compatibility alias
     text as _text,
 )
 from ummanu.board.models import (

@@ -19,7 +19,6 @@ from ummanu.board.events import (
 )
 from ummanu.board.fake import FakeBoardHost
 from ummanu.board.host import (
-    BoardHost,
     Create,
     DescriptionAppend,
     DescriptionEdit,
@@ -87,7 +86,6 @@ __all__ = [
     "BoardEntity",
     "BoardEventCanon",
     "BoardEventPending",
-    "BoardHost",
     "BoardProtocolError",
     "Card",
     "CardState",

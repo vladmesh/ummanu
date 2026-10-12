@@ -576,7 +576,7 @@ def _reconcile_open_sprint(
                 "head": record.head,
                 "launches": record.launches,
             }
-        if record.state in {"waiting", "idle-grace", "idle-recovering"}:
+        if record.state in {"waiting", "idle-grace"}:
             _set_observer_state(record, "running")
         return {
             "status": "ok",
