@@ -45,7 +45,13 @@ from ummanu.webproto.commands import (
     run_web_read_request,
 )
 from ummanu.webproto.cursor import Cursor
-from ummanu.webproto.errors import InvalidCursor, OperationPending, ReadError, ValidationRefused
+from ummanu.webproto.errors import (
+    InstallationUnavailable,
+    InvalidCursor,
+    OperationPending,
+    ReadError,
+    ValidationRefused,
+)
 from ummanu.webproto.journal import MAX_LIMIT
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -431,7 +437,8 @@ class HonestyTests(CommandProtocolFixture):
         ).command_history()
         self.assert_unavailable(document, "sources", "installation")
         self.assert_available(document, "commands")
-        with self.assertRaises(ValidationRefused):
+        # Every layer's code for a config that cannot be used (CON-07); it was `validation` here.
+        with self.assertRaises(InstallationUnavailable):
             CommandReadLayer(broken, board_client=self.board).command_history()
 
 
@@ -659,9 +666,9 @@ class CommandClientTests(CommandProtocolFixture):
         broken = self.tmp / "not-an-installation"
         broken.mkdir(exist_ok=True)
         (broken / "instance.yaml").write_text("version: 1\nname: broken\n", encoding="utf-8")
-        # `validation` keeps the status `ummanu web-read` already answers it with.
-        self.assertEqual(run_web_read_commands(self._args(instance=str(broken), data_dir=None)), 2)
-        self.assertEqual(run_web_read_request(self._args(instance=str(broken), data_dir=None)), 2)
+        # `backend_unavailable`, the status `ummanu web-read system` answers the same config with.
+        self.assertEqual(run_web_read_commands(self._args(instance=str(broken), data_dir=None)), 1)
+        self.assertEqual(run_web_read_request(self._args(instance=str(broken), data_dir=None)), 1)
 
     def test_the_command_holds_no_rule_of_its_own(self) -> None:
         """Whatever the read says is what is printed: the client decides nothing about it."""

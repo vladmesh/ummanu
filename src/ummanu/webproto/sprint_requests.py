@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu._fsutil import file_lock
+from ummanu.webproto._values import _float, _text
 from ummanu.webproto.runs import RequestMismatch
 from ummanu.webproto.store_io import RunStoreError, write_document
 
@@ -154,11 +155,3 @@ class SprintRequestStore:
 
     def _write(self, record: SprintRequest) -> None:
         write_document(self._path(record.request_id), json.dumps(record.to_json(), sort_keys=True, indent=2))
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
-
-
-def _float(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0

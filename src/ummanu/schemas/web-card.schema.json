@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-card.schema.json",
+  "title": "Transport-independent owner writes on one card",
+  "description": "The two documents ummanu.webproto's card operations return: a comment put on a card and a card moved, each under the request id the caller names. `result` is what `TaskWriter` answered, unchanged, so the CLI prints the same object; `event_id` is its event, null when the writer named none. No failure is a status number.",
+  "oneOf": [
+    {"$ref": "#/$defs/commented"},
+    {"$ref": "#/$defs/moved"}
+  ],
+  "$defs": {
+    "written": {
+      "type": "object",
+      "required": ["schema_version", "kind", "observed_at", "request_id", "ref", "event_id", "result"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "kind": {"type": "string"},
+        "observed_at": {"type": "string"},
+        "request_id": {"type": "string"},
+        "ref": {"type": "string"},
+        "event_id": {"type": ["string", "null"]},
+        "result": {"type": "object", "description": "The writer's own answer, unchanged."}
+      }
+    },
+    "commented": {
+      "allOf": [{"$ref": "#/$defs/written"}],
+      "properties": {"kind": {"const": "card_commented"}}
+    },
+    "moved": {
+      "allOf": [{"$ref": "#/$defs/written"}],
+      "properties": {"kind": {"const": "card_moved"}}
+    }
+  }
+}

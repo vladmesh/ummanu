@@ -3428,10 +3428,10 @@ The same pause through the transport-independent layer (`ummanu.webproto.pause_o
 
 | operation | inputs | answers with | errors |
 | --- | --- | --- | --- |
-| `pause_drain` | `actor`, `reason` | a `pause_command` document | `validation` (empty actor or reason, or an installation whose config does not validate), `owner_conflict` (already paused in the other mode), `backend_unavailable` (a durable source or the host refused) |
-| `pause_resume` | `actor` | a `pause_command` document, with `restored` | `validation` (an installation whose config does not validate), `backend_unavailable` (a durable source or the host refused) |
-| `pause_state` | — | a `pause_state` document | `validation` (an installation whose config does not validate, with no data directory to fall back on) |
-| `pause_scope` | — | a `pause_scope` document | `validation` (the same) |
+| `pause_drain` | `actor`, `reason` | a `pause_command` document | `validation` (empty actor or reason, or a head registry that does not validate), `owner_conflict` (already paused in the other mode), `backend_unavailable` (an installation whose config does not validate, or a durable source or the host refused) |
+| `pause_resume` | `actor` | a `pause_command` document, with `restored` | `validation` (a head registry that does not validate), `backend_unavailable` (an installation whose config does not validate, or a durable source or the host refused) |
+| `pause_state` | — | a `pause_state` document | `backend_unavailable` (an installation whose config does not validate, with no data directory to fall back on) |
+| `pause_scope` | — | a `pause_scope` document | `backend_unavailable` (the same) |
 
 The table is checked against `ummanu.webproto.pause_ops.PAUSE_ERRORS`. Every operation of the
 package can also answer `backend_unavailable` for an implementation failure caught by
@@ -3524,7 +3524,8 @@ unreadable-flag sentence.
 **The commands are clients.** `ummanu pause drain`, `ummanu resume`, `ummanu pause-status` and
 `ummanu pause-scope` call these operations, print the document, and map codes to exit status as
 `ummanu web-run` does: `validation`/`not_found` → 2, `owner_conflict` → 3 (a `pause_conflict`),
-`backend_unavailable` → 1. An installation whose config does not validate is `validation` (exit 2).
+`backend_unavailable` → 1. An installation whose config does not validate is `backend_unavailable`
+(exit 1), the code every layer gives it.
 With an explicit `--data-dir` and an invalid config, the two reads answer from the flag and dispatcher
 state and report `installation` unavailable. `ummanu pause freeze` does not go through the layer and
 keeps its own path.
@@ -3872,7 +3873,8 @@ python3 -P -m ummanu web-run list   --instance I --ref REF
 ```
 
 Every document validates against the packaged `web-run` schema and carries `schema_version`, a `kind`
-of `product_run` or `product_review`, and `observed_at`. A run id is `pr-` prefixed.
+of `product_run`, `product_review` or `product_runs` (the listing), and `observed_at`. A run id is
+`pr-` prefixed.
 
 `--profile` is required, with no default. The profile comes from the head registry and must declare the
 `local-pty` runtime; a profile naming any other runtime is refused. `--heads-registry` (or
@@ -4491,8 +4493,10 @@ Neither read has a code of its own; any other durable-source failure is `backend
 
 | read | code | when |
 | --- | --- | --- |
-| `command_history` | `validation` | the instance config does not validate, or the cursor is one this reader did not issue, belongs to a card, or is past the end of a journal that only grows |
-| `command_request` | `validation` | the instance config does not validate, or no request id was given |
+| `command_history` | `validation` | the cursor is one this reader did not issue, belongs to a card, or is past the end of a journal that only grows |
+| `command_history` | `backend_unavailable` | the instance config does not validate and no data directory was given |
+| `command_request` | `validation` | no request id was given |
+| `command_request` | `backend_unavailable` | the instance config does not validate and no data directory was given |
 
 ## Serving the pipeline locally
 
@@ -4569,6 +4573,12 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/owner-events` | `owner_events.owner_event_list` | the owner's bell: the unread owner events by default, `?all=1` every event (unread highlighted); open `needs_owner` events first, then newest first, with its class badge and subject link; `?unread=1` or any other value is the unread default; the board without `owner_events` reads as no events with the source `unavailable` ([Owner events](#owner-events-and-the-bell)) |
 | POST | `/owner-events/read-all` | `owner_events.mark_all_read` | mark every unread notice read; a `needs_owner` event is never touched; form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
 | POST | `/owner-events/{event_id}/read` | `owner_events.mark_read` | mark one event read; a `needs_owner` event whose card carries `waiting_owner` is refused (409 `owner_conflict`); form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
+
+A JSON answer validates against the packaged schema of its layer: `web-read` (system, task, events),
+`web-run` (a run, its start or review, a card's runs), `web-sprint`, `web-pause`, `web-command`,
+`web-card` (`card_commented`, `card_moved`) and `web-provider` (`codex_reset_limit`). The head view
+and the `/po` session document have none yet: both still change with the head and PO surfaces they
+show.
 
 The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
 — and a refusing one marks only its own section; only the snapshot's refusal fails the page. Card and
@@ -4675,7 +4685,7 @@ One table, in `ummanu.web.statuses`; no status number elsewhere in the transport
 | `owner_conflict` | 409 | the request is well formed and refused on the state of the world |
 | `request_conflict` | 409 | a `/po` request id reused for another operation or other inputs |
 | `session_closed` | 409 | a message into a PO session the owner closed; no turn, feed entry, request row or process. It never clears by waiting |
-| `backend_unavailable` | 503 | a source this request needs could not be reached at all |
+| `backend_unavailable` | 503 | a source this request needs could not be reached at all, the installation's own config among them: an instance config that does not validate is 503 on every route |
 | anything else | 500 | a code this transport has never heard of — a defect of the transport, not of the client |
 
 The transport's own refusals are 404 (unrouted path) and 405 (unrouted method). A refusal on a page

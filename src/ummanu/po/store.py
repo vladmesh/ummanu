@@ -1,9 +1,11 @@
 """PO head sessions, turns, feed and request ids in the board store (revisions `0008_po_sessions`, `0009_po_requests`,
 `0010_po_session_close`, `0015_po_effort_resolved_model`, `0019_po_session_title`).
 
-One short connection per operation: the runner's waiter threads settle turns concurrently, and a
-connection shared between them would serialize exactly what must not be serialized. Every state
-change of a turn is conditional on the turn still being `running`, so a stop, a recovery and a
+One connection per operation, kept between operations: an operation borrows an idle connection (or
+opens one, schema-gated once) and gives it back after its own transaction. The runner's waiter
+threads settle turns concurrently, so operations that overlap each hold their own connection and
+none is shared between transactions; a store that is used one operation at a time holds one. Every
+state change of a turn is conditional on the turn still being `running`, so a stop, a recovery and a
 process exit racing each other settle a turn once, by whichever came first.
 
 **Request ids.** A /po form's request id belongs to exactly one operation with fixed inputs,
@@ -21,6 +23,8 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import threading
+import weakref
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,6 +59,8 @@ REQUEST_OPERATIONS = (SESSION_CREATE, SEND, SPRINT_SESSION)
 ONE_RUNNING_INDEX = "po_turns_one_running_per_session"
 # The two-key advisory lock namespace for PO request ids ("POR" + "Q"); the second key is the id's hash.
 REQUEST_LOCK_CLASS = 0x504F5251
+# Idle connections a store keeps between operations; more are open only while operations overlap.
+IDLE_CONNECTIONS = 4
 
 
 class PoStoreError(RuntimeError):
@@ -217,6 +223,17 @@ def _digest(parts: list[str]) -> str:
 class PoStore:
     def __init__(self, credentials: Any) -> None:
         self.credentials = credentials
+        # Idle admitted connections, newest last; a borrowed one is its operation's alone.
+        self._idle: list[Any] = []
+        self._pool = threading.Lock()
+        # A store dropped without `close` (a one-off read) still closes what it kept.
+        weakref.finalize(self, _close_all, self._idle)
+
+    def close(self) -> None:
+        """Close the idle connections; one an operation holds is closed when it is given back after."""
+        with self._pool:
+            closing, self._idle[:] = list(self._idle), []
+        _close_all(closing)
 
     @classmethod
     def for_instance(cls, instance_dir: Path | str, *, role: str = "app") -> PoStore:
@@ -226,23 +243,69 @@ class PoStore:
 
     @contextlib.contextmanager
     def _transaction(self) -> Iterator[Any]:
-        """One connection and one transaction: committed on success, rolled back on any error.
+        """One borrowed connection and one transaction: committed on success, rolled back on any error.
 
-        The schema gate reads first, inside the same transaction, so a store that owes migrations
-        is refused as :class:`PoSchemaOwed` before any PO table is touched.
+        A connection is schema-gated once, when it opens, so a store that owes migrations is refused
+        as :class:`PoSchemaOwed` before any PO table is touched. The connection goes back to the pool
+        after the transaction ends, unless it can carry no further statement.
         """
         import psycopg
 
         try:
-            with psycopg.connect(self.credentials.conninfo()) as connection:
-                require(connection, PoSchemaOwed)
-                yield connection
+            connection = self._borrow()
+            try:
+                with connection.transaction():
+                    yield connection
+            finally:
+                self._give_back(connection)
         except psycopg.errors.UniqueViolation as exc:
             if exc.diag.constraint_name == ONE_RUNNING_INDEX:
                 raise TurnInProgress("a turn is already running in this session") from None
             raise PoStoreError(f"the board store refused a PO session write: {exc}") from exc
         except psycopg.Error as exc:
             raise PoStoreError(f"the board store did not answer a PO session operation: {exc}") from exc
+
+    def _borrow(self) -> Any:
+        """An idle live connection, or a new admitted one.
+
+        An idle connection that is dead, or whose server has hung up on it (a terminated backend, a
+        restarted store), is closed and never handed out, so the operation reconnects instead of
+        failing on it.
+        """
+        import psycopg
+
+        from ummanu.board.sql_cards import _hung_up, _unusable
+
+        with self._pool:
+            while self._idle:
+                candidate = self._idle.pop()
+                if not (_unusable(candidate) or _hung_up(candidate)):
+                    return candidate
+                with contextlib.suppress(Exception):
+                    candidate.close()
+        # Autocommit, so the gate's read leaves no transaction open and each operation's own
+        # `transaction()` is the explicit BEGIN/COMMIT around exactly that operation.
+        connection = psycopg.connect(self.credentials.conninfo(), autocommit=True)
+        try:
+            require(connection, PoSchemaOwed)
+        except BaseException:
+            # A refused connection is not kept, so the next operation reads the revision again.
+            with contextlib.suppress(Exception):
+                connection.close()
+            raise
+        return connection
+
+    def _give_back(self, connection: Any) -> None:
+        """Keep an idle live connection for the next operation; close a dead one or one too many."""
+        from ummanu.board.sql_cards import _transaction_state, _unusable
+
+        if not _unusable(connection) and _transaction_state(connection) in (None, "IDLE"):
+            with self._pool:
+                if len(self._idle) < IDLE_CONNECTIONS:
+                    self._idle.append(connection)
+                    return
+        with contextlib.suppress(Exception):
+            connection.close()
 
     # --- request ids ------------------------------------------------------------------------
 
@@ -648,6 +711,13 @@ class PoStore:
         return [FeedEntry(*row) for row in rows]
 
 
+def _close_all(connections: list[Any]) -> None:
+    """Close every connection in `connections`; closing one that is already gone may fail."""
+    for connection in connections:
+        with contextlib.suppress(Exception):
+            connection.close()
+
+
 __all__ = [
     "AGENT",
     "CLIS",
@@ -675,3 +745,4 @@ __all__ = [
     "send_fingerprint",
     "session_fingerprint",
 ]
+

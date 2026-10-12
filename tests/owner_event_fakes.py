@@ -175,3 +175,22 @@ class FakeOwnerEvents:
 
     def of_kind(self, kind: str) -> list[OwnerEvent]:
         return [row for row in sorted(self.rows.values(), key=lambda row: row.id) if row.kind == kind]
+
+
+class CountingOwnerEventLayer:
+    """An `OwnerEventLayer` stand-in for sprint reads: one fixed board reading, and how often it was taken."""
+
+    def __init__(self, human_waits: list[dict[str, Any]] | None = None) -> None:
+        self.human_waits = [dict(wait) for wait in human_waits or []]
+        self.snapshots = 0
+
+    def snapshot(self) -> dict[str, Any]:
+        self.snapshots += 1
+        return {
+            "state": "available",
+            "reason": None,
+            "events": [],
+            "unread_events": [],
+            "unread": 0,
+            "human_waits": [dict(wait) for wait in self.human_waits],
+        }

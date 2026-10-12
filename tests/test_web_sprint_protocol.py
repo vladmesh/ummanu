@@ -28,6 +28,7 @@ from typing import Any, ClassVar
 from unittest import mock
 
 from tests.observer_identity import bind_observer
+from tests.owner_event_fakes import CountingOwnerEventLayer
 from tests.sprint_close_fixtures import CLOSEOUT_BODY, init_state_repo
 from tests.webproto_sprint_fixtures import (
     OBSERVER_PROFILE,
@@ -47,9 +48,13 @@ from ummanu.sprint_close import CLOSE_NOT_DONE
 from ummanu.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
 from ummanu.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
 from ummanu.tasks import _STATE_BY_COLUMN, TaskError, TaskWriter, task_audit_for
-from ummanu.webproto import section as section_module
-from ummanu.webproto import sources, sprint_requests, store_io
-from ummanu.webproto import sprint_reads as sprint_reads_module
+from ummanu.webproto import (
+    section as section_module,
+    sources,
+    sprint_reads as sprint_reads_module,
+    sprint_requests,
+    store_io,
+)
 from ummanu.webproto.boundary import GUARDED, operations
 from ummanu.webproto.commands import _EXIT_BY_CODE, EXIT_CONFLICT, EXIT_PENDING
 from ummanu.webproto.errors import (
@@ -229,6 +234,18 @@ class CreateTests(SprintProtocolFixture):
         with self.assertRaises(ValidationRefused):
             self.create(request_id="")
         self.assertEqual(self.sprint_rows(), [])
+
+    def test_the_created_sprint_reads_its_attention_from_the_owner_events_it_was_given(self) -> None:
+        """BUG-24: the create answered through a read layer without owner events, so always `unknown`."""
+        events = CountingOwnerEventLayer()
+        layer = self.ops(owner_events=events)
+        with mock.patch.object(self, "ops", return_value=layer):
+            document = self.create()
+        self.assertEqual(
+            document["sprint"]["work"]["attention"], {"state": "none", "event_ids": [], "reason": None}
+        )
+        self.assertEqual(events.snapshots, 1)
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
 
 
 class ExecutorPinTests(SprintProtocolFixture):
@@ -1107,6 +1124,25 @@ class SprintListTests(SprintWorkFixture):
             self.assertIn("source", entry[section], f"{section} carries no availability")
         self.assertEqual(entry["observer"]["declared"]["profile"], OBSERVER_PROFILE)
         self.assertEqual(entry["observer"]["launch"]["state"], OBSERVER_NOT_STARTED)
+
+    def test_the_listing_reads_the_owner_events_once_for_every_open_sprint(self) -> None:
+        """INEF-15: one bell reading (and one copy of it) per listing, not one per sprint."""
+        self.add_sprint_row("sprint:1001")
+        self.add_sprint_row("sprint:1002")
+        self.add_sprint_row("sprint:1003", status="closed")
+        wait = {"event_id": 7, "subject_ref": "ummanu-9", "sprint_ref": "sprint:1002"}
+        events = CountingOwnerEventLayer([wait])
+
+        document = self.reads(owner_events=events).sprint_list()
+
+        self.assertEqual(events.snapshots, 1)
+        attention = {
+            ref: self._entry(document, ref)["attention"] for ref in ("sprint:1001", "sprint:1002", "sprint:1003")
+        }
+        self.assertEqual(attention["sprint:1001"], {"state": "none", "event_ids": [], "reason": None})
+        self.assertEqual(attention["sprint:1002"], {"state": "waiting", "event_ids": [7], "reason": None})
+        self.assertEqual(attention["sprint:1003"], {"state": "none", "event_ids": [], "reason": None})
+        self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
 
     def test_the_status_filter_selects_and_an_unknown_status_is_refused(self) -> None:
         self.reference_of(self.create())

@@ -29,6 +29,7 @@ from ummanu.infra.doctor_findings import accepted as accepted
 from ummanu.status import collect_status
 from ummanu.tasks import TaskError, TaskReader, task_audit_for
 from ummanu.webproto import agents as agent_reads, head_view as head_reads, sources
+from ummanu.webproto._values import _reason, _text
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.cursor import Cursor, decode
 from ummanu.webproto.errors import (
@@ -37,6 +38,7 @@ from ummanu.webproto.errors import (
     InvalidCursor,
     ReadError,
     TaskNotFound,
+    installation_refusal,
 )
 from ummanu.webproto.journal import DEFAULT_LIMIT, CommittedAudit, EventPage
 from ummanu.webproto.section import read_source
@@ -99,10 +101,7 @@ class ReadLayer(ProtocolBoundary):
         """The validated instance, or `InstallationUnavailable`: without it there is no data plane to read."""
         report = validate_instance(self.instance)
         if not report.ok or report.data_dir is None:
-            raise InstallationUnavailable(
-                "this instance config does not validate: "
-                + "; ".join(str(error) for error in report.errors[:5])
-            )
+            raise InstallationUnavailable(installation_refusal(report))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
@@ -701,14 +700,6 @@ def _classification(body: str) -> str | None:
         if line.startswith("classification:"):
             return line.partition(":")[2].strip() or None
     return None
-
-
-def _reason(exc: Exception) -> str:
-    return getattr(exc, "message", None) or str(exc) or type(exc).__name__
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
 
 
 # -- installation health, summarized ---------------------------------------------------------------

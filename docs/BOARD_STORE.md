@@ -1249,8 +1249,8 @@ and restore reads stay outside latency-sensitive paths.
   *previous* build at release, so it imports from the product only what that build already ships.
 - **Schema gate (`board/schema_gate.py`):** every operational connection reads `alembic_version`
   once when it opens, before any schema-dependent statement: each new connection of
-  `SqlCardClient`'s pool (cards, sprints, products/issues, SQL audit, `SqlBoardHost`), each
-  `PoStore` operation and each `OwnerEventStore` connection of its own (one joined to a client
+  `SqlCardClient`'s pool (cards, sprints, products/issues, SQL audit, `SqlBoardHost`), each new
+  connection a `PoStore` keeps between its operations, and each `OwnerEventStore` connection of its own (one joined to a client
   transaction was admitted with that client's connection). Exactly
   `EXPECTED_SCHEMA_REVISION` is current: one read, no Alembic import. A revision of this build's
   lineage short of it, or no version table at all, is refused with code `schema_owed` naming the

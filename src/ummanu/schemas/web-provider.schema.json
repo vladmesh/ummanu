@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-provider.schema.json",
+  "title": "Transport-independent owner writes on a provider",
+  "description": "The document ummanu.webproto's provider operation returns: one Codex rate-limit reset press under the request id the caller names, read off the board audit record that every answer is. `replayed` is true when a committed record for the id answered and nothing was sent. No token reaches it, and no failure is a status number.",
+  "oneOf": [
+    {"$ref": "#/$defs/codex_reset_limit"}
+  ],
+  "$defs": {
+    "credits": {
+      "type": "object",
+      "description": "The reset credits the live usage read saw before the press.",
+      "required": ["available", "applicable"],
+      "properties": {
+        "available": {"type": ["integer", "null"], "minimum": 0},
+        "applicable": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "codex_reset_limit": {
+      "type": "object",
+      "required": [
+        "schema_version", "kind", "observed_at", "request_id", "event_id", "outcome", "reason",
+        "credits", "replayed"
+      ],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "kind": {"const": "codex_reset_limit"},
+        "observed_at": {"type": "string"},
+        "request_id": {"type": "string"},
+        "event_id": {"type": ["string", "null"]},
+        "outcome": {
+          "type": "string",
+          "description": "As the record holds it: the provider's answer (`reset`, `nothing_to_reset`, `no_credit`, `already_redeemed`, or `error` with its `reason`), `refused` when no credit was available and nothing was sent, or `unknown` for a press staged and never settled."
+        },
+        "reason": {"type": ["string", "null"]},
+        "credits": {"oneOf": [{"$ref": "#/$defs/credits"}, {"type": "null"}]},
+        "replayed": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -25,6 +25,7 @@ from ummanu.webproto.errors import (
     RuntimeUnavailable,
     TaskNotFound,
     ValidationRefused,
+    installation_refusal,
 )
 
 SCHEMA_VERSION = 1
@@ -70,10 +71,7 @@ class CardOperationLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report = validate_instance(self.instance)
         if not report.ok or report.data_dir is None:
-            raise InstallationUnavailable(
-                "this instance config does not validate: "
-                + "; ".join(str(error) for error in report.errors[:5])
-            )
+            raise InstallationUnavailable(installation_refusal(report))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
