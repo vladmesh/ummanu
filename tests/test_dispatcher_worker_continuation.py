@@ -29,9 +29,11 @@ from ummanu.dispatch.types import HostError
 from ummanu.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
+    ContinuationLivenessState,
     ContinuationRecoveryRung,
     WorkerContinuationLiveness,
     WorkerContinuationStage,
+    residual_composer_class,
 )
 from ummanu.runtime.head.handoff import PromptHandoff, handoff_budget
 
@@ -1159,6 +1161,60 @@ class DecisionNativeReplayTests(unittest.TestCase):
                     self.effect("release", "new pointer")
                 self.assertEqual(self.host.canon.committed("decision-move"), owned)
                 self.assertEqual(self.host._move_card.call_count, 1)
+
+
+class ResidualComposerClassTests(unittest.TestCase):
+    """The one classification the observer wake and the retained worker continuation share."""
+
+    STALE: ClassVar[dict[str, str]] = {
+        "composer_before": "digest:stale-composer",
+        "composer_after": "digest:stale-composer",
+        "cursor_before": "cursor:report-done",
+        "cursor_after": "cursor:report-done",
+        "reason": "readiness-busy",
+    }
+
+    def test_an_unchanged_known_composer_and_cursor_is_a_completed_turn(self) -> None:
+        self.assertEqual(residual_composer_class(self.STALE), "completed_turn_residual_composer")
+
+    def test_anything_less_than_both_unchanged_stays_active_or_unknown(self) -> None:
+        for name, change in (
+            ("no evidence", None),
+            ("empty composer", {"composer_before": "empty", "composer_after": "empty"}),
+            ("unknown composer", {"composer_before": "unknown", "composer_after": "unknown"}),
+            ("composer moved", {"composer_after": "digest:other"}),
+            ("cursor moved", {"cursor_after": "cursor:later"}),
+            ("no cursor", {"cursor_before": "", "cursor_after": ""}),
+        ):
+            with self.subTest(name):
+                evidence = {} if change is None else {**self.STALE, **change}
+                self.assertEqual(residual_composer_class(evidence), "active_or_unknown_turn")
+
+    def test_both_callers_delegate_to_it(self) -> None:
+        from ummanu.dispatch import observer
+
+        record = SimpleNamespace(worker_delivery_evidence=dict(self.STALE))
+        self.assertEqual(
+            continuation_module._continuation_no_progress_evidence(record, ContinuationLivenessState.STALLED),
+            "completed_turn_residual_composer",
+        )
+        delivery = SimpleNamespace(last_evidence={})
+        self.assertEqual(
+            observer._observer_no_progress_evidence(
+                SimpleNamespace(delivery=delivery), {"delivery_evidence": dict(self.STALE)}
+            ),
+            "completed_turn_residual_composer",
+        )
+        self.assertEqual(
+            observer._observer_no_progress_evidence(
+                SimpleNamespace(delivery=delivery), {"delivery_evidence": {"reason": "payload-left-in-composer"}}
+            ),
+            "completed_turn_residual_composer",
+        )
+        self.assertEqual(
+            observer._observer_no_progress_evidence(SimpleNamespace(delivery=delivery), {}),
+            "active_or_unknown_turn",
+        )
 
 
 if __name__ == "__main__":

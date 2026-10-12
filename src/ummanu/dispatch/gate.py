@@ -147,6 +147,11 @@ rejection must remain distinct from an unanswered request.
     return bool(_ANSWERED_RE.search(text))
 
 
+def _answer(completed) -> str:
+    """What a finished command said: its stderr, else its stdout, stripped."""
+    return (completed.stderr or completed.stdout or "").strip()
+
+
 def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None, project: str = ""):
     """Invoke the gate backend and classify unanswered remote calls.
 
@@ -169,7 +174,7 @@ as ProjectGitAccessError rather than retryable silence.
         raise GateTransportError(f"{label} got no answer: {exc}") from None
     if completed.returncode == 0:
         return completed
-    text = _tail((completed.stderr or completed.stdout or "").strip())
+    text = _tail(_answer(completed))
     if _backend_answered(text, args):
         return completed
     raise GateTransportError(f"{label} got no answer: {text or '(no output)'}")
@@ -267,7 +272,7 @@ to prevent untrusted message framing; unreadable history fails closed.
     if listing.returncode != 0:
         raise HostError(
             "gate candidate history could not be read: "
-            f"{_tail((listing.stderr or listing.stdout or '').strip())}"
+            f"{_tail(_answer(listing))}"
         )
     try:
         shas = parse_shas(listing.stdout or "")
@@ -285,7 +290,7 @@ to prevent untrusted message framing; unreadable history fails closed.
         if message.returncode != 0:
             raise HostError(
                 f"gate candidate history could not be read for {sha[:12]}: "
-                f"{_tail((message.stderr or message.stdout or '').strip())}"
+                f"{_tail(_answer(message))}"
             )
         commits.append(Commit(sha=sha, message=message.stdout or ""))
     attributions = ai_attributions(commits)
@@ -351,7 +356,7 @@ def _recover_base(host, workspace: str, base: str, project: str) -> str:
         # An answered refusal (a base branch the remote does not have, a rejected credential) is
         # a determinate gate failure, exactly as it was before this call moved here.
         raise HostError(
-            f"gate base fetch (git fetch) refused: {_tail((fetch.stderr or fetch.stdout or '').strip())}"
+            f"gate base fetch (git fetch) refused: {_tail(_answer(fetch))}"
         )
     behind = host._run(
         ["git", "-C", workspace, "rev-list", "--count", f"HEAD..origin/{base}"],
@@ -407,7 +412,7 @@ def _local_gate(host, task: dict, workspace: str) -> GateResult:
     if completed.returncode == 0:
         return GateResult("green", "local validation passed", attestation=receipt)
     tail = (
-        _tail((completed.stderr or completed.stdout or "").strip(), GATE_LOG_FRAGMENT_LINES) or "(no output)"
+        _tail(_answer(completed), GATE_LOG_FRAGMENT_LINES) or "(no output)"
     )
     # Local output lacks Actions provenance and cannot classify infrastructure.
     return GateResult(
@@ -463,7 +468,7 @@ def _remote_branch_sha(host, workspace: str, branch: str, project: str) -> str:
     if listing.returncode != 0:
         raise HostError(
             "gate could not read the remote branch: "
-            f"{_tail((listing.stderr or listing.stdout or '').strip())}"
+            f"{_tail(_answer(listing))}"
         )
     first = (listing.stdout or "").strip().splitlines()
     sha = first[0].split()[0].strip() if first and first[0].split() else ""
@@ -518,13 +523,13 @@ instead of overwriting another writer.
         expected = _remote_branch_sha(host, workspace, branch, project)
     push = _push_leased(host, workspace, branch, expected, project)
     if push.returncode != 0:
-        text = _tail((push.stderr or push.stdout or "").strip())
+        text = _tail(_answer(push))
         if not _LEASE_REFUSED_RE.search(text):
             raise HostError(f"gate publish branch failed: {text}")
         observed = _remote_branch_sha(host, workspace, branch, project)
         if leased and _contained_in_candidate(host, workspace, observed, sha):
             push = _push_leased(host, workspace, branch, observed, project)
-            text = _tail((push.stderr or push.stdout or "").strip())
+            text = _tail(_answer(push))
         if push.returncode != 0:
             if not _LEASE_REFUSED_RE.search(text):
                 raise HostError(f"gate publish branch failed: {text}")
@@ -557,7 +562,7 @@ def _github_gate(
     host, task: dict, record, workspace: str, base: str, required: list[str] | None = None
 ) -> GateResult:
     branch = _legacy_worker_branch(task["ref"])
-    sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
+    sha = _rev_parse(host, workspace, "HEAD", "gate head sha")
     refused = _publish_branch(host, record, workspace, branch, sha, task["project"])
     if refused is not None:
         return refused
@@ -781,7 +786,7 @@ def rerun_failed_ci(host, result: GateResult) -> None:
     )
     if completed.returncode != 0:
         raise HostError(
-            f"gate rerun failed CI: {_tail((completed.stderr or completed.stdout or '').strip())}"
+            f"gate rerun failed CI: {_tail(_answer(completed))}"
         )
 
 
@@ -794,7 +799,7 @@ def _rerun_status(host, repo: str, run_id: str) -> tuple[str, str]:
     )
     if completed.returncode != 0:
         raise HostError(
-            f"gate infrastructure rerun status failed: {_tail((completed.stderr or completed.stdout or '').strip())}"
+            f"gate infrastructure rerun status failed: {_tail(_answer(completed))}"
         )
     try:
         payload = json.loads((completed.stdout or "").strip())
@@ -816,7 +821,7 @@ def _name_with_owner(host, workspace: str) -> str:
     if completed.returncode != 0 or not name:
         # The answer travels with the failure: a message that drops the tool's own words leaves
         # nothing behind to say what the backend said.
-        detail = _tail((completed.stderr or completed.stdout or "").strip()) or "(no output)"
+        detail = _tail(_answer(completed)) or "(no output)"
         raise HostError(f"gate could not resolve the repository name: {detail}")
     return name
 
@@ -987,7 +992,7 @@ Never treat a failed creation as a successful validation launch.
     if created.returncode == 0:
         _remember_created_pr(host, workspace, record, branch, title, body)
         return
-    text = (created.stderr or created.stdout or "").strip()
+    text = _answer(created)
     try:
         # gh refusing to duplicate a PR, or a concurrent tick that opened one first: the create
         # answered "no", and it is only tolerated when the backend also answers that a PR is open.
@@ -1021,7 +1026,7 @@ human PR prose. Determinate failures to edit/reopen are gate failures.
         if completed.returncode != 0:
             raise HostError(
                 f"{label} failed for PR #{number} (base {observed!r} -> {base!r}): "
-                f"{_tail((completed.stderr or completed.stdout or '').strip())}"
+                f"{_tail(_answer(completed))}"
             )
 
 
@@ -1053,7 +1058,7 @@ mean no PR; a failed backend call must not be mistaken for an empty result.
         cwd=Path(workspace),
     )
     if completed.returncode != 0:
-        raise HostError(f"gate pr list failed: {_tail((completed.stderr or completed.stdout or '').strip())}")
+        raise HostError(f"gate pr list failed: {_tail(_answer(completed))}")
     text = (completed.stdout or "").strip()
     if not text:
         return None
@@ -1115,13 +1120,15 @@ def _terminal_check(item: dict) -> dict[str, str]:
     }
 
 
+def _rev_parse(host, workspace: str, rev: str, label: str) -> str:
+    return host._run(["git", "-C", workspace, "rev-parse", rev], label).stdout.strip()
+
+
 def _head_sha(host, workspace: str) -> str:
     if not workspace:
         return ""
     try:
-        return host._run(
-            ["git", "-C", workspace, "rev-parse", "HEAD"], "gate attestation head"
-        ).stdout.strip()
+        return _rev_parse(host, workspace, "HEAD", "gate attestation head")
     except HostError:
         return ""
 
@@ -1130,9 +1137,7 @@ def _base_sha(host, workspace: str, base: str) -> str:
     if not workspace or not base:
         return ""
     try:
-        return host._run(
-            ["git", "-C", workspace, "rev-parse", f"origin/{base}"], "gate attestation base"
-        ).stdout.strip()
+        return _rev_parse(host, workspace, f"origin/{base}", "gate attestation base")
     except HostError:
         return ""
 
@@ -1140,7 +1145,7 @@ def _base_sha(host, workspace: str, base: str) -> str:
 def _gh_api(host, path: str, *, jq: str):
     completed = _backend_call(host, ["gh", "api", path, "--jq", jq], "gate gh api")
     if completed.returncode != 0:
-        raise HostError(f"gate gh api failed: {_tail((completed.stderr or completed.stdout or '').strip())}")
+        raise HostError(f"gate gh api failed: {_tail(_answer(completed))}")
     text = (completed.stdout or "").strip()
     if not text:
         return []
@@ -1224,18 +1229,9 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
 gh run view --log-failed interleaves steps; keep the selected failure
 bounded and attributed to the appropriate job and step.
     """
-    match = _RUN_URL_RE.search(
-        str(
-            item.get("details_url")
-            or item.get("html_url")
-            or item.get("targetUrl")
-            or item.get("target_url")
-            or ""
-        )
-    )
-    if not match:
+    run_id = _actions_run_id(item)
+    if not run_id:
         return _LogFragment(available=False, reason="the entry is not an Actions run (no run link)")
-    run_id = match.group(2)
     try:
         completed = _backend_call(
             host, ["gh", "run", "view", run_id, "-R", repo, "--log-failed"], "gate failed log"

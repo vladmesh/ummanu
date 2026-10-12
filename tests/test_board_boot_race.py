@@ -313,7 +313,9 @@ class GateTests(unittest.TestCase):
         self.assert_selected_venv(work, self.product)
         skip = self.run_gate([100])
         self.assertEqual(skip.returncode, 0)
-        self.assertIn("--cleanup-only", skip.stdout)
+        self.assertIn("no change, skill dispatch skipped", skip.stdout)
+        # A quiet tick starts no second process: `--cleanup-only` was a no-op for every agent.
+        self.assertNotIn("ran:", skip.stdout)
         self.assert_selected_venv(skip, self.product)
         broke = self.run_gate([2])
         self.assertEqual(broke.returncode, 2)
@@ -374,11 +376,9 @@ class GateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.attempts, 1)
-        self.assertIn("--cleanup-only", result.stdout)
+        self.assertNotIn("ran:", result.stdout)
         self.assert_selected_venv(result, self.product)
-        self.assertEqual(
-            [record["kind"] for record in self.records(result)], ["role_env", "role", "role_env", "role"]
-        )
+        self.assertEqual([record["kind"] for record in self.records(result)], ["role_env", "role"])
 
     def test_every_supported_root_precedence_selects_its_own_venv(self):
         runtime = self.make_product(self.root / "runtime-wins")

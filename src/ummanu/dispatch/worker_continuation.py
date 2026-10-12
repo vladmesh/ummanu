@@ -39,8 +39,6 @@ from ummanu.dispatch.state import (
     now_rfc3339,
 )
 from ummanu.dispatch.tui import (
-    COMPOSER_EMPTY,
-    COMPOSER_UNKNOWN,
     READINESS_BUSY,
     delivery_readiness_state as _delivery_readiness_state,
 )
@@ -58,6 +56,7 @@ from ummanu.dispatch.worker_lifecycle import (
     ContinuationProviderCondition,
     ContinuationRecoveryRung,
     WorkerContinuationLiveness,
+    residual_composer_class,
 )
 from ummanu.runtime.head.handoff import (
     HANDOFF_DEFERRED,
@@ -1315,16 +1314,4 @@ def _continuation_no_progress_evidence(
     if state == ContinuationLivenessState.UNKNOWN:
         return "provider_or_identity_unknown"
     evidence = record.worker_delivery_evidence if isinstance(record.worker_delivery_evidence, dict) else {}
-    composer_before = str(evidence.get("composer_before") or "")
-    composer_after = str(evidence.get("composer_after") or "")
-    cursor_before = str(evidence.get("cursor_before") or "")
-    cursor_after = str(evidence.get("cursor_after") or "")
-    if (
-        composer_before
-        and composer_before == composer_after
-        and composer_before not in {COMPOSER_EMPTY, COMPOSER_UNKNOWN}
-        and cursor_before
-        and cursor_before == cursor_after
-    ):
-        return "completed_turn_residual_composer"
-    return "active_or_unknown_turn"
+    return residual_composer_class(evidence)

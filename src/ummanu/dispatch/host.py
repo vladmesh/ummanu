@@ -1116,8 +1116,8 @@ class CommandHostRuntime:
             raise HostError(f"git worktree list failed: {_tail((listed.stderr or listed.stdout or '').strip())}")
         target = _resolved_path(Path(workspace))
         return any(
-            line.startswith("worktree ") and _resolved_path(Path(line[len("worktree ") :])) == target
-            for line in (listed.stdout or "").splitlines()
+            "worktree" in row and _resolved_path(Path(row["worktree"])) == target
+            for row in git_worktree.parse_list(listed.stdout or "")
         )
 
     def _create_git_observer_workspace(self, workspace: Path) -> Path:
@@ -2735,11 +2735,7 @@ class CommandHostRuntime:
         listing = self._run(
             ["git", "-C", str(repo), "worktree", "list", "--porcelain"], "resume workspace ownership check"
         ).stdout
-        registered = {
-            line.removeprefix("worktree ").strip()
-            for line in listing.splitlines()
-            if line.startswith("worktree ")
-        }
+        registered = {row["worktree"] for row in git_worktree.parse_list(listing) if "worktree" in row}
         if not any(_same_repo(Path(candidate), path) for candidate in registered):
             raise HostError(
                 "resume workspace is not a registered worktree of the project repo",
