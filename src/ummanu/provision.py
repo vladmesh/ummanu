@@ -19,6 +19,7 @@ from ummanu.onboarding import (
     onboarding_cycle,
     scan_repo,
 )
+from ummanu.runtime.paths import instance_dir as _instance_dir
 
 ENVIRONMENT_SUMMARIES = {
     "dependency-missing": "required dependency is missing",
@@ -176,11 +177,6 @@ def _apply_provision_result_locked(
 
 def render_result(data: dict[str, Any]) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-
-
-def _instance_dir(value: str) -> Path:
-    path = Path(value).expanduser()
-    return path.parent if path.name == "instance.yaml" else path
 
 
 def _storage_unavailable(exc: DataDirError) -> dict[str, Any]:

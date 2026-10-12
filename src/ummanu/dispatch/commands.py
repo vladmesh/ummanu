@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 
+from ummanu.cli_output import print_error, usage_handler
 from ummanu.dispatch.bootstrap import runtime_from_args
 from ummanu.dispatch.head_status import head_status
 from ummanu.dispatch.pause import PAUSE_MODES, normalize_pause_mode
@@ -56,7 +57,7 @@ def add_dispatcher_subcommands(subparsers) -> None:
             command.add_argument("--max-interval-seconds", type=float, default=300.0)
             command.add_argument("--max-ticks", type=int)
 
-    dispatcher.set_defaults(handler=not_implemented_dispatcher)
+    dispatcher.set_defaults(handler=usage_handler("dispatcher subcommand required"))
 
 
 def add_pause_commands(subparsers) -> None:
@@ -142,11 +143,6 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def not_implemented_dispatcher(args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "dispatcher subcommand required"}}))
-    return 2
-
-
 def run_dispatcher_production_tick(args: argparse.Namespace) -> int:
     if getattr(args, "probe", False):
         return _run_production(args, lambda runtime: runtime.production_probe())
@@ -187,9 +183,13 @@ def run_pause(args: argparse.Namespace) -> int:
     freeze: the two spellings reach two different implementations, and the freeze one is the
     deliberate `pause freeze` an operator types.
     """
-    reason = (args.reason or "").strip() or _read_optional(args.reason_file).strip()
+    try:
+        reason = (args.reason or "").strip() or _read_reason_file(args.reason_file).strip()
+    except DispatcherError as exc:
+        print_error({"code": exc.code, "message": exc.message})
+        return exc.exit_code
     if not reason:
-        print(json.dumps({"error": {"code": "usage", "message": "pause requires --reason or --reason-file"}}))
+        print_error({"code": "usage", "message": "pause requires --reason or --reason-file"})
         return 2
     if normalize_pause_mode(args.mode) == DRAIN:
         return _answer(lambda: _pause_operations(args).pause_drain(actor=args.actor, reason=reason))
@@ -239,7 +239,7 @@ def _answer(call) -> int:
     try:
         document = call()
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return _RUN_EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
     print(json.dumps(document, sort_keys=True, separators=(",", ":")))
     return 0
@@ -256,27 +256,19 @@ def _run_production(args: argparse.Namespace, operation) -> int:
         with bound_data_dir(runtime.data_dir):
             result = operation(runtime)
     except (DispatcherError, TaskError) as exc:
-        print(
-            json.dumps(
-                {"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")
-            )
-        )
+        print_error({"code": exc.code, "message": exc.message}, compact=True, sort_keys=True)
         return exc.exit_code
     except HostError as exc:
-        print(
-            json.dumps(
-                {"error": {"code": "host_error", "message": str(exc)}}, sort_keys=True, separators=(",", ":")
-            )
-        )
+        print_error({"code": "host_error", "message": str(exc)}, compact=True, sort_keys=True)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result.get("status") in {"ok", "skipped"} else 3
 
 
-def _read_optional(path: str | None) -> str:
+def _read_reason_file(path: str | None) -> str:
     if path is None:
         return ""
     try:
         return Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise DispatcherError("usage", f"cannot read file: {exc}", 2) from None
+        raise DispatcherError("usage", f"cannot read --reason-file: {exc}", 2) from None

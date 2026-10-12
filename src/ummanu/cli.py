@@ -21,6 +21,7 @@ from ummanu.checkpoint import (
     rpo_problem,
     snapshot_foreign_commits,
 )
+from ummanu.cli_output import EXIT_USAGE, error_line, usage_handler
 from ummanu.config import (
     DataDirError,
     fallback_errors,
@@ -110,7 +111,12 @@ from ummanu.runtime.codex_preflight import (
     data_dir_codex_home,
     resolve_codex_home,
 )
-from ummanu.runtime.paths import MissingDefaultInstance, add_instance_argument, resolve_instance_argument
+from ummanu.runtime.paths import (
+    MissingDefaultInstance,
+    add_instance_argument,
+    instance_file,
+    resolve_instance_argument,
+)
 from ummanu.secret_commands import add_secret_subcommands
 from ummanu.secret_store import store_findings as _secret_store_findings
 from ummanu.session import run_shell
@@ -124,7 +130,6 @@ from ummanu.web.commands import add_web_serve_subcommands
 from ummanu.webfront.commands import add_web_front_subcommands
 from ummanu.webproto.commands import add_web_read_subcommands, add_web_run_subcommands
 
-NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
 MEMORY_EXIT_PERMISSION = 3
 MEMORY_EXIT_LOCKED = 4
@@ -158,7 +163,7 @@ class StructuredArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
     def error(self, message: str) -> None:
-        self.exit(2, json.dumps({"error": {"code": "usage", "message": message}}) + "\n")
+        self.exit(EXIT_USAGE, error_line({"code": "usage", "message": message}) + "\n")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -264,7 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_instance(config_check, help="the live root: an instance dir or its instance.yaml")
     config_check.set_defaults(handler=run_config_check)
-    config.set_defaults(handler=not_implemented("config"))
+    config.set_defaults(handler=usage_handler("config subcommand required"))
 
     add_upgrade_command(subparsers)
     add_transition_subcommands(subparsers)
@@ -275,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
     add_reconcile_subcommands(reconcile_subcommands)
-    reconcile.set_defaults(handler=not_implemented("reconcile"))
+    reconcile.set_defaults(handler=usage_handler("reconcile subcommand required"))
 
     data = subparsers.add_parser("data", help="manage the ummanu-data layout")
     data_subcommands = data.add_subparsers(dest="data_command")
@@ -362,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     snapshot_command.add_argument("--state-dir", default=str(PIPELINE_STATE_DIR))
     snapshot_command.set_defaults(handler=run_data_snapshot)
-    data.set_defaults(handler=not_implemented("data"))
+    data.set_defaults(handler=usage_handler("data subcommand required"))
 
     backup = subparsers.add_parser("backup", help="create or verify backups")
     backup_subcommands = backup.add_subparsers(dest="backup_command")
@@ -395,7 +400,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="treat warnings as findings",
     )
     backup_verify.set_defaults(handler=run_backup_verify)
-    backup.set_defaults(handler=not_implemented("backup"))
+    backup.set_defaults(handler=usage_handler("backup subcommand required"))
 
     add_restore_subcommands(subparsers)
 
@@ -448,7 +453,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("project_id")
     _add_env_instance(gate)
     gate.set_defaults(handler=run_project_gate)
-    project.set_defaults(handler=not_implemented("project"))
+    project.set_defaults(handler=usage_handler("project subcommand required"))
 
     add_task_subcommands(subparsers)
     add_product_issue_subcommands(subparsers)
@@ -524,7 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
     memory_supersede.add_argument("--tags", default="")
     memory_supersede.add_argument("--pinned", action="store_true")
     memory_supersede.set_defaults(handler=run_memory_supersede)
-    memory.set_defaults(handler=not_implemented("memory"))
+    memory.set_defaults(handler=usage_handler("memory subcommand required"))
 
     knowledge = subparsers.add_parser(
         "knowledge", help="write long recoverable documents into state/knowledge"
@@ -551,7 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_instance(knowledge_list)
     knowledge_list.set_defaults(handler=run_knowledge_list)
-    knowledge.set_defaults(handler=not_implemented("knowledge"))
+    knowledge.set_defaults(handler=usage_handler("knowledge subcommand required"))
 
     add_secret_subcommands(subparsers)
 
@@ -572,6 +577,10 @@ def _add_instance(
 ) -> None:
     add_instance_argument(parser, help=help)
     if data_dir:
+        # Deliberately no UMMANU_DATA_DIR default, unlike task/sprint/product/dispatcher/web: these
+        # data, backup and memory commands write the data plane of the installation `--instance`
+        # names, and every role head inherits UMMANU_DATA_DIR pointing at the live one. An ambient
+        # default would send `data init --instance <other>` or a fixture's export into live data.
         parser.add_argument("--data-dir", help=data_dir_help)
 
 
@@ -2279,8 +2288,7 @@ def _join(names: list[str]) -> str:
 
 
 def _instance_path(value: str) -> Path:
-    path = Path(value).expanduser()
-    return path / "instance.yaml" if path.is_dir() else path
+    return instance_file(Path(value).expanduser())
 
 
 def _instance_dir(value: str) -> Path:
@@ -2305,11 +2313,3 @@ def _data_dir_from_args(args: argparse.Namespace, *, validate_tree: bool) -> Pat
     except DataDirError as exc:
         print(f"ummanu data: cannot resolve instance data_dir: {exc}")
         return None
-
-
-def not_implemented(command: str):
-    def handler(_args: argparse.Namespace) -> int:
-        print(f"ummanu {command}: {NOT_IMPLEMENTED}")
-        return 1
-
-    return handler

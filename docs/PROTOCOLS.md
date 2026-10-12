@@ -2750,7 +2750,9 @@ the card in either.
 
 The audit trail is always written to the installation data directory: `--data-dir`, else
 `UMMANU_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
-instance file. An unresolvable data directory is a usage error.
+instance file. An unresolvable data directory is a usage error. The `data`, `backup` and `memory`
+commands skip `UMMANU_DATA_DIR` on purpose: they write the data plane of the installation `--instance`
+names, and every role head inherits the variable pointing at the live one.
 
 ### The no-observer ceiling
 

@@ -48,6 +48,7 @@ from ummanu.product_issues import (
     registered_projects,
 )
 from ummanu.runtime.head import CODEX_LAUNCH_MODES
+from ummanu.runtime.paths import instance_file
 from ummanu.sprint_observer import (
     EXECUTOR_FIELDS,
     ObserverMetadataError,
@@ -1454,14 +1455,14 @@ def restore_postgres_backup(
     if target.exists():
         try:
             record = json.loads(marker.read_text(encoding="utf-8"))
-            config = resolve(_instance_file_for_restore(instance_path).parent)
+            config = resolve(instance_file(instance_path.expanduser()).parent)
         except (OSError, ValueError, BoardStoreError):
             raise RestoreError(f"target data root already exists: {target}") from None
         if record.get("archive_sha256") != sha256_file(archive):
             raise RestoreError("existing PostgreSQL restore belongs to a different archive")
         if target_counts(config) != component.get("table_counts"):
             raise RestoreError("existing PostgreSQL restore no longer matches the archive")
-        _verify_postgres_normalized_parity(target, _instance_file_for_restore(instance_path).parent)
+        _verify_postgres_normalized_parity(target, instance_file(instance_path.expanduser()).parent)
         return plan
     if dry_run:
         return plan
@@ -1476,18 +1477,13 @@ def restore_postgres_backup(
                 with source, dump.open("wb") as output:
                     shutil.copyfileobj(source, output, length=1024 * 1024)
             dump.chmod(0o600)
-            result = restore_dump(dump, _instance_file_for_restore(instance_path).parent, component)
+            result = restore_dump(dump, instance_file(instance_path.expanduser()).parent, component)
         plan = restore_backup(archive, instance_path, _allow_postgres_engine=True)
-        _verify_postgres_normalized_parity(target, _instance_file_for_restore(instance_path).parent)
+        _verify_postgres_normalized_parity(target, instance_file(instance_path.expanduser()).parent)
         write_restore_marker(target, archive, result)
         return plan
     except PostgresRecoveryError as exc:
         raise RestoreError(str(exc)) from None
-
-
-def _instance_file_for_restore(path: Path) -> Path:
-    expanded = path.expanduser()
-    return expanded / "instance.yaml" if expanded.is_dir() else expanded
 
 
 def _verify_postgres_normalized_parity(data_dir: Path, instance_dir: Path) -> None:

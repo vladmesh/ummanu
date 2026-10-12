@@ -255,6 +255,7 @@ integration-board tests/test_sprint_user_path.py
 integration-heads tests/test_automations_composition.py
 unit tests/test_task_commands.py
 unit tests/test_cli_live_defaults.py
+unit tests/test_cli_errors.py
 unit tests/test_task_routing.py
 integration-board tests/test_tasks.py
 integration-board tests/test_tasks_sql_backend.py

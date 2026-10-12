@@ -36,7 +36,7 @@ from ummanu.runtime.heads import (
     validate_registry,
     validate_role_defaults,
 )
-from ummanu.runtime.paths import configured_product_root
+from ummanu.runtime.paths import configured_product_root, instance_file
 
 HEADS_RELATIVE = Path("src") / "ummanu" / "runtime" / "heads.toml"
 INSTANCE_HEADS_RELATIVE = Path("heads") / "heads.toml"
@@ -93,11 +93,9 @@ def _instance_dir(instance_path: Path) -> Path:
     then to raise a bounded error naming a file under it.
     """
     try:
-        is_dir = instance_path.is_dir()
+        return instance_file(instance_path).parent
     except OSError:
-        is_dir = instance_path.name != "instance.yaml"
-    instance_file = instance_path / "instance.yaml" if is_dir else instance_path
-    return instance_file.parent
+        return instance_path if instance_path.name != "instance.yaml" else instance_path.parent
 
 
 def canonical_path(product_root: Path, instance_path: Path | None = None) -> tuple[Path, str]:

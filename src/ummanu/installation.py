@@ -46,6 +46,7 @@ from ummanu._fsutil import (
 from ummanu.board.backend import CARD, board_client
 from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_BRANCH, SNAPSHOT_REF
+from ummanu.cli_output import print_error
 from ummanu.config import (
     ConfigError,
     DataDirError,
@@ -2308,16 +2309,12 @@ def install(args: argparse.Namespace) -> InstallResult:
 
 def run_install(args: argparse.Namespace) -> int:
     if args.bootstrap_credential_stdin and args.recovery_phrase_stdin:
-        print(
-            json.dumps(
-                {
-                    "error": {
-                        "code": "usage",
-                        "message": "--bootstrap-credential-stdin and --recovery-phrase-stdin cannot share standard input; use a mode-0600 file for one input",
-                    }
-                }
-            ),
-            file=sys.stderr,
+        print_error(
+            {
+                "code": "usage",
+                "message": "--bootstrap-credential-stdin and --recovery-phrase-stdin cannot share standard input; use a mode-0600 file for one input",
+            },
+            stderr=True,
         )
         return 2
     result = install(args)

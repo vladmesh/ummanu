@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -21,12 +20,12 @@ from ummanu.board.task_routing import (
     TaskReview,
     TaskType,
 )
-from ummanu.cli_output import print_json
+from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missing_snapshot
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.runtime.head import CODEX_LAUNCH_MODES
-from ummanu.runtime.paths import add_instance_argument, resolve_instance_path
+from ummanu.runtime.paths import add_instance_argument, instance_file, resolve_instance_path
 from ummanu.tasks import (
     BOARD_STORE_KIND,
     TaskError,
@@ -72,9 +71,8 @@ def resolve_data_dir(args: argparse.Namespace) -> str:
     try:
         return str(instance_data_dir(instance))
     except DataDirError as exc:
-        instance_file = instance / "instance.yaml" if instance.is_dir() else instance
         raise TaskError(
-            "usage", f"cannot resolve data dir from {instance_file}: {exc}; pass --data-dir", 2
+            "usage", f"cannot resolve data dir from {instance_file(instance)}: {exc}; pass --data-dir", 2
         ) from None
 
 
@@ -355,7 +353,7 @@ def add_task_subcommands(subparsers) -> None:
     verify_audit = task_subcommands.add_parser("verify-audit")
     _add_data_dir_args(verify_audit)
     verify_audit.set_defaults(handler=run_task_verify_audit)
-    task.set_defaults(handler=not_implemented_task)
+    task.set_defaults(handler=usage_handler("task subcommand required"))
 
 
 def _add_wait_create_args(parser) -> None:
@@ -416,11 +414,6 @@ def _add_sprint_override_args(parser) -> None:
     parser.add_argument("--sprint-override-reason-file", help="required PO override reason file")
 
 
-def not_implemented_task(args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "task subcommand required"}}))
-    return 2
-
-
 def run_task_list(args: argparse.Namespace) -> int:
     return _run_task_read(
         args,
@@ -473,10 +466,15 @@ def run_task_command(
     try:
         result = operation()
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
     print_json(result, compact=True)
     return exit_code(result) if exit_code is not None else 0
+
+
+def print_task_error(exc: TaskError) -> None:
+    """A task-protocol refusal, on stderr as every task and sprint command prints one."""
+    print_error({"code": exc.code, "message": exc.message}, stderr=True)
 
 
 def _read_body(path: str | None) -> str:

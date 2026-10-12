@@ -98,6 +98,16 @@ def configured_product_root(environ: Mapping[str, str] | None = None) -> Path:
     return Path(configured).expanduser() if configured else default_product_root()
 
 
+def instance_file(path: Path) -> Path:
+    """The config file for a path naming either an existing instance directory or the file itself.
+
+    Decided by the filesystem, unlike :func:`instance_dir`: an existing directory yields its
+    ``instance.yaml``, anything else (a file, a missing path) is returned unchanged. ``~`` is not
+    expanded here; a caller that accepts it expands first.
+    """
+    return path / INSTANCE_CONFIG_NAME if path.is_dir() else path
+
+
 def instance_dir(path: Path | str) -> Path:
     """The instance directory for a path naming either the directory or its ``instance.yaml``."""
     resolved = Path(path).expanduser()

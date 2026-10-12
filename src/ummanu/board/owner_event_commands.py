@@ -12,8 +12,8 @@ import sys
 from pathlib import Path
 
 from ummanu.board.owner_events import OwnerEventError, OwnerEventStore
-from ummanu.runtime.paths import add_instance_argument
-from ummanu.runtime.paths import instance_dir as normalize_instance_dir
+from ummanu.cli_output import print_error
+from ummanu.runtime.paths import add_instance_argument, instance_dir as normalize_instance_dir
 
 EXIT_UNAVAILABLE = 1
 
@@ -36,7 +36,7 @@ def run_owner_events_list(args: argparse.Namespace) -> int:
         unread = store.unread_count()
     except (OwnerEventError, RuntimeError) as exc:
         if args.json:
-            print(json.dumps({"error": {"code": "backend_unavailable", "message": str(exc)}}, sort_keys=True))
+            print_error({"code": "backend_unavailable", "message": str(exc)}, sort_keys=True)
         else:
             print(f"ummanu owner-events: {exc}", file=sys.stderr)
         return EXIT_UNAVAILABLE

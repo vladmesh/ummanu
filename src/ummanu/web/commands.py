@@ -8,12 +8,12 @@ a run or a sprint is decided here.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
 from collections.abc import Callable
 
+from ummanu.cli_output import print_error
 from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 from ummanu.web.provider_usage import ProviderUsageLayer
@@ -128,5 +128,5 @@ def run_web_serve(args: argparse.Namespace) -> int:
     try:
         return serve(app, host=args.host, port=args.port)
     except LoopbackOnly as refused:
-        print(json.dumps({"error": {"code": "validation", "message": str(refused)}}), file=sys.stderr)
+        print_error({"code": "validation", "message": str(refused)}, stderr=True)
         return EXIT_VALIDATION

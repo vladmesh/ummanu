@@ -7,10 +7,10 @@ Only the parser lives here; the transition itself is imported when the command r
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
+from .. import cli_output
 from ..runtime import paths
 from .names import OLD
 
@@ -90,7 +90,7 @@ def run_transition(args: argparse.Namespace) -> int:
             return engine.run_rollback(ctx)
         return engine.apply(ctx, through=args.through)
     except TransitionError as exc:
-        print(json.dumps({"error": {"code": "transition_refused", "message": str(exc)}}), file=sys.stderr)
+        cli_output.print_error({"code": "transition_refused", "message": str(exc)}, stderr=True)
         return 3
 
 
