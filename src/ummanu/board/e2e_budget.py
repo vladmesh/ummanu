@@ -34,7 +34,7 @@ import re
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.extension_bag import card_bag
 from ummanu.board.owner_handover import HANDED_TO_OWNER, OWNER_ROLE
 
 #: What a sprint may spend when `sprint create` names no budget, and what 0023 gave every sprint.
@@ -136,15 +136,9 @@ def sprint_budget(meta: Mapping[str, Any]) -> dict[str, Any]:
     return budget_view(budget, used, charges if isinstance(charges, list) else [])
 
 
-def _bag(task: Mapping[str, Any]) -> Mapping[str, Any]:
-    extensions = task.get("extensions")
-    bag = extensions.get(EXTENSION_BAG) if isinstance(extensions, Mapping) else None
-    return bag if isinstance(bag, Mapping) else {}
-
-
 def cap_raises(task: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The raises recorded on a card's own cap, oldest first."""
-    raw = _bag(task).get(E2E_CAP_FIELD)
+    raw = card_bag(task).get(E2E_CAP_FIELD)
     try:
         payload = raw if isinstance(raw, Mapping) else json.loads(str(raw or "") or "{}")
     except ValueError:

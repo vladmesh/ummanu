@@ -43,6 +43,7 @@ from ummanu.board.e2e_record import e2e_state
 from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.owner_handover import MARK_KEYS, OWNER_ESCALATION, attention_record, waiting_owner
 from ummanu.board.schema_gate import SchemaAssessment, SchemaOwed, require
+from ummanu.board.sql_rows import rfc3339
 
 TABLE = "owner_events"
 
@@ -413,7 +414,7 @@ def _held_refusal(event: OwnerEvent) -> str:
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
+    return rfc3339(value, microseconds=True) if value is not None else None
 
 
 # --- the writer every producer calls ------------------------------------------------------

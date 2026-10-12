@@ -7,10 +7,10 @@ import json
 import re
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime
 from typing import Any
 
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
+from ummanu.board.sql_rows import now, rfc3339
 from ummanu.dispatch.cleanup import bulk_lane
 from ummanu.runtime.references import next_reference, reference_allocation_lock
 from ummanu.tasks import (
@@ -273,10 +273,7 @@ def apply_reference_repair(
                 event = by_task_id.get(task_id) or {
                     "event_id": "evt_" + uuid.uuid4().hex,
                     "schema_version": 1,
-                    "occurred_at": datetime.now(UTC)
-                    .replace(microsecond=0)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "occurred_at": rfc3339(now()),
                     "actor": {"role": role, "id": actor},
                     "kind": REPAIR_KIND,
                     "outcome": "success",

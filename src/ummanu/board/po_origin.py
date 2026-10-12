@@ -30,7 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.extension_bag import bag_json
 
 PO_ORIGIN = "po_origin"
 PO_RETURN = "po_return"
@@ -40,21 +40,9 @@ def origin_text(session: str, request: str) -> str:
     return json.dumps({"session": session, "request": request}, sort_keys=True, separators=(",", ":"))
 
 
-def _json_field(task: Mapping[str, Any], key: str) -> Any:
-    extensions = task.get("extensions")
-    bag = extensions.get(EXTENSION_BAG) if isinstance(extensions, Mapping) else None
-    raw = bag.get(key) if isinstance(bag, Mapping) else None
-    if isinstance(raw, Mapping):
-        return raw
-    try:
-        return json.loads(str(raw or ""))
-    except ValueError:
-        return None
-
-
 def po_origin(task: Mapping[str, Any]) -> dict[str, str] | None:
     """`{session, request}` of the card's origin, or None when it carries no well-formed one."""
-    payload = _json_field(task, PO_ORIGIN)
+    payload = bag_json(task, PO_ORIGIN)
     if not isinstance(payload, Mapping):
         return None
     session = str(payload.get("session") or "").strip()
@@ -98,7 +86,7 @@ class ReturnState:
 
 
 def return_state(task: Mapping[str, Any]) -> ReturnState:
-    return ReturnState.from_json(_json_field(task, PO_RETURN))
+    return ReturnState.from_json(bag_json(task, PO_RETURN))
 
 
 def line_head(origin_session: str, state: ReturnState) -> str:

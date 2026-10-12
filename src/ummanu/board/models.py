@@ -12,12 +12,13 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, ClassVar, TypeAlias
 
+from ummanu.board.roles import Role
+from ummanu.board.sql_rows import parse_rfc3339, rfc3339
 from ummanu.board.terminal_taxonomy import (
     BLOCKED_REASONS,
     TERMINAL_DISPOSITIONS,
     read_terminal_taxonomy,
 )
-from ummanu.board.roles import Role
 
 EntityRef: TypeAlias = str
 
@@ -255,7 +256,7 @@ class Sprint:
     def __post_init__(self) -> None:
         _non_empty(self.ref, "sprint ref")
         if not isinstance(self.goal, str):
-            raise ValueError("sprint goal must be a string")
+            raise ValueError("sprint goal must be a string")  # noqa: TRY004 - model validation refuses with ValueError
 
     @property
     def kind(self) -> EntityKind:
@@ -304,7 +305,7 @@ class Actor:
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, Role):
-            raise ValueError("actor role must be a Role")
+            raise ValueError("actor role must be a Role")  # noqa: TRY004 - model validation refuses with ValueError
         _non_empty(self.id, "actor id")
         if self.head_run_ref is not None:
             _non_empty(self.head_run_ref, "actor head-run ref")
@@ -318,7 +319,7 @@ class RelatedRefs:
 
     def __post_init__(self) -> None:
         if not isinstance(self.refs, tuple):
-            raise ValueError("related refs must be a tuple")
+            raise ValueError("related refs must be a tuple")  # noqa: TRY004 - model validation refuses with ValueError
         unique: list[EntityRef] = []
         for ref in self.refs:
             _non_empty(ref, "related ref")
@@ -363,24 +364,24 @@ class Event:
     def __post_init__(self) -> None:
         _non_empty(self.event_id, "event id")
         if not isinstance(self.kind, EventKind):
-            raise ValueError("event kind must be an EventKind")
+            raise ValueError("event kind must be an EventKind")  # noqa: TRY004 - model validation refuses with ValueError
         if not isinstance(self.entity_kind, EntityKind):
-            raise ValueError("event entity kind must be an EntityKind")
+            raise ValueError("event entity kind must be an EntityKind")  # noqa: TRY004 - model validation refuses with ValueError
         _non_empty(self.ref, "event ref")
         _non_empty(self.reason, "event reason")
         if not isinstance(self.actor, Actor):
-            raise ValueError("event actor must be an Actor")
+            raise ValueError("event actor must be an Actor")  # noqa: TRY004 - model validation refuses with ValueError
         if not isinstance(self.occurred_at, datetime) or self.occurred_at.tzinfo is None:
             raise ValueError("event occurred_at must be timezone-aware")
         if not isinstance(self.related_refs, RelatedRefs):
-            raise ValueError("event related refs must be RelatedRefs")
+            raise ValueError("event related refs must be RelatedRefs")  # noqa: TRY004 - model validation refuses with ValueError
         if (self.source_state is None) != (self.target_state is None):
             raise ValueError("event transition requires both source and target states")
         if self.source_state is not None:
             _non_empty(self.source_state, "event transition source")
             _non_empty(self.target_state or "", "event transition target")
         if not isinstance(self.data, dict):
-            raise ValueError("event data must be an object")
+            raise ValueError("event data must be an object")  # noqa: TRY004 - model validation refuses with ValueError
         _validate_control_marker_event(self.kind, self.entity_kind, self.reason, self.data)
         _validate_attempt_usage_event(self.kind, self.entity_kind, self.data)
         _validate_attempt_outcome_event(self.kind, self.entity_kind, self.data)
@@ -420,7 +421,7 @@ class Event:
     def from_record(cls, record: dict[str, Any]) -> Event:
         """Read and validate one protocol record, rejecting generic audit rows."""
         if not isinstance(record, dict):
-            raise ValueError("board event record must be an object")
+            raise ValueError("board event record must be an object")  # noqa: TRY004 - model validation refuses with ValueError
         if record.get("record_type") != cls.RECORD_TYPE:
             raise ValueError("record is not a board protocol event")
         if record.get("schema_version") != cls.SCHEMA_VERSION:
@@ -431,15 +432,15 @@ class Event:
         lifecycle = record.get("transition")
         data = record.get("data", {})
         if not isinstance(subject, dict):
-            raise ValueError("board event subject must be an object")
+            raise ValueError("board event subject must be an object")  # noqa: TRY004 - model validation refuses with ValueError
         if not isinstance(actor, dict):
-            raise ValueError("board event actor must be an object")
+            raise ValueError("board event actor must be an object")  # noqa: TRY004 - model validation refuses with ValueError
         if not isinstance(related, list) or not all(isinstance(ref, str) for ref in related):
             raise ValueError("board event related_refs must be a string list")
         if len(set(related)) != len(related):
             raise ValueError("board event related_refs must be deduplicated")
         if not isinstance(data, dict):
-            raise ValueError("board event data must be an object")
+            raise ValueError("board event data must be an object")  # noqa: TRY004 - model validation refuses with ValueError
         if lifecycle is not None and (
             not isinstance(lifecycle, dict)
             or not isinstance(lifecycle.get("source"), str)
@@ -476,7 +477,7 @@ class Event:
 def _string_field(document: dict[str, Any], name: str) -> str:
     value = document.get(name)
     if not isinstance(value, str):
-        raise ValueError(f"board event {name} must be a string")
+        raise ValueError(f"board event {name} must be a string")  # noqa: TRY004 - model validation refuses with ValueError
     return value
 
 
@@ -485,7 +486,7 @@ def _optional_string_field(document: dict[str, Any], name: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError(f"board event {name} must be a string")
+        raise ValueError(f"board event {name} must be a string")  # noqa: TRY004 - model validation refuses with ValueError
     return value
 
 
@@ -803,19 +804,19 @@ def _validate_terminal_taxonomy_event(
         raise ValueError("terminal taxonomy requires a Card transition")
     raw = data["terminal_taxonomy"]
     if not isinstance(raw, dict):
-        raise ValueError("terminal taxonomy must be an object")
+        raise ValueError("terminal taxonomy must be an object")  # noqa: TRY004 - model validation refuses with ValueError
     read_terminal_taxonomy({"terminal_taxonomy": raw}, disposition=str(raw.get("disposition") or ""))
 
 
 def _format_time(value: datetime) -> str:
-    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    """An event's `occurred_at`, kept to the microsecond: events of one second order by it (CON-08)."""
+    return rfc3339(value, microseconds=True)
 
 
 def _parse_time(value: str) -> datetime:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("board event occurred_at must be RFC3339") from exc
+    parsed = parse_rfc3339(value)
+    if parsed is None:
+        raise ValueError("board event occurred_at must be RFC3339")
     if parsed.tzinfo is None:
         raise ValueError("board event occurred_at must be timezone-aware")
     return parsed.astimezone(UTC)

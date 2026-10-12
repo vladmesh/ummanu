@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from ummanu.board.owner_events import OwnerEventError, OwnerEventStore
+from ummanu.board.sql_rows import rfc3339
 from ummanu.cli_output import print_error
 from ummanu.runtime.paths import add_instance_argument, instance_dir as normalize_instance_dir
 
@@ -48,7 +49,7 @@ def run_owner_events_list(args: argparse.Namespace) -> int:
         mark = "*" if event.unread else " "
         subject = event.subject_ref or "-"
         print(
-            f"{mark} #{event.id} {event.created_at.isoformat()} {event.event_class} {event.kind} {subject}"
+            f"{mark} #{event.id} {rfc3339(event.created_at)} {event.event_class} {event.kind} {subject}"
         )
         for line in event.text.splitlines() or [""]:
             print(f"    {line}")

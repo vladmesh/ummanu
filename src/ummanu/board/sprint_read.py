@@ -10,12 +10,12 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from ummanu.board.legacy_codec import positive_int, text
 from ummanu.board.models import SprintState
 from ummanu.board.po_channel import PoRequest
+from ummanu.board.sql_rows import now, rfc3339
 
 SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
 
@@ -46,7 +46,7 @@ RESUME_FIELDS = (
 )
 
 def _default_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return rfc3339(now())
 
 
 def budget_thresholds(config: Mapping[str, Any] | None = None) -> dict[str, int]:

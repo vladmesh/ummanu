@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import hashlib
+import json
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -43,37 +45,34 @@ class AttemptOutcomeOccurrence:
         return self._payload or AttemptOutcomePayload.from_data(self.event.data)
 
 
+def event_id(identity: Mapping[str, Any]) -> str:
+    """The id of the one occurrence `identity` describes, the same for every retry of it.
+
+    `identity` is what the occurrence durably is (its request id, kind, subject, actor and
+    payload); its canonical JSON is digested, so the same request with the same payload names the
+    same event and any other payload names another.  Recorded events keep these ids, so the
+    spelling of the JSON and the digest are frozen: changing either breaks idempotency.
+    """
+    payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
 def render_marker_comment(event: Event) -> str:
-    """Render the public Card marker grammar from its complete typed event."""
-    data = event.data
-    marker = data.get("marker")
-    body = data.get("body")
-    if not isinstance(marker, str) or not marker or not isinstance(body, str):
-        raise ValueError("Card marker event has incomplete marker data")
-    if event.reason != body or not body.strip():
-        raise ValueError("Card marker event reason does not match its marker body")
-    if event.kind is EventKind.CARD_REPORTED:
-        status = data.get("status")
-        if status not in {"done", "blocked"} or marker != f"report:{status}":
-            raise ValueError("Card report event has an unsupported marker payload")
-        classification = data.get("classification")
-        if status == "blocked":
-            if classification not in {"external_fact", "wrong_task_definition"}:
-                raise ValueError("blocked Card report has an unsupported classification")
-            return f"[{marker}]\nclassification: {classification}\n\n{body}"
-        if classification is not None:
-            raise ValueError("done Card report must not carry a classification")
-    elif event.kind is EventKind.CARD_VERDICTED:
-        status = data.get("status")
-        if status not in {"green", "red"} or marker != f"review:{status}":
-            raise ValueError("Card verdict event has an unsupported marker payload")
-    elif event.kind is EventKind.CARD_DECIDED:
-        decision = data.get("decision")
-        if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
-            raise ValueError("Card decision event has an unsupported marker payload")
-    else:
+    """Render the public Card marker grammar from its complete typed event.
+
+    The marker payload is checked once, where an `Event` is made
+    (`models._validate_control_marker_event`): no marker event exists whose marker, body, status
+    or classification that check refused, so this only spells what it accepted.
+    """
+    if event.kind not in _MARKER_KINDS:
         raise ValueError("event is not a Card marker occurrence")
+    marker, body = event.data["marker"], event.data["body"]
+    if event.kind is EventKind.CARD_REPORTED and event.data.get("status") == "blocked":
+        return f"[{marker}]\nclassification: {event.data['classification']}\n\n{body}"
     return f"[{marker}]\n{body}"
+
+
+_MARKER_KINDS = frozenset({EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED})
 
 
 class BoardEventPending(RuntimeError):

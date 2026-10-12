@@ -44,6 +44,7 @@ from typing import Any
 
 from ummanu.board.backend import record_key, record_key_kind
 from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.sql_rows import epoch as _epoch, grouped as _grouped, now as _now
 
 #: §8.1's Product keys, and the column or table each one is.
 PRODUCT_KEYS = ("record_type", "product_id", "product_projects")
@@ -468,18 +469,21 @@ class ProductIssueRecords:
         if not isinstance(projects, list) or any(not isinstance(item, str) for item in projects):
             raise self._error("a Product's project set must be a JSON array of ids")
         self.client._execute("DELETE FROM product_projects WHERE product_id = %s", (product_id,))
-        for project in sorted(set(projects)):
-            # §3.1: `projects` is derived from the file registry, which stays canonical.  The
-            # mutation that references an id inserts a missing row inside its own transaction,
-            # with the id only: everything else in the row is the registry's.
-            self.client._execute(
-                "INSERT INTO projects (project_id) VALUES (%s) ON CONFLICT (project_id) DO NOTHING",
-                (project,),
-            )
-            self.client._execute(
-                "INSERT INTO product_projects (product_id, project_id) VALUES (%s, %s)",
-                (product_id, project),
-            )
+        listed = sorted(set(projects))
+        if not listed:
+            return
+        # §3.1: `projects` is derived from the file registry, which stays canonical.  The
+        # mutation that references an id inserts a missing row inside its own transaction,
+        # with the id only: everything else in the row is the registry's.  Two statements for
+        # the whole set, in sorted order, as the row-by-row writes went.
+        self.client._execute(
+            "INSERT INTO projects (project_id) SELECT unnest(%s::text[]) ON CONFLICT (project_id) DO NOTHING",
+            (listed,),
+        )
+        self.client._execute(
+            "INSERT INTO product_projects (product_id, project_id) SELECT %s, unnest(%s::text[])",
+            (product_id, listed),
+        )
 
     def _update_product(self, product_id: str, values: dict[str, Any]) -> bool:
         if _text(values.get("record_type")) not in {"", "product"}:
@@ -622,24 +626,6 @@ class ProductIssueRecords:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
-
-
-def _epoch(value: Any) -> str:
-    from ummanu.board.sql_cards import _epoch as card_epoch
-
-    return card_epoch(value)
-
-
-def _grouped(rows: Any) -> dict[Any, list[Any]]:
-    from ummanu.board.sql_cards import _grouped as card_grouped
-
-    return card_grouped(rows)
-
-
-def _now() -> Any:
-    from ummanu.board.sql_cards import _now as card_now
-
-    return card_now()
 
 
 __all__ = ["ISSUE_KEYS", "PRODUCT_KEYS", "ProductIssueRecords"]
