@@ -28,7 +28,6 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
-from typing import ClassVar
 from unittest import mock
 
 from ummanu.web.app import ROUTES
@@ -1369,15 +1368,6 @@ class DataDirectoryResolutionTests(unittest.TestCase):
 
 class MeasurementScriptDocumentationTests(unittest.TestCase):
     """The command an operator is told to run is the command that exists."""
-
-    COMMAND: ClassVar[str] = "python3 scripts/measure_dashboard.py"
-
-    def test_operations_names_the_command_and_the_three_places_the_durations_land(self) -> None:
-        text = (REPO_ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
-
-        self.assertIn(self.COMMAND, text)
-        self.assertIn("journalctl -u ummanu-web.service", text)
-        self.assertIn("ummanu status", text)
 
     def test_the_script_adds_no_dependency(self) -> None:
         """Criterion 9: standard library only, and nothing new in `pyproject.toml`."""

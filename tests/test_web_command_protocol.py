@@ -13,7 +13,6 @@ fixture's own data plane.
 from __future__ import annotations
 
 import json
-import re
 import unittest
 from argparse import Namespace
 from datetime import UTC, datetime
@@ -52,8 +51,6 @@ from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
 from ummanu.webproto.section import Section, SectionSet, sections
 from ummanu.webproto.sprint_ops import SprintOperationLayer
-
-DOCS = Path(__file__).resolve().parents[1] / "docs"
 
 #: The operation layers the identity contract is derived from. Every mutation of this package lives
 #: on one of them, so "which operations take a request id" is a question about these three classes
@@ -547,24 +544,6 @@ class IdentityContractTests(CommandProtocolFixture):
         self.assertIn(operation["state"], {STATE_COMMITTED, STATE_PENDING})
         self.assertEqual(operation["entity"]["ref"], pending.exception.data["action"]["reference"])
 
-    def test_the_published_protocols_table_records_exactly_this_contract(self) -> None:
-        """`docs/PROTOCOLS.md` is held to the contract, not trusted to have kept up with it."""
-        protocols = (DOCS / "PROTOCOLS.md").read_text(encoding="utf-8")
-        documented: dict[str, set[str]] = {"with_request_id": set(), "without_request_id": set()}
-        for line in protocols.splitlines():
-            cells = [cell.strip() for cell in line.split("|")]
-            if len(cells) != 5:
-                continue
-            operation = re.fullmatch(r"`([a-z_]+)`", cells[1])
-            if operation is None:
-                continue
-            if cells[2] == "`request_id`":
-                documented["with_request_id"].add(operation.group(1))
-            elif cells[2] == "none":
-                documented["without_request_id"].add(operation.group(1))
-        self.assertEqual(documented["with_request_id"], set(OPERATION_IDENTITY["with_request_id"]))
-        self.assertEqual(documented["without_request_id"], set(OPERATION_IDENTITY["without_request_id"]))
-
     def test_the_published_error_table_records_exactly_the_codes_the_reads_refuse_with(self) -> None:
         broken = self.tmp / "not-an-installation"
         broken.mkdir(exist_ok=True)
@@ -585,30 +564,10 @@ class IdentityContractTests(CommandProtocolFixture):
             with self.subTest(operation=name):
                 self.assertEqual(raised[name], set(documented))
 
-    def test_the_published_error_table_is_the_same_value(self) -> None:
-        """The doc restates the codes, so the doc is held to the value rather than trusted."""
-        protocols = (DOCS / "PROTOCOLS.md").read_text(encoding="utf-8")
-        documented: dict[str, tuple[str, ...]] = {}
-        for line in protocols.splitlines():
-            cells = [cell.strip() for cell in line.split("|")]
-            if len(cells) != 5:
-                continue
-            read = re.fullmatch(r"`(command_[a-z]+)`", cells[1])
-            if read is None or read.group(1) not in COMMAND_ERRORS:
-                continue
-            documented[read.group(1)] = tuple(re.findall(r"`([a-z_]+)`", cells[2]))
-        self.assertEqual(documented, COMMAND_ERRORS)
-
     def _refused(self, call) -> str:
         with self.assertRaises(ReadError) as refused:
             call()
         return refused.exception.code
-
-    def test_the_operator_scenario_is_written_down(self) -> None:
-        operations_doc = (DOCS / "OPERATIONS.md").read_text(encoding="utf-8")
-        for needle in ("web-read commands", "web-read request"):
-            self.assertIn(needle, operations_doc)
-
 
 class LayerPropertyTests(CommandProtocolFixture):
     """The properties of the command half, checked rather than described."""

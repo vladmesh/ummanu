@@ -5155,7 +5155,7 @@ class BlockedContractTests(CardStoreCase):
         )
 
 
-class RequestIdOwnershipTests(CardStoreCase):
+class RequestIdOwnershipFixture(CardStoreCase):
     """A request id owns the operation it committed (secretary-1060).
 
     A retained worker reused the previous round's report id while submitting the next
@@ -5198,6 +5198,8 @@ class RequestIdOwnershipTests(CardStoreCase):
         call.update(overrides)
         return self.writer.report(**call)  # type: ignore[arg-type]
 
+
+class RequestIdOwnershipTests(RequestIdOwnershipFixture):
     def test_a_reused_report_id_with_another_body_is_refused(self) -> None:
         """The live shape of issue:df7d0778b26357e60046."""
         first = self._report()
@@ -5373,7 +5375,7 @@ class RequestIdOwnershipTests(CardStoreCase):
         self.assertEqual(len(self._comments()), 1)
 
 
-class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
+class TypedMarkerRecoveryTests(RequestIdOwnershipFixture):
     """The three migrated marker families share one staged typed transaction."""
 
     def setUp(self) -> None:

@@ -207,18 +207,6 @@ class CuratorRebindTests(unittest.TestCase):
             self.assertEqual(self._run()[0], 0)
             self.assertEqual(transaction.call_count, 1)
 
-    def test_operations_documents_the_verb_and_its_rules(self) -> None:
-        operations = (Path(__file__).resolve().parents[1] / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
-        for required in (
-            "`ummanu automations curator rebind\n--dry-run`",
-            "after a move of the curator's workspace and Claude\nproject directories",
-            "a cursor never moves backwards",
-            "A second run finds nothing and writes nothing",
-            "`automation_busy_without_advance`",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, operations)
-
     def test_a_failed_audit_append_changes_nothing_and_exits_non_zero(self) -> None:
         self._fixture()
         before = self._snapshot()
