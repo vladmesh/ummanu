@@ -24,6 +24,7 @@ from ummanu.broad_check import (
     summarize,
     usable_receipt,
 )
+from ummanu.cli_output import print_error
 from ummanu.config import ConfigError, _load_bindings, load_config
 from ummanu.projects.contract import (
     ContractUnusable,
@@ -202,7 +203,7 @@ def _common(parser: argparse.ArgumentParser) -> None:
 
 
 def _fail(exc: BroadCheckError) -> int:
-    print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=sys.stderr)
+    print_error({"code": exc.code, "message": exc.message}, stderr=True)
     return 2
 
 

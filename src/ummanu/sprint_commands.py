@@ -26,8 +26,10 @@ from pathlib import Path
 
 from ummanu.board.backend import SPRINT, board_client
 from ummanu.board.roles import Role
+from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, load_config
 from ummanu.po import PO_SESSION_ENV
+from ummanu.runtime.paths import instance_file
 from ummanu.sprint_observer import observer_choice
 from ummanu.sprints import (
     BUDGET_RECORDED_EVENT_TYPES,
@@ -35,7 +37,7 @@ from ummanu.sprints import (
     SprintWriter,
     public_current_task,
 )
-from ummanu.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
+from ummanu.task_commands import _add_data_dir_args, _read_body, print_task_error, resolve_data_dir
 from ummanu.tasks import TaskError, admit_role
 from ummanu.webproto.commands import (
     _EXIT_BY_CODE,
@@ -225,7 +227,7 @@ def add_sprint_subcommands(subparsers) -> None:
     decisions.add_argument("--request-id")
     _add_data_dir_args(decisions)
     decisions.set_defaults(handler=run_owner_decisions)
-    sprint.set_defaults(handler=not_implemented)
+    sprint.set_defaults(handler=usage_handler("sprint subcommand required"))
 
 
 def _runs(minimum: int) -> Callable[[str], int]:
@@ -295,18 +297,23 @@ def _add_po_channel_arguments(command: argparse.ArgumentParser) -> None:
     )
 
 
-def not_implemented(args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "sprint subcommand required"}}))
-    return 2
-
-
 def _read(
     args: argparse.Namespace,
     operation: Callable[[SprintReader], object],
     *,
-    data_dir: str | None = None,
     thresholds: dict | None = None,
 ) -> int:
+    """Run one read and print it, or its typed refusal with the refusal's exit status.
+
+    An installation without a usable data dir is an input error: its usage refusal goes to stdout
+    with status 2, as a bare group's does, rather than escaping as a traceback. The read's own
+    typed refusals keep the stderr stream every sprint and task command prints them on.
+    """
+    try:
+        data_dir = resolve_data_dir(args)
+    except TaskError as exc:
+        print_error({"code": exc.code, "message": exc.message})
+        return exc.exit_code
     try:
         result = operation(
             SprintReader(
@@ -314,9 +321,9 @@ def _read(
             )
         )
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    print_json(result, compact=True)
     return 0
 
 
@@ -331,9 +338,9 @@ def _write(args: argparse.Namespace, operation: Callable[[SprintWriter], object]
             )
         )
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    print_json(result, compact=True)
     return 0
 
 
@@ -390,12 +397,12 @@ def _answer(
     except OperationPending as exc:
         if pending is None:
             raise
-        print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return pending
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return statuses.get(exc.code, EXIT_BACKEND)
-    print(json.dumps(_status_first(document), separators=(",", ":")))
+    print_json(_status_first(document), compact=True, sort_keys=False)
     return 0
 
 
@@ -433,7 +440,6 @@ def run_show(args: argparse.Namespace) -> int:
     return _read(
         args,
         lambda reader: _public_show(reader.show(args.ref)),
-        data_dir=resolve_data_dir(args),
         thresholds=_thresholds(args),
     )
 
@@ -446,10 +452,8 @@ def _thresholds(args: argparse.Namespace) -> dict | None:
     raw_instance = getattr(args, "instance", "") or ""
     if not raw_instance:
         return None
-    instance = Path(raw_instance)
-    instance_file = instance / "instance.yaml" if instance.is_dir() else instance
     try:
-        config = load_config(instance_file)
+        config = load_config(instance_file(Path(raw_instance)))
     except ConfigError:
         return None
     return config.get("sprint_budget") if isinstance(config, dict) else None
@@ -467,10 +471,10 @@ def run_create(args: argparse.Namespace) -> int:
         if not isinstance(local_run_exceptions, list):
             raise ValueError("local_run_exceptions must be a list")  # noqa: TRY004 - uniform JSON value validation
     except ValueError as exc:
-        print(json.dumps({"error": {"code": "validation", "message": f"invalid sprint create JSON: {exc}"}}), file=os.sys.stderr)
+        print_error({"code": "validation", "message": f"invalid sprint create JSON: {exc}"}, stderr=True)
         return 2
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
     return _write(
         args,
@@ -501,13 +505,13 @@ def run_owner_decisions(args: argparse.Namespace) -> int:
     try:
         admit_role(args.role, args.actor or args.role, {"po"})
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
     try:
         from ummanu.board.owner_decisions import parse_decisions
         entries = parse_decisions(json.loads(_read_body(args.decisions_file)))
     except (ValueError, TaskError) as exc:
-        print(json.dumps({"error": {"code": "validation", "message": str(exc)}}), file=os.sys.stderr)
+        print_error({"code": "validation", "message": str(exc)}, stderr=True)
         return 2
     return _write(args, lambda writer: writer.record_owner_decisions(
         role=args.role, actor=args.actor or args.role, reference=args.ref,
@@ -554,7 +558,7 @@ def run_comment(args: argparse.Namespace) -> int:
     try:
         body = _read_body(args.body_file)
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
     return _sprint_operation(
         args,
@@ -604,10 +608,7 @@ def run_resume(args: argparse.Namespace) -> int:
     try:
         entry = json.loads(_read_body(args.body_file))
     except (TaskError, ValueError):
-        print(
-            json.dumps({"error": {"code": "validation", "message": "resume file must contain JSON"}}),
-            file=os.sys.stderr,
-        )
+        print_error({"code": "validation", "message": "resume file must contain JSON"}, stderr=True)
         return 2
     return _write(
         args,
@@ -650,7 +651,7 @@ def run_close(args: argparse.Namespace) -> int:
         decisions = parse_close_decisions(_read_body(args.decisions_file)) if args.decisions_file else None
         closeout = _read_body(args.closeout_file)
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
     return _sprint_operation(
         args,

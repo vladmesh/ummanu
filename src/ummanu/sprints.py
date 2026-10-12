@@ -291,10 +291,10 @@ def instance_open_sprint_limit(instance: Path | None) -> int:
     if instance is None:
         return DEFAULT_OPEN_SPRINT_LIMIT
     from ummanu.config import ConfigError, load_config
+    from ummanu.runtime.paths import instance_file
 
-    path = instance / "instance.yaml" if instance.is_dir() else instance
     try:
-        config = load_config(path)
+        config = load_config(instance_file(instance))
     except ConfigError:
         return DEFAULT_OPEN_SPRINT_LIMIT
     return open_sprint_limit(config if isinstance(config, dict) else None)

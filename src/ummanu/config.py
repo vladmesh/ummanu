@@ -26,6 +26,7 @@ from referencing.jsonschema import DRAFT202012
 #: paid four times per dashboard.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
+from ummanu.runtime.paths import instance_file as config_file
 from ummanu.sprints import budget_thresholds, open_sprint_limit_invalid
 from ummanu.tasks import TaskError
 
@@ -229,9 +230,19 @@ class InstanceReport:
 
 def _resolve_instance(path: Path) -> Path:
     """Accept either an instance dir or a direct path to instance.yaml."""
-    expanded = path.expanduser()
-    instance_file = expanded / "instance.yaml" if expanded.is_dir() else expanded
-    return instance_file.resolve(strict=False)
+    return config_file(path.expanduser()).resolve(strict=False)
+
+
+def _instance_config(instance_file: Path) -> Any:
+    """``instance.yaml``'s content; a failure to read or parse it is a data-dir refusal."""
+    try:
+        return load_config(instance_file)
+    except ConfigError as exc:
+        raise DataDirError(str(exc)) from None
+
+
+def _invalid_instance(instance_file: Path, detail: str) -> DataDirError:
+    return DataDirError(f"invalid instance {instance_file}: {detail}")
 
 
 def _configured_data_dir(instance_file: Path, instance: dict[str, Any]) -> Path:
@@ -253,15 +264,7 @@ def instance_data_dir(path: Path) -> Path:
     command-line and environment overrides remain caller-owned paths.
     """
     instance_file = _resolve_instance(path)
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
-    errors = validate(instance, "instance", instance_file.name)
-    if errors:
-        raise DataDirError(f"invalid instance {instance_file}: " + "; ".join(map(str, errors)))
-    assert isinstance(instance, dict)
-    return _configured_data_dir(instance_file, instance)
+    return _configured_data_dir(instance_file, _validated_instance_config(instance_file))
 
 
 def generated_state_dir(path: Path) -> Path:
@@ -273,13 +276,10 @@ def generated_state_dir(path: Path) -> Path:
     state unreachable. ``data_dir`` itself is held to its schema: a non-empty string.
     """
     instance_file = _resolve_instance(path)
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
+    instance = _instance_config(instance_file)
     configured = instance.get("data_dir") if isinstance(instance, dict) else None
     if not isinstance(configured, str) or not configured:
-        raise DataDirError(f"invalid instance {instance_file}: data_dir must be a non-empty string")
+        raise _invalid_instance(instance_file, "data_dir must be a non-empty string")
     return _configured_data_dir(instance_file, instance)
 
 
@@ -311,13 +311,10 @@ def recovered_instance_locations(instance_file: Path, live_root: Path) -> tuple[
 
 
 def _validated_instance_config(instance_file: Path) -> dict[str, Any]:
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
+    instance = _instance_config(instance_file)
     errors = validate(instance, "instance", instance_file.name)
     if errors:
-        raise DataDirError(f"invalid instance {instance_file}: " + "; ".join(map(str, errors)))
+        raise _invalid_instance(instance_file, "; ".join(map(str, errors)))
     assert isinstance(instance, dict)
     return instance
 
@@ -337,11 +334,7 @@ def instance_offsite_remote(path: Path) -> str:
     the snapshot pusher reports an absent remote as a skipped push, as the legacy pusher does a
     repository with no remote.
     """
-    instance_file = _resolve_instance(path)
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
+    instance = _instance_config(_resolve_instance(path))
     offsite = instance.get("offsite") if isinstance(instance, dict) else None
     remote = offsite.get("instance_remote") if isinstance(offsite, dict) else None
     return remote.strip() if isinstance(remote, str) else ""

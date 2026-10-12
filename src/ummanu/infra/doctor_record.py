@@ -22,7 +22,7 @@ from typing import Any
 
 from ummanu.config import validate_instance
 from ummanu.infra.doctor_findings import accepted, active_findings
-from ummanu.runtime.paths import add_instance_argument
+from ummanu.runtime.paths import add_instance_argument, instance_file
 
 RESULT_PATH = Path("doctor/latest.json")
 FRESH_SECONDS = 180
@@ -38,8 +38,7 @@ def utc(now: float) -> str:
 
 
 def identity(instance: Path, data_dir: Path) -> dict[str, str]:
-    config = instance / "instance.yaml" if instance.is_dir() else instance
-    return {"instance": str(config.resolve()), "data_dir": str(data_dir.resolve())}
+    return {"instance": str(instance_file(instance).resolve()), "data_dir": str(data_dir.resolve())}
 
 
 def publish(path: Path, document: dict[str, Any]) -> None:
@@ -184,7 +183,7 @@ def _load(path: Path) -> dict[str, Any]:
 
 def _start(attempt: Any, *, now: float) -> float:
     if not isinstance(attempt, dict):
-        raise ValueError("invalid doctor attempt")
+        raise ValueError("invalid doctor attempt")  # noqa: TRY004 - recorded-document refusals share ValueError
     started = _timestamp(attempt["run_at"])
     if started > now + 5:
         raise ValueError("doctor time is in the future")

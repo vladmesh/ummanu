@@ -12,8 +12,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 
+from ummanu.cli_output import print_error
 from ummanu.po import PO_SESSION_ENV
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND, EXIT_VALIDATION
@@ -47,14 +47,14 @@ def run_po_rename(args: argparse.Namespace) -> int:
     session_id = (args.session or os.environ.get(PO_SESSION_ENV) or "").strip()
     if not session_id:
         message = f"name the session with --session; ${PO_SESSION_ENV} is not set outside a PO turn"
-        print(json.dumps({"error": {"code": "validation", "message": message}}), file=sys.stderr)
+        print_error({"code": "validation", "message": message}, stderr=True)
         return EXIT_VALIDATION
     try:
         document = PoLayer(args.instance, data_dir=args.data_dir).po_rename(
             session_id=session_id, title=args.title
         )
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return _RUN_EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
     print(json.dumps(document, sort_keys=True, separators=(",", ":")))
     return 0

@@ -51,8 +51,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from ummanu.board import po_execution as execution_field
-from ummanu.board import po_origin as origin_field
+from ummanu.board import po_execution as execution_field, po_origin as origin_field
 from ummanu.board.completion_evidence import missing_completion_evidence
 from ummanu.board.owner_handover import (
     OWNER_ANSWER,
@@ -76,16 +75,10 @@ from ummanu.dispatch.po_delivery import DISPATCHER_SOURCE, SUCCESSORS_PER_TICK, 
 from ummanu.dispatch.state import (
     DispatcherRecord,
     PoSubmission,
-    request_token,
-)
-from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
-)
-from ummanu.dispatch.state import (
     new_attempt_id as _new_attempt_id,
-)
-from ummanu.dispatch.state import (
     record_attempt as _record_attempt,
+    request_token,
 )
 from ummanu.po.client import OutcomeUnknown, PoServiceError, ServiceRefused, ServiceUnavailable
 from ummanu.po.queue import QueuedInput
@@ -194,6 +187,7 @@ class ServicePoChannel:
         from ummanu.config import ConfigError, load_config
         from ummanu.po.models import efforts_from_instance, models_from_instance, successor_choice
         from ummanu.po.store import SessionNotFound
+        from ummanu.runtime.paths import instance_file
 
         try:
             row = self._po_store().session(session_id)
@@ -202,11 +196,7 @@ class ServicePoChannel:
             previous = None
         instance = Path(self.instance_dir) if self.instance_dir is not None else None
         try:
-            config = (
-                load_config(instance / "instance.yaml" if instance.is_dir() else instance)
-                if instance is not None
-                else None
-            )
+            config = load_config(instance_file(instance)) if instance is not None else None
         except ConfigError as exc:
             raise PoStoreError(f"the instance config cannot be read: {exc}") from exc
         return successor_choice(previous, models_from_instance(config), efforts_from_instance(config))
@@ -289,10 +279,10 @@ def render_po_card_input(
     lines = [f"Card: {reference} ({kind}): {task.get('title') or ''}", "",
              excerpt(str(task.get("description") or "")), "",
              "## Service instructions", "",
-             f"The dispatcher hands you this card {_of_sprint(submission, task)}. "
+             (f"The dispatcher hands you this card {_of_sprint(submission, task)}. "
              "Answer it in this turn and complete the card before the turn ends; "
              "a turn that ends with the card still In progress Blocks it, "
-             "unless you handed it to the owner in this turn.", ""]
+             "unless you handed it to the owner in this turn."), ""]
     if kind != OPERATION_KIND:
         lines += ["## Production rights", "",
                   "This decision input grants no production permission.", ""]
@@ -307,13 +297,13 @@ def render_po_card_input(
     if submission.sprint_ref:
         lines.append(f"Sprint: `python3 -P -m ummanu sprint show --ref {submission.sprint_ref}`")
     lines += ["", "## Complete the card", "",
-              f"Write two non-empty sections: `## {first}` and `## {second}` "
-              "(repeatable verification). Run exactly:", "",
+              (f"Write two non-empty sections: `## {first}` and `## {second}` "
+              "(repeatable verification). Run exactly:"), "",
               "    " + complete_command(reference, kind, submission.complete_request_id), "",
               "## Or hand it to the owner", "",
-              "Only for money, owner-only access or an owner product decision; architecture is yours. "
+              ("Only for money, owner-only access or an owner product decision; architecture is yours. "
               "Write the unresolved question to a reason file, run this and end the turn. "
-              "The card waits and the owner's answer returns to this session:", "",
+              "The card waits and the owner's answer returns to this session:"), "",
               "    " + handover_command(reference, submission.handover_request_id), "",
               "Keep the turn short; anything long-running becomes a card."]
     return "\n".join(lines).rstrip() + "\n"
@@ -406,8 +396,8 @@ def render_owner_answer_input(
     ]
     for answer in answers:
         lines += [f"### {answer['created_at'] or 'undated'}", "", answer["body"] or "(empty)", ""]
-    lines += ["Recording this answer applies no grant. Reference an existing standing decision by its ID; "
-              "do not apply an already recorded grant again.", ""]
+    lines += [("Recording this answer applies no grant. Reference an existing standing decision by its ID; "
+              "do not apply an already recorded grant again."), ""]
     if submission.owner_event_id:
         # A command that applies the owner's answer on the owner's authority names it (`--authorized-by`
         # of `sprint e2e-budget`, secretary-1796).
@@ -416,8 +406,8 @@ def render_owner_answer_input(
             lines += [f"The owner's comment is event `{submission.owner_event_id}`.", ""]
         else:
             lines += [f"The quoted owner answer is recorded as event `{submission.owner_event_id}`.",
-                "This answer applies no grant. Record new sprint authority with `sprint record-owner-decisions` "
-                "and stable decision IDs; do not apply an already recorded grant again.", ""]
+                ("This answer applies no grant. Record new sprint authority with `sprint record-owner-decisions` "
+                "and stable decision IDs; do not apply an already recorded grant again."), ""]
     lines += [
         "",
         "## Complete the card",

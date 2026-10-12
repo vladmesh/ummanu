@@ -17,13 +17,14 @@ from ummanu.dispatch.git_workspace import orca_workspaces_root, workspace_roots_
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.types import DispatcherError
+from ummanu.runtime.paths import instance_file
 from ummanu.sprints import SprintReader
 from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
 
 
 def default_data_dir(instance_path: Path) -> Path:
     try:
-        return instance_data_dir(_instance_file(instance_path))
+        return instance_data_dir(instance_file(instance_path))
     except DataDirError as exc:
         raise DispatcherError("invalid_instance", f"invalid instance: {exc}", 2) from None
 
@@ -33,10 +34,6 @@ def validate_workspace_roots(data_dir: Path) -> None:
     overlap = workspace_roots_overlap(orca_workspaces_root(), data_dir)
     if overlap is not None:
         raise DispatcherError("workspace_roots_overlap", overlap, 2)
-
-
-def _instance_file(path: Path) -> Path:
-    return path / "instance.yaml" if path.is_dir() else path
 
 
 def runtime_from_args(

@@ -8,7 +8,6 @@ a run or a sprint is decided here.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -20,7 +19,7 @@ from ummanu.web.provider_usage import ProviderUsageLayer
 from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from ummanu.webproto.card_ops import CardOperationLayer
 from ummanu.webproto.command_reads import CommandReadLayer
-from ummanu.webproto.commands import add_instance_argument
+from ummanu.webproto.commands import add_instance_argument, print_error
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -128,5 +127,5 @@ def run_web_serve(args: argparse.Namespace) -> int:
     try:
         return serve(app, host=args.host, port=args.port)
     except LoopbackOnly as refused:
-        print(json.dumps({"error": {"code": "validation", "message": str(refused)}}), file=sys.stderr)
+        print_error({"code": "validation", "message": str(refused)}, stderr=True)
         return EXIT_VALIDATION

@@ -16,9 +16,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from typing import Any
 
+from ummanu.cli_output import print_error, usage_handler
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.command_reads import CommandReadLayer
 from ummanu.webproto.errors import ReadError
@@ -87,7 +87,7 @@ def add_web_read_subcommands(subparsers) -> None:
     request.add_argument("--request-id", required=True, help="the id the operation was sent with")
     request.set_defaults(handler=run_web_read_request)
 
-    group.set_defaults(handler=_usage)
+    group.set_defaults(handler=usage_handler("web-read subcommand required"))
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
@@ -112,11 +112,6 @@ def _installation(parser: argparse.ArgumentParser) -> None:
         help="override the instance's configured data directory",
     )
     parser.add_argument("--json", action="store_true", help="print the snapshot as JSON")
-
-
-def _usage(_args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "web-read subcommand required"}}))
-    return EXIT_VALIDATION
 
 
 def _layer(args: argparse.Namespace) -> ReadLayer:
@@ -164,7 +159,7 @@ def _emit(args: argparse.Namespace, operation, render) -> int:
     try:
         snapshot = operation()
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return _EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
     if args.json:
         print(json.dumps(snapshot, sort_keys=True))
@@ -292,7 +287,7 @@ def add_web_run_subcommands(subparsers) -> None:
     listing.add_argument("--ref", required=True, help="the card whose runs to list")
     listing.set_defaults(handler=run_web_run_list)
 
-    group.set_defaults(handler=_run_usage)
+    group.set_defaults(handler=usage_handler("web-run subcommand required"))
 
 
 def _run_common(parser: argparse.ArgumentParser) -> None:
@@ -314,11 +309,6 @@ def _run_common(parser: argparse.ArgumentParser) -> None:
         help="how long a run may take before the product ends the head holding it",
     )
     parser.add_argument("--json", action="store_true", help="print the document as JSON")
-
-
-def _run_usage(_args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "web-run subcommand required"}}))
-    return EXIT_VALIDATION
 
 
 def _ops_layer(args: argparse.Namespace) -> OperationLayer:
@@ -369,7 +359,7 @@ def _emit_run(args: argparse.Namespace, operation, render) -> int:
     try:
         document = operation()
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return _RUN_EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
     if args.json:
         print(json.dumps(document, sort_keys=True))

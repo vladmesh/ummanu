@@ -90,7 +90,7 @@ from ummanu.po.store import (
     session_fingerprint,
     sprint_session_fingerprint,
 )
-from ummanu.runtime.paths import add_instance_argument
+from ummanu.runtime.paths import add_instance_argument, instance_file
 
 # How often the service looks at its queue, its restart marker and a recovery that did not run yet,
 # besides being woken by a submit or a settled turn.
@@ -784,9 +784,8 @@ class PoService:
             return None
         from ummanu.config import ConfigError, load_config
 
-        path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
         try:
-            return load_config(path)
+            return load_config(instance_file(self.instance))
         except ConfigError as exc:
             raise Refused("unavailable", f"the instance config cannot be read: {exc}") from None
 

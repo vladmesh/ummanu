@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 
 from ummanu.board.backend import PRODUCT_ISSUE, board_client
+from ummanu.cli_output import usage_handler
 from ummanu.product_issues import ISSUE_WRITE_ROLES, ProductIssueStore
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.task_commands import _read_body, resolve_data_dir, run_task_command
@@ -73,8 +73,8 @@ def add_product_issue_subcommands(subparsers) -> None:
     _common(transaction_adopt)
     transaction_adopt.add_argument("--path", required=True)
     transaction_adopt.set_defaults(handler=run_transaction_adopt)
-    transaction.set_defaults(handler=_missing("product transaction subcommand required"))
-    product.set_defaults(handler=_missing("product subcommand required"))
+    transaction.set_defaults(handler=usage_handler("product transaction subcommand required"))
+    product.set_defaults(handler=usage_handler("product subcommand required"))
 
     issue = subparsers.add_parser("issue", help="manage durable Product issues")
     issue_sub = issue.add_subparsers(dest="issue_command")
@@ -124,15 +124,7 @@ def add_product_issue_subcommands(subparsers) -> None:
     close.add_argument("--ref", required=True)
     close.add_argument("--reason", required=True, choices=("resolved", "invalid", "duplicate", "wont_do"))
     close.set_defaults(handler=run_issue_close)
-    issue.set_defaults(handler=_missing("issue subcommand required"))
-
-
-def _missing(message: str):
-    def handler(_args: argparse.Namespace) -> int:
-        print(json.dumps({"error": {"code": "usage", "message": message}}))
-        return 2
-
-    return handler
+    issue.set_defaults(handler=usage_handler("issue subcommand required"))
 
 
 def _store(args: argparse.Namespace) -> ProductIssueStore:

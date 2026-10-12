@@ -26,10 +26,15 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ummanu.config import ConfigError, DataDirError, load_config, validate
-from ummanu.config import instance_data_dir as _configured_data_dir
+from ummanu.config import (
+    ConfigError,
+    DataDirError,
+    instance_data_dir as _configured_data_dir,
+    load_config,
+    validate,
+)
 from ummanu.head_health import resource_health_path as _resource_health_path
-from ummanu.runtime.paths import default_instance_path
+from ummanu.runtime.paths import default_instance_path, instance_file as _config_file
 
 DEFAULT_INSTANCE = default_instance_path()
 
@@ -48,7 +53,7 @@ def _instance_from_runtime_env() -> Path | None:
 def instance_file() -> Path:
     configured = os.environ.get("UMMANU_INSTANCE")
     path = Path(configured).expanduser() if configured else (_instance_from_runtime_env() or DEFAULT_INSTANCE)
-    return path / "instance.yaml" if path.is_dir() else path
+    return _config_file(path)
 
 
 def instance_host_configuration() -> tuple[dict | None, str | None]:
