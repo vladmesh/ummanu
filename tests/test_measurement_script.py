@@ -25,7 +25,6 @@ import re
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,10 +67,13 @@ class VirtualClock:
     the order they were taken in. Beyond that, time jumps in two places only. A stub answer with a
     decided cost (`advance`) moves it, and is allowed only outside the poll phase, where nothing is
     scheduled. And a poll falls due only when something waits for it — a round armed, or a held
-    round request that asks for the next poll — at which point time jumps to that poll's schedule
-    plus the lateness the case chose for its slot (`late`). So the offset a poll records is the
-    case's decision, to the microsecond, however long this host takes to wake a thread: the flake
-    this replaces was a runner starting the poll thread 143 ms late against a 50 ms token cadence.
+    round asking for the poll after the one that launched it — and only once every poll released
+    before it has read its own start (`poll_started`). Then time jumps to that poll's schedule plus
+    the lateness the case chose for its slot (`late`). So the offset a poll records is the case's
+    decision, to the microsecond, however long this host takes to wake a thread: the flake this
+    replaces was a runner starting the poll thread 143 ms late against a 50 ms token cadence. The
+    start confirmation is what keeps that true when a poll's thread is the slow one: without it,
+    a later slot could move time on before the earlier poll read the clock.
 
     It also counts what the stub's holds are keyed on, per run: polls released, poll reads and round
     requests that reached the stub. A hold waits on those counts, never on a duration.
@@ -86,6 +88,13 @@ class VirtualClock:
         self.late: Callable[[int], float] = lambda _slot: 0.0
         self.dues: list[float] = []
         self.fired = 0
+        #: Released polls whose thread has read its start off this clock.
+        self.started = 0
+        #: The slot the timer is waiting to release, while it waits.
+        self.waiting_slot: int | None = None
+        #: The slot that launches the latest armed round, and the round requests seen before it.
+        self.round_slot = 0
+        self.round_base = 0
         self.poll_reads = 0
         self.round_requests = 0
         self._now = 1000.0
@@ -111,7 +120,9 @@ class VirtualClock:
         """A `SessionPoll` is starting: its slots and arrivals count from zero."""
         with self._cond:
             self._stop = stop
-            self.fired = self._demand = self.poll_reads = self.round_requests = 0
+            self.fired = self.started = self._demand = self.poll_reads = self.round_requests = 0
+            self.round_slot = self.round_base = 0
+            self.waiting_slot = None
             self.dues = []
 
     def wait_until(self, due: float, stop: threading.Event) -> bool:
@@ -119,8 +130,11 @@ class VirtualClock:
             if stop is not self._stop:
                 raise AssertionError("a poll timer this clock was not told about")
             slot = self.fired
-            while not (stop.is_set() or self._demand > slot):
+            self.waiting_slot = slot
+            self._cond.notify_all()
+            while not (stop.is_set() or (self._demand > slot and self.started == self.fired)):
                 self._cond.wait(0.005)
+            self.waiting_slot = None
             if stop.is_set():
                 return False
             self.fired += 1
@@ -129,17 +143,35 @@ class VirtualClock:
             self._cond.notify_all()
             return True
 
-    def demand(self) -> None:
-        """Something is waiting for the next poll: release it."""
+    def demand(self, slots: int) -> None:
+        """Something waits for a poll: release slots until `slots` of them have been released.
+
+        A count rather than "one more", so the four requests of one round asking for the same
+        poll ask for it once.
+        """
         with self._cond:
+            self._demand = max(self._demand, slots)
+            self._cond.notify_all()
+
+    def arm_round(self) -> None:
+        """A round is armed: the next slot launches it."""
+        with self._cond:
+            self.round_slot = self.fired
+            self.round_base = self.round_requests
             self._demand = max(self._demand, self.fired + 1)
             self._cond.notify_all()
 
+    def poll_started(self) -> None:
+        with self._cond:
+            self.started += 1
+            self._cond.notify_all()
+
     def round_request(self) -> int:
+        """A round request reached the stub; the slot that launched its round."""
         with self._cond:
             self.round_requests += 1
             self._cond.notify_all()
-            return self.fired
+            return self.round_slot
 
     def poll_read(self) -> int:
         with self._cond:
@@ -301,8 +333,11 @@ class AgainstAStubDashboard(unittest.TestCase):
             return 200, "<html>dashboard</html>", delay, ""
 
         clock = self.clock
-        if clock is None and (poll_reads != "instant" or held_rounds_after is not None):
-            raise AssertionError("holds are kept against the virtual clock")
+        if clock is None and (poll_reads != "instant" or held_rounds_after is not None or delays):
+            raise AssertionError("costs and holds are kept against the virtual clock")
+
+        def refuse_delay(_seconds: float) -> None:
+            raise AssertionError("a timed answer needs the virtual clock")
         # Only the plain schedule settles between rounds: with an overlapping read or a held round,
         # a poll is still under way when the next round is armed, by design.
         self.quiet_between_rounds = poll_reads == "until_round" and held_rounds_after is None
@@ -311,11 +346,12 @@ class AgainstAStubDashboard(unittest.TestCase):
             if clock is None or method != "GET" or not clock.polling():
                 return True
             if path == "/":
-                fired = clock.round_request()
+                launching = clock.round_request()
                 if held_rounds_after is None or counted < held_rounds_after:
                     return True
-                clock.demand()
-                return clock.hold(lambda: clock.poll_reads > fired)
+                # The poll after the launching one: one request for it however many ask.
+                clock.demand(launching + 2)
+                return clock.hold(lambda: clock.poll_reads >= launching + 2)
             if not path.startswith("/po/api/sessions/"):
                 return True
             arrived = clock.poll_read()
@@ -328,7 +364,7 @@ class AgainstAStubDashboard(unittest.TestCase):
         server = StubDashboard(("127.0.0.1", 0), _Stub)
         server.plan = plan  # type: ignore[attr-defined]
         server.seen = seen  # type: ignore[attr-defined]
-        server.pause = time.sleep if clock is None else clock.advance  # type: ignore[attr-defined]
+        server.pause = clock.advance if clock is not None else refuse_delay  # type: ignore[attr-defined]
         self.server = server
         # A short poll interval, because `shutdown` waits out the one in progress: at the default
         # half second that wait was most of this module's run time.
@@ -374,7 +410,8 @@ class AgainstAStubDashboard(unittest.TestCase):
 
         Arming is where a round starts waiting for the next due poll, so it is where virtual time
         is told to bring one. On the plain schedule the previous round's polls are first let finish,
-        so each round starts with exactly its own poll in flight.
+        so each round starts with exactly its own poll in flight. Every poll's start is reported to
+        the clock from inside `fetch`, right after the script read it.
         """
         clock = self.clock or VirtualClock()
         self.enterContext(mock.patch.object(module, "CLOCK", clock))
@@ -384,8 +421,21 @@ class AgainstAStubDashboard(unittest.TestCase):
             if self.quiet_between_rounds:
                 clock.settle(lambda: not poll._pending, "a poll of the previous round never answered")
             launch = arm(poll, gate)
-            clock.demand()
+            clock.arm_round()
             return launch
+
+        fetch = module.fetch
+
+        def fetched(*args: Any, on_start: Callable[[float], None] | None = None, **kwargs: Any) -> Any:
+            if on_start is None:
+                return fetch(*args, **kwargs)
+
+            def started(at: float) -> None:
+                # The poll has read its start; only now may a later slot move time on.
+                clock.poll_started()
+                on_start(at)
+
+            return fetch(*args, on_start=started, **kwargs)
 
         enter = module.SessionPoll.__enter__
 
@@ -395,6 +445,7 @@ class AgainstAStubDashboard(unittest.TestCase):
 
         self.enterContext(mock.patch.object(module.SessionPoll, "arm", armed))
         self.enterContext(mock.patch.object(module.SessionPoll, "__enter__", entered))
+        self.enterContext(mock.patch.object(module, "fetch", fetched))
         return clock
 
     def run_main(self, base_url: str, *extra: str) -> tuple[int, str]:
@@ -766,7 +817,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             return sample
         with mock.patch.object(measure, "fetch", side_effect=observe_poll), measure.SessionPoll(
                 base, scenario.poll_target, scenario.cookie) as poll:
-            self.clock.demand()  # type: ignore[union-attr]
+            self.clock.demand(1)  # type: ignore[union-attr]
             self.assertTrue(answered.wait(5), "the selected running session was never polled")
         poll.check()
         self.assertGreaterEqual(poll.successes, 1)
@@ -1229,6 +1280,68 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
         self.assert_cadence_and_launch(report)
         self.assertIn("the poll started every 3 s", "\n".join(measure.render(report)))
 
+    def test_a_poll_slow_to_start_while_its_round_asks_for_the_next_keeps_its_schedule(self) -> None:
+        """BLOCKER-virtual-poll-start-race (review of b848c1de), as an ordering the case forces.
+
+        The round's four held requests all ask for the poll after the launching one, and that
+        poll's thread is kept from reading its start until all four have asked. Each poll still
+        records its own schedule (late is 0 here, so the offsets are ticks), the four requests
+        bring exactly one poll between them, and no later slot moves time on before the slow
+        poll has read the clock.
+        """
+        clock = self.clock
+        assert clock is not None
+        fetch = measure.fetch
+
+        def slow_to_start(*args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("on_start") is not None:
+                slot = int(threading.current_thread().name.rsplit("-", 1)[-1])
+                if slot != clock.round_slot:
+                    clock.settle(
+                        lambda: clock.round_requests >= clock.round_base + measure.CONCURRENT_REQUESTS,
+                        "the round's requests never all asked for the next poll",
+                    )
+            return fetch(*args, **kwargs)
+
+        warm = 1
+        base = self.serve(held_rounds_after=1 + warm + 1, poll_reads="until_next_poll")
+        with (
+            mock.patch.object(measure, "WARM_REQUESTS", warm),
+            mock.patch.object(measure, "fetch", side_effect=slow_to_start),
+        ):
+            report = measure.run(base, None)
+
+        self.assertLess(max(abs(offset) for offset in report.poll_offsets), 1e-3, report.poll_offsets)
+        # One launching poll and one mid-round poll per round: four requests, one request for it.
+        self.assertEqual(len(clock.dues), 2 * measure.CONCURRENT_ROUNDS, clock.dues)
+        self.assert_cadence_and_launch(report)
+
+    def test_the_virtual_clock_releases_no_poll_before_the_last_one_has_started(self) -> None:
+        """The same rule on the clock alone: two polls asked for, the first not yet started."""
+        clock = VirtualClock()
+        stop = threading.Event()
+        clock.begin(stop)
+        anchor = clock.now()
+        clock.demand(2)
+
+        def timer() -> None:
+            for slot in range(2):
+                if not clock.wait_until(anchor + slot * measure.POLL_INTERVAL_SECONDS, stop):
+                    return
+
+        thread = threading.Thread(target=timer, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(stop.set)
+        # Settles either way: the timer waiting on slot 1, or slot 1 released ahead of the start.
+        clock.settle(lambda: clock.waiting_slot == 1 or clock.fired == 2, "the timer never reached slot 1")
+        self.assertEqual(clock.fired, 1, "slot 1 was released before slot 0's poll read its start")
+        self.assertLess(clock.now() - anchor, 1e-3, "time moved on before the first poll started")
+
+        clock.poll_started()
+        clock.settle(lambda: clock.fired == 2, "slot 1 was never released after slot 0 started")
+        self.assertGreaterEqual(clock.now() - anchor, measure.POLL_INTERVAL_SECONDS)
+
     def test_a_run_whose_polls_were_faster_than_the_cadence_is_refused_by_the_command(self) -> None:
         """The first defect put back deliberately, to show what the command now does with it.
 
@@ -1509,33 +1622,48 @@ class RoundsUnderThePollTests(AgainstAStubDashboard):
 class RealClockSmokeTests(AgainstAStubDashboard):
     """The one case on the script's own clock: real threads, real waits, a token cadence.
 
-    Everything else in this file runs on `VirtualClock`, so this is what shows the default
-    `Clock` drives a whole run end to end. It asserts nothing about milliseconds: the tolerance is
-    lifted for it, because a busy runner waking a thread late is exactly what this case must not
-    turn into a failure. The one timing fact asserted is a sign, which holds on any host: the real
-    clock never starts a poll before its schedule. The session read is slowed by a real 0.2 s, an
-    ordering margin rather than a measurement, so each round's requests start while it is out.
+    Everything else in this file runs on `VirtualClock`, so this is what shows the default `Clock`
+    drives the timer and launches a round. It asserts only what holds on any host, whatever order
+    the scheduler runs the threads in: a round is launched by a poll that started before it
+    (program order inside the poll thread), and the real clock never starts a poll before its
+    schedule (a sign, not a number of milliseconds). It does not collect judged rounds, because
+    whether a request starts while a real read is still out is up to the scheduler; that property
+    is held on the virtual clock, by events, in `RoundsUnderThePollTests`.
     """
 
     VIRTUAL = False
 
-    def test_a_whole_run_on_the_real_clock_completes_and_never_starts_a_poll_early(self) -> None:
-        base = self.serve(delays={f"/po/api/sessions/{self.SESSION}": 0.2}, poll_reads="instant")
+    def test_the_real_clock_drives_the_timer_and_launches_a_round_never_early(self) -> None:
+        base = self.serve(poll_reads="instant")
+        self.assertIsInstance(measure.CLOCK, measure.Clock)
+        scenario = measure.prepare(base, None)
+        answered = threading.Event()
+        polls: list[measure.Sample] = []
+        fetch = measure.fetch
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            sample = fetch(*args, **kwargs)
+            if args[1] == scenario.poll_target:
+                polls.append(sample)
+                if len(polls) >= measure.CONCURRENT_ROUNDS:
+                    answered.set()
+            return sample
+
         with (
             mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05),
-            mock.patch.object(measure, "CADENCE_TOLERANCE_SECONDS", float("inf")),
-            mock.patch.object(measure, "WARM_REQUESTS", 2),
+            mock.patch.object(measure, "fetch", side_effect=counted),
+            measure.SessionPoll(base, scenario.poll_target, scenario.cookie) as poll,
         ):
-            self.assertIsInstance(measure.CLOCK, measure.Clock)
-            report = measure.run(base, None)
+            item = measure.measure_concurrent(base, poll)
+            # A bound on a hang, not a measurement: the timer keeps polling on its own.
+            self.assertTrue(answered.wait(10), "the real timer did not keep polling")
+        poll.check()
 
-        self.assertEqual(len(report.concurrent), measure.CONCURRENT_ROUNDS)
-        self.assertGreaterEqual(len(report.poll_offsets), measure.CONCURRENT_ROUNDS)
-        self.assertGreaterEqual(min(report.poll_offsets), 0.0, report.poll_offsets)
-        for index, item in enumerate(report.concurrent, start=1):
-            with self.subTest(round=index):
-                self.assertIsNotNone(item.launched_at)
-                self.assertLess(item.launched_at, item.started_at)
+        self.assertIsNotNone(item.launched_at, "no poll launched the round")
+        self.assertLess(item.launched_at, item.started_at)  # type: ignore[operator]
+        self.assertEqual(len(item.samples), measure.CONCURRENT_REQUESTS)
+        self.assertGreaterEqual(len(poll.offsets), measure.CONCURRENT_ROUNDS)
+        self.assertGreaterEqual(min(poll.offsets), 0.0, poll.offsets)
 
 
 class DataDirectoryResolutionTests(unittest.TestCase):

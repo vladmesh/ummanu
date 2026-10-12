@@ -679,5 +679,6 @@ The original component CI report observed a 94.627437s cleanup replay module, a 
 guard test and an 18.513881s measurement test. The journal-layout component tests remain local.
 Since ummanu-240 the measurement module keeps the poll's three-second cadence and 100 ms
 tolerance on a virtual clock injected through the script's `CLOCK` seam: a case chooses whether a
-poll starts late, and the stub orders answers by events rather than sleeps. One smoke case runs
-the real clock with the tolerance lifted and asserts no milliseconds.
+poll starts late, and the stub orders answers by events rather than sleeps. A virtual poll is
+released only after every earlier poll has read its start. One smoke case runs the real clock and
+asserts only scheduler-independent facts: program-order launch and no poll before its schedule.
