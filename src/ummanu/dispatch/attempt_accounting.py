@@ -26,10 +26,18 @@ from ummanu.dispatch.attempt_usage import (
     provider_usage_source as _provider_usage_source,
 )
 from ummanu.dispatch.helpers import _round_report_ids
-from ummanu.dispatch.state import DispatcherRecord, OutcomeTerminalPath
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
-from ummanu.routing_journal import MODEL_UNKNOWN, REVIEWER, WORKER, HeadRun
-from ummanu.routing_journal import routing_head_snapshot_from_launch as _routing_head_snapshot_from_launch
+from ummanu.dispatch.state import (
+    DispatcherRecord,
+    OutcomeTerminalPath,
+    attempt_request_id as _attempt_request_id,
+)
+from ummanu.routing_journal import (
+    MODEL_UNKNOWN,
+    REVIEWER,
+    WORKER,
+    HeadRun,
+    routing_head_snapshot_from_launch as _routing_head_snapshot_from_launch,
+)
 from ummanu.tasks import TaskError, specification_revision
 
 
@@ -72,7 +80,6 @@ def _attempt_outcome_obligation(
     record: DispatcherRecord,
     *,
     terminal_state: str,
-    disposition: str,
     verdict: str = "missing",
     decision: str = "",
     terminal_path: OutcomeTerminalPath,
@@ -533,7 +540,6 @@ def terminal_effect(
             task,
             record,
             terminal_state=terminal_state,
-            disposition=disposition,
             verdict=verdict,
             decision=decision,
             terminal_path=record.outcome_terminal_path,

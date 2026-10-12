@@ -16,9 +16,6 @@ from ummanu.codex_provider_events import (
 from ummanu.dispatch import attempt_accounting, release_activation
 from ummanu.dispatch.assessment_decision import advance_assessment as _advance_assessment
 from ummanu.dispatch.claim import (
-    SPRINT_RESERVATION_BLOCKED_ACTION,  # noqa: F401  # Compatibility re-export.
-    SPRINT_RESERVATION_RESERVED,  # noqa: F401  # Compatibility re-export.
-    SPRINT_RESERVATION_UNVERIFIABLE,  # noqa: F401  # Compatibility re-export.
     claim_ready_task as _claim_ready_task,
     resolve_head as _resolve_claim_head,
 )
@@ -34,27 +31,9 @@ from ummanu.dispatch.helpers import (
     _worker_id,
     scrub_host_output,
 )
-from ummanu.dispatch.host import (  # noqa: F401  # Compatibility re-exports.
-    DESTRUCTIVE_VERDICTS,
-    HEAD_STOP_GRACE_SECONDS,
-    HEAD_STOP_POLL_SECONDS,
-    OBSERVER_REPO_BRANCH,
-    OBSERVER_WORKSPACE_DIR,
+from ummanu.dispatch.host import (
     CommandHostRuntime,
-    DispatcherHeadTransport,
     InstanceCatalog,
-    LaunchedHead as LaunchedHead,  # Compatibility re-export.
-    _body_file_instructions,
-    _body_file_path,
-    _continuation_note,
-    _durable_head_run,
-    _gate_attestation_for_prompt,
-    _head_runtime_name,
-    _legacy_worker_branch,
-    _record_worker_delivery_evidence,
-    _report_nudge_prompt,
-    _same_repo,
-    _watchdog_kind,
 )
 from ummanu.dispatch.launch import (
     REVIEW_ROLE,
@@ -105,14 +84,7 @@ from ummanu.dispatch.state import (
 )
 from ummanu.dispatch.tick_telemetry import tick_count, tick_stage, tick_stage_entering
 from ummanu.dispatch.types import (
-    STOPPED_BY_DISPATCHER,  # noqa: F401  # Public compatibility re-export.
-    STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
-    STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REPLACEMENT,
-    STOPPED_BY_REVIEW_FREEZE,  # noqa: F401  # Public compatibility re-export.
-    STOPPED_BY_REVIEW_VERDICT,  # noqa: F401  # Public compatibility re-export.
-    STOPPED_BY_WATCHDOG,  # noqa: F401  # Public compatibility re-export.
-    DispatcherError as DispatcherError,
     HostError,
 )
 from ummanu.dispatch.wait_cards import advance_wait_card as _advance_wait_card

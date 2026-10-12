@@ -259,7 +259,6 @@ class ProviderCursorTests(unittest.TestCase):
 
         # Stagnation is the reducer's conclusion over time; one reading cannot see it.
         self.assertEqual(snapshot.progress, ProgressState.QUIET)
-        self.assertNotEqual(snapshot.progress, ProgressState.STAGNANT)
         self.assertEqual(snapshot.cursor, "12:abc")
 
     def test_the_first_observation_of_a_source_has_no_progress_opinion_yet(self) -> None:

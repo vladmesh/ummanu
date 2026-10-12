@@ -41,9 +41,7 @@ from ummanu.board.sprint_close import (
 from ummanu.board.sprint_read import (
     BUDGET_EVENT_TYPES,
     BUDGET_RECORDED_EVENT_TYPES,
-    BUDGET_UNCHARGED_EVENT_TYPES as BUDGET_UNCHARGED_EVENT_TYPES,
     BUDGET_UNCHARGED_FIELD,
-    BUDGET_UNCHARGED_INFRASTRUCTURE as BUDGET_UNCHARGED_INFRASTRUCTURE,
     RESUME_FIELDS,
     SprintBudget,
     SprintReadMetadata,

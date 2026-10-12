@@ -189,11 +189,12 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             )
             accepted = AcceptedGreenGate.accept(
                 receipt, current_sha=host.head_commit(_record()), gate_mode="github", noop=host.mode == "noop")
-            self.assertTrue(accepted.valid)
-            self.assertEqual(accepted.persisted_payload(), receipt)
+            self.assertTrue(accepted.policy_valid)
+            assert accepted.receipt is not None
+            self.assertEqual(accepted.receipt.as_dict(), receipt)
             missing = AcceptedGreenGate.accept(
                 None, current_sha=host.head_commit(_record()), gate_mode="github", noop=host.mode == "noop")
-            self.assertFalse(missing.valid)
+            self.assertFalse(missing.policy_valid)
 
     def test_gate_is_fenced_before_and_after_backend_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

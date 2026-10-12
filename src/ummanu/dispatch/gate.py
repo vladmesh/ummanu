@@ -245,7 +245,7 @@ verdicts stay ordinary GateResult outcomes.
         # `none` is an explicit absence of mechanical validation, not an all-green check set.
         return GateResult("green", "ci none: mechanical gate skipped")
     if ci == "local":
-        return _local_gate(host, task, record, workspace)
+        return _local_gate(host, task, workspace)
     if ci == "github":
         return _github_gate(host, task, record, workspace, base, _required_checks(host, task))
     raise HostError(f"unsupported validation ci mode {ci!r}; expected local, github or none")
@@ -368,7 +368,7 @@ def _recover_base(host, workspace: str, base: str, project: str) -> str:
     return "recovered"
 
 
-def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
+def _local_gate(host, task: dict, workspace: str) -> GateResult:
     command = _validation(host, task).get("command")
     if not isinstance(command, str) or not command.strip():
         raise HostError("local validation has no command")

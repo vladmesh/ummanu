@@ -29,14 +29,8 @@ class RecoveryIntent(StrEnum):
     NUDGE = "nudge"
     #: Send SIGCONT to the head's process group, identity-fenced at send time. Wired.
     SIGCONT = "sigcont"
-    #: Ask the current head to finish and hand over cleanly. Unwired.
-    REQUEST_DRAIN = "request_drain"
     #: Escalate to a human, touching nothing. Wired.
     ESCALATE_OPERATOR = "escalate_operator"
-    #: Start a fresh head of the same profile. Unwired.
-    RESPAWN = "respawn"
-    #: Stop admitting work to this head entirely. Unwired.
-    BLOCK = "block"
 
 
 #: The rungs :func:`decide_recovery` actually climbs this card. Named constants so tests,

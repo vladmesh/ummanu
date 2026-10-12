@@ -16,9 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu.dispatch import pause as dispatcher_pause
-from ummanu.runtime import launch_prefix, paths
-from ummanu.runtime import role_env as runtime_role_env
-from ummanu.runtime import resource_probe as health
+from ummanu.runtime import launch_prefix, paths, resource_probe as health, role_env as runtime_role_env
 
 
 class PortableDefaultTests(unittest.TestCase):
@@ -55,14 +53,14 @@ class PortableDefaultTests(unittest.TestCase):
 class LauncherCheckoutTests(unittest.TestCase):
     """Which checkout a launched process imports the product from.
 
-    All three launchers answer the same question and have to answer it the same way: the explicit
+    The launchers answer the same question and have to answer it the same way: the explicit
     ``TA_RUNTIME_PYTHONPATH``, then the checkout the installation is configured with, then a home
     default. A launcher that skipped the configured name would start an installation materialized
     from an alternate checkout out of ``~/ummanu`` — a version nobody upgraded, or nothing.
     """
 
     SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-    LAUNCHERS = ("ummanu-agent-gate.sh", "ummanu-start.sh")
+    LAUNCHERS = ("ummanu-agent-gate.sh",)
 
     def script_pythonpath(self, script: str, env: dict[str, str]) -> str:
         """Run the shipped PYTHONPATH assignment itself, in a shell with only this environment."""

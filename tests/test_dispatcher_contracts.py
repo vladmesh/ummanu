@@ -1536,8 +1536,6 @@ class PerProfileRuntimeTests(unittest.TestCase):
         for subject in (legacy, ORCA_LEGACY_RUNTIME, None):
             with self.subTest(subject=subject), self.assertRaisesRegex(HostError, "legacy Orca record"):
                 host.head_runtime_for(subject)
-        with self.assertRaisesRegex(HostError, "legacy Orca record"):
-            host.head_runtime  # noqa: B018
         self.assertIsInstance(host.head_runtime_for(supervised), LocalPtyHeadRuntime)
         self.assertIs(
             host.head_runtime_for(supervised),

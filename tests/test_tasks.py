@@ -5735,26 +5735,6 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipFixture):
 
 
 class LegacyTaskCodecTests(unittest.TestCase):
-    def test_reader_and_restore_share_legacy_task_codec(self) -> None:
-        import importlib
-
-        from ummanu.board import legacy_codec
-
-        restore = importlib.import_module("ummanu.restore")
-
-        self.assertIs(tasks._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
-        self.assertIs(tasks._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
-        self.assertIs(tasks._text, legacy_codec.text)
-        self.assertIs(tasks._positive_int, legacy_codec.positive_int)
-        self.assertIs(tasks._nonnegative_int, legacy_codec.nonnegative_int)
-        self.assertIs(tasks._null_if_empty, legacy_codec.null_if_empty)
-        self.assertIs(tasks._split_heads, legacy_codec.split_heads)
-        self.assertIs(tasks._enum_or_default, legacy_codec.enum_or_default)
-        self.assertIs(tasks._enum_or_none, legacy_codec.enum_or_none)
-        self.assertIs(restore._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
-        self.assertIs(restore._positive_int, legacy_codec.positive_int)
-        self.assertIs(restore._enum_or_default, legacy_codec.enum_or_default)
-
     def test_legacy_task_codec_preserves_released_normalization(self) -> None:
         from ummanu.board import legacy_codec
 

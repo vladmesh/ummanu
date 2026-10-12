@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Protocol
 
 from ummanu.board.marker_payload import MarkerPayload, marker_payload_from_data
 from ummanu.board.models import (
@@ -151,7 +150,7 @@ class TransitionRequest:
 
     def __post_init__(self) -> None:
         if not isinstance(self.data, dict):
-            raise ValueError("transition data must be an object")
+            raise ValueError("transition data must be an object")  # noqa: TRY004 - preserve the validation error contract
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -212,19 +211,3 @@ class MutationResult:
     entity: BoardEntity
     event: Event
     replayed: bool = False
-
-
-class BoardHost(Protocol):
-    """The protocol seam.  Its values never expose backend row dictionaries."""
-
-    def read(self, kind: EntityKind, ref: EntityRef) -> BoardEntity: ...
-
-    def list(self, kind: EntityKind) -> Sequence[BoardEntity]: ...
-
-    def create(self, operation: Create) -> MutationResult: ...
-
-    def replace(self, operation: Replace) -> MutationResult: ...
-
-    def transition(self, operation: TransitionRequest) -> MutationResult: ...
-
-    def marker_comment(self, operation: MarkerComment) -> MutationResult: ...

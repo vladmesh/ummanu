@@ -22,6 +22,7 @@ from unittest import mock
 from tests.fakes.review_packet import marker_event
 from ummanu._fsutil import file_lock, try_file_lock, write_json
 from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
+from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.checkpoint import CheckpointResult
 from ummanu.cli import main as task_main
 from ummanu.dispatch import (
@@ -190,7 +191,7 @@ from ummanu.runtime.prompt_document import (
     PromptDocumentError,
 )
 from ummanu.runtime.tui_delivery import DeliveryEvidence
-from ummanu.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, instance_open_sprint_limit
+from ummanu.sprints import instance_open_sprint_limit
 from ummanu.task_commands import _read_body
 from ummanu.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 
@@ -12812,7 +12813,7 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
                 mock.patch.object(writer.audit, "pending_event", wraps=writer.audit.pending_event) as pending,
             ):
                 outcome = release_lifecycle.release_parked(
-                    runtime, task, record, {task["ref"]: record}, {}, "attempt-1", reason="approved"
+                    runtime, task, record, {task["ref"]: record}, {}, "attempt-1",
                 )
 
             head = git(workspace, "rev-parse", "HEAD")

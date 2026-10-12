@@ -143,7 +143,7 @@ def accept_green_gate(
         gate_mode=_validation_ci(runtime.host, task),
         noop=getattr(runtime.host, "mode", "real") == "noop",
     )
-    if not accepted.valid:
+    if not accepted.policy_valid:
         if stage == "initial":
             return _block_missing_gate_receipt(runtime, task, record, records, payload, attempt_id)
         step = "assessment" if stage == "release" else "review"

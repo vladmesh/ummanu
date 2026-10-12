@@ -511,7 +511,7 @@ def _escalate_unobservable_wait(
     }
 
 
-def _recovery_thresholds(runtime: Any) -> Any:
+def _recovery_thresholds() -> Any:
     """This installation's recovery-policy thresholds, read per call.
 
     The response window comes from the watchdog's env knob so operations can tighten it
@@ -524,10 +524,8 @@ def _recovery_thresholds(runtime: Any) -> Any:
 
 
 def _recovery_policy_decision(
-    runtime: Any,
     episode: Any,
     *,
-    kind: str,
     now: float,
 ) -> tuple[Any, Any] | None:
     """Ask the policy what this tick should intend, and persist its rung state.
@@ -538,7 +536,7 @@ def _recovery_policy_decision(
     """
     if episode is None:
         return None
-    decision = _decide_recovery(episode, episode, now, _recovery_thresholds(runtime))
+    decision = _decide_recovery(episode, episode, now, _recovery_thresholds())
     # An observe with unchanged state rewrites nothing: persisting per tick would churn
     # the record for zero information. Only a rung/refusal change is worth a save.
     if decision.intent is _RecoveryIntent.OBSERVE and (
@@ -582,7 +580,7 @@ def recovery_policy_outcome(
     Used on arms that only escalate (the deterministic-refusal fast path): ``None``
     means "no escalation earned, carry on with the caller's own logic".
     """
-    asked = _recovery_policy_decision(runtime, episode=episode, kind=kind, now=now)
+    asked = _recovery_policy_decision(episode=episode, now=now)
     if asked is None:
         return None
     decision, updated = asked
@@ -603,7 +601,6 @@ def recovery_policy_outcome(
         attempt_id,
         kind=kind,
         decision=decision,
-        now=now,
     )
 
 
@@ -633,7 +630,7 @@ def _run_recovery_policy(
     a foreign-run episode the destructive guard refuses as FOREIGN_RUN until some later
     ordinary reduction overwrites it, and a rung that never resets on the real subject.
     """
-    asked = _recovery_policy_decision(runtime, episode=episode, kind=kind, now=now)
+    asked = _recovery_policy_decision(episode=episode, now=now)
     if asked is None:
         return
     _, updated = asked
@@ -674,7 +671,7 @@ def execute_recovery_intent(
       destructive step on a Suspended verdict regardless; this path simply never asks.
     """
     ref = task["ref"]
-    asked = _recovery_policy_decision(runtime, episode=episode, kind=kind, now=now)
+    asked = _recovery_policy_decision(episode=episode, now=now)
     if asked is None:
         return {
             "status": "degraded",
@@ -688,7 +685,7 @@ def execute_recovery_intent(
     _store_recovery_episode(runtime, record, records, payload, ref, kind=kind, episode=updated)
     step = "review" if kind == "review" else "advance"
     if decision.intent is _RecoveryIntent.SIGCONT:
-        sent = _sigcont_head(runtime, task, record, kind=kind, now=now)
+        sent = _sigcont_head(runtime, task, record, kind=kind)
         body = (
             f"Vitality ({kind}): the head's process is parked on a stop signal "
             f"(suspended since {time.strftime('%H:%M:%S', time.gmtime(decision.detail['span_started_at']))}). "
@@ -757,7 +754,6 @@ def _sigcont_head(
     record: DispatcherRecord,
     *,
     kind: str,
-    now: float = 0.0,
 ) -> bool:
     """Send SIGCONT to this role's head process group, identity-fenced at send time.
 
@@ -849,7 +845,6 @@ def _escalate_recovery_to_operator(
     *,
     kind: str,
     decision: Any,
-    now: float = 0.0,
 ) -> dict[str, Any]:
     """Escalate a deterministic terminal refusal class to the operator, touching nothing.
 
@@ -891,7 +886,6 @@ def _escalate_recovery_to_operator(
 
 
 def _vitality_guard_decision(
-    runtime: Any,
     record: DispatcherRecord,
     *,
     kind: str,
@@ -917,12 +911,9 @@ def _guard_or_wait(
     runtime: Any,
     task: dict[str, Any],
     record: DispatcherRecord,
-    records: dict[str, DispatcherRecord],
-    payload: dict[str, Any],
     attempt_id: str,
     *,
     kind: str,
-    now: float,
     action: str,
     proceed: Callable[[], dict[str, Any]],
     current_run_id: str = "",
@@ -935,7 +926,7 @@ def _guard_or_wait(
     outcome carries it, and the durable comment is written once per cycle (keyed on
     the wait-cycle token, like every other watchdog comment).
     """
-    decision = _vitality_guard_decision(runtime,
+    decision = _vitality_guard_decision(
         record,
         kind=kind,
         action=action,
@@ -1216,11 +1207,8 @@ def _trigger_wait_watchdog(
     return _guard_or_wait(runtime,
         task,
         record,
-        records,
-        payload,
         attempt_id,
         kind=kind,
-        now=time.time(),
         action=action,
         proceed=lambda: (
             _respawn_wait(runtime,
