@@ -364,8 +364,7 @@ By default an operation touches no production; a sprint allows its operations th
 at create ([`allowed_productions`](#the-sprints-po-session-and-productions)), and the ones its PO allows
 later with `sprint allow-production` (below). The rule is evaluated in one place: the PO service's
 handling of a dispatcher submit (`PoService.submit`), after the request id is reserved and the session
-found open. Neither the dispatcher nor the web evaluates it. It refuses nothing and hands nothing over
-(secretary-1769): every operation card becomes a normal PO turn, and the rule only decides what that
+found open. Neither the dispatcher nor the web evaluates it. It refuses nothing and hands nothing over: every operation card becomes a normal PO turn, and the rule only decides what that
 turn's input says. On a submit whose facts say `kind: operation`, `input: card`, the service queues the
 input with a **rights section** (`## Production rights (the PO service)`) that the turn's prompt, and
 the session's feed, carry after the dispatcher's text:
@@ -500,7 +499,7 @@ Every card of the sprint that waits on the PO, the owner or a run, current or no
 
 ### Wait cards
 
-A `wait` card (secretary-1790) waits for one external or board fact with no head and delivers its
+A `wait` card waits for one external or board fact with no head and delivers its
 outcome to the return addresses its creator named, exactly once. The dispatcher advances it once per
 tick; there is no watcher process, background job or queue, and everything the wait knows is on the
 card, so a restarted dispatcher (or PO service) continues where the last one stopped. It is a
@@ -660,7 +659,7 @@ records, and ends the same way at once: a wait is not restarted; cut a new one.
 A PO turn is a conversation with the owner. Work that would take longer than about a minute, or read
 more than about ten files, becomes a card the PO cuts (the rule its instructions state,
 `packaging/po-workspace/AGENTS.md`), and the card's result comes back to the session that cut it as a
-new input (secretary-1792). Nothing waits in the turn, and a background job is not a way to wait: a
+new input. Nothing waits in the turn, and a background job is not a way to wait: a
 long wait is a [wait card](#wait-cards).
 
 **Origin.** `task create --role po` inside a PO turn records the card's origin: the turn's session
@@ -1128,10 +1127,10 @@ boundary once; `unavailable`, malformed and stale-handle evidence keep their own
 
 ### Provider failure of a head's turn
 
-Every role keeps working when one subscription is down (ummanu-108): a role's default profile is
+Every role keeps working when one subscription is down: a role's default profile is
 only the first one to try. A worker, reviewer, observer, standing automation or PO turn that ends on a
 provider error has failed on its provider. That is a provider verdict, not a stall
-(`src/ummanu/dispatch/provider_failure.py`, first written for secretary-1799). The provider errors in
+(`src/ummanu/dispatch/provider_failure.py`). The provider errors in
 scope are a spent subscription (Codex `codex_error_info: usage_limit_exceeded`, "You've hit your usage
 limit ... try again at Oct 9th, 2026 9:11 PM"; Claude "You've hit your weekly limit · resets 1am
 (UTC)", "5-hour limit reached"), an HTTP 401/403, a 429, any 5xx (529 included), and a connection the
@@ -1501,7 +1500,7 @@ are the dialogue of an attempt; the spec lives only in the description.
 ## The e2e stage
 
 A project may declare one end-to-end check: a GitHub Actions workflow the dispatcher dispatches on a
-`code` card's candidate and waits for through a [wait card](#wait-cards) (secretary-1795). The stage
+`code` card's candidate and waits for through a [wait card](#wait-cards). The stage
 is `dispatch/e2e_stage.py`; the declaration and the GitHub calls are `dispatch/e2e.py`.
 
 **Declaration.** In the adapter, beside the gate:
@@ -1558,7 +1557,7 @@ The stage proceeds only on a SHA with a green run of its own, or one reconciled 
 
 A base-only move does not invalidate an e2e result for the card's own change, as it does not invalidate
 a review; CI still gates the new SHA. This avoids re-paying a long run for every base move on an active
-main (the observer's decision, secretary-1795).
+main.
 
 **Dispatch identity.** The card's `e2e` field (`extensions.extra.e2e`, JSON, written only by the
 dispatcher through `TaskWriter.record_e2e_state`; no column, no migration) is the stage's record: one
@@ -1636,7 +1635,7 @@ A declaration the stage cannot read Blocks the card as `gate`.
 ### The e2e run budget
 
 Every e2e run pays for stands (BitLaunch machines), `mega-noop` included, so runs are budgeted
-(secretary-1796; `board/e2e_budget.py`). The budget replaces the interim per-card cap of 3 for every
+(`board/e2e_budget.py`). The budget replaces the interim per-card cap of 3 for every
 card of a sprint.
 
 **The budget.** A sprint carries `e2e_budget`, the runs it may dispatch (`sprint create --e2e-budget N`,
@@ -1748,7 +1747,7 @@ run `sha`, `dispatch_id`, `workflow`, `state` (`dispatching`, `identifying`, `wa
 Some e2e workflows can only run on a commit whose releases the post-merge CI of `main` published: the
 Codegen mega's `stand-e2e.yml` waits for the worker and service releases of its exact SHA, and codegen
 publishes them only on a push to `main`. Its candidate branch never has them. A project declares that with
-`placement: after_merge` (secretary-1807, the PO's decision secretary-1805; `dispatch/e2e_after_merge.py`).
+`placement: after_merge` (`dispatch/e2e_after_merge.py`).
 
 **No stage before the merge.** A card of such a project never runs the stage above: it goes through
 review, Assessment and release as a card of a project with no e2e.
@@ -2183,10 +2182,10 @@ issues:
     actual: duplicate
     reason: another PO closed it as a duplicate while this sprint ran
 cards:
-  - ref: secretary-1400
+  - ref: project-1
     verdict: drop              # done | drop
     reason: superseded by the next sprint's cut
-  - ref: secretary-1401
+  - ref: project-2
     verdict: already_moved     # somebody else took it there; name the state it is in
     actual: ready
     reason: its own head put it back in Ready before the close got to it
@@ -2836,6 +2835,20 @@ carries the head that earned it.
 
 Reader: `ummanu.routing_journal.attempts(events, ref)` returns a finished card's attempts with heads
 and outcome. These events travel in the recovery checkpoint with the rest of the event log.
+
+### Outcome lineage
+
+Worker and reviewer launches create a durable round handoff. The dispatcher adds the exact report,
+verdict and decision event identities as it consumes each source. The terminal transition reads
+that handoff to freeze the specification revision, sources, taxonomy and usage identities into
+its durable `attempt_outcome_owed` record. Recovery publishes only that record; it never reopens
+a card or infers a link from a request id, comment, timestamp or journal order.
+
+When a worker report is accepted, the dispatcher persists the typed terminal path
+(`outcome_terminal_path`) before looking up that report's event. Validate, gate, reviewer launch,
+reviewer wait and post-gate terminal all read that path. A missing report handoff stays a named
+incomplete lineage obligation; it cannot become a path claiming no report was consumed.
+The resulting record follows [Attempt outcome ledger v1](#attempt-outcome-ledger-v1).
 
 ### Attempt outcome ledger v1
 
@@ -4273,7 +4286,7 @@ observer claim.
 **`waiting_on`** is what the sprint waits for, beside `waiting` (which is about the current card only): a
 list of `{kind, card, detail}`, one entry per waiting live card of the sprint, derived at read time from
 the sprint's cards in the Pipeline listing and nothing else -- no dispatcher record, no journal, nothing
-stored (secretary-1811). It is a list rather than a section; the document's `cards` mark is its source.
+stored. It is a list rather than a section; the document's `cards` mark is its source.
 `kind` is exactly one of:
 
 | kind | a card of the sprint that is | `detail` |
@@ -4749,7 +4762,7 @@ moves a research report into `state/knowledge/reports/<card ref>/`.
 
 ```bash
 python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
-  --path reports/secretary-1640 --dir REPORT_DIR
+  --path reports/project-1 --dir REPORT_DIR
 ```
 
 Refused with code 2 before anything is written: a missing source or one with no files; a symlink,

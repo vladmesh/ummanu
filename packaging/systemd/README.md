@@ -82,3 +82,8 @@ absent. The board projection holds `board-bulk.lock` shared during its SQL read-
 READ cut, including metadata, comments, audit and sprints; publication and Git run after release.
 The instance repository writer lock continues to protect commit publication. The component is
 enabled when omitted, so upgrade installs both units for existing instances.
+
+`ummanu-doctor.timer` runs `ummanu-doctor.service` 30 seconds after boot and 60 seconds after the
+previous activation ends. The service runs `ummanu doctor-record` to persist the health report
+read by status and web views; it launches no head. The collector has a 40-second bound and the
+unit a 50-second timeout, including publication and cleanup.

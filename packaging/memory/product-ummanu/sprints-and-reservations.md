@@ -5,7 +5,7 @@ title: Sprints, products, and project reservations
 
 A sprint is a separate durable entity, identified as `sprint:ID`. It records a goal, Definition of Done, product and issues it serves, reserved projects, and its open, stopped, or closed status. `ummanu sprint show` is the authoritative view of that contract.
 
-An execution card belongs to an open sprint. An open sprint reserves its projects so that work proceeds under one visible plan rather than through competing writers. Create and modify sprint-linked work through the role and workflow assigned to that sprint; a PO override is an explicit, audited exception.
+The PO may create, move and edit a `code`, `research` or `infra` card outside a sprint without an override, even on a reserved project. The dispatcher decides admission: `research` and `infra` may run on any project; out-of-sprint `code` requires no open sprint to reserve its project. Sprint-linked work follows that sprint's role and workflow; a PO override is an explicit, audited exception.
 
 An optional observer follows sprint-level progress and decisions. It does not replace the worker or reviewer, and it does not claim cards. A stopped or closed sprint is not permission to continue changing its old card contract: start or reopen the appropriate planned work through the normal protocol.
 

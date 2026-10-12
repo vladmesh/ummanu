@@ -21,7 +21,7 @@ from ummanu.runtime.head import HeadRun
 from ummanu.runtime.tui_delivery import DeliveryEvidence
 
 # ``VitalityEpisode`` is imported lazily in ``DispatcherRecord.from_json``: the episode module
-# reads the heartbeat vocabulary from ``dispatcher_watchdog``, whose own imports reach back into
+# reads the heartbeat vocabulary from ``watchdog``, whose own imports reach back into
 # this module, so an eager import here would close a cycle at load time. A deferred import keeps
 # the record's typed persistence without making the state module an ancestor of the vocabulary.
 
@@ -1309,7 +1309,7 @@ def _vitality_episode_from_json(payload: Any) -> VitalityEpisode:
     """Load one persisted vitality episode, importing its module lazily.
 
     See the import note at the top of this module: the episode vocabulary sits above
-    ``dispatcher_watchdog`` in the dependency order, so the record reads it at call time instead
+    ``watchdog`` in the dependency order, so the record reads it at call time instead
     of at load time.
     """
     from ummanu.dispatch.head_vitality_episode import VitalityEpisode

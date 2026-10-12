@@ -17,7 +17,7 @@ Everything §3 constrains is declared here, including the parts an ORM does not 
 * §3.3's two scoped sprint cursors are `DEFERRABLE INITIALLY DEFERRED` composite foreign keys,
   and every constraint §3.13 defers to step 2 carries ``use_alter=True`` so it is emitted as an
   ``ALTER TABLE`` after the tables exist, exactly as §3.13 orders it;
-* the eight `jsonb` columns are the eight §3.10 names and no others.
+* the eleven `jsonb` columns are the eleven §3.10 names and no others.
 
 Revision `0002_board_gaps` moved four things here, each named by the import run of
 `secretary-1583` on the live board (2026-09-07) that found it: `issue_comments` (479 comments on
