@@ -387,6 +387,51 @@ def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
             pass
 
 
+def record_incident(telemetry: dict[str, Any], entry: dict[str, Any]) -> None:
+    """Fold one tick into the open incident, closing it when the tick is healthy again.
+
+    An incident is one continuous run of unhealthy ticks: the tick that finds none open opens one and
+    bumps `incident_total`, every unhealthy tick after it extends that record, and the first healthy
+    tick closes it into `recovery` and bumps `recovery_total`. Both counters are monotonic within a
+    generation, because a reader dedupes on them and a counter that can go down would let a later
+    event consume an earlier one the reader has not seen.
+
+    The tick that opened the incident is kept whole under `opened`, so its cause survives into the
+    recovery record.
+    """
+    incident = telemetry.get("incident")
+    incident = dict(incident) if isinstance(incident, dict) else None
+    if entry["healthy"]:
+        if incident:
+            telemetry["recovery"] = {
+                **incident,
+                "recovered_seq": entry["seq"],
+                "recovered_at": entry["at"],
+                "recovered_status": entry["status"],
+            }
+            telemetry["recovery_total"] = _counter(telemetry.get("recovery_total")) + 1
+            incident = None
+    elif incident:
+        incident["unhealthy_ticks"] = _counter(incident.get("unhealthy_ticks")) + 1
+        incident["last_seq"] = entry["seq"]
+        incident["last_at"] = entry["at"]
+    else:
+        incident = {
+            "id": uuid.uuid4().hex,
+            "opened_seq": entry["seq"],
+            "opened_at": entry["at"],
+            "last_seq": entry["seq"],
+            "last_at": entry["at"],
+            "unhealthy_ticks": 1,
+            "opened": entry,
+        }
+        telemetry["incident_total"] = _counter(telemetry.get("incident_total")) + 1
+    telemetry["incident"] = incident
+    telemetry.setdefault("recovery", None)
+    telemetry.setdefault("incident_total", _counter(telemetry.get("incident_total")))
+    telemetry.setdefault("recovery_total", _counter(telemetry.get("recovery_total")))
+
+
 def _record_refusal_telemetry(payload: dict[str, Any], provenance: RuntimeProvenance) -> None:
     """Write the existing terminal-tick shape so health and steward stay the only readers."""
     telemetry = payload.get("tick_telemetry")
@@ -418,26 +463,7 @@ def _record_refusal_telemetry(payload: dict[str, Any], provenance: RuntimeProven
     unhealthy.append(entry)
     telemetry["unhealthy"] = unhealthy[-_UNHEALTHY_KEPT:]
     telemetry["unhealthy_total"] = _counter(telemetry.get("unhealthy_total")) + 1
-    incident = telemetry.get("incident")
-    incident = dict(incident) if isinstance(incident, dict) else None
-    if incident:
-        incident["unhealthy_ticks"] = _counter(incident.get("unhealthy_ticks")) + 1
-        incident["last_seq"] = seq
-        incident["last_at"] = entry["at"]
-    else:
-        incident = {
-            "id": uuid.uuid4().hex,
-            "opened_seq": seq,
-            "opened_at": entry["at"],
-            "last_seq": seq,
-            "last_at": entry["at"],
-            "unhealthy_ticks": 1,
-            "opened": entry,
-        }
-        telemetry["incident_total"] = _counter(telemetry.get("incident_total")) + 1
-    telemetry["incident"] = incident
-    telemetry.setdefault("recovery", None)
-    telemetry.setdefault("recovery_total", _counter(telemetry.get("recovery_total")))
+    record_incident(telemetry, entry)
     payload["tick_telemetry"] = telemetry
 
 

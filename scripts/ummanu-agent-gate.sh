@@ -8,10 +8,11 @@
 # `python3 -P -m ummanu automations`, whose composition root injects the board ports; see
 # each agent's cli.py under src/ummanu/automations and ummanu/runtime/state.py PRECHECK_SKIP):
 #   0              -> there is work: exec the dispatch, the head wakes up.
-#   100            -> deliberate skip (nothing changed / paused): no new skill dispatch. The gate
-#                     still runs `dispatch --cleanup-only`, which is a no-op exit 0 for every agent
-#                     since the pane lifecycle it tore down was deleted (secretary-1720); the call
-#                     stays so the installed units and this gate need no change.
+#   100            -> deliberate skip (nothing changed / paused): exit successfully, no dispatch.
+#                     The gate used to follow with `dispatch --cleanup-only`, a no-op exit 0 for
+#                     every agent since the pane lifecycle it tore down was deleted
+#                     (secretary-1720), at the cost of one more interpreter per quiet tick
+#                     (ummanu-239). The flag is still accepted for manual callers.
 #   101            -> the board refused the connection for the client's whole retry window: nothing
 #                     was evaluated, so the tick is deferred rather than answered. This gate waits
 #                     and re-runs the precheck a bounded number of times before giving up with 101.
@@ -128,7 +129,7 @@ if [ "$rc" -eq 0 ]; then
     exec_role_env "$managed_python" -P "${role_command[@]}" "$agent" dispatch
 elif [ "$rc" -eq 100 ]; then
     echo "[ta-$agent] precheck: no change, skill dispatch skipped"
-    exec_role_env "$managed_python" -P "${role_command[@]}" "$agent" dispatch --cleanup-only
+    exit 0
 elif [ "$rc" -eq 101 ]; then
     # No dispatch and no cleanup: both talk to the same board none of the attempts could reach.
     echo "[ta-$agent] precheck: board unreachable after $board_attempts attempts; run not taken" >&2

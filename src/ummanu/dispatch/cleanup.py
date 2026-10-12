@@ -360,19 +360,7 @@ def _registered(repo: Path) -> list[dict[str, str]]:
     result = _read_git(repo, "worktree", "list", "--porcelain", "-z")
     if result.returncode:
         raise HostError("cleanup worktree registrations are unreadable")
-    rows: list[dict[str, str]] = []
-    row: dict[str, str] = {}
-    for item in result.stdout.split("\0"):
-        if not item:
-            if row:
-                rows.append(row)
-                row = {}
-        else:
-            key, _, value = item.partition(" ")
-            row[key] = value
-    if row:
-        rows.append(row)
-    return rows
+    return git_worktree.parse_list(result.stdout)
 
 
 # Any of these naming a value means a head may have run for the attempt.

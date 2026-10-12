@@ -62,8 +62,6 @@ from ummanu.dispatch.observer_state import (
 )
 from ummanu.dispatch.post_merge import render_fact, wake_facts
 from ummanu.dispatch.tui import (
-    COMPOSER_EMPTY,
-    COMPOSER_UNKNOWN,
     READINESS_BUSY,
     delivery_readiness_state,
 )
@@ -80,6 +78,7 @@ from ummanu.dispatch.worker_lifecycle import (
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
     head_run_binding,
+    residual_composer_class,
 )
 from ummanu.infra.env import positive_int
 from ummanu.role_skills import skill_delivery
@@ -1258,19 +1257,7 @@ def _observer_no_progress_evidence(record: ObserverRecord, status: dict[str, Any
     )
     if str(evidence.get("reason") or "") == "payload-left-in-composer":
         return "completed_turn_residual_composer"
-    composer_before = str(evidence.get("composer_before") or "")
-    composer_after = str(evidence.get("composer_after") or "")
-    cursor_before = str(evidence.get("cursor_before") or "")
-    cursor_after = str(evidence.get("cursor_after") or "")
-    if (
-        composer_before
-        and composer_before == composer_after
-        and composer_before not in {COMPOSER_EMPTY, COMPOSER_UNKNOWN}
-        and cursor_before
-        and cursor_before == cursor_after
-    ):
-        return "completed_turn_residual_composer"
-    return "active_or_unknown_turn"
+    return residual_composer_class(evidence)
 
 
 def _replace_observer_for_no_progress(

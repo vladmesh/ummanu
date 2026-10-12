@@ -31,8 +31,10 @@ from typing import Any
 
 from ummanu import _proc, role_skills, state_repo
 from ummanu.board.migrate import migrate_instance
-from ummanu.board.provision import provision as provision_board_store
-from ummanu.board.provision import verify_roles as verify_board_store_roles
+from ummanu.board.provision import (
+    provision as provision_board_store,
+    verify_roles as verify_board_store_roles,
+)
 from ummanu.board.store import BoardStoreError, ensure_ignored, store_path
 from ummanu.config import DataDirError, validate_instance
 from ummanu.dispatch import entrypoint_guard
@@ -67,6 +69,7 @@ from ummanu.host_apply import (
     resolve_packaged,
     resolve_runtime_owner,
 )
+from ummanu.infra import git_worktree
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.client_config import (
     CODEX_HOME_SEEDED_FILES,
@@ -76,9 +79,7 @@ from ummanu.memory.client_config import (
 )
 from ummanu.memory.health import MemoryProbeError, probe_memory
 from ummanu.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
-from ummanu.po import client as po_client
-from ummanu.po import token as po_token
-from ummanu.po import workspace as po_workspace
+from ummanu.po import client as po_client, token as po_token, workspace as po_workspace
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import interactive_workspace
 from ummanu.runtime.paths import add_instance_argument, component_enabled, configured_product_root
@@ -87,14 +88,8 @@ from ummanu.web.health import WebProbeError, probe_web, target_from_unit
 from ummanu.web.server import LoopbackOnly
 from ummanu.webfront.commands import (
     CONFIG_NAME as WEB_FRONT_CONFIG_NAME,
-)
-from ummanu.webfront.commands import (
     FRONT_DIRNAME as WEB_FRONT_DIRNAME,
-)
-from ummanu.webfront.commands import (
     SITES_SETTING as WEB_FRONT_SITES_SETTING,
-)
-from ummanu.webfront.commands import (
     configured_sites,
     missing_sites_message,
 )
@@ -1215,9 +1210,9 @@ def _registered_worktree(product_root: Path, worktree: Path) -> bool:
     listing = _git(product_root, ["worktree", "list", "--porcelain"])
     wanted = worktree.resolve(strict=False)
     return any(
-        Path(line.removeprefix("worktree ")).resolve(strict=False) == wanted
-        for line in listing.splitlines()
-        if line.startswith("worktree ")
+        Path(row["worktree"]).resolve(strict=False) == wanted
+        for row in git_worktree.parse_list(listing)
+        if "worktree" in row
     )
 
 
