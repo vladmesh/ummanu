@@ -3,8 +3,8 @@
 Stands on the local-pty substrate (`head.local_pty`): a supervisor in its own session holding the
 head's pty, a Unix socket that answers without waiting for the head, and a versioned journal.
 `HEAD_BUSY`, `HEAD_DRAINING`, `HEAD_ALIVE` and `HEAD_GONE` mean what they mean on every backend; the
-shared contract suite runs against this one. See docs/HEAD_RUNTIME.md ("`local-pty` parity
-criteria", "Supervisor progress journal") and docs/HEAD_SCOPES.md.
+shared contract suite runs against this one. See docs/HEAD_RUNTIME.md ("The runtime default",
+"Supervisor progress journal") and docs/HEAD_SCOPES.md.
 
 Invariants:
 

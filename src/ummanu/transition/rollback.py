@@ -1,4 +1,4 @@
-"""`--rollback`: put the old installation back from the journal (`docs/RENAME.md` §T3, Rollback).
+"""`--rollback`: put the old installation back from the journal (`docs/RENAME.md` §T3).
 
 Each part acts only on what the journal or the rollback copies say the transition did, and each is
 idempotent, so an interrupted rollback is rerun. The order matters: the new units and the new store

@@ -235,8 +235,9 @@ loads and is shown as a legacy record, but no backend is built for it, so it is 
 delivered to. A dispatcher record from that time, one whose workspace is an Orca worktree or whose
 head run is a legacy record, is refused by every host verb (launch, delivery, stop, teardown) with
 one typed error, `LegacyDispatcherRecord`, before anything runs; the card goes Blocked with a reason
-naming the record. What an absent key means, the `local-pty` parity criteria and the A20 exit
-checklist are in [Head runtime](HEAD_RUNTIME.md).
+naming the record. Absent-key meanings are in
+[The runtime default](HEAD_RUNTIME.md#the-runtime-default); completed migration evidence is in
+[Orca migration history](HEAD_RUNTIME.md#orca-migration-history).
 
 - `LocalPtyHeadRuntime` runs a per-run supervisor that owns the process group, PTY, Unix socket and
   a versioned append-only journal. Delivery, drain and stop share one lock. The supervisor's status
@@ -544,7 +545,7 @@ the boundary.
   managed manifest or a product-written marker. Its kinds are project checkouts and systemd units.
   An `orca` record an older reconcile left in the managed manifest is kept, untouched (A20 step 8).
   A binding's `orca_binding` is optional legacy, read only by curator routing
-  ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)); new projects have none. Card placement
+  ([Head runtime](HEAD_RUNTIME.md#orca-migration-history)); new projects have none. Card placement
   never reads it.
 - Store-registered secrets reach the snapshot and the instance remote only as encrypted envelopes.
   The raw installation key, the recovery phrase and `runtime.env` are never exported. Facts, exports and diagnostics carry no

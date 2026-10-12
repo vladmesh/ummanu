@@ -149,7 +149,7 @@ class FakeBoard:
 
 
 class Installation:
-    """A fixture installation, laid out as the live host is (docs/RENAME.md §4-§6, §10)."""
+    """A fixture installation for the retained transition (docs/RENAME.md §T3)."""
 
     def __init__(self, root: Path, *, extra_revision: bool = False, extra_merge: bool = False,
                  rename: bool = True) -> None:

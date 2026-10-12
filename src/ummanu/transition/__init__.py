@@ -1,4 +1,4 @@
-"""The one-shot transition of this installation to the product's new name (`docs/RENAME.md` §T2-§T4).
+"""The one-shot transition of this installation to the product's new name (`docs/RENAME.md` §T3).
 
 Class T in §T5: with its shell bootstrap and its tests, the only code allowed to name the old
 product after the rename. It reaches the product only through relative imports of stable

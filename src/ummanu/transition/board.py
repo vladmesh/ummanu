@@ -1,4 +1,4 @@
-"""Board data across the rename (`docs/RENAME.md` §T2): dump, stop, restore, translate, count, and
+"""Board data across the rename (`docs/RENAME.md` §T3): dump, stop, restore, translate, count, and
 afterwards archive one Product (`products`).
 
 The product's recovery primitives are used by module, and every name is passed in: the old store
@@ -15,11 +15,13 @@ import stat
 from pathlib import Path
 from typing import Any
 
-from ..board import backend as board_backend
-from ..board import migrate as board_migrate
-from ..board import postgres_recovery
-from ..board import provision as board_provision
-from ..board import store as board_store
+from ..board import (
+    backend as board_backend,
+    migrate as board_migrate,
+    postgres_recovery,
+    provision as board_provision,
+    store as board_store,
+)
 from .context import TransitionError
 from .names import ADDED_ROWS, INSTANCE_PROJECT, UNCHANGED_TABLES, Names
 

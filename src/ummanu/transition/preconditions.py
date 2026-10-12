@@ -1,4 +1,4 @@
-"""Step 1: refuse unless the installation is ready to move (`docs/RENAME.md` §T3.1).
+"""Step 1: refuse unless the installation is ready to move (`docs/RENAME.md` §T3).
 
 Every check reads; none writes. `--plan` runs them as they are, `--apply` fetches `origin` first.
 """

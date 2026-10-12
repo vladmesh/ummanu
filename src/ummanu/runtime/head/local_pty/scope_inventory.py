@@ -1,7 +1,7 @@
 """Read-only projection of canonical scope owners, fenced to a native scope incarnation.
 
 Creates no files and takes only shared locks on existing owner locks; a retained owner alone does
-not prove a systemd unit still belongs to that launch. See docs/HEAD_RUNTIME.md "Runtime scopes in
+not prove a systemd unit still belongs to that launch. See docs/HEAD_SCOPES.md "Runtime scopes in
 host reconciliation".
 """
 
