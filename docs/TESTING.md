@@ -674,6 +674,11 @@ Timing rollout exposed four modules containing real integration work. Their asse
 fixtures are retained in CI: `test_docker_guard` executes installed role wrappers and native
 tool subprocesses in runtime-component; `test_owned_cleanup` and `test_bounded_cleanup_replay`
 exercise real Git, process termination, journals and runtime cleanup in integration-dispatcher;
-`test_measurement_script` runs loopback HTTP and real cadence waits in integration-board.
+`test_measurement_script` runs loopback HTTP in integration-board.
 The original component CI report observed a 94.627437s cleanup replay module, a 10.425188s
 guard test and an 18.513881s measurement test. The journal-layout component tests remain local.
+Since ummanu-240 the measurement module keeps the poll's three-second cadence and 100 ms
+tolerance on a virtual clock injected through the script's `CLOCK` seam: a case chooses whether a
+poll starts late, and the stub orders answers by events rather than sleeps. A virtual poll is
+released only after every earlier poll has read its start. One smoke case runs the real clock and
+asserts only scheduler-independent facts: program-order launch and no poll before its schedule.

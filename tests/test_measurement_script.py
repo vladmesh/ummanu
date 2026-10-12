@@ -7,8 +7,10 @@ and its table say the same thing. The measurements themselves run against a stub
 binds on loopback — the same hermetic rule the transport suite works under (`tests/README.md`): no
 live installation, no real Orca, no network.
 
-Hermetic in one more sense that matters for a timing script: the stub answers instantly, so a case
-that wants a slow answer says how slow, and no assertion here depends on how fast this host is.
+Hermetic in one more sense that matters for a timing script: the script's clock is a virtual one
+(`VirtualClock`), so a case that wants a slow answer or a late poll says how slow or how late, and
+no assertion here depends on how fast this host is. One smoke case runs the real clock and asserts
+no number from it (`RealClockSmokeTests`).
 """
 
 from __future__ import annotations
@@ -23,11 +25,12 @@ import re
 import sys
 import tempfile
 import threading
-import time
 import unittest
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from unittest import mock
 
 from ummanu.web.app import ROUTES
@@ -57,6 +60,143 @@ def _script() -> ModuleType:
 measure = _script()
 
 
+class VirtualClock:
+    """The script's :data:`CLOCK` for a case: time passes only where the case says it does.
+
+    Every reading moves time on by one microsecond, so no two readings are equal and their order is
+    the order they were taken in. Beyond that, time jumps in two places only. A stub answer with a
+    decided cost (`advance`) moves it, and is allowed only outside the poll phase, where nothing is
+    scheduled. And a poll falls due only when something waits for it — a round armed, or a held
+    round asking for the poll after the one that launched it — and only once every poll released
+    before it has read its own start (`poll_started`). Then time jumps to that poll's schedule plus
+    the lateness the case chose for its slot (`late`). So the offset a poll records is the case's
+    decision, to the microsecond, however long this host takes to wake a thread: the flake this
+    replaces was a runner starting the poll thread 143 ms late against a 50 ms token cadence. The
+    start confirmation is what keeps that true when a poll's thread is the slow one: without it,
+    a later slot could move time on before the earlier poll read the clock.
+
+    It also counts what the stub's holds are keyed on, per run: polls released, poll reads and round
+    requests that reached the stub. A hold waits on those counts, never on a duration.
+    """
+
+    TICK = 1e-6
+    #: Real-time bound on a hold or a settle, in 5 ms waits: a broken ordering fails, never hangs.
+    PATIENCE = 2000
+
+    def __init__(self) -> None:
+        #: Seconds poll `slot` starts after its schedule; negative is early.
+        self.late: Callable[[int], float] = lambda _slot: 0.0
+        self.dues: list[float] = []
+        self.fired = 0
+        #: Released polls whose thread has read its start off this clock.
+        self.started = 0
+        #: The slot the timer is waiting to release, while it waits.
+        self.waiting_slot: int | None = None
+        #: The slot that launches the latest armed round, and the round requests seen before it.
+        self.round_slot = 0
+        self.round_base = 0
+        self.poll_reads = 0
+        self.round_requests = 0
+        self._now = 1000.0
+        self._demand = 0
+        self._stop: threading.Event | None = None
+        self._cond = threading.Condition()
+
+    def now(self) -> float:
+        with self._cond:
+            self._now += self.TICK
+            return self._now
+
+    def polling(self) -> bool:
+        return self._stop is not None and not self._stop.is_set()
+
+    def advance(self, seconds: float) -> None:
+        with self._cond:
+            if self.polling():
+                raise AssertionError("a timed answer during the poll phase would move its schedule; hold it")
+            self._now += seconds
+
+    def begin(self, stop: threading.Event) -> None:
+        """A `SessionPoll` is starting: its slots and arrivals count from zero."""
+        with self._cond:
+            self._stop = stop
+            self.fired = self.started = self._demand = self.poll_reads = self.round_requests = 0
+            self.round_slot = self.round_base = 0
+            self.waiting_slot = None
+            self.dues = []
+
+    def wait_until(self, due: float, stop: threading.Event) -> bool:
+        with self._cond:
+            if stop is not self._stop:
+                raise AssertionError("a poll timer this clock was not told about")
+            slot = self.fired
+            self.waiting_slot = slot
+            self._cond.notify_all()
+            while not (stop.is_set() or (self._demand > slot and self.started == self.fired)):
+                self._cond.wait(0.005)
+            self.waiting_slot = None
+            if stop.is_set():
+                return False
+            self.fired += 1
+            self.dues.append(due)
+            self._now = max(self._now, due + self.late(slot))
+            self._cond.notify_all()
+            return True
+
+    def demand(self, slots: int) -> None:
+        """Something waits for a poll: release slots until `slots` of them have been released.
+
+        A count rather than "one more", so the four requests of one round asking for the same
+        poll ask for it once.
+        """
+        with self._cond:
+            self._demand = max(self._demand, slots)
+            self._cond.notify_all()
+
+    def arm_round(self) -> None:
+        """A round is armed: the next slot launches it."""
+        with self._cond:
+            self.round_slot = self.fired
+            self.round_base = self.round_requests
+            self._demand = max(self._demand, self.fired + 1)
+            self._cond.notify_all()
+
+    def poll_started(self) -> None:
+        with self._cond:
+            self.started += 1
+            self._cond.notify_all()
+
+    def round_request(self) -> int:
+        """A round request reached the stub; the slot that launched its round."""
+        with self._cond:
+            self.round_requests += 1
+            self._cond.notify_all()
+            return self.round_slot
+
+    def poll_read(self) -> int:
+        with self._cond:
+            self.poll_reads += 1
+            self._cond.notify_all()
+            return self.poll_reads
+
+    def hold(self, released: Callable[[], bool]) -> bool:
+        """Block a stub answer until `released()` or the run stops. False if it never came."""
+        with self._cond:
+            for _ in range(self.PATIENCE):
+                if released() or not self.polling():
+                    return True
+                self._cond.wait(0.005)
+        return False
+
+    def settle(self, settled: Callable[[], bool], why: str) -> None:
+        with self._cond:
+            for _ in range(self.PATIENCE):
+                if settled():
+                    return
+                self._cond.wait(0.005)
+        raise AssertionError(why)
+
+
 class _Stub(BaseHTTPRequestHandler):
     """A dashboard that answers as fast, as slowly and as badly as a case tells it to."""
 
@@ -70,7 +210,7 @@ class _Stub(BaseHTTPRequestHandler):
         path = self.path.partition("?")[0]
         status, body, delay, location = plan(self.command, path)
         if delay:
-            time.sleep(delay)
+            self.server.pause(delay)  # type: ignore[attr-defined]
         payload = body.encode("utf-8")
         self.send_response(status)
         if location:
@@ -97,11 +237,15 @@ class AgainstAStubDashboard(unittest.TestCase):
     """The script against a dashboard whose answers this test decides.
 
     Everything here is the fixture: the stub, the run helpers, and the patches that keep the case
-    off the host it happens to be running on. The cases are in the subclasses, which differ in one
-    thing — whether they run the poll at its real three-second cadence or at a token one.
+    off the host it happens to be running on — its installation and its scheduler both. Every case
+    runs the poll at its real three-second cadence and its real 100 ms tolerance, on a
+    :class:`VirtualClock`, so no outcome depends on how fast this host wakes a thread; the one
+    exception says so (`RealClockSmokeTests`).
     """
 
     SESSION = "11111111-2222-3333-4444-555555555555"
+    #: False only for the case that runs the script's own clock.
+    VIRTUAL = True
 
     def serve(
         self,
@@ -113,15 +257,24 @@ class AgainstAStubDashboard(unittest.TestCase):
         session_status: int = 200,
         overview_status: int = 200,
         delays: dict[str, float] | None = None,
-        slow_get_after: tuple[str, int, float] | None = None,
+        poll_reads: str = "until_round",
+        held_rounds_after: int | None = None,
         status_after: tuple[str, int, int] | None = None,
         redirect: tuple[str, str] | None = None,
     ) -> str:
         """A dashboard with a decided answer, and a decided cost, for every route.
 
-        `slow_get_after` is `(path, nth, seconds)`: that path's GETs become slow from the nth one
-        on. It is how a case makes one *round* of the concurrent scenario slow while the earlier
-        one stays fast, which is the only way to see which round the threshold is judged on.
+        `delays` is a cost in clock seconds per path, paid by advancing the virtual clock; it is
+        for the warm phase, where nothing is scheduled (`VirtualClock.advance` refuses otherwise).
+
+        During the poll phase an answer's cost is an *order* instead, kept by holding the answer
+        until a named event has reached this stub. `poll_reads` holds the selected session's polls:
+        `"until_round"` (the default) answers a poll once its round's four requests have all
+        arrived, so it is in flight at every start and over before the next round is armed;
+        `"until_next_poll"` answers it once the next poll has arrived, so reads overlap the way
+        reads slower than the interval do; `"instant"` does not hold. `held_rounds_after` holds
+        every `GET /` from that nth one on until a poll released after it has arrived, and asks for
+        that poll, which is a round that outlasts the interval.
 
         `status_after` is `(path, nth, status)` and does the same to the *status*: the route answers
         cleanly for the warm phase and then starts failing, which is the reviewer's reproduction of
@@ -147,10 +300,8 @@ class AgainstAStubDashboard(unittest.TestCase):
                 seen.append((method, path))
                 counted = sum(1 for verb, seen_path in seen if verb == "GET" and seen_path == path)
             delay = (delays or {}).get(path, 0.0)
-            if slow_get_after is not None:
-                slow_path, nth, seconds = slow_get_after
-                if method == "GET" and path == slow_path and counted >= nth:
-                    delay = seconds
+            if not held(method, path, counted):
+                return 599, "held past the case's patience: the ordering it waited for never came", 0.0, ""
             if redirect is not None and path == redirect[0]:
                 return 302, "moved", delay, redirect[1]
             if status_after is not None:
@@ -181,11 +332,43 @@ class AgainstAStubDashboard(unittest.TestCase):
                 return session_status, json.dumps(body), delay, ""
             return 200, "<html>dashboard</html>", delay, ""
 
+        clock = self.clock
+        if clock is None and (poll_reads != "instant" or held_rounds_after is not None or delays):
+            raise AssertionError("costs and holds are kept against the virtual clock")
+
+        def refuse_delay(_seconds: float) -> None:
+            raise AssertionError("a timed answer needs the virtual clock")
+        # Only the plain schedule settles between rounds: with an overlapping read or a held round,
+        # a poll is still under way when the next round is armed, by design.
+        self.quiet_between_rounds = poll_reads == "until_round" and held_rounds_after is None
+
+        def held(method: str, path: str, counted: int) -> bool:
+            if clock is None or method != "GET" or not clock.polling():
+                return True
+            if path == "/":
+                launching = clock.round_request()
+                if held_rounds_after is None or counted < held_rounds_after:
+                    return True
+                # The poll after the launching one: one request for it however many ask.
+                clock.demand(launching + 2)
+                return clock.hold(lambda: clock.poll_reads >= launching + 2)
+            if not path.startswith("/po/api/sessions/"):
+                return True
+            arrived = clock.poll_read()
+            if poll_reads == "until_round":
+                return clock.hold(lambda: clock.round_requests >= measure.CONCURRENT_REQUESTS * clock.fired)
+            if poll_reads == "until_next_poll":
+                return clock.hold(lambda: clock.poll_reads > arrived)
+            return True
+
         server = StubDashboard(("127.0.0.1", 0), _Stub)
         server.plan = plan  # type: ignore[attr-defined]
         server.seen = seen  # type: ignore[attr-defined]
+        server.pause = clock.advance if clock is not None else refuse_delay  # type: ignore[attr-defined]
         self.server = server
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        # A short poll interval, because `shutdown` waits out the one in progress: at the default
+        # half second that wait was most of this module's run time.
+        thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(thread.join, 5)
@@ -217,6 +400,53 @@ class AgainstAStubDashboard(unittest.TestCase):
         )
         # What these two resolve to for real is exercised in `DataDirectoryResolutionTests`.
         self.enterContext(mock.patch.object(measure, "po_cookie", return_value="ummanu_po=deadbeef"))
+        self.clock: VirtualClock | None = None
+        self.quiet_between_rounds = True
+        if self.VIRTUAL:
+            self.clock = self.virtual_time(measure)
+
+    def virtual_time(self, module: ModuleType) -> VirtualClock:
+        """Put `module` on this case's virtual clock, with every armed round asking for its poll.
+
+        Arming is where a round starts waiting for the next due poll, so it is where virtual time
+        is told to bring one. On the plain schedule the previous round's polls are first let finish,
+        so each round starts with exactly its own poll in flight. Every poll's start is reported to
+        the clock from inside `fetch`, right after the script read it.
+        """
+        clock = self.clock or VirtualClock()
+        self.enterContext(mock.patch.object(module, "CLOCK", clock))
+        arm = module.SessionPoll.arm
+
+        def armed(poll: Any, gate: threading.Barrier) -> Any:
+            if self.quiet_between_rounds:
+                clock.settle(lambda: not poll._pending, "a poll of the previous round never answered")
+            launch = arm(poll, gate)
+            clock.arm_round()
+            return launch
+
+        fetch = module.fetch
+
+        def fetched(*args: Any, on_start: Callable[[float], None] | None = None, **kwargs: Any) -> Any:
+            if on_start is None:
+                return fetch(*args, **kwargs)
+
+            def started(at: float) -> None:
+                # The poll has read its start; only now may a later slot move time on.
+                clock.poll_started()
+                on_start(at)
+
+            return fetch(*args, on_start=started, **kwargs)
+
+        enter = module.SessionPoll.__enter__
+
+        def entered(poll: Any) -> Any:
+            clock.begin(poll._stop)
+            return enter(poll)
+
+        self.enterContext(mock.patch.object(module.SessionPoll, "arm", armed))
+        self.enterContext(mock.patch.object(module.SessionPoll, "__enter__", entered))
+        self.enterContext(mock.patch.object(module, "fetch", fetched))
+        return clock
 
     def run_main(self, base_url: str, *extra: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -229,24 +459,10 @@ class MeasurementScriptTests(AgainstAStubDashboard):
     """Everything about the script that is not the cadence itself.
 
     These cases are about statuses, routes, percentiles, verdicts and refusals, and every one of
-    them runs the whole three-round scenario. At the real cadence that is nine seconds of waiting
-    per case for a property none of them is asserting, so the interval is shortened here — which is
-    exactly the shortcut the script refuses to take on a measured run, and is why the cadence is
-    proved at its real three seconds, separately, in `CadenceAndLaunchTests`.
+    them runs the whole three-round scenario at the real cadence and tolerance. On the virtual
+    clock that costs nothing and asserts nothing about this host's scheduler; the cadence itself is
+    the subject of `CadenceAndLaunchTests`.
     """
-
-    #: Short enough to be free, long enough that a poll is not a busy loop against the stub.
-    TOKEN_INTERVAL_SECONDS = 0.05
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.enterContext(mock.patch.object(measure, "POLL_INTERVAL_SECONDS", self.TOKEN_INTERVAL_SECONDS))
-        # These cases verify routes, responses and verdicts, not scheduler precision.
-        # A 50 ms token interval on a busy CI runner can miss the production
-        # 100 ms start tolerance despite correct application behavior. Retain
-        # the minimum poll count, but test strict cadence with the unmodified
-        # three-second clock in CadenceAndLaunchTests below.
-        self.enterContext(mock.patch.object(measure, "CADENCE_TOLERANCE_SECONDS", float("inf")))
 
     # -- read-only ---------------------------------------------------------------------------
 
@@ -496,6 +712,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         proxy = self.elsewhere()
         base = self.serve()
         fresh = self.load_under({"http_proxy": proxy, "HTTP_PROXY": proxy})
+        self.virtual_time(fresh)
 
         with (
             mock.patch.object(
@@ -503,8 +720,6 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             ),
             mock.patch.object(fresh, "po_cookie", return_value="ummanu_po=deadbeef"),
             mock.patch.object(fresh, "WARM_REQUESTS", 2),
-            mock.patch.object(fresh, "POLL_INTERVAL_SECONDS", self.TOKEN_INTERVAL_SECONDS),
-            mock.patch.object(fresh, "CADENCE_TOLERANCE_SECONDS", float("inf")),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
         ):
@@ -586,10 +801,9 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         polled, not by believing the overview's markup.
         """
         idle, running = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
-        base = self.serve(listed=((idle, False), (running, True)))
-        # Selection and the actual polling route are the subject here. A whole measurement's
-        # exit also depends on this host meeting the token 50 ms schedule, which is unrelated.
-        # CadenceAndLaunchTests and the verdict tests keep that separate contract intact.
+        base = self.serve(listed=((idle, False), (running, True)), poll_reads="instant")
+        # Selection and the actual polling route are the subject here, so the poll runs without a
+        # round: the case asks for its first poll itself.
         scenario = measure.prepare(base, None)
         self.assertEqual(scenario.poll_target, f"/po/api/sessions/{running}")
         self.assertIn(f"whose own JSON reports a running turn ({running})", scenario.poll_explanation)
@@ -603,6 +817,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             return sample
         with mock.patch.object(measure, "fetch", side_effect=observe_poll), measure.SessionPoll(
                 base, scenario.poll_target, scenario.cookie) as poll:
+            self.clock.demand(1)  # type: ignore[union-attr]
             self.assertTrue(answered.wait(5), "the selected running session was never polled")
         poll.check()
         self.assertGreaterEqual(poll.successes, 1)
@@ -951,10 +1166,10 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
     the mechanism has to survive, and against one slow enough that a round outlasts an interval,
     which is the installation this sprint starts from.
 
-    These cases are slow by construction. A round waits for the poll that falls due next, so three
-    rounds cost about two intervals of waiting however fast the dashboard is. That waiting is the
-    proof, not an overhead to be tuned away; every other case in this file shortens the interval
-    instead, and says so.
+    The three seconds are virtual (`VirtualClock`). These cases used to wait them out for real, and
+    the cases that shortened the interval instead measured this host's thread wake-ups against the
+    100 ms tolerance and went red when a runner was busy (issue:e536892b9e59f8f43e05). Here whether
+    a poll started late is the case's decision, so the refusal and the acceptance each have a case.
     """
 
     def assert_on_schedule(self, report: object) -> None:
@@ -987,6 +1202,11 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
         """Both properties, off one report, with every observed start checked individually."""
         self.assertEqual(measure.POLL_INTERVAL_SECONDS, 3.0, "the cadence under test is the /po page's own")
         self.assert_on_schedule(report)
+        # The schedule the timer asked for, as the timer asked for it: absolute from one anchor, so
+        # nothing a read or a round did moved a due time.
+        dues = self.clock.dues  # type: ignore[union-attr]
+        for earlier, later in zip(dues, dues[1:], strict=False):
+            self.assertAlmostEqual(later - earlier, measure.POLL_INTERVAL_SECONDS, delta=1e-9)
 
         self.assertEqual(len(report.concurrent), measure.CONCURRENT_ROUNDS)  # type: ignore[attr-defined]
         for index, item in enumerate(report.concurrent, start=1):  # type: ignore[attr-defined]
@@ -1037,10 +1257,11 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
         poll rather than on whatever the dashboard is doing.
         """
         warm = 1
-        # GETs on `/`: one warm-up, `warm` timed ones, then the rounds. The rounds are the slow
-        # ones, so the warm half of this case costs nothing.
+        # GETs on `/`: one warm-up, `warm` timed ones, then the rounds. Every round request is
+        # answered only once a poll released after it started has arrived, which on the cadence is
+        # an interval later; the reads overlap the same way, so a read is still out at every start.
         first_concurrent_get = 1 + warm + 1
-        base = self.serve(slow_get_after=("/", first_concurrent_get, measure.POLL_INTERVAL_SECONDS + 0.2))
+        base = self.serve(held_rounds_after=first_concurrent_get, poll_reads="until_next_poll")
         with mock.patch.object(measure, "WARM_REQUESTS", warm):
             report = measure.run(base, None)
 
@@ -1059,24 +1280,80 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
         self.assert_cadence_and_launch(report)
         self.assertIn("the poll started every 3 s", "\n".join(measure.render(report)))
 
+    def test_a_poll_slow_to_start_while_its_round_asks_for_the_next_keeps_its_schedule(self) -> None:
+        """BLOCKER-virtual-poll-start-race (review of b848c1de), as an ordering the case forces.
+
+        The round's four held requests all ask for the poll after the launching one, and that
+        poll's thread is kept from reading its start until all four have asked. Each poll still
+        records its own schedule (late is 0 here, so the offsets are ticks), the four requests
+        bring exactly one poll between them, and no later slot moves time on before the slow
+        poll has read the clock.
+        """
+        clock = self.clock
+        assert clock is not None
+        fetch = measure.fetch
+
+        def slow_to_start(*args: Any, **kwargs: Any) -> Any:
+            if kwargs.get("on_start") is not None:
+                slot = int(threading.current_thread().name.rsplit("-", 1)[-1])
+                if slot != clock.round_slot:
+                    clock.settle(
+                        lambda: clock.round_requests >= clock.round_base + measure.CONCURRENT_REQUESTS,
+                        "the round's requests never all asked for the next poll",
+                    )
+            return fetch(*args, **kwargs)
+
+        warm = 1
+        base = self.serve(held_rounds_after=1 + warm + 1, poll_reads="until_next_poll")
+        with (
+            mock.patch.object(measure, "WARM_REQUESTS", warm),
+            mock.patch.object(measure, "fetch", side_effect=slow_to_start),
+        ):
+            report = measure.run(base, None)
+
+        self.assertLess(max(abs(offset) for offset in report.poll_offsets), 1e-3, report.poll_offsets)
+        # One launching poll and one mid-round poll per round: four requests, one request for it.
+        self.assertEqual(len(clock.dues), 2 * measure.CONCURRENT_ROUNDS, clock.dues)
+        self.assert_cadence_and_launch(report)
+
+    def test_the_virtual_clock_releases_no_poll_before_the_last_one_has_started(self) -> None:
+        """The same rule on the clock alone: two polls asked for, the first not yet started."""
+        clock = VirtualClock()
+        stop = threading.Event()
+        clock.begin(stop)
+        anchor = clock.now()
+        clock.demand(2)
+
+        def timer() -> None:
+            for slot in range(2):
+                if not clock.wait_until(anchor + slot * measure.POLL_INTERVAL_SECONDS, stop):
+                    return
+
+        thread = threading.Thread(target=timer, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(stop.set)
+        # Settles either way: the timer waiting on slot 1, or slot 1 released ahead of the start.
+        clock.settle(lambda: clock.waiting_slot == 1 or clock.fired == 2, "the timer never reached slot 1")
+        self.assertEqual(clock.fired, 1, "slot 1 was released before slot 0's poll read its start")
+        self.assertLess(clock.now() - anchor, 1e-3, "time moved on before the first poll started")
+
+        clock.poll_started()
+        clock.settle(lambda: clock.fired == 2, "slot 1 was never released after slot 0 started")
+        self.assertGreaterEqual(clock.now() - anchor, measure.POLL_INTERVAL_SECONDS)
+
     def test_a_run_whose_polls_were_faster_than_the_cadence_is_refused_by_the_command(self) -> None:
         """The first defect put back deliberately, to show what the command now does with it.
 
-        `arm` used to set the event the poll thread was waiting on, so polls fired back to back.
-        The seam that decides when a poll starts is `_sleep_until`; making it return after two
-        milliseconds instead of at the schedule reproduces that run. What is asserted is the
-        outcome: exit 2, the numbers printed and unjudged, and no sentence claiming a cadence.
+        `arm` used to set the event the poll thread was waiting on, so polls fired back to back,
+        milliseconds apart. Here every poll after the first starts two milliseconds after the one
+        before it instead of three seconds, which is that run. What is asserted is the outcome:
+        exit 2, the numbers printed and unjudged, and no sentence claiming a cadence.
         """
-
-        def hurried(poll: object, _due: float) -> bool:
-            time.sleep(0.002)
-            return not poll._stop.is_set()  # type: ignore[attr-defined]
+        self.clock.late = lambda slot: -slot * (measure.POLL_INTERVAL_SECONDS - 0.002)  # type: ignore[union-attr]
 
         base = self.serve()
-        with (
-            mock.patch.object(measure.SessionPoll, "_sleep_until", hurried),
-            mock.patch.object(measure, "WARM_REQUESTS", 2),
-        ):
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
@@ -1085,6 +1362,44 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
         self.assertNotIn("the poll started every", text)
         self.assertNotIn("MEETS", text)
         self.assertIn("NOT JUDGED", text)
+
+    def test_a_poll_that_starts_late_makes_the_run_unmeasurable(self) -> None:
+        """The CI runner's run, decided rather than waited for: one poll 143 ms behind schedule.
+
+        On 2026-10-12 a busy runner started the poll thread 143–148 ms late, and the command did
+        exactly what it should: exit 2, NOT MEASURED. That outcome is the honesty this script
+        exists for, so it is pinned here with the lateness chosen by the case, at the real cadence
+        and tolerance, and nothing about this host can move it either way.
+        """
+        self.clock.late = lambda slot: 0.143 if slot == 2 else 0.0  # type: ignore[union-attr]
+        base = self.serve()
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_UNMEASURABLE, text)
+        self.assertIn("NOT MEASURED: a poll started 143 ms late against its 3 s schedule", text)
+        self.assertIn("beyond the 100 ms the timer is allowed", text)
+        self.assertIn("start against schedule: furthest +143.0 ms", text)
+        self.assertIn("the 3 s cadence did NOT hold", text)
+        self.assertNotIn("the poll started every", text)
+        self.assertNotIn("MEETS", text)
+        self.assertNotIn("EXCEEDS", text)
+        self.assertIn("NOT JUDGED", text)
+        # The rounds were taken and are printed; only the verdict is withheld.
+        self.assertEqual(len(re.findall(r"^  round \d+: ", text, re.MULTILINE)), measure.CONCURRENT_ROUNDS, text)
+
+    def test_a_poll_late_within_the_tolerance_is_a_judged_run(self) -> None:
+        """The other side of the same rule: every poll 90 ms late is still the page's cadence."""
+        self.clock.late = lambda _slot: 0.09  # type: ignore[union-attr]
+        base = self.serve()
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            code, text = self.run_main(base)
+
+        self.assertEqual(code, measure.EXIT_MET, text)
+        self.assertNotIn("NOT MEASURED", text)
+        self.assertIn("start against schedule: furthest +90.0 ms", text)
+        self.assertIn("the poll started every 3 s on its own schedule", text)
+        self.assertEqual(text.count("MEETS"), len(measure.WARM_ROUTES) + measure.CONCURRENT_REQUESTS, text)
 
     def test_the_cadence_rule_is_two_sided_on_every_start(self) -> None:
         """The rule itself, apart from the mechanism that satisfies it.
@@ -1128,8 +1443,7 @@ class CadenceAndLaunchTests(AgainstAStubDashboard):
 class SlowReadsAndEndedTurnsTests(AgainstAStubDashboard):
     """The two things a real `/po` page does that a quiet stub never shows.
 
-    Both are run at a scaled cadence: the property is about the timer's control flow, not about
-    three seconds, and the real interval is already proved in `CadenceAndLaunchTests`.
+    Both run at the real cadence on the virtual clock.
     """
 
     def test_a_session_read_slower_than_the_interval_does_not_stretch_the_cadence(self) -> None:
@@ -1141,28 +1455,27 @@ class SlowReadsAndEndedTurnsTests(AgainstAStubDashboard):
         read and the load fell below the page's while the output said the cadence held. Here the
         session endpoint is slower than the interval, and the starts still have to be on schedule —
         which means the reads overlap each other, and that is asserted too.
-        """
-        for interval, read in ((0.05, 0.12), (0.2, 0.5)):
-            with self.subTest(interval=interval, read=read):
-                base = self.serve(delays={f"/po/api/sessions/{self.SESSION}": read})
-                with (
-                    mock.patch.object(measure, "POLL_INTERVAL_SECONDS", interval),
-                    mock.patch.object(measure, "WARM_REQUESTS", 2),
-                ):
-                    report = measure.run(base, None)
 
-                self.assertTrue(measure.cadence_holds(report.poll_offsets), report.poll_offsets)
-                # The discriminating number: the old loop's gaps were at least one read long.
-                self.assertLess(max(report.poll_intervals), read, report.poll_intervals)
-                # Reads overlapped each other, as they do under the page's timer.
-                windows = report.poll_windows
-                self.assertTrue(
-                    any(later[0] < earlier[1] for earlier, later in zip(windows, windows[1:], strict=False)),
-                    "no read was still outstanding when the next one started",
-                )
-                for index, item in enumerate(report.concurrent, start=1):
-                    self.assertIsNotNone(item.launched_at, f"round {index}")
-                    self.assertLess(item.launched_at, item.started_at, f"round {index}")
+        Each read is answered only once the next poll has arrived, so every read is still out when
+        the next one starts. The old loop would never have started that next poll.
+        """
+        base = self.serve(poll_reads="until_next_poll")
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
+            report = measure.run(base, None)
+
+        self.assertTrue(measure.cadence_holds(report.poll_offsets), report.poll_offsets)
+        windows = report.poll_windows
+        self.assertGreaterEqual(len(windows), measure.CONCURRENT_ROUNDS)
+        for index, (earlier, later) in enumerate(zip(windows, windows[1:], strict=False), start=1):
+            with self.subTest(poll=index):
+                # The read outlasted the gap to the next start: the next start did not wait for it.
+                self.assertLess(later[0], earlier[1], "a read was over before the next one started")
+        # The discriminating number: the old loop's gaps were at least one read long.
+        for spacing in report.poll_intervals:
+            self.assertAlmostEqual(spacing, measure.POLL_INTERVAL_SECONDS, delta=measure.CADENCE_TOLERANCE_SECONDS)
+        for index, item in enumerate(report.concurrent, start=1):
+            self.assertIsNotNone(item.launched_at, f"round {index}")
+            self.assertLess(item.launched_at, item.started_at, f"round {index}")
 
     def test_a_turn_that_ends_mid_run_is_reported_and_the_run_still_stands(self) -> None:
         """The observer's ruling on an ended turn: detect it, say so, do not abort.
@@ -1175,10 +1488,7 @@ class SlowReadsAndEndedTurnsTests(AgainstAStubDashboard):
         """
         # Read 1 is the selection probe; read 2 is the first poll; from read 3 on the turn is over.
         base = self.serve(running_reads=2)
-        with (
-            mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05),
-            mock.patch.object(measure, "WARM_REQUESTS", 2),
-        ):
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_MET, text)
@@ -1191,10 +1501,7 @@ class SlowReadsAndEndedTurnsTests(AgainstAStubDashboard):
 
     def test_a_turn_that_stays_running_prints_no_ended_line(self) -> None:
         base = self.serve()
-        with (
-            mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05),
-            mock.patch.object(measure, "WARM_REQUESTS", 2),
-        ):
+        with mock.patch.object(measure, "WARM_REQUESTS", 2):
             code, text = self.run_main(base)
 
         self.assertEqual(code, measure.EXIT_MET, text)
@@ -1222,18 +1529,24 @@ class SlowReadsAndEndedTurnsTests(AgainstAStubDashboard):
 class RoundsUnderThePollTests(AgainstAStubDashboard):
     """secretary-1746 review 4: the four requests start while a poll is in flight, or do not count.
 
-    The token interval keeps these cases short; the cadence itself is proved at its real three
-    seconds in `CadenceAndLaunchTests`.
+    These run at the real cadence and tolerance on the virtual clock, so whether a round counted
+    is decided by the order of events the stub sees, never by how quickly this host ran them; the
+    case that flaked here (issue:e536892b9e59f8f43e05) was the token cadence missing the
+    tolerance on a busy runner, not the rounds.
     """
 
     def setUp(self) -> None:
         super().setUp()
-        self.enterContext(mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05))
         self.enterContext(mock.patch.object(measure, "WARM_REQUESTS", 2))
 
     def test_the_requests_start_before_the_launching_poll_has_answered(self) -> None:
-        """The reviewer's case: a session read that takes a while is still under way at every start."""
-        base = self.serve(delays={f"/po/api/sessions/{self.SESSION}": 0.3})
+        """The reviewer's case: the launching poll's read is still under way at every start.
+
+        The stub answers that read only once all four of the round's requests have reached it. A
+        round released after its poll answered, which is what review 4 refused, could never get
+        there, and this case would fail on the held read instead of passing.
+        """
+        base = self.serve()
         report = measure.run(base, None)
 
         self.assertEqual(len(report.concurrent), measure.CONCURRENT_ROUNDS)
@@ -1304,6 +1617,53 @@ class RoundsUnderThePollTests(AgainstAStubDashboard):
             self.assertEqual(len(counts), measure.CONCURRENT_REQUESTS)
             self.assertGreaterEqual(min(counts), 1)
         self.assertIsInstance(parsed["concurrent_discarded_rounds_ms"], list)
+
+
+class RealClockSmokeTests(AgainstAStubDashboard):
+    """The one case on the script's own clock: real threads, real waits, a token cadence.
+
+    Everything else in this file runs on `VirtualClock`, so this is what shows the default `Clock`
+    drives the timer and launches a round. It asserts only what holds on any host, whatever order
+    the scheduler runs the threads in: a round is launched by a poll that started before it
+    (program order inside the poll thread), and the real clock never starts a poll before its
+    schedule (a sign, not a number of milliseconds). It does not collect judged rounds, because
+    whether a request starts while a real read is still out is up to the scheduler; that property
+    is held on the virtual clock, by events, in `RoundsUnderThePollTests`.
+    """
+
+    VIRTUAL = False
+
+    def test_the_real_clock_drives_the_timer_and_launches_a_round_never_early(self) -> None:
+        base = self.serve(poll_reads="instant")
+        self.assertIsInstance(measure.CLOCK, measure.Clock)
+        scenario = measure.prepare(base, None)
+        answered = threading.Event()
+        polls: list[measure.Sample] = []
+        fetch = measure.fetch
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            sample = fetch(*args, **kwargs)
+            if args[1] == scenario.poll_target:
+                polls.append(sample)
+                if len(polls) >= measure.CONCURRENT_ROUNDS:
+                    answered.set()
+            return sample
+
+        with (
+            mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05),
+            mock.patch.object(measure, "fetch", side_effect=counted),
+            measure.SessionPoll(base, scenario.poll_target, scenario.cookie) as poll,
+        ):
+            item = measure.measure_concurrent(base, poll)
+            # A bound on a hang, not a measurement: the timer keeps polling on its own.
+            self.assertTrue(answered.wait(10), "the real timer did not keep polling")
+        poll.check()
+
+        self.assertIsNotNone(item.launched_at, "no poll launched the round")
+        self.assertLess(item.launched_at, item.started_at)  # type: ignore[operator]
+        self.assertEqual(len(item.samples), measure.CONCURRENT_REQUESTS)
+        self.assertGreaterEqual(len(poll.offsets), measure.CONCURRENT_ROUNDS)
+        self.assertGreaterEqual(min(poll.offsets), 0.0, poll.offsets)
 
 
 class DataDirectoryResolutionTests(unittest.TestCase):
