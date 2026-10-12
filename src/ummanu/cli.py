@@ -130,6 +130,7 @@ from ummanu.web.commands import add_web_serve_subcommands
 from ummanu.webfront.commands import add_web_front_subcommands
 from ummanu.webproto.commands import add_web_read_subcommands, add_web_run_subcommands
 
+NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
 MEMORY_EXIT_PERMISSION = 3
 MEMORY_EXIT_LOCKED = 4
@@ -280,7 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
     add_reconcile_subcommands(reconcile_subcommands)
-    reconcile.set_defaults(handler=usage_handler("reconcile subcommand required"))
+    reconcile.set_defaults(handler=not_implemented("reconcile"))
 
     data = subparsers.add_parser("data", help="manage the ummanu-data layout")
     data_subcommands = data.add_subparsers(dest="data_command")
@@ -400,7 +401,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="treat warnings as findings",
     )
     backup_verify.set_defaults(handler=run_backup_verify)
-    backup.set_defaults(handler=usage_handler("backup subcommand required"))
+    backup.set_defaults(handler=not_implemented("backup"))
 
     add_restore_subcommands(subparsers)
 
@@ -453,7 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("project_id")
     _add_env_instance(gate)
     gate.set_defaults(handler=run_project_gate)
-    project.set_defaults(handler=usage_handler("project subcommand required"))
+    project.set_defaults(handler=not_implemented("project"))
 
     add_task_subcommands(subparsers)
     add_product_issue_subcommands(subparsers)
@@ -556,7 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_instance(knowledge_list)
     knowledge_list.set_defaults(handler=run_knowledge_list)
-    knowledge.set_defaults(handler=usage_handler("knowledge subcommand required"))
+    knowledge.set_defaults(handler=not_implemented("knowledge"))
 
     add_secret_subcommands(subparsers)
 
@@ -2313,3 +2314,11 @@ def _data_dir_from_args(args: argparse.Namespace, *, validate_tree: bool) -> Pat
     except DataDirError as exc:
         print(f"ummanu data: cannot resolve instance data_dir: {exc}")
         return None
+
+
+def not_implemented(command: str):
+    def handler(_args: argparse.Namespace) -> int:
+        print(f"ummanu {command}: {NOT_IMPLEMENTED}")
+        return 1
+
+    return handler

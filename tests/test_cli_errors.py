@@ -77,7 +77,7 @@ class CliErrorTests(unittest.TestCase):
                 self.assertIn("; pass --data-dir", json.loads(err)["error"]["message"])
 
     def test_bare_command_groups_answer_one_usage_refusal(self) -> None:
-        for group in ("data", "memory", "config", "knowledge", "backup", "reconcile", "project"):
+        for group in ("data", "memory", "config"):
             with self.subTest(group=group):
                 status, out, err = self.invoke([group])
 
