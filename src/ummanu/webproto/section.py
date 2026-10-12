@@ -28,7 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ummanu.config import InstanceReport, validate_instance
 from ummanu.webproto import sources
+from ummanu.webproto._values import _typed_reason
+from ummanu.webproto.errors import InstallationUnavailable, installation_refusal
 
 #: The four fields `sources.Source.to_json` always writes; `render` uses them to recognise a
 #: hand-built section.
@@ -74,6 +77,46 @@ def read_source(
         source = sources.unavailable(refusal(exc), now=now, evidence=evidence)
         return Reading(key, source, None)
     return Reading(key, sources.available(now), value)
+
+
+class _Unusable(Exception):
+    """Inside the installation read: the config was read, and it cannot be used."""
+
+
+def read_installation(
+    instance: Path, *, key: str, now: float, located: bool
+) -> tuple[InstanceReport | None, Reading]:
+    """The installation config as one source of a document, and the refusal only it can force.
+
+    An answered reading carries the validated report. With an explicit data directory (`located`)
+    an unusable config removes only what it owns; without one nothing can be located, and the read
+    is refused as `InstallationUnavailable`, the code every layer gives an unusable config.
+    """
+    evidence = instance if instance.is_file() else instance / "instance.yaml"
+
+    def produce() -> InstanceReport:
+        report = validate_instance(instance)
+        if not report.ok or report.data_dir is None:
+            raise _Unusable(installation_refusal(report))
+        return report
+
+    reading = read_source(
+        key,
+        produce,
+        refusal=lambda exc: (
+            str(exc)
+            if isinstance(exc, _Unusable)
+            else f"this instance config could not be read: {_typed_reason(exc)}"
+        ),
+        now=now,
+        evidence=evidence,
+    )
+    if reading.answered:
+        return reading.value, reading
+    # Raised outside the span: this is the layer answering the caller, not a source failing.
+    if not located:
+        raise InstallationUnavailable(str(reading.source.reason))
+    return None, reading
 
 
 @dataclass(frozen=True, slots=True)

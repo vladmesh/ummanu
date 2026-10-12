@@ -23,6 +23,7 @@ audit event, the sprint from `SprintReader`, and observer liveness from `observe
 
 from __future__ import annotations
 
+import functools
 import json
 import time
 from collections.abc import Callable, Sequence
@@ -35,9 +36,13 @@ from ummanu.board.backend import PRODUCT_ISSUE, SPRINT, board_client
 from ummanu.board.completion_evidence import is_po_executed
 from ummanu.board.e2e_record import AFTER_MERGE, AM_COVERED, AM_PENDING, e2e_state
 from ummanu.board.owner_handover import OWNER_ESCALATION, attention_record, waiting_owner
-from ummanu.board.wait_card import RESULT_READY as WAIT_RESULT_READY
-from ummanu.board.wait_card import TARGET_CARD, TARGET_RUN, TARGET_TIME
-from ummanu.board.wait_card import WAITING as WAIT_WAITING
+from ummanu.board.wait_card import (
+    RESULT_READY as WAIT_RESULT_READY,
+    TARGET_CARD,
+    TARGET_RUN,
+    TARGET_TIME,
+    WAITING as WAIT_WAITING,
+)
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.dispatch.headless import headless_cards
 from ummanu.dispatch.observer import (
@@ -73,12 +78,14 @@ from ummanu.sprints import (
 )
 from ummanu.tasks import TaskError, recorded_card_transition, task_audit_for
 from ummanu.webproto import sources
+from ummanu.webproto._values import _reason
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import (
     InstallationUnavailable,
     RuntimeUnavailable,
     TaskNotFound,
     ValidationRefused,
+    installation_refusal,
 )
 from ummanu.webproto.section import Reading, Rule, Section, SectionSet, SourceSet, read_source, render, rule
 
@@ -1015,12 +1022,7 @@ class SprintReadLayer(ProtocolBoundary):
         report = validate_instance(self.instance)
         if report.ok and report.data_dir is not None:
             return report, Reading(SOURCE_INSTALLATION, sources.available(now), report)
-        reason = (
-            "this instance config does not validate: "
-            + "; ".join(str(error) for error in report.errors[:5])
-            if report.errors
-            else "this instance config names no data directory"
-        )
+        reason = installation_refusal(report)
         if self._data_dir is None:
             raise InstallationUnavailable(reason)
         return None, Reading(
@@ -1073,12 +1075,14 @@ class SprintReadLayer(ProtocolBoundary):
             report, installation, self.data_dir(report), now=now, listing=frozenset(wanted)
         )
 
+        waits = self._waits()
+
         def items() -> list[dict[str, Any]]:
             rows, views = read.value(SOURCE_SPRINTS)
             return [
                 {
                     **_identity(row, view),
-                    **self._work(read.replacing(SOURCE_SPRINTS, (row, view)), now=now),
+                    **self._work(read.replacing(SOURCE_SPRINTS, (row, view)), now=now, waits=waits),
                     "observer": self._observer(read.replacing(SOURCE_SPRINTS, (row, view))),
                 }
                 for row, view in zip(rows, views, strict=True)
@@ -1124,7 +1128,7 @@ class SprintReadLayer(ProtocolBoundary):
                 "ref": reference,
                 "sprint": SECTIONS.sprint(sprint),
                 "observer": self._observer(sprint),
-                "work": self._work(sprint, now=now),
+                "work": self._work(sprint, now=now, waits=self._waits()),
                 **self._marks(read),
             }
         )
@@ -1206,7 +1210,7 @@ class SprintReadLayer(ProtocolBoundary):
 
     # -- assembly ----------------------------------------------------------------------------
 
-    def _work(self, sprint: SourceSet, *, now: float) -> dict[str, Any]:
+    def _work(self, sprint: SourceSet, *, now: float, waits: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         """What one sprint is doing, in the sections a listing and a watched page both carry."""
         current = SECTIONS.current_task(sprint)
         return {
@@ -1218,18 +1222,23 @@ class SprintReadLayer(ProtocolBoundary):
             "checks": SECTIONS.checks(sprint),
             "waiting": SECTIONS.waiting(sprint),
             "waiting_on": _waiting_on(sprint),
-            "attention": self._attention(sprint),
+            "attention": self._attention(sprint, waits),
             "head_profiles": SECTIONS.head_profiles(sprint),
         }
 
-    def _attention(self, sprint: SourceSet) -> dict[str, Any]:
-        """Only this sprint's open human-wait events, from the bell's same board reading."""
+    def _waits(self) -> Callable[[], dict[str, Any]]:
+        """The bell's board reading for one document: taken (and copied) at most once, however many
+        sprints the document holds, and only when a sprint needs it."""
+        return functools.cache(lambda: self.owner_events.snapshot())
+
+    def _attention(self, sprint: SourceSet, waits: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        """Only this sprint's open human-wait events, from the bell's same board reading (`waits`)."""
         if self.owner_events is None or not sprint.answered(SOURCE_SPRINTS) or not sprint.answered(SOURCE_CARDS):
             return {"state": "unknown", "event_ids": [], "reason": "human wait source is unavailable"}
         row, _view = sprint.value(SOURCE_SPRINTS)
         if not row or row.get("status") != "open":
             return {"state": "none", "event_ids": [], "reason": None}
-        snapshot = self.owner_events.snapshot()
+        snapshot = waits()
         if snapshot["state"] != "available":
             return {"state": "unknown", "event_ids": [], "reason": snapshot["reason"]}
         identifiers = [wait["event_id"] for wait in snapshot["human_waits"] if wait["sprint_ref"] == row["ref"]]
@@ -2246,10 +2255,6 @@ def _sprint_value(sprint: dict[str, Any] | None) -> dict[str, Any] | None:
         "budget": sprint.get("budget"),
         "audit": sprint.get("audit"),
     }
-
-
-def _reason(exc: Exception) -> str:
-    return getattr(exc, "message", None) or str(exc) or type(exc).__name__
 
 
 #: Includes `OBSERVER_FIELD` so callers need not know which module defines it.

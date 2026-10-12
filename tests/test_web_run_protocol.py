@@ -26,7 +26,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 import yaml
@@ -50,10 +50,15 @@ from ummanu.runtime.head.runtime import (
     StopReceipt,
 )
 from ummanu.runtime.heads import Registry
-from ummanu.webproto import admission as admission_module
-from ummanu.webproto import lifecycle as lifecycle_module
-from ummanu.webproto import ops as ops_module
-from ummanu.webproto import run_events, run_state, store_io, workspaces
+from ummanu.webproto import (
+    admission as admission_module,
+    lifecycle as lifecycle_module,
+    ops as ops_module,
+    run_events,
+    run_state,
+    store_io,
+    workspaces,
+)
 from ummanu.webproto.boundary import GUARDED, IMPLEMENTATION_FAILURES, ProtocolBoundary, operations
 from ummanu.webproto.errors import (
     OwnerConflict,
@@ -991,9 +996,8 @@ class EventVisibilityTests(ProductRuntimeFixture):
         """
         with mock.patch.object(
             ops_module.run_events, "publish_started", side_effect=RuntimeUnavailable("journal down")
-        ):
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="lost-start-event")
+        ), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="lost-start-event")
         self.assertEqual(
             self.reads().task_events("ummanu-run-1", None, limit=10)["items"], []
         )
@@ -1011,9 +1015,8 @@ class EventVisibilityTests(ProductRuntimeFixture):
         self.runtime.publish_result(run_id, {"status": "done"})
         with mock.patch.object(
             ops_module.run_events, "publish_finished", side_effect=RuntimeUnavailable("journal down")
-        ):
-            with self.assertRaises(RuntimeUnavailable):
-                self.layer().run_state(run_id)
+        ), self.assertRaises(RuntimeUnavailable):
+            self.layer().run_state(run_id)
         kinds = [item["kind"] for item in self.reads().task_events("ummanu-run-1", None, limit=10)["items"]]
         self.assertEqual(kinds, [run_events.STARTED])
 
@@ -1147,9 +1150,12 @@ class LifecycleTests(ProductRuntimeFixture):
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                    if node.func.attr in {"start", "stop", "settle"}:
-                        offenders.append(f"{path.name}:{node.lineno} .{node.func.attr}()")
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"start", "stop", "settle"}
+                ):
+                    offenders.append(f"{path.name}:{node.lineno} .{node.func.attr}()")
         self.assertEqual(offenders, [])
 
     # -- write-ahead, and ownership recovered from disk -----------------------------------------
@@ -1219,9 +1225,8 @@ class LifecycleTests(ProductRuntimeFixture):
 
     def test_a_save_failure_after_a_successful_start_leaves_no_live_head(self) -> None:
         """The reviewer's scenario, with the cleanup confirmed: no orphan, and the card is free."""
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable) as refused:
-                self.start(request_id="req-lost-save")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable) as refused:
+            self.start(request_id="req-lost-save")
         self.assertIn("disk write failed", str(refused.exception))
         self.assertEqual(len(self.runtime.starts), 1)
         run = RunStore(self.data_dir).by_request("req-lost-save")
@@ -1239,9 +1244,8 @@ class LifecycleTests(ProductRuntimeFixture):
         self.runtime.stop = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-in-doubt")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-in-doubt")
         run = RunStore(self.data_dir).by_request("req-in-doubt")
         self.assertEqual(run.phase, UNRESOLVED)
         self.assertFalse(run.ended, "an unconfirmed cleanup is not an ending")
@@ -1270,9 +1274,8 @@ class LifecycleTests(ProductRuntimeFixture):
         self.runtime.stop = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-late-result")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-late-result")
         run_id = RunStore(self.data_dir).by_request("req-late-result").run_id
 
         # The head survived that stop, did its work and published its result.
@@ -1310,9 +1313,8 @@ class LifecycleTests(ProductRuntimeFixture):
         self.runtime.stop = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-dark")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-dark")
         run = RunStore(self.data_dir).by_request("req-dark")
         self.assertEqual(run.phase, UNRESOLVED)
 
@@ -1369,13 +1371,12 @@ class LifecycleTests(ProductRuntimeFixture):
 
     def test_an_unresolved_run_settles_as_soon_as_the_ending_is_confirmed(self) -> None:
         """An unresolved run is a fence, not a dead end: the next read retries the same stop."""
-        refusing = lambda run, initiator, **options: StopReceipt(  # noqa: E731
+        refusing = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
         self.runtime.stop = refusing
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-recover")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-recover")
         run_id = RunStore(self.data_dir).by_request("req-recover").run_id
 
         self.runtime.stop = FakeHeadRuntime.stop.__get__(self.runtime, FakeHeadRuntime)
@@ -1506,7 +1507,8 @@ class RealHeadOwnershipTests(RealHeadFixture):
                 lambda profile, **kwargs: HeadCommand(command=self.CHILD_COMMAND, adapter="claude"),
             ),
         ):
-            document = self.layer(runtime_factory=lambda _root: backend).run_start(
+            # Called here, before the `del backend` below that proves the stop needs no live backend.
+            document = self.layer(runtime_factory=lambda _root: backend).run_start(  # noqa: F821
                 "ummanu-run-1", request_id="req-real-head", profile=REVIEWER_PROFILE
             )
 
@@ -1712,7 +1714,7 @@ class ErrorContractTests(ProductRuntimeFixture):
 
     REF = "ummanu-run-1"
 
-    READ_CALLS = {
+    READ_CALLS: ClassVar[dict[str, Any]] = {
         "report": lambda layer: layer.report(),
         "data_dir": lambda layer: layer.data_dir(),
         "system_snapshot": lambda layer: layer.system_snapshot(),
@@ -1723,7 +1725,7 @@ class ErrorContractTests(ProductRuntimeFixture):
         "po_delegated": lambda layer: layer.po_delegated("session-contract"),
     }
 
-    OPERATION_CALLS = {
+    OPERATION_CALLS: ClassVar[dict[str, Any]] = {
         "report": lambda layer: layer.report(),
         "data_dir": lambda layer: layer.data_dir(),
         "store": lambda layer: layer.store(),
@@ -2032,6 +2034,16 @@ class SchemaTests(ProductRuntimeFixture):
             with self.subTest(kind=candidate["kind"]):
                 self.assertEqual(validate(candidate, "web-run", candidate["kind"]), [])
                 json.dumps(candidate)
+
+    def test_every_document_a_run_route_answers_validates(self) -> None:
+        """CON-02: the run routes' listing (`product_runs`) failed the schema's `oneOf` it is published under."""
+        document = self.start()
+        listed = self.layer().run_list(document["run"]["ref"])
+        empty = self.layer().run_list("ummanu-run-none")
+        self.assertEqual([len(listed["items"]), len(empty["items"])], [1, 0])
+        for route, candidate in (("runs", listed), ("runs, none", empty), ("run", listed["items"][0])):
+            with self.subTest(route=route):
+                self.assertEqual(validate(candidate, "web-run", candidate["kind"]), [])
 
 
 class WebRunCommandTests(ProductRuntimeFixture):

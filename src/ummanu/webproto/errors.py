@@ -48,9 +48,27 @@ class InvalidCursor(ReadError):
 
 
 class InstallationUnavailable(ReadError):
-    """The instance config itself does not validate, so nothing below it can be read."""
+    """The instance config itself does not validate, so nothing below it can be read.
+
+    Every layer refuses an unusable instance config with this one code, whether the caller reads or
+    writes: the installation is unavailable, the request was not wrong.
+    """
 
     code = "backend_unavailable"
+
+
+def installation_refusal(report: Any) -> str:
+    """Why a validated instance (`config.InstanceReport`) cannot be used, the same sentence in every layer.
+
+    It names the config file and the `instance` schema even when the report carries no error, which
+    is a config that validates and still names no usable data directory.
+    """
+    if report.errors:
+        return "this instance config does not validate: " + "; ".join(str(error) for error in report.errors[:5])
+    return (
+        f"this instance config {report.instance_path} validates against the `instance` schema "
+        "but names no data directory"
+    )
 
 
 # -- operations: same base, so one `ReadError` code table and one catch cover reads and writes ----

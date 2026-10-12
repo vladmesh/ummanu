@@ -14,6 +14,7 @@ import unittest
 from typing import Any
 
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.config import validate
 from ummanu.status import collect_status
 from ummanu.tasks import TaskWriter
 from ummanu.web.app import ROUTES, WebApp
@@ -826,6 +827,7 @@ class CardOperationTests(SprintProtocolFixture):
         answer = self.layer().task_comment(request_id="r-1", actor="web", reference=ref, body="hold on")
         self.assertEqual(answer["kind"], "card_commented")
         self.assertEqual(answer["ref"], ref)
+        self.assertEqual(validate(answer, "web-card", answer["kind"]), [])
         comments = [str(comment.get("comment")) for comment in self.board.comments(self.board.key_of(ref))]
         self.assertTrue(any("hold on" in comment for comment in comments), comments)
 
@@ -870,6 +872,7 @@ class CardOperationTests(SprintProtocolFixture):
         )
         self.assertEqual(answer["kind"], "card_moved")
         self.assertEqual(self.state_of(ref), "blocked")
+        self.assertEqual(validate(answer, "web-card", answer["kind"]), [])
 
     def test_a_move_the_writer_forbids_is_an_owner_conflict(self) -> None:
         """A PO may move a card between any two states; to the state it is in is not a move."""

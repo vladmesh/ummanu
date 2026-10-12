@@ -47,6 +47,8 @@ SCHEMAS = {
     "web-sprint": "web-sprint.schema.json",
     "web-pause": "web-pause.schema.json",
     "web-command": "web-command.schema.json",
+    "web-card": "web-card.schema.json",
+    "web-provider": "web-provider.schema.json",
 }
 
 

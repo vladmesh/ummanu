@@ -5,7 +5,8 @@
   "description": "The documents ummanu.webproto's operations return. A run's state values are the read layer's own five; the exit status beside them is the process's, not a sixth name for it; and whether a run is over is the separate `ended` fact rather than a value.",
   "oneOf": [
     {"$ref": "#/$defs/run"},
-    {"$ref": "#/$defs/review"}
+    {"$ref": "#/$defs/review"},
+    {"$ref": "#/$defs/runs"}
   ],
   "$defs": {
     "source": {
@@ -129,6 +130,18 @@
         "observed_at": {"type": "string"},
         "review": {"$ref": "#/$defs/run"},
         "worker": {"oneOf": [{"$ref": "#/$defs/run"}, {"type": "null"}]}
+      }
+    },
+    "runs": {
+      "type": "object",
+      "description": "Every product run of one card (`run_list`), each item the whole `product_run` document `run_state` returns. No runs is an empty list.",
+      "required": ["schema_version", "kind", "observed_at", "ref", "items"],
+      "properties": {
+        "schema_version": {"type": "integer"},
+        "kind": {"const": "product_runs"},
+        "observed_at": {"type": "string"},
+        "ref": {"type": "string"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/run"}}
       }
     }
   }

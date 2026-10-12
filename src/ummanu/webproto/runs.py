@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu._fsutil import file_lock
+from ummanu.webproto._values import _float, _text
 from ummanu.webproto.store_io import RunStoreError, write_document
 
 #: Which side of the demonstration scenario a run is; there is no third.
@@ -455,10 +456,6 @@ def now() -> float:
     return time.time()
 
 
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
-
-
 def _int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
@@ -479,7 +476,3 @@ def _flag(value: Any, fallback: bool) -> bool:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _float(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0

@@ -14,6 +14,7 @@ from typing import Any
 
 from ummanu.board.models import Event
 from ummanu.webproto import sources
+from ummanu.webproto._values import _reason, _text
 from ummanu.webproto.cursor import Cursor
 from ummanu.webproto.errors import InvalidCursor
 from ummanu.webproto.sources import Source
@@ -140,10 +141,6 @@ class CommittedAudit:
         )
 
 
-def _reason(exc: Exception) -> str:
-    return getattr(exc, "message", None) or str(exc) or type(exc).__name__
-
-
 def _payload(record: dict[str, Any]) -> Any:
     """What a record says: a typed event's `data`, a generic audit record's `payload`."""
     return record.get("data") if record.get("record_type") == Event.RECORD_TYPE else record.get("payload")
@@ -187,7 +184,3 @@ def _item(record: dict[str, Any], cursor: Cursor) -> dict[str, Any]:
         "related_refs": [ref for ref in related if isinstance(ref, str)] if isinstance(related, list) else [],
         "data": payload if isinstance(payload, dict) else {},
     }
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""

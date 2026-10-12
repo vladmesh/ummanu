@@ -1098,17 +1098,15 @@ def dashboard(
     *,
     pause: dict[str, Any] | None = None,
     sprints: dict[str, Any] | None = None,
-    limits: dict[str, Any] | None = None,
     po: dict[str, Any] | None = None,
 ) -> str:
     """The operator's one screen: pipeline state, open sprints, work in flight, recent history.
 
     An unavailable side read (``{"available", "reason", "document"}``) is the marked block, not empty.
+    Usage windows and health colour are the bottom bar's and the lamp's, read per request, not here.
     """
     installation = snapshot.get("installation") or {}
     open_items = _sprint_items(sprints)
-    # Usage windows and health colour belong to the bar and lamp; `limits` is accepted but unused.
-    del limits
     body = "\n".join(
         part
         for part in [

@@ -19,6 +19,7 @@ from unittest import mock
 from urllib.error import HTTPError, URLError
 
 from tests.web_fakes import Recording
+from ummanu.config import validate
 from ummanu.tasks import TaskError
 from ummanu.web import pages
 from ummanu.web.app import WebApp
@@ -330,6 +331,18 @@ class ResetOperationTests(ResetFixture):
                 if outcome == "error":
                     self.assertTrue(record["reason"])
                 self.assertNoToken(document, record)
+
+    def test_every_answer_validates_against_the_published_schema(self) -> None:
+        """A sent press, its replay, a refusal and a provider error: each is a `web-provider` document."""
+        answers = [self.press("rid-sent"), self.press("rid-sent")]
+        self.provider.answer = {"code": "mystery"}
+        answers.append(self.press("rid-error"))
+        self.provider.credits = {"available_count": 0, "applicable_available_count": 0}
+        answers.append(self.press("rid-refused"))
+        self.assertEqual([a["outcome"] for a in answers], ["reset", "reset", "error", "refused"])
+        for answer in answers:
+            with self.subTest(outcome=answer["outcome"], replayed=answer["replayed"]):
+                self.assertEqual(validate(answer, "web-provider", answer["kind"]), [])
 
     def test_the_record_names_the_actor_the_action_the_id_and_the_outcome(self) -> None:
         self.press("rid-7")

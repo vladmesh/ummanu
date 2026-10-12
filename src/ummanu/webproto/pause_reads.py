@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.board.backend import SPRINT, board_client
-from ummanu.config import InstanceReport, validate_instance
+from ummanu.config import InstanceReport
 from ummanu.dispatch.observer import observer_snapshot
 from ummanu.dispatch.pause import (
     ProductionPause,
@@ -36,10 +36,19 @@ from ummanu.dispatch.production import ProductionState
 from ummanu.sprints import SprintReader
 from ummanu.tasks import _TYPED_RECORD_TYPES
 from ummanu.webproto import sources
+from ummanu.webproto._values import _typed_reason
 from ummanu.webproto.boundary import ProtocolBoundary
-from ummanu.webproto.errors import ValidationRefused
-from ummanu.webproto.section import Reading, Section, SectionSet, SourceSet, render, rule
-from ummanu.webproto.section import read_source as _source
+from ummanu.webproto.errors import InstallationUnavailable
+from ummanu.webproto.section import (
+    Reading,
+    Section,
+    SectionSet,
+    SourceSet,
+    read_installation,
+    read_source as _source,
+    render,
+    rule,
+)
 
 SCHEMA_VERSION = 1
 
@@ -400,7 +409,7 @@ class PauseReadLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report, refused = self._installation(now=self._clock())
         if report is None:
-            raise ValidationRefused(str(refused.source.reason))
+            raise InstallationUnavailable(str(refused.source.reason))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
@@ -411,42 +420,14 @@ class PauseReadLayer(ProtocolBoundary):
         return report.data_dir
 
     def _installation(self, *, now: float) -> tuple[InstanceReport | None, Reading]:
-        """The installation config as a source, and the refusal only it can force.
-
-        With an explicit data directory, an invalid config removes only what it owns. Without one,
-        the refusal is `validation` (not `backend_unavailable`), keeping the exit status 2 that
-        `runtime_from_args`' `invalid_instance` gave `ummanu pause-status`.
-        """
-
-        def produce() -> tuple[InstanceReport, dict[str, Path]]:
-            report = validate_instance(self.instance)
-            if not report.ok or report.data_dir is None:
-                raise _Unreadable(
-                    "this instance config does not validate: "
-                    + "; ".join(str(error) for error in report.errors[:5])
-                    if report.errors
-                    else "this instance config names no data directory"
-                )
-            return report, self._paths(report.data_dir)
-
-        reading = _source(
-            SOURCE_INSTALLATION,
-            produce,
-            refusal=lambda exc: (
-                str(exc)
-                if isinstance(exc, _Unreadable)
-                else f"this instance config could not be read: {_reason(exc)}"
-            ),
-            now=now,
-            evidence=self._instance_file(),
+        """The installation config as a source (:func:`read_installation`), carrying the pause's paths."""
+        report, reading = read_installation(
+            self.instance, key=SOURCE_INSTALLATION, now=now, located=self._data_dir is not None
         )
-        if reading.answered:
-            report, paths = reading.value
-            return report, Reading(SOURCE_INSTALLATION, reading.source, paths)
-        # Raised outside the span: this is the layer answering the caller, not a source failing.
-        if self._data_dir is None:
-            raise ValidationRefused(str(reading.source.reason))
-        return None, reading
+        if report is None:
+            return None, reading
+        assert report.data_dir is not None
+        return report, Reading(SOURCE_INSTALLATION, reading.source, self._paths(report.data_dir))
 
     @staticmethod
     def _paths(data_dir: Path) -> dict[str, Path]:
@@ -483,7 +464,7 @@ class PauseReadLayer(ProtocolBoundary):
             # The file parses, so the tick still behaves by it: only what it says is unestablished.
             return (
                 f"the pause flag parses but does not hold a pause state: {flag.path} "
-                f"({_reason(exc)}). The production tick reads the same file, so what could not be "
+                f"({_typed_reason(exc)}). The production tick reads the same file, so what could not be "
                 "established here is what the flag says, not the pipeline's behaviour"
             )
 
@@ -515,7 +496,7 @@ class PauseReadLayer(ProtocolBoundary):
             refusal=lambda exc: (
                 f"the dispatcher production state could not be read: {state.path}"
                 if isinstance(exc, _Unreadable)
-                else f"the dispatcher production state could not be read: {state.path} ({_reason(exc)})"
+                else f"the dispatcher production state could not be read: {state.path} ({_typed_reason(exc)})"
             ),
             now=now,
             evidence=state.path,
@@ -532,14 +513,14 @@ class PauseReadLayer(ProtocolBoundary):
         sprints = _source(
             SOURCE_SPRINTS,
             lambda: SprintReader(self._client(), data_dir=data_dir).list(create=False),
-            refusal=lambda exc: f"the sprint board could not be read: {_reason(exc)}",
+            refusal=lambda exc: f"the sprint board could not be read: {_typed_reason(exc)}",
             now=now,
             evidence=evidence,
         )
         cards = _source(
             SOURCE_CARDS,
             lambda: SprintReader(self._client(), data_dir=data_dir).linked_cards(),
-            refusal=lambda exc: f"the Pipeline board could not be read: {_reason(exc)}",
+            refusal=lambda exc: f"the Pipeline board could not be read: {_typed_reason(exc)}",
             now=now,
             evidence=evidence,
         )
@@ -557,18 +538,11 @@ class PauseReadLayer(ProtocolBoundary):
     def _instance_dir(self) -> Path:
         return self.instance.parent if self.instance.is_file() else self.instance
 
-    def _instance_file(self) -> Path:
-        """The config file itself, so a refusal can be dated by it even when reading it failed."""
-        return self.instance if self.instance.is_file() else self.instance / "instance.yaml"
 
 
 def extent() -> dict[str, Any]:
     """Property 1 as a field, read from no source, so it is present even when every source refused."""
     return {"scope": "pipeline", "per_sprint": False, "statement": PIPELINE_WIDE}
-
-
-def _reason(exc: Exception) -> str:
-    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
 __all__ = [

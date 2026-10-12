@@ -17,8 +17,6 @@ See docs/PROTOCOLS.md, "Running the pipeline".
 from __future__ import annotations
 
 import contextlib
-import json
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -28,11 +26,11 @@ from ummanu.board.backend import CARD, board_client
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.runtime.head.command import HeadCommandError
 from ummanu.runtime.head.spec import HeadSpec, HeadSpecError
+from ummanu.runtime.head_runtime_backends import build_head_runtime
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.heads import HeadRegistryError, load_registry
 from ummanu.tasks import task_audit_for
-from ummanu.webproto import run_events, sources
-from ummanu.webproto import run_state as run_state_reads
+from ummanu.webproto import run_events, run_state as run_state_reads, sources
 from ummanu.webproto.admission import Admission, admit
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import (
@@ -42,6 +40,7 @@ from ummanu.webproto.errors import (
     RunNotFound,
     RuntimeUnavailable,
     ValidationRefused,
+    installation_refusal,
 )
 from ummanu.webproto.lifecycle import (
     CLAUDE_JSON,
@@ -75,18 +74,17 @@ from ummanu.webproto.runs import (
 )
 from ummanu.webproto.store_io import write_document
 from ummanu.webproto.workspaces import provision, workspace_path
-from ummanu.runtime.head_runtime_backends import build_head_runtime
 
 #: Re-exported names; the transitions using them live in :mod:`ummanu.webproto.lifecycle`.
 __all__ = [
     "CLAUDE_JSON",
     "INITIATOR",
-    "OperationLayer",
     "STOP_BRING_UP_FAILED",
     "STOP_DEADLINE",
     "STOP_ENDED",
     "STOP_RESULT_IN",
     "SUBMIT_KEY",
+    "OperationLayer",
 ]
 
 SCHEMA_VERSION = 1
@@ -139,10 +137,7 @@ class OperationLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report = validate_instance(self.instance)
         if not report.ok or report.data_dir is None:
-            raise InstallationUnavailable(
-                "this instance config does not validate: "
-                + "; ".join(str(error) for error in report.errors[:5])
-            )
+            raise InstallationUnavailable(installation_refusal(report))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:

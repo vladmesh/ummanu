@@ -24,8 +24,7 @@ from ummanu.web.statuses import status_for
 from ummanu.webproto.errors import OperationPending, ReadError, RuntimeUnavailable, ValidationRefused
 from ummanu.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from ummanu.webproto.owner_events import OwnerEventLayer
-from ummanu.webproto.po_auth import COOKIE_NAME as PO_COOKIE_NAME
-from ummanu.webproto.po_auth import COOKIE_PATH as PO_COOKIE_PATH
+from ummanu.webproto.po_auth import COOKIE_NAME as PO_COOKIE_NAME, COOKIE_PATH as PO_COOKIE_PATH
 from ummanu.webproto.reads import TASK_SNAPSHOT_EVENTS
 from ummanu.webproto.sprint_reads import NONE_SPELLING
 
@@ -504,10 +503,9 @@ class WebApp:
         snapshot = self.reads.system_snapshot()
         pause = self._or_reason(self.pause_reads.pause_state)
         sprints = self._or_reason(lambda: self.sprint_reads.sprint_list(statuses=["open"]))
-        limits = self._limits_section()
         # A count only, so no token; an unavailable PO store just hides it.
         po = self._or_reason(self.po.po_running_count) if self.po is not None else None
-        return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, limits=limits, po=po))
+        return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, po=po))
 
     def _task_page(self, params, query, _body) -> Response:
         ref = params["ref"]

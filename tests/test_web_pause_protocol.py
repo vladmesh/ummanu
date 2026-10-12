@@ -24,9 +24,11 @@ from tests.webproto_pause_fixtures import EXISTING_CARD, PauseProtocolFixture
 from ummanu.board.sql_cards import BOARD_ID
 from ummanu.config import validate
 from ummanu.dispatch import pause_ops as dispatcher_pause_ops
-from ummanu.dispatch.pause_ops import PauseCommandCompleted
-from ummanu.dispatch.pause_ops import pause as dispatcher_pause
-from ummanu.dispatch.pause_ops import resume as dispatcher_resume
+from ummanu.dispatch.pause_ops import (
+    PauseCommandCompleted,
+    pause as dispatcher_pause,
+    resume as dispatcher_resume,
+)
 from ummanu.dispatch.types import DispatcherError
 from ummanu.webproto.errors import OwnerConflict, ReadError, ValidationRefused
 from ummanu.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
@@ -643,11 +645,8 @@ class ErrorContractTests(PauseProtocolFixture):
         raised: dict[str, set[str]] = {name: set() for name in PAUSE_ERRORS}
         broken = str(self._broken_instance())
 
-        # validation, on all four: an installation whose config does not validate, and for the
-        # drain also the operation's own missing input.
-        raised["pause_drain"].add(
-            self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason=""))
-        )
+        # backend_unavailable, on all four: an installation whose config does not validate, the code
+        # every layer gives it (CON-07).
         raised["pause_drain"].add(
             self._code(lambda: PauseOperationLayer(broken).pause_drain(actor="operator", reason="why"))
         )
@@ -656,6 +655,20 @@ class ErrorContractTests(PauseProtocolFixture):
         )
         raised["pause_state"].add(self._code(PauseReadLayer(broken).pause_state))
         raised["pause_scope"].add(self._code(PauseReadLayer(broken).pause_scope))
+
+        # validation: the drain's own missing input, and for both writes a head registry that does
+        # not validate.
+        raised["pause_drain"].add(
+            self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason=""))
+        )
+        heads = DispatcherError("invalid_heads", "the head registry does not validate")
+        with mock.patch("ummanu.webproto.pause_ops.runtime_from_args", side_effect=heads):
+            raised["pause_drain"].add(
+                self._code(lambda: PauseOperationLayer(self.instance).pause_drain(actor="operator", reason="why"))
+            )
+            raised["pause_resume"].add(
+                self._code(lambda: PauseOperationLayer(self.instance).pause_resume(actor="operator"))
+            )
 
         # owner_conflict: a well-formed drain refused on the state of the world.
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
@@ -772,14 +785,14 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(status, 2)
         self.assertEqual(document["error"]["code"], "usage")
 
-    def test_an_invalid_instance_keeps_the_exit_status_it_always_had(self) -> None:
-        """Criterion 8 on the configuration refusal, which used to be the dispatcher's own exit 2.
+    def test_an_invalid_instance_answers_every_pause_command_with_one_status(self) -> None:
+        """The configuration refusal is `backend_unavailable` (exit 1) on all four commands (CON-07).
 
-        Before these commands were clients, every one of them reached the dispatcher through
-        `runtime_from_args`, whose `invalid_instance` is a `DispatcherError` with exit status 2. A
-        script reading that status must keep reading it, so the layer's typed code for a config that
-        does not validate is `validation` and not `backend_unavailable`. No layer is substituted
-        here: these run the real handlers over a real broken installation.
+        It used to be `validation` (exit 2, the dispatcher's own `invalid_instance`) here and in the
+        command-history reads, while every other reader answered `backend_unavailable` for the same
+        config, so HTTP gave it 400 on some routes and 503 on the rest. One cause now has one code
+        and so one status. No layer is substituted here: these run the real handlers over a real
+        broken installation.
         """
         from ummanu.dispatch import commands as dispatcher_commands
 
@@ -796,7 +809,7 @@ class CommandClientTests(PauseProtocolFixture):
             with self.subTest(command=name):
                 with mock.patch("sys.stdout"), mock.patch("sys.stderr"):
                     status = handler(self._args(instance=str(broken), data_dir=None, **extra))
-                self.assertEqual(status, 2)
+                self.assertEqual(status, 1)
 
     def test_pause_freeze_does_not_go_through_the_soft_path(self) -> None:
         """Criterion 5 at the command: the two spellings reach two implementations."""

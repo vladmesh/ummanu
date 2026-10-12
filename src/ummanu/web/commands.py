@@ -110,7 +110,7 @@ def run_web_serve(args: argparse.Namespace) -> int:
         reads,
         OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
         SprintReadLayer(args.instance, data_dir=args.data_dir, owner_events=owner_events),
-        SprintOperationLayer(args.instance, data_dir=args.data_dir),
+        SprintOperationLayer(args.instance, data_dir=args.data_dir, owner_events=owner_events),
         PauseReadLayer(args.instance, data_dir=args.data_dir),
         # The same construction `ummanu pause`/`resume` make for the production dispatcher: a
         # drain or a resume issued from the browser is the operator's own command, not a rehearsal.
