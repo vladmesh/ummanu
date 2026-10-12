@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import functools
 import hashlib
 import json
@@ -13,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ummanu._fsutil import file_lock, held_lock
 from ummanu.board import e2e_budget as sprint_e2e, owner_decisions, owner_events
 from ummanu.board.backend import (
     BoardIdentityError,
@@ -211,7 +211,7 @@ def update_active_sprint_projects(data_dir: str | Path, sprint: SprintAdmission 
 
 @contextmanager
 def _sprint_guard_index_lock(data_dir: str | Path):
-    with _exclusive_lock((Path(data_dir) / _GUARD_INDEX).with_suffix(".lock")):
+    with file_lock((Path(data_dir) / _GUARD_INDEX).with_suffix(".lock")):
         yield
 
 
@@ -221,19 +221,8 @@ def sprint_admission_lock(data_dir: str | Path):
     opening a sprint are reads of live state, so two writers that both check before
     either writes would each see no open sprint and both create one.
     """
-    with _exclusive_lock(Path(data_dir) / _ADMISSION_LOCK):
+    with file_lock(Path(data_dir) / _ADMISSION_LOCK):
         yield
-
-
-@contextmanager
-def _exclusive_lock(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _write_guard_index(data_dir: str | Path, index: SprintReservationIndex) -> None:
@@ -2524,83 +2513,79 @@ class SprintWriter:
             raise TaskError("validation", str(exc), 2) from None
         intent = SprintCloseIntent(Role(role), actor, reference)
         intent_document = intent.to_document()
-        with sprint_admission_lock(self.data_dir), self.transactions.reference_lock(reference) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                document, committed = self.transactions.existing(
+        with sprint_admission_lock(self.data_dir), self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            document, committed = self.transactions.existing(
+                request_id,
+                kind=SPRINT_CLOSED,
+                intent=intent_document,
+            )
+            if committed is not None:
+                self._check_completed_close(committed, offered, reason=reason, closeout=closeout)
+                return self._close_result(committed)
+            if document is not None:
+                self._check_staged_decisions(document, offered)
+                self._check_staged_closeout(document, reason=reason, closeout=closeout)
+            if document is None:
+                from ummanu.sprint_close import plan_close_decisions
+
+                sprint_document = self.reader.show(reference, include_cards=False)
+                sprint = SprintCloseSnapshot.from_document(sprint_document)
+                targets = self._close_targets(sprint)
+                plan = plan_close_decisions(
+                    offered,
+                    declared_issues=sprint.issues,
+                    remaining=targets.remaining,
+                    states=targets.remaining_state_map,
+                    issue_states=self._declared_issue_states(list(sprint.issues)),
+                )
+                self._check_close_decisions_are_writable(
+                    plan, role=role, states=targets.remaining_state_map
+                )
+                closeout_plan = self._plan_closeout(
+                    sprint, plan, actor=actor, reason=reason, closeout=closeout
+                )
+                event = self._event(
+                    SPRINT_CLOSED,
+                    role,
+                    actor,
+                    reference,
+                    request_id,
+                    {
+                        "intent": intent_document,
+                        "reason": str(reason or ""),
+                        "closeout": closeout_plan.to_document() if closeout_plan else None,
+                        "targets": targets.to_document(),
+                        "archived_tasks": [],
+                        "remaining_tasks": list(targets.remaining),
+                        "decisions": plan.to_document(),
+                        "closed_issues": [],
+                        "moved_tasks": [],
+                        "disposed_tasks": [],
+                        "conflicts": [],
+                    },
+                    sprint_document,
+                )
+                document, committed = self.transactions.begin(
                     request_id,
                     kind=SPRINT_CLOSED,
                     intent=intent_document,
+                    event=event,
                 )
                 if committed is not None:
-                    self._check_completed_close(committed, offered, reason=reason, closeout=closeout)
                     return self._close_result(committed)
-                if document is not None:
-                    self._check_staged_decisions(document, offered)
-                    self._check_staged_closeout(document, reason=reason, closeout=closeout)
                 if document is None:
-                    from ummanu.sprint_close import plan_close_decisions
-
-                    sprint_document = self.reader.show(reference, include_cards=False)
-                    sprint = SprintCloseSnapshot.from_document(sprint_document)
-                    targets = self._close_targets(sprint)
-                    plan = plan_close_decisions(
-                        offered,
-                        declared_issues=sprint.issues,
-                        remaining=targets.remaining,
-                        states=targets.remaining_state_map,
-                        issue_states=self._declared_issue_states(list(sprint.issues)),
-                    )
-                    self._check_close_decisions_are_writable(
-                        plan, role=role, states=targets.remaining_state_map
-                    )
-                    closeout_plan = self._plan_closeout(
-                        sprint, plan, actor=actor, reason=reason, closeout=closeout
-                    )
-                    event = self._event(
-                        SPRINT_CLOSED,
-                        role,
-                        actor,
-                        reference,
-                        request_id,
-                        {
-                            "intent": intent_document,
-                            "reason": str(reason or ""),
-                            "closeout": closeout_plan.to_document() if closeout_plan else None,
-                            "targets": targets.to_document(),
-                            "archived_tasks": [],
-                            "remaining_tasks": list(targets.remaining),
-                            "decisions": plan.to_document(),
-                            "closed_issues": [],
-                            "moved_tasks": [],
-                            "disposed_tasks": [],
-                            "conflicts": [],
-                        },
-                        sprint_document,
-                    )
-                    document, committed = self.transactions.begin(
-                        request_id,
-                        kind=SPRINT_CLOSED,
-                        intent=intent_document,
-                        event=event,
-                    )
-                    if committed is not None:
-                        return self._close_result(committed)
-                    if document is None:
-                        raise TaskError("audit_pending", "sprint close transaction claim is unavailable", 4)
-                close_payload = document["event"].get("payload", {})
-                close_plan = SprintCloseDecisions.from_document(close_payload.get("decisions"))
-                closeout_plan = SprintCloseoutPlan.from_document(close_payload.get("closeout"))
-                self.client.sprints.save_close(
-                    reference,
-                    request_id,
-                    close_plan.to_document(),
-                    reason=str(close_payload.get("reason") or ""),
-                    closeout_document=closeout_plan.document if closeout_plan else None,
-                )
-                return self._run_close(document)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    raise TaskError("audit_pending", "sprint close transaction claim is unavailable", 4)
+            close_payload = document["event"].get("payload", {})
+            close_plan = SprintCloseDecisions.from_document(close_payload.get("decisions"))
+            closeout_plan = SprintCloseoutPlan.from_document(close_payload.get("closeout"))
+            self.client.sprints.save_close(
+                reference,
+                request_id,
+                close_plan.to_document(),
+                reason=str(close_payload.get("reason") or ""),
+                closeout_document=closeout_plan.document if closeout_plan else None,
+            )
+            return self._run_close(document)
 
     def _issue_store(self) -> Any:
         from ummanu.product_issues import ProductIssueStore
