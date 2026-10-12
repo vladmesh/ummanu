@@ -18,10 +18,10 @@ mutable and derived runtime state lives in a local data directory. Install and r
 - [Head runtime](docs/HEAD_RUNTIME.md) — the one head runtime, `local-pty`, and the A20 record of how it replaced Orca
 - [Head scopes](docs/HEAD_SCOPES.md) — head scope ownership, memory limits and memory exits
 - [Head vitality](docs/HEAD_VITALITY.md) — observation axes, snapshots and their invariants
-- [Outcome lineage](docs/OUTCOME_LINEAGE.md) — durable round handoffs between worker and reviewer launches
+- [Outcome lineage](docs/PROTOCOLS.md#outcome-lineage) — durable round handoffs between worker and reviewer launches
 - [Board store](docs/BOARD_STORE.md) — board read/write inventory and the PostgreSQL schema
-- [Requests growth](docs/REQUESTS_GROWTH.md) — the decision to keep every `requests` row
-- [Owned cleanup](docs/OWNED_CLEANUP.md) — who settles dispatcher-owned Git residue
+- [Requests growth](docs/BOARD_STORE.md#requests-growth-policy) — the decision to keep every `requests` row
+- [Owned cleanup](docs/OPERATIONS.md#git-residue-read-the-manifest-then-replay-exact-targets) — who settles dispatcher-owned Git residue
 - [Protocols](docs/PROTOCOLS.md) — command contracts for tasks, sprints, memory and secrets
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore

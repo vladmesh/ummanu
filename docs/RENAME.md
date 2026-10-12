@@ -249,7 +249,7 @@ Board identity rows (live counts):
 
 | Item | Found | Decision |
 |---|---|---|
-| `docs/*.md` | OPERATIONS 402, PROTOCOLS 240, HEAD_RUNTIME 78, ARCHITECTURE 57, BOARD_STORE 56, RECOVERY 30, HEAD_VITALITY 23, TESTING 11, ROADMAP 4, VISION 3, REQUESTS_GROWTH 3, OWNED_CLEANUP 3, HEAD_SCOPES 1 | rename (commands, paths, names); card refs: leave (R); this file: leave (T) |
+| `docs/*.md` | OPERATIONS 402, PROTOCOLS 240, HEAD_RUNTIME 78, ARCHITECTURE 57, BOARD_STORE 56, RECOVERY 30, HEAD_VITALITY 23, TESTING 11, ROADMAP 4, VISION 3, HEAD_SCOPES 1 | rename (commands, paths, names); card refs: leave (R); this file: leave (T) |
 | `README.md`, `CONTRIBUTING.md`, `SECURITY.md` | 97 with `pyproject.toml` | rename |
 | `skills/manifest.toml` | `[roles.secretary]`, `secretary/<skill>` entries, targets `claude-secretary-global`, `codex-orca-secretary`, `claude-secretary-{curator,retro,steward,observer}`, `codex-secretary-roles`, roots `~/orca/workspaces/secretary/*` | rename (role → `operator`, targets → `*-ummanu-*`/`*-operator-*`, roots → `…/ummanu/…`) |
 | `skills/manifest.toml` `hermes-secretary`, `hermes-secretary-roles`, roots `~/.hermes/skills/secretary*` | 4 | leave (H) |

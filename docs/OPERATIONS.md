@@ -218,8 +218,7 @@ Every Codex head launched by the dispatcher, and the `openai-sub` resource probe
 
 With none of them the launch fails closed: no Codex head starts, and the refusal names the fix, "log
 in under `DATA_DIR/codex-home` (`CODEX_HOME=DATA_DIR/codex-home codex login`), or copy an `auth.json`
-there". There is no fallback to the legacy Orca home (`~/.config/orca/...`); A20 step 7 removed it
-(secretary-1723) once every live Codex head was proven to run on the data-dir login.
+there". There is no fallback to the legacy Orca home (`~/.config/orca/...`).
 
 Rung 3 needs to know the data dir. It comes from `UMMANU_DATA_DIR`. The production dispatcher
 tick, the background agents and `ummanu shell` set that variable for their own run from the
@@ -603,9 +602,9 @@ deferred: N turn(s) running` and does not fail. The request is the marker `DATA_
 the next process removes it at start. A stopped service is started.
 
 **Process receipt.** This run's pull delta alone cannot tell whether the service runs current code: the
-dispatcher's release fast-forwards the checkout before the PO runs `upgrade`, so the pull is empty
-(secretary-1759). So, like the web and memory services, the service is bound to what it was started
-on. Each process writes `DATA_DIR/po-service/process-receipt.json` at start, before it removes the
+dispatcher's release fast-forwards the checkout before the PO runs `upgrade`, so the pull is empty.
+Like the web and memory services, the service is bound to what it was started on. Each process
+writes `DATA_DIR/po-service/process-receipt.json` at start, before it removes the
 restart marker and takes the queue: its pid, kernel start ticks and systemd `INVOCATION_ID`, and the
 checkout it runs from — product revision and the sha256 of the tracked product source, dependencies and
 bundled schemas, computed as for the web and memory receipts. It is one private (0600) atomic
@@ -1034,7 +1033,7 @@ over on a repeat `project add`, so refreshing a draft does not reset routing.
 
 `project add` writes no `orca_binding`: a new project runs on local-pty heads in git workspaces.
 `orca_binding` is optional legacy (A20 step 8). An existing one is kept; only curator routing reads
-it, and card placement never does (secretary-1722).
+it, and card placement never does.
 
 ### Stale input or an invalid schema
 
@@ -1314,7 +1313,7 @@ the saved comment bytes. A crash after park intent, or after the move before sta
 the existing park and move identity. Release similarly replays its comment before the separate
 merge effect. A frozen comment never supplies current gate admission.
 
-Released old-format comments, including secretary-1883's overwritten observation timestamp,
+Released old-format comments, including an overwritten observation timestamp,
 are supported through authoritative `audit.committed_event` and `TaskReader.show` reads. Adoption
 requires successful commented kind, exact request/ref/dispatcher actor/marker, event id, one
 original board body with the immutable audit digest, the canonical receipt/reconciliation
@@ -1523,9 +1522,9 @@ issues:
     verdict: open
     reason: not reached before the sprint ended
 cards:
-  - ref: secretary-1573
+  - ref: project-1
     verdict: drop
-    reason: superseded by secretary-1577
+    reason: superseded by project-2
 ```
 
 **The closeout file** is your prose account of what was achieved, what is unfinished and what you
@@ -1755,11 +1754,23 @@ usage error, and nothing is written.
    `pending` and deletes nothing. Every save writes back only the target's own intent, so other
    intents and the replay cursor stay byte for byte as they were. `replay` reports each target's `status`, `reason` and `progress`. If a target is
    refused, read the manifest again before you retry. A target replay obeys the same hourly retry
-   policy as the tick ([Owned cleanup](OWNED_CLEANUP.md)): an intent that is not due, or that ended
+   policy as the tick: an intent that is not due, or that ended
    terminally, reports `replayed: false` with its `next_attempt_at` or terminal kind, and nothing runs.
 
 Code never chooses the targets. Protected candidates and audit branches stay until an operator
 names them.
+
+Close stages its observer handoff in the cleanup journal using the original generation and
+launch count. The external dispatcher enriches that obligation from the exact observer
+registration, waits for the existing close transaction to finish and for card cleanup or
+verified preservation, then processes the observer last. Retained observer user work appears
+as preservation in the same inventory. Pending Git removal, registration, ref or claim settlement
+blocks observer stop, including after exact card heads are stopped. Preservation permits handoff
+only when the owner verified the retained disposition, or ended it terminally, and settled heads
+and claims; missing ownership reported as preservation cannot stand in for that proof.
+A failed handoff or stop remains pending after board closure. Neither the closing observer nor
+a code worker cleans live residue. Installation and final residue proof belong to the subsequent
+authorized PO operation.
 
 ## Sprint observer heads
 
@@ -2936,7 +2947,7 @@ the upgrade put them. `upgrade --no-pull` realigns them against the moved checko
 service through their receipts, the web transport through its own (the front is `PartOf=` and comes with
 it). See [Taking the slice down, and rolling the application back a
 revision](#taking-the-slice-down-and-rolling-the-application-back-a-revision).
-For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
+For a target revision older than `bb43b5f`, that revision's `upgrade` has no
 dependency or memory receipts. After `ummanu upgrade --no-pull`, also run
 `"$HOME/ummanu/.venv/bin/pip" install -e "$HOME/ummanu[dev,memory]"` and restart
 `ummanu-memory.service`.
@@ -2981,7 +2992,7 @@ ummanu upgrade --instance INSTANCE --no-pull
 - An `upgrade` that ends `status: failed` did only the steps printed before the failure; it rolls nothing
   back.
 
-For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
+For a target revision older than `bb43b5f`, that revision's `upgrade` has no
 dependency or memory receipts. After `ummanu upgrade --no-pull`, also run
 `"$HOME/ummanu/.venv/bin/pip" install -e "$HOME/ummanu[dev,memory]"` and restart
 `ummanu-memory.service`.
@@ -3007,7 +3018,7 @@ No password, nothing written to the installation:
   ss -ltnp '( sport = :8787 or sport = :443 )'
   ummanu status --instance INSTANCE
   ummanu web-front check --instance INSTANCE
-  for path in / /api/system /api/tasks/secretary-1/events; do
+  for path in / /api/system /api/tasks/project-1/events; do
     printf '%s ' "$path"
     curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://HOST$path"
   done
@@ -3029,8 +3040,8 @@ It parses the running configuration against every published route and prints `"u
 Over the wire, an unauthorised client must get 401 and no body:
 
 ```bash
-for path in / /tasks/secretary-1 /api/system /api/tasks/secretary-1 \
-            /api/tasks/secretary-1/events /api/runs/x; do
+for path in / /tasks/project-1 /api/system /api/tasks/project-1 \
+            /api/tasks/project-1/events /api/runs/x; do
   printf '%s ' "$path"
   curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://HOST$path"
 done
@@ -3497,7 +3508,7 @@ from its launch identity (state, pid), `supervisor` from the supervisor's `statu
 torn or untimed lines is `degraded`, with the reason. A source that did not answer is listed in
 `unavailable_sources`, never read as a gone head. A legacy record (a run on `orca-legacy`, or a head
 identity with no durable run) says `runtime: orca-legacy` and `legacy_record: true`, and is read through
-its pid heartbeat alone (secretary-1723 removed the pane inventory, A20 step 5).
+its pid heartbeat alone.
 
 Readings are advisory. No disconnected or unreadable source is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:

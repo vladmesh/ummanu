@@ -2,11 +2,14 @@
 
 `docs/BOARD_STORE.md` §2.2 is the reason this module has the shape it has.  Almost every consumer
 of the board reaches cards through `TaskReader` and `TaskWriter`, not through the JSON-RPC client,
-so the cheapest honest place to put the store is *underneath* those two classes and nowhere else.  `SqlCardClient` therefore answers the same eleven-method board vocabulary
-`tasks.py` and `board/sql_host.py` speak — `getAllTasks`, `getTaskMetadata`, `saveTaskMetadata`,
+so the cheapest honest place to put the store is *underneath* those two classes and nowhere else.
+`SqlCardClient` therefore answers a twenty-four-method board vocabulary used by `tasks.py` and
+`board/sql_host.py`: `getAllTasks`, `getTaskMetadata`, `saveTaskMetadata`,
 `createTask`, `updateTask`, `moveTaskPosition`, `closeTask`, `createComment`, `getAllComments`,
-`getColumns`, `getActiveSwimlanes`, `getProjectByName`, `getTaskByReference`, `addSwimlane` — over
-`tasks`, `task_comments` and their satellites (§3.5, §3.7).  The public behaviour of the two
+`getColumns`, `getActiveSwimlanes`, `getProjectByName`, `getTaskByReference`, `addSwimlane`,
+`createProject`, `getBoardRows`, `getTaskById`, `getArchivedAfterMergeTasks`, `getCapacityReferences`,
+`lockOwnershipReference`, `getNextTaskReference`, `getSprintE2eBudget`, `chargeSprintE2e`,
+`removeTask`, over `tasks`, `task_comments` and their satellites (§3.5, §3.7). The public behaviour of the two
 classes above it does not change; where their data comes from and where it lands does.
 
 Three mappings do the whole job:

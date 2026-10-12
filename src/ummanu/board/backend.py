@@ -172,7 +172,7 @@ def entity_id(kind: str, number: int) -> str:
     """Mint `<kind>_postgres_<n>`: the one identity a normalized row carries.
 
     `kind` says whether the row is a card or a sprint and `number` is the store's own number for it,
-    `tasks.task_number`.  It is minted here and nowhere else, and `entity_number` reads it back.
+    its `board_key`.  It is minted here and nowhere else, and `entity_number` reads it back.
     """
     if kind not in ENTITY_KINDS:
         raise BoardIdentityError(f"an entity identity names one of {', '.join(ENTITY_KINDS)}, not {kind!r}")
