@@ -66,15 +66,14 @@ class CliErrorTests(unittest.TestCase):
                 status, out, err = self.invoke(["sprint", "show", "--ref", "sprint:1", "--instance", str(named)])
 
                 self.assertEqual(status, 2)
-                self.assertEqual(out, "")
                 self.assertNotIn("Traceback", err)
-                # On stderr, as every sprint and task command prints a TaskError refusal.
+                self.assertEqual(err, "")
                 self.assert_refusal(
-                    err,
+                    out,
                     "usage",
                     f"cannot resolve data dir from {self.instance / 'instance.yaml'}: ",
                 )
-                self.assertIn("; pass --data-dir", json.loads(err)["error"]["message"])
+                self.assertIn("; pass --data-dir", json.loads(out)["error"]["message"])
 
     def test_bare_command_groups_answer_one_usage_refusal(self) -> None:
         for group in ("data", "memory", "config"):

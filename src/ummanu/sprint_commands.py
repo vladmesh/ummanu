@@ -305,11 +305,16 @@ def _read(
 ) -> int:
     """Run one read and print it, or its typed refusal with the refusal's exit status.
 
-    The data dir is resolved inside the handler, as `_write` resolves it, so an installation
-    without a usable one answers the usage refusal (status 2) rather than a traceback.
+    An installation without a usable data dir is an input error: its usage refusal goes to stdout
+    with status 2, as a bare group's does, rather than escaping as a traceback. The read's own
+    typed refusals keep the stderr stream every sprint and task command prints them on.
     """
     try:
         data_dir = resolve_data_dir(args)
+    except TaskError as exc:
+        print_error({"code": exc.code, "message": exc.message})
+        return exc.exit_code
+    try:
         result = operation(
             SprintReader(
                 board_client(args.instance, serves=(SPRINT,)), data_dir=data_dir, thresholds=thresholds
