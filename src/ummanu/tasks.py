@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -15,6 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ummanu._fsutil import file_lock
 from ummanu.board import (
     e2e_budget,
     e2e_record,
@@ -678,15 +678,9 @@ def next_project_reference(client: SqlCardClient, project_id: int, project: str)
 @contextlib.contextmanager
 def assessment_decision_lock(data_dir: Path, reference: str) -> Iterator[None]:
     """Serialize the complete decision transaction for one card, across observer processes."""
-    directory = data_dir / "board" / "assessment-decisions"
-    directory.mkdir(parents=True, exist_ok=True)
     name = hashlib.sha256(reference.encode("utf-8")).hexdigest() + ".lock"
-    with (directory / name).open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    with file_lock(data_dir / "board" / "assessment-decisions" / name):
+        yield
 
 
 class TaskReader:
@@ -1634,9 +1628,7 @@ class TaskWriter:
             try:
                 event_id = self.audit.append(request_id, committed)
             except OSError:
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise _audit_repair_required() from None
             return {
                 "action": "created",
                 "task": self.reader.show(str(committed["ref"])),
@@ -1654,9 +1646,7 @@ class TaskWriter:
                 self.audit.stage(request_id, pending)
                 event_id = self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError):
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise _audit_repair_required() from None
             return {"action": "created", "task": task, "event_id": event_id, "replayed": True}
 
         event = {
@@ -1733,14 +1723,14 @@ class TaskWriter:
                         self.client.call("saveTaskMetadata", task_id=_task_number(previous),
                                          values={**CLEAR_MARK, OWNER_ESCALATION: ""})
             except _CommittedWriteError:
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+                raise _audit_repair_required() from None
             except Exception:
                 self.audit.discard(request_id)
                 raise
             try:
                 task = self.reader.show(created_ref)
             except Exception:  # noqa: BLE001 - any post-create read failure is an ambiguous commit.
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+                raise _audit_repair_required() from None
             event["task_id"] = task["id"]
             event["ref"] = created_ref
             event["backend"]["revision"] = _revision(task)
@@ -1748,7 +1738,7 @@ class TaskWriter:
             try:
                 event_id = self.audit.append(request_id, event)
             except OSError:
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+                raise _audit_repair_required() from None
             return {"action": "created", "task": task, "event_id": event_id, "replayed": False}
 
     def create_steward_report(
@@ -1854,47 +1844,28 @@ class TaskWriter:
                 if not reference_persisted:
                     raise _CommittedWriteError()
                 try:
-                    values = {
-                        "record_type": "task",
-                        "task_type": task_type,
-                        "project": project,
-                        "complexity": complexity,
-                        "family_preference": family_preference,
-                        "review": review,
-                    }
-                    if live_impact:
-                        values["live_impact"] = "1"
-                    if touches_production:
-                        # Not a column: a typed field of the extension bag (board/production_rights.py).
-                        values[TOUCHES_PRODUCTION] = touches_production
-                    if wait_spec:
-                        # Not a column either: the wait card's spec (board/wait_card.py).
-                        values[wait_card.WAIT_SPEC] = wait_spec
-                    if po_origin:
-                        # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
-                        values[origin_field.PO_ORIGIN] = po_origin
-                    if po_execution:
-                        values[execution_field.PO_EXECUTION] = po_execution
-                    if blocked_by:
-                        values["blocked_by"] = blocked_by
-                    if head:
-                        values["head"] = head
-                    if review_head:
-                        values["review_head"] = review_head
-                    if slug:
-                        values["slug"] = slug
-                    if base_branch:
-                        values["base_branch"] = base_branch
-                    if seed_ref:
-                        values["seed_ref"] = seed_ref
-                    if supersedes:
-                        values["supersedes"] = supersedes
-                    if codex_launch_mode:
-                        values["codex_launch_mode"] = codex_launch_mode
-                    if sprint:
-                        values["sprint_ref"] = sprint
-                    if steward_report:
-                        values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
+                    values = _create_metadata(
+                        task_type=task_type,
+                        project=project,
+                        complexity=complexity,
+                        family_preference=family_preference,
+                        review=review,
+                        live_impact=live_impact,
+                        touches_production=touches_production,
+                        wait_spec=wait_spec,
+                        po_origin=po_origin,
+                        po_execution=po_execution,
+                        blocked_by=blocked_by,
+                        head=head,
+                        review_head=review_head,
+                        slug=slug,
+                        base_branch=base_branch,
+                        seed_ref=seed_ref,
+                        supersedes=supersedes,
+                        codex_launch_mode=codex_launch_mode,
+                        sprint=sprint,
+                        steward_report=steward_report,
+                    )
                     self.client.call("saveTaskMetadata", task_id=task_id, values=values)
                     if steward_report:
                         created = self.reader.show_id(task_id)
@@ -4748,9 +4719,7 @@ class TaskWriter:
                 self._prove_retired_closed(pending)
                 self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError, ValueError):
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise _audit_repair_required() from None
             return {"action": "retired", "reference": reference, "retired": True, "replayed": True}
 
         # Do not stage a successful-looking occurrence for a candidate that has
@@ -4916,11 +4885,7 @@ class TaskWriter:
                     )
                 )
         except BoardEventPending:
-            raise TaskError(
-                "audit_pending",
-                "backend write committed; audit repair is required",
-                4,
-            ) from None
+            raise _audit_repair_required() from None
         except ValueError as exc:
             message = str(exc)
             if "released generic audit record" in message:
@@ -4956,9 +4921,7 @@ class TaskWriter:
             try:
                 event_id = self.audit.append(request_id, committed)
             except OSError:
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise _audit_repair_required() from None
             return {
                 "action": kind,
                 "task": self.reader.show(reference),
@@ -4976,9 +4939,7 @@ class TaskWriter:
                 self.audit.stage(request_id, pending)
                 event_id = self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError):
-                raise TaskError(
-                    "audit_pending", "backend write committed; audit repair is required", 4
-                ) from None
+                raise _audit_repair_required() from None
             return {
                 "action": kind,
                 "task": self.reader.show(reference),
@@ -5033,7 +4994,7 @@ class TaskWriter:
         phantom repair obligation.
         """
         if not self._transactional:
-            return TaskError("audit_pending", "backend write committed; audit repair is required", 4)
+            return _audit_repair_required()
         return TaskError(
             "backend_error",
             f"{subject} did not happen: it was rolled back together with its record, "
@@ -5076,20 +5037,20 @@ class TaskWriter:
         try:
             mutation(task)
         except _CommittedWriteError:
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            raise _audit_repair_required() from None
         except Exception:
             self.audit.discard(request_id)
             raise
         try:
             task = self.reader.show(reference)
         except Exception:  # noqa: BLE001 - any post-write read failure is an ambiguous commit.
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            raise _audit_repair_required() from None
         event["backend"]["revision"] = _revision(task)
         self.audit.stage(request_id, event)
         try:
             event_id = self.audit.append(request_id, event)
         except OSError:
-            raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+            raise _audit_repair_required() from None
         return {"action": kind, "task": task, "event_id": event_id, "replayed": False}
 
     def reconcile(
@@ -5228,15 +5189,8 @@ class TaskWriter:
                 source=str(transition.get("source") or ""),
                 target=target,
             )
-            if target in {"ready", "done"}:
-                normalized = self.reader.show(ref)
-                if (
-                    normalized["claim"]["worker"] is not None
-                    or normalized["routing"]["resolved_worker_head"] is not None
-                    or normalized["routing"]["resolved_review_head"] is not None
-                    or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
-                ):
-                    raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
+            if target in {"ready", "done"} and _ready_cleanup_incomplete(self.reader.show(ref)):
+                raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
         self.board_host.recover_transition(str(event["request_id"]))
 
     @ownership_recovery
@@ -5282,13 +5236,7 @@ class TaskWriter:
             task_id=_task_number(task),
             values=_READY_RESET_METADATA,
         )
-        normalized = self.reader.show(str(event["ref"]))
-        if (
-            normalized["claim"]["worker"] is not None
-            or normalized["routing"]["resolved_worker_head"] is not None
-            or normalized["routing"]["resolved_review_head"] is not None
-            or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
-        ):
+        if _ready_cleanup_incomplete(self.reader.show(str(event["ref"]))):
             raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
 
     def _retention_card(
@@ -5671,6 +5619,21 @@ def _blocker_refs(task: Mapping[str, Any]) -> list[str]:
     return [part.strip() for part in str(task.get("blocked_by") or "").split(",") if part.strip()]
 
 
+def _audit_repair_required() -> TaskError:
+    """The backend write committed but its audit record did not: a later repair finishes it."""
+    return TaskError("audit_pending", "backend write committed; audit repair is required", 4)
+
+
+def _ready_cleanup_incomplete(task: dict[str, Any]) -> bool:
+    """A Ready or Done card that still carries a claim, a resolved head or retry history."""
+    return (
+        task["claim"]["worker"] is not None
+        or task["routing"]["resolved_worker_head"] is not None
+        or task["routing"]["resolved_review_head"] is not None
+        or task["retry"] != {"same": 0, "switched": 0, "heads": []}
+    )
+
+
 def _task_number(task: dict[str, Any]) -> int:
     """The backend's own number for a normalized card, read through the one identity parser."""
     value = entity_number("task", task.get("id"))
@@ -5738,50 +5701,111 @@ def _task_is_active(task: dict[str, Any]) -> bool:
         return True
 
 
-def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
+def _create_metadata(
+    *,
+    task_type: str,
+    project: str,
+    complexity: str,
+    family_preference: str,
+    review: str,
+    live_impact: bool,
+    touches_production: str,
+    wait_spec: str,
+    po_origin: str,
+    po_execution: str,
+    blocked_by: str,
+    head: str,
+    review_head: str,
+    slug: str,
+    base_branch: str,
+    seed_ref: str,
+    supersedes: str,
+    codex_launch_mode: str,
+    sprint: str,
+    steward_report: bool,
+) -> dict[str, str]:
+    """The one metadata write of a create, shared by a fresh create and a pending-create repair."""
     values = {
-        "task_type": _text(payload.get("task_type")),
-        "project": _text(payload.get("project")),
-        "complexity": _text(payload.get("complexity")) or "standard",
-        "family_preference": _text(payload.get("family_preference")) or "auto",
+        "record_type": "task",
+        "task_type": task_type,
+        "project": project,
+        "complexity": complexity,
+        "family_preference": family_preference,
     }
-    # A create recorded before the review choice was stored names none, and repairs it as none.
-    if review := _text(payload.get("review")):
+    if review:
         values["review"] = review
-    if payload.get("live_impact") is True:
+    if live_impact:
         values["live_impact"] = "1"
-    if wait_spec := _text(payload.get("wait_spec")):
+    if touches_production:
+        # Not a column: a typed field of the extension bag (board/production_rights.py).
+        values[TOUCHES_PRODUCTION] = touches_production
+    if wait_spec:
+        # Not a column either: the wait card's spec (board/wait_card.py).
         values[wait_card.WAIT_SPEC] = wait_spec
-    if isinstance(origin := payload.get("po_origin"), Mapping) and _text(origin.get("session")):
-        values[origin_field.PO_ORIGIN] = origin_field.origin_text(
-            _text(origin.get("session")), _text(origin.get("request"))
-        )
-    if isinstance(execution := payload.get("po_execution"), Mapping):
-        values[execution_field.PO_EXECUTION] = execution_field.PoExecution.from_document(execution).text()
-    for payload_key, metadata_key in (
-        ("blocked_by", "blocked_by"),
-        ("head", "head"),
-        ("review_head", "review_head"),
-        ("slug", "slug"),
-        ("base_branch", "base_branch"),
-        ("seed_ref", "seed_ref"),
-        ("supersedes", "supersedes"),
-        ("codex_launch_mode", "codex_launch_mode"),
-        ("sprint", "sprint_ref"),
+    if po_origin:
+        # Nor the PO turn a delegated card came from (board/po_origin.py), written only here.
+        values[origin_field.PO_ORIGIN] = po_origin
+    if po_execution:
+        values[execution_field.PO_EXECUTION] = po_execution
+    if codex_launch_mode not in _CODEX_LAUNCH_MODES:
+        # Drop retired launch modes when repairing legacy creates.
+        codex_launch_mode = ""
+    for metadata_key, value in (
+        ("blocked_by", blocked_by),
+        ("head", head),
+        ("review_head", review_head),
+        ("slug", slug),
+        ("base_branch", base_branch),
+        ("seed_ref", seed_ref),
+        ("supersedes", supersedes),
+        ("codex_launch_mode", codex_launch_mode),
+        ("sprint_ref", sprint),
     ):
-        value = _text(payload.get(payload_key))
-        if metadata_key == "codex_launch_mode" and value not in _CODEX_LAUNCH_MODES:
-            # Drop retired launch modes when repairing legacy creates.
-            continue
         if value:
             values[metadata_key] = value
-    if payload.get("steward_report") is True:
-        slug = _text(payload.get("slug"))
+    if steward_report:
         # A recovered report must prove the whole accounting identity, not merely
         # that its row exists.  Keep these in the one metadata write so a retry
         # repairs a partial backend write as one unit.
-        values.update({"record_type": "task", "claim": slug, "steward_report": "1"})
+        values.update({"claim": slug, "steward_report": "1"})
     return values
+
+
+def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
+    """The create metadata a staged create payload records, for its repair."""
+    origin = payload.get("po_origin")
+    execution = payload.get("po_execution")
+    return _create_metadata(
+        task_type=_text(payload.get("task_type")),
+        project=_text(payload.get("project")),
+        complexity=_text(payload.get("complexity")) or "standard",
+        family_preference=_text(payload.get("family_preference")) or "auto",
+        # A create recorded before the review choice was stored names none, and repairs it as none.
+        review=_text(payload.get("review")),
+        live_impact=payload.get("live_impact") is True,
+        touches_production=_text(payload.get("touches_production")),
+        wait_spec=_text(payload.get("wait_spec")),
+        po_origin=(
+            origin_field.origin_text(_text(origin.get("session")), _text(origin.get("request")))
+            if isinstance(origin, Mapping) and _text(origin.get("session"))
+            else ""
+        ),
+        po_execution=(
+            execution_field.PoExecution.from_document(execution).text()
+            if isinstance(execution, Mapping)
+            else ""
+        ),
+        blocked_by=_text(payload.get("blocked_by")),
+        head=_text(payload.get("head")),
+        review_head=_text(payload.get("review_head")),
+        slug=_text(payload.get("slug")),
+        base_branch=_text(payload.get("base_branch")),
+        seed_ref=_text(payload.get("seed_ref")),
+        supersedes=_text(payload.get("supersedes")),
+        codex_launch_mode=_text(payload.get("codex_launch_mode")),
+        sprint=_text(payload.get("sprint")),
+        steward_report=payload.get("steward_report") is True,
+    )
 
 
 def _rfc3339(value: Any) -> str | None:

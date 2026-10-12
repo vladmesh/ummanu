@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import IO, Any, BinaryIO
 
 from ummanu import _proc
 
@@ -202,12 +202,18 @@ def _restore_file(path: Path, before: bytes | None) -> None:
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with path.open("a+", encoding="utf-8") as handle, held_lock(handle):
+        yield
+
+
+@contextlib.contextmanager
+def held_lock(handle: IO[str]) -> Iterator[None]:
+    """Hold an exclusive `flock` on an already open lock file for the block."""
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @contextlib.contextmanager
