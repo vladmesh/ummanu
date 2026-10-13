@@ -73,6 +73,25 @@ from ummanu.dispatch.worker_report import prompt_worker_report as _prompt_worker
 from ummanu.runtime.head import HeadRun as _HeadRun
 
 
+def _wait_outcome(
+    *,
+    status: str,
+    kind: str,
+    pilot_ref: str,
+    attempt_id: str,
+    step: str | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Assemble an already-decided wait outcome, preserving caller field order."""
+    return {
+        "status": status,
+        "step": step if step is not None else {"worker": "advance", "review": "review"}[kind],
+        "pilot_ref": pilot_ref,
+        "attempt_id": attempt_id,
+        **fields,
+    }
+
+
 def wait_watchdog(
     runtime: Any,
     task: dict[str, Any],
@@ -85,13 +104,13 @@ def wait_watchdog(
 ) -> dict[str, Any] | None:
     """Watch an open-ended wait without confusing a bad Orca inventory for a dead head."""
     if getattr(record, f"paused_{'reviewer' if kind == 'review' else 'worker'}_at"):
-        return {
-            "status": "ok",
-            "step": "review" if kind == "review" else "advance",
-            "pilot_ref": task["ref"],
-            "attempt_id": attempt_id,
-            "action": f"{kind}-paused",
-        }
+        return _wait_outcome(
+            status="ok",
+            kind=kind,
+            pilot_ref=task["ref"],
+            attempt_id=attempt_id,
+            action=f"{kind}-paused",
+        )
     runtime_reason = ""
     try:
         with tick_stage("observation"):
@@ -106,14 +125,14 @@ def wait_watchdog(
         status = {"known": False, "live": True, "reason": "runtime-unavailable"}
         runtime_reason = scrub_host_output(str(exc))
     if status.get("identity_mismatch"):
-        return {
-            "status": "degraded",
-            "step": "review" if kind == "review" else "advance",
-            "pilot_ref": task["ref"],
-            "attempt_id": attempt_id,
-            "action": f"{kind}-heartbeat-identity-mismatch",
-            "reason": "the heartbeat names a live process with a mismatching launch identity",
-        }
+        return _wait_outcome(
+            status="degraded",
+            kind=kind,
+            pilot_ref=task["ref"],
+            attempt_id=attempt_id,
+            action=f"{kind}-heartbeat-identity-mismatch",
+            reason="the heartbeat names a live process with a mismatching launch identity",
+        )
     # A turn that ended on a provider error is a provider verdict, and it outranks every
     # stall reading below (secretary-1799): a head idle at its prompt after a 401 is not late, it
     # was refused, and the answer is the next head of its chain, not a nudge, a respawn into the
@@ -222,14 +241,14 @@ def _decide_wait_by_verdict(
 
     def plain_wait() -> dict[str, Any] | None:
         if runtime_reason:
-            return {
-                "status": "degraded",
-                "step": "review" if kind == "review" else "advance",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "action": f"{kind}-runtime-unavailable",
-                "reason": runtime_reason,
-            }
+            return _wait_outcome(
+                status="degraded",
+                kind=kind,
+                pilot_ref=ref,
+                attempt_id=attempt_id,
+                action=f"{kind}-runtime-unavailable",
+                reason=runtime_reason,
+            )
         return None
 
     if verdict is VitalityVerdict.DEAD:
@@ -298,25 +317,25 @@ def _decide_wait_by_verdict(
                 return prompted
             # The prompt was already spent this round (or the head cannot take one):
             # carry the suspicion as visible degradation without escalating.
-            return {
-                "status": "degraded",
-                "step": "review" if kind == "review" else "advance",
-                "pilot_ref": ref,
-                "attempt_id": attempt_id,
-                "action": f"{kind}-stall-suspected",
-                "reason": trigger,
-            }
-        return {
-            "status": "degraded",
-            "step": "review" if kind == "review" else "advance",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": f"{kind}-stall-suspected",
-            "reason": (
+            return _wait_outcome(
+                status="degraded",
+                kind=kind,
+                pilot_ref=ref,
+                attempt_id=attempt_id,
+                action=f"{kind}-stall-suspected",
+                reason=trigger,
+            )
+        return _wait_outcome(
+            status="degraded",
+            kind=kind,
+            pilot_ref=ref,
+            attempt_id=attempt_id,
+            action=f"{kind}-stall-suspected",
+            reason=(
                 f"the review head's vitality episode suspects a stall "
                 f"({suspicion_basis}) with no {expectation}"
             ),
-        }
+        )
     if verdict is VitalityVerdict.RETAINED:
         # The dispatcher's own retention is holding this head still, and it is the only
         # thing that ends it. Waking it would be this tick fighting the tick that parked
@@ -337,14 +356,14 @@ def _decide_wait_by_verdict(
         runtime.save_records(payload, records)
         if runtime_reason:
             return plain_wait()
-        return {
-            "status": "ok",
-            "step": "review" if kind == "review" else "advance",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": f"{kind}-retained",
-            "reason": "the head is held suspended by this card's confirmed retention",
-        }
+        return _wait_outcome(
+            status="ok",
+            kind=kind,
+            pilot_ref=ref,
+            attempt_id=attempt_id,
+            action=f"{kind}-retained",
+            reason="the head is held suspended by this card's confirmed retention",
+        )
     if verdict is VitalityVerdict.SUSPENDED:
         # The recovery policy owns this arm (S1-5): one identity-fenced SIGCONT per
         # suspension span, then a bounded response window, then operator escalation --
@@ -499,17 +518,17 @@ def _escalate_unobservable_wait(
             _wait_cycle_token(record),
         ),
     )
-    return {
-        "status": "degraded",
-        "step": "review" if kind == "review" else "advance",
-        "pilot_ref": ref,
-        "attempt_id": attempt_id,
-        "action": f"{kind}-unobserved-wait-escalated",
-        "reason": (
+    return _wait_outcome(
+        status="degraded",
+        kind=kind,
+        pilot_ref=ref,
+        attempt_id=attempt_id,
+        action=f"{kind}-unobserved-wait-escalated",
+        reason=(
             f"nothing could observe the head for {seconds}s "
             f"(ceiling {ceiling}s); escalated to the operator, head untouched"
         ),
-    }
+    )
 
 
 def _recovery_thresholds() -> Any:
@@ -674,17 +693,16 @@ def execute_recovery_intent(
     ref = task["ref"]
     asked = _recovery_policy_decision(episode=episode, now=now)
     if asked is None:
-        return {
-            "status": "degraded",
-            "step": "review" if kind == "review" else "advance",
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": f"{kind}-suspension-observed",
-            "reason": "no vitality episode on file",
-        }
+        return _wait_outcome(
+            status="degraded",
+            kind=kind,
+            pilot_ref=ref,
+            attempt_id=attempt_id,
+            action=f"{kind}-suspension-observed",
+            reason="no vitality episode on file",
+        )
     decision, updated = asked
     _store_recovery_episode(runtime, record, records, payload, ref, kind=kind, episode=updated)
-    step = "review" if kind == "review" else "advance"
     if decision.intent is _RecoveryIntent.SIGCONT:
         sent = _sigcont_head(runtime, task, record, kind=kind)
         body = (
@@ -711,15 +729,15 @@ def execute_recovery_intent(
                 suffix=_request_token(f"sigcont@{decision.detail['span_started_at']:.0f}"),
             ),
         )
-        return {
-            "status": "degraded",
-            "step": step,
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": f"{kind}-sigcont-sent" if sent else f"{kind}-sigcont-fenced",
-            "reason": decision.reason,
-            "recovery": decision.to_json(),
-        }
+        return _wait_outcome(
+            status="degraded",
+            kind=kind,
+            pilot_ref=ref,
+            attempt_id=attempt_id,
+            action=f"{kind}-sigcont-sent" if sent else f"{kind}-sigcont-fenced",
+            reason=decision.reason,
+            recovery=decision.to_json(),
+        )
     if decision.intent is _RecoveryIntent.ESCALATE_OPERATOR:
         _escalate_suspended_head(runtime,
             task,
@@ -728,25 +746,25 @@ def execute_recovery_intent(
             kind=kind,
             decision=decision,
         )
-        return {
-            "status": "degraded",
-            "step": step,
-            "pilot_ref": ref,
-            "attempt_id": attempt_id,
-            "action": f"{kind}-suspension-escalated",
-            "reason": decision.reason,
-            "recovery": decision.to_json(),
-        }
+        return _wait_outcome(
+            status="degraded",
+            kind=kind,
+            pilot_ref=ref,
+            attempt_id=attempt_id,
+            action=f"{kind}-suspension-escalated",
+            reason=decision.reason,
+            recovery=decision.to_json(),
+        )
     # Observe: inside the response window (or already escalated and holding).
-    return {
-        "status": "ok" if decision.rung < _RUNG_ESCALATED else "degraded",
-        "step": step,
-        "pilot_ref": ref,
-        "attempt_id": attempt_id,
-        "action": f"{kind}-suspension-observed",
-        "reason": decision.reason,
-        "recovery": decision.to_json(),
-    }
+    return _wait_outcome(
+        status="ok" if decision.rung < _RUNG_ESCALATED else "degraded",
+        kind=kind,
+        pilot_ref=ref,
+        attempt_id=attempt_id,
+        action=f"{kind}-suspension-observed",
+        reason=decision.reason,
+        recovery=decision.to_json(),
+    )
 
 
 def _sigcont_head(
@@ -875,15 +893,15 @@ def _escalate_recovery_to_operator(
             str(detail.get("identical_refusals") or 0),
         ),
     )
-    return {
-        "status": "degraded",
-        "step": "review" if kind == "review" else "advance",
-        "pilot_ref": ref,
-        "attempt_id": attempt_id,
-        "action": f"{kind}-deterministic-refusal-escalated",
-        "reason": decision.reason,
-        "recovery": decision.to_json(),
-    }
+    return _wait_outcome(
+        status="degraded",
+        kind=kind,
+        pilot_ref=ref,
+        attempt_id=attempt_id,
+        action=f"{kind}-deterministic-refusal-escalated",
+        reason=decision.reason,
+        recovery=decision.to_json(),
+    )
 
 
 def _vitality_guard_decision(
@@ -957,15 +975,15 @@ def _guard_or_wait(
         ),
         request_id=request_id,
     )
-    return {
-        "status": "degraded",
-        "step": "review" if kind == "review" else "advance",
-        "pilot_ref": task["ref"],
-        "attempt_id": attempt_id,
-        "action": f"{kind}-guard-refused",
-        "reason": f"{decision.refusal.value}: {decision.reason}",
-        "guard": decision.to_json(),
-    }
+    return _wait_outcome(
+        status="degraded",
+        kind=kind,
+        pilot_ref=task["ref"],
+        attempt_id=attempt_id,
+        action=f"{kind}-guard-refused",
+        reason=f"{decision.refusal.value}: {decision.reason}",
+        guard=decision.to_json(),
+    )
 
 
 def answer_owed_since_for_wait(record: DispatcherRecord, kind: str) -> float:
@@ -1264,8 +1282,8 @@ def _respawn_wait_bring_up(
     degraded: bool = False,
 ) -> dict[str, Any]:
     ref = task["ref"]
-    step = "review" if kind == "review" else "advance"
     if kind == "review":
+        step = "review"
         # Only the reviewer is stalled; its pane goes and the workspace stays. A stall is not a
         # death, so an unconfirmed stop ends the tick rather than adding a second reviewer.
         unconfirmed = runtime._end_review_pane_confirmed(
@@ -1287,6 +1305,7 @@ def _respawn_wait_bring_up(
             runtime.save_records(payload, records)
             return outcome
     else:
+        step = "advance"
         # Same as the reviewer above: a silent worker is not a dead one.
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         if unconfirmed is not None:
@@ -1369,16 +1388,17 @@ def _respawn_wait_bring_up(
             f"{_wait_cycle_token(record)}-{respawns}",
         ),
     )
-    return {
-        # A head that is alive, idle and has delivered nothing is the pipeline failing to move a
-        # card: `degraded` is what puts it in the telemetry an operator and the steward read.
-        "status": "degraded" if degraded else "ok",
-        "step": step,
-        "pilot_ref": ref,
-        "attempt_id": attempt_id,
-        "action": f"{kind}-respawned",
+    # A head that is alive, idle and has delivered nothing is the pipeline failing to move a
+    # card: `degraded` is what puts it in the telemetry an operator and the steward read.
+    return _wait_outcome(
+        status="degraded" if degraded else "ok",
+        kind=kind,
+        pilot_ref=ref,
+        attempt_id=attempt_id,
+        step=step,
+        action=f"{kind}-respawned",
         **({"reason": trigger} if degraded else {}),
-    }
+    )
 
 
 def _escalate_wait(
@@ -1394,8 +1414,8 @@ def _escalate_wait(
     trigger: str,
 ) -> dict[str, Any]:
     ref = task["ref"]
-    step = "review" if kind == "review" else "advance"
     if kind == "review":
+        step = "review"
         # The reviewer may still hold the checkout when its second stall escalates. End it
         # through the same confirmed boundary; a refused stop leaves the record for the retry.
         unconfirmed = runtime._end_review_pane_confirmed(
@@ -1412,6 +1432,7 @@ def _escalate_wait(
         # Review starts over a retained worker: settle that role before dropping the record.
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
     else:
+        step = "advance"
         unconfirmed = runtime._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
     if unconfirmed is not None:
         return unconfirmed
@@ -1440,7 +1461,14 @@ def _escalate_wait(
     )
     records.pop(ref, None)
     runtime.save_records(payload, records)
-    return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
+    return _wait_outcome(
+        status="ok",
+        kind=kind,
+        pilot_ref=ref,
+        attempt_id=attempt_id,
+        step=step,
+        to="blocked",
+    )
 
 
 def _wait_expectation(kind: str) -> str:
