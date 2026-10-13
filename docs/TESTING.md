@@ -279,7 +279,7 @@ The existing validator checks all CI ownership for duplicate, stale, missing or 
 empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
 CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
 
-The config boundary adds `tests.test_config_boundary` to `unit`; the manifest now owns 312
+The config boundary adds `tests.test_config_boundary` to `unit`; the manifest now owns 313
 modules. Its shared policy and storage fixtures check effective limits, draft validation and the
 released storage alias. `tests.test_kernel_import_boundary` follows config's actual reachable
 nested/relative imports, aliases, string targets and package ancestors and caps that closure at ten
@@ -289,6 +289,15 @@ diagnostics through native `config check` and offline `doctor`; the policy owner
 `ummanu.kernel.sprint_policy`, storage is `ummanu.runtime.onboarding_storage`, and fallback
 diagnostics belong to `ummanu.infra.fallback`. Sprint admission and onboarding/upgrade packaging
 remain in their existing CI shards.
+
+`tests.test_cleanup_foundation` belongs to `unit`: it guards the ownership/journal imports and
+cold imports, checks shared identities and mocked lock acquisition/order, and uses a fake clock
+for replay waits, nested deadlines, before-effect reservation and publication after work exhaustion.
+Small released-source journal goldens compare persisted byte hashes for state, retained head evidence,
+v1 migration and copy/publication/archive crash recovery. Actual concurrent locks and runtime effects
+remain in integration-dispatcher (`bounded_cleanup_replay`, `owned_cleanup`, `narrow_cleanup_lock`,
+`cleanup_journal_layout`), integration-recovery (`cleanup_journal_migration`, `bulk_ownership_lane`)
+and integration-board (`cleanup_lock_sql`). These suites run in CI only.
 
 The historical ummanu-202 routing baseline, measured on the control host on 2026-10-10, contained
 141 modules and 2,644 tests:

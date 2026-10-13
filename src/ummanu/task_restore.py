@@ -787,7 +787,7 @@ def reconcile_restore_order(
     references: list[str],
     request_id: str,
 ) -> None:
-    from ummanu.dispatch.cleanup import bulk_lane
+    from ummanu.dispatch.ownership import bulk_lane
 
     with bulk_lane(writer.data_dir, exclusive=True):
         _reconcile_restore_order(writer, column, swimlane, references, request_id)
@@ -891,7 +891,7 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
     ):
         raise TaskError("backend_error", "pending restore order is invalid", 1)
 
-    from ummanu.dispatch.cleanup import bulk_lane
+    from ummanu.dispatch.ownership import bulk_lane
 
     with bulk_lane(writer.data_dir, exclusive=True):
         live, rows = _live_restore_group(writer, column, swimlane)

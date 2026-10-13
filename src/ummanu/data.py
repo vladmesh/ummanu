@@ -207,7 +207,7 @@ def _read_board_cut(
     Non-SQL clients are retained for offline test/export compatibility.
     """
     from ummanu.board.sql_cards import SqlCardClient
-    from ummanu.dispatch.cleanup import bulk_lane
+    from ummanu.dispatch.ownership import bulk_lane
 
     owned = reader is None
     client = None

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import re
 from pathlib import Path
 
@@ -68,10 +69,14 @@ def dependencies(name: str, path: Path, source: str) -> set[str]:
                 raise AssertionError(f"{name}:{node.lineno}: nonliteral dynamic import")
             target = node.args[0].value
             if target.startswith("."):
-                level = len(target) - len(target.lstrip("."))
-                target = ".".join(
-                    package.split(".")[: len(package.split(".")) - level + 1] + [target.lstrip(".")]
+                supplied = node.args[1] if len(node.args) > 1 else next(
+                    (keyword.value for keyword in node.keywords if keyword.arg == "package"), None
                 )
+                if supplied is not None and (
+                    not isinstance(supplied, ast.Constant) or not isinstance(supplied.value, str)
+                ):
+                    raise AssertionError(f"{name}:{node.lineno}: nonliteral dynamic import package")
+                target = importlib.util.resolve_name(target, supplied.value if supplied is not None else package)
             targets.add(target)
     return {target for target in targets if target == "ummanu" or target.startswith("ummanu.")}
 
