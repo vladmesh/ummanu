@@ -10,6 +10,7 @@ import ast
 import hashlib
 import inspect
 import json
+import signal
 import unittest
 from contextlib import ExitStack
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from ummanu.dispatch.head_vitality_episode import VitalityEpisode, VitalityVerdi
 from ummanu.dispatch.head_vitality_guard import GuardDecision, GuardRefusal
 from ummanu.dispatch.head_vitality_policy import RecoveryDecision, RecoveryIntent
 from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.watchdog import HEARTBEAT_LIVE_MATCH
 
 CASES = (
     "paused", "identity", "provider-forward", "healthy", "healthy-degraded",
@@ -45,7 +47,7 @@ GOLDENS = {
     "worker/recovery-missing": "917d513537685df2c9fb179ab40b5be476cfc2efce3bc70f83a1665e531334a5",
     "worker/observe": "c48ffdc1c80ffd27f1d36f1528842d2b7979c54fad1bbc7ab2404bd911c85e41",
     "worker/observe-escalated": "bd0faddc798ad80089e129bd0d4c1f0e698fa49c9c1ad0e60796b2b0ba983dda",
-    "worker/sigcont": "c11df95e369b6d702e9265df4d176485a348160df278b2320191aa881caec305",
+    "worker/sigcont": "d291ba20853c9e9dab1cf254893491ee5bc9cad23e42f1db2256902dfca90cb3",
     "worker/sigcont-foreign": "c11df95e369b6d702e9265df4d176485a348160df278b2320191aa881caec305",
     "worker/suspension-escalation": "9dd2280787b1b7302ac928efaa9be38b2c74778ee6b51967283c57d3d5cf82f7",
     "worker/guard-missing": "804e6e1d3d6ac53bf5898890aa54d3a5757df526383b3150063efbfef1245499",
@@ -73,7 +75,7 @@ GOLDENS = {
     "review/recovery-missing": "97fe51e06bc5d787f6c71f69ab3558acd4e98e3f81b76a623693a9aa6dc5a195",
     "review/observe": "72e7488efd9ac10b3edf84369e95295c7bcbed542ab76d3ad19f75c20ad57a2f",
     "review/observe-escalated": "00f7aff1b89d3231583dff83db203554f34b033294f54f149d4d7bce231215cb",
-    "review/sigcont": "5d76afd7f5865d54aa450c4e3662afea2f32c69c0fdb0be38aafafd63baec0ad",
+    "review/sigcont": "16fc4bd00effc4efbbd519885bc28771cb4394987456d61ba038717c8e1a08dd",
     "review/sigcont-foreign": "5d76afd7f5865d54aa450c4e3662afea2f32c69c0fdb0be38aafafd63baec0ad",
     "review/suspension-escalation": "a9dbd32852e82e05fc3542e2ccbab4ff2724f1214b48b8d4b77060087c5e12ce",
     "review/guard-missing": "507a536da0b371805117591921a43a7e0451f4535e36c332312d01d1942037ba",
@@ -156,6 +158,9 @@ class WaitOutcomeTests(unittest.TestCase):
         refusal = GuardRefusal.FOREIGN_RUN if case == "guard-foreign" else GuardRefusal.MISSING_EPISODE
         guard = GuardDecision("respawn", case == "guard-allowed", refusal, "guard reason",
                               "Unverifiable", "foreign-run")
+        identity_status = {"pid": 123, "process_alive": True}
+        if case == "sigcont":
+            identity_status["state"] = HEARTBEAT_LIVE_MATCH
         with ExitStack() as stack:
             def patch(owner, name, result=None, error=None):
                 return stack.enter_context(mock.patch.object(
@@ -163,7 +168,7 @@ class WaitOutcomeTests(unittest.TestCase):
 
             patch(wait.time, "time", 1000.0)
             patch(runtime, "save_records")
-            patch(runtime.writer, "comment")
+            comment = patch(runtime.writer, "comment")
             patch(runtime.host, "worker_status", status)
             patch(runtime.host, "review_status", status)
             patch(wait, "_provider_failure_outcome", forwarded if case == "provider-forward" else None)
@@ -172,12 +177,12 @@ class WaitOutcomeTests(unittest.TestCase):
             patch(wait, "_prompt_worker_report", (None, "spent prompt"))
             patch(wait, "_stall_seconds", 300)
             patch(wait, "_vitality_guard_decision", guard)
-            patch(wait, "_guard_head_run_identity", {"pid": 123, "process_alive": True},
+            identity = patch(wait, "_guard_head_run_identity", identity_status,
                   wait._HeadRunIdentityMismatch("foreign identity") if case == "sigcont-foreign" else None)
-            patch(wait.os, "getpgid", 123)
-            patch(wait.os, "getpgrp", 456)
-            patch(wait.os, "killpg")
-            patch(wait.os, "kill")
+            getpgid = patch(wait.os, "getpgid", 123)
+            getpgrp = patch(wait.os, "getpgrp", 456)
+            killpg = patch(wait.os, "killpg")
+            kill = patch(wait.os, "kill")
             refused = forwarded if case in ("respawn-refused", "terminal-refused") else None
             patch(runtime, "_stop_worker_confirmed", refused)
             patch(runtime, "_end_review_pane_confirmed", refused)
@@ -221,11 +226,34 @@ class WaitOutcomeTests(unittest.TestCase):
                 proceed.assert_called_once_with()
             elif case.startswith("guard-"):
                 proceed.assert_not_called()
+            if case in ("sigcont", "sigcont-foreign"):
+                identity.assert_called_once_with(
+                    f"{'review' if kind == 'review' else 'worker'}.pid",
+                    run={"run_id": f"{kind}-run"}, role=kind, task="card:DUP-1", leaf="",
+                )
+                comment.assert_called_once()
+                expected_calls = ["_recovery_policy_decision", "save_records", "_guard_head_run_identity"]
+                if case == "sigcont":
+                    self.assertEqual(outcome["action"], f"{kind}-sigcont-sent")
+                    getpgid.assert_called_once_with(123)
+                    getpgrp.assert_called_once_with()
+                    killpg.assert_called_once_with(123, signal.SIGCONT)
+                    self.assertIn("Sent one identity-fenced SIGCONT", comment.call_args.kwargs["body"])
+                    expected_calls.extend(["getpgid", "getpgrp", "killpg"])
+                else:
+                    self.assertEqual(outcome["action"], f"{kind}-sigcont-fenced")
+                    for collaborator in (getpgid, getpgrp, killpg):
+                        collaborator.assert_not_called()
+                    self.assertIn("Could NOT verify the process identity", comment.call_args.kwargs["body"])
+                kill.assert_not_called()
+                self.assertEqual([event[0] for event in events], [*expected_calls, "comment"])
             snapshot = {"outcome": outcome, "events": events, "record": record.to_json(),
                         "records": normal(records)}
             return json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
 
     def test_producer_goldens(self):
+        for kind in ("worker", "review"):
+            self.assertNotEqual(GOLDENS[f"{kind}/sigcont"], GOLDENS[f"{kind}/sigcont-foreign"])
         for kind in ("worker", "review"):
             for case in CASES:
                 with self.subTest(kind=kind, case=case):
