@@ -10103,8 +10103,9 @@ class HeadPromptTests(unittest.TestCase):
             self.host._review_prompt(self.task, "attempt-1", 3),
         ):
             for command in self._command_lines(doc):
-                self.assertNotIn("--body-file /tmp/ummanu-", command)
-                self.assertIn(f"--body-file {self.bodies}/", command)
+                # The old shared name, not any path under /tmp: the suite's own temp root is /tmp/ummanu-*.
+                self.assertNotRegex(command, r"--body-file /tmp/ummanu-(report|verdict)-")
+                self.assertIn(f"--body-file {self.bodies}/ummanu-", command)
         self.assertEqual(stat.S_IMODE(self.bodies.stat().st_mode), 0o700)
         self.assertEqual(list(self.bodies.iterdir()), [], "the head writes the body, not the dispatcher")
 
