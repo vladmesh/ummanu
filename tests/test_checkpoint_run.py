@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import fcntl
-import inspect
 import io
 import json
 import multiprocessing
@@ -21,6 +19,7 @@ from ummanu._fsutil import try_file_lock, write_json
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.checkpoint import CheckpointResult
 from ummanu.dispatch import production
+from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.host import (
     SHIPPED_PACKAGING_ROOT,
     CollectResult,
@@ -73,16 +72,46 @@ class CheckpointRunTests(unittest.TestCase):
         )
 
     def test_tick_bodies_have_no_checkpoint_call_or_phase(self):
-        for body in (
-            production._production_tick_work,
-            production._production_tick_with_snapshot,
-            production._frozen_tick_body,
-        ):
-            source = inspect.getsource(body)
-            ast.parse(source)
-            self.assertNotIn("_coordinate_checkpoint", source)
-            self.assertNotIn('tick_phase("checkpoint")', source)
-            self.assertNotIn("_checkpoint_degradation", source)
+        """A working and a frozen production tick run past the checkpoint: no cut, no push, no phase."""
+        host = mock.Mock(spec=CommandHostRuntime)
+        host.mode = "real"
+        host.committing.side_effect = lambda flush: contextlib.nullcontext()
+        state = production.ProductionState(self.root)
+        self.runtime.owner = "unit-test"
+        self.runtime.production_state = state
+        self.runtime.host = host
+        self.runtime.reader = mock.Mock(**{"list.return_value": []})
+        self.runtime.cleanup = mock.Mock(**{"replay.return_value": []})
+        self.runtime.pause = mock.Mock()
+        seams = {
+            "attempt_accounting.publish_pending_attempt_usage": [],
+            "attempt_accounting.publish_pending_attempt_outcomes": [],
+            "observer_fence": {},
+            "_reconcile_production": [],
+            "_advance_active": ([], [], {}),
+            "reconcile_post_merge_watches": [],
+            "reconcile_after_merge": [],
+            "_reconcile_sprint_budget": [],
+            "reconcile_observers": [],
+            "reconcile_origin_returns": [],
+            "retry_pending_observer_stops": [],
+            "auto_resume_expired_freeze": None,
+        }
+        for name, result in seams.items():
+            self.enterContext(mock.patch("ummanu.dispatch.production." + name, return_value=result))
+        coordinate = self.enterContext(mock.patch.object(checkpoint_run, "_coordinate_checkpoint"))
+        for mode, status in (("running", "ok"), ("freeze", "skipped")):
+            with self.subTest(mode=mode):
+                self.runtime.pause.summary.return_value = {"mode": mode}
+                result = production.production_tick(self.runtime)
+                self.assertEqual(result["status"], status)
+                self.assertNotIn("checkpoint", result)
+                last = state.load()["tick_telemetry"]["last"]
+                self.assertNotIn("checkpoint", last["phases"])
+                self.assertEqual(last["degradations"], [])
+        coordinate.assert_not_called()
+        self.writer.write.assert_not_called()
+        self.assertEqual(self.pusher.method_calls, [])
 
     def test_cli_owns_state_and_runs_under_foreign_cleanup_and_tick_locks(self):
         parent, child = multiprocessing.get_context("fork").Pipe()

@@ -408,24 +408,16 @@ class LocalRunPacketTests(unittest.TestCase):
             self.assertEqual(parsed.module_arg, list(self.contract.args))
 
     def test_reviewer_observes_heavy_run_excludes_results_and_requires_valid_evidence(self) -> None:
+        """Every card type carries the local-run sections in both packets, and the reviewer's part of
+        the rule, which classifies an observed heavy run, is one text whatever the type."""
+        rules = set()
         for kind in ("code", "research", "infra"):
-            _worker, reviewer = self.packets(type=kind)
-            self.assertIn(
-                "An observed excessive local heavy run is a non-blocking observation, never grounds",
-                reviewer,
-            )
-            self.assertIn(
-                "for RED, even if its tests passed. Exclude its results from validation evidence", reviewer
-            )
-            self.assertNotIn("is a blocking", reviewer)
-            self.assertNotIn("RED finding, even if its tests passed", reviewer)
-            self.assertIn(
-                "The observer does not order rework or charge the budget for such a run alone", reviewer
-            )
-            self.assertIn("Preserve historical verdicts in the audit; do not reopen them", reviewer)
-            self.assertIn("Missing required valid evidence or a code", reviewer)
-            self.assertIn("Apply the same local-run bounds", reviewer)
-            self.assertIn(
-                "Missing/none/noop mechanical receipts still require appropriate validation evidence",
-                reviewer,
-            )
+            with self.subTest(kind=kind):
+                worker, reviewer = self.packets(type=kind)
+                for packet in (worker, reviewer):
+                    self.assertIn("\n## Control-host local-run rule\n", packet)
+                    self.assertIn("\n## Applicable sprint local_run_exceptions\n", packet)
+                rule = reviewer.partition("\n## Control-host local-run rule\n")[2].partition("\n## No subagents\n")[0]
+                self.assertIn("non-blocking", rule)
+                rules.add(rule)
+        self.assertEqual(len(rules), 1)

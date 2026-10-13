@@ -9967,40 +9967,90 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("`codex`", substituted)
         self.assertNotIn("Head failover", plain)
 
-    def test_every_worker_packet_forbids_ai_co_authorship_whatever_the_head(self) -> None:
-        """secretary-1401: the instruction used to live in one model family's home file, so a head
-        of another family never saw it. It is in the packet now, and the packet is the same
-        document for every runtime."""
+    def _head_record(self, head: str) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="ummanu-510-pilot",
+            workspace="",
+            handle="",
+            head=head,
+            review_head=f"{head}-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="review_starting",
+            claimed_at=1.0,
+        )
+
+    @staticmethod
+    def _sections(doc: str) -> dict[str, str]:
+        """The packet's `## ` sections in order, each heading to the text up to the next one."""
+        sections: dict[str, str] = {}
+        heading = ""
+        for line in doc.splitlines():
+            if line.startswith("## "):
+                heading = line
+                sections[heading] = ""
+            elif heading:
+                sections[heading] += line + "\n"
+        return sections
+
+    def test_every_worker_packet_carries_the_policy_sections_whatever_the_head(self) -> None:
+        """secretary-1401: a policy that lived in one model family's home file never reached a head
+        of another family. The policy sections are in the packet, the same for every runtime; each
+        policy is anchored by the one fact it hands the worker, not by its wording."""
+        policies = {
+            "## No subagents": ("subagents",),
+            "## Check-cost contract": ("none/noop", "dispatcher-owned exact-SHA gate receipt"),
+            "## Scope of a rework": (
+                "`report:blocked`",  # an obvious wrong cut only
+                "`--product-root .`",  # checks never write to the live installation
+                "existing test",  # a changed test is named in the report
+                "foreground",  # no backgrounded check
+                "`Co-Authored-By:`",  # the trailer the gate refuses
+            ),
+        }
+        scopes = set()
         for head in ("claude-opus", "codex", "gemini"):
-            record = DispatcherRecord(
-                worker="ummanu-510-pilot",
-                workspace="",
-                handle="",
-                head=head,
-                review_head=f"{head}-reviewer",
-                attempt_id="attempt-1",
-                comment_baseline=0,
-                review_baseline=0,
-                state="review_starting",
-                claimed_at=1.0,
-            )
-            doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-            review = self.host._review_prompt(self.task, "attempt-1", 1, record=record)
-
-            self.assertIn("Do not add AI co-authorship to your commits", doc)
-            self.assertIn("`Co-Authored-By:` trailer", doc)
-            self.assertIn("Human", doc)
-            self.assertIn("Read the commit messages on this branch", review)
-            self.assertIn("RED blocker", review)
-
-    def test_worker_and_reviewer_prompt_sources_forbid_subagents(self) -> None:
-        worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
-        reviewer = self.host._review_prompt(self.task, "attempt-1", 1)
+            with self.subTest(head=head):
+                doc = self.host._worker_task_doc(self.task, "main", "attempt-1", record=self._head_record(head))
+                sections = self._sections(doc)
+                self.assertEqual([heading for heading in sections if heading in policies], list(policies))
+                for heading, anchors in policies.items():
+                    for anchor in anchors:
+                        self.assertIn(anchor, sections[heading], heading)
+                # Each blocked command's classification is the one the section tells the worker to pick.
+                classifications = {
+                    line.split("--classification ", 1)[1].split()[0]
+                    for line in self._command_lines(doc)
+                    if "--kind blocked" in line
+                }
+                self.assertEqual(classifications, {"external_fact", "wrong_task_definition"})
+                for classification in classifications:
+                    self.assertIn(f"`--classification {classification}`", sections["## Scope of a rework"])
+                scopes.add(sections["## Scope of a rework"])
+        self.assertEqual(len(scopes), 1, "the policy is the same document for every head")
+        # The launch pointer, which has no sections, repeats the subagent rule before TASK.md is read.
         launch = self.host._worker_launch_prompt()
+        self.assertIn("TASK.md", launch)
+        self.assertIn("subagents", launch)
 
-        for prompt in (worker, reviewer, launch):
-            self.assertIn("Do not spawn", prompt)
-            self.assertIn("subagents", prompt)
+    def test_every_review_packet_carries_the_policy_sections_whatever_the_head(self) -> None:
+        """The reviewer's policies after its `## No subagents` section, each anchored by its fact."""
+        anchors = (
+            "subagents",
+            "`BLOCKER-<short-slug>`",  # every blocker of the round, with a stable id
+            "RED blocker",  # each with its scenario, criterion and origin
+            "`Co-Authored-By:`",  # commit messages are read, not only the diff
+            "fixture",  # a passing fixture is no backend evidence
+        )
+        for head in ("claude-opus", "codex", "gemini"):
+            with self.subTest(head=head):
+                doc = self.host._review_prompt(self.task, "attempt-1", 3, record=self._head_record(head))
+                policy = doc.partition("\n## No subagents\n")[2]
+                self.assertTrue(policy, "the review packet has a `## No subagents` section")
+                for anchor in anchors:
+                    self.assertIn(anchor, policy)
+                self.assertEqual(len(self._command_lines(policy)), 2, "the verdict commands follow the policy")
 
     def test_worker_packet_points_at_the_receipt_and_forbids_a_scrolled_pane_rerun(self) -> None:
         """secretary-1406: the packet used to leave the evidence in the terminal, so the only way
@@ -10393,70 +10443,6 @@ class HeadPromptTests(unittest.TestCase):
         self.assertNotIn("Reviewer findings, as supporting context", adjudicated)
         self.assertEqual(self._read_back(adjudicated, "adjudicated"), decision)
         self.assertEqual(self._read_back(unadjudicated, "unadjudicated"), "")
-
-    def test_worker_prompt_says_which_blocked_classification_to_use(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("`--classification external_fact` when the blocker is a fact outside this", doc)
-        self.assertIn("`--classification wrong_task_definition` when the card itself is", doc)
-        self.assertIn("a blocked report without one is", doc)
-
-    def test_worker_prompt_limits_blocked_reports_to_an_obvious_wrong_cut(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("only for an obvious wrong cut", doc)
-        self.assertIn("requires a new durable protocol, product contract, or trust", doc)
-        self.assertIn("Difficulty or size alone is not a reason to stop", doc)
-        self.assertIn("conflict and the observer decision needed", doc)
-
-    def test_worker_prompt_forbids_writing_to_the_live_installation(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("read the live installation; they never write to it", doc)
-        self.assertIn("deploys, syncs, provisions or reconciles live state", doc)
-        self.assertIn("--product-root .", doc)
-        self.assertIn("what you could not verify", doc)
-
-    def test_worker_prompt_makes_an_existing_test_change_reportable(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("Do not change or weaken an existing test", doc)
-        self.assertIn("name the test, what it", doc)
-        self.assertIn("silently rewritten assertion", doc)
-
-    def test_worker_prompt_keeps_checks_in_the_foreground(self) -> None:
-        """A head has no way to wait: a background job answers at the start of its next turn, and
-        any tool call keeps the current one open. Backgrounding a check is therefore a stall."""
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("Run every check in the foreground", doc)
-        self.assertIn("do not write a loop that waits for it", doc)
-        self.assertIn("keeps the turn open", doc)
-
-    def test_worker_prompt_does_not_call_none_or_noop_validation_authoritative(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("only if it produces a valid dispatcher-owned exact-SHA gate receipt", doc)
-        self.assertIn("none/noop gate", doc)
-        self.assertIn("attests no broad suite", doc)
-        self.assertNotIn("authoritative broad suite belongs", doc)
-
-    def test_review_prompt_refuses_a_fixture_as_backend_evidence(self) -> None:
-        doc = self.host._review_prompt(self.task, "attempt-1", 3)
-
-        self.assertIn("a passing fixture is not", doc)
-        self.assertIn("same wrong assumption as the code", doc)
-        self.assertIn("no end-to-end check against the real backend", doc)
-        self.assertIn("which assumption stays unverified", doc)
-
-    def test_review_prompt_requires_evidence_for_every_red_blocker(self) -> None:
-        doc = self.host._review_prompt(self.task, "attempt-1", 3)
-
-        self.assertIn("concrete reachable scenario", doc)
-        self.assertIn("violated acceptance", doc)
-        self.assertIn("whether this branch introduced", doc)
-        self.assertIn("compatibility promise", doc)
-        self.assertIn("do not silently widen the supported boundary or decide sprint scope", doc)
 
     def test_review_prompt_uses_an_exact_sha_receipt_and_delta_packet(self) -> None:
         record = DispatcherRecord(

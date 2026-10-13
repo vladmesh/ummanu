@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import copy
 import fcntl
-import inspect
-import textwrap
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest import mock
 
 from tests import test_owned_cleanup as owned_fixtures, test_tick_board_snapshot as tick_fixtures
 from tests.fakes.dispatcher import FakeCatalog
+from tests.support.cleanup_lock_probe import LockProbes, run_host_operations, run_production_operations
 from ummanu import restore
 from ummanu.board.fake import MemoryAudit
 from ummanu.board.host import TransitionRequest
@@ -349,13 +349,38 @@ class NarrowCleanupLockTests(unittest.TestCase):
         self.assertEqual(runtime.mock_calls, [])
 
     def test_long_methods_have_no_global_serialization(self):
-        methods = (CommandHostRuntime.prepare_worker, CommandHostRuntime.start_review,
-                   CommandHostRuntime.restart_worker, CommandHostRuntime.teardown,
-                   cleanup.CleanupOwner.replay_one, production.production_tick, production.production_probe)
-        for method in methods:
-            tree = ast.parse(textwrap.dedent(inspect.getsource(inspect.unwrap(method))))
-            self.assertFalse(any(isinstance(node, ast.Name) and node.id in {"serialized", "ownership_lock"}
-                                 for node in ast.walk(tree)), method.__name__)
+        """Each long operation runs to its end with the global cleanup lock free at every slow step.
+
+        prepare_worker, restart_worker, start_review, teardown and both ticks run on a real host or
+        tick with their work recorded (`tests/support/cleanup_lock_probe.py`); replay_one runs a real
+        Done replay of this fixture. A lock taken by a decorator or anywhere in a body before one of
+        those steps is seen held there, and every step must be reached.
+        """
+        operations = {
+            **run_host_operations(Path(self.enterContext(tempfile.TemporaryDirectory()))),
+            **run_production_operations(Path(self.enterContext(tempfile.TemporaryDirectory()))),
+        }
+        self.fixture.head()
+        key = self.fixture.request()
+        probes = LockProbes(self.data)
+        with probes.patch(self.owner, "_attempt", name="replay_one", wraps=True), \
+                probes.patch(cleanup, "_read_git", wraps=True), \
+                probes.patch(self.fixture.backend, "stop", wraps=True), \
+                probes.patch(cleanup.git_worktree, "remove", wraps=True):
+            operations["replay_one"] = (self.owner.replay_one(key), probes)
+        self.assertEqual(
+            set(operations),
+            {"prepare_worker", "prepare_worker (fresh workspace)", "restart_worker", "start_review", "teardown",
+             "replay_one", "production_tick", "production_probe"},
+        )
+        for name, (outcome, probes) in operations.items():
+            with self.subTest(name):
+                self.assertEqual(probes.held, [])
+                self.assertEqual(probes.unreached(), set())
+                self.assertTrue(outcome)
+        self.assertEqual(operations["replay_one"][0]["status"], "completed")
+        self.assertEqual(operations["start_review"][0].commit, "abc123")
+        self.assertEqual(operations["production_tick"][0]["status"], "ok")
 
     def assessment_record(self):
         self.store.rows[1]["column_id"] = 5

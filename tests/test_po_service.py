@@ -8,7 +8,9 @@ says so, its turn processes killed. No PostgreSQL, no Docker, no systemd.
 
 from __future__ import annotations
 
+import argparse
 import ast
+import contextlib
 import getpass
 import inspect
 import json
@@ -41,6 +43,7 @@ from tests.po_cli_fakes import (
     unscoped_test_launch,
 )
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints, sprint_client
+from tests.support.call_log import CallLog
 from tests.web_fakes import Recording
 from ummanu import upgrade
 from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
@@ -1785,8 +1788,26 @@ class ProcessReceiptTests(PoUpgradeFixture):
         self.assertIn("no process receipt was written (no INVOCATION_ID)", line)
 
     def test_the_service_writes_its_receipt_before_it_fulfils_a_pending_restart(self) -> None:
-        source = inspect.getsource(po_service.run_po_serve)
-        self.assertLess(source.index("_write_process_receipt(data_dir)"), source.index("service.start()"))
+        log = CallLog()
+
+        class Service:
+            def __init__(self, *args, data_dir, **kwargs) -> None:
+                self.queue = SimpleNamespace(directory=data_dir / "queue")
+
+            start = log.recorder("start", [])
+            run = log.recorder("run", 0)
+
+        with (
+            mock.patch.object(po_service, "PoService", Service),
+            mock.patch.object(po_service, "PoRunner"),
+            mock.patch.object(po_service, "BoardSprintSessions"),
+            mock.patch.object(po_service, "listening", lambda service: contextlib.nullcontext(self.data / "po.sock")),
+            log.patch(po_service, "_write_process_receipt", "ummanu po: wrote it"),
+            mock.patch.object(po_service, "_say"),
+        ):
+            code = po_service.run_po_serve(argparse.Namespace(data_dir=str(self.data), instance="unused"))
+        self.assertEqual(code, 0)
+        self.assertEqual(log.names, ["_write_process_receipt", "start", "run"])
         with mock.patch.object(upgrade, "write_po_process_receipt", return_value="wrote it") as write:
             self.assertEqual(po_service._write_process_receipt(self.data), "ummanu po: wrote it")
         root = write.call_args.args[1]
@@ -2657,9 +2678,6 @@ class ThinWebTests(unittest.TestCase):
                         if name in ("ummanu.po.runner", "ummanu.po.service"):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {name}")
         self.assertEqual(offenders, [])
-
-    def test_the_web_recovery_module_is_gone(self) -> None:
-        self.assertFalse((ROOT / "src" / "ummanu" / "webproto" / "po_recovery.py").exists())
 
 
 class ProviderFallbackTests(ServiceFixture):

@@ -227,6 +227,9 @@ class _Stub(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:
         self._answer(head=True)
 
+    # A writing verb reaches the case's plan like any other request, so `seen` records it.
+    do_POST = do_PUT = do_PATCH = do_DELETE = do_GET
+
 
 class StubDashboard(ThreadingHTTPServer):
     daemon_threads = True
@@ -487,15 +490,16 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             measure.fetch("http://127.0.0.1:1", "/", method="POST")
 
     def test_no_call_in_the_script_names_a_writing_verb(self) -> None:
-        """A grep a reviewer would do, done here so it stays true."""
-        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT))
-        verbs = {
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and isinstance(node.value, str)
-        }
-        for forbidden in ("POST", "PUT", "PATCH", "DELETE"):
-            self.assertNotIn(forbidden, verbs, f"{forbidden} appears as a literal in the script")
+        """Every request a whole run makes, in each of its modes, reaches the stub as a read."""
+        for extra in ((), ("--json",), ("--no-poll",), ("--poll-idle-session",)):
+            with self.subTest(argv=extra):
+                base = self.serve()
+                with mock.patch.object(measure, "WARM_REQUESTS", 2):
+                    code, text = self.run_main(base, *extra)
+                self.assertEqual(code, measure.EXIT_MET, text)
+                methods = {method for method, _path in self.server.seen}  # type: ignore[attr-defined]
+                self.assertTrue(methods)
+                self.assertLessEqual(methods, {"GET", "HEAD"})
 
     def test_response_validity_lives_in_fetch_and_no_call_site_re_implements_it(self) -> None:
         """The structural half of the rule: a new request path cannot bypass it.

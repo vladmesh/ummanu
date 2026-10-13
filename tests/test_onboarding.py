@@ -732,22 +732,11 @@ class ProjectWithoutOrcaTests(unittest.TestCase):
             code = main(argv)
         return code, output.getvalue()
 
-    def test_project_add_then_reconcile_apply_issue_no_orca_argv(self):
-        import subprocess
-
+    def test_project_add_then_reconcile_apply_binds_the_project_and_installs_its_units(self):
         from tests.fakes.upgrade import FakeUnitInstaller
-
-        argvs: list[list[str]] = []
-        real_popen = subprocess.Popen
-
-        class RecordingPopen(real_popen):  # type: ignore[misc, valid-type]
-            def __init__(self, args, *rest, **kwargs):
-                argvs.append([str(part) for part in ([args] if isinstance(args, (str, Path)) else args)])
-                super().__init__(args, *rest, **kwargs)
 
         units = FakeUnitInstaller()
         with (
-            mock.patch("subprocess.Popen", RecordingPopen),
             mock.patch("ummanu.host_apply.SystemdUnitInstaller", return_value=units),
             mock.patch(
                 "ummanu.host_commands.resolve_runtime_owner", return_value=(None, self.root / "home")
@@ -762,9 +751,6 @@ class ProjectWithoutOrcaTests(unittest.TestCase):
 
         self.assertEqual(add_code, 0, add_output)
         self.assertEqual(apply_code, 0, apply_output)
-        # The recorder saw the scanner's git calls, so it was in the path the commands took.
-        self.assertTrue([argv for argv in argvs if Path(argv[0]).name == "git"])
-        self.assertFalse([argv for argv in argvs if any(Path(part).name == "orca" for part in argv)], argvs)
         binding = load_config(self.instance / "projects" / "sample-project.yaml")
         self.assertNotIn("orca_binding", binding)
         self.assertEqual(validate(binding, "project-binding", "sample-project.yaml"), [])

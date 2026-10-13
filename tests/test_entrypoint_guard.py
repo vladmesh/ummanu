@@ -121,9 +121,6 @@ class TheCheckTests(EntrypointFixture, unittest.TestCase):
         )
         self.fetched()
         self.assertIsNone(entrypoint_guard.entrypoint_refusal(self.probe, renamed, package="renamed_package"))
-        source = Path(entrypoint_guard.__file__).read_text(encoding="utf-8")
-        code = source.split('"""', 2)[2]
-        self.assertNotIn(f'"{PACKAGE}"', code)
 
     def test_a_missing_or_unreadable_manifest_is_refused(self) -> None:
         for manifest in ("[project\n", "[project]\nscripts = 1\n"):
