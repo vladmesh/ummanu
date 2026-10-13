@@ -139,20 +139,27 @@ class ClaimAuditContractTests(DispatcherRuntimeFixture, unittest.TestCase):
         ):
             result = production._production_claim_ready(self.runtime, {}, self.runtime.production_state.load())
         request_id = attempt_request_id(result["attempt_id"], "claim", CARD_REF)
-        preflight = [call for call in committed.call_args_list if "blocked" in call.args[0] or "wait-stall" in call.args[0]]
+        preflight = [call for call in committed.call_args_list
+                     if "blocked" in call.args[0] or "wait-stall" in call.args[0] or "pending-stall" in call.args[0]]
         writer = [call for call in committed.call_args_list if call.args[0] == request_id]
+        writer_pending = [call for call in pending.call_args_list if call.args[0] == request_id]
         events = [event for event in audit.events(CARD_REF) if event not in before]
         protocols = [event for event in events if event.get("record_type") == Event.RECORD_TYPE]
         counts = {
             "committed": committed.call_count, "pending": pending.call_count,
             "history": history.call_count, "total": committed.call_count + pending.call_count + history.call_count,
             "terminal_preflight": len(preflight), "claim_writer_committed": len(writer),
+            "claim_writer_pending": len(writer_pending), "claim_writer_total": len(writer) + len(writer_pending),
             "protocol_events": len(protocols), "all_events": len(events),
         }
         print("CLAIM_COUNTS " + json.dumps(counts, sort_keys=True), flush=True)
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(len(preflight), 0)
-        self.assertGreater(len(writer), 0)
+        self.assertEqual(counts, {
+            "committed": 22, "pending": 19, "history": 5, "total": 46,
+            "terminal_preflight": 0, "claim_writer_committed": 8,
+            "claim_writer_pending": 7, "claim_writer_total": 15,
+            "protocol_events": 1, "all_events": 4,
+        })
         self.assertEqual(len([event for event in protocols if event["kind"] == "card.started"]), 1)
 
     def test_committed_claim_without_record_still_reports_live_divergence(self):
@@ -166,3 +173,20 @@ class ClaimAuditContractTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(result["reason"], "claim live board mismatch")
         self.assertEqual(len(self.host.prepared), prepared)
         self.assertEqual(self.reader.show(CARD_REF)["state"], "ready")
+
+    def test_admission_refused_without_workspace_returns_through_fresh_bringup(self):
+        payload = self.runtime.production_state.load()
+        records = {}
+        with mock.patch.object(claim, "live_root_project_refusal", return_value="live root cannot be claimed"):
+            refused = claim.claim_ready_task(
+                self.runtime, self.reader.show(CARD_REF), records, payload, "old-attempt"
+            )
+        self.assertEqual(refused["status"], "blocked")
+        self.assertEqual(records, {})
+        self.assertEqual(self.host.prepared, [])
+        self.move_ready()
+        retried = claim.claim_ready_task(self.runtime, self.reader.show(CARD_REF), records, payload, "old-attempt")
+        self.assertEqual(retried["status"], "ok")
+        self.assertNotEqual(retried["attempt_id"], "old-attempt")
+        self.assertFalse(self.host.prepare_requires_existing[-1])
+        self.assertEqual(self.host.prepared, [CARD_REF])

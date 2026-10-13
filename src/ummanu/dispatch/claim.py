@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ummanu.board.completion_evidence import has_candidate, is_po_executed, is_wait
+from ummanu.board.models import EventKind
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.helpers import _worker_id, scrub_host_output
 from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins, live_root_project_refusal
@@ -20,14 +21,8 @@ from ummanu.dispatch.launch import (
     STAGE_CLAIM,
     WORKER_ROLE,
     BringUpFailure,
-)
-from ummanu.dispatch.launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
-)
-from ummanu.dispatch.launch import (
     bring_up_terminal_reason as _bring_up_terminal_reason,
-)
-from ummanu.dispatch.launch import (
     classify_bring_up_failure as _classify_bring_up_failure,
 )
 from ummanu.dispatch.po_cards import claim_po_card
@@ -37,14 +32,8 @@ from ummanu.dispatch.state import (
     CLAIM_SKIP_RESOURCE_NOT_READY,
     CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE,
     DispatcherRecord,
-)
-from ummanu.dispatch.state import (
     attempt_request_id as _attempt_request_id,
-)
-from ummanu.dispatch.state import (
     new_attempt_id as _new_attempt_id,
-)
-from ummanu.dispatch.state import (
     record_attempt as _record_attempt,
 )
 from ummanu.dispatch.types import STOPPED_BY_REPLACEMENT, HostError
@@ -547,6 +536,7 @@ def _prepare_claim(
     attempt_id: str,
     *,
     resume_workspace: bool = False,
+    fresh_attempt: bool = False,
 ) -> ClaimHandoff | dict[str, Any]:
     ref = task["ref"]
     # Both heads are decided here, before anything is claimed, and both may be decided against
@@ -623,40 +613,12 @@ def _prepare_claim(
     # is a genuine board divergence and still fails closed below.
     active = records.get(ref)
     requeued = active is not None
-    retry_after_block = resume_workspace or any(
-        runtime.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
-        for action in _blocked_actions_and_their_infrastructure_twins(
-            "bringup-blocked",
-            "worker-result-blocked",
-            "worker-blocked",
-            "worker-respawn-blocked",
-            "worker-wait-stall",
-            "rework-blocked",
-            "contract-preflight-blocked",
-            "git-access-preflight-blocked",
-            "gate-blocked",
-            "gate-red-blocked",
-            "gate-pending-stall",
-            "merge-gate-blocked",
-            "merge-gate-red-blocked",
-            "merge-blocked",
-            "release-drift-blocked",
-            "release-failed-blocked",
-            "review-blocked",
-            "review-freeze-red-blocked",
-            "review-inventory-blocked",
-            "review-wait-stall",
-            "stale-done-rework-blocked",
-        )
-    )
-    # A card refused at admission never had a workspace, so coming back to Ready is a fresh
-    # attempt that creates one rather than a retry that expects the last one's checkout.
-    refused_at_admission = any(
-        runtime.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
-        for action in _blocked_actions_and_their_infrastructure_twins(
-            SPRINT_RESERVATION_BLOCKED_ACTION, LIVE_ROOT_PROJECT_BLOCKED_ACTION
-        )
-    )
+    # Production creates this identity immediately before calling us. Only a caller reusing an
+    # attempt can have terminal events to read; a resume already proves the workspace path.
+    retry_after_block = resume_workspace
+    refused_at_admission = False
+    if not fresh_attempt and not resume_workspace:
+        retry_after_block, refused_at_admission = _claim_terminal_paths(runtime, ref, attempt_id)
     if requeued and active is not None:
         # The preempted head can still be in the workspace the next round claims, and it is
         # stopped through the workspace, not the handle: an adopted head has no handle on record.
@@ -786,6 +748,60 @@ def _prepare_claim(
     )
 
 
+def _claim_terminal_paths(runtime: Any, ref: str, attempt_id: str) -> tuple[bool, bool]:
+    """Read this card's committed blocks, including released watchdog cycle suffixes.
+
+    Exact unsuffixed IDs were also written by these producers and remain readable. Admission
+    refusals had no checkout, including contract/Git preflight, so they open a fresh workspace.
+    Audit errors propagate before any claim or replacement effect.
+    """
+    workspace_actions = _blocked_actions_and_their_infrastructure_twins(
+        "bringup-blocked",
+        "worker-result-blocked",
+        "worker-blocked",
+        "worker-respawn-blocked",
+        "worker-wait-stall",
+        "rework-blocked",
+        "gate-blocked",
+        "gate-red-blocked",
+        "gate-pending-stall",
+        "merge-gate-blocked",
+        "merge-gate-red-blocked",
+        "merge-blocked",
+        "release-drift-blocked",
+        "release-failed-blocked",
+        "review-blocked",
+        "review-freeze-red-blocked",
+        "review-inventory-blocked",
+        "review-wait-stall",
+        "stale-done-rework-blocked",
+    )
+    # A card refused at admission never had a workspace, so coming back to Ready is a fresh
+    # attempt that creates one rather than a retry that expects the last one's checkout.
+    admission_actions = _blocked_actions_and_their_infrastructure_twins(
+        SPRINT_RESERVATION_BLOCKED_ACTION, LIVE_ROOT_PROJECT_BLOCKED_ACTION,
+        "contract-preflight-blocked", "git-access-preflight-blocked",
+    )
+    cycle_actions = _blocked_actions_and_their_infrastructure_twins(
+        "worker-wait-stall", "review-wait-stall", "worker-respawn-blocked", "review-blocked",
+    )
+    workspace_ids = {_attempt_request_id(attempt_id, action, ref) for action in workspace_actions}
+    admission_ids = {_attempt_request_id(attempt_id, action, ref) for action in admission_actions}
+    cycle_prefixes = tuple(_attempt_request_id(attempt_id, action, ref) + "-" for action in cycle_actions)
+    retry = refused = False
+    for event in runtime.audit.events(ref, kind=EventKind.CARD_BLOCKED.value):
+        request_id = str(event.get("request_id") or "")
+        retry |= request_id in workspace_ids or request_id.startswith(cycle_prefixes)
+        refused |= request_id in admission_ids
+    # TaskWriter's released generic `moved` records remain replayable through _legacy_record.
+    # Their unsuffixed request IDs must remain readable here too, without an installation scan.
+    for event in runtime.audit.events(ref, kind="moved"):
+        request_id = str(event.get("request_id") or "")
+        retry |= request_id in workspace_ids
+        refused |= request_id in admission_ids
+    return retry, refused
+
+
 def claim_ready_task(
     runtime: Any,
     task: dict[str, Any],
@@ -794,6 +810,7 @@ def claim_ready_task(
     attempt_id: str,
     *,
     resume_workspace: bool = False,
+    fresh_attempt: bool = False,
 ) -> dict[str, Any]:
     """Claim one Ready card and cross the typed handoff into worker bring-up."""
     if is_po_executed(task):
@@ -809,6 +826,7 @@ def claim_ready_task(
         payload,
         attempt_id,
         resume_workspace=resume_workspace,
+        fresh_attempt=fresh_attempt,
     )
     if not isinstance(prepared, ClaimHandoff):
         return prepared

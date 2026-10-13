@@ -1557,6 +1557,7 @@ def _production_claim_ready(
                 payload,
                 attempt_id,
                 resume_workspace=resume_workspace,
+                fresh_attempt=True,
             )
         except TaskError as exc:
             if exc.code in {"capacity_reached", "claim_conflict", "predecessor_open"}:

@@ -25,7 +25,10 @@ class ClaimBoundaryTests(unittest.TestCase):
         self.runtime._end_review_pane_confirmed.return_value = None
         self.runtime._stop_worker_confirmed.return_value = None
         self.runtime.audit.events.return_value = []
-        self.runtime.audit.committed_event.return_value = None
+        self.runtime.audit.committed_event.side_effect = lambda request_id: next(
+            (event for event in self.runtime.audit.events.return_value if event["request_id"] == request_id),
+            None,
+        )
         self.records = {}
         self.payload = {}
         choice = SimpleNamespace(resolved=True, head="head", preferred="head", substituted=False)
@@ -66,8 +69,18 @@ class ClaimBoundaryTests(unittest.TestCase):
                     self.assertTrue(prepared.require_existing_workspace)
                     self.assertNotEqual(prepared.record.attempt_id, "old-attempt")
                     self.assertEqual(self.payload["attempts"][0]["attempt_id"], prepared.record.attempt_id)
-        self.runtime.audit.events.assert_called_with("sample-1", kind="card.blocked")
+        self.runtime.audit.events.assert_any_call("sample-1", kind="card.blocked")
+        self.runtime.audit.events.assert_any_call("sample-1", kind="moved")
         self.runtime.audit.committed_event.assert_not_called()
+
+    def test_released_generic_unsuffixed_move_remains_a_workspace_retry(self):
+        event = {"kind": "moved", "ref": "sample-1", "payload": {"target": "blocked"},
+                 "request_id": attempt_request_id("old-attempt", "worker-blocked", "sample-1")}
+        self.runtime.audit.events.return_value = [event]
+        self.runtime.audit.events.side_effect = lambda ref, *, kind: [event] if kind == "moved" else []
+        prepared = self.prepare()
+        self.assertTrue(prepared.require_existing_workspace)
+        self.assertNotEqual(prepared.record.attempt_id, "old-attempt")
 
     def test_other_attempt_and_nonterminal_request_do_not_authorize_a_retry(self):
         for event in (
@@ -111,6 +124,8 @@ class ClaimBoundaryTests(unittest.TestCase):
             mock.patch.object(claim, "launch_worker_after_claim", return_value={"status": "ok"}) as launch,
         ):
             production._production_claim_ready(self.runtime, self.records, self.payload)
+        print(f"CLAIM_PREFLIGHT committed={self.runtime.audit.committed_event.call_count} "
+              f"history={self.runtime.audit.events.call_count}")
         self.runtime.audit.committed_event.assert_not_called()
         self.runtime.audit.events.assert_not_called()
         self.runtime.writer.claim.assert_called_once()
@@ -118,6 +133,7 @@ class ClaimBoundaryTests(unittest.TestCase):
 
     def test_audit_error_precedes_replacement_and_claim(self):
         self.runtime.audit.events.side_effect = TaskError("backend_error", "audit unavailable", 1)
+        self.runtime.audit.committed_event.side_effect = self.runtime.audit.events.side_effect
         with self.assertRaisesRegex(TaskError, "audit unavailable"):
             self.prepare()
         self.runtime.writer.claim.assert_not_called()
@@ -157,7 +173,7 @@ class ClaimBoundaryTests(unittest.TestCase):
         self.assertIs(self.records["sample-1"], prepared.record)
 
     def test_committed_claim_without_record_keeps_identity_for_writer_verification(self):
-        self.runtime.audit.committed_event.return_value = {"request_id": "committed-claim"}
+        self.runtime.audit.events.return_value = [self.block("claim")]
         with mock.patch.object(claim, "launch_worker_after_claim", return_value={"status": "blocked"}) as launch:
             claim.claim_ready_task(self.runtime, self.task, self.records, self.payload, "old-attempt")
         self.assertEqual(
