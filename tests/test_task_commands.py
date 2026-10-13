@@ -366,7 +366,9 @@ class HandoffBodyFileTests(unittest.TestCase):
         writer = mock.MagicMock()
         getattr(writer.return_value, verb).return_value = {"ok": True}
         errors = io.StringIO()
+        # No installation is resolved: the board client and writer are stand-ins, and CI has no live root.
         with (
+            mock.patch("ummanu.task_commands._instance", return_value=str(self.root)),
             mock.patch("ummanu.task_commands.card_client"),
             mock.patch("ummanu.task_commands.TaskWriter", writer),
             contextlib.redirect_stdout(io.StringIO()),
