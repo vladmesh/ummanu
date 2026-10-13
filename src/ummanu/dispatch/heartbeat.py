@@ -11,14 +11,15 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from ummanu.dispatch.card_roles import head_role
+
 # One definition, beside the writer and the reader of the record it versions.
-from ummanu.runtime.head.identity import HEARTBEAT_VERSION as HEARTBEAT_VERSION
-from ummanu.runtime.head.identity import task_binding as launch_task
+from ummanu.runtime.head.identity import HEARTBEAT_VERSION as HEARTBEAT_VERSION, task_binding as launch_task
 
 
 def heartbeat_role(role: str) -> str:
     """The stable role name written into a heartbeat record."""
-    return "reviewer" if role == "review" else str(role or "")
+    return head_role(str(role or ""))
 
 
 def task_binding(task_ref: Mapping[str, Any] | None, fallback: str = "") -> str:

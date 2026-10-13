@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ummanu.dispatch.card_roles import card_kind, head_role
 from ummanu.dispatch.helpers import safe_one_line
 from ummanu.dispatch.launch import (
     STAGE_RESPAWN,
@@ -250,7 +251,7 @@ def _fall_back(
     ref = task["ref"]
     review = kind == "review"
     step = "review" if review else "advance"
-    role = "reviewer" if review else "worker"
+    role = head_role(card_kind(kind))
     head = record.review_head if review else record.head
     raw_error = reading.get("error")
     error: dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
@@ -547,7 +548,7 @@ def _empty_chain(
 
     ref = task["ref"]
     step = "review" if kind == "review" else "advance"
-    role = "reviewer" if kind == "review" else "worker"
+    role = head_role(card_kind(kind))
     reason = both_down_reason(choice, evidence)
     if kind == "review":
         # Review starts over a retained worker: settle that role before dropping the record.
