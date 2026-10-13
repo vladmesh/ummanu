@@ -147,7 +147,8 @@ class TickVitalityContractTests(unittest.TestCase):
             ({"status": "blocked"}, True),
             ({"status": "ok", "to": "blocked"}, True),
             ({"status": "ok", "to": "validate"}, False),
-            ({"status": "degraded", "to": "blocked"}, False),
+            ({"status": "degraded", "to": "blocked"}, True),
+            ({"to": "blocked"}, True),
         ):
             with self.subTest(outcome=outcome):
                 with mock.patch.object(production, "_production_tick_active", return_value=outcome):
