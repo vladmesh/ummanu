@@ -16,7 +16,7 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 - `src/ummanu` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
   packages: `automations`, `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`,
-  `schemas`, `transition`, `web`, `webfront`, `webproto`.
+  `schemas`, `web`, `webfront`, `webproto`.
 - `src/ummanu/automations` is the three background agents (curator, steward, retro), built on top
   of the rest of `ummanu`. `python3 -P -m ummanu automations <agent> <cmd>` is their one entry:
   `ummanu.cli` hands the argv untouched to the composition root

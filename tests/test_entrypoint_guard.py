@@ -2,7 +2,7 @@
 
 Real Git over a fixture origin and checkout. The release path (`production_checkout.advance`) and
 the operator path (`upgrade.fast_forward`) refuse the same targets through the same check, before
-the board schema or the checkout is touched (secretary-1929, `docs/RENAME.md` §T1).
+the board schema or the checkout is touched (secretary-1929, `docs/OPERATIONS.md` §Entrypoint activation).
 """
 
 from __future__ import annotations
@@ -167,7 +167,7 @@ class AdvanceTests(EntrypointFixture, unittest.TestCase):
         self.assertIsNone(facts["revision"])
         self.assertIsNone(facts["remote_merge"])
         self.assertIn(PREFLIGHT, facts["message"])
-        self.assertIn("docs/RENAME.md", facts["message"])
+        self.assertIn("docs/OPERATIONS.md §Entrypoint activation", facts["message"])
 
     def test_a_dropped_console_script_is_refused(self) -> None:
         self.scriptless()
@@ -203,7 +203,7 @@ class UpgradeFastForwardTests(EntrypointFixture, unittest.TestCase):
                 self.assertEqual(raised.exception.refusal.reason, "entrypoint_moved")
                 self.assertEqual(raised.exception.refusal.target, target)
                 self.assertIn("entrypoint_moved", str(raised.exception))
-                self.assertIn("docs/RENAME.md", str(raised.exception))
+                self.assertIn("docs/OPERATIONS.md §Entrypoint activation", str(raised.exception))
                 self.assert_untouched()
 
     def test_the_pull_step_and_its_dry_run_report_the_refusal(self) -> None:
@@ -217,7 +217,7 @@ class UpgradeFastForwardTests(EntrypointFixture, unittest.TestCase):
                 result = upgrade.step_pull(context)  # type: ignore[arg-type]
                 self.assertEqual(result.status, "failed")
                 self.assertIn("entrypoint_moved", result.detail)
-                self.assertIn("docs/RENAME.md", result.detail)
+                self.assertIn("docs/OPERATIONS.md §Entrypoint activation", result.detail)
                 self.assertEqual(context.changed_paths, (), "a refused target plans no move")
                 self.assert_untouched()
 

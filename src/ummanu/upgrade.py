@@ -275,7 +275,7 @@ def fast_forward(root: Path, base_branch: str) -> tuple[str, str]:
     Strictly ``--ff-only``: a checkout with local commits or a diverged history is left exactly as
     found and the caller hears why. Nothing in an upgrade may discard work that is only on this host.
     The upstream commit is pinned and checked first: a target without the entrypoint the live units
-    execute raises `EntrypointRefused` before anything moves (`docs/RENAME.md` §T1).
+    execute raises `EntrypointRefused` before anything moves (`docs/OPERATIONS.md` §Entrypoint activation).
     """
     before, target = upstream_target(root, base_branch)
     _git(root, ["merge", "--ff-only", target])

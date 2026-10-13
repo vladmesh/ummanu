@@ -124,7 +124,6 @@ from ummanu.sprint_commands import add_sprint_subcommands
 from ummanu.state_repo import StateRepoError
 from ummanu.status import collect_status, disk_free_bytes
 from ummanu.task_commands import add_task_subcommands
-from ummanu.transition.commands import add_transition_subcommands
 from ummanu.upgrade import add_upgrade_command
 from ummanu.web.commands import add_web_serve_subcommands
 from ummanu.webfront.commands import add_web_front_subcommands
@@ -273,7 +272,6 @@ def build_parser() -> argparse.ArgumentParser:
     config.set_defaults(handler=usage_handler("config subcommand required"))
 
     add_upgrade_command(subparsers)
-    add_transition_subcommands(subparsers)
     add_install_commands(subparsers)
     add_role_skills_subcommands(subparsers)
     add_sprint_subcommands(subparsers)

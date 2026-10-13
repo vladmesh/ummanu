@@ -21,8 +21,8 @@ from unittest import mock
 
 from ummanu import cli
 from ummanu.infra import live_root_findings as lrf
+from ummanu.infra.old_name_guard import INSTANCE_PROJECT
 from ummanu.runtime import paths
-from ummanu.transition.names import INSTANCE_PROJECT
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"

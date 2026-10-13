@@ -12,13 +12,34 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from ummanu.automations.agents.curator import busy, cli, harvest, rebind
+from ummanu.automations.agents.curator import busy, cli, harvest, move_paths, rebind
 from ummanu.runtime.state import PRECHECK_SKIP, AgentState
-from ummanu.transition import rewrite
 
 
 def claude(text: str) -> str:
     return json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": text}]}}) + "\n"
+
+
+class ReleasedMovePathTests(unittest.TestCase):
+    """Pure source goldens pin the released mapping independently of rebind fixture construction."""
+
+    def test_released_order_paths_and_key_encoding_match_source_capture(self) -> None:
+        fixture = json.loads((Path(__file__).parent / "fixtures/rebind_move_sprint1475.json").read_text())
+        home = Path(fixture["home"])
+        pairs = move_paths.claude_move_paths(home, fixture["sprint"])
+        self.assertEqual([[str(old), str(new)] for old, new in pairs], fixture["pairs"])
+        self.assertEqual(len(pairs), 9)
+        self.assertEqual([old.name for old, _new in pairs[-4:]], ["curator", "pipeline", "retro", "steward"])
+        self.assertEqual(move_paths.claude_move_paths(home, ""), pairs[:4] + pairs[5:])
+        other = move_paths.claude_move_paths(home, "sprint:9999")
+        self.assertEqual(other[:4] + other[5:], pairs[:4] + pairs[5:])
+        self.assertEqual(other[4], (pairs[4][0].with_name("sprint-9999"), pairs[4][1].with_name("sprint-9999")))
+        for path, expected in fixture["key_cases"]:
+            with self.subTest(path=path):
+                self.assertEqual(move_paths.claude_key(Path(path)), expected)
+        for case in fixture["prefix_cases"]:
+            with self.subTest(value=case["value"]):
+                self.assertEqual(move_paths.swap_prefix(case["value"], case["prefixes"]), case["expected"])
 
 
 class CuratorRebindTests(unittest.TestCase):
@@ -28,17 +49,17 @@ class CuratorRebindTests(unittest.TestCase):
         self.home = root / "home"
         self.projects = self.home / ".claude" / "projects"
         self.state = AgentState("curator", root / "state")
-        moves = rewrite.claude_move_paths(self.home, rebind.MOVE_SPRINT)
+        moves = move_paths.claude_move_paths(self.home, rebind.MOVE_SPRINT)
         workspaces = self.home / "orca" / "workspaces"
         [(self.old_ws, self.new_ws)] = [(old, new) for old, new in moves if old.parent.parent == workspaces
                                         and old.name == "curator"]
         (po_old, po_new), (product_old, product_new) = moves[0], moves[3]
-        self.po_old = self.projects / rewrite.claude_key(po_old)
-        self.po_new = self.projects / rewrite.claude_key(po_new)
-        self.product_old = self.projects / rewrite.claude_key(product_old)
-        self.product_new = self.projects / rewrite.claude_key(product_new)
-        self.ws_old_dir = self.projects / rewrite.claude_key(self.old_ws)
-        self.ws_new_dir = self.projects / rewrite.claude_key(self.new_ws)
+        self.po_old = self.projects / move_paths.claude_key(po_old)
+        self.po_new = self.projects / move_paths.claude_key(po_new)
+        self.product_old = self.projects / move_paths.claude_key(product_old)
+        self.product_new = self.projects / move_paths.claude_key(product_new)
+        self.ws_old_dir = self.projects / move_paths.claude_key(self.old_ws)
+        self.ws_new_dir = self.projects / move_paths.claude_key(self.new_ws)
         self.outside = self.projects / "-home-dev-orca-workspaces-relay-relay-1200-card"
         self.new_ws.mkdir(parents=True)
         self.patches = [

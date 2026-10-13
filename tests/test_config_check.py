@@ -247,7 +247,7 @@ class ConfigCheckTests(LiveRootCase):
 
 
 class PortedAllowlistTests(unittest.TestCase):
-    """The instance guard's class tables, against the ported allowlist (docs/RENAME.md §T5)."""
+    """The instance guard's class tables, against the ported allowlist (docs/RENAME.md, Guard)."""
 
     def test_each_class_covers_its_own_spelling_only(self) -> None:
         allowed = {

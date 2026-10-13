@@ -26,7 +26,7 @@ mutable and derived runtime state lives in a local data directory. Install and r
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
 - [Testing](docs/TESTING.md) — CI suite taxonomy and local test boundaries
-- [Old-name policy](docs/RENAME.md): allowed historical names and the entrypoint activation guard
+- [Old-name policy](docs/RENAME.md): allowed historical names and permanent guards
 
 ## Install
 

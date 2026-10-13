@@ -1,6 +1,6 @@
 """Rebind curator state after a known move of Claude project directories (issue:db32299c8).
 
-The transition of sprint:1475 moved a fixed set of cwds (`transition.rewrite.claude_move_paths`):
+The transition of sprint:1475 moved a fixed set of cwds (`curator.move_paths.claude_move_paths`):
 the curator's role workspace among them, and with them the Claude project directories whose
 transcript paths key the watermark.  A pending record bound to the retired workspace refuses every
 tick, and a cursor left under the old key would let harvest read the moved transcript from zero.
@@ -27,11 +27,11 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ummanu.transition import rewrite
+from ummanu.automations.agents.curator import move_paths
 
 from . import harvest
 
-#: The transition whose moves this rebind follows (`transition.rewrite.claude_move_paths`).
+#: The transition whose moves this rebind follows (`curator.move_paths.claude_move_paths`).
 MOVE_SPRINT = "sprint:1475"
 SKIP_REASONS = ("outside_moves", "old_exists", "new_missing", "incomparable")
 
@@ -140,13 +140,13 @@ def _project(record: dict) -> str | None:
 
 def plan_rebind(st, *, home: Path, projects: Path, current: dict[str, str]) -> RebindPlan:
     """What a rebind of `st` would change, with the Claude projects root `projects` under `home`."""
-    moves = rewrite.claude_move_paths(home, MOVE_SPRINT)
+    moves = move_paths.claude_move_paths(home, MOVE_SPRINT)
     prefixes = [
-        (str(projects / rewrite.claude_key(old)), str(projects / rewrite.claude_key(new))) for old, new in moves
+        (str(projects / move_paths.claude_key(old)), str(projects / move_paths.claude_key(new))) for old, new in moves
     ]
 
     def moved(key: str) -> tuple[str | None, str | None]:
-        new = rewrite.swap_prefix(key, prefixes)
+        new = move_paths.swap_prefix(key, prefixes)
         if new == key:
             return None, "outside_moves"
         if os.path.lexists(key):
