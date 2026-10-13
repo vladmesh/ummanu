@@ -9,6 +9,7 @@ background agents moved from the top-level `triggered_agents` package into `umma
 from __future__ import annotations
 
 import argparse
+import functools
 import inspect
 import re
 import unittest
@@ -74,11 +75,18 @@ def _agent_commands(agent: str) -> set[str]:
     return set(re.findall(r'"([a-z][a-z0-9-]*)"', source)) | {"dispatch"}
 
 
+@functools.cache
+def _product_parser() -> argparse.ArgumentParser:
+    """The product CLI's parser, built once: it is only walked here, never parsed with, and building
+    it per named command kept this module near CI's 5 s per-test budget."""
+    return build_parser()
+
+
 def _unknown(words: list[str]) -> str | None:
     """Why this word path is not a real `ummanu` command, or None when it is."""
     if not words:
         return "names no subcommand"
-    parser: argparse.ArgumentParser = build_parser()
+    parser: argparse.ArgumentParser = _product_parser()
     for index, word in enumerate(words):
         choices = _subcommands(parser)
         if choices is None:
