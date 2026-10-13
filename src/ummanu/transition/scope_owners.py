@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .. import _fsutil, config
+from .. import config
 from ..runtime.head import memory
 from .context import Layout, TransitionError
 from .names import OLD
@@ -99,7 +99,11 @@ def _write_atomic(path: Path, data: bytes, mode: int) -> None:
     finally:
         os.close(fd)
     os.replace(temporary, path)
-    _fsutil.fsync_directory(path.parent)
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _backup(backups: Path, raw: bytes) -> None:
