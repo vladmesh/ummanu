@@ -18,6 +18,7 @@ from unittest import mock
 
 import yaml
 
+from tests import source_trees
 from ummanu import memory_journal
 from ummanu.data import export_memory, init_layout
 from ummanu.memory import canon
@@ -83,7 +84,7 @@ BANNED_MODULES = frozenset({"subprocess", "ummanu._proc"})
 def git_findings(relative: str, source: str) -> list[str]:
     """Every way `source` could start a Git child, as `file:line what`."""
     found = []
-    for node in ast.walk(ast.parse(source, filename=relative)):
+    for node in ast.walk(source_trees.parse(source, filename=relative)):
         where = f"{relative}:{getattr(node, 'lineno', 0)}"
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             if node.value.id == "state_repo" and node.attr in BANNED_STATE_REPO:

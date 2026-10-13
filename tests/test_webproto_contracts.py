@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from tests import source_trees
 from tests.owner_event_fakes import CountingOwnerEventLayer
 from ummanu.config import InstanceReport, validate
 from ummanu.web import pages
@@ -252,7 +253,7 @@ class LeafHelperTests(unittest.TestCase):
         names = {"_reason", "_text", "_float", "_typed_reason"}
         found = []
         for path in sorted((SRC / "webproto").glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             found += [
                 (path.name, node.name)
                 for node in tree.body

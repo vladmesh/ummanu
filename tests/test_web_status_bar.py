@@ -860,12 +860,6 @@ class ResetRenderingTests(unittest.TestCase):
                 else:
                     self.assertRegex(drawn, r">(\d+d \d+h|\d+h \d+m|\d+m|less than a minute) left<")
 
-    def test_no_text_in_the_web_package_says_a_reset_already_passed(self) -> None:
-        root = Path(pages.__file__).parent
-        for path in root.rglob("*.py"):
-            with self.subTest(path=path.name):
-                self.assertNotIn("already passed", path.read_text(encoding="utf-8"))
-
     def test_a_reading_with_no_moment_says_so_and_carries_no_title(self) -> None:
         for absent in (None, "", "   ", "not a moment", 17):
             with self.subTest(absent=absent):

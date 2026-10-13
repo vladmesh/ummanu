@@ -432,7 +432,8 @@ class SourceLayoutTests(unittest.TestCase):
         """Shared fakes are a one-way dependency, not bridges between test modules."""
         offenders: list[str] = []
         for path in (ROOT / "tests").rglob("*.py"):
-            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            # Read once, by this check only: nothing keeps the test files' trees.
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path), retain=False)
             for node in source_trees.imports(tree):
                 module = node.module if isinstance(node, ast.ImportFrom) else None
                 if module and (module == "tests.test" or module.startswith("tests.test_")):
@@ -796,7 +797,3 @@ class SingleHomeTests(unittest.TestCase):
             ),
             [],
         )
-
-
-def tearDownModule() -> None:
-    source_trees.clear()

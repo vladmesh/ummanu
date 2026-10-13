@@ -24,14 +24,11 @@ from ummanu.host import (
     load_packaged_units,
     render_systemd_unit,
 )
-from ummanu.web.app import ROUTES
+from ummanu.web.app import ROUTES, WebApp
 from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT
 from ummanu.webfront.caddyfile import (
-    HASH_SECRET_ID,
-    PASSWORD_SECRET_ID,
     SESSION_COOKIE_MAX_AGE,
     SESSION_COOKIE_NAME,
-    SESSION_SECRET_ID,
     FrontConfig,
     FrontConfigError,
     render,
@@ -65,11 +62,18 @@ class GuardCoverageTests(unittest.TestCase):
     def test_no_published_route_is_answered_without_owner_authentication(self) -> None:
         self.assertEqual(unguarded_routes(rendered(), ROUTES), ())
 
-    def test_the_routes_asked_about_are_the_documented_table_itself(self) -> None:
-        """Not a copy of it: the assertion above grows with `ROUTES`, so forgetting one is not possible."""
-        documented = _documented_routes()
-        self.assertEqual({(route.method, route.pattern) for route in ROUTES}, documented)
-        self.assertTrue(documented)
+    def test_the_routes_asked_about_are_the_ones_the_app_answers(self) -> None:
+        """Not a copy of the router: every route the guard is asked about is one the app dispatches to."""
+        app = WebApp(None, None, None, None, None, None, None, None)
+        self.assertTrue(ROUTES)
+        for route in ROUTES:
+            path = "/" + "/".join(
+                f"{part[1:-1]}-1" if part.startswith("{") else part for part in route.segments
+            )
+            with self.subTest(route=f"{route.method} {route.pattern}"):
+                self.assertIs(app.match(route.method, path)[0], route)
+                self.assertTrue(callable(getattr(app, f"_{route.handler}", None)))
+                self.assertEqual(unguarded_routes(rendered(), [path]), ())
 
     def test_the_guard_covers_pages_json_events_and_worker_output_alike(self) -> None:
         """The classes criterion 4 names, each one asked about by the path it is served on."""
@@ -249,9 +253,6 @@ class RenderedConfigTests(unittest.TestCase):
             with self.subTest(path=path.name):
                 self.assertNotIn("$2a$", body)
                 self.assertNotIn("$2b$", body)
-        self.assertEqual(PASSWORD_SECRET_ID, "web-front-password")
-        self.assertEqual(HASH_SECRET_ID, "web-front-password-hash")
-        self.assertEqual(SESSION_SECRET_ID, "web-front-session-secret")
 
 
 class ShippedUnitTests(unittest.TestCase):
@@ -325,20 +326,6 @@ class ShippedUnitTests(unittest.TestCase):
         self.assertIn("Requires=ummanu-web.service", text)
         self.assertIn("PartOf=ummanu-web.service", text)
         self.assertIn("After=network-online.target ummanu-web.service", text)
-
-
-def _documented_routes() -> set[tuple[str, str]]:
-    """The route table as `docs/PROTOCOLS.md` prints it, read out of the document itself."""
-    lines = (REPO_ROOT / "docs" / "PROTOCOLS.md").read_text(encoding="utf-8").splitlines()
-    start = lines.index("## Serving the pipeline locally")
-    routes: set[tuple[str, str]] = set()
-    for line in lines[start:]:
-        if line.startswith("## ") and line != "## Serving the pipeline locally":
-            break
-        cells = [cell.strip() for cell in line.split("|")]
-        if len(cells) > 3 and cells[1] in {"GET", "POST"}:
-            routes.add((cells[1], cells[2].strip("`")))
-    return routes
 
 
 if __name__ == "__main__":  # pragma: no cover

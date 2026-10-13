@@ -5,7 +5,7 @@ import inspect
 import textwrap
 import unittest
 
-from tests import test_product_issues as product_issue_tests
+from tests import source_trees, test_product_issues as product_issue_tests
 from tests.product_issue_fixtures import ProductIssueFixture
 from ummanu.tasks import TaskError
 
@@ -63,7 +63,7 @@ class ProductIssueFixtureGuards(unittest.TestCase):
         violations: list[str] = []
         for owner, names in portable.items():
             for name in sorted(names):
-                tree = ast.parse(textwrap.dedent(inspect.getsource(getattr(owner, name))))
+                tree = source_trees.parse(textwrap.dedent(inspect.getsource(getattr(owner, name))))
                 attrs = {
                     node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
                 } & forbidden_attrs

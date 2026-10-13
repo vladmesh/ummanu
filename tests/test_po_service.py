@@ -33,6 +33,7 @@ from typing import ClassVar
 from unittest import mock
 from urllib.parse import urlencode
 
+from tests import source_trees
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.po_cli_fakes import (
     FAKE_CLAUDE,
@@ -2667,7 +2668,7 @@ class ThinWebTests(unittest.TestCase):
         offenders = []
         for package in ("web", "webproto"):
             for path in sorted((ROOT / "src" / "ummanu" / package).rglob("*.py")):
-                tree = ast.parse(path.read_text(encoding="utf-8"))
+                tree = source_trees.parse(path.read_text(encoding="utf-8"))
                 for node in ast.walk(tree):
                     names = []
                     if isinstance(node, ast.Import):

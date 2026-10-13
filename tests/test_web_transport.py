@@ -34,6 +34,7 @@ from urllib.parse import urlencode
 import yaml
 from jsonschema import Draft202012Validator
 
+from tests import source_trees
 from tests.fakes.tasks import SEED_COLUMN, empty_seed
 from tests.sql_backend_fixtures import card_store
 from ummanu.config import ConfigError, load_schema
@@ -555,7 +556,7 @@ class RouteTableTests(TransportFixture):
         forbidden = {"subprocess", "os.system", "shutil", "pty"}
         offenders: list[str] = []
         for path in sorted(source):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 names = (
                     [alias.name for alias in node.names]
@@ -1505,7 +1506,7 @@ class ThinnessTests(unittest.TestCase):
     def test_the_transport_reaches_the_installation_only_through_the_layer(self) -> None:
         offenders: list[str] = []
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "web").rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 modules = (
                     [alias.name for alias in node.names]

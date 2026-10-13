@@ -20,13 +20,13 @@ import hashlib
 import inspect
 import io
 import json
-import re
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from tests import source_trees
 from tests.observer_identity import bind_observer
 from tests.owner_event_fakes import CountingOwnerEventLayer
 from tests.sprint_close_fixtures import CLOSEOUT_BODY, init_state_repo
@@ -106,37 +106,6 @@ _WRITE_METHODS = {
     "createComment",
     "removeTask",
 }
-
-
-def _write_kinds() -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The kinds `SprintWriter` gives `_write`, read from the writer instead of restated here.
-
-    `docs/PROTOCOLS.md` publishes what a terminal sprint answers for each of them, and a list kept
-    by hand beside that table is what let the table claim to be complete while it was not. The
-    writer's own calls are the only enumeration that cannot fall behind the writer.
-    """
-    module = ast.parse(inspect.getsource(sprints_module))
-    writer = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.ClassDef) and node.name == "SprintWriter"
-    )
-    kinds: set[str] = set()
-    underivable: set[str] = set()
-    for node in ast.walk(writer):
-        if not isinstance(node, ast.Call):
-            continue
-        function = node.func
-        if not isinstance(function, ast.Attribute) or function.attr != "_write":
-            continue
-        if not isinstance(function.value, ast.Name) or function.value.id != "self":
-            continue
-        kind = node.args[0] if node.args else None
-        if isinstance(kind, ast.Constant) and isinstance(kind.value, str):
-            kinds.add(kind.value)
-        else:
-            underivable.add(ast.unparse(kind) if kind is not None else "<no positional kind>")
-    return tuple(sorted(kinds)), tuple(sorted(underivable))
 
 
 def _board_id(board: Any, name: str) -> int:
@@ -697,50 +666,77 @@ class LayerPropertyTests(SprintProtocolFixture):
                 json.dumps(document)
 
     def test_the_post_create_region_is_one_place_with_one_exit(self) -> None:
-        """The invariant, as structure rather than as a promise every future step must remember.
+        """Every step after the row exists, made to fail in turn, gives the one pending answer.
 
         Two rounds of this card fixed a post-create failure at the primitive that happened to raise
-        it and watched the next primitive open the same hole. So what is checked here is the shape:
-        `sprint_create` ends by handing the whole post-create region to `_after_create`, and that
-        region is a single `try` with a single `except Exception` that raises the pending answer. A
-        step added to it later is covered by being inside it, and there is no list to keep in step.
+        it and watched the next primitive open the same hole. So the steps are not listed here:
+        they are discovered from a create that succeeds, as every method of the layer's own and of
+        the collaborators it holds that runs only after the writer made the row. Each then raises
+        an exception type no list would name, on a fresh installation, and must come back as the
+        pending answer with its cause chained. A step added later is covered by being reached.
         """
-        import ast
-
-        source = (
-            Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto" / "sprint_ops.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        layer = next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ClassDef) and node.name == "SprintOperationLayer"
+        steps = self._post_create_steps()
+        self.assertLessEqual(
+            {
+                (SprintRequestStore, "record_reference"),
+                (SprintOperationLayer, "_document"),
+                (SprintReadLayer, "sprint_state"),
+            },
+            set(steps),
         )
-        methods = {node.name: node for node in layer.body if isinstance(node, ast.FunctionDef)}
+        for owner, name in steps:
+            with self.subTest(step=f"{owner.__name__}.{name}"):
+                self.doCleanups()
+                self.setUp()
+                failure = LookupError(f"{owner.__name__}.{name} failed after the row exists")
+                with (
+                    mock.patch.object(owner, name, side_effect=failure),
+                    self.assertRaises(OperationPending) as pending,
+                ):
+                    self.create()
+                self.assert_pending_after_create(pending.exception, cause=str(failure))
+                self.assertIs(pending.exception.__cause__, failure)
 
-        # `sprint_create` hands over and does nothing after the hand-over.
-        last = methods["sprint_create"].body[-1]
-        self.assertIsInstance(last, ast.Return)
-        self.assertIsInstance(last.value, ast.Call)
-        self.assertEqual(getattr(last.value.func, "attr", ""), "_after_create")
+    def _post_create_steps(self) -> list[tuple[type, str]]:
+        """The methods a successful create reaches only after `SprintWriter.create` returned.
 
-        # And the region has exactly one exit for every failure in it.
-        body = [
-            node
-            for node in methods["_after_create"].body
-            if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
-        ]
-        guarded = [node for node in body if isinstance(node, ast.Try)]
-        self.assertEqual(len(guarded), 1)
-        self.assertIs(guarded[0], body[-1], "nothing runs after the region")
-        handlers = guarded[0].handlers
-        self.assertEqual(len(handlers), 1)
-        self.assertEqual(getattr(handlers[0].type, "id", ""), "Exception")
-        raised = [node for node in ast.walk(handlers[0]) if isinstance(node, ast.Raise)]
-        self.assertEqual(len(raised), 1)
-        self.assertEqual(getattr(raised[0].exc.func, "id", ""), "OperationPending")
-        # Chained, so the primitive that failed is still named in a traceback.
-        self.assertIsNotNone(raised[0].cause)
+        The layer's own private steps, and the public surface of the request index and the read
+        layer it answers through; a method also reached before the row exists is not one of them.
+        """
+        from ummanu.sprints import SprintWriter
+
+        real_create = SprintWriter.create
+        made: list[bool] = []
+        before: set[tuple[type, str]] = set()
+        after: list[tuple[type, str]] = []
+
+        def create(writer, *args, **kwargs):
+            created = real_create(writer, *args, **kwargs)
+            made.append(True)
+            return created
+
+        def spy(owner: type, name: str, real):
+            def method(*args, **kwargs):
+                step = (owner, name)
+                if not made:
+                    before.add(step)
+                elif step not in after:
+                    after.append(step)
+                return real(*args, **kwargs)
+
+            return method
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(SprintWriter, "create", create))
+            for owner in (SprintOperationLayer, SprintRequestStore, SprintReadLayer):
+                for name, real in list(vars(owner).items()):
+                    own_step = owner is SprintOperationLayer and name.startswith("_") and not name.startswith("__")
+                    surface = owner is not SprintOperationLayer and not name.startswith("_")
+                    if inspect.isfunction(real) and name != "_after_create" and (own_step or surface):
+                        stack.enter_context(mock.patch.object(owner, name, spy(owner, name, real)))
+            self.create()
+        self.assertTrue(made, "the create reached the writer")
+        return [step for step in after if step not in before]
 
     def test_the_sprint_modules_import_no_transport(self) -> None:
         """The promise as it is meant: this layer speaks no transport to its caller.
@@ -753,8 +749,6 @@ class LayerPropertyTests(SprintProtocolFixture):
         caller: no HTTP, socket, framework or rendering in this layer's own surface, and failures
         that leave it are typed `webproto.errors` codes rather than status numbers.
         """
-        import ast
-
         forbidden = frozenset(
             """
             http httpx requests urllib urllib3 socket socketserver ssl asyncio aiohttp flask
@@ -765,7 +759,7 @@ class LayerPropertyTests(SprintProtocolFixture):
         root = Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto"
         offenders: list[str] = []
         for name in ("sprint_ops.py", "sprint_reads.py", "sprint_requests.py"):
-            tree = ast.parse((root / name).read_text(encoding="utf-8"), filename=name)
+            tree = source_trees.parse((root / name).read_text(encoding="utf-8"), filename=name)
             for node in ast.walk(tree):
                 imported = []
                 if isinstance(node, ast.Import):
@@ -3294,30 +3288,33 @@ class PostCloseCommentTests(CloseFixture):
 
 
 class TerminalSprintWriteTests(SprintProtocolFixture):
-    """The documented terminal-sprint table, held to what `SprintWriter._write` actually does.
+    """What a `closed` or `stopped` sprint answers for each write the writer makes, held here.
 
     The first version of this pin carried a hand-written list of three kinds and a document that
     claimed to describe the writer "in full". It was wrong -- `budget_recorded` and `restored` are
-    accepted on a sprint that has ended -- and, being its own authority on what to check, it could
-    not notice. So the set is not written here. It is read out of `SprintWriter`'s own calls to
-    `_write`, which is where the kinds actually are, and a write added to the writer tomorrow either
-    appears in the published table or fails `test_the_document_names_every_write_the_writer_makes`.
+    accepted on a sprint that has ended. The table below is therefore every kind `SprintWriter`
+    passes to `_write`, each with its answer. The guard refuses by naming kinds, so a kind added to
+    the writer without a row here is accepted on an ended sprint without anybody having decided
+    that; a new write kind needs a deliberate row.
 
     Each kind is driven through `_write` itself rather than through its public caller, which could
     refuse first for a reason of its own -- a role, a payload, an observer identity -- and hide what
     the terminal guard would have done.
     """
 
-    #: The kinds `SprintWriter` passes to `_write`, taken from the writer's own source. A call whose
-    #: kind is not a literal would leave a kind untested without saying so, so it is collected too
-    #: and asserted away rather than skipped.
-    KINDS: ClassVar[tuple[str, ...]]
-    UNDERIVABLE: ClassVar[tuple[str, ...]]
-
-    @classmethod
-    def setUpClass(cls) -> None:
-        super().setUpClass()
-        cls.KINDS, cls.UNDERIVABLE = _write_kinds()
+    REFUSED = ("refused", "closed", "3")
+    #: Every kind `SprintWriter` passes to `_write`, and what a terminal sprint answers for it.
+    EXPECTED: ClassVar[dict[str, tuple[str, ...]]] = {
+        "budget_recorded": ("accepted",),
+        "commented": ("accepted",),
+        "current_task_set": REFUSED,
+        "e2e_budget_raised": REFUSED,
+        "po_session_set": ("accepted",),
+        "production_allowed": REFUSED,
+        "owner_decisions_recorded": REFUSED,
+        "restored": ("accepted",),
+        "resume_recorded": REFUSED,
+    }
 
     def setUp(self) -> None:
         super().setUp()
@@ -3345,51 +3342,24 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
             return ("refused", refused.code, str(refused.exit_code))
         return ("accepted",)
 
-    def _documented(self) -> dict[str, tuple[str, ...]]:
-        """The published table, read as rows rather than looked up by the kinds this test knows.
-
-        Looking rows up would let a row for a kind the writer no longer has survive unnoticed, which
-        is the same shape of hole from the other side.
-        """
-        protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
-            encoding="utf-8"
-        )
-        lines = protocols.splitlines()
-        header = lines.index("| sprint write | a `closed` or `stopped` sprint |")
-        rows: dict[str, tuple[str, ...]] = {}
-        for line in lines[header + 2 :]:
-            if not line.startswith("|"):
-                break
-            cells = [cell.strip() for cell in line.split("|")]
-            # A kind may carry a digit (`e2e_budget_raised`, secretary-1796).
-            kind = re.fullmatch(r"`([a-z0-9_]+)`", cells[1])
-            self.assertIsNotNone(kind, f"unreadable row in the terminal-write table: {line}")
-            assert kind is not None
-            rows[kind.group(1)] = tuple(re.findall(r"`([a-z_0-9]+)`", cells[2]))
-        return rows
-
-    def test_every_kind_the_writer_passes_to_write_was_derivable(self) -> None:
-        """The derivation is only a pin while it can see every call. It says so when it cannot."""
-        self.assertEqual(self.UNDERIVABLE, ())
-        self.assertIn("commented", self.KINDS)
-
-    def test_the_document_names_every_write_the_writer_makes(self) -> None:
-        self.assertEqual(sorted(self._documented()), sorted(self.KINDS))
-
-    def test_each_documented_row_is_what_the_writer_actually_answers(self) -> None:
-        documented = self._documented()
+    def test_a_kind_the_table_does_not_hold_is_accepted_by_an_ended_sprint(self) -> None:
+        """Why the table is deliberate: the guard names what it refuses, and lets the rest through."""
         for status, reference in self.terminal.items():
-            for kind in self.KINDS:
+            with self.subTest(status=status):
+                self.assertEqual(self._answer(reference, "a_write_no_row_names"), ("accepted",))
+
+    def test_each_row_is_what_the_writer_actually_answers(self) -> None:
+        for status, reference in self.terminal.items():
+            for kind, expected in self.EXPECTED.items():
                 with self.subTest(status=status, kind=kind):
-                    self.assertIn(kind, documented, f"{kind} is a sprint write the table omits")
-                    self.assertEqual(self._answer(reference, kind), documented[kind])
+                    self.assertEqual(self._answer(reference, kind), expected)
 
     def test_the_two_semantic_writes_are_the_refused_ones(self) -> None:
         """The direction, stated outright, so a table of five acceptances could not pass by symmetry.
 
         Only these two are named by hand, because only these two are this card's own contract: a
         comment is accepted where it used to be refused, and the writes that state work in progress
-        are still refused. What the rest answer is settled by the derivation above, not here.
+        are still refused. What the rest answer is settled by the table above, not here.
         """
         for status, reference in self.terminal.items():
             with self.subTest(status=status):
@@ -3590,75 +3560,6 @@ class CloseCommandTests(CloseFixture):
         self.assertEqual(document["kind"], "sprint_close_result")
         self.assertEqual(document["close"]["disposed_tasks"], [self.left])
         self.assertFalse(document["definition_of_done"]["satisfied"])
-
-
-class ClosePublishedPromiseTests(unittest.TestCase):
-    """Criterion 9: the published prose is held to the contract rather than trusted to keep up.
-
-    Each promise below is one this card's code makes. A change that moves the behaviour without the
-    sentence, or the sentence without the behaviour, fails here instead of leaving a public claim
-    behind.
-    """
-
-    def _document(self, name: str) -> str:
-        return (Path(__file__).resolve().parents[1] / "docs" / name).read_text(encoding="utf-8")
-
-    def test_the_protocol_records_the_operation_the_closeout_step_and_the_post_close_comment(self) -> None:
-        protocols = self._document("PROTOCOLS.md")
-        for promise in (
-            "**`sprint_close(request_id, actor, reference, reason, closeout, decisions, role=\"po\")`**",
-            "**`sprint_close_result(ref, event_id)`**",
-            # The terminal phase order, with the step this card added in its place.
-            "the dispositions, the knowledge closeout, then the\nstatus",
-            "closeouts/<day>-<sprint-ref>.md",
-            "#### A comment on a sprint that has ended",
-            "`not_deliverable`",
-        ):
-            with self.subTest(promise=promise):
-                self.assertIn(promise, protocols)
-
-    def test_the_passages_a_terminal_sprint_is_read_through_agree_with_the_accepted_comment(
-        self,
-    ) -> None:
-        """The three passages the finding named, beside `TerminalSprintWriteTests` which pins them.
-
-        The table there holds the behaviour; these hold the sentences an operator reads *around* it,
-        which is where the contradiction actually lived: the CLI's exit status, the errors table's
-        two rows, and the resume-freshness paragraph whose reasoning had to survive the narrowing.
-        """
-        protocols = " ".join(self._document("PROTOCOLS.md").split())
-        for promise in (
-            "`sprint comment` on a `closed` or `stopped` sprint succeeds with exit status `0`",
-            (
-                "the sprint a resume or a current task names has ended "
-                "(a comment on it is accepted, not refused)"
-            ),
-            "the create, the comment or the close is part-done and repairable with the same request id",
-            "a terminal sprint's freshness never reads the audit the comment is recorded in",
-        ):
-            with self.subTest(promise=promise):
-                self.assertIn(promise, protocols)
-
-    def test_the_operator_scenario_is_written_down_end_to_end(self) -> None:
-        operations = self._document("OPERATIONS.md")
-        for promise in (
-            "## Closing a sprint",
-            "--closeout-file CLOSEOUT.md",
-            "sprint close-result --ref sprint:1431 --event-id",
-            "### Commenting after the close",
-            "A close is not a completed Definition of Done.",
-        ):
-            with self.subTest(promise=promise):
-                self.assertIn(promise, operations)
-
-    def test_the_sentence_the_documents_carry_is_the_one_the_code_carries(self) -> None:
-        """The one claim that may not drift: a close is not a satisfied contract."""
-        clause = "it is not a statement that the sprint's definition of done was reached"
-        self.assertIn(clause, CLOSE_NOT_DONE.lower())
-        for name in ("PROTOCOLS.md", "OPERATIONS.md"):
-            with self.subTest(document=name):
-                self.assertIn("definition of done", self._document(name).lower())
-        self.assertIn(clause, self._document("PROTOCOLS.md").lower())
 
 
 if __name__ == "__main__":

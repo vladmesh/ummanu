@@ -30,6 +30,8 @@ from typing import Any, ClassVar
 
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
+from tests import source_trees
+
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = next(path.parent.parent.name for path in sorted((ROOT / "src").glob("*/transition/names.py")))
 TRANSITION = ROOT / "src" / PACKAGE / "transition"
@@ -862,7 +864,7 @@ class NameTableTests(unittest.TestCase):
     def test_product_imports_are_relative_and_name_modules_only(self) -> None:
         offenders = []
         for path in self.modules():
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     offenders += [f"{path.name}:{node.lineno} import {alias.name}" for alias in node.names
@@ -887,7 +889,7 @@ class NameTableTests(unittest.TestCase):
         for path in self.modules():
             if path.name == "names.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"))
             docstrings = {
                 id(node.body[0].value) for node in ast.walk(tree)
                 if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef))

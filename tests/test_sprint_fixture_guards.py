@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from tests import (
+    source_trees,
     test_sprint_executors,
     test_sprint_listing_budget,
     test_sprint_restore,
@@ -113,7 +114,7 @@ FORBIDDEN_RPC = {
 
 def _method_findings(method: object, *, include_rpc: bool = True) -> set[str]:
     body = textwrap.dedent(inspect.getsource(method))
-    tree = ast.parse(body)
+    tree = source_trees.parse(body)
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} & FORBIDDEN_NAMES
     rpc = (
         {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)} & FORBIDDEN_RPC
@@ -169,7 +170,7 @@ def _reachable_helpers(owner: type, root: object) -> list[tuple[tuple[str, ...],
             continue
         seen.add(method)
         reached.append((path, method))
-        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+        tree = source_trees.parse(textwrap.dedent(inspect.getsource(method)))
         helper_names = {
             node.attr
             for node in ast.walk(tree)
