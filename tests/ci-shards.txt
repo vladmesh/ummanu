@@ -78,6 +78,7 @@ unit tests/test_curator_operator_contract.py
 integration-board tests/test_data.py
 component tests/test_ndjson.py
 integration-dispatcher tests/test_dispatcher.py
+integration-dispatcher tests/test_dispatcher_claim_contract.py
 integration-heads tests/test_dispatcher_review_lifecycle.py
 integration-dispatcher tests/test_dispatcher_no_candidate.py
 integration-dispatcher tests/test_e2e_stage.py
@@ -89,6 +90,7 @@ integration-dispatcher tests/test_observer_git_workspace.py
 integration-dispatcher tests/test_legacy_dispatcher_records.py
 integration-dispatcher tests/test_dispatcher_contracts.py
 unit tests/test_dispatcher_worker_report.py
+unit tests/test_dispatcher_claim.py
 unit tests/test_dispatcher_worker_continuation.py
 unit tests/test_git_worktree_listing.py
 unit tests/test_production_head_handoff.py

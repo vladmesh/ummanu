@@ -65,6 +65,7 @@ class _ClaimRuntime:
         self.writer = mock.Mock()
         self.audit = mock.Mock()
         self.audit.committed_event.return_value = None
+        self.audit.events.return_value = []
         self.host = mock.Mock()
 
     def head_readiness(self, head: str) -> HeadReadiness:
