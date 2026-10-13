@@ -19,7 +19,7 @@ from ummanu import sprints
 from ummanu.board.sql_sprints import sprint_key
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
-from ummanu.tasks import TaskError
+from ummanu.tasks import TaskError, TaskWriter
 
 
 class SqlSprintAtomicityTests(SprintFixture):
@@ -114,7 +114,12 @@ class SqlSprintAtomicityTests(SprintFixture):
 
     def test_established_default_reads_linked_cards_comments_and_freshness_write_nothing(self) -> None:
         self._create()
-        self.arrange_card_sprint("secretary-12", "sprint:atomic")
+        # This fixture intentionally has no seeded Cards. Arrange the linked card through
+        # the public writer before starting statement/audit measurement.
+        TaskWriter(self.client, data_dir=self.tmp.name).create(
+            role="po", actor="operator", project="ummanu", task_type="research", title="read card",
+            reference="ummanu-1", sprint="sprint:atomic", request_id="read-card",
+        )
         self.writer.comment(role="po", actor="operator", reference="sprint:atomic", body="read comment", request_id="read-comment")
         self.writer.resume(role="po", actor="operator", reference="sprint:atomic", entry=self._resume_entry(), request_id="read-resume")
         before = self._read_state()
@@ -123,7 +128,7 @@ class SqlSprintAtomicityTests(SprintFixture):
             listed = reader.list()
             self.assertEqual([s["ref"] for s in listed], ["sprint:atomic"])
             default = reader.show("sprint:atomic")
-            self.assertEqual([card["ref"] for card in default["cards"]], ["secretary-12"])
+            self.assertEqual([card["ref"] for card in default["cards"]], ["ummanu-1"])
             self.assertIn("read comment", [entry["body"] for entry in default["comments"]])
             self.assertIn("resume_freshness", default)
             explicit = reader.show("sprint:atomic", include_cards=True, include_comments=False, include_resume_freshness=True)
