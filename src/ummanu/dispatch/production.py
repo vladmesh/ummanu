@@ -73,6 +73,7 @@ from ummanu.dispatch.tick_telemetry import (
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.infra.checkpoint_run import load_checkpoint_state
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.head.handoff import (
     active_budget,
     handoff_budget,
@@ -81,7 +82,7 @@ from ummanu.runtime.head.handoff import (
     handoff_stages_since,
 )
 from ummanu.sprints import SprintWriter, budget_thresholds
-from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY, TaskError
+from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY
 
 # Tick telemetry records terminal health for pipeline and steward readers.
 TICK_TELEMETRY_UNHEALTHY_KEPT = 50

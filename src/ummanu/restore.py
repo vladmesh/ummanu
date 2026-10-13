@@ -42,6 +42,7 @@ from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
 from ummanu.data import init_layout
 from ummanu.dispatch.cleanup import bulk_lane
+from ummanu.kernel.errors import TaskError
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.config import DEFAULT_DIM as DEFAULT_MEMORY_DIM
 from ummanu.product_issues import (
@@ -60,12 +61,7 @@ from ummanu.sprint_observer import (
     parse_observer,
 )
 from ummanu.task_restore import restored_entity_number, set_restore_phase
-from ummanu.tasks import (
-    TaskError,
-    TaskReader,
-    TaskWriter,
-    all_project_cards,
-)
+from ummanu.tasks import TaskReader, TaskWriter, all_project_cards
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient

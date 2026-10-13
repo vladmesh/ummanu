@@ -12,11 +12,11 @@ from typing import Any
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
 from ummanu.board.sql_rows import now, rfc3339
 from ummanu.dispatch.cleanup import bulk_lane
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.references import next_reference, reference_allocation_lock
 from ummanu.tasks import (
     _STATE_BY_COLUMN,
     ACTIVE_STATES,
-    TaskError,
     TaskWriter,
     _positive_int,
     _task_is_active,

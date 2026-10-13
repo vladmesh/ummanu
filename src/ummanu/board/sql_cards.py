@@ -56,7 +56,7 @@ from ummanu.board.sql_rows import (
 from ummanu.board.sql_sprints import SqlSprintRecords
 from ummanu.board.store import BoardStoreCredentials
 from ummanu.board.task_routing import live_impact_flag
-from ummanu.tasks import TaskError
+from ummanu.kernel.errors import TaskError
 
 #: The seven columns of the Pipeline board, in board order.  Their ids are this module's own:
 #: nothing outside the client may depend on the number, only on the title.

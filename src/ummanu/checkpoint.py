@@ -72,13 +72,14 @@ from ummanu.infra.github_credential import (
     CredentialError,
     RemoteExecution,
 )
+from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import (
     ProductIssueValidationError,
     registered_projects,
 )
 from ummanu.runtime.redact import redact
 from ummanu.state_repo import BOARD_RUNS_PATHSPEC
-from ummanu.tasks import TaskError, task_audit_for
+from ummanu.tasks import task_audit_for
 
 # Canonical checkpoint entries per component. `events.ndjson` is stored history: the
 # pre-2026-09-10 file journal, which nothing writes any more. It is copied while the data dir

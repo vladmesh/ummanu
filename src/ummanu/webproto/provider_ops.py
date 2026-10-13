@@ -22,8 +22,9 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.board.backend import BOARD_STORE_KIND, card_client
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.codex_home import installation_codex_dir
-from ummanu.tasks import TaskError, task_audit_for
+from ummanu.tasks import task_audit_for
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import OwnerConflict, RuntimeUnavailable, ValidationRefused

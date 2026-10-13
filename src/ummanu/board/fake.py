@@ -25,8 +25,7 @@ _FOREIGN_CLAIM = "request id belongs to another operation or payload"
 
 
 def _foreign_claim() -> Exception:
-    # Kept local: ummanu.tasks imports the board package for its transition registry.
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     return TaskError("validation", _FOREIGN_CLAIM, 2)
 

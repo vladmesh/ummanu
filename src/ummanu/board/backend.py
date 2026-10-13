@@ -124,7 +124,7 @@ def board_client(
     `serves` is what the call site needs from the client it is asking for.  Every surface is served
     by the store today, so a surface outside `POSTGRES_SERVES` is a programming error refused by name.
     """
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     unknown = tuple(entity for entity in serves if entity not in POSTGRES_SERVES)
     if unknown:
@@ -156,7 +156,7 @@ def _store_refusal(exc: Exception) -> Exception:
     refusal with an exit status, so a `board-store.env` that is missing, malformed or tracked by
     git leaves here as `backend_unavailable` carrying the store's own sentence.
     """
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     return TaskError("backend_unavailable", f"board store is not usable: {exc}", 1)
 

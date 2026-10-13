@@ -26,8 +26,9 @@ from ummanu.dispatch.state import DispatcherRecord
 
 # Public row disposition for transports, shared with the native doctor evaluator.
 from ummanu.infra.doctor_findings import accepted as accepted
+from ummanu.kernel.errors import TaskError
 from ummanu.status import collect_status
-from ummanu.tasks import TaskError, TaskReader, task_audit_for
+from ummanu.tasks import TaskReader, task_audit_for
 from ummanu.webproto import agents as agent_reads, head_view as head_reads, sources
 from ummanu.webproto._values import _reason, _text
 from ummanu.webproto.boundary import ProtocolBoundary

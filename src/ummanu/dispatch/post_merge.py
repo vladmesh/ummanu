@@ -57,7 +57,8 @@ from ummanu.dispatch.gate import (
 from ummanu.dispatch.helpers import safe_one_line
 from ummanu.dispatch.types import HostError, MergeLanding
 from ummanu.infra.env import positive_int
-from ummanu.tasks import POST_MERGE_CI_KEY, TaskError, post_merge_ci_fact
+from ummanu.kernel.errors import TaskError
+from ummanu.tasks import POST_MERGE_CI_KEY, post_merge_ci_fact
 
 WATCHES_KEY = "post_merge_watches"
 CEILING_ENV = "UMMANU_POST_MERGE_CI_CEILING_SECONDS"

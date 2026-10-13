@@ -57,6 +57,7 @@ from ummanu.board.sprint_write import (
 )
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.dispatch.cleanup import CleanupJournal
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 from ummanu.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -74,7 +75,6 @@ from ummanu.sprint_observer import (
 )
 from ummanu.tasks import (
     BOARD_STORE_KIND,
-    TaskError,
     TaskReader,
     TaskWriter,
     _digest,
@@ -950,14 +950,8 @@ class SprintWriter:
         observer: str | None = None,
         budget_by_type: tuple[tuple[str, int], ...] = (),
     ) -> None:
-        from ummanu.board import (
-            Actor,
-            EntityKind,
-            RelatedRefs,
-            SprintState,
-            SprintSupplement,
-            TransitionRequest,
-        )
+        from ummanu.board.host import SprintSupplement, TransitionRequest
+        from ummanu.board.models import Actor, EntityKind, RelatedRefs, SprintState
 
         try:
             host = self._host()

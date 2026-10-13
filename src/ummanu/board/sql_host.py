@@ -493,7 +493,7 @@ class SqlBoardHost:
                     )
                 except Exception as exc:
                     # Only unavailable transport can hide an applied effect.
-                    from ummanu.tasks import TaskError
+                    from ummanu.kernel.errors import TaskError
 
                     if isinstance(exc, TaskError) and exc.code == "backend_unavailable":
                         return

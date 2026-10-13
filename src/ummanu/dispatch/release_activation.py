@@ -29,7 +29,7 @@ from ummanu.dispatch.state import (
     request_token,
 )
 from ummanu.dispatch.types import HostError
-from ummanu.tasks import TaskError
+from ummanu.kernel.errors import TaskError
 
 ACTION = "production-activation-blocked"
 COMMENT_ACTION = "production-activation-refused"

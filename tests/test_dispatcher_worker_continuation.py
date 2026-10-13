@@ -13,16 +13,11 @@ from typing import Any, ClassVar
 from unittest import mock
 
 from tests.support.call_log import CallLog
-from ummanu.board import (
-    Actor,
-    BoardEventPending,
-    Card,
-    CardState,
-    EntityKind,
-    SqlBoardHost,
-    TransitionRequest,
-)
+from ummanu.board.events import BoardEventPending
 from ummanu.board.fake import MemoryAudit
+from ummanu.board.host import TransitionRequest
+from ummanu.board.models import Actor, Card, CardState, EntityKind
+from ummanu.board.sql_host import SqlBoardHost
 from ummanu.dispatch import (
     attempt_accounting,
     runtime as dispatch_runtime,

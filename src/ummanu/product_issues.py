@@ -17,9 +17,9 @@ import yaml
 
 from ummanu._fsutil import file_lock, held_lock
 from ummanu.board.backend import entity_id
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import (
     BOARD_STORE_KIND,
-    TaskError,
     _digest,
     _now,
     _positive_int,
@@ -1167,7 +1167,8 @@ class ProductIssueStore:
                     raise TaskError(
                         "validation", "unknown registered project(s): " + ", ".join(unknown), 2
                     )
-            from ummanu.board import Actor, Create, Product
+            from ummanu.board.host import Create
+            from ummanu.board.models import Actor, Product
 
             try:
                 operation = Create(
@@ -1236,7 +1237,8 @@ class ProductIssueStore:
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)
-            from ummanu.board import Actor, Create, Issue, RelatedRefs
+            from ummanu.board.host import Create
+            from ummanu.board.models import Actor, Issue, RelatedRefs
 
             try:
                 host = self._host()
@@ -1276,7 +1278,8 @@ class ProductIssueStore:
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)
-            from ummanu.board import Actor, EntityKind, Issue, Replace
+            from ummanu.board.host import Replace
+            from ummanu.board.models import Actor, EntityKind, Issue
 
             host = self._host()
             try:
@@ -1341,7 +1344,8 @@ class ProductIssueStore:
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)
-            from ummanu.board import Actor, DescriptionAppend, EntityKind, Issue, Replace
+            from ummanu.board.host import DescriptionAppend, Replace
+            from ummanu.board.models import Actor, EntityKind, Issue
 
             host = self._host()
             try:
@@ -1417,7 +1421,8 @@ class ProductIssueStore:
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)
-            from ummanu.board import Actor, DescriptionEdit, EntityKind, Issue, Replace
+            from ummanu.board.host import DescriptionEdit, Replace
+            from ummanu.board.models import Actor, EntityKind, Issue
 
             host = self._host()
             try:
@@ -1495,13 +1500,8 @@ class ProductIssueStore:
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)
-            from ummanu.board import (
-                Actor,
-                EntityKind,
-                Issue,
-                IssueState,
-                TransitionRequest,
-            )
+            from ummanu.board.host import TransitionRequest
+            from ummanu.board.models import Actor, EntityKind, Issue, IssueState
 
             current = self._host().read(EntityKind.ISSUE, reference)
             if isinstance(current, Issue) and current.state is IssueState.CLOSED:

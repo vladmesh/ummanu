@@ -733,14 +733,14 @@ class SqlSprintTransaction:
         event = self.audit.committed_event(request_id)
         if event is not None:
             if event.get("kind") != kind or self._intent(event) != intent:
-                from ummanu.tasks import TaskError
+                from ummanu.kernel.errors import TaskError
 
                 raise TaskError("validation", "request id belongs to another operation or payload", 2)
             return None, event
         pending = self.audit.pending_event(request_id)
         if pending is not None:
             if pending.get("kind") != kind or self._intent(pending) != intent:
-                from ummanu.tasks import TaskError
+                from ummanu.kernel.errors import TaskError
 
                 raise TaskError("validation", "request id belongs to another operation or payload", 2)
             return {

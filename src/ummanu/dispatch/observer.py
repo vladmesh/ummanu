@@ -81,6 +81,7 @@ from ummanu.dispatch.worker_lifecycle import (
     residual_composer_class,
 )
 from ummanu.infra.env import positive_int
+from ummanu.kernel.errors import TaskError
 from ummanu.role_skills import skill_delivery
 from ummanu.runtime import head as head_ops
 from ummanu.runtime.codex_preflight import CodexFanoutRecordingError
@@ -92,7 +93,7 @@ from ummanu.sprint_observer import (
     ObserverMetadataError,
     executable_observer,
 )
-from ummanu.tasks import TaskError, is_significant_observer_event
+from ummanu.tasks import is_significant_observer_event
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"

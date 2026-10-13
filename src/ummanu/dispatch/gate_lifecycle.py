@@ -43,7 +43,7 @@ from ummanu.dispatch.wait_vitality import (
     reduce_and_store_vitality_episode as _reduce_and_store_vitality_episode,
 )
 from ummanu.dispatch.worker_continuation import begin_red_transition as _begin_red_transition
-from ummanu.tasks import TaskError
+from ummanu.kernel.errors import TaskError
 
 
 def run_gate(

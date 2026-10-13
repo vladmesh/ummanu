@@ -6,7 +6,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.kernel.errors import TaskError
+from ummanu.tasks import TaskReader, TaskWriter
 
 DONE_RETENTION_DAYS = 5
 
