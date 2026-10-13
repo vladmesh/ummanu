@@ -19,7 +19,7 @@ from unittest import mock
 import yaml
 
 from tests.head_registry import live_root_pair, write_installed_pair
-from ummanu import installation, status, task_commands, upgrade
+from ummanu import status, task_commands, upgrade
 from ummanu.config import validate_instance
 from ummanu.dispatch.host import InstanceCatalog
 from ummanu.head_registry import (
@@ -29,6 +29,7 @@ from ummanu.head_registry import (
     installed_heads,
     installed_pair,
 )
+from ummanu.installation import materialize as installation_materialize
 from ummanu.onboarding import OnboardingStorage
 from ummanu.runtime import heads
 
@@ -234,15 +235,15 @@ class RecoverRegenerationTests(unittest.TestCase):
     def materialize(self) -> None:
         """The recover materializer, with only its head-registry step running."""
 
-        def head_registry_only(context, steps=installation.STEPS):
+        def head_registry_only(context, steps=installation_materialize.STEPS):
             self.assertIn(upgrade.step_head_registry, steps)
             return upgrade.run_steps(context, steps=(upgrade.step_head_registry,))
 
         with (
-            mock.patch.object(installation, "run_steps", side_effect=head_registry_only),
-            mock.patch.object(installation, "check_product_runtime"),
+            mock.patch.object(installation_materialize, "run_steps", side_effect=head_registry_only),
+            mock.patch.object(installation_materialize, "check_product_runtime"),
         ):
-            result = installation.materialize_host(self.instance, upgrade.running_product_root())
+            result = installation_materialize.materialize_host(self.instance, upgrade.running_product_root())
         self.assertTrue(result.ok, result.render())
 
     def assert_regenerated(self) -> None:

@@ -17,7 +17,7 @@ from unittest import mock
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from ummanu import _proc, installation, state_repo, status, upgrade
+from ummanu import _proc, state_repo, status, upgrade
 from ummanu.board import provision as board_provision
 from ummanu.config import DataDirError
 from ummanu.head_health import HeadReadiness, resolve_head_chain
@@ -48,6 +48,7 @@ from ummanu.host import (
     strict_manifest,
 )
 from ummanu.host_apply import ApplyInputs, apply_host
+from ummanu.installation import materialize as installation_materialize
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import heads
 
@@ -2129,14 +2130,14 @@ class PipelineStateStepTests(unittest.TestCase):
             return upgrade.UpgradeResult()
 
         with (
-            mock.patch("ummanu.installation.validate_instance", return_value=SimpleNamespace(ok=True)),
-            mock.patch("ummanu.installation.check_product_runtime"),
+            mock.patch("ummanu.installation.materialize.validate_instance", return_value=SimpleNamespace(ok=True)),
+            mock.patch("ummanu.installation.materialize.check_product_runtime"),
             mock.patch(
-                "ummanu.installation.resolve_runtime_owner", return_value=("operator", self.root / "home")
+                "ummanu.installation.materialize.resolve_runtime_owner", return_value=("operator", self.root / "home")
             ),
-            mock.patch("ummanu.installation.run_steps", side_effect=run),
+            mock.patch("ummanu.installation.materialize.run_steps", side_effect=run),
         ):
-            installation.materialize_host(self.instance, self.root / "product", before_host=lambda _: None)
+            installation_materialize.materialize_host(self.instance, self.root / "product", before_host=lambda _: None)
 
         self.assertTrue(seen)
         self.assertFalse(any(upgrade.step_pipeline_state in steps for steps in seen))

@@ -17,8 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import cli, installation, session, upgrade
+from ummanu import cli, session, upgrade
 from ummanu.infra.export_allowlist import is_exported
+from ummanu.installation import materialize as installation_materialize
 from ummanu.memory import client_config
 from ummanu.po import workspace as po_workspace
 from ummanu.role_skills import BIN_DIR_ENV, MANIFEST, sync
@@ -219,15 +220,15 @@ class RecoverTests(Fixture):
         (live_root / "persona").mkdir()
         (live_root / "persona" / "AGENTS.md").write_bytes(PERSONAL)
 
-        def interactive_only(context, steps=installation.STEPS):
+        def interactive_only(context, steps=installation_materialize.STEPS):
             self.assertIn(upgrade.step_interactive_workspace, steps)
             return upgrade.run_steps(context, steps=(upgrade.step_interactive_workspace,))
 
         with (
-            mock.patch.object(installation, "run_steps", side_effect=interactive_only),
-            mock.patch.object(installation, "check_product_runtime"),
+            mock.patch.object(installation_materialize, "run_steps", side_effect=interactive_only),
+            mock.patch.object(installation_materialize, "check_product_runtime"),
         ):
-            result = installation.materialize_host(live_root, self.product)
+            result = installation_materialize.materialize_host(live_root, self.product)
 
         self.assertTrue(result.ok, result.render())
         recovered = recovered_data / iw.WORKSPACE_NAME

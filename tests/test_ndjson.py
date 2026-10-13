@@ -20,7 +20,7 @@ from ummanu.checkpoint import (
     _validate_runs,
 )
 from ummanu.data import export_board, export_runs
-from ummanu.installation import (
+from ummanu.installation.materialize import (
     _live_run_journals,
     _render_restored_journal,
     _restored_run_journals,

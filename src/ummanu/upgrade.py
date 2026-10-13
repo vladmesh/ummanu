@@ -729,7 +729,8 @@ def step_codex_home(context: UpgradeContext) -> StepResult:
     if context.dry_run:
         return StepResult("codex-home", "skipped", "--dry-run does not seed CODEX_HOME")
     # installation imports this module; the seeding lives there with install's own call of it.
-    from ummanu.installation import InstallError, provision_codex_home
+    from ummanu.installation.models import InstallError
+    from ummanu.installation.provision import provision_codex_home
 
     try:
         seeded = provision_codex_home(
@@ -1320,7 +1321,8 @@ def step_pipeline_state(context: UpgradeContext) -> StepResult:
     the step and is never overwritten.
     """
     # installation imports this module; the restore lives there with install's own call of it.
-    from ummanu.installation import InstallError, materialize_pipeline_state, pipeline_state_path
+    from ummanu.installation.materialize import materialize_pipeline_state, pipeline_state_path
+    from ummanu.installation.models import InstallError
 
     if not (context.instance_path / "state" / "runs" / "runs.ndjson").is_file():
         return StepResult("pipeline-state", "skipped", "the instance checkpoint carries no run journal")

@@ -18,7 +18,7 @@ from ummanu.host import (
     plan_input_errors,
 )
 from ummanu.host_apply import resolve_installed_packaged
-from ummanu.installation import add_bootstrap_credential_arguments
+from ummanu.installation.credentials import add_bootstrap_credential_arguments
 from ummanu.memory.config import memory_config
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.restore import (

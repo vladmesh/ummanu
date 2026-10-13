@@ -31,13 +31,18 @@ from typing import ClassVar
 from unittest import mock
 
 from tests import source_trees
-from ummanu import bootstrap, installation, restore, upgrade
+from ummanu import bootstrap, restore, upgrade
 from ummanu.config import validate_instance
 from ummanu.dispatch import commands, production
 from ummanu.dispatch.observer import DRAIN_DEFERRED_REASON, ObserverRecord, put_observers
 from ummanu.dispatch.observer_fence import REASON_DEFERRED, REASON_NO_RECORD, observer_fence
 from ummanu.host import HostInventory, build_doctor_expectations, build_expectations, inventory
-from ummanu.installation import InstallError, ProjectProvisionResult
+from ummanu.installation import (
+    materialize as installation_materialize,
+    models as installation_models,
+    provision as installation_provision,
+)
+from ummanu.installation.models import InstallError, ProjectProvisionResult
 from ummanu.secret_store import generate_recovery_phrase, initialize_store, set_secret
 from ummanu.sprint_observer import head_choice
 from ummanu.web.app import ROUTES
@@ -267,19 +272,19 @@ class WebFrontCaddyTests(unittest.TestCase):
 
     def test_the_web_front_is_wanted_exactly_when_the_host_plan_would_install_its_unit(self) -> None:
         prefixed = "host:\n  unit_prefix: ummanu-\n"
-        self.assertTrue(installation.web_front_wanted(self.instance(prefixed)))
-        self.assertFalse(installation.web_front_wanted(self.instance("host:\n  memory_threads: 1\n")))
+        self.assertTrue(installation_materialize.web_front_wanted(self.instance(prefixed)))
+        self.assertFalse(installation_materialize.web_front_wanted(self.instance("host:\n  memory_threads: 1\n")))
         self.assertFalse(
-            installation.web_front_wanted(
+            installation_materialize.web_front_wanted(
                 self.instance(prefixed + "  components:\n    web-front:\n      enabled: false\n")
             )
         )
         self.assertFalse(
-            installation.web_front_wanted(
+            installation_materialize.web_front_wanted(
                 self.instance(prefixed + "  foreign_units: [ummanu-web-front.service]\n")
             )
         )
-        self.assertFalse(installation.web_front_wanted(self.root / "absent"))
+        self.assertFalse(installation_materialize.web_front_wanted(self.root / "absent"))
 
     def test_bootstrap_masks_the_distribution_unit_and_installs_caddy_for_the_web_front(self) -> None:
         with (
@@ -346,12 +351,12 @@ class WebFrontCaddyTests(unittest.TestCase):
     def test_prerequisites_refuse_up_front_and_name_caddy(self) -> None:
         instance = self.instance("host:\n  unit_prefix: ummanu-\n")
         with (
-            mock.patch("ummanu.installation.caddy_installed", return_value=False),
-            mock.patch("ummanu.installation.board_client"),
-            mock.patch("ummanu.installation.TaskReader"),
+            mock.patch("ummanu.installation.materialize.caddy_installed", return_value=False),
+            mock.patch("ummanu.installation.materialize.board_client"),
+            mock.patch("ummanu.installation.materialize.TaskReader"),
             self.assertRaisesRegex(InstallError, r"caddy prerequisite failed: .*web-front.*/usr/bin/caddy"),
         ):
-            installation.check_prerequisites(instance)
+            installation_materialize.check_prerequisites(instance)
 
     def test_prerequisites_pass_caddy_when_it_is_installed_or_not_wanted(self) -> None:
         cases = (
@@ -366,11 +371,11 @@ class WebFrontCaddyTests(unittest.TestCase):
         )
         for instance, present in cases:
             with (
-                mock.patch("ummanu.installation.caddy_installed", return_value=present),
-                mock.patch("ummanu.installation.board_client"),
-                mock.patch("ummanu.installation.TaskReader") as reader,
+                mock.patch("ummanu.installation.materialize.caddy_installed", return_value=present),
+                mock.patch("ummanu.installation.materialize.board_client"),
+                mock.patch("ummanu.installation.materialize.TaskReader") as reader,
             ):
-                installation.check_prerequisites(instance)
+                installation_materialize.check_prerequisites(instance)
             reader.return_value.list.assert_called_once_with()
 
 
@@ -513,8 +518,8 @@ class DisabledBindingTests(unittest.TestCase):
                 "enabled": False,
                 "adapter": "retired",
             }
-            with mock.patch("ummanu.installation.RemoteExecution") as remote:
-                [result] = installation.provision_project_checkouts([binding], None, instance_dir=root)
+            with mock.patch("ummanu.installation.provision.RemoteExecution") as remote:
+                [result] = installation_provision.provision_project_checkouts([binding], None, instance_dir=root)
 
             remote.assert_not_called()
             self.assertEqual(
@@ -530,7 +535,7 @@ class DisabledBindingTests(unittest.TestCase):
                 ),
             )
             self.assertFalse((root / "retired-instance").exists())
-            recovered = installation.InstallResult(projects=[result])
+            recovered = installation_models.InstallResult(projects=[result])
             self.assertEqual(recovered.status, "ok")
 
 
@@ -609,10 +614,10 @@ class RuntimeOwnershipTests(unittest.TestCase):
         remote = mock.Mock(transport="https")
         remote.run_clone.side_effect = clone
         with (
-            mock.patch("ummanu.installation.RemoteExecution", return_value=remote),
-            mock.patch("ummanu.installation._set_installation_owner") as owner,
+            mock.patch("ummanu.installation.provision.RemoteExecution", return_value=remote),
+            mock.patch("ummanu.installation.provision._set_installation_owner") as owner,
         ):
-            [result] = installation.provision_project_checkouts([binding], "dev", instance_dir=self.root)
+            [result] = installation_provision.provision_project_checkouts([binding], "dev", instance_dir=self.root)
 
         self.assertEqual(result.outcome, "cloned", result)
         self.assertEqual(owner.call_args_list[0], mock.call(home / "projects", "dev"))
@@ -689,11 +694,11 @@ class WebFrontSitesTests(unittest.TestCase):
             return upgrade.StepResult("host", "unchanged", "")
 
         with (
-            mock.patch.object(installation, "STEPS", (upgrade.step_web_front_config, host)),
-            mock.patch.object(installation, "step_host", host),
-            mock.patch.object(installation, "check_product_runtime"),
+            mock.patch.object(installation_materialize, "STEPS", (upgrade.step_web_front_config, host)),
+            mock.patch.object(installation_materialize, "step_host", host),
+            mock.patch.object(installation_materialize, "check_product_runtime"),
         ):
-            result = installation.materialize_host(
+            result = installation_materialize.materialize_host(
                 instance,
                 self.root / "product",
                 installation_user=getpass.getuser(),
@@ -767,15 +772,15 @@ class WebFrontSitesTests(unittest.TestCase):
     def test_prerequisites_refuse_an_enabled_front_without_sites_and_name_the_setting(self) -> None:
         instance = _write_instance(self.root / "bare", "host:\n  unit_prefix: ummanu-\n")
         with (
-            mock.patch("ummanu.installation.caddy_installed", return_value=True),
-            mock.patch("ummanu.installation.board_client"),
-            mock.patch("ummanu.installation.TaskReader"),
+            mock.patch("ummanu.installation.materialize.caddy_installed", return_value=True),
+            mock.patch("ummanu.installation.materialize.board_client"),
+            mock.patch("ummanu.installation.materialize.TaskReader"),
             self.assertRaisesRegex(
                 InstallError,
                 r"web-front prerequisite failed: .*host\.web_front\.sites.*`ummanu web-front render",
             ),
         ):
-            installation.check_prerequisites(instance)
+            installation_materialize.check_prerequisites(instance)
 
     def test_the_schema_takes_https_site_addresses_only(self) -> None:
         cases = (("[https://front.example]", True), ("[http://front.example]", False), ("[]", False))
@@ -891,7 +896,7 @@ class EmbedderReleaseTests(unittest.TestCase):
         self.assertNotEqual(restore.restore_state(self.data).get("memory_index"), "complete")
 
     def test_recover_asks_for_the_isolated_rebuild_at_every_call(self) -> None:
-        tree = source_trees.parse((SOURCE / "installation.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse((SOURCE / "installation" / "commands.py").read_text(encoding="utf-8"))
         calls = [
             node
             for node in ast.walk(tree)

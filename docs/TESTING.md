@@ -17,6 +17,17 @@ determines which owners and modules apply to a PR. Pushes and manual dispatches 
 | integration-heads | test / integration-heads | Head launch, vitality, observer, review lifecycle and attempt accounting. |
 | packaging | test / packaging | Bootstrap, installation, provisioning and upgrade flows. |
 
+`tests.test_installation_boundary` (unit) guards the thin installation namespace, directed owner
+imports, shared type identity, bounded file sizes, baseline definition ASTs, representative result
+bytes and CLI defaults. Its goldens are baseline source captures, not independent baseline runs.
+`tests.test_kernel_source_graph` (integration-recovery) guards all four ARCH-04 facts, including
+SCC <=60 on the uncut static source graph with nested/lazy/alias/string/package edges. It reuses
+the source dependency capability with coupling.py's tier_none semantics; selector opacity and
+runtime import tables are not SCC evidence. Planted barrel/cycle/package/persisted-string cases
+stay in the small unit profile. The existing twelve kernel and fifteen cleanup foundation tests
+remain in their original local shards. Install/recovery, snapshot/PostgreSQL and packaging
+fixtures retain their CI owners.
+
 ## Suite manifest
 
 `tests/ci-shards.txt` owns the taxonomy: every top-level `tests/test_*.py` occurs exactly once, under

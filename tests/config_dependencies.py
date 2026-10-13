@@ -12,7 +12,7 @@ from tests import source_trees
 TARGET = re.compile(r"ummanu(?:\.[A-Za-z0-9_]+)+")
 
 
-def dependencies(name: str, path: Path, source: str) -> set[str]:
+def dependencies(name: str, path: Path, source: str, *, strict_dynamic: bool = True) -> set[str]:
     tree = source_trees.parse(source, filename=str(path))
     nodes = source_trees.walk(tree)
     package = name if path.name == "__init__.py" else name.rpartition(".")[0]
@@ -66,7 +66,9 @@ def dependencies(name: str, path: Path, source: str) -> set[str]:
                 or not isinstance(node.args[0], ast.Constant)
                 or not isinstance(node.args[0].value, str)
             ):
-                raise AssertionError(f"{name}:{node.lineno}: nonliteral dynamic import")
+                if strict_dynamic:
+                    raise AssertionError(f"{name}:{node.lineno}: nonliteral dynamic import")
+                continue
             target = node.args[0].value
             if target.startswith("."):
                 supplied = node.args[1] if len(node.args) > 1 else next(
@@ -75,7 +77,9 @@ def dependencies(name: str, path: Path, source: str) -> set[str]:
                 if supplied is not None and (
                     not isinstance(supplied, ast.Constant) or not isinstance(supplied.value, str)
                 ):
-                    raise AssertionError(f"{name}:{node.lineno}: nonliteral dynamic import package")
+                    if strict_dynamic:
+                        raise AssertionError(f"{name}:{node.lineno}: nonliteral dynamic import package")
+                    continue
                 target = importlib.util.resolve_name(target, supplied.value if supplied is not None else package)
             targets.add(target)
     return {target for target in targets if target == "ummanu" or target.startswith("ummanu.")}

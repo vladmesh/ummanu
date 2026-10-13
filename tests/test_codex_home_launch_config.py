@@ -28,7 +28,7 @@ from unittest import mock
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from ummanu import upgrade
-from ummanu.installation import provision_codex_home
+from ummanu.installation.provision import provision_codex_home
 from ummanu.memory.client_config import bridge_executable, reconcile_clients
 from ummanu.runtime.codex_home import managed_codex_homes
 from ummanu.runtime.codex_preflight import CodexHomeLoginMissing, resolve_codex_home

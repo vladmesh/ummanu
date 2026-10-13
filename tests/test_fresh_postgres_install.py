@@ -27,16 +27,15 @@ from unittest import mock
 
 import psycopg
 
-from tests.fakes.installation import CARD as CHECKPOINT_CARD
-from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
+from tests.fakes.installation import CARD as CHECKPOINT_CARD, PRODUCT_ROOT, _checkpoint, _git
 from tests.retired_board import STALE_FILE
 from tests.sql_backend_fixtures import PostgresBoard
 from ummanu import bootstrap as bootstrap_module
-from ummanu import installation
 from ummanu.board import store
 from ummanu.board.backend import CARD, board_client
 from ummanu.board.store import BoardStoreConfig
 from ummanu.data import init_layout
+from ummanu.installation import commands as installation_commands, support as installation_support
 from ummanu.tasks import TaskReader, TaskWriter
 
 STORE_DATABASE = "ummanu"
@@ -166,7 +165,7 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         self.assertFalse((target / "runtime.env").exists())
         self.assertFalse((target / STALE_FILE).exists())
 
-        real_run = installation._run
+        real_run = installation_support._run
 
         def run(argv: list[str], **kwargs: object) -> object:
             # Recovery needs no Orca (A20 step 9); every command runs for real.
@@ -191,24 +190,27 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         )
         with ExitStack() as stack:
             for patch in (
-                mock.patch("ummanu.installation._ensure_installation_user"),
-                mock.patch("ummanu.installation._set_installation_owner"),
-                mock.patch("ummanu.installation._run", side_effect=run),
+                mock.patch("ummanu.installation.commands._ensure_installation_user"),
+                mock.patch("ummanu.installation.clone._set_installation_owner"),
+                mock.patch("ummanu.installation.commands._set_installation_owner"),
+                mock.patch("ummanu.installation.materialize._set_installation_owner"),
+                mock.patch("ummanu.installation.support._set_installation_owner"),
+                mock.patch("ummanu.installation.clone._run", side_effect=run),
                 # Project checkouts and CODEX_HOME are host provisioning, not the board.
-                mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
-                mock.patch("ummanu.installation.provision_codex_home", return_value=0),
-                mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
+                mock.patch("ummanu.installation.commands.provision_project_checkouts", return_value=[]),
+                mock.patch("ummanu.installation.commands.provision_codex_home", return_value=0),
+                mock.patch("ummanu.installation.commands.rebuild_memory_index", return_value=1),
                 # The fixture enables the web front; the host's Caddy is not this test's (ummanu-49 P4).
-                mock.patch("ummanu.installation.caddy_installed", return_value=True),
+                mock.patch("ummanu.installation.materialize.caddy_installed", return_value=True),
                 mock.patch(
-                    "ummanu.installation.materialize_host",
+                    "ummanu.installation.commands.materialize_host",
                     return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
                 ),
-                mock.patch("ummanu.installation.materialize_pipeline_state", return_value=0),
-                mock.patch("ummanu.installation.restore_findings", return_value=[]),
+                mock.patch("ummanu.installation.commands.materialize_pipeline_state", return_value=0),
+                mock.patch("ummanu.installation.commands.restore_findings", return_value=[]),
             ):
                 stack.enter_context(patch)
-            result = installation.install(args)
+            result = installation_commands.install(args)
 
         steps = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertEqual(result.status, "ok", result.steps)

@@ -25,7 +25,7 @@ LEGACY_FLAT_MODULES = frozenset(
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
     codex_provider_events.py config.py data.py
     gate.py
-    head_health.py head_registry.py host.py host_apply.py host_commands.py installation.py
+    head_health.py head_registry.py host.py host_apply.py host_commands.py
     knowledge_write.py memory_errors.py memory_journal.py memory_reindex.py memory_service.py
     memory_write.py observer_root.py onboarding.py product_issue_commands.py product_issues.py
     product_lanes.py provision.py restore.py restore_commands.py role_skills.py

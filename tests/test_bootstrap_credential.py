@@ -15,10 +15,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import installation
 from ummanu.bootstrap import bootstrap
 from ummanu.cli import build_parser
-from ummanu.installation import InstallError, SnapshotCheckout
+from ummanu.installation import (
+    clone as installation_clone,
+    commands as installation_commands,
+    credentials as installation_credentials,
+)
+from ummanu.installation.clone import SnapshotCheckout
+from ummanu.installation.models import InstallError
 
 REMOTE = "https://github.com/example/private-instance.git"
 TOKEN = "fixture-bootstrap-token"
@@ -144,10 +149,10 @@ class BootstrapCredentialTests(unittest.TestCase):
         remote = mock.Mock()
         remote.return_value.run_clone.side_effect = InstallError("fixture clone refused")
 
-        with mock.patch.object(installation, "RemoteExecution", remote):
+        with mock.patch.object(installation_clone, "RemoteExecution", remote):
             code, _steps, output = self.run_bootstrap(
                 self.args("--bootstrap-credential-file", str(self.token_file)),
-                snapshot=mock.Mock(wraps=installation._snapshot_checkout),
+                snapshot=mock.Mock(wraps=installation_clone._snapshot_checkout),
             )
 
         self.assertEqual(code, 1)
@@ -183,11 +188,11 @@ class BootstrapCredentialTests(unittest.TestCase):
             ]
         )
         with (
-            mock.patch.object(installation, "_ensure_installation_user"),
-            mock.patch.object(installation, "_snapshot_checkout") as recover_snapshot,
-            mock.patch.object(installation, "_clone_or_reuse") as recover_clone,
+            mock.patch.object(installation_commands, "_ensure_installation_user"),
+            mock.patch.object(installation_commands, "_snapshot_checkout") as recover_snapshot,
+            mock.patch.object(installation_commands, "_clone_or_reuse") as recover_clone,
         ):
-            result = installation.install(recover_args)
+            result = installation_commands.install(recover_args)
         recover_snapshot.assert_not_called()
         recover_clone.assert_not_called()
         message = {step.name: step.detail for step in result.steps}["install"]
@@ -242,7 +247,7 @@ class BootstrapCredentialTests(unittest.TestCase):
         clone = mock.Mock(side_effect=self.clone)
 
         with mock.patch(
-            "ummanu.bootstrap._bootstrap_credential", wraps=installation._bootstrap_credential
+            "ummanu.bootstrap._bootstrap_credential", wraps=installation_credentials._bootstrap_credential
         ) as read:
             code, _steps, output = self.run_bootstrap(self.args(), clone=clone)
 

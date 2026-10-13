@@ -35,7 +35,7 @@ from unittest import mock
 from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
 from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
-from ummanu import bootstrap as bootstrap_module, installation, upgrade
+from ummanu import bootstrap as bootstrap_module, upgrade
 from ummanu.board import store
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
@@ -43,6 +43,7 @@ from ummanu.board.store import BoardStoreConfig
 from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_REF, SnapshotExporter, tick_checkpoint_writer
 from ummanu.data import init_layout
 from ummanu.head_registry import installed_heads, installed_pair
+from ummanu.installation import commands as installation_commands, materialize as installation_materialize
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import DEFAULT_MEMORY_DIM, restore_state
@@ -322,7 +323,7 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             mock.patch("ummanu.bootstrap._host_supported"),
             mock.patch("ummanu.bootstrap._ensure_installation_user"),
             mock.patch("ummanu.bootstrap._set_installation_owner"),
-            mock.patch("ummanu.installation._set_installation_owner"),
+            mock.patch("ummanu.installation.clone._set_installation_owner"),
             mock.patch("ummanu.bootstrap._install_platform"),
             mock.patch("ummanu.bootstrap.provision_board_store", side_effect=provision),
             # The database is a migrated copy, so the migration finds nothing owed. The role contract
@@ -355,7 +356,7 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.assertTrue((target / ".ummanu-bootstrap").is_file())
         self.assertEqual(store.store_path(target).stat().st_mode & 0o777, 0o600)
 
-        def head_registry_only(context, steps=installation.STEPS):
+        def head_registry_only(context, steps=installation_materialize.STEPS):
             return upgrade.run_steps(
                 context, steps=tuple(step for step in steps if step is upgrade.step_head_registry)
             )
@@ -390,18 +391,21 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         with ExitStack() as stack:
             for patch in (
                 mock.patch.object(SqlCardClient, "call_batch", autospec=True, side_effect=recording_batch),
-                mock.patch("ummanu.installation._ensure_installation_user"),
-                mock.patch("ummanu.installation._set_installation_owner"),
-                mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
-                mock.patch("ummanu.installation.provision_codex_home", return_value=0),
-                mock.patch("ummanu.installation.run_steps", side_effect=head_registry_only),
-                mock.patch("ummanu.installation.check_product_runtime"),
+                mock.patch("ummanu.installation.commands._ensure_installation_user"),
+                mock.patch("ummanu.installation.clone._set_installation_owner"),
+                mock.patch("ummanu.installation.commands._set_installation_owner"),
+                mock.patch("ummanu.installation.materialize._set_installation_owner"),
+                mock.patch("ummanu.installation.support._set_installation_owner"),
+                mock.patch("ummanu.installation.commands.provision_project_checkouts", return_value=[]),
+                mock.patch("ummanu.installation.commands.provision_codex_home", return_value=0),
+                mock.patch("ummanu.installation.materialize.run_steps", side_effect=head_registry_only),
+                mock.patch("ummanu.installation.materialize.check_product_runtime"),
                 # The fixture enables the web front; the host's Caddy is not this test's (ummanu-49 P4).
-                mock.patch("ummanu.installation.caddy_installed", return_value=True),
+                mock.patch("ummanu.installation.materialize.caddy_installed", return_value=True),
                 mock.patch("ummanu.memory_service.build_document_embedder", return_value=_Embedder()),
             ):
                 stack.enter_context(patch)
-            result = installation.install(args)
+            result = installation_commands.install(args)
 
         steps = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
