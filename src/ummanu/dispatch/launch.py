@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.dispatch import attempt_accounting
+from ummanu.dispatch.card_roles import REVIEW_ROLE, WORKER_ROLE, card_kind, head_role
 from ummanu.dispatch.heartbeat import intent_heartbeat_identity
 from ummanu.dispatch.helpers import scrub_host_output
 from ummanu.dispatch.state import DispatcherRecord, LaunchIntent
@@ -49,8 +50,6 @@ from ummanu.dispatch.watchdog import (
 )
 from ummanu.runtime.head import operations as head_ops
 
-WORKER_ROLE = "worker"
-REVIEW_ROLE = "review"
 PANE_STATE_LABELS = {
     READINESS_BUSY: "busy",
     READINESS_BLOCKED: "held in a dialog",
@@ -84,7 +83,7 @@ STORAGE_ERRORS = (OSError, ValueError, TypeError, UnicodeError)
 
 def launch_pid_file(role: str, reference: str) -> str:
     """The heartbeat file the head of this role writes. Known before the head exists."""
-    return pid_file_path(role, reference)
+    return pid_file_path(card_kind(role), reference)
 
 
 def launch_intent(record: DispatcherRecord) -> dict[str, Any]:
@@ -246,6 +245,7 @@ def write_launch_intent(
 A failed write leaves the record unchanged and prevents launch. Reserve the
 new round here so an interrupted rework cannot resume in its rejected round.
     """
+    role = card_kind(role)
     previous = dict(getattr(record, "launch_intent", None) or {})
     previous_workspace_settled = record.workspace_settled
     snapshot_field = "review_local_run_snapshot" if role == REVIEW_ROLE else "worker_local_run_snapshot"
@@ -260,7 +260,7 @@ new round here so an interrupted rework cannot resume in its rejected round.
         try:
             candidate = attest(
                 head,
-                role="reviewer" if role == REVIEW_ROLE else role,
+                role=head_role(role),
                 workspace=workspace,
                 task_ref=head_ops.TaskRef.card(ref, document=task_document),
                 pid_file=launch_pid_file(role, ref),
@@ -524,7 +524,7 @@ def launch_left_a_head(record: DispatcherRecord) -> bool:
 
 
 def role_field(role: str, suffix: str) -> str:
-    return f"{'review' if role == REVIEW_ROLE else 'worker'}_{suffix}"
+    return f"{card_kind(role)}_{suffix}"
 
 
 def clear_launch_intent(record: DispatcherRecord) -> None:
@@ -544,6 +544,7 @@ def clear_launch_intent(record: DispatcherRecord) -> None:
 
 def forget_role_head(record: DispatcherRecord, role: str) -> None:
     """Drop every pointer to one role's head, once it is confirmed gone."""
+    role = card_kind(role)
     if role == REVIEW_ROLE:
         record.review_handle = ""
         record.review_leaf = ""
@@ -601,7 +602,7 @@ def launch_aborted(*, step: str, ref: str, attempt_id: str, role: str, reason: s
 
 def role_label(role: str) -> str:
     """What this role's head is called in a line an operator reads."""
-    return "reviewer" if role == REVIEW_ROLE else "worker"
+    return head_role(card_kind(role))
 
 
 def pane_state_label(readiness: str) -> str:

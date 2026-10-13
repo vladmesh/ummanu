@@ -38,6 +38,7 @@ from ummanu.codex_provider_events import (
 )
 from ummanu.config import validate_instance
 from ummanu.dispatch import production_checkout
+from ummanu.dispatch.card_roles import card_kind, head_role
 from ummanu.dispatch.cleanup import CleanupJournal, lifecycle
 from ummanu.dispatch.e2e import parse_e2e
 from ummanu.dispatch.gate import (
@@ -1575,13 +1576,14 @@ class CommandHostRuntime:
 
     def provider_progress(self, task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, str]:
         """Read an opaque provider cursor for this exact role's persisted HeadRun."""
+        kind = card_kind(kind)
         run = record.review_head_run if kind == "review" else record.worker_head_run
         expected_workspace = record.workspace
         try:
             lifecycle_run = head_ops.HeadRun.from_json(run)
         except (head_ops.HeadRunError, TypeError, ValueError):
             return {"state": "unavailable", "reason": "persisted HeadRun is unavailable"}
-        expected_role = "reviewer" if kind == "review" else "worker"
+        expected_role = head_role(kind)
         if (
             lifecycle_run.workspace != expected_workspace
             or lifecycle_run.task_ref.kind != "card"
@@ -1626,12 +1628,13 @@ class CommandHostRuntime:
         """Whether this role's exact HeadRun ended its last turn on a provider error (secretary-1799, ummanu-108)."""
         if self.mode == "noop":
             return {"state": "unavailable", "reason": "noop host"}
+        kind = card_kind(kind)
         run = record.review_head_run if kind == "review" else record.worker_head_run
         try:
             lifecycle_run = head_ops.HeadRun.from_json(run)
         except (head_ops.HeadRunError, TypeError, ValueError):
             return {"state": "unavailable", "reason": "persisted HeadRun is unavailable"}
-        expected_role = "reviewer" if kind == "review" else "worker"
+        expected_role = head_role(kind)
         if (
             lifecycle_run.workspace != record.workspace
             or lifecycle_run.task_ref.kind != "card"
@@ -3050,6 +3053,7 @@ class CommandHostRuntime:
         if role in {WORKER_ROLE, REVIEW_ROLE, "reviewer"}:
             self._require_production_runtime(f"{role}-launch")
             self._require_workspace_environment(workspace)
+        role = head_role(role)
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         task_ref = self._task_ref(task, role, prompt_document)
         run_id = heartbeat_run_id or head_ops.new_run_id()
@@ -5078,7 +5082,7 @@ def _report_nudge_prompt(generation: int, reference: str) -> str:
 def _watchdog_kind(role: str) -> str:
     """`_launch`'s `role` ("worker"/"reviewer") to the `kind` the wait watchdog and
     `command_terminal_status` key their pid-heartbeat file on ("worker"/"review")."""
-    return "review" if role == "reviewer" else "worker"
+    return card_kind(role)
 
 
 def _body_file_path(data_dir: Path, kind: str, reference: str, review_round: int) -> str:
