@@ -279,6 +279,17 @@ The existing validator checks all CI ownership for duplicate, stale, missing or 
 empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
 CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
 
+The config boundary adds `tests.test_config_boundary` to `unit`; the manifest now owns 312
+modules. Its shared policy and storage fixtures check effective limits, draft validation and the
+released storage alias. `tests.test_kernel_import_boundary` follows config's actual reachable
+nested/relative imports, aliases, string targets and package ancestors and caps that closure at ten
+modules, alongside the TaskError leaf and board package guards. It parses only reachable files
+through `tests.source_trees`. The component `tests.test_config_check` exercises cross-family
+diagnostics through native `config check` and offline `doctor`; the policy owner is
+`ummanu.kernel.sprint_policy`, storage is `ummanu.runtime.onboarding_storage`, and fallback
+diagnostics belong to `ummanu.infra.fallback`. Sprint admission and onboarding/upgrade packaging
+remain in their existing CI shards.
+
 The historical ummanu-202 routing baseline, measured on the control host on 2026-10-10, contained
 141 modules and 2,644 tests:
 92.254 seconds through the sequential module receipt wrapper (89.354 seconds in the native runner),

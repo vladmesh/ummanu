@@ -58,6 +58,12 @@ from ummanu.board.sprint_write import (
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.dispatch.cleanup import CleanupJournal
 from ummanu.kernel.errors import TaskError
+from ummanu.kernel.sprint_policy import (
+    DEFAULT_OPEN_SPRINT_LIMIT as DEFAULT_OPEN_SPRINT_LIMIT,
+    MAX_OPEN_SPRINT_LIMIT as MAX_OPEN_SPRINT_LIMIT,
+    open_sprint_limit as open_sprint_limit,
+    open_sprint_limit_invalid as open_sprint_limit_invalid,
+)
 from ummanu.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 from ummanu.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -120,8 +126,6 @@ SPRINT_METADATA = {
     sprint_e2e.SPRINT_E2E_USED,
     sprint_e2e.SPRINT_E2E_CHARGES,
 }
-DEFAULT_OPEN_SPRINT_LIMIT = 1
-MAX_OPEN_SPRINT_LIMIT = 2
 # Observer freshness is based on card transitions, not status-read time.
 RESUME_FRESHNESS_GRACE_SECONDS = 5 * 60
 _GUARD_INDEX = "sprints/active-repositories.json"
@@ -246,30 +250,6 @@ def budget_thresholds(config: dict[str, Any] | None = None) -> dict[str, int]:
         return _read_budget_thresholds(config)
     except ValueError as exc:
         raise TaskError("validation", str(exc), 2) from None
-
-
-def open_sprint_limit(config: dict[str, Any] | None = None) -> int:
-    """How many sprints this installation may hold open, refusing to widen on bad
-    input. An absent, unreadable or malformed setting all answer one.
-    """
-    raw = config.get("open_sprint_limit") if isinstance(config, dict) else None
-    if raw is None or isinstance(raw, bool) or not isinstance(raw, int):
-        return DEFAULT_OPEN_SPRINT_LIMIT
-    if not DEFAULT_OPEN_SPRINT_LIMIT <= raw <= MAX_OPEN_SPRINT_LIMIT:
-        return DEFAULT_OPEN_SPRINT_LIMIT
-    return raw
-
-
-def open_sprint_limit_invalid(config: dict[str, Any] | None = None) -> bool:
-    """Whether the setting is present and holds something this installation cannot honour."""
-    if not isinstance(config, dict) or "open_sprint_limit" not in config:
-        return False
-    raw = config["open_sprint_limit"]
-    # `True` is an int to Python and would compare equal to the limit it falls back to,
-    # so the type is judged before the value.
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        return True
-    return not DEFAULT_OPEN_SPRINT_LIMIT <= raw <= MAX_OPEN_SPRINT_LIMIT
 
 
 def instance_open_sprint_limit(instance: Path | None) -> int:

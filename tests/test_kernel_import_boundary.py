@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests import source_trees
+from tests import config_dependencies, source_trees
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT = ROOT / "src" / "ummanu"
@@ -60,6 +60,58 @@ def symbol_imports(path: Path, tree: ast.Module) -> list[str]:
 
 
 class KernelImportBoundaryTests(unittest.TestCase):
+    def test_config_has_no_domain_imports(self) -> None:
+        path = PRODUCT / "config.py"
+        targets = config_dependencies.dependencies("ummanu.config", path, path.read_text())
+        forbidden = ("ummanu.tasks", "ummanu.sprints", "ummanu.onboarding", "ummanu.head_registry", "ummanu.po", "ummanu.runtime.heads")
+        self.assertEqual(sorted(target for target in targets if any(target == prefix or target.startswith(prefix + ".") for prefix in forbidden)), [])
+
+    def test_config_cold_import_excludes_domain_owners(self) -> None:
+        with mock.patch.dict(sys.modules):
+            for name in tuple(sys.modules):
+                if name == "ummanu" or name.startswith("ummanu."):
+                    del sys.modules[name]
+            importlib.import_module("ummanu.config")
+            forbidden = ("ummanu.tasks", "ummanu.sprints", "ummanu.onboarding", "ummanu.head_registry", "ummanu.po", "ummanu.runtime.heads")
+            self.assertEqual([name for name in sys.modules if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)], [])
+
+    def test_config_actual_selector_dependency_closure_is_at_most_ten_modules(self) -> None:
+        reached = config_dependencies.closure(PRODUCT)
+        self.assertLessEqual(len(reached), 10, sorted(reached))
+        self.assertIn("ummanu.config", reached)
+        self.assertNotIn("ummanu.onboarding", reached)
+        self.assertNotIn("ummanu.sprints", reached)
+
+    def test_config_guard_follows_nested_relative_alias_string_and_package_edges(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary:
+            product = Path(temporary) / "ummanu"
+            (product / "runtime").mkdir(parents=True)
+            for relative, source in {
+                "__init__.py": "from . import tasks\n",
+                "tasks.py": "",
+                "sprints.py": "",
+                "config.py": "def f():\n    from . import runtime as r\n    return r.paths.value\nPATCH = 'ummanu.sprints.open_sprint_limit'\n",
+                "runtime/__init__.py": "",
+                "runtime/paths.py": "from .. import tasks as owner\n",
+            }.items():
+                (product / relative).write_text(source)
+            self.assertEqual(config_dependencies.closure(product), {
+                "ummanu", "ummanu.config", "ummanu.tasks", "ummanu.sprints", "ummanu.runtime", "ummanu.runtime.paths",
+            })
+        for source in (
+            "def f():\n    from .sprints import budget_thresholds\n",
+            "from . import sprints as s\nx = s.budget_thresholds\n",
+            "import importlib as loader\nx = loader.import_module('ummanu.sprints')\n",
+            "from importlib import import_module as load\nx = load('.sprints', 'ummanu')\n",
+        ):
+            with self.subTest(source=source):
+                targets = config_dependencies.dependencies("ummanu.config", PRODUCT / "config.py", source)
+                self.assertTrue(any(target.startswith("ummanu.sprints") for target in targets))
+        with self.assertRaisesRegex(AssertionError, "nonliteral dynamic import"):
+            config_dependencies.dependencies("ummanu.config", PRODUCT / "config.py", "from importlib import import_module as load\nload(target)\n")
+
     def test_task_error_has_one_leaf_definition_without_domain_dependencies(self) -> None:
         self.assertTrue(LEAF.is_file(), "TaskError must have a leaf owner")
         tree = source_trees.parse(LEAF.read_text(), filename=str(LEAF))

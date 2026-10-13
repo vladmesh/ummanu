@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from ummanu.config import fallback_errors
 from ummanu.dispatch.observer import ObserverRecord
 from ummanu.head_health import (
     QUOTA_BACKOFF_SECONDS,
@@ -27,6 +26,7 @@ from ummanu.head_health import (
     failure_until,
     resolve_head_chain,
 )
+from ummanu.infra.fallback import fallback_errors
 from ummanu.runtime.heads import cross_family_gaps
 from ummanu.runtime.provider_errors import (
     KIND_AUTH,

@@ -24,7 +24,6 @@ from ummanu.checkpoint import (
 from ummanu.cli_output import EXIT_USAGE, error_line, usage_handler
 from ummanu.config import (
     DataDirError,
-    fallback_errors,
     instance_data_dir,
     load_config,
     validate,
@@ -74,6 +73,7 @@ from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from ummanu.host_commands import add_reconcile_subcommands
 from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 from ummanu.infra.doctor_findings import accepted, active_findings, apply_acceptance
+from ummanu.infra.fallback import fallback_errors
 from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
 from ummanu.installation import add_install_commands

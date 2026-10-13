@@ -627,10 +627,10 @@ HEAD_HEALTH_HOME = "ummanu/head_health.py"
 RESOURCE_HEALTH_FILE = "resource_health.json"
 # Generated state that left the live root for the data directory (ummanu-26). Each class has one
 # resolver, and only its module spells the paths: `head_registry.installed_pair`/`generated_pair`
-# for the head-registry pair, `onboarding.OnboardingStorage` for onboarding's drafts, runs and locks.
+# for the head-registry pair, `runtime.onboarding_storage.OnboardingStorage` for onboarding's drafts, runs and locks.
 HEAD_REGISTRY_HOME = "ummanu/head_registry.py"
 HEAD_PAIR_FILES = ("heads.yaml", "source.yaml")
-ONBOARDING_STORAGE_HOME = "ummanu/onboarding.py"
+ONBOARDING_STORAGE_HOME = "ummanu/runtime/onboarding_storage.py"
 ONBOARDING_STORAGE_NAMES = ("adapter-drafts", "gate-runs", "provision-runs", "compatibility-manifests", ".locks")
 SINGLE_HOME_ASSIGNMENTS = {
     "ROLE_ALLOWLIST": ROLE_ENV_HOME,
