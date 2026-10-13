@@ -750,7 +750,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `tasks.review` | `required`, `skipped`, or NULL (legacy, read as `required`) | `board.task_routing.TaskReview` |
 | `tasks.complexity` | `cheap`, `standard`, `hard`, `frontier` | `board.task_routing.TaskComplexity` |
 | `tasks.family_preference` | `auto`, `claude`, `codex` | `board.task_routing.FamilyPreference` |
-| `tasks.codex_launch_mode` | `tui` | `tasks._CODEX_LAUNCH_MODES` ← `head/command.py:CODEX_LAUNCH_MODES` |
+| `tasks.codex_launch_mode` | `tui` | `board.task_protocol.rows._CODEX_LAUNCH_MODES` ← `runtime.head.CODEX_LAUNCH_MODES` |
 | `sprint_budget_events.event_type` | six charged types + `infrastructure_blocked` | `sprints.BUDGET_RECORDED_EVENT_TYPES` |
 | `sprint_decisions.verdict` | per subject kind | `sprint_close.ISSUE_VERDICTS`, `CARD_DISPOSITIONS` |
 | `requests.status` | `staged`, `committed`, `discarded` | this schema |
@@ -760,7 +760,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `owner_events.kind` | the 14 owner event kinds | `board.owner_events.KINDS` |
 | `owner_events.class` | `needs_owner`, `notice`, derived from the kind (`owner_event_class_follows_kind`) | `board.owner_events.KIND_CLASS` |
 
-A retired `codex_launch_mode` reads as NULL (`tasks.py`); an audit record whose kind is not an
+A retired `codex_launch_mode` reads as NULL (`board/task_protocol/rows.py`); an audit record whose kind is not an
 `EventKind` stays a generic `requests` row (§3.9).
 
 Open vocabularies (`claim_worker`, `slug`, `base_branch`, pins, comment markers, head/profile

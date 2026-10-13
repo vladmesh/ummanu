@@ -28,6 +28,17 @@ stay in the small unit profile. The existing twelve kernel and fifteen cleanup f
 remain in their original local shards. Install/recovery, snapshot/PostgreSQL and packaging
 fixtures retain their CI owners.
 
+`tests.test_task_protocol_owners` (unit) checks DEC-01's six task files, unique owning
+definitions and exact baseline ASTs (including decorators/defaults/annotations), operative
+instance and owner-global patches, shared error identities and recovery refusal distinctions.
+`docs/task-protocol-inventory.json` is a capture of dc84b45e source, not an independently
+executed baseline. Existing task/board, dispatcher and recovery fault suites keep their
+CI manifest owners. The `task-protocol-graph` workflow runs on task-owner pull requests or manual
+dispatches, using the frozen, byte-identical
+ummanu-220 research scanner against its exact dispatched SHA in CI and uploads the uncut
+tier_none graph and full SCC membership. Its `.txt` fixture is research source, never imported
+by the product or local tests; this avoids a second implementation of the coupling model.
+
 ## Suite manifest
 
 `tests/ci-shards.txt` owns the taxonomy: every top-level `tests/test_*.py` occurs exactly once, under

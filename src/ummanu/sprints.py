@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from ummanu._fsutil import file_lock, held_lock
 from ummanu.board import e2e_budget as sprint_e2e, owner_decisions, owner_events
 from ummanu.board.backend import (
+    BOARD_STORE_KIND,
     BoardIdentityError,
     entity_id,
     entity_number,
@@ -22,6 +23,7 @@ from ummanu.board.backend import (
 )
 from ummanu.board.card_transitions import CardTransitionForbidden, card_transition
 from ummanu.board.e2e_budget import DEFAULT_E2E_BUDGET
+from ummanu.board.legacy_codec import positive_int as _positive_int, text as _text
 from ummanu.board.local_run import (
     LOCAL_RUN_EXCEPTIONS_FIELD,
     parse_local_run_exceptions,
@@ -55,6 +57,7 @@ from ummanu.board.sprint_write import (
     SprintReopenIntent,
     SprintWriteSnapshot,
 )
+from ummanu.board.task_protocol.rows import _digest, _now, _rfc3339, admit_role, is_significant_observer_event
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.dispatch.cleanup_journal import CleanupJournal
 from ummanu.kernel.errors import TaskError
@@ -64,7 +67,12 @@ from ummanu.kernel.sprint_policy import (
     open_sprint_limit as open_sprint_limit,
     open_sprint_limit_invalid as open_sprint_limit_invalid,
 )
-from ummanu.runtime.references import BoardRowsUnavailable, board_rows, next_reference
+from ummanu.runtime.references import (
+    BoardRowsUnavailable,
+    board_rows,
+    next_reference,
+    reference_allocation_lock,
+)
 from ummanu.sprint_observer import (
     EXECUTOR_FIELDS,
     KIND_HEAD,
@@ -79,20 +87,7 @@ from ummanu.sprint_observer import (
     parse_observer,
     stored_executors,
 )
-from ummanu.tasks import (
-    BOARD_STORE_KIND,
-    TaskReader,
-    TaskWriter,
-    _digest,
-    _now,
-    _positive_int,
-    _rfc3339,
-    _text,
-    admit_role,
-    is_significant_observer_event,
-    reference_allocation_lock,
-    task_audit_for,
-)
+from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient
@@ -3318,8 +3313,8 @@ class SprintWriter:
         """
         if role != "observer":
             return
+        from ummanu.board.task_protocol.rows import _sprint_guard_denial_request_id
         from ummanu.runtime.role_env import declared_observer_sprint
-        from ummanu.tasks import _sprint_guard_denial_request_id
 
         declared = declared_observer_sprint()
         if declared and declared == reference:

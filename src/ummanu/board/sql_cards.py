@@ -1068,7 +1068,7 @@ class SqlCardClient:
         This filtered primary-key query is not a full board/metadata hydration.
         TaskWriter revalidates each peer while its capacity admission lock is held.
         """
-        from ummanu.tasks import ACTIVE_STATES
+        from ummanu.board.task_routing import ACTIVE_STATES
 
         return [row[0] for row in self._query(
             "SELECT task_ref FROM tasks WHERE NOT archived AND state = ANY(%s) ORDER BY task_ref",

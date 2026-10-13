@@ -280,6 +280,7 @@ class StayUnreadThroughTheCardTests(unittest.TestCase):
         self.writer.audit = MemoryAudit()
         self.writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(self.card))
         self.enterContext(mock.patch("ummanu.tasks._task_number", return_value=1900))
+        self.enterContext(mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=1900))
         typed: dict[str, Any] = {}
         self.writer._typed_event = lambda request_id: typed.get(request_id)  # type: ignore[method-assign]
 
@@ -370,6 +371,7 @@ class StewardProducerTests(unittest.TestCase):
         self.writer.audit = MemoryAudit()
         self.writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(self.card))
         self.enterContext(mock.patch("ummanu.tasks._task_number", return_value=77))
+        self.enterContext(mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=77))
         self.writer._typed_event = lambda request_id: None  # type: ignore[method-assign]
         self.writer._guard_sprint_write = lambda **_: {}  # type: ignore[method-assign]
 
@@ -855,6 +857,7 @@ class CardCommentRoleTests(unittest.TestCase):
                 mock.patch.object(CardOperationLayer, "report", return_value=SimpleNamespace(data_dir=Path(tmp))),
                 mock.patch("ummanu.webproto.card_ops.TaskWriter", return_value=writer),
                 mock.patch("ummanu.tasks._task_number", return_value=1900),
+                mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=1900),
             ):
                 writer.handover(role="po", actor="po", reference=REF, to="owner", reason=REASON, request_id="real-handover")
                 layer.task_comment(request_id="r-1", actor="web", reference=REF, body="Yes, pay it.")

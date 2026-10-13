@@ -118,7 +118,7 @@ class MemoryAudit:
         self, kinds: Iterable[str] | None = None, *, outcome_owed: bool = False
     ) -> list[tuple[dict[str, Any], bool]]:
         """Committed then staged records, read under one lock hold, narrowed as the card audit does."""
-        from ummanu.tasks import _projection_slice
+        from ummanu.board.task_protocol.rows import _projection_slice
 
         with self._lock:
             records = [(copy.deepcopy(record), False) for record in self._committed.values()]
