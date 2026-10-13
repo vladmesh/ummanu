@@ -96,7 +96,15 @@ class SourceIndex:
         tree = self._trees.get(source)
         if tree is not None:
             return tree, False
-        tree = ast.parse(source, filename=filename)
+        # A tree holds no cycle, so the collector has nothing to find while it is being built; left
+        # on, it would traverse the half-built tree, and the whole heap behind it, over and over.
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            tree = ast.parse(source, filename=filename)
+        finally:
+            if enabled:
+                gc.enable()
         self.parses += 1
         if retain:
             self._trees[source] = tree
