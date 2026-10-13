@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shlex
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -508,6 +509,8 @@ class PacketHeaderTests(unittest.TestCase):
         host.production_runtime = SimpleNamespace(interpreter=Path("/installed/bin/python"))
         host.audit = SimpleNamespace(events=lambda ref: fixture.events)
         host.mode = "noop"
+        # The constructor always sets it; the prompt builders keep the body directory under it.
+        host.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         return host
 
     def record(self):
