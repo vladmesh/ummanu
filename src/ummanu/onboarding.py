@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,7 +15,12 @@ from ummanu._fsutil import (
     publish_pair_and_remove_atomic,
     publish_pair_atomic,
 )
-from ummanu.config import ConfigError, DataDirError, generated_state_dir, load_config, validate
+from ummanu.config import ConfigError, DataDirError, load_config, validate
+from ummanu.runtime.onboarding_storage import (
+    ADAPTER_STORAGE as ADAPTER_STORAGE,
+    DRAFT_STORAGE as DRAFT_STORAGE,
+    OnboardingStorage as OnboardingStorage,
+)
 from ummanu.runtime.paths import default_instance_path
 
 # The installation of a host that configured none. One spelling of the fallback, shared with the
@@ -31,60 +35,8 @@ REQUIRED_DECISIONS = [
 ]
 
 
-# The logical homes the onboarding contract records in `ownership.adapter.storage`: the draft is
-# generated state in the data directory, the canonical adapter is configuration in the live root.
-DRAFT_STORAGE = "<data>/onboarding/adapter-drafts/<project>.yaml"
-ADAPTER_STORAGE = "<instance>/adapters/<project>.yaml"
-
-
 class ScannerError(RuntimeError):
     """The repository could not be inspected deterministically."""
-
-
-@dataclass(frozen=True)
-class OnboardingStorage:
-    """Where onboarding, provision and the gate keep their generated state: the data directory.
-
-    Drafts, provision runs, gate runs and compatibility manifests live under `<data>/onboarding/`,
-    the per-project locks under `<data>/locks/onboarding/`. All of it is re-creatable by onboarding,
-    never exported and never restored (docs/RECOVERY.md), so nothing of it belongs in the live root.
-    This is the one place these paths are spelled.
-    """
-
-    data_dir: Path
-
-    @classmethod
-    def for_instance(cls, instance: Path) -> OnboardingStorage:
-        """The storage of the instance at ``instance`` (its directory or `instance.yaml`).
-
-        Raises :class:`ummanu.config.DataDirError` when the instance names no usable data directory.
-        """
-        return cls(generated_state_dir(instance))
-
-    @property
-    def root(self) -> Path:
-        return self.data_dir / "onboarding"
-
-    @property
-    def drafts(self) -> Path:
-        return self.root / "adapter-drafts"
-
-    def draft(self, project_id: str) -> Path:
-        return self.drafts / f"{project_id}.yaml"
-
-    def provision_runs(self, project_id: str) -> Path:
-        return self.root / "provision-runs" / project_id
-
-    def gate_runs(self, project_id: str) -> Path:
-        return self.root / "gate-runs" / project_id
-
-    @property
-    def compatibility_manifests(self) -> Path:
-        return self.root / "compatibility-manifests"
-
-    def lock(self, project_id: str) -> Path:
-        """The lock onboarding, provision and the gate serialize their draft writes on."""
-        return self.data_dir / "locks" / "onboarding" / f"{project_id}.lock"
 
 
 def project_add(

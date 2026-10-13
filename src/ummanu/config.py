@@ -7,7 +7,6 @@ to the offending field, so ``doctor`` never shows a traceback for bad input.
 from __future__ import annotations
 
 import json
-import tomllib
 from dataclasses import dataclass
 from functools import cache
 from importlib import resources
@@ -26,9 +25,8 @@ from referencing.jsonschema import DRAFT202012
 #: paid four times per dashboard.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
-from ummanu.kernel.errors import TaskError
+from ummanu.kernel.sprint_policy import budget_thresholds, open_sprint_limit_invalid
 from ummanu.runtime.paths import instance_file as config_file
-from ummanu.sprints import budget_thresholds, open_sprint_limit_invalid
 
 # schema name -> file in ummanu/schemas/
 SCHEMAS = {
@@ -380,7 +378,7 @@ def validate_instance(path: Path) -> InstanceReport:
         # so a partial setting cannot pass validation then stop every dispatcher tick.
         try:
             budget_thresholds(instance)
-        except TaskError:
+        except ValueError:
             errors.append(
                 SchemaError(
                     instance_file.name, "sprint_budget", "hard threshold must not be below signal threshold"
@@ -408,7 +406,7 @@ def validate_instance(path: Path) -> InstanceReport:
     # usable one already carries that error above.
     adapter_drafts = 0
     if data_dir is not None:
-        from ummanu.onboarding import OnboardingStorage
+        from ummanu.runtime.onboarding_storage import OnboardingStorage
 
         adapter_drafts = _validate_dir(OnboardingStorage(data_dir).drafts, "onboarding-contract", errors)
     bindings = _load_bindings(instance_dir / "projects")
@@ -447,54 +445,6 @@ def validate_instance(path: Path) -> InstanceReport:
         instance=instance if isinstance(instance, dict) else {},
         data_dir=data_dir,
     )
-
-
-def fallback_errors(instance_dir: Path, instance: Any) -> list[SchemaError]:
-    """Every head and PO session must be able to fall over to the other subscription family.
-
-    Read by `ummanu config check` and `ummanu doctor`, which fail on it naming the profile; not by
-    `validate_instance`, so an installation with a gap still upgrades and runs (and is told).
-
-    ummanu-108: a role's default profile is only the first one to try. The installation's own head
-    registry (`heads/heads.toml`, when it has one; the product default otherwise, which passes) has
-    to give every `claude`/`codex` profile a cross-family fallback at the same effort, and
-    `po.models` has to offer a model on both CLIs, or on neither, so a PO session opened on one can
-    continue on the other. A registry that cannot be parsed is reported by the reader that loads it.
-    """
-    from ummanu.head_registry import INSTANCE_HEADS_RELATIVE
-    from ummanu.po.models import models_from_instance
-    from ummanu.runtime.heads import HeadRegistryError, cross_family_gaps, validate_registry
-
-    errors: list[SchemaError] = []
-    path = instance_dir / INSTANCE_HEADS_RELATIVE
-    if path.is_file():
-        try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-            profiles = data.get("profiles") or {}
-            validate_registry(data.get("resources") or {}, profiles)
-        except (OSError, UnicodeError, ValueError, HeadRegistryError, AttributeError) as exc:
-            errors.append(SchemaError(str(INSTANCE_HEADS_RELATIVE), "<file>", f"head registry is invalid: {exc}"))
-        else:
-            for gap in cross_family_gaps(profiles):
-                errors.append(SchemaError(str(INSTANCE_HEADS_RELATIVE), "profiles.fallback", gap))
-    if not isinstance(instance, dict):
-        return errors
-    try:
-        models = models_from_instance(instance)
-    except (AttributeError, TypeError):
-        return errors
-    offered = {cli: bool(values) for cli, values in models.items()}
-    if any(offered.values()) and not all(offered.values()):
-        lone = next(cli for cli, has in offered.items() if has)
-        missing = ", ".join(cli for cli, has in offered.items() if not has)
-        errors.append(
-            SchemaError(
-                "instance.yaml",
-                "po.models",
-                f"a {lone} PO session has no model on {missing} to fall over to when its subscription is down",
-            )
-        )
-    return errors
 
 
 def _find_manifest(instance_dir: Path, data_dir: Path | None) -> Path | None:

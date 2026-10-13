@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -16,9 +17,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 from ummanu.cli import main
+from ummanu.config import validate_instance
 from ummanu.infra import config_check
 from ummanu.infra.export_allowlist import is_exported
+from ummanu.infra.fallback import fallback_errors
 from ummanu.infra.old_name_guard import live_root_violations
 
 OLD = "secret" + "ary"
@@ -64,6 +69,66 @@ class LiveRootCase(unittest.TestCase):
 
 
 class ConfigCheckTests(LiveRootCase):
+    def test_native_check_preserves_fallback_diagnostics_without_blocking_validation(self) -> None:
+        registry = (
+            '[resources.openai-sub]\nprovider = "openai"\nkind = "subscription"\n'
+            '[profiles.codex-terra-high]\nadapter = "codex"\nresource = "openai-sub"\n'
+            'effort = "high"\nruntime = "local-pty"\nfallback = []\n'
+        )
+        for source in ("[broken", registry):
+            with self.subTest(source=source):
+                self.write("heads/heads.toml", source)
+                report = validate_instance(self.live)
+                self.assertTrue(report.ok, report.errors)
+                expected = fallback_errors(self.live, report.instance)
+                self.assertEqual(len(expected), 1)
+                code, findings, _ = self.check()
+                self.assertEqual(code, 1)
+                self.assertEqual([line for line in findings if line.startswith("fallback:")],
+                                 [f"fallback: {error}" for error in expected])
+                self.assertEqual(expected[0].source, "heads/heads.toml")
+                self.assertEqual(expected[0].path, "<file>" if source == "[broken" else "profiles.fallback")
+                if source == "[broken":
+                    self.assertTrue(expected[0].message.startswith("head registry is invalid:"))
+
+    def test_native_check_reports_po_one_family(self) -> None:
+        path = self.live / "instance.yaml"
+        path.write_text(path.read_text() + "po:\n  models:\n    claude: [fable]\n    codex: []\n")
+        report = validate_instance(self.live)
+        self.assertTrue(report.ok, report.errors)
+        expected = fallback_errors(self.live, report.instance)
+        self.assertEqual([(error.source, error.path, error.message) for error in expected], [
+            ("instance.yaml", "po.models", "a claude PO session has no model on codex to fall over to when its subscription is down")])
+        code, findings, _ = self.check()
+        self.assertEqual(code, 1)
+        self.assertEqual([line for line in findings if line.startswith("fallback:")], [f"fallback: {expected[0]}"])
+
+    def test_native_doctor_reports_fallback_errors_that_instance_validation_allows(self):
+        heads = self.live / "heads"
+        heads.mkdir(exist_ok=True)
+        registry = (
+            '[resources.openai-sub]\nprovider = "openai"\nkind = "subscription"\n'
+            '[profiles.codex-terra-high]\nadapter = "codex"\nresource = "openai-sub"\n'
+            'effort = "high"\nruntime = "local-pty"\nfallback = []\n'
+        )
+        for source in ("[broken", registry, "[role_defaults]\n"):
+            with self.subTest(source=source):
+                (heads / "heads.toml").write_text(source)
+                path = self.live / "instance.yaml"
+                document = yaml.safe_load(path.read_text())
+                document["po"] = {"models": {"claude": ["fable"], "codex": []}}
+                path.write_text(yaml.safe_dump(document))
+                report = validate_instance(self.live)
+                self.assertTrue(report.ok, report.errors)
+                expected = [{"code": "head_fallback", "message": f"{error.path}: {error.message}"}
+                            for error in fallback_errors(self.live, report.instance)]
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = main(["doctor", "--instance", str(self.live), "--dry-run", "--offline", "--json"])
+                payload = json.loads(out.getvalue())
+                self.assertEqual(code, 1)
+                self.assertEqual([row for row in payload["findings"] if row["code"] == "head_fallback"], expected)
+
     def test_a_clean_live_root_passes(self) -> None:
         code, findings, summary = self.check()
 

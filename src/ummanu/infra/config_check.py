@@ -4,7 +4,7 @@ It replaces the instance repository's test suite (docs/OPERATIONS.md, "Changing 
 config"). Two checks run over the live root:
 
 - schema validation, `config.validate_instance`, the same read the dispatcher makes every tick,
-  and the cross-family fallback rule (`config.fallback_errors`, ummanu-108): every head profile
+  and the cross-family fallback rule (`infra.fallback.fallback_errors`, ummanu-108): every head profile
   and PO session can fall over to the other subscription family;
 - the old-name guard (`infra.old_name_guard`, docs/RENAME.md §T5) over the files the next exporter
   cut copies. A file outside the export allowlist (`runtime.env`, `board-store.env`,
@@ -21,7 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ummanu.checkpoint import CheckpointBlocked, exported_files
-from ummanu.config import fallback_errors, validate_instance
+from ummanu.config import validate_instance
+from ummanu.infra.fallback import fallback_errors
 from ummanu.infra.old_name_guard import live_root_violations, text_of
 
 
