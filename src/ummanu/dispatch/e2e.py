@@ -56,7 +56,7 @@ from typing import Any
 
 from ummanu.board.e2e_record import AFTER_MERGE, BEFORE_MERGE, PLACEMENTS
 from ummanu.board.wait_card import WaitSpecError, parse_duration, parse_utc
-from ummanu.dispatch.gate import _HTTP_STATUS_RE, _backend_call, _failed_log, _gh_api, _LogFragment
+from ummanu.dispatch.github_ci import _HTTP_STATUS_RE, _backend_call, _failed_log, _gh_api, _LogFragment
 from ummanu.dispatch.helpers import _tail
 from ummanu.dispatch.types import GateTransportError, HostError
 

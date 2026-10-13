@@ -5,6 +5,19 @@ on:
     paths:
       - src/ummanu/dispatch/host.py
       - src/ummanu/dispatch/host_runtime/**
+      - src/ummanu/dispatch/gate.py
+      - src/ummanu/dispatch/gate_types.py
+      - src/ummanu/dispatch/github_ci.py
+      - src/ummanu/dispatch/gate_pr.py
+      - src/ummanu/dispatch/gate_workflows.py
+      - src/ummanu/dispatch/gate_lifecycle.py
+      - src/ummanu/dispatch/e2e.py
+      - src/ummanu/dispatch/e2e_stage.py
+      - src/ummanu/dispatch/e2e_after_merge.py
+      - src/ummanu/dispatch/post_merge.py
+      - src/ummanu/dispatch/wait_cards.py
+      - tests/test_gate_owners.py
+      - tests/support/gate_owners.py
       - tests/test_host_owners.py
       - tests/support/host_owners.py
       - tests/config_dependencies.py

@@ -18,11 +18,11 @@ from ummanu.dispatch.gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
-    _fingerprint as _gate_fingerprint,
     reset_infrastructure_reruns as _reset_infrastructure_reruns,
     validation_ci as _validation_ci,
 )
 from ummanu.dispatch.gate_receipt import AcceptedGreenGate
+from ummanu.dispatch.gate_types import _fingerprint as _gate_fingerprint
 from ummanu.dispatch.head_vitality import status_has_vitality_observation
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.helpers import _gate_red_repeat_count, scrub_host_output

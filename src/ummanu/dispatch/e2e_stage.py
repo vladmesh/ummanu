@@ -88,8 +88,9 @@ from ummanu.dispatch.e2e import (
     red_evidence,
     run_head_sha,
 )
-from ummanu.dispatch.gate import GateResult, _fingerprint as _gate_fingerprint, _name_with_owner
 from ummanu.dispatch.gate_receipt import is_exact_sha
+from ummanu.dispatch.gate_types import GateResult, _fingerprint as _gate_fingerprint
+from ummanu.dispatch.github_ci import _name_with_owner
 from ummanu.dispatch.helpers import _legacy_worker_branch, safe_one_line, scrub_host_output
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id, request_token
 from ummanu.dispatch.types import HostError

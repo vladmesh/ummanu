@@ -42,7 +42,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ummanu.dispatch.gate import (
+from ummanu.dispatch.gate_workflows import push_trigger_absent_reason
+from ummanu.dispatch.github_ci import (
     _actions_run_id,
     _backend_call,
     _check_name,
@@ -52,7 +53,6 @@ from ummanu.dispatch.gate import (
     _required_checks,
     _rollup,
     _selected_checks,
-    push_trigger_absent_reason,
 )
 from ummanu.dispatch.helpers import safe_one_line
 from ummanu.dispatch.types import HostError, MergeLanding

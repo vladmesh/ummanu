@@ -29,7 +29,6 @@ from ummanu.dispatch.cleanup import lifecycle
 from ummanu.dispatch.gate import (
     GateResult,
     gate_check as _gate_check,
-    rerun_failed_ci as _rerun_failed_ci,
     validation_ci as _validation_ci,
 )
 from ummanu.dispatch.gate_receipt import is_exact_sha as _is_exact_sha
@@ -39,6 +38,7 @@ from ummanu.dispatch.git_workspace import (
     _resolved as _resolved_path,
     orca_workspaces_root,
 )
+from ummanu.dispatch.github_ci import rerun_failed_ci as _rerun_failed_ci
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict as VitalityVerdict
 from ummanu.dispatch.heartbeat import heartbeat_identity
 from ummanu.dispatch.helpers import (

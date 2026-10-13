@@ -26,10 +26,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.head_registry import write_installed_pair
+from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu import cli, secret_store, state_repo
-from ummanu.dispatch import gate as dispatcher_gate
 from ummanu.cli import main
 from ummanu.config import validate_instance
+from ummanu.dispatch import gate as dispatcher_gate, gate_pr as dispatcher_gate_pr
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE
 from ummanu.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
@@ -46,9 +49,6 @@ from ummanu.infra.recovery_inventory import collect_recovery_inventory
 from ummanu.projects.contract import CANNOT_ATTEST_PROJECT, ContractVerdict
 from ummanu.secret_words import RECOVERY_WORDS
 from ummanu.state_repo import GitChildIdentity, StateRepoError
-from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.head_registry import write_installed_pair
-from tests.production_runtime_fixtures import registered_production_runtime
 
 
 def fast_key_params():
@@ -387,7 +387,7 @@ class ManagedProjectGitTests(HermeticGitTestCase):
         self.assertEqual(dispatcher_gate._recover_base(host, str(self.ws), "main", PROJECT), "clean")
         sha = git(self.ws, "rev-parse", "HEAD")
         record = self.record()
-        self.assertIsNone(dispatcher_gate._publish_branch(host, record, str(self.ws), BRANCH, sha, PROJECT))
+        self.assertIsNone(dispatcher_gate_pr._publish_branch(host, record, str(self.ws), BRANCH, sha, PROJECT))
         self.assertEqual(
             git(self.bare, "rev-parse", f"refs/heads/{BRANCH}"), sha, "exact candidate published"
         )
@@ -443,7 +443,7 @@ class ManagedProjectGitTests(HermeticGitTestCase):
         host = self.host()
         record = self.record()
         first = git(self.ws, "rev-parse", "HEAD")
-        self.assertIsNone(dispatcher_gate._publish_branch(host, record, str(self.ws), BRANCH, first, PROJECT))
+        self.assertIsNone(dispatcher_gate_pr._publish_branch(host, record, str(self.ws), BRANCH, first, PROJECT))
         foreign = self.root / "foreign"
         subprocess.run(
             ["git", "clone", "--quiet", str(self.bare), str(foreign)], check=True, capture_output=True
@@ -453,7 +453,7 @@ class ManagedProjectGitTests(HermeticGitTestCase):
         git(foreign, "push", "--quiet", "origin", BRANCH)
         candidate = commit(self.ws, "rework.txt")
 
-        result = dispatcher_gate._publish_branch(host, record, str(self.ws), BRANCH, candidate, PROJECT)
+        result = dispatcher_gate_pr._publish_branch(host, record, str(self.ws), BRANCH, candidate, PROJECT)
 
         self.assertIsNotNone(result)
         assert result is not None
@@ -481,7 +481,7 @@ class ManagedProjectGitTests(HermeticGitTestCase):
                     (access.state, access.code, access.transport), ("refused", code, "github-https")
                 )
                 with self.assertRaises(ProjectGitAccessError) as refused:
-                    dispatcher_gate._publish_branch(
+                    dispatcher_gate_pr._publish_branch(
                         host, self.record(), str(self.ws), BRANCH, git(self.ws, "rev-parse", "HEAD"), PROJECT
                     )
                 self.assertNotIsInstance(refused.exception, GateTransportError)
@@ -514,7 +514,7 @@ class ManagedProjectGitTests(HermeticGitTestCase):
                 self.assertEqual((access.state, access.code), ("refused", "credential-rejected"))
                 self.assertNotIn("sample.git", access.reason, "the reason is fixed vocabulary")
                 with self.assertRaises(ProjectGitAccessError) as refused:
-                    dispatcher_gate._publish_branch(
+                    dispatcher_gate_pr._publish_branch(
                         host, self.record(), str(self.ws), BRANCH, git(self.ws, "rev-parse", "HEAD"), PROJECT
                     )
                 self.assertNotIsInstance(refused.exception, GateTransportError)

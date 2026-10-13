@@ -41,11 +41,10 @@ from ummanu.dispatch.bootstrap import default_data_dir
 from ummanu.dispatch.gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
-    PR_BODY_SECTION_CHARS,
     GateResult,
-    _backend_call,
-    _pr_digest,
 )
+from ummanu.dispatch.gate_pr import PR_BODY_SECTION_CHARS, _pr_digest
+from ummanu.dispatch.github_ci import _backend_call
 from ummanu.dispatch.head_vitality import HeadVitalityError
 from ummanu.dispatch.head_vitality_episode import (
     VitalityEpisode,
@@ -13669,7 +13668,7 @@ class DispatcherGateTests(unittest.TestCase):
         """`_backend_answered` has to keep these apart with the lease in play: the refusal below is
         git 2.43.0's own text for a push whose lease was stale, and the remote produced it. A
         transport failure on the same command is still no answer at all."""
-        from ummanu.dispatch.gate import _backend_answered
+        from ummanu.dispatch.github_ci import _backend_answered
 
         push = ["git", "-C", "/ws", "push", "--force-with-lease=refs/heads/x:" + "a" * 40, "origin", "x:x"]
         refused = (
@@ -14276,7 +14275,7 @@ class DispatcherGateTests(unittest.TestCase):
 
     def _spy_backend_calls(self):
         """Record the label of every question that goes through the single backend call point."""
-        from ummanu.dispatch import gate as gate_module
+        from ummanu.dispatch import github_ci as gate_module
 
         seen: list[str] = []
         real = gate_module._backend_call
@@ -15042,7 +15041,7 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertIn("optional-suite", result.summary)
 
     def test_github_rollup_honours_the_required_set(self) -> None:
-        from ummanu.dispatch.gate import _rollup
+        from ummanu.dispatch.github_ci import _rollup
 
         items = [
             {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"},
@@ -15059,7 +15058,7 @@ class DispatcherGateTests(unittest.TestCase):
         )
 
     def test_github_rollup_classification(self) -> None:
-        from ummanu.dispatch.gate import _rollup
+        from ummanu.dispatch.github_ci import _rollup
 
         self.assertEqual(_rollup([])[0], "NONE")
         self.assertEqual(_rollup([{"status": "COMPLETED", "conclusion": "SUCCESS"}])[0], "SUCCESS")
