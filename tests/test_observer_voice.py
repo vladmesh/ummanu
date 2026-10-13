@@ -400,8 +400,8 @@ class ObserverSprintCloseTests(SprintWriterFixture):
             mock.patch.object(self.writer, "_close_step_status", return_value="todo"),
             mock.patch.object(self.writer, "_require_close_step_settled"),
             mock.patch.object(self.writer.transactions, "save"),
-            mock.patch("ummanu.sprints.TaskWriter") as writer_class,
-            mock.patch("ummanu.sprints.TaskReader") as reader_class,
+            mock.patch("ummanu.board.sprint_protocol.lifecycle.TaskWriter") as writer_class,
+            mock.patch("ummanu.board.sprint_protocol.lifecycle.TaskReader") as reader_class,
         ):
             reader_class.return_value.show.return_value = {"state": "in_progress"}
             self.writer._close_declared_issues(document, document["event"], payload, decisions)
@@ -436,8 +436,8 @@ class CloseDispositionPlanTests(SprintWriterFixture):
         committed = {"kind": "closed", "ref": SPRINT, "payload": {}}
         with (
             mock.patch.object(self.writer.reader, "show", return_value=sprint),
-            mock.patch("ummanu.sprints.TaskReader") as reader_class,
-            mock.patch("ummanu.sprints.TaskWriter") as writer_class,
+            mock.patch("ummanu.board.sprint_protocol.lifecycle.TaskReader") as reader_class,
+            mock.patch("ummanu.board.sprint_protocol.lifecycle.TaskWriter") as writer_class,
             mock.patch.object(self.writer, "_issue_store", return_value=store),
             mock.patch.object(self.writer.transactions, "existing", return_value=(None, None)),
             mock.patch.object(self.writer.transactions, "begin", return_value=(None, committed)) as begin,

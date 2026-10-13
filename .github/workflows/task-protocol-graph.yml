@@ -27,6 +27,13 @@ on:
       - src/ummanu/dispatch/worker_report.py
       - src/ummanu/dispatch/worker_continuation.py
       - src/ummanu/tasks.py
+      - src/ummanu/sprints.py
+      - src/ummanu/board/sprint_protocol/**
+      - tests/test_observer_voice.py
+      - tests/test_sprint_read.py
+      - tests/test_sprint_lifecycle_owners.py
+      - tests/test_cleanup_foundation.py
+      - tests/support/sprint_lifecycle_owners.py
       - src/ummanu/board/task_protocol/**
       - tests/fixtures/task_protocol_coupling.py.txt
       - .github/workflows/task-protocol-graph.yml

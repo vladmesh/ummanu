@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PRODUCT = ROOT / "src" / "ummanu"
 OWNERS = ("ummanu.dispatch.ownership", "ummanu.dispatch.cleanup_journal")
 PRIMITIVE_CONSUMERS = (
-    "tasks", "sprints", "board.sql_host", "board.reference_repair", "restore", "data", "task_restore",
+    "tasks", "sprints", "board.sprint_protocol.lifecycle", "board.sprint_protocol.reservations",
+    "board.sql_host", "board.reference_repair", "restore", "data", "task_restore",
 )
 FORBIDDEN = (
     "ummanu.dispatch.cleanup", "ummanu.dispatch.host", "ummanu.dispatch.runtime",
@@ -132,15 +133,16 @@ class SharedOwnershipTests(unittest.TestCase):
         self.data = Path(self.temporary)
 
     def test_facade_aliases_and_actual_callers_share_definitions_and_globals(self) -> None:
-        from ummanu import sprints, tasks
+        from ummanu import tasks
         from ummanu.board import reference_repair, sql_host
+        from ummanu.board.sprint_protocol import lifecycle as sprint_lifecycle
 
         for name in ("Allowance", "Deferred", "ownership_lock", "bulk_lane", "reference_lock",
                      "capacity_serialized", "ownership_recovery", "lifecycle", "owner_operation",
                      "serialized", "journal_mutation", "_locks", "_guard", "_held", "_ALLOWANCE"):
             self.assertIs(getattr(self.effects, name), getattr(self.owner, name), name)
         self.assertIs(self.effects.CleanupJournal, self.journal_module.CleanupJournal)
-        self.assertIs(tasks.CleanupJournal, sprints.CleanupJournal)
+        self.assertIs(tasks.CleanupJournal, sprint_lifecycle.CleanupJournal)
         self.assertIs(tasks.CleanupJournal, self.journal_module.CleanupJournal)
         self.assertIs(tasks.reference_lock, sql_host.reference_lock)
         self.assertIs(tasks.bulk_lane, reference_repair.bulk_lane)
