@@ -155,6 +155,39 @@ class CanonicalRegistryTests(unittest.TestCase):
             with self.subTest(str(source)):
                 self.assertEqual(source.parent.parent, ROLES_ROOT)
 
+    def test_the_product_canon_delivers_and_audits_clean_into_a_fresh_installation(self) -> None:
+        """Every skill this checkout ships reaches every target root, byte for byte, and the audit that
+        follows finds nothing to report: the canon is deliverable as written, not only readable."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home, data_dir = Path(tmp) / "home", Path(tmp) / "data"
+            env = {"HOME": str(home), BIN_DIR_ENV: str(home / "bin")}
+            with mock.patch.dict(os.environ, env, clear=False):
+                result = sync(instance_path=self.instance, product_manifest=MANIFEST, home=home, data_dir=data_dir)
+                expected = iter_expected(
+                    load_registry(self.instance, product_manifest=MANIFEST), home, data_dir
+                )
+
+            after = result["after"]
+            self.assertTrue(after["ok"], after)
+            for bucket in (
+                "missing", "drift", "source_missing", "entry_points", "config_errors",
+                "destination_conflicts", "retired", "unresolved_targets",
+            ):
+                self.assertEqual(after[bucket], [], bucket)
+            self.assertLessEqual(
+                {OBSERVER_SKILL, OPEN_SPRINT_SKILL, "steward"}, {item.skill for item in expected}
+            )
+            self.assertEqual(
+                {(item.target, item.skill) for item in expected},
+                {(item["target"], item["skill"]) for item in result["copied"]},
+            )
+            for item in expected:
+                with self.subTest(target=item.target, skill=item.skill):
+                    self.assertEqual(item.source.parent.parent, ROLES_ROOT)
+                    self.assertEqual(
+                        (item.dest / "SKILL.md").read_bytes(), (item.source / "SKILL.md").read_bytes()
+                    )
+
     def test_the_product_canon_reads_the_same_without_an_instance_directory(self) -> None:
         """A checkout on a machine with no installation at all is still a readable registry."""
         registry = load_registry(self.instance / "not-installed", product_manifest=MANIFEST)
