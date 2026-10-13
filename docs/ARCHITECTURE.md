@@ -101,6 +101,22 @@ round/source handoff, phase usage accounting and publication, terminal outcome o
 generic terminal board effect. Reviewer launch/wait, confirmed-stop/adoption, routing bookkeeping and
 provider ingress remain separate runtime boundaries.
 
+`dispatch.gate` owns mechanical mode selection, candidate attribution preflight,
+base recovery, local validation and GitHub verdict/receipt orchestration. Shared
+GitHub transport, checks/status rollup, Actions logs and failed-job reruns belong
+to `dispatch.github_ci`; e2e, post-merge and wait consumers import that owner.
+`dispatch.gate_pr` owns publication leases and PR authorship/readback; it records
+successful publication before another tick can reuse a lease and preserves human
+PR text. `dispatch.gate_workflows` owns PR/push trigger analysis: only readable
+workflows unanimously refusing the base prove impossibility. None/noop and empty
+rollups do not attest an executed green suite. `dispatch.gate_types` defines the
+shared result, import-time limits and failure fingerprint; `gate.GateResult` is a direct alias.
+Lower owners never import the gate facade. Core and publication resolve backend
+calls through `github_ci`, so patches at that owner observe every remote question.
+Bounded ownership guards live in `tests/test_gate_owners.py`; the Git/backend
+scenario corpus stays in its declared CI shards. The original coupling scanner
+and `task-protocol-graph` workflow measure the candidate's uncut graph.
+
 Dependency rules:
 
 - Dependencies point inward, from entry points to feature APIs. CLI and automation modules call

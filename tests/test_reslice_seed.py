@@ -27,7 +27,8 @@ from tests.fakes.dispatcher import FakeCatalog
 from tests.fakes.tasks import writer_seed
 from tests.production_runtime_fixtures import registered_production_runtime
 from tests.sql_backend_fixtures import card_store
-from ummanu.dispatch.gate import GateResult, _impossible_trigger_reason, gate_check
+from ummanu.dispatch.gate import GateResult, gate_check
+from ummanu.dispatch.gate_workflows import _impossible_trigger_reason
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.launch import BRING_UP_CAUSE_CLASSES, CAUSE_BASE_BRANCH_CONTRACT
 from ummanu.dispatch.types import HostError

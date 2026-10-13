@@ -122,7 +122,7 @@ from ummanu.dispatch.e2e_stage import (
     stage_request_id,
     utcnow,
 )
-from ummanu.dispatch.gate import _name_with_owner
+from ummanu.dispatch.github_ci import _name_with_owner
 from ummanu.dispatch.helpers import safe_one_line, scrub_host_output
 from ummanu.dispatch.state import request_token
 from ummanu.dispatch.types import HostError
