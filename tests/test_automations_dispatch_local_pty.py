@@ -37,7 +37,7 @@ from ummanu.automations.runtime import dispatch
 from ummanu.dispatch.watchdog import head_process_status
 from ummanu.head_health import HeadChoice, HeadReadiness
 from ummanu.runtime import heads as pipeline_heads, local_pty_head, role_env, state as runtime_state
-from ummanu.runtime.head import HeadCommand, render_head_command
+from ummanu.runtime.head import HeadCommand, HeadRun, render_head_command
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import SupervisorClient
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
@@ -321,7 +321,12 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.run_tick(registry), 0)
 
         self.assertEqual(len(self.run_dirs()), 1)
-        self.assertEqual(self.state.load_head_profile(), "supervised")
+        run = HeadRun.from_json(self.state.load_head_run())
+        self.assertEqual(run.spec.profile_id, "supervised")
+        self.assertEqual(run.spec.runtime, LOCAL_PTY_RUNTIME)
+        self.assertEqual(run.workspace, str(self.workspace))
+        self.assertEqual(run.role, self.AGENT)
+        self.assertEqual(run.run_id, self.run_dirs()[0].name)
 
 
 class FailClosedTests(MechanicalRoleBackendTestCase):
@@ -427,14 +432,16 @@ class FailClosedTests(MechanicalRoleBackendTestCase):
     def test_a_recorded_pane_refuses_the_bring_up_and_is_left_recorded(self) -> None:
         """A `terminal_handle.json` from the retired pane backend names a head nothing here can
         reach. It is not deleted, and no second head is raised beside it."""
-        self.state.save_terminal_handle("term-1", created_at=1.0)
+        historical = b'{"handle": "term-1", "created_at": 1.0}\n'
+        self.state.ensure_dir()
+        self.state.terminal_handle_file.write_bytes(historical)
         err = io.StringIO()
 
         with contextlib.redirect_stderr(err):
             self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), dispatch.REFUSED_EXIT)
 
         self.assertEqual(self.run_dirs(), [], "a head was raised beside a recorded pane")
-        self.assertEqual(self.state.load_terminal_handle(), "term-1", "the pane record was deleted")
+        self.assertEqual(self.state.terminal_handle_file.read_bytes(), historical, "the pane record was changed")
         events = self.events()
         self.assertEqual([event["action"] for event in events], [dispatch.SUPERVISED_OWNER_CONFLICT])
         self.assertEqual(events[0]["result"], "error")
@@ -443,16 +450,15 @@ class FailClosedTests(MechanicalRoleBackendTestCase):
 
     def test_a_pane_record_fences_by_existence_whatever_it_holds(self) -> None:
         """The fence is the file, not its parsed handle: an empty file, unreadable JSON and JSON
-        with no `handle` all read as no handle through `AgentState`, and all still refuse."""
+        with no `handle` all still refuse without parsing the record."""
         for label, content in (
-            ("empty", ""),
-            ("unreadable", "{ not json"),
-            ("no handle", json.dumps({"created_at": 1.0})),
+            ("empty", b""),
+            ("unreadable", b"{ not json"),
+            ("no handle", b'{"created_at": 1.0}'),
         ):
             with self.subTest(label):
                 self.state.dir.mkdir(parents=True, exist_ok=True)
-                self.state.terminal_handle_file.write_text(content, encoding="utf-8")
-                self.assertIsNone(self.state.load_terminal_handle(), "the shape parses to a handle")
+                self.state.terminal_handle_file.write_bytes(content)
                 runs = self.state.dir / "runs.jsonl"
                 runs.unlink(missing_ok=True)
                 err = io.StringIO()
@@ -464,7 +470,7 @@ class FailClosedTests(MechanicalRoleBackendTestCase):
 
                 self.assertEqual(self.run_dirs(), [], "a head was raised beside a recorded pane")
                 self.assertEqual(
-                    self.state.terminal_handle_file.read_text(encoding="utf-8"), content, "the record was changed"
+                    self.state.terminal_handle_file.read_bytes(), content, "the record was changed"
                 )
                 events = self.events()
                 self.assertEqual([event["action"] for event in events], [dispatch.SUPERVISED_OWNER_CONFLICT])

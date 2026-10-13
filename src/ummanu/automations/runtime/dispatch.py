@@ -842,7 +842,6 @@ def _supervised_bring_up(
         raise failure
     live = receipt.run
     state.save_head_run(live.to_json())
-    state.save_head_profile(cmd.profile)
     reports.taken(cmd, live.handle)
     state.log_run(event, action="supervised-started", reference=cmd.card_ref)
     print(f"dispatch[{agent}]: raised a supervised head {live.run_id} -> {cmd.skill}")
