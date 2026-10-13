@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+# The logical homes recorded in `ownership.adapter.storage`: generated drafts in the data
+# directory, canonical adapters in the live root.
+DRAFT_STORAGE = "<data>/onboarding/adapter-drafts/<project>.yaml"
+ADAPTER_STORAGE = "<instance>/adapters/<project>.yaml"
+
 
 @dataclass(frozen=True)
 class OnboardingStorage:

@@ -16,7 +16,11 @@ from ummanu._fsutil import (
     publish_pair_atomic,
 )
 from ummanu.config import ConfigError, DataDirError, load_config, validate
-from ummanu.runtime.onboarding_storage import OnboardingStorage as OnboardingStorage
+from ummanu.runtime.onboarding_storage import (
+    ADAPTER_STORAGE as ADAPTER_STORAGE,
+    DRAFT_STORAGE as DRAFT_STORAGE,
+    OnboardingStorage as OnboardingStorage,
+)
 from ummanu.runtime.paths import default_instance_path
 
 # The installation of a host that configured none. One spelling of the fallback, shared with the
@@ -29,12 +33,6 @@ REQUIRED_DECISIONS = [
     "validation.ci",
     "artifact_policy.write_project_files",
 ]
-
-
-# The logical homes the onboarding contract records in `ownership.adapter.storage`: the draft is
-# generated state in the data directory, the canonical adapter is configuration in the live root.
-DRAFT_STORAGE = "<data>/onboarding/adapter-drafts/<project>.yaml"
-ADAPTER_STORAGE = "<instance>/adapters/<project>.yaml"
 
 
 class ScannerError(RuntimeError):

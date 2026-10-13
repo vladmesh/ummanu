@@ -8,12 +8,12 @@ import unittest
 from collections import UserDict
 from pathlib import Path
 
-from ummanu import config, sprints
+from ummanu import config, onboarding, sprints
 from ummanu.board import sprint_read
 from ummanu.kernel import sprint_policy
 from ummanu.kernel.errors import TaskError
 from ummanu.onboarding import OnboardingStorage as LegacyStorage
-from ummanu.runtime.onboarding_storage import OnboardingStorage
+from ummanu.runtime.onboarding_storage import ADAPTER_STORAGE, DRAFT_STORAGE, OnboardingStorage
 
 
 class ConfigBoundaryTests(unittest.TestCase):
@@ -101,6 +101,8 @@ class ConfigBoundaryTests(unittest.TestCase):
 
     def test_storage_alias_paths_and_canonical_draft_validation_without_writes(self) -> None:
         self.assertIs(LegacyStorage, OnboardingStorage)
+        self.assertIs(onboarding.DRAFT_STORAGE, DRAFT_STORAGE)
+        self.assertIs(onboarding.ADAPTER_STORAGE, ADAPTER_STORAGE)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             path = self.instance(root)
