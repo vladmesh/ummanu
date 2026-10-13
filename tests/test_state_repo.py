@@ -11,7 +11,8 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from ummanu import checkpoint, installation, state_repo, upgrade
+from ummanu import checkpoint, state_repo, upgrade
+from ummanu.installation import support as installation_support
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -177,9 +178,9 @@ class GitEnvironmentTests(unittest.TestCase):
             upgrade_env = run.call_args.kwargs["env"]
             with (
                 mock.patch.dict(os.environ, self.CONTAMINATION, clear=False),
-                mock.patch("ummanu.installation._proc.run", return_value=result) as run,
+                mock.patch("ummanu.installation.support._proc.run", return_value=result) as run,
             ):
-                installation._run(["git", "clone", "--", "remote", str(root)], label="clone")
+                installation_support._run(["git", "clone", "--", "remote", str(root)], label="clone")
             install_env = run.call_args.kwargs["env"]
         for name in state_repo.GIT_SELECTION_VARIABLES:
             self.assertNotIn(name, upgrade_env)

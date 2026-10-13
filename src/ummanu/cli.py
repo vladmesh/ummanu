@@ -76,7 +76,7 @@ from ummanu.infra.doctor_findings import accepted, active_findings, apply_accept
 from ummanu.infra.fallback import fallback_errors
 from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
-from ummanu.installation import add_install_commands
+from ummanu.installation.commands import add_install_commands
 from ummanu.knowledge_write import (
     KnowledgeError,
     KnowledgeValidationError,

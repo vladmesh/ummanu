@@ -538,6 +538,15 @@ the boundary.
 
 ## Ownership and security
 
+Install/recover capabilities live in `ummanu.installation`: `commands` owns CLI orchestration,
+`clone` owns legacy and snapshot checkouts, `credentials` owns bootstrap input, secret unlock and
+scoped environment, `materialize` owns checkpoint/run-state/host/registry/memory recovery and
+progress, and `provision` owns projects and CODEX_HOME. `support` owns subprocess, ownership and
+target confinement boundaries; `models` owns their shared error and results. The package root is
+only a namespace. Bootstrap, restore commands and upgrade import these owners directly. The
+[moved-definition inventory](installation-boundary-inventory.json) records the baseline AST and
+all source/patch seams; [testing](TESTING.md) records the graph guard's CI ownership.
+
 - The security profile assumes one trusted host owner. Agents are not isolated as untrusted tenants.
 - `doctor` reads config, data and host inventory and never changes the host. `status` and `doctor`
   share one recovery projection; it does not decrypt values, update the probe cache or launch heads.

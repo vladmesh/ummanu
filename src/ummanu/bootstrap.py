@@ -24,21 +24,20 @@ from pathlib import Path
 from ummanu import _proc
 from ummanu._fsutil import write_text_atomic
 from ummanu.board.migrate import migrate_instance
-from ummanu.board.provision import provision as provision_board_store
-from ummanu.board.provision import verify_roles as verify_board_store_roles
-from ummanu.installation import (
-    InstallError,
-    SnapshotCheckout,
-    _bootstrap_credential,
-    _clone_or_reuse,
-    _ensure_installation_user,
-    _reads_remote_shape,
-    _run,
-    _set_installation_owner,
-    _snapshot_checkout,
-    caddy_installed,
-    web_front_wanted,
+from ummanu.board.provision import (
+    provision as provision_board_store,
+    verify_roles as verify_board_store_roles,
 )
+from ummanu.installation.clone import (
+    SnapshotCheckout,
+    _clone_or_reuse,
+    _reads_remote_shape,
+    _snapshot_checkout,
+)
+from ummanu.installation.credentials import _bootstrap_credential
+from ummanu.installation.materialize import caddy_installed, web_front_wanted
+from ummanu.installation.models import InstallError
+from ummanu.installation.support import _ensure_installation_user, _run, _set_installation_owner
 
 BOOTSTRAP_STAMP = ".ummanu-bootstrap"
 

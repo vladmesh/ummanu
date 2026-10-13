@@ -31,7 +31,7 @@ from tests.retired_board import (
     legacy_runtime_lines,
     write_stale_leftovers,
 )
-from ummanu import cli as cli_module, installation, role_skills, upgrade
+from ummanu import cli as cli_module, role_skills, upgrade
 from ummanu.cli import main as cli_main
 from ummanu.config import validate_instance
 from ummanu.head_registry import (
@@ -44,6 +44,7 @@ from ummanu.head_registry import (
 )
 from ummanu.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
 from ummanu.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
+from ummanu.installation import commands as installation_commands
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import heads as shipped_heads
 
@@ -1505,7 +1506,7 @@ class ProductRootDefaultTests(PortableFixture):
         with mock.patch.dict(os.environ, {"UMMANU_REPO": str(self.product)}):
             self.assertEqual(upgrade.default_product_root(), self.product)
             self.assertEqual(
-                installation._product_root(SimpleNamespace(product_root=None)),
+                installation_commands._product_root(SimpleNamespace(product_root=None)),
                 self.product.resolve(),
             )
 

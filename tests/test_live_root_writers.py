@@ -606,7 +606,7 @@ class RecoveryCheckoutChangesTests(LiveRootCase):
             (self.live / local).write_text("local\n", encoding="utf-8")
 
     def changes(self) -> str:
-        from ummanu.installation import _checkout_changes
+        from ummanu.installation.clone import _checkout_changes
 
         return _checkout_changes(self.live, label="test")
 

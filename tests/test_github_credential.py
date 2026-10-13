@@ -13,10 +13,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import installation, secret_store
+from ummanu import secret_store
 from ummanu.checkpoint import CheckpointPusher, _credential_snapshot
 from ummanu.cli import main
 from ummanu.infra import github_credential
+from ummanu.installation import (
+    clone as installation_clone,
+    credentials as installation_credentials,
+    models as installation_models,
+)
 from ummanu.secret_words import RECOVERY_WORDS
 
 
@@ -211,21 +216,21 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         source.write_text(token + "\n", encoding="utf-8")
         source.chmod(0o600)
         args = SimpleNamespace(bootstrap_credential_file=str(source), bootstrap_credential_stdin=False)
-        path, disposable = installation._bootstrap_credential(args, self.instance / "target")
+        path, disposable = installation_credentials._bootstrap_credential(args, self.instance / "target")
         self.assertEqual((path, disposable), (source, None))
         self.assertEqual(self.digest(github_credential._bootstrap_token(source)), self.digest(token))
         source.write_text(" " + token + "\n", encoding="utf-8")
-        with self.assertRaisesRegex(installation.InstallError, "content is rejected"):
-            installation._bootstrap_credential(args, self.instance / "target")
+        with self.assertRaisesRegex(installation_models.InstallError, "content is rejected"):
+            installation_credentials._bootstrap_credential(args, self.instance / "target")
         source.unlink()
-        with self.assertRaisesRegex(installation.InstallError, "could not inspect bootstrap credential file"):
-            installation._bootstrap_credential(args, self.instance / "target")
+        with self.assertRaisesRegex(installation_models.InstallError, "could not inspect bootstrap credential file"):
+            installation_credentials._bootstrap_credential(args, self.instance / "target")
 
     def test_wrong_recovery_phrase_stays_a_sanitized_recovery_failure(self) -> None:
         self.set_token()
         (self.instance / "secrets" / secret_store.KEY_NAME).unlink()
-        with self.assertRaisesRegex(installation.InstallError, "secret store") as failure:
-            installation._open_secret_store(
+        with self.assertRaisesRegex(installation_models.InstallError, "secret store") as failure:
+            installation_credentials._open_secret_store(
                 self.instance, self.instance / "runtime.env", phrase="wrong recovery phrase", dry_run=True
             )
         self.assertNotIn("github-test-token", str(failure.exception))
@@ -365,11 +370,11 @@ class ManagedGithubCredentialTests(unittest.TestCase):
 
         self.set_token()
         with (
-            mock.patch("ummanu.installation.state_repo.git", side_effect=inspect),
-            mock.patch("ummanu.installation.state_repo.run_git", side_effect=run),
+            mock.patch("ummanu.installation.clone.state_repo.git", side_effect=inspect),
+            mock.patch("ummanu.installation.clone.state_repo.run_git", side_effect=run),
         ):
             self.assertEqual(
-                installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False),
+                installation_clone._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False),
                 "reused checkpoint checkout",
             )
         self.assertEqual(len(commands), 2)
@@ -380,21 +385,21 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         (self.instance / "secrets" / secret_store.KEY_NAME).unlink()
         commands.clear()
         with (
-            mock.patch("ummanu.installation.state_repo.git", side_effect=inspect),
-            mock.patch("ummanu.installation.state_repo.run_git", side_effect=run) as remote_run,
-            self.assertRaisesRegex(installation.InstallError, "needs a bootstrap credential"),
+            mock.patch("ummanu.installation.clone.state_repo.git", side_effect=inspect),
+            mock.patch("ummanu.installation.clone.state_repo.run_git", side_effect=run) as remote_run,
+            self.assertRaisesRegex(installation_models.InstallError, "needs a bootstrap credential"),
         ):
-            installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False)
+            installation_clone._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False)
         remote_run.assert_not_called()
 
         bootstrap = Path(self.temporary.name) / "bootstrap"
         bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
         bootstrap.chmod(0o600)
         with (
-            mock.patch("ummanu.installation.state_repo.git", side_effect=inspect),
-            mock.patch("ummanu.installation.state_repo.run_git", side_effect=run),
+            mock.patch("ummanu.installation.clone.state_repo.git", side_effect=inspect),
+            mock.patch("ummanu.installation.clone.state_repo.run_git", side_effect=run),
         ):
-            installation._clone_or_reuse(
+            installation_clone._clone_or_reuse(
                 remote, self.instance, recovery=True, dry_run=False, bootstrap_credential=bootstrap
             )
         self.assertNotEqual(commands[0][1]["UMMANU_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
@@ -405,16 +410,16 @@ class ManagedGithubCredentialTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "ummanu.installation.state_repo.git",
+                "ummanu.installation.clone.state_repo.git",
                 side_effect=(remote + "\n", "", "", ""),
             ) as git,
             mock.patch(
-                "ummanu.installation.state_repo.run_git",
+                "ummanu.installation.clone.state_repo.run_git",
                 side_effect=lambda _instance, args, **_kwargs: subprocess.CompletedProcess(args, 0, "", ""),
             ) as remote_git,
         ):
             self.assertEqual(
-                installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False),
+                installation_clone._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False),
                 "reused checkpoint checkout",
             )
 
@@ -634,12 +639,12 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         source.write_bytes(b"bootstrap-token")
         source.chmod(0o600)
         args = SimpleNamespace(bootstrap_credential_file=str(source), bootstrap_credential_stdin=False)
-        path, disposable = installation._bootstrap_credential(args, self.instance / "target")
+        path, disposable = installation_credentials._bootstrap_credential(args, self.instance / "target")
         self.assertEqual(path, source)
         self.assertIsNone(disposable)
         source.chmod(0o644)
-        with self.assertRaisesRegex(installation.InstallError, "mode-0600"):
-            installation._bootstrap_credential(args, self.instance / "target")
+        with self.assertRaisesRegex(installation_models.InstallError, "mode-0600"):
+            installation_credentials._bootstrap_credential(args, self.instance / "target")
 
     def test_clone_timeout_is_a_sanitized_install_error_and_cleans_capability(self) -> None:
         bootstrap = Path(self.temporary.name) / "bootstrap-timeout"
@@ -660,10 +665,10 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             ),
             mock.patch("ummanu.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
             self.assertRaisesRegex(
-                installation.InstallError, "clone instance remote: command timed out"
+                installation_models.InstallError, "clone instance remote: command timed out"
             ) as failure,
         ):
-            installation._clone_instance(
+            installation_clone._clone_instance(
                 "https://github.com/example/private.git",
                 self.instance / "clone",
                 bootstrap_credential=bootstrap,

@@ -16,7 +16,7 @@ from ummanu.bootstrap import (
     _install_platform,
     bootstrap,
 )
-from ummanu.installation import SnapshotCheckout
+from ummanu.installation.clone import SnapshotCheckout
 
 
 class BootstrapTests(unittest.TestCase):
@@ -250,8 +250,7 @@ class BootstrapTests(unittest.TestCase):
         it runs `_set_installation_owner` for real with root's view of the host and records the
         uid and gid each `chown` receives, and when, relative to the store steps.
         """
-        from ummanu.board import provision as provision_module
-        from ummanu.board import store
+        from ummanu.board import provision as provision_module, store
 
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
