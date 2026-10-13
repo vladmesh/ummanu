@@ -389,7 +389,7 @@ class BackupTests(unittest.TestCase):
                 mock.patch.object(tempfile, "tempdir", str(system_tmp)),
                 mock.patch("os.replace", side_effect=replace),
                 mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("ummanu.backup._pipeline_action"),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
                 mock.patch("ummanu.backup.export_all", side_effect=fake_export_all),
             ):
                 result = create_backup(instance)
