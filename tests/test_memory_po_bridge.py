@@ -13,6 +13,8 @@ from mcp.client.stdio import stdio_client
 
 from ummanu.memory import access
 from ummanu.memory.po_bridge import bind_operator
+from ummanu.runtime.head_runtime_backends import is_legacy_record
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 
 class MemoryPoBridgeTests(unittest.TestCase):
@@ -29,6 +31,9 @@ class MemoryPoBridgeTests(unittest.TestCase):
             self.assertIsNone(identity.scopes)
             self.assertTrue(binding.grant_path.is_file())
             self.assertTrue(binding.pid_path.is_file())
+            # Named, not defaulted: a hand-built spec would carry the legacy Orca record rule.
+            self.assertEqual(binding.run.spec.runtime, LOCAL_PTY_RUNTIME)
+            self.assertFalse(is_legacy_record(binding.run))
 
             binding.close()
             self.assertFalse(binding.grant_path.exists())

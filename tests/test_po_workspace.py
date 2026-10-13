@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import tomllib
@@ -12,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import upgrade
+from ummanu import cli, upgrade
 from ummanu.memory import client_config
 from ummanu.po import workspace
 from ummanu.role_skills import (
@@ -39,16 +42,35 @@ class InstructionsTests(unittest.TestCase):
         self.flat = " ".join(self.agents.split())
 
     def test_it_quotes_the_wait_card_form_of_the_protocols_exactly(self) -> None:
-        protocols = (ROOT / "docs" / "PROTOCOLS.md").read_text(encoding="utf-8")
-        section = protocols[
-            protocols.index("### Wait cards") : protocols.index("### Owner events and the bell")
-        ]
-        [form] = [
+        """Every wait-card command the PO is shown parses under the real `task create` parser.
+
+        Each flag of the documented form is handed to the parser with the first alternative of its
+        value, a placeholder kept as its own text, so a flag the CLI does not have fails here.
+        """
+        forms = [
             line.strip()
-            for line in section.splitlines()
-            if "task create" in line and "--type wait" in line and line.strip().startswith("python3")
+            for line in self.agents.splitlines()
+            if "ummanu task create" in line and "--type wait" in line
         ]
-        self.assertIn(form, self.agents)
+        self.assertTrue(forms)
+        parser = cli.build_parser()
+        for form in forms:
+            with self.subTest(form=form):
+                command = re.sub(r"<([^>]*)>", lambda m: "<" + m.group(1).replace(" ", "-") + ">", form)
+                words = command.split(" -m ummanu ", 1)[1].split()[:2]
+                argv = list(words)
+                for flag, value in re.findall(r"(--[a-z][a-z-]*)(?:\s+(?!-)([^\s\[\]|]+))?", command):
+                    argv += [flag, value] if value else [flag]
+                self.assertEqual(argv[:2], ["task", "create"])
+                stderr = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(stderr):
+                        args = parser.parse_args(argv)
+                except SystemExit:
+                    self.fail(f"{argv} is refused by the CLI: {stderr.getvalue()}")
+                self.assertEqual((args.role, args.type), ("po", "wait"))
+                self.assertTrue(args.wait_deadline and args.wait_return)
+
 
 class PoWorkspaceStepTests(unittest.TestCase):
     def setUp(self) -> None:

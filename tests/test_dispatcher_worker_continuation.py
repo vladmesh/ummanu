@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import ast
+import contextlib
 import copy
-import inspect
 import tempfile
 import unittest
 from dataclasses import replace
@@ -13,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest import mock
 
+from tests.support.call_log import CallLog
 from ummanu.board import (
     Actor,
     BoardEventPending,
@@ -23,7 +23,11 @@ from ummanu.board import (
     TransitionRequest,
 )
 from ummanu.board.fake import MemoryAudit
-from ummanu.dispatch import attempt_accounting, worker_continuation as continuation_module
+from ummanu.dispatch import (
+    attempt_accounting,
+    runtime as dispatch_runtime,
+    worker_continuation as continuation_module,
+)
 from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.worker_lifecycle import (
@@ -31,6 +35,7 @@ from ummanu.dispatch.worker_lifecycle import (
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
     ContinuationRecoveryRung,
+    WorkerContinuation,
     WorkerContinuationLiveness,
     WorkerContinuationStage,
     residual_composer_class,
@@ -1007,60 +1012,47 @@ class TheRecoveryStateTableTests(ProductionContinuationHandoffTests):
         self.runtime.host.resume_worker.assert_not_called()
 
 
-class ContinuationOwnershipTests(unittest.TestCase):
-    def test_implementation_is_owned_by_the_package_not_runtime_callbacks(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        runtime_source = (root / "src/ummanu/dispatch/runtime.py").read_text(encoding="utf-8")
-        runtime_tree = ast.parse(runtime_source)
-        runtime = next(
-            n for n in runtime_tree.body if isinstance(n, ast.ClassDef) and n.name == "DispatcherRuntime"
+class AdvanceWorkerContinuationOrderTests(unittest.TestCase):
+    """`_advance_worker` runs the continuation collaborators in order, observed through one call log."""
+
+    ORDER = (
+        "_complete_red_transition",
+        "_worker_report_marker",
+        "_recover_worker_continuation",
+        "_handle_worker_report",
+        "_resolve_headless_worker",
+        "_deliver_worker_comments",
+        "_wait_watchdog",
+    )
+
+    def advance(self, stage: WorkerContinuationStage, *, recovered: dict | None = None) -> list[str]:
+        record = DispatcherRecord(
+            worker="worker-1", workspace="/unused", handle="worker-1", head="codex", review_head="claude",
+            attempt_id="attempt-1", comment_baseline=0, review_baseline=0, state="claimed", claimed_at=1.0,
         )
-        module_tree = ast.parse(inspect.getsource(continuation_module))
-        helpers = {
-            "_begin_red_transition",
-            "_complete_red_transition",
-            "_deliver_red_continuation",
-            "_observe_retained_continuation_progress",
-            "_block_unadmitted_continuation_liveness",
-            "_continuation_recovery_window",
-            "_advance_no_progress_continuation",
-            "_finish_retained_worker_resume",
-            "_restart_red_worker",
-            "_record_worker_continuation",
-        }
-        runtime_names = {n.name for n in runtime.body if isinstance(n, ast.FunctionDef)}
-        self.assertFalse(helpers & runtime_names)
-        callbacks = {
-            n.attr
-            for n in ast.walk(module_tree)
-            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "runtime"
-        }
-        self.assertFalse(helpers & callbacks)
-        for helper in (
-            "_retained_worker_busy_deferred",
-            "_retained_worker_recovery_window",
-            "_continuation_no_progress_evidence",
-        ):
-            self.assertNotIn(f"def {helper}(", runtime_source)
-        owned = {n.name for n in module_tree.body if isinstance(n, ast.FunctionDef)}
-        self.assertTrue(
-            {"begin_red_transition", "complete_red_transition", "recover_worker_continuation"} <= owned
-        )
-        self.assertNotIn("ummanu.dispatch.runtime", inspect.getsource(continuation_module))
-        advance = next(
-            n for n in runtime.body if isinstance(n, ast.FunctionDef) and n.name == "_advance_worker"
-        )
-        advance_source = ast.get_source_segment(runtime_source, advance)
-        names = [
-            "_complete_red_transition(",
-            "_worker_report_marker(",
-            "_recover_worker_continuation(",
-            "_handle_worker_report(",
-            "_wait_watchdog(self, ",
-        ]
-        positions = [advance_source.index(name) for name in names]
-        self.assertEqual(positions, sorted(positions))
-        self.assertNotIn("if continuation.delivery_pending:", advance_source)
+        record.worker_continuation = WorkerContinuation(stage=stage)
+        log = CallLog()
+        with contextlib.ExitStack() as stack:
+            for name in self.ORDER:
+                result = recovered if name == "_recover_worker_continuation" else None
+                stack.enter_context(log.patch(dispatch_runtime, name, result))
+            dispatch_runtime.DispatcherRuntime._advance_worker(
+                SimpleNamespace(), {"ref": "sample-1"}, {"sample-1": record}, {}, "attempt-1"
+            )
+        return log.names
+
+    def test_an_open_red_transition_outranks_the_report_and_the_wait(self) -> None:
+        self.assertEqual(self.advance(WorkerContinuationStage.RED_TRANSITION_PENDING), ["_complete_red_transition"])
+
+    def test_the_report_marker_is_read_before_the_continuation_is_recovered_and_the_report_handled(self) -> None:
+        self.assertEqual(self.advance(WorkerContinuationStage.NONE), list(self.ORDER[1:]))
+
+    def test_a_pending_delivery_goes_through_the_same_recovery_not_a_branch_of_its_own(self) -> None:
+        self.assertEqual(self.advance(WorkerContinuationStage.DELIVERY_PENDING), list(self.ORDER[1:]))
+
+    def test_a_recovered_continuation_ends_the_tick_before_the_report_is_handled(self) -> None:
+        names = self.advance(WorkerContinuationStage.DELIVERY_PENDING, recovered={"action": "recovered"})
+        self.assertEqual(names, list(self.ORDER[1:3]))
 
 
 class DecisionNativeReplayTests(unittest.TestCase):

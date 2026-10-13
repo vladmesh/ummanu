@@ -65,6 +65,40 @@ def _names(module: str, package: str) -> bool:
     return module == package or module.startswith(package + ".")
 
 
+# The dispatcher's state machine (`ummanu.dispatch.runtime`) calls each flow of a card through a
+# module of its own; a flow module never imports the state machine back, so the flows stay
+# testable without it and there is no cycle through the runtime class.
+DISPATCH_STATE_MACHINE = "ummanu.dispatch.runtime"
+DISPATCH_FLOW_MODULES = (
+    "claim",
+    "worker_launch",
+    "worker_report",
+    "worker_continuation",
+    "gate_lifecycle",
+    "review_verdict",
+    "assessment_decision",
+    "release_lifecycle",
+    "attempt_accounting",
+    "wait_vitality",
+)
+
+
+def _imports_dispatch_state_machine(relative: str, source: str) -> list[str]:
+    """Every import of `ummanu.dispatch.runtime` in one module of `ummanu.dispatch`, relative or not."""
+    package = relative.removeprefix("src/").removesuffix(".py").split("/")[:-1]
+    offenders: list[str] = []
+    for node in source_trees.imports(source_trees.parse(source, filename=relative)):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        else:
+            base = package[: len(package) - node.level + 1] if node.level else []
+            module = ".".join([*base, *([node.module] if node.module else [])])
+            names = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+        if any(_names(name, DISPATCH_STATE_MACHINE) for name in names):
+            offenders.append(f"{relative}:{node.lineno}")
+    return offenders
+
+
 def _imports_automations(relative: str, source: str) -> list[str]:
     """Every back edge from a `ummanu` module outside the agents into `ummanu.automations`."""
     if relative.startswith("src/ummanu/automations/"):
@@ -434,296 +468,29 @@ async def asynchronous():
         expected = {id(node) for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))}
         self.assertEqual({id(node) for node in source_trees.imports(tree)}, expected)
 
-    def test_dispatcher_claim_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
-            encoding="utf-8"
-        )
-        production_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "production.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "_failover_collapse",
-            "_broad_check_contract_verdict",
-            "_sprint_admission_refusal",
-            "_project_git_access",
-            "_write_claim_preflight_block",
+    def test_no_dispatcher_flow_module_imports_the_state_machine_back(self) -> None:
+        """The dependency runs one way: `ummanu.dispatch.runtime` -> the flow modules it calls."""
+        offenders: list[str] = []
+        for name in DISPATCH_FLOW_MODULES:
+            relative = f"src/ummanu/dispatch/{name}.py"
+            offenders.extend(_imports_dispatch_state_machine(relative, (ROOT / relative).read_text(encoding="utf-8")))
+        self.assertEqual(offenders, [])
+        # Every spelling of the back edge is caught, at module level or inside a function.
+        for source in (
+            "from ummanu.dispatch.runtime import DispatcherRuntime\n",
+            "import ummanu.dispatch.runtime as runtime\n",
+            "from ummanu.dispatch import runtime\n",
+            "def f():\n    from ummanu.dispatch import gate, runtime\n",
+            "from . import runtime\n",
+            "from .runtime import DispatcherRuntime\n",
+            "from ..dispatch.runtime import DispatcherRuntime\n",
         ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        self.assertNotIn("runtime._claim(", production_source)
-
-    def test_dispatcher_worker_launch_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
-            encoding="utf-8"
-        )
-        claim_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "claim.py"
-        ).read_text(encoding="utf-8")
-        worker_launch_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "worker_launch.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "_launch_worker_after_claim",
-            "_worker_launch_failure",
-            "_bring_up_worker_head",
-            "_worker_relaunch_intent",
-            "_resolve_headless_worker",
-            "_relaunch_headless_worker",
-            "_refuse_headless_worker",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        self.assertNotIn("runtime._launch_worker_after_claim(", claim_source)
-        self.assertIn("def launch_worker_after_claim(", worker_launch_source)
-        self.assertIn("def resolve_headless_worker(", worker_launch_source)
-
-    def test_dispatcher_worker_report_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        report_source = (ROOT / "src" / "ummanu" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
-        for helper in (
-            "_record_infra_completion", "_accept_stale_infrastructure_done",
-            "_block_repeated_infrastructure_done", "_reject_stale_done", "_prompt_worker_report",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"self.{helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", report_source)
-        runtime_tree = source_trees.parse(dispatcher_source)
-        advance = next(node for node in source_trees.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker")
-        advance_source = ast.get_source_segment(dispatcher_source, advance)
-        self.assertIn("_worker_report_marker(", advance_source)
-        self.assertIn("_handle_worker_report(", advance_source)
-        self.assertNotIn("verify_worker_result(", advance_source)
-        self.assertLess(
-            advance_source.index("_worker_report_marker("),
-            advance_source.index("_recover_worker_continuation("),
-        )
-        self.assertLess(
-            advance_source.index("_recover_worker_continuation("),
-            advance_source.index("_handle_worker_report("),
-        )
-        self.assertLess(
-            advance_source.index("_handle_worker_report("),
-            advance_source.index("_wait_watchdog(self, "),
-        )
-        for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
-            self.assertIn(f"def {entry}(", report_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", report_source)
-
-    def test_dispatcher_gate_lifecycle_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        gate_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "gate_lifecycle.py"
-        ).read_text(encoding="utf-8")
-        gate_domain_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "gate.py"
-        ).read_text(encoding="utf-8")
-        helpers = (
-            "_run_gate",
-            "_accept_green_gate",
-            "_block_missing_gate_receipt",
-            "_gate_red_to_worker",
-            "_retry_infrastructure_gate",
-            "_reset_infrastructure_reruns",
-            "_block_infrastructure_reruns_exhausted",
-            "_block_infrastructure_rerun_unavailable",
-            "_gate_answered",
-            "_gate_transport_retry",
-            "_gate_rerun_transport_retry",
-            "_block_gate_transport",
-            "_gate_pending",
-            "_worker_vitality_for_gate",
-        )
-        for helper in helpers:
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", gate_source)
-        for entry in (
-            "run_gate",
-            "accept_green_gate",
-            "gate_red_to_worker",
-            "gate_transport_retry",
-            "block_gate_transport",
-            "gate_answered",
-            "gate_pending",
-        ):
-            self.assertIn(f"def {entry}(", gate_source)
-        self.assertIn("def reset_infrastructure_reruns(", gate_domain_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", gate_source)
-
-    def test_dispatcher_review_verdict_parking_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        verdict_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "review_verdict.py"
-        ).read_text(encoding="utf-8")
-        helpers = (
-            "_parks_for_decision",
-            "_park_green_verdict",
-            "_merge_ready_for_park",
-            "_begin_park",
-            "_complete_park",
-            "_block_red_review_ceiling",
-        )
-        for helper in helpers:
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"self.{helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", verdict_source)
-        for entry in (
-            "advance_review_verdict",
-            "park_green_verdict",
-            "merge_ready_for_park",
-            "begin_park",
-            "complete_park",
-        ):
-            self.assertIn(f"def {entry}(", verdict_source)
-        self.assertIn("_advance_review_verdict(self, task, record, records, payload, attempt_id)", dispatcher_source)
-        self.assertNotIn("\n    def _advance_assessment(", dispatcher_source)
-        self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
-        self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", verdict_source)
-
-    def test_dispatcher_assessment_decision_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        decision_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "assessment_decision.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "_advance_assessment",
-            "_recorded_decision",
-            "_rework_parked",
-            "_reslice_parked",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        for entry in (
-            "advance_assessment",
-            "recorded_decision",
-            "rework_parked",
-            "reslice_parked",
-        ):
-            self.assertIn(f"def {entry}(", decision_source)
-        self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
-        self.assertIn("release_lifecycle.release_parked(", decision_source)
-        self.assertNotIn("runtime._release_parked(", decision_source)
-        self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", decision_source)
-
-    def test_dispatcher_release_completion_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        release_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "release_lifecycle.py"
-        ).read_text(encoding="utf-8")
-        gate_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "gate_lifecycle.py"
-        ).read_text(encoding="utf-8")
-        verdict_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "review_verdict.py"
-        ).read_text(encoding="utf-8")
-        decision_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "assessment_decision.py"
-        ).read_text(encoding="utf-8")
-
-        for helper in (
-            "_block_merge_path",
-            "_release_parked",
-            "_release_effect",
-            "_require_completion_evidence",
-            "_transfer_research_report",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        for helper in ("_released_verdict", "_merge_terminal_reason"):
-            self.assertNotIn(f"\ndef {helper}(", dispatcher_source)
-        for entry in (
-            "block_merge_path",
-            "release_parked",
-            "release_effect",
-            "require_completion_evidence",
-            "transfer_research_report",
-            "review_drift",
-            "merge_readiness",
-        ):
-            self.assertIn(f"def {entry}(", release_source)
-
-        self.assertNotIn("def review_drift(", verdict_source)
-        self.assertNotIn("def merge_readiness(", verdict_source)
-        self.assertIn("release_lifecycle.merge_readiness(runtime,", verdict_source)
-        self.assertIn("release_lifecycle.release_effect(runtime,", verdict_source)
-        self.assertIn("release_lifecycle.release_parked(", decision_source)
-        self.assertIn("release_lifecycle.block_merge_path(runtime,", gate_source)
-        self.assertNotIn("runtime._block_merge_path(", gate_source)
-        self.assertNotIn("runtime._block_merge_path(", verdict_source)
-        self.assertNotIn("runtime._release_effect(", verdict_source)
-        self.assertNotIn("runtime._release_parked(", decision_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", release_source)
-
-    def test_dispatcher_attempt_accounting_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        accounting_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "attempt_accounting.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "pending_attempt_usage",
-            "_attempt_outcome_obligation",
-            "_outcome_lineage_sources",
-            "_outcome_round_context_request_id",
-            "_persist_outcome_round_context",
-            "_capture_outcome_source",
-            "_outcome_round_context",
-            "_outcome_usage_source",
-            "_finish_attempt_outcome",
-            "terminal_effect",
-            "publish_pending_attempt_outcomes",
-            "publish_pending_attempt_usage",
-            "record_attempt_usage",
-            "_write_attempt_usage",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        for entry in (
-            "persist_outcome_round_context",
-            "capture_outcome_source",
-            "terminal_effect",
-            "publish_pending_attempt_outcomes",
-            "publish_pending_attempt_usage",
-            "record_attempt_usage",
-        ):
-            self.assertIn(f"def {entry}(", accounting_source)
-        for path in (ROOT / "src" / "ummanu" / "dispatch").glob("*.py"):
-            if path.name == "attempt_accounting.py":
-                continue
-            source = path.read_text(encoding="utf-8")
-            for legacy_call in (
-                "runtime.terminal_effect(",
-                "runtime._persist_outcome_round_context(",
-                "runtime._capture_outcome_source(",
-                "runtime.record_attempt_usage(",
-                "runtime.publish_pending_attempt_outcomes(",
-                "runtime.publish_pending_attempt_usage(",
-            ):
-                self.assertNotIn(legacy_call, source, path.name)
-        self.assertNotIn("from ummanu.dispatch.runtime import", accounting_source)
-
-    def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        wait_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "wait_vitality.py"
-        ).read_text(encoding="utf-8")
-        helpers = (
-            "_decide_wait_by_verdict",
-            "_escalate_unobservable_wait",
-            "_recovery_policy_decision",
-            "_execute_recovery_intent",
-            "_sigcont_head",
-            "_guard_or_wait",
-            "_trigger_wait_watchdog",
-            "_respawn_wait",
-            "_escalate_wait",
-        )
-        for helper in helpers:
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", wait_source)
-        for entry in (
-            "wait_watchdog",
-            "execute_recovery_intent",
-            "recovery_policy_outcome",
-            "reduce_and_store_vitality_episode",
-        ):
-            self.assertIn(f"def {entry}(", wait_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", wait_source)
+            with self.subTest(source=source):
+                self.assertEqual(len(_imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source)), 1)
+        # A sibling flow module or a similarly named module is not the state machine.
+        for source in ("from ummanu.dispatch import runtime_preflight\n", "from .gate_lifecycle import run_gate\n"):
+            with self.subTest(source=source):
+                self.assertEqual(_imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source), [])
 
     def test_no_ummanu_module_imports_the_agents_back(self) -> None:
         """The dependency runs one way: `ummanu.automations` -> the rest of `ummanu`."""
@@ -776,13 +543,11 @@ class FileAuditOwnershipTests(unittest.TestCase):
     """A live audit reader follows its card client, and the exceptions are named with their reasons."""
 
     def test_the_card_audit_has_one_owner(self) -> None:
-        """`task_audit_for` returns the SQL audit whatever it is handed; no card writer builds a file one."""
+        """`task_audit_for` returns the SQL audit whatever it is handed, never a file one."""
         from ummanu.board.sql_audit import SqlTaskAudit
         from ummanu.tasks import task_audit_for
 
         self.assertIsInstance(task_audit_for(mock.sentinel.client, "/nonexistent"), SqlTaskAudit)
-        source = inspect.getsource(task_audit_for)
-        self.assertIsNone(re.search(r"(?<!Sql)TaskAudit\(", source))
 
     def test_no_source_module_writes_a_retired_backend_identity(self) -> None:
         """A new write names the PostgreSQL store; an earlier store's identities are only read.

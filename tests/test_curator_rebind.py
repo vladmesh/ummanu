@@ -272,28 +272,41 @@ class CuratorRebindTests(unittest.TestCase):
         self.assertEqual(self._journal()[1]["state_digest"], self._published_digest())
 
     def test_rebind_only_appends_to_the_journal(self) -> None:
-        import ast
-        import inspect
-        import textwrap
+        self._fixture()
+        journal = self.state.dir / "runs.jsonl"
+        journal.write_text('{"event": "precheck", "result": "change"}\n', encoding="utf-8")
+        before, inode = journal.read_bytes(), journal.stat().st_ino
+        real_open, real_replace = os.open, os.replace
+        opened: list[int] = []
+        replaced: list[Path] = []
 
-        from ummanu.runtime import state as runtime_state
+        def spy_open(path, flags, *args, **kwargs):
+            if Path(path) == journal:
+                opened.append(flags)
+            return real_open(path, flags, *args, **kwargs)
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(cli.cmd_rebind)))
-        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-        names = {node.func.id if isinstance(node.func, ast.Name) else node.func.attr for node in calls
-                 if isinstance(node.func, (ast.Name, ast.Attribute))}
-        self.assertFalse(names & {"open", "read_text", "read_bytes", "write_text", "write_bytes", "replace", "unlink"})
-        journal_uses = [node for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id == "journal"]
-        appends = [call for call in calls if isinstance(call.func, ast.Name) and call.func.id == "append_line_durable"]
-        self.assertEqual(len(journal_uses), 1 + len(appends))  # the assignment, then only append arguments
-        self.assertTrue(all(isinstance(call.args[0], ast.Name) and call.args[0].id == "journal" for call in appends))
-        for call in calls:
-            if isinstance(call.func, ast.Name) and call.func.id == "publish_state_atomic":
-                self.assertNotIn("journal", ast.dump(call))
-                self.assertNotIn("runs.jsonl", ast.dump(call))
-        helper = inspect.getsource(runtime_state.append_line_durable)
-        self.assertIn("os.O_APPEND", helper)
-        self.assertNotIn("O_TRUNC", helper)
+        def spy_replace(source, target, *args, **kwargs):
+            replaced.append(Path(target))
+            return real_replace(source, target, *args, **kwargs)
+
+        with (
+            mock.patch("ummanu.runtime.state.os.open", side_effect=spy_open),
+            mock.patch("ummanu.runtime.state.os.replace", side_effect=spy_replace),
+        ):
+            self.assertEqual(self._run()[0], 0)
+        after = journal.read_bytes()
+        # The old bytes are an unchanged prefix of the same file, which gained exactly one line.
+        self.assertTrue(after.startswith(before))
+        self.assertEqual(journal.stat().st_ino, inode)
+        self.assertEqual([event["event"] for event in self._journal()], ["precheck", "rebind"])
+        self.assertTrue(opened)
+        for flags in opened:
+            self.assertTrue(flags & os.O_APPEND)
+            self.assertFalse(flags & os.O_TRUNC)
+        self.assertNotIn(journal, replaced)
+        # A second run has nothing to rebind and writes nothing, the journal included.
+        self.assertEqual(self._run()[0], 0)
+        self.assertEqual(journal.read_bytes(), after)
 
     def test_a_carried_cursor_never_moves_backwards(self) -> None:
         fixture = self._fixture()

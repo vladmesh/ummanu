@@ -8,7 +8,7 @@ TASK.md has been rewritten to hold it.
 
 from __future__ import annotations
 
-import ast
+import contextlib
 import json
 import os
 import tempfile
@@ -24,7 +24,8 @@ from tests.dispatcher_fixtures import (
     supervised_run,
     write_heartbeat,
 )
-from ummanu.dispatch import worker_report
+from tests.support.call_log import CallLog
+from ummanu.dispatch import runtime as dispatch_runtime, worker_report
 from ummanu.dispatch.heartbeat import run_heartbeat_identity
 from ummanu.dispatch.runtime_provenance import ProductionRuntime
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
@@ -40,6 +41,16 @@ from ummanu.tasks import _digest
 
 REF = "ummanu-1768"
 DESCRIPTION = "Build the frobnicator."
+# The report arm of `_advance_worker` for a claimed worker with no open red transition, in the order
+# the tick runs it: the report first, then the headless check, the mid-round comments, the wait.
+ADVANCE_ORDER = (
+    "_worker_report_marker",
+    "_recover_worker_continuation",
+    "_handle_worker_report",
+    "_resolve_headless_worker",
+    "_deliver_worker_comments",
+    "_wait_watchdog",
+)
 EXCLUDED_ROLES = ("dispatcher", "worker", "reviewer", "steward", "retro")
 
 
@@ -421,18 +432,29 @@ class MidRoundContinuationTests(HostCase):
             _ProbeHost(self.host).deliver_worker_comments(self.card.task, self.live_worker())
         self.assertEqual(self.host.backend.deliveries, [])
 
+    def advance(self, record: DispatcherRecord, log: CallLog, *, real_comments: bool = False):
+        """`_advance_worker` with every collaborator of the report arm recording into `log`."""
+        with contextlib.ExitStack() as stack:
+            for name in ADVANCE_ORDER:
+                wraps = real_comments and name == "_deliver_worker_comments"
+                stack.enter_context(log.patch(dispatch_runtime, name, wraps=wraps))
+            return dispatch_runtime.DispatcherRuntime._advance_worker(
+                self.runtime, self.card.task, {REF: record}, {}, "attempt-1"
+            )
+
     def test_the_tick_offers_comments_after_the_report_and_headless_checks_and_before_the_wait(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
-            encoding="utf-8"
-        )
-        advance = next(
-            node
-            for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker"
-        )
-        body = ast.get_source_segment(source, advance) or ""
-        self.assertLess(body.index("_resolve_headless_worker("), body.index("_deliver_worker_comments("))
-        self.assertLess(body.index("_deliver_worker_comments("), body.index("_wait_watchdog(self, "))
+        log = CallLog()
+        outcome = self.advance(self.live_worker(), log)
+        self.assertEqual(log.names, list(ADVANCE_ORDER))
+        self.assertEqual(outcome["action"], "waiting-worker-report")
+
+    def test_a_delivered_comment_ends_the_tick_before_the_wait(self) -> None:
+        self.card.comment("observer", "Mid-round: drop the web half.", at="2026-09-26T14:00:00Z", event_id="evt_mid")
+        log = CallLog()
+        outcome = self.advance(self.live_worker(report_generation=0), log, real_comments=True)
+        self.assertEqual(outcome["action"], "worker-comments-delivered")
+        self.assertEqual(log.names, list(ADVANCE_ORDER[:-1]))
+        self.assertEqual(len(self.host.backend.deliveries), 1)
 
 
 if __name__ == "__main__":

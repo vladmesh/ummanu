@@ -33,8 +33,6 @@ from ummanu.runtime.head_runtimes import (
 )
 from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 
-REPO = Path(__file__).resolve().parents[1]
-
 GRANT = {
     "expires_at": 1790296027,
     "grant_id": "f4aa66cfb5fb4023a8a243ea720707d0",
@@ -197,11 +195,22 @@ class RecordTests(unittest.TestCase):
         self.assertFalse(is_legacy_record(HeadRun.from_json(payload)))
 
     def test_the_hand_built_bridge_and_probe_specs_name_local_pty(self) -> None:
-        """They were live producers of `orca-legacy` grants only because a hand-built spec defaults to it."""
-        for module in ("memory/po_bridge.py", "memory/health.py"):
-            with self.subTest(module=module):
-                source = (REPO / "src" / "ummanu" / module).read_text(encoding="utf-8")
-                self.assertIn("runtime=LOCAL_PTY_RUNTIME", source)
+        """They were live producers of `orca-legacy` grants only because a hand-built spec defaults to it.
+
+        The probe's run is read where it is handed to the read; the bridge's, which needs the
+        `memory` extra, in `test_memory_po_bridge`.
+        """
+        from ummanu.memory import health
+
+        probed: list[HeadRun] = []
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            mock.patch.object(health, "_probe_read", side_effect=lambda run, *args, **kwargs: probed.append(run)),
+        ):
+            health.probe_memory(Path(data_dir))
+        [run] = probed
+        self.assertEqual(run.spec.runtime, LOCAL_PTY_RUNTIME)
+        self.assertFalse(is_legacy_record(run))
 
 
 class AccessGrantTests(unittest.TestCase):

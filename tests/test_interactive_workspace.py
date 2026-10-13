@@ -76,15 +76,16 @@ class Fixture(unittest.TestCase):
 
 
 class SharedPartTests(unittest.TestCase):
-    """The shared part ships nothing personal and nothing of the retired layout."""
+    """The shared part ships nothing personal."""
 
-    def setUp(self) -> None:
-        self.text = iw.shared_source(ROOT).read_text(encoding="utf-8")
-
-    def test_it_names_no_retired_layout_and_no_owner(self) -> None:
-        for word in ("secretary-instance", "orca", "policies", "vladmesh"):
-            with self.subTest(word=word):
-                self.assertNotIn(word, self.text.lower())
+    def test_no_shipped_packaging_text_names_the_owner(self) -> None:
+        # The owner's identity belongs in the live root (`persona/`), never in a shipped text: one
+        # guard over everything `packaging/` ships, the shared part of this workspace included.
+        shipped = sorted(path for path in (ROOT / "packaging").rglob("*") if path.is_file())
+        self.assertIn(iw.shared_source(ROOT), shipped)
+        for path in shipped:
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertNotIn(b"vladmesh", path.read_bytes().lower())
 
     def test_the_personal_part_is_exported_with_the_snapshot(self) -> None:
         self.assertTrue(is_exported(iw.PERSONAL_SOURCE_RELATIVE.as_posix()))

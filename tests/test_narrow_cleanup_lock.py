@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import ast
 import contextlib
 import copy
 import fcntl
-import inspect
-import textwrap
 import threading
 import time
 import unittest
@@ -349,13 +346,47 @@ class NarrowCleanupLockTests(unittest.TestCase):
         self.assertEqual(runtime.mock_calls, [])
 
     def test_long_methods_have_no_global_serialization(self):
-        methods = (CommandHostRuntime.prepare_worker, CommandHostRuntime.start_review,
-                   CommandHostRuntime.restart_worker, CommandHostRuntime.teardown,
-                   cleanup.CleanupOwner.replay_one, production.production_tick, production.production_probe)
-        for method in methods:
-            tree = ast.parse(textwrap.dedent(inspect.getsource(inspect.unwrap(method))))
-            self.assertFalse(any(isinstance(node, ast.Name) and node.id in {"serialized", "ownership_lock"}
-                                 for node in ast.walk(tree)), method.__name__)
+        """Each long operation reaches its first collaborator with the global cleanup lock free.
+
+        A decorator or a `with ownership_lock` around one of them would hold the lock over all of its
+        host work; the probe answers at the first step of the body and stops it there, so none of
+        that work runs. The work itself is observed lock-free in the cases above and in
+        `TickPhaseLockTests`.
+        """
+        class Probed(Exception):
+            pass
+
+        free: dict[str, bool] = {}
+
+        def probe(name):
+            def answer(*args, **kwargs):
+                free[name] = lock_free(self.data)
+                raise Probed(name)
+            return answer
+
+        host = CommandHostRuntime(FakeCatalog(), self.data, mode="real")
+        task, record = self.fixture.task, self.fixture.record
+        state = production.ProductionState(self.data)
+        long_operations = {
+            "prepare_worker": (CommandHostRuntime, "_require_production_runtime",
+                               lambda: host.prepare_worker(task, record.worker, record.head)),
+            "restart_worker": (CommandHostRuntime, "_require_cleanup_admission",
+                               lambda: host.restart_worker(task, record)),
+            "start_review": (CommandHostRuntime, "_require_project_available",
+                             lambda: host.start_review(task, record)),
+            "teardown": (CommandHostRuntime, "_refuse_legacy_record", lambda: host.teardown(record)),
+            "replay_one": (self.owner, "_attempt", lambda: self.owner.replay_one("any-intent")),
+        }
+        pause = SimpleNamespace(summary=None)
+        runtime = SimpleNamespace(production_state=state, pause=pause, owner="unit-test")
+        for name, tick in (("production_tick", production.production_tick),
+                           ("production_probe", production.production_probe)):
+            long_operations[name] = (pause, "summary", lambda tick=tick: tick(runtime))
+        for name, (owner, first, run) in long_operations.items():
+            with self.subTest(name), mock.patch.object(owner, first, side_effect=probe(name)), \
+                    self.assertRaises(Probed):
+                run()
+        self.assertEqual(free, dict.fromkeys(long_operations, True))
 
     def assessment_record(self):
         self.store.rows[1]["column_id"] = 5
