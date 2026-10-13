@@ -19,7 +19,7 @@ from unittest import mock
 from tests import test_narrow_cleanup_lock as narrow
 from tests.fakes.card_restore import BOARD, COLUMNS, RETIRED, StoreModel
 from ummanu import restore, task_restore
-from ummanu.dispatch import cleanup
+from ummanu.dispatch import cleanup, ownership
 from ummanu.dispatch.types import HostError
 from ummanu.tasks import TaskError, TaskWriter
 
@@ -246,7 +246,7 @@ class BulkLaneTests(unittest.TestCase):
         self.assertNotIn("removal_started", results[0]["progress"])
 
     def test_reentrant_bulk_helpers_open_no_card_or_capacity_descriptors(self):
-        with mock.patch.object(cleanup.fcntl, "flock", wraps=fcntl.flock) as flock, \
+        with mock.patch.object(ownership.fcntl, "flock", wraps=fcntl.flock) as flock, \
                 cleanup.bulk_lane(self.data, exclusive=True):
             for index in range(1500):
                 with cleanup.reference_lock(self.data, f"demo-{index}"), \
