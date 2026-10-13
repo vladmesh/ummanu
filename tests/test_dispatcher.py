@@ -5693,6 +5693,47 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green",
         )
 
+    def _assert_failed_merge_gate_taxonomy(self, *, release: bool) -> None:
+        self.start_dispatcher()
+        self._drive_to_green_verdict()
+        if release:
+            self.assertEqual(self.tick()["to"], "assessment")
+            self._decide("release")
+        self.host.gate_results = [HostError("gate backend failed")]
+        action = "release-failed-blocked" if release else "merge-gate-blocked"
+        attempt = self._pilot_record()["attempt_id"]
+
+        result = self.tick()
+
+        self.assertEqual(result, {
+            "status": "blocked", "step": "assessment" if release else "review",
+            "pilot_ref": CARD_REF, "reason": "release failed" if release else "merge gate failed",
+        })
+        request_id = f"dispatcher-{attempt}-{action}-{CARD_REF}"
+        terminal = next(event for event in self.audit_events() if event["request_id"] == request_id)
+        taxonomy = terminal["data"]["terminal_taxonomy"]
+        self.assertEqual(taxonomy["blocked_reason"], "gate")
+        self.assertEqual(taxonomy["budget_class"], "blocked")
+        self.assertEqual(_budget_event_type(terminal), "blocked")
+        canon = self.writer.board_host.canon
+        outcomes = canon.attempt_outcome_occurrences(ref=CARD_REF)
+        self.assertEqual(len(outcomes), 1)
+        self.assertFalse(outcomes[0].pending)
+        outcome = outcomes[0].event
+        self.assertEqual(outcome.data["blocked_reason"], "gate")
+        self.assertEqual(outcome.data["terminal_state"], "blocked")
+        effect = canon.event(request_id)
+        self.assertEqual(outcome.data["source_event_ids"]["effect"], effect.event_id)
+        self.assertEqual(effect.data["terminal_taxonomy"], taxonomy)
+        self.assertEqual(self.host.completed, [])
+        self.assertEqual(self.host.torn_down, [])
+
+    def test_review_failed_merge_gate_persists_gate_taxonomy_and_attempt_outcome(self) -> None:
+        self._assert_failed_merge_gate_taxonomy(release=False)
+
+    def test_release_failed_merge_gate_persists_gate_taxonomy_and_attempt_outcome(self) -> None:
+        self._assert_failed_merge_gate_taxonomy(release=True)
+
     def test_rejected_merge_blocks_the_card_instead_of_escaping_the_tick(self) -> None:
         """The merge push is rejected when the branch is not a fast-forward of main.
 

@@ -22,8 +22,12 @@ from ummanu.board.release_migrations import (
 )
 from ummanu.dispatch.entrypoint_guard import ENTRYPOINT_MOVED, RUNBOOK
 from ummanu.dispatch.production_checkout import ProductionActivationRefused
-from ummanu.dispatch.state import ActivationRecovery, DispatcherRecord, request_token
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
+from ummanu.dispatch.state import (
+    ActivationRecovery,
+    DispatcherRecord,
+    attempt_request_id as _attempt_request_id,
+    request_token,
+)
 from ummanu.dispatch.types import HostError
 from ummanu.tasks import TaskError
 
@@ -104,6 +108,7 @@ def resume_refused_activation(
         )
         outcome = block_merge_path(
             runtime, task, record, records, payload, attempt_id,
+            blocked_reason="implementation",
             action=ACTION, reason=_reason(facts), step=owed.step,
             outcome="production activation refused", request_id=owed.block_request_id,
         )

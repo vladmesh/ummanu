@@ -154,6 +154,7 @@ def accept_green_gate(
             records,
             payload,
             attempt_id,
+            blocked_reason="gate",
             action=f"{stage}-gate-receipt-blocked",
             reason=f"{stage} gate reported green without a valid exact-SHA receipt",
             step=step,
@@ -296,6 +297,7 @@ def gate_red_to_worker(
             records,
             payload,
             attempt_id,
+            blocked_reason="gate",
             action=f"{phase}-gate-topology-blocked",
             reason=(
                 "the mechanical validation gate cannot produce this project's required CI for "
@@ -716,6 +718,7 @@ def block_gate_transport(
         records,
         payload,
         attempt_id,
+        blocked_reason="gate",
         action=action,
         reason=f"{prefix}{reason}" if prefix else reason,
         step=step,
