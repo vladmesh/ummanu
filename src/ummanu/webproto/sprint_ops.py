@@ -28,9 +28,9 @@ from typing import Any
 from ummanu.board.backend import SPRINT, board_client
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.config import InstanceReport, validate_instance
+from ummanu.kernel.errors import TaskError
 from ummanu.sprint_observer import observer_choice
 from ummanu.sprints import SprintWriter
-from ummanu.task_errors import TaskError
 from ummanu.tasks import _digest
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary

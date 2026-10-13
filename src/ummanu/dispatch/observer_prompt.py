@@ -6,8 +6,8 @@ import json
 from typing import Any
 
 from ummanu.dispatch.observer_state import ObserverDelivery, delivery_evidence_summary
+from ummanu.kernel.errors import TaskError
 from ummanu.sprint_observer import EXECUTOR_FIELDS, pinned_executor
-from ummanu.task_errors import TaskError
 
 OBSERVER_PROMPT_FILE = "SPRINT.md"
 OBSERVER_SKILL = "observe-sprint"

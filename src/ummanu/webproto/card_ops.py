@@ -16,7 +16,7 @@ from typing import Any
 from ummanu.board.backend import card_client
 from ummanu.board.owner_handover import OWNER_ROLE, waiting_owner
 from ummanu.config import InstanceReport, validate_instance
-from ummanu.task_errors import TaskError
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import TaskWriter
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary

@@ -25,7 +25,7 @@ _FOREIGN_CLAIM = "request id belongs to another operation or payload"
 
 
 def _foreign_claim() -> Exception:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     return TaskError("validation", _FOREIGN_CLAIM, 2)
 

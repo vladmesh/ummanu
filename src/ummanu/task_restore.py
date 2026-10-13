@@ -73,7 +73,7 @@ def _restore_create_payload(item: RestoreCardObligation, board_id: int) -> dict[
 
 
 def _restore_payload_error(item: Any, phase: str, error: Exception) -> Exception:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     card = item.card if isinstance(item, RestoreCardObligation) else item
     reference = str(card.get("reference") or "<unknown>")
@@ -92,7 +92,7 @@ def refused_in_transaction(client: Any, error: BaseException) -> bool:
     transport loss (`backend_unavailable`, `sql_cards._driver_error`) leaves an outcome unknown,
     and only it, or a refusal outside a transaction, takes the ambiguity path.
     """
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     return (
         isinstance(error, TaskError)
@@ -103,7 +103,7 @@ def refused_in_transaction(client: Any, error: BaseException) -> bool:
 
 def store_refusal(what: str, error: BaseException) -> Exception:
     """The refusal of a restored batch, carrying what the store said."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     message = getattr(error, "message", str(error))
     return TaskError("backend_error", f"board store refused the restored {what}: {message}", 1)
@@ -143,8 +143,8 @@ def restore_cards_batched(
     request_prefix: str,
 ) -> None:
     """Create and initialize normalized cards without the interactive read cycle."""
+    from ummanu.kernel.errors import TaskError
     from ummanu.restore import _restore_board_metadata
-    from ummanu.task_errors import TaskError
     from ummanu.tasks import _matching_swimlane, _now, _positive_int
 
     column_ids = {title: identifier for identifier, title in columns.items()}
@@ -353,7 +353,7 @@ def close_restored_cards_batched(
     board_id: int,
 ) -> None:
     """Close archived normalized rows in bounded calls after their comments are proved."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _task_is_active
 
     entries: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
@@ -421,7 +421,7 @@ def commit_restored_cards(
         try:
             writer.audit.append(request_id, event)
         except OSError:
-            from ummanu.task_errors import TaskError
+            from ummanu.kernel.errors import TaskError
 
             raise TaskError("audit_pending", "restored card is proved; audit repair is required", 4) from None
 
@@ -448,7 +448,7 @@ def _restore_card_identity(card: dict[str, Any], metadata: dict[str, str]) -> di
 
 
 def _restore_inventory(client: Any, board_id: int) -> dict[str, dict[str, Any]]:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import all_project_cards
 
     result: dict[str, dict[str, Any]] = {}
@@ -465,7 +465,7 @@ def _restore_inventory(client: Any, board_id: int) -> dict[str, dict[str, Any]]:
 def _validate_restore_inventory(
     inventory: dict[str, dict[str, Any]], obligations: list[RestoreCardObligation]
 ) -> None:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     seen: set[str] = set()
     for key, row in inventory.items():
@@ -488,7 +488,7 @@ def _validate_restore_inventory(
 
 
 def _restore_task_id(inventory: dict[str, dict[str, Any]], item: RestoreCardObligation) -> int:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _positive_int
 
     reference = str(item.card["reference"])
@@ -523,7 +523,7 @@ def _metadata_holds(live: dict[str, str], expected: dict[str, str]) -> bool:
 
 
 def _metadata_map(answer: Any) -> dict[str, str]:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     if answer is not None and not isinstance(answer, dict):
         raise TaskError("backend_error", "board store returned invalid task metadata", 1)
@@ -537,7 +537,7 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
     promise execution order inside a batch, so this is the boundary that permits
     batching across entities without weakening order within one history.
     """
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _BATCH_CHUNK, _now
 
     grouped: dict[str, list[RestoreCommentOccurrence]] = {}
@@ -649,7 +649,7 @@ def _read_comment_histories(client: Any, subjects: list[tuple[str, int]]) -> dic
     order when several restores share the same one-second timestamp; the
     disposable backend contract canary is recorded in the recovery docs.
     """
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     answers = client.call_batch(("getAllComments", {"task_id": task_id}) for _, task_id in subjects)
     result: dict[str, list[str]] = {}
@@ -661,7 +661,7 @@ def _read_comment_histories(client: Any, subjects: list[tuple[str, int]]) -> dic
 
 
 def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any) -> dict[str, Any]:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _digest
 
     identity = {"body_sha256": _digest(item.body), "restore_occurrence": item.occurrence}
@@ -700,7 +700,7 @@ def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any
 def _commit_proven_comment(
     writer: Any, item: RestoreCommentOccurrence, event: dict[str, Any], history_size: int
 ) -> None:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     payload = event.get("payload")
     if not isinstance(payload, dict):
@@ -746,7 +746,7 @@ def restore_card(
     request_id: str | None,
 ) -> dict[str, Any]:
     """Apply an audited restore-only metadata and placement update."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _STATE_BY_COLUMN, _CommittedWriteError, _task_number
 
     if target not in _STATE_BY_COLUMN.values():
@@ -801,7 +801,7 @@ def _reconcile_restore_order(
     request_id: str,
 ) -> None:
     """Repair one active restore group under its own resumable audit boundary."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _now, _positive_int
 
     if not column or not references or any(not reference for reference in references):
@@ -871,7 +871,7 @@ def _reconcile_restore_order(
 
 def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
     """Resume a staged group, proving every uncertain move from live state."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _positive_int
 
     payload = event.get("payload")
@@ -949,7 +949,7 @@ def _live_restore_group(
     order, the final authoritative proof and parity gate disagree and fail
     closed instead of publishing this repair.
     """
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _positive_int, _task_is_active, all_project_cards
 
     board_id, columns, swimlanes = writer.reader._board()
@@ -1010,7 +1010,7 @@ def restore_comment(
     writer: Any, reference: str, body: str, occurrence: int, request_id: str | None
 ) -> dict[str, Any]:
     """Append one comment and retain pending state when its reply is lost."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _CommittedWriteError, _digest, _task_number
 
     payload: dict[str, Any] = {
@@ -1053,7 +1053,7 @@ def restore_comment(
 
 def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str, Any]) -> None:
     """Finish a restore whose metadata committed before its placement failed."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _STATE_BY_COLUMN
 
     target = payload.get("target")
@@ -1082,7 +1082,7 @@ def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str
 
 def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: dict[str, Any]) -> None:
     """Prove or finish one ambiguous Card/Sprint comment before audit append."""
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _digest, _positive_int
 
     ref = str(event.get("ref") or "")
@@ -1141,7 +1141,7 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
 def _restore_placement(
     writer: Any, task: dict[str, Any], target: str, position: int | None, swimlane: str
 ) -> None:
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
     from ummanu.tasks import _nonnegative_int, _positive_int, project_card_by_reference
 
     board_id, _, swimlanes = writer.reader._board()

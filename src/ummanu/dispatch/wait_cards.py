@@ -79,7 +79,7 @@ from ummanu.dispatch.state import (
     request_token,
 )
 from ummanu.dispatch.types import HostError
-from ummanu.task_errors import TaskError
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import recorded_card_transition
 
 WAIT_STEP = "wait-card"

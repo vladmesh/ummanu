@@ -28,6 +28,7 @@ from ummanu.board.backend import SPRINT, board_client
 from ummanu.board.roles import Role
 from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, load_config
+from ummanu.kernel.errors import TaskError
 from ummanu.po import PO_SESSION_ENV
 from ummanu.runtime.paths import instance_file
 from ummanu.sprint_observer import observer_choice
@@ -38,7 +39,6 @@ from ummanu.sprints import (
     public_current_task,
 )
 from ummanu.task_commands import _add_data_dir_args, _read_body, print_task_error, resolve_data_dir
-from ummanu.task_errors import TaskError
 from ummanu.tasks import admit_role
 from ummanu.webproto.commands import (
     _EXIT_BY_CODE,

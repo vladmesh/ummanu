@@ -70,6 +70,7 @@ from ummanu.infra.github_credential import (
     bootstrap_file_owner_is_allowed,
     validate_checkpoint_credential,
 )
+from ummanu.kernel.errors import TaskError
 from ummanu.memory.client_config import (
     ClientConfigError,
     bridge_executable,
@@ -107,7 +108,6 @@ from ummanu.secret_store import (
     normalize_phrase,
 )
 from ummanu.state_repo import StateRepoError
-from ummanu.task_errors import TaskError
 from ummanu.tasks import TaskReader
 from ummanu.upgrade import (
     STEPS,

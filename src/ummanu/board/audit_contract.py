@@ -63,7 +63,7 @@ def require_claim(
     body once the comment is known to be on the card. Comparing those would turn a retry into a
     conflict.
     """
-    from ummanu.task_errors import TaskError
+    from ummanu.kernel.errors import TaskError
 
     if str(existing.get("kind") or "") != kind:
         raise TaskError("validation", _FOREIGN_CLAIM, 2)

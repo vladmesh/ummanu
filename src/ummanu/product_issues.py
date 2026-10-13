@@ -17,7 +17,7 @@ import yaml
 
 from ummanu._fsutil import file_lock, held_lock
 from ummanu.board.backend import entity_id
-from ummanu.task_errors import TaskError
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import (
     BOARD_STORE_KIND,
     _digest,

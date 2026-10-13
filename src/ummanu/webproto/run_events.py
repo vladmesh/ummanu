@@ -20,7 +20,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from ummanu.task_errors import TaskError
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import BOARD_STORE_KIND
 from ummanu.webproto.errors import RuntimeUnavailable
 from ummanu.webproto.runs import ProductRun

@@ -57,6 +57,7 @@ from ummanu.board.sprint_write import (
 )
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.dispatch.cleanup import CleanupJournal
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 from ummanu.sprint_observer import (
     EXECUTOR_FIELDS,
@@ -72,7 +73,6 @@ from ummanu.sprint_observer import (
     parse_observer,
     stored_executors,
 )
-from ummanu.task_errors import TaskError
 from ummanu.tasks import (
     BOARD_STORE_KIND,
     TaskReader,

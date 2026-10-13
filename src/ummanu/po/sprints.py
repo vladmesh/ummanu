@@ -183,8 +183,8 @@ class BoardSprintSessions:
         return SprintWriter(self._client(), data_dir=self.data_dir, instance=self.instance)
 
     def sprint(self, sprint_ref: str) -> SprintRecord | None:
+        from ummanu.kernel.errors import TaskError
         from ummanu.sprints import SprintReader
-        from ummanu.task_errors import TaskError
 
         try:
             document = SprintReader(self._client(), data_dir=self.data_dir).show(

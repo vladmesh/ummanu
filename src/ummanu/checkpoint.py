@@ -72,13 +72,13 @@ from ummanu.infra.github_credential import (
     CredentialError,
     RemoteExecution,
 )
+from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import (
     ProductIssueValidationError,
     registered_projects,
 )
 from ummanu.runtime.redact import redact
 from ummanu.state_repo import BOARD_RUNS_PATHSPEC
-from ummanu.task_errors import TaskError
 from ummanu.tasks import task_audit_for
 
 # Canonical checkpoint entries per component. `events.ndjson` is stored history: the

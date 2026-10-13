@@ -31,6 +31,7 @@ from ummanu.dispatch.state import (
     OutcomeTerminalPath,
     attempt_request_id as _attempt_request_id,
 )
+from ummanu.kernel.errors import TaskError
 from ummanu.routing_journal import (
     MODEL_UNKNOWN,
     REVIEWER,
@@ -38,7 +39,6 @@ from ummanu.routing_journal import (
     HeadRun,
     routing_head_snapshot_from_launch as _routing_head_snapshot_from_launch,
 )
-from ummanu.task_errors import TaskError
 from ummanu.tasks import specification_revision
 
 

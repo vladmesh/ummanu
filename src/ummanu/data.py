@@ -25,8 +25,8 @@ from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.board.owner_decisions import stored_decisions
 from ummanu.config import validate
+from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot
-from ummanu.task_errors import TaskError
 from ummanu.tasks import TaskReader, task_audit_for
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
@@ -247,8 +247,8 @@ def _read_board_cut(
 
 def export_sprint_entities(instance_dir: Path, client: Any = None) -> list[dict[str, Any]]:
     """Read the sprint board into deterministic checkpoint records."""
+    from ummanu.kernel.errors import TaskError
     from ummanu.sprints import SprintReader
-    from ummanu.task_errors import TaskError
 
     try:
         sprint_board = client if client is not None else board_client(instance_dir, serves=(SPRINT,))

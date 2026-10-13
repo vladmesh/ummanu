@@ -52,6 +52,7 @@ from ummanu.dispatch.observer import (
     observer_snapshot,
 )
 from ummanu.head_registry import HeadRegistryConfigError, installed_heads, installed_pair
+from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import ProductIssueStore, registered_projects
 from ummanu.sprint_close import CLOSE_NOT_DONE
 from ummanu.sprint_observer import (
@@ -76,7 +77,6 @@ from ummanu.sprints import (
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
-from ummanu.task_errors import TaskError
 from ummanu.tasks import recorded_card_transition, task_audit_for
 from ummanu.webproto import sources
 from ummanu.webproto._values import _reason

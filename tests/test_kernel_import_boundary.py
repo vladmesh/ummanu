@@ -14,7 +14,7 @@ from tests import source_trees
 
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCT = ROOT / "src" / "ummanu"
-LEAF = PRODUCT / "task_errors.py"
+LEAF = PRODUCT / "kernel" / "errors.py"
 
 
 def symbol_imports(path: Path, tree: ast.Module) -> list[str]:
@@ -71,7 +71,7 @@ class KernelImportBoundaryTests(unittest.TestCase):
         definitions = []
         for path, module in source_trees.modules(PRODUCT, naming=("class TaskError",)):
             definitions.extend(path.relative_to(ROOT).as_posix() for node in source_trees.walk(module) if isinstance(node, ast.ClassDef) and node.name == "TaskError")
-        self.assertEqual(definitions, ["src/ummanu/task_errors.py"])
+        self.assertEqual(definitions, ["src/ummanu/kernel/errors.py"])
 
     def test_board_package_has_no_symbol_barrel_or_import_hooks(self) -> None:
         tree = source_trees.parse((PRODUCT / "board" / "__init__.py").read_text())
@@ -109,15 +109,15 @@ class KernelImportBoundaryTests(unittest.TestCase):
             for name in tuple(sys.modules):
                 if name == "ummanu" or name.startswith("ummanu."):
                     del sys.modules[name]
-            leaf = importlib.import_module("ummanu.task_errors")
-            self.assertEqual({name for name in sys.modules if name.startswith("ummanu.")}, {leaf.__name__})
+            leaf = importlib.import_module("ummanu.kernel.errors")
+            self.assertEqual({name for name in sys.modules if name.startswith("ummanu.")}, {"ummanu.kernel", leaf.__name__})
             importlib.import_module("ummanu.board.models")
             forbidden = ("ummanu.tasks", "ummanu.sprints", "ummanu.dispatch", "ummanu.board.host", "ummanu.board.events", "ummanu.board.fake", "ummanu.board.sql_host", "ummanu.board.sql_cards", "ummanu.board.sql_audit", "ummanu.board.sql_sprints", "ummanu.board.sql_product_issues")
             self.assertEqual([name for name in sys.modules if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden)], [])
 
     def test_error_identity_contract_and_real_role_refusal(self) -> None:
         from ummanu.board.backend import _store_refusal
-        from ummanu.task_errors import TaskError
+        from ummanu.kernel.errors import TaskError
         from ummanu.tasks import ArtifactOwnershipTaskError, TaskError as LegacyTaskError, admit_role
 
         self.assertIs(LegacyTaskError, TaskError)

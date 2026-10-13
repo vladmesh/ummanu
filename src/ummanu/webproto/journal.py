@@ -121,7 +121,7 @@ class CommittedAudit:
         return Cursor(ref=ref, offset=ordinal)
 
     def _failures(self) -> tuple[type[BaseException], ...]:
-        from ummanu.task_errors import TaskError
+        from ummanu.kernel.errors import TaskError
 
         return (TaskError, *self._FAILURES)
 

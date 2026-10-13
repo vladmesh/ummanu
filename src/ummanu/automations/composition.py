@@ -23,10 +23,10 @@ from ummanu.board.backend import card_client
 from ummanu.board.done_retention import DoneRetentionBoard
 from ummanu.board.steward_reports import StewardReportBoard, StewardSignalBoard
 from ummanu.config import instance_data_dir
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.codex_home import bound_data_dir
 from ummanu.runtime.paths import default_instance_path
 from ummanu.runtime.state import BoardUnavailable
-from ummanu.task_errors import TaskError
 from ummanu.tasks import TaskReader, TaskWriter
 
 _SIGNAL_COMMANDS = frozenset({"scan", "precheck", "advance"})

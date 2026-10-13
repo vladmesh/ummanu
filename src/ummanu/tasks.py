@@ -126,6 +126,9 @@ from ummanu.dispatch.cleanup import (
     ownership_recovery,
     reference_lock,
 )
+
+# Preserve the class identity for existing tests and internal callers.
+from ummanu.kernel.errors import TaskError as TaskError
 from ummanu.projects.integration_base import (
     integration_base_refusal,
     seed_ref_refusal,
@@ -139,9 +142,6 @@ from ummanu.runtime.references import (
     reference_allocation_lock,
 )
 from ummanu.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
-
-# Preserve the class identity for existing tests and internal callers.
-from ummanu.task_errors import TaskError as TaskError
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient

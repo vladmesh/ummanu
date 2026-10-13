@@ -287,7 +287,7 @@ class SqlTaskAudit:
 
     @staticmethod
     def _require_same_event(existing: dict[str, Any], event: dict[str, Any]) -> None:
-        from ummanu.task_errors import TaskError
+        from ummanu.kernel.errors import TaskError
 
         if existing != event:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
@@ -308,7 +308,7 @@ class SqlTaskAudit:
             if self._record(request_id, "discarded") is not None:
                 if operation == "discard":
                     return None, None, False
-                from ummanu.task_errors import TaskError
+                from ummanu.kernel.errors import TaskError
 
                 refusal = self.refusal(request_id) or {}
                 reason = refusal.get("reason") or "no reason recorded"

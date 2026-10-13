@@ -24,9 +24,9 @@ from ummanu.dispatch.bootstrap import runtime_from_args
 from ummanu.dispatch.head_status import head_status
 from ummanu.dispatch.pause import PAUSE_MODES, normalize_pause_mode
 from ummanu.dispatch.types import DispatcherError, HostError
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.codex_home import bound_data_dir
 from ummanu.runtime.paths import add_instance_argument
-from ummanu.task_errors import TaskError
 from ummanu.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.pause_ops import PauseOperationLayer

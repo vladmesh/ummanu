@@ -44,7 +44,7 @@ from ummanu.board.origin_outbox import DELIVERED, SKIPPED, OutboxRow, outbox_for
 from ummanu.board.production_rights import DELEGATED_RESULT_INPUT, card_facts
 from ummanu.dispatch.po_delivery import deliver, open_successor
 from ummanu.dispatch.state import request_token
-from ummanu.task_errors import TaskError
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import PO_SESSION_KEY, recorded_card_transition
 
 STEP = "origin-return"

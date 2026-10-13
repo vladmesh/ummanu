@@ -26,9 +26,9 @@ from referencing.jsonschema import DRAFT202012
 #: paid four times per dashboard.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.paths import instance_file as config_file
 from ummanu.sprints import budget_thresholds, open_sprint_limit_invalid
-from ummanu.task_errors import TaskError
 
 # schema name -> file in ummanu/schemas/
 SCHEMAS = {

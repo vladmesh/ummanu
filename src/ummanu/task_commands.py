@@ -25,10 +25,10 @@ from ummanu.board.task_routing import (
 from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missing_snapshot
+from ummanu.kernel.errors import TaskError
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.runtime.head import CODEX_LAUNCH_MODES
 from ummanu.runtime.paths import add_instance_argument, instance_file, resolve_instance_path
-from ummanu.task_errors import TaskError
 from ummanu.tasks import BOARD_STORE_KIND, TaskReader, TaskWriter, task_audit_for
 
 

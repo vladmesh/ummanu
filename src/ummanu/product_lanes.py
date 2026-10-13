@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import (
     ISSUE_TYPE,
     META_ISSUE_PRODUCT,
@@ -24,7 +25,6 @@ from ummanu.product_issues import (
     product_lane_name,
     product_swimlane_id,
 )
-from ummanu.task_errors import TaskError
 from ummanu.tasks import _nonnegative_int, _positive_int, all_project_cards
 
 if TYPE_CHECKING:

@@ -15,7 +15,7 @@ from typing import Any
 
 from ummanu.dispatch.gate_receipt import GateReceipt, is_exact_sha
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
-from ummanu.task_errors import TaskError
+from ummanu.kernel.errors import TaskError
 
 ATTESTATION_FAILURE_LIMIT = 3
 

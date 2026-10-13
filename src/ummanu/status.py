@@ -35,10 +35,10 @@ from ummanu.host import (
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from ummanu.infra.checkpoint_run import load_checkpoint_state
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime import interactive_workspace
 from ummanu.secret_store import store_health
 from ummanu.sprints import SprintReader, budget_thresholds
-from ummanu.task_errors import TaskError
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient

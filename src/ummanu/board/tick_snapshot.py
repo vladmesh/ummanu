@@ -29,7 +29,7 @@ class TickSnapshot:
             self.references_by_id[number] = card["ref"]
 
     def load(self) -> None:
-        from ummanu.task_errors import TaskError
+        from ummanu.kernel.errors import TaskError
 
         self.cards = {card["ref"]: card for card in self.reader.list()}
         # Lightweight normalized test readers need only list/show. The production reader
@@ -44,7 +44,7 @@ class TickSnapshot:
             self.remember(card)
 
     def select(self, reader: Any, *, sprints: bool = False, **filters: Any) -> list[dict[str, Any]]:
-        from ummanu.task_errors import TaskError
+        from ummanu.kernel.errors import TaskError
 
         if sprints and self.sprints is None:
             self.sprints = {sprint["ref"]: sprint for sprint in reader.list(create=filters.get("create", True))}

@@ -20,7 +20,7 @@ from ummanu.dispatch.worker_continuation import (
     begin_red_transition as _begin_red_transition,
     complete_red_transition as _complete_red_transition,
 )
-from ummanu.task_errors import TaskError
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import _event_payload, assessment_resolution, specification_revision
 
 

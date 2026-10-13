@@ -331,7 +331,7 @@ class BoardEventCanon:
         return tuple(effects)
 
     def _claim(self, request_id: str, record: dict[str, Any]) -> dict[str, Any] | None:
-        from ummanu.task_errors import TaskError
+        from ummanu.kernel.errors import TaskError
 
         try:
             return self.audit.claim(request_id, record, verify=self._require_unclaimed_event_id)
