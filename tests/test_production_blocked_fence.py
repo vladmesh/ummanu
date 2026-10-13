@@ -80,7 +80,7 @@ class ProductionBlockedFenceTests(TestCase):
                         claim.reset_mock()
                         claim.return_value = {"status": "ok", "ref": candidate["ref"]}
                         with mock.patch.object(production, "_production_tasks",
-                                               side_effect=lambda _runtime, states: [candidate]
+                                               side_effect=lambda _runtime, states, card=candidate: [card]
                                                if states == {"ready"} else []):
                             result = production._production_claim_ready(
                                 runtime, records, payload, blocked_scopes=next_scopes
@@ -119,5 +119,5 @@ class ProductionBlockedFenceTests(TestCase):
             outcomes, errors, scopes = production._advance_active(SimpleNamespace(), {}, {}, cards)
         self.assertIs(outcomes[0], outcome)
         self.assertEqual(errors[0], {"ref": "alpha-1", "code": "unavailable", "message": "board unavailable"})
-        self.assertEqual(errors[1], production._unexpected_error("alpha-2", ValueError("bad step")))
+        self.assertEqual(errors[1], {"ref": "alpha-2", "code": "unexpected_error", "message": "ValueError"})
         self.assertEqual(scopes, {"sprints": set(), "projects": set()})
