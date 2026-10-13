@@ -27,8 +27,8 @@ from ummanu.backup_policy import (
     restore_plan_components,
     should_skip_data_entry,
 )
-from ummanu.backup_verify import _verify_plain_tar
-from ummanu.board.backend import CARD, SPRINT, board_client, entity_number
+from ummanu.backup_verify import _unsafe_member, _verify_plain_tar
+from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.extension_bag import EXTENSION_BAG, fold_extension_bags
 from ummanu.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
@@ -59,6 +59,7 @@ from ummanu.sprint_observer import (
     is_executable,
     parse_observer,
 )
+from ummanu.task_restore import restored_entity_number, set_restore_phase
 from ummanu.tasks import (
     TaskError,
     TaskReader,
@@ -97,19 +98,6 @@ _PRODUCT_ISSUE_METADATA = (
     "issue_priority",
     "issue_closed_reason",
 )
-
-
-def _entity_number(kind: str, identity: object) -> int:
-    """A restored row's backend number, read through the one identity parser.
-
-    `board/backend.py` mints `<kind>_<backend>_<n>` and reads it back; restore used to strip one
-    literal prefix and hand whatever remained to `int()`, which raised `ValueError` rather than a
-    restore refusal on any identity it did not recognise.
-    """
-    number = entity_number(kind, identity)
-    if number is None:
-        raise RestoreError(f"restored row carries no usable {kind} identity: {identity!r}")
-    return number
 
 
 def restore_state(data_dir: Path) -> dict[str, Any]:
@@ -161,7 +149,7 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
     _, unresolved = writer.reconcile(defer_restore_comments=True, defer_bulk_restore=True)
     if unresolved:
         raise RestoreError("board audit repair is required before restore")
-    _set_restore_phase(client, "inventory")
+    set_restore_phase(client, "inventory")
     board_id, columns, swimlanes = reader._board()
     existing = _existing_board_cards(client, board_id)
     unexpected = set(existing) - {card["reference"] for card in cards}
@@ -191,23 +179,23 @@ def _import_normalized_board(data_dir: Path, *, client: SqlCardClient, instance:
         existing=existing,
         request_prefix=prefix,
     )
-    _set_restore_phase(client, "proof")
+    set_restore_phase(client, "proof")
     setup = reader.restore_snapshot()
     _require_card_snapshot(data_dir, cards, setup)
     from ummanu.task_restore import commit_restored_cards
 
     commit_restored_cards(writer, ordered_cards, setup, request_prefix=prefix)
-    _set_restore_phase(client, "proof")
+    set_restore_phase(client, "proof")
     _restore_card_comments_batched(writer, ordered_cards, setup, prefix)
     from ummanu.task_restore import close_restored_cards_batched
 
     close_restored_cards_batched(client, ordered_cards, setup, board_id=board_id)
-    _set_restore_phase(client, "closure")
+    set_restore_phase(client, "closure")
     post_close = reader.restore_snapshot()
     _require_card_snapshot(data_dir, cards, post_close)
-    _set_restore_phase(client, "order")
+    set_restore_phase(client, "order")
     _reconcile_restored_order(writer, cards, post_close, prefix)
-    _set_restore_phase(client, "final_parity")
+    set_restore_phase(client, "final_parity")
     actual = reader.restore_snapshot()
     _require_card_snapshot(data_dir, cards, actual)
     if any(_core_from_live(actual[card["reference"]]) != _core_from_export(card) for card in cards):
@@ -264,13 +252,6 @@ def _restore_board_history(data_dir: Path, audit: Any) -> None:
             audit.append(request_id, event, restoring=True)
         except TaskError as exc:
             raise RestoreError(f"normalized board audit restore failed: {exc.message}") from None
-
-
-def _set_restore_phase(client: Any, phase: str) -> None:
-    """Mark a restore boundary when a diagnostic client provides a phase observer."""
-    hook = getattr(client, "set_restore_phase", None)
-    if callable(hook):
-        hook(phase)
 
 
 def _existing_sprints(
@@ -354,7 +335,7 @@ def _restore_card_comments_batched(
         current = live.get(reference)
         if current is None:
             raise RestoreError(f"restored card disappeared before comment recovery: {reference}")
-        task_id = _entity_number("task", current["id"])
+        task_id = restored_entity_number("task", current["id"], error=RestoreError)
         occurrences: dict[str, int] = {}
         for index, body in enumerate(_restore_comments(card)):
             occurrence = occurrences.get(body, 0)
@@ -495,7 +476,7 @@ def _restore_sprint_comments_batched(
         current = live.get(reference)
         if current is None:
             raise RestoreError(f"restored sprint disappeared before comment recovery: {reference}")
-        task_id = _entity_number("sprint", current["id"])
+        task_id = restored_entity_number("sprint", current["id"], error=RestoreError)
         occurrences: dict[str, int] = {}
         for index, entry in enumerate(sprint["comments"]):
             body = str(entry["text"])
@@ -1579,18 +1560,6 @@ def _next_steps(components: tuple[dict[str, str], ...]) -> list[str]:
 def _reject_existing_target(target: Path) -> None:
     if target.exists():
         raise RestoreError(f"target data root already exists: {target}")
-
-
-def _unsafe_member(member: tarfile.TarInfo) -> bool:
-    path = Path(member.name)
-    return (
-        path.is_absolute()
-        or ".." in path.parts
-        or member.issym()
-        or member.islnk()
-        or member.isdev()
-        or member.isfifo()
-    )
 
 
 def _allowed_data_path(relative: str, policy: BackupPolicy) -> bool:

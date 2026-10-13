@@ -591,6 +591,9 @@ class FakeCatalog:
 class FakeHost:
     def __init__(self, root: Path, catalog: FakeCatalog | None = None) -> None:
         self.root = root
+        # The borrowed prompt builders keep report/verdict bodies under the data dir, as the real
+        # host does; the fixtures' UMMANU_DISPATCHER_BODY_DIR override still decides the directory.
+        self.data_dir = root
         # Exercise gate attestation and head observation through the production policy.
         # The recording verbs below simulate effects; they are not a noop policy host.
         self.mode = "real"

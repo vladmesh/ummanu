@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ummanu._fsutil import fsync_directory
+
 QUEUE_DIR_NAME = "po-queue"
 REFUSED_DIR_NAME = "refused"
 SUFFIX = ".json"
@@ -78,14 +80,6 @@ class QueuedInput:
         return document
 
 
-def _fsync_directory(directory: Path) -> None:
-    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def write_durably(path: Path, payload: str, *, mode: int = 0o600) -> None:
     """tmp + fsync + rename + directory fsync: after return the file survives a crash of this host."""
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -97,7 +91,7 @@ def write_durably(path: Path, payload: str, *, mode: int = 0o600) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         temporary = ""
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
     finally:
         if temporary:
             try:
@@ -207,7 +201,7 @@ class PoQueue:
         """Drop an input whose turn exists in the store. Removing one already gone is not an error."""
         try:
             (self.directory / item.name).unlink()
-            _fsync_directory(self.directory)
+            fsync_directory(self.directory)
         except FileNotFoundError:
             pass
         except OSError as exc:

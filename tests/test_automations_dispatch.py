@@ -126,13 +126,20 @@ class TriggeredDispatchTests(unittest.TestCase):
             dispatch._steward_report_card("steward", "hourly", report_board=reports),
             "ummanu-report-1",
         )
-        dispatch._release_steward_report(state, "tick", cmd, "not dispatched", report_board=reports)
-        dispatch._escalate_steward_preflight_failure(
-            state, "tick", cmd, RuntimeError("preflight"), report_board=reports
-        )
+        ticks = dispatch._TickReports("steward", state, "tick", report_board=reports)
+        ticks.undispatched(cmd, "not dispatched")
+        ticks.preflight_failed(cmd, RuntimeError("preflight"))
 
         self.assertEqual(len(reports.created), 1)
         self.assertEqual([move[1] for move in reports.moves], ["done", "blocked"])
+        self.assertEqual(
+            [entry.kwargs for entry in state.log_run.call_args_list],
+            [
+                {"action": "dispatch-release", "result": "done", "reference": "ummanu-report-1"},
+                {"action": "dispatch-preflight", "result": "blocked", "reference": "ummanu-report-1",
+                 "error": "preflight"},
+            ],
+        )
 
 
 class StandingHeadReadinessTests(unittest.TestCase):

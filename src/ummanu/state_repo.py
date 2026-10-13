@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ummanu import _proc
 from ummanu._fsutil import file_lock
@@ -327,13 +328,96 @@ def run_as_git_child(
         raise StateRepoError(f"{label} failed: {exc}") from None
 
 
-def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120) -> str:
-    """Run a required instance-repository Git command and return its stdout."""
-    result = run_git(instance_dir, args, label=label, timeout=timeout)
+def git_failure_detail(
+    result: subprocess.CompletedProcess[Any], *, fallback: str = "git error", stdout: bool = True
+) -> str:
+    """The last line Git printed on stderr (else stdout), which every Git failure message quotes."""
+    output = result.stderr or (result.stdout if stdout else None) or ""
+    if isinstance(output, bytes):
+        output = output.decode("utf-8", "replace")
+    detail = output.strip().splitlines()
+    return detail[-1] if detail else fallback
+
+
+def run_git_checked(
+    instance_dir: Path,
+    args: list[str],
+    *,
+    label: str,
+    error: type[Exception] = StateRepoError,
+    timeout: float = 120,
+    input: str | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """:func:`run_git` for a command that must succeed, failing as the caller's own `error` class.
+
+    A non-zero exit raises ``error("<label> failed: <Git's last line>")``; a runner failure (Git
+    missing, a timeout) raises ``error`` with the runner's own text.
+    """
+    try:
+        result = run_git(instance_dir, args, label=label, timeout=timeout, extra_env=extra_env, input=input)
+    except StateRepoError as exc:
+        if error is StateRepoError:
+            raise
+        raise error(str(exc)) from None
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise StateRepoError(f"{label} failed: {detail[-1] if detail else 'git error'}")
-    return result.stdout
+        raise error(f"{label} failed: {git_failure_detail(result)}")
+    return result
+
+
+def git(
+    instance_dir: Path,
+    args: list[str],
+    *,
+    label: str,
+    timeout: float = 120,
+    error: type[Exception] = StateRepoError,
+    input: str | None = None,
+) -> str:
+    """Run a required instance-repository Git command and return its stdout."""
+    return run_git_checked(instance_dir, args, label=label, error=error, timeout=timeout, input=input).stdout
+
+
+def read_blobs(
+    instance_dir: Path,
+    oids: list[str],
+    *,
+    git_args: list[str],
+    error: type[Exception] = StateRepoError,
+    label: str = "snapshot blobs",
+) -> dict[str, bytes]:
+    """The bytes of each blob, read in one `cat-file --batch` (the text runner would alter them).
+
+    `git_args` precede `cat-file` (``--git-dir <repo>`` for a bare repository). Output that ends
+    before a header or a body it announced (a truncated or interrupted read) is refused as
+    ``error``, never an index error or a short blob.
+    """
+    try:
+        result = run_git_bytes(
+            instance_dir,
+            [*git_args, "cat-file", "--batch"],
+            label=label,
+            input="".join(f"{oid}\n" for oid in oids).encode(),
+        )
+    except StateRepoError as exc:
+        if error is StateRepoError:
+            raise
+        raise error(str(exc)) from None
+    if result.returncode != 0:
+        raise error(f"{label} failed: {git_failure_detail(result, stdout=False)}")
+    payload, offset = result.stdout, 0
+    blobs: dict[str, bytes] = {}
+    for oid in oids:
+        end = payload.find(b"\n", offset)
+        header = payload[offset:end].decode("ascii", "replace").split() if end >= 0 else []
+        if len(header) != 3 or header[1] != "blob" or not header[2].isdigit():
+            raise error(f"{label} failed: {oid} is not a blob")
+        size = int(header[2])
+        if end + 1 + size > len(payload):
+            raise error(f"{label} failed: {oid} is truncated")
+        blobs[oid] = payload[end + 1 : end + 1 + size]
+        offset = end + 1 + size + 1
+    return blobs
 
 
 def _make_repo_user_owned(path: Path, instance_dir: Path) -> None:
@@ -367,8 +451,7 @@ def packing_controls(instance_dir: Path) -> dict[str, str | None]:
     for key, _ in PACKING_CONTROLS:
         result = run_git(instance, ["config", "--local", "--get-all", key], label=f"inspect {key}")
         if result.returncode not in {0, 1}:
-            detail = (result.stderr or result.stdout or "").strip().splitlines()
-            raise StateRepoError(f"inspect {key} failed: {detail[-1] if detail else 'git error'}")
+            raise StateRepoError(f"inspect {key} failed: {git_failure_detail(result)}")
         values[key] = result.stdout.strip() if result.returncode == 0 else None
     return values
 

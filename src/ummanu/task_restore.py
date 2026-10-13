@@ -39,16 +39,21 @@ class RestoreCardObligation:
     identity: dict[str, Any]
 
 
-def _entity_number(kind: str, identity: object) -> int:
-    """A live row's backend number, read through `board/backend.py`'s one identity parser."""
+def restored_entity_number(kind: str, identity: object, *, error: type[Exception] = RuntimeError) -> int:
+    """A restored row's backend number, read through `board/backend.py`'s one identity parser.
+
+    `board/backend.py` mints `<kind>_<backend>_<n>` and reads it back; restore used to strip one
+    literal prefix and hand whatever remained to `int()`, which raised `ValueError` rather than a
+    restore refusal on any identity it did not recognise. The refusal is raised as `error`.
+    """
     number = entity_number(kind, identity)
     if number is None:
-        raise RuntimeError(f"restored row carries no usable {kind} identity: {identity!r}")
+        raise error(f"restored row carries no usable {kind} identity: {identity!r}")
     return number
 
 
-def _set_restore_phase(client: Any, phase: str) -> None:
-    """Expose restore phase boundaries to an optional benchmark observer."""
+def set_restore_phase(client: Any, phase: str) -> None:
+    """Mark a restore boundary when a diagnostic client provides a phase observer."""
     hook = getattr(client, "set_restore_phase", None)
     if callable(hook):
         hook(phase)
@@ -164,7 +169,7 @@ def restore_cards_batched(
     )
     create_entries = [(item, "createTask", _restore_create_payload(item, board_id)) for item in missing]
 
-    _set_restore_phase(writer.client, "audit")
+    set_restore_phase(writer.client, "audit")
     for item in obligations:
         reference = str(item.card["reference"])
         committed = writer.audit.committed_event(item.request_id)
@@ -207,7 +212,7 @@ def restore_cards_batched(
     if missing:
         calls = [(method, payload) for _item, method, payload in create_entries]
         definite_create_failure = False
-        _set_restore_phase(writer.client, "create")
+        set_restore_phase(writer.client, "create")
         try:
             answers = writer.client.call_batch(calls)
             if any(_positive_int(answer) is None for answer in answers):
@@ -218,7 +223,7 @@ def restore_cards_batched(
             if refused_in_transaction(writer.client, exc):
                 raise store_refusal("card create batch", exc) from None
             # Transport loss or a malformed/incomplete aggregate answer is genuinely ambiguous.
-        _set_restore_phase(writer.client, "proof")
+        set_restore_phase(writer.client, "proof")
         existing = _restore_inventory(writer.client, board_id)
         _validate_restore_inventory(existing, obligations)
         absent = [
@@ -250,7 +255,7 @@ def restore_cards_batched(
             )
 
     task_ids = [_restore_task_id(existing, item) for item in obligations]
-    _set_restore_phase(writer.client, "metadata_state")
+    set_restore_phase(writer.client, "metadata_state")
     metadata_answers = writer.client.call_batch(
         ("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids
     )
@@ -307,7 +312,7 @@ def restore_cards_batched(
                 raise store_refusal("card metadata/state batch", exc) from None
             # Reconcile genuinely uncertain aggregate outcomes from fresh evidence below.
 
-    _set_restore_phase(writer.client, "proof")
+    set_restore_phase(writer.client, "proof")
     proved_rows = _restore_inventory(writer.client, board_id)
     _validate_restore_inventory(proved_rows, obligations)
     proved_ids = [_restore_task_id(proved_rows, item) for item in obligations]
@@ -353,13 +358,13 @@ def close_restored_cards_batched(
     for card in cards:
         row = live[str(card["reference"])]
         if card.get("closed") and not row.get("closed"):
-            task_id = _entity_number("task", row["id"])
+            task_id = restored_entity_number("task", row["id"])
             entries.append((card, "closeTask", {"task_id": task_id}))
     if not entries:
         return
     owed = [int(payload["task_id"]) for _card, _method, payload in entries]
     definite_failure = False
-    _set_restore_phase(client, "closure")
+    set_restore_phase(client, "closure")
     try:
         answers = client.call_batch((method, payload) for _card, method, payload in entries)
         if any(answer is not True for answer in answers):
@@ -370,7 +375,7 @@ def close_restored_cards_batched(
         if refused_in_transaction(client, exc):
             raise store_refusal("card closure batch", exc) from None
         # Transport loss or an invalid aggregate answer needs an authoritative read.
-    _set_restore_phase(client, "proof")
+    set_restore_phase(client, "proof")
     rows = _restore_inventory(client, board_id)
     active_ids = {
         int(row["id"]) for row in rows.values() if _task_is_active(row) and str(row.get("id") or "").isdigit()
@@ -380,7 +385,7 @@ def close_restored_cards_batched(
         reference = next(
             str(card["reference"])
             for card in cards
-            if _entity_number("task", live[str(card["reference"])]["id"]) == incomplete[0]
+            if restored_entity_number("task", live[str(card["reference"])]["id"]) == incomplete[0]
         )
         if definite_failure:
             raise TaskError("backend_error", f"board store rejected restored-card closure for {reference}", 1)
@@ -395,7 +400,7 @@ def commit_restored_cards(
     request_prefix: str,
 ) -> None:
     """Publish one card obligation after its initialized row is authoritatively visible."""
-    _set_restore_phase(writer.client, "audit")
+    set_restore_phase(writer.client, "audit")
     for card in cards:
         reference = str(card["reference"])
         request_id = f"{request_prefix}card:{reference}"
@@ -404,7 +409,7 @@ def commit_restored_cards(
         event = writer.audit.pending_event(request_id)
         if event is None or event.get("kind") != "restored_bulk":
             raise RuntimeError(f"restored card has no durable obligation: {reference}")
-        task_id = _entity_number("task", live[reference]["id"])
+        task_id = restored_entity_number("task", live[reference]["id"])
         backend = BOARD_STORE_KIND
         event["task_id"] = entity_id("task", task_id)
         event["backend"]["kind"] = backend

@@ -429,6 +429,28 @@ class HostBehaviourContractTests(unittest.TestCase):
         removal.assert_not_called()
 
 
+    def test_teardown_refuses_a_head_run_with_a_null_task_ref_by_name(self) -> None:
+        """ummanu-241: `task_ref: null` in a stored head run raised `AttributeError` out of
+        `.get` on None; it is a refusal naming the record and the run instead."""
+        real = CommandHostRuntime(
+            FakeCatalog(), self.root / "data", mode="real", production_runtime=registered_production_runtime(self.root)
+        )
+        record = self._supervised_record()
+        record.worker_head_run = {**record.worker_head_run, "task_ref": None}
+        cleanup = mock.Mock()
+        real.cleanup_owner = SimpleNamespace(runtime=SimpleNamespace(reader=SimpleNamespace(show=dict)),
+                                             cleanup=cleanup, _state=dict)
+        with (
+            mock.patch.object(GitWorkspaceManager, "teardown") as removal,
+            self.assertRaisesRegex(
+                HostError, rf"cleanup refuses the dispatcher record of {record.worker}: its worker head run "
+                r"carries task_ref None"
+            ),
+        ):
+            real.teardown(record)
+        cleanup.assert_not_called()
+        removal.assert_not_called()
+
 class RuntimeWiringContractTests(unittest.TestCase):
     def test_production_unit_puts_local_bin_on_path(self) -> None:
         """The dispatcher shells out to `orca` by bare name. systemd starts with a minimal PATH, so

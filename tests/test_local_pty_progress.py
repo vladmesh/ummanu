@@ -11,8 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ummanu.runtime.head.local_pty import protocol
-from ummanu.runtime.head.local_pty import supervisor as module
+from ummanu.runtime.head.local_pty import protocol, supervisor as module
 from ummanu.runtime.redact import scrub_secrets
 
 FIXTURES = Path(__file__).parent / "fixtures" / "local_pty_recorded"
@@ -102,7 +101,7 @@ class ProgressFoldTests(unittest.TestCase):
     def test_folded_windows_are_reported_when_a_turn_ends(self) -> None:
         self._window(b"\x1b[1;1H\x1b[2KThinking 1s")
         self._window(b"\x1b[1;1H\x1b[2KThinking 2s")
-        self.supervisor._last_output_at = time.time() - 3
+        self.supervisor._last_output_at = time.monotonic() - 3
         self.supervisor._tick()
         finished = [fields for kind, fields in self.events if kind == module.TURN_FINISHED]
         self.assertEqual(len(finished), 1)

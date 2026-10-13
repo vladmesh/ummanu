@@ -374,118 +374,40 @@ def _memory_heartbeat(run: HeadRun, command: str) -> str:
     )
 
 
-def _recover_steward_dispatch_failure(
+def _move_report(
     state: AgentState,
     event: str,
-    cmd: DispatchCommand,
-    failure: BaseException,
+    reference: str | None,
     *,
-    report_board: StewardReportBoard | None = None,
+    target: Literal["done", "blocked"],
+    reason: str,
+    action: str,
+    report_board: StewardReportBoard | None,
+    cause: BaseException | None = None,
 ) -> None:
-    """Close out a steward report card whose head was brought up but never took the run."""
-    if not cmd.card_ref:
-        return
-    state.clear_active_report(cmd.card_ref)
-    body = f"steward dispatch failed before the head accepted the report-card run.\n\nfailure: {failure}"
-    try:
-        if report_board is None:
-            raise RuntimeError("steward report board must be supplied by the composition root")
-        report_board.move_report(reference=cmd.card_ref, target="done", reason=body)
-        state.log_run(event, action="dispatch-recovery", result="done", reference=cmd.card_ref)
-    except Exception as recovery_error:  # noqa: BLE001 - a failed recovery is logged, not raised
-        state.log_run(
-            event,
-            action="dispatch-recovery",
-            result="failed",
-            reference=cmd.card_ref,
-            error=str(recovery_error),
-        )
+    """Settle one steward report card no head will write: forget it, move it, log the outcome.
 
-
-def _release_steward_report(
-    state: AgentState,
-    event: str,
-    cmd: DispatchCommand,
-    note: str,
-    *,
-    report_board: StewardReportBoard | None = None,
-) -> None:
-    """Close a tick's unwritten steward report with the reason no head received it."""
-    if not cmd.card_ref:
-        return
-    state.clear_active_report(cmd.card_ref)
-    try:
-        if report_board is None:
-            raise RuntimeError("steward report board must be supplied by the composition root")
-        report_board.move_report(reference=cmd.card_ref, target="done", reason=note)
-        state.log_run(event, action="dispatch-release", result="done", reference=cmd.card_ref)
-    except Exception as error:  # noqa: BLE001 - a failed release is logged, not raised
-        state.log_run(
-            event, action="dispatch-release", result="failed", reference=cmd.card_ref, error=str(error)
-        )
-
-
-def _escalate_steward_preflight_failure(
-    state: AgentState,
-    event: str,
-    cmd: DispatchCommand,
-    failure: BaseException,
-    *,
-    report_board: StewardReportBoard | None = None,
-) -> None:
-    """Block a steward report when workspace preflight fails before launch.
-
-    If moving the card fails, log the reason without masking the preflight cause.
+    A failed move is logged, never raised, so the caller's own outcome stands. `cause` is the
+    failure the move answers when the log names it (a preflight escalation); without it the reason
+    alone carries the story. A reference of None or "" means there is no card to settle.
     """
-    if not cmd.card_ref:
-        return
-    state.clear_active_report(cmd.card_ref)
-    body = (
-        "steward dispatch could not prepare the head workspace, so no head was started "
-        "and no sweep ran.\n\n"
-        f"failure: {failure}"
-    )
-    try:
-        if report_board is None:
-            raise RuntimeError("steward report board must be supplied by the composition root")
-        report_board.move_report(reference=cmd.card_ref, target="blocked", reason=body)
-        state.log_run(
-            event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref, error=str(failure)
-        )
-    except Exception as escalation_error:  # noqa: BLE001 - a failed escalation is logged, not raised
-        state.log_run(
-            event,
-            action="dispatch-preflight",
-            result="failed",
-            reference=cmd.card_ref,
-            error=f"{failure} (escalation failed: {escalation_error})",
-        )
-
-
-def _release_standing_report(
-    state: AgentState,
-    event: str,
-    note: str,
-    *,
-    report_board: StewardReportBoard | None = None,
-) -> None:
-    """Close the active steward report whose head is no longer recorded.
-
-    Other roles have no reporting contract and leave an empty record untouched.
-    """
-    reference = (state.load_active_report() or {}).get("reference")
     if not reference:
         return
     state.clear_active_report(reference)
     try:
         if report_board is None:
             raise RuntimeError("steward report board must be supplied by the composition root")
-        report_board.move_report(reference=reference, target="done", reason=note)
-        state.log_run(event, action="owner-report-release", result="done", reference=reference)
-    except Exception as error:  # noqa: BLE001 - a failed release is logged, not raised
-        state.log_run(
-            event, action="owner-report-release", result="failed", reference=reference, error=str(error)
-        )
+        report_board.move_report(reference=reference, target=target, reason=reason)
+        named = {} if cause is None else {"error": str(cause)}
+        state.log_run(event, action=action, result=target, reference=reference, **named)
+    except Exception as error:  # noqa: BLE001 - a failed move is logged, not raised
+        detail = str(error) if cause is None else f"{cause} (escalation failed: {error})"
+        state.log_run(event, action=action, result="failed", reference=reference, error=detail)
+
+
+def _active_reference(state: AgentState) -> str | None:
+    """The standing steward report this role recorded; other roles have no reporting contract."""
+    return (state.load_active_report() or {}).get("reference")
 
 
 class _TickReports:
@@ -558,18 +480,30 @@ class _TickReports:
         self.settled = True
 
     def undispatched(self, cmd: DispatchCommand, note: str) -> None:
-        _release_steward_report(self.state, self.event, cmd, note, report_board=self.report_board)
+        _move_report(self.state, self.event, cmd.card_ref, target="done", reason=note,
+                     action="dispatch-release", report_board=self.report_board)
         self.settled = True
 
     def failed(self, cmd: DispatchCommand, failure: BaseException) -> None:
-        _recover_steward_dispatch_failure(
-            self.state, self.event, cmd, failure, report_board=self.report_board
+        _move_report(
+            self.state, self.event, cmd.card_ref, target="done",
+            reason=(
+                "steward dispatch failed before the head accepted the report-card run.\n\n"
+                f"failure: {failure}"
+            ),
+            action="dispatch-recovery", report_board=self.report_board,
         )
         self.settled = True
 
     def preflight_failed(self, cmd: DispatchCommand, failure: BaseException) -> None:
-        _escalate_steward_preflight_failure(
-            self.state, self.event, cmd, failure, report_board=self.report_board
+        _move_report(
+            self.state, self.event, cmd.card_ref, target="blocked",
+            reason=(
+                "steward dispatch could not prepare the head workspace, so no head was started "
+                "and no sweep ran.\n\n"
+                f"failure: {failure}"
+            ),
+            action="dispatch-preflight", report_board=self.report_board, cause=failure,
         )
         self.settled = True
 
@@ -590,11 +524,14 @@ class _TickReports:
                 return
         except Exception:  # noqa: BLE001 - an unreadable head record leaves the report alone
             return
-        _release_standing_report(
+        _move_report(
             self.state,
             self.event,
-            "the head that was writing this report is no longer this role's recorded head, so "
+            _active_reference(self.state),
+            target="done",
+            reason="the head that was writing this report is no longer this role's recorded head, so "
             "the report was closed unwritten by the tick that found it ownerless.",
+            action="owner-report-release",
             report_board=self.report_board,
         )
 
@@ -712,11 +649,14 @@ def _retire_idle_head(
     _forget_stopped_head(runtime, run)
     state.log_run(event, action=SUPERVISED_IDLE_STOP, reference=run.run_id, idle_seconds=int(idle))
     print(f"dispatch[{agent}]: retired the idle head {run.run_id} after {int(idle)}s")
-    _release_standing_report(
+    _move_report(
         state,
         event,
-        "the head that was writing this report finished its turn and was retired idle, "
+        _active_reference(state),
+        target="done",
+        reason="the head that was writing this report finished its turn and was retired idle, "
         "so the report was closed by the tick that raised its successor.",
+        action="owner-report-release",
         report_board=reports.report_board,
     )
 
@@ -798,11 +738,14 @@ def _retire_refused_head(
         error=f"{resource or '(unnamed resource)'} refused the turn: {summary}; red until {until_text(until)}",
     )
     print(f"dispatch[{agent}]: {resource} refused head {run.run_id} ({summary}); red until {until_text(until)}")
-    _release_standing_report(
+    _move_report(
         state,
         event,
-        f"the head writing this report was refused by its provider ({resource}: {summary}), so it was "
-        "retired and the role was raised on the next head of its chain.",
+        _active_reference(state),
+        target="done",
+        reason=f"the head writing this report was refused by its provider ({resource}: {summary}), so it "
+        "was retired and the role was raised on the next head of its chain.",
+        action="owner-report-release",
         report_board=reports.report_board,
     )
 

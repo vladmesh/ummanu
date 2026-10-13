@@ -1247,6 +1247,9 @@ class SerialisationTests(unittest.TestCase):
             {**base, "updated_at": None},
             {**base, "updated_at": float("nan")},
             {**base, "suspected_since": "300"},
+            # An integer beyond the float range: float() raises OverflowError, refused as inf.
+            {**base, "updated_at": 10**400},
+            {**base, "unavailable_since": {"provider_cursor": 10**400}},
         ]
         for payload in cases:
             with self.subTest(payload=payload), self.assertRaises(HeadVitalityError):

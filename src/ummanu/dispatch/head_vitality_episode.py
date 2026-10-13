@@ -130,7 +130,11 @@ def _finite_timestamp(value: Any, name: str) -> float:
     """Validate one epoch-seconds field shared by construction and deserialisation."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise HeadVitalityError(f"vitality episode {name} is a number")
-    stamp = float(value)
+    try:
+        stamp = float(value)
+    except OverflowError:
+        # An integer beyond the float range (a damaged file) is as unusable as inf.
+        raise HeadVitalityError(f"vitality episode {name} is finite and not negative") from None
     if not math.isfinite(stamp) or stamp < 0:
         raise HeadVitalityError(f"vitality episode {name} is finite and not negative")
     return stamp
