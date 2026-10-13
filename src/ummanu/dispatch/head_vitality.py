@@ -100,6 +100,11 @@ class SnapshotSource(StrEnum):
     SUPERVISOR_JOURNAL = "supervisor_journal"
 
 
+# Reducer/guard safety vocabulary, deliberately provider-only. Child and journal
+# advancement have separate clocks and must not bypass dark-source or outer ceilings.
+PROGRESS_SOURCES = frozenset({SnapshotSource.PROVIDER_CURSOR.value})
+
+
 @dataclass(frozen=True)
 class VitalitySnapshot:
     """One channel's reading of one head run at one instant."""
@@ -646,6 +651,17 @@ def _parse_child_cursor(
     except ValueError:
         return None
     return uptime, total_cpu, total_io, counters
+
+
+def status_has_vitality_observation(status: Any) -> bool:
+    """Whether any supported channel was observed, including unavailable journal answers."""
+    return isinstance(status, dict) and (
+        isinstance(status.get("pid_status"), dict)
+        or isinstance(status.get("provider_progress"), dict)
+        or "idle" in status
+        or isinstance(status.get("child_activity"), dict)
+        or "supervisor_journal" in status
+    )
 
 
 def snapshots_from_status(

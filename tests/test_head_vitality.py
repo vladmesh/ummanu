@@ -27,6 +27,8 @@ from ummanu.dispatch.head_vitality import (
     SourceAvailability,
     TurnState,
     VitalitySnapshot,
+    snapshots_from_status,
+    status_has_vitality_observation,
 )
 from ummanu.dispatch.watchdog import (
     HEARTBEAT_DEAD,
@@ -36,6 +38,20 @@ from ummanu.dispatch.watchdog import (
 from ummanu.runtime.head import identity, with_pid_heartbeat
 
 RUN_ID = "run-1"
+
+
+class StatusObservationTests(unittest.TestCase):
+    def test_observation_predicate_matches_converter_for_all_source_shapes(self) -> None:
+        for key in ("pid_status", "provider_progress", "idle", "child_activity", "supervisor_journal"):
+            for payload in ({}, None, [], "broken", False):
+                status = {key: payload}
+                with self.subTest(key=key, payload=payload):
+                    self.assertEqual(status_has_vitality_observation(status),
+                                     bool(snapshots_from_status(status, run_id=RUN_ID, observed_at=1.0)))
+        for status in (None, [], "broken", {}, {"reason": "unavailable"}):
+            with self.subTest(status=status):
+                self.assertFalse(status_has_vitality_observation(status))
+                self.assertEqual(snapshots_from_status(status, run_id=RUN_ID, observed_at=1.0), [])
 
 
 def _heartbeat_identity(run_id: str = RUN_ID) -> dict[str, str]:

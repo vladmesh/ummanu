@@ -119,6 +119,7 @@ unit tests/test_head_spec.py
 unit tests/test_head_registry_location.py
 unit tests/test_head_status_command.py
 unit tests/test_head_vitality.py
+unit tests/test_vitality_observation_seam.py
 integration-heads tests/test_head_vitality_child_activity.py
 integration-heads tests/test_head_vitality_child_respawn.py
 unit tests/test_head_vitality_episode.py
