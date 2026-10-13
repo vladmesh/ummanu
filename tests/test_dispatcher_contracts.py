@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
+from tests import source_trees
 from tests.dispatcher_fixtures import card_audit
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
@@ -127,7 +128,7 @@ def _runtime_trees() -> list[ast.AST]:
     host's own use of the real catalog, not the surface the doubles have to cover."""
     trees: list[ast.AST] = []
     for module in _RUNTIME_MODULES:
-        tree = ast.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))
+        tree = source_trees.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))
         if module is dispatcher_module:
             trees.extend(
                 node
@@ -163,7 +164,7 @@ def _declares(cls, name: str) -> bool:
     if hasattr(cls, name):
         return True
     try:
-        tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+        tree = source_trees.parse(textwrap.dedent(inspect.getsource(cls)))
     except (OSError, TypeError, SyntaxError):
         return False
     return any(
@@ -247,7 +248,7 @@ class HostSurfaceContractTests(unittest.TestCase):
     def test_host_internal_catalog_calls_exist_on_the_real_catalog(self) -> None:
         """`CommandHostRuntime` drives the catalog itself when launching a head. No double covers
         that path (the launcher tests use the real classes), but a rename must still fail here."""
-        tree = ast.parse(Path(inspect.getsourcefile(dispatcher_host_module)).read_text(encoding="utf-8"))
+        tree = source_trees.parse(Path(inspect.getsourcefile(dispatcher_host_module)).read_text(encoding="utf-8"))
         host_class = next(
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "CommandHostRuntime"
         )

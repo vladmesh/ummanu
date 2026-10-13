@@ -631,9 +631,5 @@ class SeamGrepTests(unittest.TestCase):
         self.assertEqual(offenders, [], f"head command assembly outside the head package: {offenders}")
 
 
-def tearDownModule() -> None:
-    source_trees.clear()
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -33,6 +33,7 @@ from types import ModuleType
 from typing import Any
 from unittest import mock
 
+from tests import source_trees
 from ummanu.web.app import ROUTES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -515,7 +516,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         follows redirects and reads the proxy environment — would be a request that could leave the
         installation the caller named, so neither may exist anywhere in this file.
         """
-        tree = ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT))
+        tree = source_trees.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT))
         fetch = next(
             node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "fetch"
         )
@@ -1738,11 +1739,11 @@ class MeasurementScriptDocumentationTests(unittest.TestCase):
         source = SCRIPT.read_text(encoding="utf-8")
         imported = {
             (node.module or "").split(".")[0]
-            for node in ast.walk(ast.parse(source, filename=str(SCRIPT)))
+            for node in ast.walk(source_trees.parse(source, filename=str(SCRIPT)))
             if isinstance(node, ast.ImportFrom)
         } | {
             alias.name.split(".")[0]
-            for node in ast.walk(ast.parse(source, filename=str(SCRIPT)))
+            for node in ast.walk(source_trees.parse(source, filename=str(SCRIPT)))
             if isinstance(node, ast.Import)
             for alias in node.names
         }

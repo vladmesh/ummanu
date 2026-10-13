@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
+from tests import source_trees
 from ummanu import bootstrap, installation, restore, upgrade
 from ummanu.config import validate_instance
 from ummanu.dispatch import commands, production
@@ -142,7 +143,7 @@ class EmbedderEnvironmentTests(unittest.TestCase):
     HUB_MODULES = ("fastembed", "huggingface_hub")
 
     def test_memory_service_sets_the_variable_before_its_first_third_party_import(self) -> None:
-        tree = ast.parse((SOURCE / "memory_service.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse((SOURCE / "memory_service.py").read_text(encoding="utf-8"))
         setting = next(
             index
             for index, node in enumerate(tree.body)
@@ -173,8 +174,9 @@ class EmbedderEnvironmentTests(unittest.TestCase):
     def test_no_other_module_imports_the_embedding_stack(self) -> None:
         """One place sets it: every embedder (service, reindex, recover) is built through `memory_service`."""
         importers = set()
-        for path in SOURCE.rglob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        # An import of the stack spells its top-level name, so no other file can import it.
+        for path, tree in source_trees.modules(SOURCE, naming=self.HUB_MODULES):
+            for node in source_trees.imports(tree):
                 names = (
                     [alias.name for alias in node.names]
                     if isinstance(node, ast.Import)
@@ -185,7 +187,7 @@ class EmbedderEnvironmentTests(unittest.TestCase):
                 if any(name.split(".")[0] in self.HUB_MODULES for name in names):
                     importers.add(path.relative_to(SOURCE).as_posix())
         self.assertEqual(importers, {"memory_service.py"})
-        reindex = ast.parse((SOURCE / "memory_reindex.py").read_text(encoding="utf-8"))
+        reindex = source_trees.parse((SOURCE / "memory_reindex.py").read_text(encoding="utf-8"))
         self.assertIn(
             "memory_service",
             [alias.name for node in reindex.body if isinstance(node, ast.ImportFrom) for alias in node.names],
@@ -889,7 +891,7 @@ class EmbedderReleaseTests(unittest.TestCase):
         self.assertNotEqual(restore.restore_state(self.data).get("memory_index"), "complete")
 
     def test_recover_asks_for_the_isolated_rebuild_at_every_call(self) -> None:
-        tree = ast.parse((SOURCE / "installation.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse((SOURCE / "installation.py").read_text(encoding="utf-8"))
         calls = [
             node
             for node in ast.walk(tree)

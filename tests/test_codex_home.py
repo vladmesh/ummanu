@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+from tests import source_trees
 from ummanu.automations.agents.curator import discover
 from ummanu.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
 from ummanu.dispatch import commands as dispatch_commands, tui as dispatcher_tui
@@ -319,7 +320,7 @@ class NoImportTimeHomeTests(unittest.TestCase):
         """A module-level call would freeze the home before the PO's login could move it."""
         offenders: list[str] = []
         for path in sorted(SRC.rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             offenders.extend(f"{path.relative_to(SRC)}:{node.lineno}" for node in _import_time_calls(tree))
         self.assertEqual(offenders, [])
 

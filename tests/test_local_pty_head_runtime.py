@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
+from tests import source_trees
 from tests.support.head_runtime_contract import HeadRuntimeContract
 from ummanu.codex_provider_events import CodexProviderEventIngress
 from ummanu.dispatch.watchdog import clear_head_heartbeat, head_process_status
@@ -2191,11 +2192,11 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         po_runner = REPO / "src" / "ummanu" / "po" / "runner.py"
         substrate = "ummanu.runtime.head.local_pty"
         offenders = []
-        for path in (REPO / "src").rglob("*.py"):
+        # Every name of the substrate spells its last package, so no other file can import it.
+        for path, tree in source_trees.modules(REPO / "src", naming=("local_pty",)):
             if package in path.parents or path in (backend, po_runner):
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
+            for node in source_trees.imports(tree):
                 names = []
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]
@@ -2214,11 +2215,11 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         backend, exactly one function anywhere turns that name into an object.
         """
         sites = {}
-        for path in sorted((REPO / "src").rglob("*.py")):
+        # A call to a name ending in `HeadRuntime` spells that name, so no other file can build one.
+        for path, tree in source_trees.modules(REPO / "src", naming=("HeadRuntime",)):
             if path == REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py":
                 continue  # the class's own module, where it is defined rather than built
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for holder in ast.walk(tree):
+            for holder in source_trees.walk(tree):
                 if not isinstance(holder, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     continue
                 for node in ast.walk(holder):

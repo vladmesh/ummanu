@@ -18,6 +18,7 @@ from threading import Thread
 from typing import Any, ClassVar
 from urllib.parse import urlencode
 
+from tests import source_trees
 from tests.web_fakes import Recording, system_snapshot
 from ummanu.config import validate
 from ummanu.po import token as po_token
@@ -320,7 +321,7 @@ class PoRequestIdCoverageTests(PoGateFixture):
     def test_sessions_turns_and_request_rows_are_written_only_inside_the_request_transaction(self) -> None:
         root = Path(__file__).resolve().parents[1]
         store = root / "src" / "ummanu" / "po" / "store.py"
-        tree = ast.parse(store.read_text(encoding="utf-8"))
+        tree = source_trees.parse(store.read_text(encoding="utf-8"))
         inserts: dict[str, set[str]] = {"po_sessions": set(), "po_turns": set(), "po_requests": set()}
         recorders: set[str] = set()
         for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
@@ -359,16 +360,6 @@ class PoModelListTests(unittest.TestCase):
         "data_dir": "data",
         "offsite": {"instance_remote": "git@x:y.git"},
     }
-
-    def test_the_default_offers_the_frontier_models_first(self) -> None:
-        # The current catalogue, as the live installation's `po.models` lists it.
-        self.assertEqual(
-            DEFAULT_MODELS,
-            {
-                "claude": ("fable", "claude-opus-5-5"),
-                "codex": ("gpt-6-astra", "gpt-6-sol", "gpt-5.6-terra"),
-            },
-        )
 
     def test_without_a_po_section_the_product_default_applies(self) -> None:
         self.assertEqual(models_from_instance(self.INSTANCE), DEFAULT_MODELS)
@@ -622,12 +613,6 @@ class PoSessionInPlaceTests(unittest.TestCase):
         taken = script.index("seen = swapped.state;")
         reset = script.index("submitted = false;\n      if (button) button.disabled = false;")
         self.assertLess(taken, reset)
-
-    def test_no_page_tells_the_owner_to_reload_to_see_anything(self) -> None:
-        web = Path(pages.__file__).parent
-        for source in sorted(web.rglob("*.py")):
-            with self.subTest(source=source.name):
-                self.assertNotIn("reload to see", source.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

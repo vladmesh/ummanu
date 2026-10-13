@@ -20,6 +20,7 @@ import ast
 import unittest
 from pathlib import Path
 
+from tests import source_trees
 from ummanu.runtime.head import (
     EXITED,
     HeadNudgeFailed,
@@ -27,9 +28,9 @@ from ummanu.runtime.head import (
     HeadSpec,
     StopInitiator,
     TaskRef,
+    operations as head_operations,
     post_delivery_run,
 )
-from ummanu.runtime.head import operations as head_operations
 
 HEAD_PACKAGE = Path(head_operations.__file__).parent
 
@@ -102,7 +103,7 @@ class BackendIndependenceTests(unittest.TestCase):
         docstring naming the session manager it is deliberately independent of does not pass for a
         command that runs it."""
         for source in sorted(HEAD_PACKAGE.glob("*.py")):
-            tree = ast.parse(source.read_text(encoding="utf-8"))
+            tree = source_trees.parse(source.read_text(encoding="utf-8"))
             docstrings = {
                 id(node.value)
                 for node in ast.walk(tree)

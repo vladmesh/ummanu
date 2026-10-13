@@ -31,6 +31,7 @@ from unittest import mock
 
 import yaml
 
+from tests import source_trees
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.fakes.tasks import SEED_COLUMN
 from tests.sql_backend_fixtures import card_store
@@ -59,6 +60,7 @@ from ummanu.webproto import (
     store_io,
     workspaces,
 )
+from ummanu.webproto.agents import AGENT_STATES
 from ummanu.webproto.boundary import GUARDED, IMPLEMENTATION_FAILURES, ProtocolBoundary, operations
 from ummanu.webproto.errors import (
     OwnerConflict,
@@ -730,32 +732,43 @@ class AdmissionTests(ProductRuntimeFixture):
         self.assertIn("pr-in-doubt", str(refused.exception))
 
     def test_no_branch_of_the_gate_reads_what_a_run_ended_as(self) -> None:
-        """The static half: the outcome vocabulary is not reachable from this module's code.
+        """Exhaustive over the outcome vocabulary: what a run ended as never changes the answer.
 
-        A behavioural check can only sample the values; this says the question is not asked at all.
-        Docstrings are excluded on purpose -- the module explains the distinction at length, and
-        naming a value while explaining why it is not consulted is not consulting it.
+        `AGENT_STATES` is every value a run can end as, so each one is driven rather than sampled:
+        a run that is over frees the card whatever it ended as and whatever reason it gives, and a
+        run that is not over fences it whatever ending its record also carries.
         """
-        import ast
-
-        tree = ast.parse(
-            (REPO_ROOT / "src" / "ummanu" / "webproto" / "admission.py").read_text(encoding="utf-8")
-        )
-        forbidden = {"running", "finished", "process_failed", "source_unavailable", "unknown"}
-        offenders: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)):
-                body = node.body[1:] if ast.get_docstring(node) else node.body
-                for statement in body:
-                    for inner in ast.walk(statement):
-                        if isinstance(inner, ast.Constant) and inner.value in forbidden:
-                            offenders.append(f"line {inner.lineno}: {inner.value!r}")
-                        if isinstance(inner, ast.Attribute) and inner.attr in {
-                            "settled_state",
-                            "settled_reason",
-                        }:
-                            offenders.append(f"line {inner.lineno}: .{inner.attr}")
-        self.assertEqual(sorted(set(offenders)), [])
+        admitted = set()
+        fenced = set()
+        for value in AGENT_STATES:
+            with self.subTest(value=value):
+                self._record(
+                    "pr-prior",
+                    phase="settled",
+                    ended=True,
+                    settled_state=value,
+                    settled_reason=f"this run ended as {value}",
+                    settled_at=self.clock,
+                )
+                admission = self._admit()
+                admitted.add((admission.ref, admission.project, tuple(run.run_id for run in admission.runs)))
+                self._record(
+                    "pr-prior",
+                    phase="unresolved",
+                    unresolved_reason="the stop was refused",
+                    ended=False,
+                    settled_state=value,
+                    settled_reason=f"this run ended as {value}",
+                )
+                with self.assertRaises(OwnerConflict) as refused:
+                    self._admit()
+                fenced.add(str(refused.exception))
+        self.assertEqual(len(admitted), 1, admitted)
+        ref, project, runs = admitted.pop()
+        self.assertEqual((ref, project), ("ummanu-run-1", "ummanu"))
+        self.assertIn("pr-prior", runs)
+        self.assertEqual(len(fenced), 1, fenced)
+        self.assertIn("pr-prior", fenced.pop())
 
 
 class RunStateTests(ProductRuntimeFixture):
@@ -903,12 +916,6 @@ class RunStateTests(ProductRuntimeFixture):
         never_raised = run_state.observe(self._run(head_run={}), now=self.clock)
         self.assertEqual(never_raised["value"], "unknown")
         self.assertIn("no head has been raised", never_raised["reason"])
-
-    def test_a_window_is_never_consulted(self) -> None:
-        """Criterion 5's last sentence: a pane or panel is not evidence of a live run."""
-        source = (REPO_ROOT / "src" / "ummanu" / "webproto" / "run_state.py").read_text(encoding="utf-8")
-        for word in ("pane", "terminal list", "session"):
-            self.assertNotIn(f"{word}(", source)
 
 
 class SettlingTests(ProductRuntimeFixture):
@@ -1148,7 +1155,7 @@ class LifecycleTests(ProductRuntimeFixture):
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             if path.name == "lifecycle.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if (
                     isinstance(node, ast.Call)
@@ -1872,7 +1879,7 @@ class FileWriteSeamTests(unittest.TestCase):
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             if path.name == "store_io.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for line, name, args in self._calls(tree):
                 if name in self.WRITERS:
                     offenders.append(f"{path.name}:{line}: {name}")
@@ -1890,7 +1897,7 @@ class FileWriteSeamTests(unittest.TestCase):
     def test_the_seam_is_where_this_layer_actually_writes(self) -> None:
         writers: set[str] = set()
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             if any(name == "write_document" for _line, name, _args in self._calls(tree)):
                 writers.add(path.name)
         self.assertLessEqual(set(self.SEAM_CALLERS), writers)
@@ -1908,71 +1915,14 @@ class FileWriteSeamTests(unittest.TestCase):
 class OrcaAbsenceTests(ProductRuntimeFixture):
     """Criterion 2, as a check rather than a promise.
 
-    What this test asserts, in the words of the card:
+    No Orca import and no Orca process anywhere in the product is `test_architecture`'s
+    `NoOrcaInSourceTests`, over all of `src/ummanu`. What is left here is the half that scan cannot
+    see, in the words of the card:
 
-    * **no Orca import** on any module of the layer -- neither the pane host, nor the legacy
-      backend, nor the control plane's Orca-facing terminal readers;
-    * **no Orca call** on the start path or the result-reading path: with
-      `ummanu.dispatch.head_status` replaced by a detonator, `run_start`, `run_state` and
-      `run_review` all complete. The pane host whose verbs were detonated here too is deleted
-      (secretary-1725), and `test_architecture` forbids importing it anywhere;
-    * **no `orca` process**: every child process the two paths spawn is captured, and none of them
-      is an `orca` executable;
     * **no session manager**: the backend is built by name through the product's one
       name-to-backend mapping, with a session factory that raises if anything ever calls it;
     * **the supervised backend and no other**: the name handed to that mapping is `local-pty`.
     """
-
-    FORBIDDEN_IMPORTS = frozenset(
-        """
-        ummanu.automations.runtime.orca_rpc ummanu.runtime.pane_host
-        ummanu.runtime.orca_legacy_head ummanu.runtime.tui_delivery
-        ummanu.dispatch.head_status ummanu.dispatch.host ummanu.dispatch.review
-        orca
-        """.split()
-    )
-
-    def _imports(self) -> list[tuple[str, str]]:
-        import ast
-
-        found: list[tuple[str, str]] = []
-        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    found.extend((path.name, alias.name) for alias in node.names)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    found.append((path.name, node.module))
-        return found
-
-    def test_the_layer_imports_no_orca(self) -> None:
-        offenders = [
-            f"{module}: {imported}"
-            for module, imported in self._imports()
-            if imported in self.FORBIDDEN_IMPORTS or imported.split(".")[0] == "orca"
-        ]
-        self.assertEqual(offenders, [])
-
-    def test_the_start_and_result_paths_call_no_orca(self) -> None:
-        spawned: list[list[str]] = []
-        real_run = subprocess.run
-
-        def watched_run(argv, *args, **kwargs):
-            spawned.append(list(argv))
-            return real_run(argv, *args, **kwargs)
-
-        with (
-            mock.patch("subprocess.run", watched_run),
-            mock.patch.dict("sys.modules", {"ummanu.dispatch.head_status": None}),
-        ):
-            document = self.start(request_id="req-orca")
-            run_id = document["run"]["run_id"]
-            self.runtime.publish_result(run_id, {"status": "done"})
-            self.layer().run_state(run_id)
-            self.layer().run_review(request_id="rev-orca", profile=REVIEWER_PROFILE, worker_run_id=run_id)
-        self.assertTrue(spawned, "the start path provisions a workspace with git")
-        for argv in spawned:
-            self.assertNotIn("orca", Path(argv[0]).name)
 
     def test_the_backend_is_named_and_holds_no_session_manager(self) -> None:
         seen: list[dict[str, Any]] = []

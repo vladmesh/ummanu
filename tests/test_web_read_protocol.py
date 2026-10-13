@@ -19,6 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests import source_trees
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.sql_backend_fixtures import card_store, terminate_session
 from ummanu.cli import main
@@ -726,7 +727,7 @@ class TransportIndependenceTests(unittest.TestCase):
 
         found: list[tuple[str, str]] = []
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
                     found.extend((path.name, alias.name) for alias in node.names)

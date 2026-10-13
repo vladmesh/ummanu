@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Self
 from unittest import mock
 
+from tests import source_trees
 from ummanu.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_LIVE_MATCH,
@@ -1476,7 +1477,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
         package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"
         verbs = {"start", "deliver", "observe", "request_drain", "attach"}
         for path in sorted(package.glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
                     self.assertNotIn(
