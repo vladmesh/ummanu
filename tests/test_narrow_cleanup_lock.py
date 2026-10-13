@@ -5,14 +5,17 @@ from __future__ import annotations
 import contextlib
 import copy
 import fcntl
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest import mock
 
 from tests import test_owned_cleanup as owned_fixtures, test_tick_board_snapshot as tick_fixtures
 from tests.fakes.dispatcher import FakeCatalog
+from tests.support.cleanup_lock_probe import LockProbes, run_host_operations, run_production_operations
 from ummanu import restore
 from ummanu.board.fake import MemoryAudit
 from ummanu.board.host import TransitionRequest
@@ -346,47 +349,38 @@ class NarrowCleanupLockTests(unittest.TestCase):
         self.assertEqual(runtime.mock_calls, [])
 
     def test_long_methods_have_no_global_serialization(self):
-        """Each long operation reaches its first collaborator with the global cleanup lock free.
+        """Each long operation runs to its end with the global cleanup lock free at every slow step.
 
-        A decorator or a `with ownership_lock` around one of them would hold the lock over all of its
-        host work; the probe answers at the first step of the body and stops it there, so none of
-        that work runs. The work itself is observed lock-free in the cases above and in
-        `TickPhaseLockTests`.
+        prepare_worker, restart_worker, start_review, teardown and both ticks run on a real host or
+        tick with their work recorded (`tests/support/cleanup_lock_probe.py`); replay_one runs a real
+        Done replay of this fixture. A lock taken by a decorator or anywhere in a body before one of
+        those steps is seen held there, and every step must be reached.
         """
-        class Probed(Exception):
-            pass
-
-        free: dict[str, bool] = {}
-
-        def probe(name):
-            def answer(*args, **kwargs):
-                free[name] = lock_free(self.data)
-                raise Probed(name)
-            return answer
-
-        host = CommandHostRuntime(FakeCatalog(), self.data, mode="real")
-        task, record = self.fixture.task, self.fixture.record
-        state = production.ProductionState(self.data)
-        long_operations = {
-            "prepare_worker": (CommandHostRuntime, "_require_production_runtime",
-                               lambda: host.prepare_worker(task, record.worker, record.head)),
-            "restart_worker": (CommandHostRuntime, "_require_cleanup_admission",
-                               lambda: host.restart_worker(task, record)),
-            "start_review": (CommandHostRuntime, "_require_project_available",
-                             lambda: host.start_review(task, record)),
-            "teardown": (CommandHostRuntime, "_refuse_legacy_record", lambda: host.teardown(record)),
-            "replay_one": (self.owner, "_attempt", lambda: self.owner.replay_one("any-intent")),
+        operations = {
+            **run_host_operations(Path(self.enterContext(tempfile.TemporaryDirectory()))),
+            **run_production_operations(Path(self.enterContext(tempfile.TemporaryDirectory()))),
         }
-        pause = SimpleNamespace(summary=None)
-        runtime = SimpleNamespace(production_state=state, pause=pause, owner="unit-test")
-        for name, tick in (("production_tick", production.production_tick),
-                           ("production_probe", production.production_probe)):
-            long_operations[name] = (pause, "summary", lambda tick=tick: tick(runtime))
-        for name, (owner, first, run) in long_operations.items():
-            with self.subTest(name), mock.patch.object(owner, first, side_effect=probe(name)), \
-                    self.assertRaises(Probed):
-                run()
-        self.assertEqual(free, dict.fromkeys(long_operations, True))
+        self.fixture.head()
+        key = self.fixture.request()
+        probes = LockProbes(self.data)
+        with probes.patch(self.owner, "_attempt", name="replay_one", wraps=True), \
+                probes.patch(cleanup, "_read_git", wraps=True), \
+                probes.patch(self.fixture.backend, "stop", wraps=True), \
+                probes.patch(cleanup.git_worktree, "remove", wraps=True):
+            operations["replay_one"] = (self.owner.replay_one(key), probes)
+        self.assertEqual(
+            set(operations),
+            {"prepare_worker", "prepare_worker (fresh workspace)", "restart_worker", "start_review", "teardown",
+             "replay_one", "production_tick", "production_probe"},
+        )
+        for name, (outcome, probes) in operations.items():
+            with self.subTest(name):
+                self.assertEqual(probes.held, [])
+                self.assertEqual(probes.unreached(), set())
+                self.assertTrue(outcome)
+        self.assertEqual(operations["replay_one"][0]["status"], "completed")
+        self.assertEqual(operations["start_review"][0].commit, "abc123")
+        self.assertEqual(operations["production_tick"][0]["status"], "ok")
 
     def assessment_record(self):
         self.store.rows[1]["column_id"] = 5

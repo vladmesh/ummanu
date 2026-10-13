@@ -15,4 +15,3 @@ class CuratorOperatorContractTests(unittest.TestCase):
         curator = role_head("curator", registry)
         self.assertEqual(registry.resolve(curator), curator)
         self.assertIn("adapter", registry.profile(curator))
-
