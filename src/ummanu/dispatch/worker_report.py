@@ -28,7 +28,7 @@ from ummanu.dispatch.helpers import (
     _round_report_marker,
     scrub_host_output,
 )
-from ummanu.dispatch.host import _record_worker_delivery_evidence
+from ummanu.dispatch.host_runtime.contracts import _record_worker_delivery_evidence
 from ummanu.dispatch.launch import (
     STAGE_REWORK,
     WORKER_ROLE,

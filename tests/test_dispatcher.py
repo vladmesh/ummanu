@@ -70,6 +70,7 @@ from ummanu.dispatch.host import (
     _gate_attestation_for_prompt,
     _report_nudge_prompt,
 )
+from ummanu.dispatch.host_runtime import lifecycle as host_lifecycle
 from ummanu.dispatch.launch import (
     BRING_UP_CAUSE_CLASSES,
     CAUSE_HOST_UNAVAILABLE,
@@ -11051,7 +11052,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         """Waking one is a lifecycle transition with its own durable boundary, and this is not it."""
         with (
             mock.patch.object(
-                dispatcher_host_module,
+                host_lifecycle,
                 "_head_run_process_status",
                 lambda path, **kwargs: {"known": True, "alive": True, "stopped": True, "state": "live-match"},
             ),
@@ -11063,7 +11064,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.pid_file.write_text("1", encoding="utf-8")
         with (
             mock.patch.object(
-                dispatcher_host_module,
+                host_lifecycle,
                 "_head_process_status",
                 lambda path, **kwargs: {"known": True, "alive": False},
             ),

@@ -5,6 +5,7 @@ component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
 unit tests/test_kernel_import_boundary.py
 unit tests/test_task_protocol_owners.py
+unit tests/test_host_owners.py
 unit tests/test_installation_boundary.py
 integration-recovery tests/test_kernel_source_graph.py
 unit tests/test_cleanup_foundation.py

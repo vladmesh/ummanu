@@ -12,9 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu.checkpoint import CheckpointResult
-from ummanu.dispatch import host as dispatcher_host_module
 from ummanu.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.host_runtime import packets as host_packets
 from ummanu.dispatch.review import (
     recover_review_launch,
 )
@@ -499,7 +499,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         host.audit = self.card_audit
         with (
             mock.patch.object(
-                dispatcher_host_module,
+                host_packets,
                 "_write_prompt_document",
                 side_effect=PromptDocumentError("read-only artifacts directory"),
             ),
