@@ -28,6 +28,7 @@ unit tests/test_attempt_outcome_payload.py
 unit tests/test_outcome_round_context.py
 integration-board tests/test_analytics_projection.py
 unit tests/test_terminal_taxonomy.py
+unit tests/test_merge_gate_reason.py
 integration-recovery tests/test_backup.py
 integration-recovery tests/test_bulk_card_restore.py
 integration-recovery tests/test_bulk_comment_restore.py
