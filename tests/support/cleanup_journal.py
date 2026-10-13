@@ -8,8 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ummanu.dispatch import cleanup
-from ummanu.dispatch.cleanup import CleanupJournal, _compact_heads, _intent_key
+from ummanu.dispatch import cleanup_journal as cleanup
+from ummanu.dispatch.cleanup_journal import CleanupJournal, _compact_heads, _intent_key
 from ummanu.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 
 STATUSES = ("owned", "pending", "preserved", "completed")

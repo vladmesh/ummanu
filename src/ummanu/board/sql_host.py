@@ -45,7 +45,7 @@ from ummanu.board.models import (
 )
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.board.transitions import BoardProtocolError, transition, transition_for
-from ummanu.dispatch.cleanup import reference_lock
+from ummanu.dispatch.ownership import reference_lock
 from ummanu.product_issues import ProductIssueStore, product_swimlane_id
 from ummanu.sprints import SprintReader
 from ummanu.tasks import (

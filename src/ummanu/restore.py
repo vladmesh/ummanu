@@ -41,7 +41,7 @@ from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.task_routing import TaskMetadata
 from ummanu.config import DataDirError, instance_data_dir, validate_instance
 from ummanu.data import init_layout
-from ummanu.dispatch.cleanup import bulk_lane
+from ummanu.dispatch.ownership import bulk_lane
 from ummanu.kernel.errors import TaskError
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.config import DEFAULT_DIM as DEFAULT_MEMORY_DIM

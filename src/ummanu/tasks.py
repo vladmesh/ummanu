@@ -119,13 +119,8 @@ from ummanu.board.task_routing import (
     impact_bounds_refusal,
 )
 from ummanu.board.transitions import BoardProtocolError
-from ummanu.dispatch.cleanup import (
-    CleanupJournal,
-    bulk_lane,
-    capacity_serialized,
-    ownership_recovery,
-    reference_lock,
-)
+from ummanu.dispatch.cleanup_journal import CleanupJournal
+from ummanu.dispatch.ownership import bulk_lane, capacity_serialized, ownership_recovery, reference_lock
 
 # Preserve the class identity for existing tests and internal callers.
 from ummanu.kernel.errors import TaskError as TaskError
@@ -5558,7 +5553,7 @@ class TaskWriter:
             raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
 
     def _request_workspace_cleanup(self, task: dict[str, Any], disposition: str) -> None:
-        from ummanu.dispatch.cleanup import CleanupJournal
+        from ummanu.dispatch.cleanup_journal import CleanupJournal
         from ummanu.dispatch.types import HostError
         try:
             CleanupJournal(self.data_dir).request(task, disposition)

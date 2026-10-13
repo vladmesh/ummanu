@@ -56,7 +56,7 @@ from ummanu.board.sprint_write import (
     SprintWriteSnapshot,
 )
 from ummanu.board.tick_snapshot import select_cards, select_sprints
-from ummanu.dispatch.cleanup import CleanupJournal
+from ummanu.dispatch.cleanup_journal import CleanupJournal
 from ummanu.kernel.errors import TaskError
 from ummanu.kernel.sprint_policy import (
     DEFAULT_OPEN_SPRINT_LIMIT as DEFAULT_OPEN_SPRINT_LIMIT,

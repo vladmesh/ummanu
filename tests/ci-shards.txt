@@ -4,6 +4,7 @@
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
 unit tests/test_kernel_import_boundary.py
+unit tests/test_cleanup_foundation.py
 unit tests/test_config_boundary.py
 unit tests/test_source_trees.py
 unit tests/test_tick_telemetry.py
