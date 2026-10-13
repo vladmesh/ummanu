@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
+from ...._fsutil import fsync_directory
 from ..memory import MemoryScopeError
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
@@ -181,11 +182,7 @@ def spawn_head(
                 previous.stop_and_prove_empty()
             lifecycle.persist(run_dir, role=role, task=task, workspace=str(Path(cwd or os.getcwd()).resolve()),
                               replace_existing=not bool(scope_generation))
-            descriptor = os.open(run_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            fsync_directory(run_dir.parent)
         except MemoryScopeError as exc:
             raise LocalPtySpawnError("cleanup_failed", str(exc), cleanup_complete=False,
                                      scope_generation=scope_generation or (previous.generation if previous is not None else lifecycle.generation)) from exc
@@ -324,16 +321,8 @@ def _startup_error(path: Path) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _answers(socket_path: Path) -> bool:
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(0.5)
-    try:
-        probe.connect(str(socket_path))
-    except OSError:
-        return False
-    finally:
-        probe.close()
-    return True
+# Kept as this module's name: tests patch `client._answers` to stand in for a live supervisor.
+_answers = protocol.socket_answers
 
 
 class SupervisorClient:

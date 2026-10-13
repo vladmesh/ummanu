@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import fcntl
 import json
 import os
@@ -287,9 +288,11 @@ class BackupTests(unittest.TestCase):
             data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
-            with mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}):
-                with self.assertRaisesRegex(RuntimeError, "claimed worker"):
-                    create_backup(instance)
+            with (
+                mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}),
+                self.assertRaisesRegex(RuntimeError, "claimed worker"),
+            ):
+                create_backup(instance)
 
     def test_create_anchors_relative_instance_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -344,9 +347,58 @@ class BackupTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, {"BOARD_ROLE": ""}),
                 mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=workspace),
+                self.assertRaisesRegex(RuntimeError, "claimed worker"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "claimed worker"):
-                    create_backup(instance)
+                create_backup(instance)
+
+    def test_create_stages_beside_the_archives_when_the_system_temp_is_another_filesystem(self):
+        """ummanu-241: a tmpfs `/tmp` or a unit's `PrivateTmp` is another mount, and a rename from it
+        into `<data>/backups` is `EXDEV`. Here the system temp directory is a separate directory and
+        `os.replace` refuses every rename that crosses its boundary, as the kernel would."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "ummanu-data"
+            system_tmp = root / "system-tmp"
+            system_tmp.mkdir()
+            _write_instance(instance, data_dir)
+            real_replace = os.replace
+
+            def other_mount(path: object) -> bool:
+                return Path(os.fspath(path)).resolve().is_relative_to(system_tmp.resolve())
+
+            def replace(source, destination, *args, **kwargs):
+                if other_mount(source) != other_mount(destination):
+                    raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), str(source), None, str(destination))
+                return real_replace(source, destination, *args, **kwargs)
+
+            def fake_export_all(data_dir_arg, _instance_dir, *, copy_transcripts):
+                _write_export_surface(data_dir_arg)
+                return {
+                    name: DataExport(data_dir_arg / relative, 1, name)
+                    for name, relative in (
+                        ("board", "board/cards.json"),
+                        ("memory", "memory/export.ndjson"),
+                        ("runs", "runs/runs.ndjson"),
+                        ("transcripts", "transcripts/inventory.json"),
+                        ("artifacts", "artifacts/inventory.json"),
+                    )
+                }
+
+            with (
+                mock.patch.object(tempfile, "tempdir", str(system_tmp)),
+                mock.patch("os.replace", side_effect=replace),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action"),
+                mock.patch("ummanu.backup.export_all", side_effect=fake_export_all),
+            ):
+                result = create_backup(instance)
+
+            self.assertTrue(result.archive.is_file())
+            self.assertEqual(result.archive.parent, data_dir / "backups")
+            self.assertEqual(verify_backup(result.archive).code, 0)
+            self.assertEqual(list(system_tmp.iterdir()), [], "backup create staged in the system temp")
+            self.assertEqual([path.name for path in (data_dir / "backups").glob(".ummanu-*")], [])
 
     def test_create_resumes_pipeline_when_snapshot_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -363,9 +415,9 @@ class BackupTests(unittest.TestCase):
                 mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("ummanu.backup._pipeline_action", side_effect=fake_pipeline),
                 mock.patch("ummanu.backup.export_all", side_effect=RuntimeError("boom")),
+                self.assertRaisesRegex(RuntimeError, "boom"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "boom"):
-                    create_backup(instance)
+                create_backup(instance)
 
             self.assertEqual(pipeline_calls, ["pause", "resume"])
 
@@ -602,9 +654,9 @@ class BackupTests(unittest.TestCase):
                     },
                 ),
                 mock.patch("ummanu.backup._pipeline_action") as pipeline_action,
+                self.assertRaisesRegex(RuntimeError, "already paused"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "already paused"):
-                    create_backup(instance)
+                create_backup(instance)
 
             pipeline_action.assert_not_called()
             fd = os.open(data_dir / "backups" / ".create.lock", os.O_RDWR)
@@ -627,9 +679,9 @@ class BackupTests(unittest.TestCase):
                     return_value={"paused": True, "mode": "drain", "internal_mode": "soft"},
                 ),
                 mock.patch("ummanu.backup._pipeline_action") as pipeline_action,
+                self.assertRaisesRegex(RuntimeError, "already paused"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "already paused"):
-                    create_backup(instance)
+                create_backup(instance)
 
             pipeline_action.assert_not_called()
 
@@ -742,9 +794,9 @@ class BackupTests(unittest.TestCase):
             with (
                 mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("ummanu.backup._pipeline_action", side_effect=RuntimeError("pause failed")),
+                self.assertRaisesRegex(RuntimeError, "pause failed"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "pause failed"):
-                    create_backup(instance)
+                create_backup(instance)
 
             self.assertEqual(list((data_dir / "backups").glob("*.tar")), [])
 

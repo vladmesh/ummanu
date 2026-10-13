@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu import _proc, role_skills, state_repo
+from ummanu._fsutil import fsync_directory
 from ummanu.board.migrate import migrate_instance
 from ummanu.board.provision import (
     provision as provision_board_store,
@@ -2041,11 +2042,7 @@ def _write_private_receipt(
             os.fsync(output.fileno())
         os.replace(temporary, path)
         temporary = None
-        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        fsync_directory(path.parent)
     except OSError as exc:
         raise error(f"could not write {label} {path}: {exc}") from None
     finally:

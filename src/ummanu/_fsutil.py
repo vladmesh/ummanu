@@ -42,6 +42,15 @@ def write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
     write_text_atomic(path, body)
 
 
+def fsync_directory(directory: Path | str) -> None:
+    """Flush a directory's entries, so a rename or a new name in it survives a host crash."""
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def write_text_atomic(path: Path, payload: str) -> None:
     temp_path: Path | None = None
     try:

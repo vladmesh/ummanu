@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ummanu._fsutil import fsync_directory
 from ummanu.config import validate_instance
 from ummanu.infra.doctor_findings import accepted, active_findings
 from ummanu.runtime.paths import add_instance_argument, instance_file
@@ -55,11 +56,7 @@ def publish(path: Path, document: dict[str, Any]) -> None:
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         temporary = None
-        descriptor = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        fsync_directory(path.parent)
     finally:
         if temporary is not None:
             Path(temporary).unlink(missing_ok=True)

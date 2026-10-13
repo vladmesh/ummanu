@@ -52,6 +52,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
+from ...._fsutil import fsync_directory
 from ..command import with_pid_heartbeat
 from ..memory import OOM_STREAM_ENV, MemoryScopeError, ScopeEvidence, read_oom_victim
 from . import protocol
@@ -231,6 +232,9 @@ class Supervisor:
         self._turn_open = False
         self._turn_id = 0
         self._turn_bytes = 0
+        # Every clock below is monotonic: they time quiet windows and deadlines, never a timestamp
+        # written out (journal records carry their own wall-clock stamps), so a wall-clock step
+        # neither closes a turn early nor kills a head inside its stop grace.
         self._last_output_at = 0.0
         # Monotonic: when the head last printed, or when this supervisor began if it has not yet.
         # A turn's start is not output, so this is kept apart from `_last_output_at`.
@@ -299,7 +303,7 @@ class Supervisor:
 
     def _bind(self) -> None:
         if self.socket_path.exists():
-            if self._socket_answers():
+            if protocol.socket_answers(self.socket_path):
                 raise SupervisorStartupError(
                     START_ALREADY_RUNNING,
                     f"{self.socket_path} still answers; refusing to start a second head",
@@ -316,17 +320,6 @@ class Supervisor:
         listener.listen(protocol.CONNECTION_MAX_CLIENTS + 4)
         listener.setblocking(False)
         self._listener = listener
-
-    def _socket_answers(self) -> bool:
-        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        probe.settimeout(0.5)
-        try:
-            probe.connect(str(self.socket_path))
-        except OSError:
-            return False
-        finally:
-            probe.close()
-        return True
 
     def _head_argv(self) -> list[str]:
         identity = {"run_id": self.run_id, "role": self.role, "task": self.task}
@@ -475,11 +468,7 @@ class Supervisor:
                 with self._memory_lifecycle.attest_launch(directory=self.run_dir, role=self.role,
                                                          task=self.task, workspace=os.getcwd()) as binding:
                     self._append(SCOPE_BOUND, binding=binding)
-                    descriptor = os.open(self.run_dir, os.O_RDONLY | os.O_DIRECTORY)
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
+                    fsync_directory(self.run_dir)
                     self.start_head()
             except MemoryScopeError as exc:
                 raise SupervisorStartupError("memory_scope_unavailable", str(exc)) from exc
@@ -569,7 +558,7 @@ class Supervisor:
                 self._read_client(client)
 
     def _tick(self) -> None:
-        now = time.time()
+        now = time.monotonic()
         if self._signalled and not self._stopping:
             self._begin_stop(f"signal:{self._signalled}", signal.SIGTERM)
         if self._turn_open and self._last_output_at and now - self._last_output_at >= self.quiet_seconds:
@@ -653,7 +642,7 @@ class Supervisor:
             excess = len(self._output) - protocol.OUTPUT_BUFFER_BYTES
             del self._output[:excess]
             self._output_dropped += excess
-        self._last_output_at = time.time()
+        self._last_output_at = time.monotonic()
         if self._turn_open:
             self._turn_bytes += len(chunk)
             self._progress_bytes += len(chunk)
@@ -790,7 +779,7 @@ class Supervisor:
             self._turn_id += 1
             self._turn_open = True
             self._turn_bytes = 0
-            self._last_output_at = time.time()
+            self._last_output_at = time.monotonic()
             self._progress_bytes = 0
             self._progress_window_bytes = 0
             self._progress_at = 0.0
@@ -1080,7 +1069,7 @@ class Supervisor:
             self._append(DRAIN_REQUESTED, initiator=initiator, turn_open=self._turn_open)
         self._append(RUN_STOPPING, initiator=initiator, signal=int(number), turn_open=self._turn_open)
         self._signal_head(number)
-        self._stop_deadline = time.time() + STOP_GRACE_SECONDS
+        self._stop_deadline = time.monotonic() + STOP_GRACE_SECONDS
 
     # -- client plumbing -------------------------------------------------------------------
 
@@ -1179,8 +1168,8 @@ class Supervisor:
                 self._announce_dropped(client)
                 client.pending += protocol.encode_frame({"event": protocol.EVENT_EXITED, "record": record})
             self._flush(client)
-        deadline = time.time() + FAREWELL_SECONDS
-        while time.time() < deadline and any(c.pending for c in self._clients.values()):
+        deadline = time.monotonic() + FAREWELL_SECONDS
+        while time.monotonic() < deadline and any(c.pending for c in self._clients.values()):
             for _key, _mask in self._selector.select(0.05):
                 pass
             for client in list(self._clients.values()):

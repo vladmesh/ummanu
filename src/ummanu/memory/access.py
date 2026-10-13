@@ -325,17 +325,20 @@ def _digest(value: str) -> str:
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        # One owner of the descriptor: this frame until `fdopen` takes it, the handle after. A second
+        # close of a number another thread has reused since would close that thread's file.
+        try:
+            os.fchmod(fd, 0o600)
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
             json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
         try:
             Path(temporary).unlink()
         except OSError:

@@ -240,38 +240,8 @@ def _write_file(path: Path, payload: bytes, *, executable: bool) -> None:
 
 def _git(repo: Path, args: list[str], label: str) -> str:
     # `--git-dir` names the bare repository outright, so Git never discovers another one.
-    try:
-        result = state_repo.run_git(repo, ["--git-dir", str(repo), *args], label=label)
-    except state_repo.StateRepoError as exc:
-        raise SnapshotTreeError(str(exc)) from None
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()
-        raise SnapshotTreeError(f"{label} failed: {detail[-1] if detail else 'git error'}")
-    return result.stdout
+    return state_repo.git(repo, ["--git-dir", str(repo), *args], label=label, error=SnapshotTreeError)
 
 
 def _blobs(repo: Path, oids: list[str]) -> dict[str, bytes]:
-    """The bytes of each blob, read in one `cat-file --batch` (the text runner would alter them)."""
-    try:
-        result = state_repo.run_git_bytes(
-            repo,
-            ["--git-dir", str(repo), "cat-file", "--batch"],
-            label="snapshot blobs",
-            input="".join(f"{oid}\n" for oid in oids).encode(),
-        )
-    except state_repo.StateRepoError as exc:
-        raise SnapshotTreeError(str(exc)) from None
-    if result.returncode != 0:
-        detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-        raise SnapshotTreeError(f"snapshot blobs failed: {detail[-1] if detail else 'git error'}")
-    payload, offset = result.stdout, 0
-    blobs: dict[str, bytes] = {}
-    for oid in oids:
-        end = payload.find(b"\n", offset)
-        header = payload[offset:end].decode("ascii", "replace").split() if end >= 0 else []
-        if len(header) != 3 or header[1] != "blob" or not header[2].isdigit():
-            raise SnapshotTreeError(f"snapshot blobs failed: {oid} is not a blob")
-        size = int(header[2])
-        blobs[oid] = payload[end + 1 : end + 1 + size]
-        offset = end + 1 + size + 1
-    return blobs
+    return state_repo.read_blobs(repo, oids, git_args=["--git-dir", str(repo)], error=SnapshotTreeError)

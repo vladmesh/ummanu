@@ -222,8 +222,8 @@ def _run(
     except (OSError, subprocess.TimeoutExpired):
         raise InstallError(f"{label}: command could not run") from None
     if completed.returncode:
-        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-        raise InstallError(f"{label}: {detail[-1] if detail else f'exited {completed.returncode}'}")
+        detail = state_repo.git_failure_detail(completed, fallback=f"exited {completed.returncode}")
+        raise InstallError(f"{label}: {detail}")
     return (completed.stdout or "").strip()
 
 
@@ -362,18 +362,14 @@ def _clone_or_reuse(
             label="fetch instance remote",
         )
         if fetch.returncode:
-            detail = (fetch.stderr or fetch.stdout or "").strip().splitlines()
-            raise InstallError(
-                f"fetch instance remote: {detail[-1] if detail else f'exited {fetch.returncode}'}"
-            )
+            detail = state_repo.git_failure_detail(fetch, fallback=f"exited {fetch.returncode}")
+            raise InstallError(f"fetch instance remote: {detail}")
         merge = remote_git.run_instance(
             target, ["merge", "--ff-only", "@{u}"], label="fast-forward instance checkout"
         )
         if merge.returncode:
-            detail = (merge.stderr or merge.stdout or "").strip().splitlines()
-            raise InstallError(
-                f"fast-forward instance checkout: {detail[-1] if detail else f'exited {merge.returncode}'}"
-            )
+            detail = state_repo.git_failure_detail(merge, fallback=f"exited {merge.returncode}")
+            raise InstallError(f"fast-forward instance checkout: {detail}")
     except CredentialError as exc:
         raise InstallError(str(exc)) from None
     return "reused checkpoint checkout"
@@ -668,8 +664,8 @@ def _snapshot_git(repository: Path, args: list[str], label: str, *, input: str |
     except StateRepoError as exc:
         raise InstallError(str(exc)) from None
     if completed.returncode:
-        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-        raise InstallError(f"{label}: {detail[-1] if detail else f'exited {completed.returncode}'}")
+        detail = state_repo.git_failure_detail(completed, fallback=f"exited {completed.returncode}")
+        raise InstallError(f"{label}: {detail}")
     return (completed.stdout or "").strip()
 
 
@@ -732,10 +728,8 @@ def _fast_forward_snapshot_repository(
         timeout=300,
     )
     if fetched.returncode:
-        detail = (fetched.stderr or fetched.stdout or "").strip().splitlines()
-        raise InstallError(
-            f"fetch snapshot remote: {detail[-1] if detail else f'exited {fetched.returncode}'}"
-        )
+        detail = state_repo.git_failure_detail(fetched, fallback=f"exited {fetched.returncode}")
+        raise InstallError(f"fetch snapshot remote: {detail}")
     if _snapshot_git(repository, ["rev-parse", "FETCH_HEAD"], "inspect fetched snapshot") != tip:
         raise InstallError("the snapshot remote moved during recovery; rerun the same command")
     try:
@@ -752,8 +746,7 @@ def _fast_forward_snapshot_repository(
             "not extend; preserve and inspect it, no files were overwritten"
         )
     if ancestry.returncode:
-        detail = (ancestry.stderr or "").strip().splitlines()
-        raise InstallError(f"snapshot ancestry: {detail[-1] if detail else 'git error'}")
+        raise InstallError(f"snapshot ancestry: {state_repo.git_failure_detail(ancestry, stdout=False)}")
     _snapshot_git(
         repository,
         ["update-ref", "-m", "recover: fast-forward to the remote tip", SNAPSHOT_REF, tip, existing],

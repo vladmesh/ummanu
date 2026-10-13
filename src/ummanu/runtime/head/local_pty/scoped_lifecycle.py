@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...._fsutil import fsync_directory
 from ..memory import (
     CGROUP_ROOT,
     MEMORY_LIMIT_REASON,
@@ -219,11 +220,7 @@ class ScopedHeadLifecycle:
             stream.flush()
             os.fsync(stream.fileno())
         temporary.replace(path)
-        fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        fsync_directory(run_dir)
 
     def launcher_argv(
         self, supervisor: list[str], *, run_dir: Path, log_path: Path, timeout: float,

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ummanu._fsutil import fsync_directory
 from ummanu.head_health import HeadHealth, failure_status, failure_until, until_text
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
@@ -368,11 +369,7 @@ class PoRunner:
             if scope_dir.is_symlink():
                 scope_dir.unlink()
             scope_dir.symlink_to(run_dir, target_is_directory=True)
-            descriptor = os.open(scope_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            fsync_directory(scope_dir.parent)
             handle = spawn_head(
                 root=self.data_dir / "po-heads", run_id=lifecycle.run_id, role="po",
                 task=f"po:{spec.profile_id}:{session.session_id}:{seq}", command=command, cwd=session.cwd,

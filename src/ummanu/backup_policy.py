@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from ummanu._fsutil import display_relative
 from ummanu.data import DataExport
 from ummanu.po.queue import QUEUE_DIR_NAME
 
@@ -253,14 +254,7 @@ def _skip_core_data_entry(relative: Path) -> bool:
 
 def _component_manifest(data_dir: Path, export: DataExport) -> dict[str, Any]:
     return {
-        "path": _relative_to_data(data_dir, export.path),
+        "path": display_relative(data_dir, export.path),
         "count": export.count,
         "source": export.source,
     }
-
-
-def _relative_to_data(data_dir: Path, path: Path) -> str:
-    try:
-        return path.relative_to(data_dir).as_posix()
-    except ValueError:
-        return str(path)

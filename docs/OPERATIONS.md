@@ -2296,8 +2296,9 @@ The stall settings are read at check time; garbage or zero falls back to the def
 
 ### Reports and verdicts
 
-Heads write bodies to `/tmp/ummanu-report-<ref>-<round>.md` and `/tmp/ummanu-verdict-<ref>-<round>.md`
-(directory from `UMMANU_DISPATCHER_BODY_DIR`); files are left in place. The round is part of the
+Heads write bodies to `ummanu-report-<ref>-<round>.md` and `ummanu-verdict-<ref>-<round>.md` in
+`<data_dir>/artifacts/bodies/` (or `UMMANU_DISPATCHER_BODY_DIR` when set), a directory the dispatcher
+keeps at mode 0700 and refuses when another user owns it; files are left in place. The round is part of the
 verdict request id.
 
 A worker round ends only with a report under the request id the dispatcher issued, taken from the hidden

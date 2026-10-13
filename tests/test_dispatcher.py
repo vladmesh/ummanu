@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -8073,7 +8074,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self.tick()
         stale_id = self._worker_report_request_id()
-        stale_body = Path(_body_file_path("report", "ummanu-510", 1))
+        stale_body = Path(_body_file_path(self.data_dir, "report", "ummanu-510", 1))
         stale_body.parent.mkdir(parents=True, exist_ok=True)
         stale_body.write_text("same body", encoding="utf-8")
         self._report_done("same body")
@@ -8117,7 +8118,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self.tick()
         stale_id = self._worker_report_request_id()
-        stale_body = Path(_body_file_path("report", "ummanu-510", 1))
+        stale_body = Path(_body_file_path(self.data_dir, "report", "ummanu-510", 1))
         stale_body.parent.mkdir(parents=True, exist_ok=True)
         stale_body.write_text("same body", encoding="utf-8")
         self._report_done("same body")
@@ -9515,7 +9516,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         return self._pilot_record().get("worker_report_nudge") or {}
 
     def _round_body_file(self, generation: int) -> Path:
-        return Path(_body_file_path("report", CARD_REF, generation))
+        return Path(_body_file_path(self.data_dir, "report", CARD_REF, generation))
 
     def test_an_idle_worker_is_asked_for_the_report_before_anything_is_stopped(self) -> None:
         """The card this exists for: the work is finished, the head went back to its prompt without
@@ -9784,9 +9785,11 @@ class HeadPromptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
-        # The assertions below name /tmp, and docs/OPERATIONS.md documents this override on the
-        # unit, so a host that exports it would fail the suite for no reason.
+        # The assertions below name the default private directory under the data dir, and
+        # docs/OPERATIONS.md documents this override on the unit, so a host that exports it would
+        # fail the suite for no reason.
         _clear_env(self, "UMMANU_DISPATCHER_BODY_DIR")
+        self.bodies = Path(self.tmpdir.name) / "artifacts" / "bodies"
         # The TASK.md feedback selector reads the card audit, so this host is handed a store's.
         self.board = card_store(self, dispatcher_seed(), instance_dir=self.tmpdir.name)
         self.host = CommandHostRuntime(
@@ -9870,7 +9873,7 @@ class HeadPromptTests(unittest.TestCase):
 
         self.assertEqual(len(commands), 2, "one green and one red command")
         for command in commands:
-            self.assertIn("--body-file /tmp/ummanu-verdict-ummanu-510-3.md", command)
+            self.assertIn(f"--body-file {self.bodies}/ummanu-verdict-ummanu-510-3.md", command)
             self.assertNotIn("<file>", command)
 
     def test_review_prompt_names_a_worker_head_chosen_by_failover(self) -> None:
@@ -10083,7 +10086,7 @@ class HeadPromptTests(unittest.TestCase):
         # classification, and the worker copies the line rather than editing a placeholder.
         self.assertEqual(len(commands), 3, "one done and one blocked command per classification")
         for command in commands:
-            self.assertIn("--body-file /tmp/ummanu-report-ummanu-510-0.md", command)
+            self.assertIn(f"--body-file {self.bodies}/ummanu-report-ummanu-510-0.md", command)
             self.assertNotIn("<file>", command)
         blocked = [command for command in commands if "--kind blocked" in command]
         self.assertEqual(
@@ -10092,16 +10095,29 @@ class HeadPromptTests(unittest.TestCase):
         )
         self.assertNotIn("--classification", commands[0])
 
+    def test_body_files_live_in_a_private_directory_not_the_shared_tmp(self) -> None:
+        """ummanu-241: `/tmp/ummanu-<kind>-<ref>-<round>.md` was a name any account on the host could
+        create or link first. Both prompts now name a file in a 0700 directory under the data dir."""
+        for doc in (
+            self.host._worker_task_doc(self.task, "main", "attempt-1"),
+            self.host._review_prompt(self.task, "attempt-1", 3),
+        ):
+            for command in self._command_lines(doc):
+                self.assertNotIn("--body-file /tmp/ummanu-", command)
+                self.assertIn(f"--body-file {self.bodies}/", command)
+        self.assertEqual(stat.S_IMODE(self.bodies.stat().st_mode), 0o700)
+        self.assertEqual(list(self.bodies.iterdir()), [], "the head writes the body, not the dispatcher")
+
     def test_clearing_report_bodies_takes_every_round_of_one_card_only(self) -> None:
         """Every round of this card goes, including the one about to start. Another card's bodies
-        and anything that is not a numbered report body stay: the sweep runs in a shared directory
-        (`/tmp` by default), where deleting by prefix alone would reach other cards' rounds."""
+        and anything that is not a numbered report body stay: the sweep runs in a directory every
+        card shares, where deleting by prefix alone would reach other cards' rounds."""
         root = Path(self.tmpdir.name)
         with mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": str(root)}):
-            mine = [Path(_body_file_path("report", "ummanu-510", n)) for n in (0, 1, 12)]
+            mine = [Path(_body_file_path(root, "report", "ummanu-510", n)) for n in (0, 1, 12)]
             others = [
-                Path(_body_file_path("report", "ummanu-511", 1)),
-                Path(_body_file_path("verdict", "ummanu-510", 1)),
+                Path(_body_file_path(root, "report", "ummanu-511", 1)),
+                Path(_body_file_path(root, "verdict", "ummanu-510", 1)),
                 root / "ummanu-report-ummanu-510-notes.md",
             ]
             for path in mine + others:
@@ -10560,7 +10576,7 @@ class HeadPromptTests(unittest.TestCase):
                 arguments = command.split("python3 -P -m ummanu task", 1)[1]
                 for banned in ("`", "$", "'", '"', "|", ";", "&", ">", "<", "(", ")"):
                     self.assertNotIn(banned, arguments, command)
-                self.assertIn("--body-file /tmp/ummanu-", command)
+                self.assertIn(f"--body-file {self.bodies}/ummanu-", command)
             self.assertIn("(no heredoc, no mktemp, no echo pipeline)", doc)
 
     def test_report_and_verdict_commands_use_the_live_control_plane_not_the_workspace(self) -> None:

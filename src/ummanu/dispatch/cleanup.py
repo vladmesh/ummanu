@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from ummanu import _proc
+from ummanu._fsutil import fsync_directory
 from ummanu.dispatch.tick_telemetry import tick_count, tick_stage, tick_stage_entering
 from ummanu.dispatch.types import HostError, OwnershipChanged
 from ummanu.infra import git_worktree
@@ -810,18 +811,10 @@ def _replace_file(path: Path, body: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(name, path)
-        _fsync_directory(path.parent)
+        fsync_directory(path.parent)
     finally:
         if os.path.exists(name):
             os.unlink(name)
-
-
-def _fsync_directory(path: Path) -> None:
-    directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
 
 
 def _valid_intent(value: Any) -> bool:
@@ -1115,12 +1108,12 @@ class CleanupJournal:
         generated.mkdir()
         for path, body in files:
             self._replace(path, body)
-        _fsync_directory(generated)
-        _fsync_directory(root)
+        fsync_directory(generated)
+        fsync_directory(root)
 
     def _publish(self) -> None:
         os.rename(self._staging, self.path)
-        _fsync_directory(self.path.parent)
+        fsync_directory(self.path.parent)
 
     def _archive_legacy(self) -> None:
         """Keep the v1 document under a name nothing reads; never delete it."""
@@ -1129,7 +1122,7 @@ class CleanupJournal:
             target = self.archive.with_name(f"cleanup.v1-archive.{index}.json")
             index += 1
         os.rename(self.legacy, target)
-        _fsync_directory(self.legacy.parent)
+        fsync_directory(self.legacy.parent)
 
     @serialized
     def migrate(self) -> bool:
@@ -1203,12 +1196,12 @@ class CleanupJournal:
         directory.mkdir()
         for prefix, body in sorted(buckets.items()):
             self._replace(directory / (prefix + ".json"), body)
-        _fsync_directory(directory)
+        fsync_directory(directory)
         self._write_meta(generated_depth=deeper)
         for stale in self.path.glob("generated*"):
             if stale != directory and stale.is_dir():
                 shutil.rmtree(stale)
-        _fsync_directory(self.path)
+        fsync_directory(self.path)
 
     @journal_mutation
     def generated(self, path: Path, body: str | bytes) -> None:

@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -210,3 +211,16 @@ def connection_refusal(connections: int) -> dict[str, Any]:
             f"{CONNECTION_MAX_CLIENTS}-connection limit"
         ),
     }
+
+
+def socket_answers(socket_path: Path) -> bool:
+    """Whether something accepts a connection on this run's socket: a live supervisor owns it."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.5)
+    try:
+        probe.connect(str(socket_path))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True

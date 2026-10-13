@@ -14,6 +14,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from stat import S_IMODE, S_ISDIR
 from typing import Any
 
 import yaml
@@ -2673,9 +2674,16 @@ class CommandHostRuntime:
             raise HostError("teardown has no durable cleanup owner")
         # Release owns the subsequent Done transition and claim settlement. A
         # failed cleanup remains replayable even after that record is discarded.
-        task_ref = next((raw.get("task_ref", {}).get("ref") for raw in
-                        (record.worker_head_run, record.review_head_run)
-                        if raw.get("task_ref", {}).get("ref")), "")
+        subject = f"the dispatcher record of {record.worker or record.head or 'an unnamed card'}"
+        task_ref = ""
+        for role, raw in (("worker", record.worker_head_run), ("reviewer", record.review_head_run)):
+            stored = raw.get("task_ref", {})
+            if not isinstance(stored, dict):
+                # A null or scalar task_ref names no card; refuse by name instead of crashing.
+                raise HostError(f"cleanup refuses {subject}: its {role} head run carries task_ref {stored!r}")
+            if stored.get("ref"):
+                task_ref = stored["ref"]
+                break
         if not task_ref:
             task_ref = next((ref for ref, raw in owner._state().get("records", {}).items()
                              if raw.get("attempt_id") == record.attempt_id and raw.get("worker") == record.worker), "")
@@ -3854,13 +3862,13 @@ class CommandHostRuntime:
     def _clear_body_file(self, kind: str, reference: str, review_round: int) -> None:
         """Drop the body file before launching the head that is supposed to write it."""
         try:
-            Path(_body_file_path(kind, reference, review_round)).unlink(missing_ok=True)
+            Path(_body_file_path(self.data_dir, kind, reference, review_round)).unlink(missing_ok=True)
         except OSError:
             pass
 
     def _clear_report_bodies(self, reference: str) -> None:
         """Drop every report body file this card has, the round about to start included."""
-        sample = _body_file_path("report", reference, 0)
+        sample = _body_file_path(self.data_dir, "report", reference, 0)
         directory, name = os.path.split(sample)
         prefix = name[: -len("0.md")]
         try:
@@ -4230,7 +4238,8 @@ class CommandHostRuntime:
             )
             for classification in ("external_fact", "wrong_task_definition")
         }
-        body_file = _body_file_path("report", task["ref"], generation)
+        body_file = _body_file_path(self.data_dir, "report", task["ref"], generation)
+        _private_body_dir(Path(body_file).parent)
         report_commands = {
             "done": self._control_plane_command(
                 "task",
@@ -4673,7 +4682,8 @@ class CommandHostRuntime:
         # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
-        body_file = _body_file_path("verdict", task["ref"], review_round)
+        body_file = _body_file_path(self.data_dir, "verdict", task["ref"], review_round)
+        _private_body_dir(Path(body_file).parent)
         verdict_commands = {
             kind: self._control_plane_command(
                 "task",
@@ -5071,10 +5081,30 @@ def _watchdog_kind(role: str) -> str:
     return "review" if role == "reviewer" else "worker"
 
 
-def _body_file_path(kind: str, reference: str, review_round: int) -> str:
-    """Where a head writes its report/verdict body."""
-    root = os.environ.get("UMMANU_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
+def _body_file_path(data_dir: Path, kind: str, reference: str, review_round: int) -> str:
+    """Where a head writes its report/verdict body: a directory private to this user, never the
+    shared `/tmp`, where another account could plant the predictable name first."""
+    override = os.environ.get("UMMANU_DISPATCHER_BODY_DIR", "").rstrip("/")
+    root = override or str(Path(data_dir) / "artifacts" / "bodies")
     return f"{root}/ummanu-{kind}-{_request_token(reference)}-{_request_token(str(review_round))}.md"
+
+
+def _private_body_dir(directory: Path) -> None:
+    """Create the body directory 0700, or take an existing one only when this user owns it.
+
+    The head writes the body file itself (its editing tool refuses to overwrite a file it has not
+    read, which is why the dispatcher clears it before launch), so the privacy lives on the
+    directory: nobody else can create, replace or read a name inside it.
+    """
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        info = directory.lstat()
+        if not S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise HostError(f"report body directory {directory} is not a directory this user owns")
+        if S_IMODE(info.st_mode) & 0o077:
+            os.chmod(directory, 0o700)
+    except OSError as exc:
+        raise HostError(f"report body directory {directory} could not be made private: {exc}") from None
 
 
 def _no_candidate_review_subject(task: dict[str, Any]) -> list[str]:
