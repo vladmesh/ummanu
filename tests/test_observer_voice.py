@@ -113,7 +113,7 @@ class AdmitRoleTests(unittest.TestCase):
             for path in sorted(SRC.rglob("*.py"))
             for _match in re.finditer(r'TaskError\(\s*"role_masquerade"', path.read_text(encoding="utf-8"))
         ]
-        self.assertEqual(raises, ["tasks.py"])
+        self.assertEqual(raises, ["board/task_protocol/rows.py"])
 
 
 class IdentityRefusalTransportTests(unittest.TestCase):

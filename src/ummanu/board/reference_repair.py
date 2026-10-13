@@ -10,21 +10,18 @@ from collections import defaultdict
 from typing import Any
 
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
+from ummanu.board.legacy_codec import (
+    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+    positive_int as _positive_int,
+    text as _text,
+)
 from ummanu.board.sql_rows import now, rfc3339
+from ummanu.board.task_protocol.rows import _task_is_active, _task_metadata, admit_role, all_project_cards
+from ummanu.board.task_routing import ACTIVE_STATES
 from ummanu.dispatch.ownership import bulk_lane
 from ummanu.kernel.errors import TaskError
 from ummanu.runtime.references import next_reference, reference_allocation_lock
-from ummanu.tasks import (
-    _STATE_BY_COLUMN,
-    ACTIVE_STATES,
-    TaskWriter,
-    _positive_int,
-    _task_is_active,
-    _task_metadata,
-    _text,
-    admit_role,
-    all_project_cards,
-)
+from ummanu.tasks import TaskWriter
 
 REPAIR_KIND = "reference_repaired"
 PRODUCER_FIX = "d9e872ba4a3166486b9282611ba54699f9dd7a66"

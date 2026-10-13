@@ -28,6 +28,7 @@ from ummanu.board.host import (
     SprintSupplement,
     TransitionRequest,
 )
+from ummanu.board.legacy_codec import positive_int as _positive_int
 from ummanu.board.models import (
     BoardEntity,
     Card,
@@ -43,20 +44,18 @@ from ummanu.board.models import (
     Sprint,
     SprintState,
 )
+from ummanu.board.task_protocol.rows import (
+    _digest,
+    _target_column_id,
+    all_project_cards,
+    project_card_by_reference,
+)
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.board.transitions import BoardProtocolError, transition, transition_for
 from ummanu.dispatch.ownership import reference_lock
 from ummanu.product_issues import ProductIssueStore, product_swimlane_id
 from ummanu.sprints import SprintReader
-from ummanu.tasks import (
-    TaskReader,
-    _digest,
-    _positive_int,
-    _target_column_id,
-    all_project_cards,
-    project_card_by_reference,
-    task_audit_for,
-)
+from ummanu.tasks import TaskReader, task_audit_for
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient

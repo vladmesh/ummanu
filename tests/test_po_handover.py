@@ -143,6 +143,7 @@ class WriterFixture(unittest.TestCase):
         patcher = mock.patch("ummanu.tasks._task_number", return_value=1900)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.enterContext(mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=1900))
 
     def hand_over(self, **fields: Any) -> dict[str, Any]:
         call = {"role": "po", "actor": "po", "reference": REF, "to": "owner", "reason": REASON,
@@ -283,8 +284,8 @@ class OwnerCommentTests(WriterFixture):
         self.writer.comment(role="owner", actor="owner", reference=REF, body="Earlier approval.", request_id="old-comment")
         first = self.hand_over()
         self.assertIsNotNone(waiting_owner(self.card))
-        fields = dict(role="po", actor="po", reference=REF, handover_event=first["event_id"],
-                      quotation="Approved.", request_id="answer-1")
+        fields = {"role": "po", "actor": "po", "reference": REF, "handover_event": first["event_id"],
+                  "quotation": "Approved.", "request_id": "answer-1"}
         result = self.writer.record_owner_answer(**fields)
         self.assertTrue(self.writer.record_owner_answer(**fields)["replayed"])
         self.assertEqual(attention_record(self.card, OWNER_ANSWER)["event_id"], result["event_id"])
@@ -425,12 +426,12 @@ class EscalationTests(WriterFixture):
     def advance(self, runtime: Any, seconds: int) -> None:
         from ummanu.dispatch.po_cards import _episode_outcome
         start = datetime.fromisoformat(SINCE).timestamp()
-        with mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds):
-            # These tests isolate the escalation writer; settled-turn transitions are exercised
-            # through the full dispatcher and real SQL writer below and in test_sprint_attention.
-            with mock.patch("ummanu.dispatch.po_cards._block", return_value={}):
-                _episode_outcome(runtime, self.card, SimpleNamespace(attempt_id="attempt",
-                    po_submission=SimpleNamespace(submit_request_id="submit-episode")), {}, {})
+        # These tests isolate the escalation writer; settled-turn transitions are exercised
+        # through the full dispatcher and real SQL writer below and in test_sprint_attention.
+        with (mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds),
+              mock.patch("ummanu.dispatch.po_cards._block", return_value={})):
+            _episode_outcome(runtime, self.card, SimpleNamespace(attempt_id="attempt",
+                po_submission=SimpleNamespace(submit_request_id="submit-episode")), {}, {})
 
     def test_queued_deadline_is_2959_then_3000_and_restart_replay_deduplicates(self) -> None:
         runtime = self.runtime()

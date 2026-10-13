@@ -86,7 +86,7 @@ _CLAIMING_EFFECT_TABLES = (
 
 def _kinds_answering(kind: str) -> set[str]:
     """Every stored `kind` a `kind=` narrowing matches: itself, and each whose action it is."""
-    from ummanu.tasks import _MARKER_EVENT_ACTIONS
+    from ummanu.board.task_protocol.rows import _MARKER_EVENT_ACTIONS
 
     return {kind} | {stored for stored, action in _MARKER_EVENT_ACTIONS.items() if action == kind}
 

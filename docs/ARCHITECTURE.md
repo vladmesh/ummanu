@@ -17,6 +17,18 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
   holds the list of existing flat modules, and a new module must go into a feature package. Current
   packages: `automations`, `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`,
   `schemas`, `web`, `webfront`, `webproto`.
+- `ummanu.tasks` owns the public `TaskReader` and `TaskWriter`, card creation, comments,
+  reports and transitions. `board/task_protocol/rows.py` owns shared task rows, event predicates,
+  request keys and admission error identities; `dispatcher.py` owns control writes for wait,
+  PO, e2e, routing and attempt accounting; `sprint_guard.py` owns reservations, executor pins
+  and observer identity; `recovery.py` owns archive/retire/restore, audit staging and pending
+  completion. The writer inherits these three capabilities and dispatches through the same
+  `self`. Lower owners do not import the public facade. Released helper aliases remain direct
+  bindings; a module-global patch must target the module executing the call.
+  [The source inventory](task-protocol-inventory.json) records baseline AST hashes, signatures,
+  decorators, global bindings and actual consumers. `tests/test_task_protocol_owners.py` checks
+  unique implementations and the 3000-line limit for this subsystem. Other giant files remain
+  outside this DEC-01 task cut.
 - `src/ummanu/automations` is the three background agents (curator, steward, retro), built on top
   of the rest of `ummanu`. `python3 -P -m ummanu automations <agent> <cmd>` is their one entry:
   `ummanu.cli` hands the argv untouched to the composition root

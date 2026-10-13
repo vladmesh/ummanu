@@ -1,0 +1,51 @@
+name: task-protocol-graph
+
+on:
+  pull_request:
+    paths:
+      - src/ummanu/tasks.py
+      - src/ummanu/board/task_protocol/**
+      - tests/fixtures/task_protocol_coupling.py.txt
+      - .github/workflows/task-protocol-graph.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Verify frozen research source
+        run: python3 -c "import hashlib,pathlib; assert hashlib.sha256(pathlib.Path('tests/fixtures/task_protocol_coupling.py.txt').read_bytes()).hexdigest() == 'd2babc8963c011ea57eed9816eee28552ece76e6885955043a3721e65bd55cce'"
+      - name: Measure exact candidate with the original uncut coupling model
+        run: >-
+          mkdir -p "$RUNNER_TEMP/task-protocol-graph"
+          && python3 -I tests/fixtures/task_protocol_coupling.py.txt
+          --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/task-protocol-graph"
+          --cache "$RUNNER_TEMP/task-protocol-cache.pickle" graph --sha "$CANDIDATE_SHA"
+      - name: Record original scanner SCC membership and config closure
+        run: >-
+          python3 -c "import json,os,pathlib,pickle,runpy;
+          m=runpy.run_path('tests/fixtures/task_protocol_coupling.py.txt');
+          repo=pathlib.Path.cwd(); sel=m['load_selector'](repo);
+          snap=m['Snapshot'](sel,sel.snapshot(repo,os.environ['CANDIDATE_SHA']),pickle.loads(pathlib.Path(os.environ['RUNNER_TEMP']+'/task-protocol-cache.pickle').read_bytes()));
+          graph,_=m['build_graph'](snap,set(),m['tier_none']);
+          product={k:{v for v in values if v.startswith('ummanu')} for k,values in graph.items() if k.startswith('ummanu')};
+          groups=sorted((sorted(g) for g in m['tarjan'](product) if len(g)>1),key=lambda g:(-len(g),g));
+          config=sorted(n for n in m['closure_forward'](graph,'ummanu.config') if n.startswith('ummanu'));
+          result={'sha':os.environ['CANDIDATE_SHA'],'product_modules':len(product),'sccs':groups,'config_closure':config};
+          pathlib.Path(os.environ['RUNNER_TEMP']+'/task-protocol-graph/uncut.json').write_text(json.dumps(result,indent=2));
+          print(json.dumps(result,indent=2)); assert len(groups[0])<=60; assert len(config)<=10"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: task-protocol-graph-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/task-protocol-graph
+          if-no-files-found: error

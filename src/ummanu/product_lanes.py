@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ummanu.board.legacy_codec import nonnegative_int as _nonnegative_int, positive_int as _positive_int
+from ummanu.board.task_protocol.rows import all_project_cards
 from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import (
     ISSUE_TYPE,
@@ -25,7 +27,6 @@ from ummanu.product_issues import (
     product_lane_name,
     product_swimlane_id,
 )
-from ummanu.tasks import _nonnegative_int, _positive_int, all_project_cards
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient
