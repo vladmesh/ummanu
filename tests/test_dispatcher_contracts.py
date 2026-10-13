@@ -49,7 +49,6 @@ from ummanu.dispatch import (
     attempt_accounting as dispatcher_attempt_accounting,
     claim as dispatcher_claim,
     gate_lifecycle as dispatcher_gate_lifecycle,
-    host as dispatcher_host_module,
     launcher as dispatcher_launcher,
     observer as dispatcher_observer,
     production as dispatcher_production,
@@ -248,12 +247,15 @@ class HostSurfaceContractTests(unittest.TestCase):
     def test_host_internal_catalog_calls_exist_on_the_real_catalog(self) -> None:
         """`CommandHostRuntime` drives the catalog itself when launching a head. No double covers
         that path (the launcher tests use the real classes), but a rename must still fail here."""
-        tree = source_trees.parse(Path(inspect.getsourcefile(dispatcher_host_module)).read_text(encoding="utf-8"))
-        host_class = next(
-            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "CommandHostRuntime"
-        )
+        host_classes = []
+        for cls in CommandHostRuntime.__mro__[:-1]:
+            tree = source_trees.parse(Path(inspect.getsourcefile(cls)).read_text(encoding="utf-8"))
+            host_classes.extend(
+                node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == cls.__name__
+            )
         used = {
             node.attr
+            for host_class in host_classes
             for node in ast.walk(host_class)
             if isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Attribute)

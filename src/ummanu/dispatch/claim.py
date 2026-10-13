@@ -16,7 +16,8 @@ from ummanu.board.completion_evidence import has_candidate, is_po_executed, is_w
 from ummanu.board.models import EventKind
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.helpers import _worker_id, scrub_host_output
-from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins, live_root_project_refusal
+from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins
+from ummanu.dispatch.host_runtime.catalog import live_root_project_refusal
 from ummanu.dispatch.launch import (
     STAGE_CLAIM,
     WORKER_ROLE,

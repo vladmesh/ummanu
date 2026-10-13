@@ -1163,7 +1163,7 @@ class CleanupOwner:
         # The existing observer producer cuts detached worktrees from this
         # empty, parentless root commit. Its named branch already retains
         # it. No user commit or arbitrary local ref gains this authority.
-        from ummanu.dispatch.host import OBSERVER_REPO_BRANCH
+        from ummanu.dispatch.host_runtime.observer_io import OBSERVER_REPO_BRANCH
         ref = "refs/heads/" + OBSERVER_REPO_BRANCH
         if (_ref_tip(repo, ref) == tip and _git(repo, "rev-list", "--parents", "-n", "1", tip) == tip
                 and not _git(repo, "ls-tree", "-r", tip)):

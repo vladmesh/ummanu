@@ -291,7 +291,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
     def test_a_worktree_git_refuses_to_cut_starts_no_head(self) -> None:
         with (
             mock.patch(
-                "ummanu.dispatch.host.git_worktree.add",
+                "ummanu.dispatch.host_runtime.observer_io.git_worktree.add",
                 return_value=subprocess.CompletedProcess([], 128, "", "fatal: invalid reference"),
             ),
             self.assertRaisesRegex(HostError, "git worktree add failed for the observer workspace"),

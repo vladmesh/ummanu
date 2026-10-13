@@ -41,7 +41,6 @@ from tests.production_runtime_fixtures import registered_production_runtime
 from tests.sql_backend_fixtures import card_store
 from ummanu._fsutil import file_lock
 from ummanu.dispatch import (
-    host as dispatcher_host_module,
     launch as dispatcher_launch,
     worker_continuation as dispatcher_worker_continuation,
 )
@@ -50,6 +49,7 @@ from ummanu.dispatch.gate_receipt import GateReceipt, TerminalCheck
 from ummanu.dispatch.git_workspace import GitWorkspaceManager
 from ummanu.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
+from ummanu.dispatch.host_runtime import lifecycle as host_lifecycle
 from ummanu.dispatch.launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
 from ummanu.dispatch.production import _budget_event_type
 from ummanu.dispatch.runtime import DispatcherRuntime
@@ -3705,7 +3705,7 @@ class HostLaunchContourTests(unittest.TestCase):
         pid_file = self.pid_file(str(os.getpid()))
 
         with mock.patch.object(self.host, "_signal_head", lambda *a, **k: None):
-            with mock.patch.object(dispatcher_host_module, "HEAD_STOP_GRACE_SECONDS", 0.05):
+            with mock.patch.object(host_lifecycle, "HEAD_STOP_GRACE_SECONDS", 0.05):
                 with self.assertRaisesRegex(HostError, "still running after stop"):
                     self.host._confirm_head_process_gone(pid_file)
 

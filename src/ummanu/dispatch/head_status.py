@@ -42,7 +42,7 @@ from ummanu.dispatch.head_vitality import (
     snapshots_from_status,
 )
 from ummanu.dispatch.head_vitality_episode import previous_snapshot_cursors, recovery_outlook
-from ummanu.dispatch.host import _durable_head_run
+from ummanu.dispatch.host_runtime.contracts import _durable_head_run
 from ummanu.dispatch.observer import load_observers, observer_head_status
 from ummanu.dispatch.review import command_terminal_status
 from ummanu.dispatch.state import DispatcherRecord
