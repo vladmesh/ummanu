@@ -128,6 +128,7 @@ integration-heads tests/test_head_vitality_child_activity.py
 integration-heads tests/test_head_vitality_child_respawn.py
 unit tests/test_head_vitality_episode.py
 unit tests/test_runtime_infra_tidy.py
+unit tests/test_automation_state_retirement.py
 unit tests/test_head_vitality_guard.py
 unit tests/test_wait_outcome.py
 unit tests/test_local_pty_vitality.py

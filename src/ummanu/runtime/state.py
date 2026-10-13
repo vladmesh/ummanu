@@ -124,9 +124,7 @@ class AgentState:
         self.watermark_file = self.dir / "watermark.json"
         self.pending_file = self.dir / "pending.json"
         self.lockfile = self.dir / "lock"
-        self.head_profile_file = self.dir / "head_profile.json"
         self.terminal_handle_file = self.dir / "terminal_handle.json"
-        self.terminal_generation_file = self.dir / "terminal_generation.json"
         self.head_run_file = self.dir / "head_run.json"
         self.active_report_file = self.dir / "active_report.json"
 
@@ -146,107 +144,6 @@ class AgentState:
         tmp = self.watermark_file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(mark, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.watermark_file)
-
-    def load_head_profile(self) -> str | None:
-        """The heads.toml profile the live terminal was launched with, or None if never recorded.
-
-        A warm terminal keeps its start profile, so idle reuse checks this, not the preferred head.
-        """
-        if not self.head_profile_file.is_file():
-            return None
-        try:
-            return json.loads(self.head_profile_file.read_text(encoding="utf-8")).get("profile")
-        except json.JSONDecodeError:
-            return None
-
-    def save_head_profile(self, profile: str | None) -> None:
-        """Record the profile a freshly (re)spawned terminal runs on; never called on warm reuse."""
-        self.ensure_dir()
-        tmp = self.head_profile_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"profile": profile}, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.head_profile_file)
-
-    def load_terminal_handle(self) -> str | None:
-        """The Orca terminal handle last created for this singleton agent."""
-        if not self.terminal_handle_file.is_file():
-            return None
-        try:
-            return json.loads(self.terminal_handle_file.read_text(encoding="utf-8")).get("handle")
-        except json.JSONDecodeError:
-            return None
-
-    def next_terminal_generation(self) -> int:
-        """Bump and return the per-agent terminal generation, stamped into a terminal's teardown trailer.
-
-        Never reset, and kept apart from terminal_handle.json so teardown cannot roll it back: a late
-        finalizer compares its trailer's generation with `load_terminal_generation` and must never
-        match, and so stop, a replacement terminal.
-        """
-        cur = 0
-        if self.terminal_generation_file.is_file():
-            try:
-                cur = int(
-                    json.loads(self.terminal_generation_file.read_text(encoding="utf-8")).get("counter", 0)
-                )
-            except (json.JSONDecodeError, ValueError, TypeError):
-                cur = 0
-        nxt = cur + 1
-        self.ensure_dir()
-        tmp = self.terminal_generation_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"counter": nxt}, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.terminal_generation_file)
-        return nxt
-
-    def load_terminal_generation(self) -> int | None:
-        """The generation of the current terminal in terminal_handle.json, or None.
-
-        A finalizer stops the live terminal only when this equals its own trailer's generation.
-        """
-        if not self.terminal_handle_file.is_file():
-            return None
-        try:
-            return json.loads(self.terminal_handle_file.read_text(encoding="utf-8")).get("generation")
-        except json.JSONDecodeError:
-            return None
-
-    def load_terminal_created_at(self) -> float | None:
-        """When this agent's terminal was last actually spawned (epoch seconds), or None.
-
-        Guards the gap before a new terminal shows in `terminal list`, so a second dispatch does not
-        read "no terminal" as "never spawned" and create a duplicate.
-        """
-        if not self.terminal_handle_file.is_file():
-            return None
-        try:
-            return json.loads(self.terminal_handle_file.read_text(encoding="utf-8")).get("created_at")
-        except json.JSONDecodeError:
-            return None
-
-    def save_terminal_handle(
-        self, handle: str | None, created_at: float | None = None, generation: int | None = None
-    ) -> None:
-        """Record the terminal handle from the latest spawn (Codex may retitle its tab, so titles
-        alone cannot identify the singleton).
-
-        `created_at` is passed only by an actual spawn; warm reuse drops it, since the terminal is
-        then already visible. `generation` comes from `next_terminal_generation` for an ephemeral
-        agent's fresh create. `handle=None` deletes the record but never the generation counter.
-        """
-        self.ensure_dir()
-        if not handle:
-            try:
-                self.terminal_handle_file.unlink()
-            except FileNotFoundError:
-                pass
-            return
-        payload: dict[str, object] = {"handle": handle}
-        if created_at is not None:
-            payload["created_at"] = created_at
-        if generation is not None:
-            payload["generation"] = generation
-        tmp = self.terminal_handle_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(self.terminal_handle_file)
 
     def load_head_run(self) -> dict | None:
         """The `HeadRun` this agent's last tick raised on a product-owned backend, or None.
@@ -314,7 +211,7 @@ class AgentState:
             rec = {"ts": datetime.now(UTC).isoformat(), "event": event, **fields}
             with (self.dir / "runs.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - best-effort telemetry must not fail the tick
             pass
 
     @contextmanager

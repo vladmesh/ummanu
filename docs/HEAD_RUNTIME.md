@@ -173,6 +173,13 @@ give the cause, also written to `journalctl -u ummanu-<agent>.service`. Any rema
 `action="supervised-owner-conflict"` and exit 1. The tick neither deletes it nor launches beside
 it; remove it only after confirming the pane-era head it names is gone.
 
+The generation and profile sidecar APIs are retired. `head_run.json` carries the current
+head's resolved profile in its typed spec and records its ownership. Existing
+`head_profile.json` and `terminal_generation.json` files remain historical evidence;
+ticks neither read, rewrite nor remove them. The retained `terminal_handle.json` path
+serves only the read-only existence fence, including when checking for an orphan report.
+Legacy files receive no migration or automatic cleanup.
+
 Host reconciliation's read-only scope projection, preserved runtime ownership and upgrade
 evidence are in [Runtime scopes in host reconciliation](HEAD_SCOPES.md#runtime-scopes-in-host-reconciliation).
 
