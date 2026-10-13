@@ -12,15 +12,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from ummanu.dispatch.head_vitality import PROGRESS_SOURCES
 from ummanu.dispatch.head_vitality_episode import (
     VitalityEpisode,
     VitalityVerdict,
 )
-
-#: The Progress-axis source names, mirrored from the reducer's vocabulary. Kept as plain
-#: strings so the guard does not have to import snapshot enums to ask one structural
-#: question: did any progress source ever answer for this episode?
-_PROGRESS_SOURCE_NAMES = frozenset({"provider_cursor"})
 
 
 class GuardRefusal(StrEnum):
@@ -95,8 +91,8 @@ def _progress_source_answering(episode: VitalityEpisode) -> bool:
     """A progress source is a second witness only when it answered and is still
     answering now. A dark or never-seen provider leaves PID-only evidence,
     which requires the additional outer-ceiling hold before destruction."""
-    witnessed = bool(set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES) or episode.last_progress_at > 0.0
-    dark = bool(set(episode.unavailable_since) & _PROGRESS_SOURCE_NAMES)
+    witnessed = bool(set(episode.evidence_cursors) & PROGRESS_SOURCES) or episode.last_progress_at > 0.0
+    dark = bool(set(episode.unavailable_since) & PROGRESS_SOURCES)
     return witnessed and not dark
 
 
@@ -180,7 +176,7 @@ def assert_destructive_allowed(
     ):
         elapsed = max(0.0, now - episode.started_at)
         if elapsed < pid_only_outer_ceiling_seconds:
-            dark = sorted(set(episode.unavailable_since) & _PROGRESS_SOURCE_NAMES)
+            dark = sorted(set(episode.unavailable_since) & PROGRESS_SOURCES)
             earned_on = (
                 f"with {', '.join(dark)} dark (secretary-1543 arm)"
                 if dark

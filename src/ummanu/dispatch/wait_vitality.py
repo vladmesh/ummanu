@@ -17,13 +17,14 @@ from typing import Any
 from ummanu.board import owner_events
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.head_vitality import (
-    SnapshotSource as _SnapshotSource,
     snapshots_from_status as _snapshots_from_status,
+    status_has_vitality_observation,
 )
 from ummanu.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS as _DEFAULT_VITALITY_THRESHOLDS,
     VitalityVerdict,
     interrupted_command_note as _interrupted_command_note,
+    previous_snapshot_cursors,
     reduce_vitality as _reduce_vitality,
 )
 from ummanu.dispatch.head_vitality_guard import (
@@ -1000,7 +1001,7 @@ def reduce_and_store_vitality_episode(
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
-    status: dict[str, Any],
+    status: Any,
     *,
     kind: str,
     now: float,
@@ -1049,15 +1050,7 @@ def reduce_and_store_vitality_episode(
         if previous is not None:
             setattr(record, field_name, None)
         return None
-    pid_status = status.get("pid_status")
-    provider_progress = status.get("provider_progress")
-    if (
-        not isinstance(pid_status, dict)
-        and not isinstance(provider_progress, dict)
-        and "idle" not in status
-        and not isinstance(status.get("child_activity"), dict)
-        and "supervisor_journal" not in status
-    ):
+    if not status_has_vitality_observation(status):
         # Nothing was observed at all (the noop host, a runtime-unavailable tick): there is
         # no reduction to run and no episode to write, so return before saving anything.
         # Writing one would both rewrite the state file every such tick and stamp an
@@ -1069,24 +1062,7 @@ def reduce_and_store_vitality_episode(
     snapshots = _snapshots_from_status(
         status,
         run_id=run_id,
-        previous_cursor=(
-            (previous.evidence_cursors or {}).get(_SnapshotSource.PROVIDER_CURSOR.value, "")
-            if previous is not None and previous.run_id == run_id
-            else ""
-        ),
-        previous_child_cursor=(
-            (previous.evidence_cursors or {}).get(_SnapshotSource.EXECUTION_CHILD.value, "")
-            if previous is not None and previous.run_id == run_id
-            else ""
-        ),
-        previous_child_key=(
-            previous.last_child_key if previous is not None and previous.run_id == run_id else ""
-        ),
-        previous_journal_cursor=(
-            (previous.evidence_cursors or {}).get(_SnapshotSource.SUPERVISOR_JOURNAL.value, "")
-            if previous is not None and previous.run_id == run_id
-            else ""
-        ),
+        **previous_snapshot_cursors(previous, run_id),
         observed_at=now,
     )
     # The one fact the reduction cannot observe: whether THIS dispatcher is the one holding

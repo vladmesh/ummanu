@@ -196,6 +196,15 @@ class RefusalClassesTests(unittest.TestCase):
         )
         self.assertTrue(decision.allowed, decision.reason)
 
+    def test_child_and_journal_cursors_do_not_bypass_the_outer_ceiling(self) -> None:
+        for source in ("execution_child", "supervisor_journal"):
+            with self.subTest(source=source):
+                decision = assert_destructive_allowed(
+                    episode(started_at=NOW - 5_400.0, evidence={source: "cursor"}),
+                    "worker-respawn", NOW, pid_only_outer_ceiling_seconds=9_000.0,
+                )
+                self.assertIs(decision.refusal, GuardRefusal.PID_ONLY_CEILING_UNELAPSED)
+
     def test_a_confirmation_earned_while_the_provider_is_dark_is_held_too(self) -> None:
         """secretary-1543: the source answered once, then went dark, then the episode aged.
 

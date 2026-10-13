@@ -23,6 +23,7 @@ from ummanu.dispatch.gate import (
     validation_ci as _validation_ci,
 )
 from ummanu.dispatch.gate_receipt import AcceptedGreenGate
+from ummanu.dispatch.head_vitality import status_has_vitality_observation
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.helpers import _gate_red_repeat_count, scrub_host_output
 from ummanu.dispatch.state import (
@@ -860,11 +861,7 @@ def _worker_vitality_for_gate(
         status = runtime.host.worker_status(task, record)
     except Exception:  # noqa: BLE001 - a blind probe must never break the gate tick
         return None
-    if not isinstance(status, dict) or (
-        not isinstance(status.get("pid_status"), dict)
-        and not isinstance(status.get("provider_progress"), dict)
-        and "idle" not in status
-    ):
+    if not status_has_vitality_observation(status):
         # Nothing was observed this tick. Do not feed a previous episode back
         # into recovery policy as fresh evidence (it may describe an old run).
         # The persisted episode remains available to identity/destructive guards.
