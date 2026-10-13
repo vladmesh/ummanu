@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -35,6 +36,8 @@ ENGINE_SPELLINGS = re.compile(
 
 def engine_references(path: Path, source: str) -> set[str]:
     """Resolve absolute/relative imports and constant dynamic targets, including absent modules."""
+    if path.suffix != ".py":
+        return set(re.findall(r"\bummanu[./]transition\b[\w./:]*", source))
     parts = path.with_suffix("").parts
     if parts[0] == "src":
         parts = parts[1:]
@@ -116,16 +119,28 @@ class InstallationRetirementTests(unittest.TestCase):
         for name in REMOVED_FILES:
             self.assertFalse((ROOT / name).exists(), name)
         found = {}
-        for directory in ("src", "tests", "scripts", "packaging"):
-            for path in (ROOT / directory).rglob("*.py"):
-                if path == Path(__file__) or path.name == "test_old_name_guard.py":
-                    continue  # exact negative guard fixtures, never executable dependencies
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", "src", "tests", "scripts", "packaging"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        for name in tracked.stdout.split("\0"):
+            path = ROOT / name
+            if not name or not path.is_file() or path.is_symlink():
+                continue
+            if path == Path(__file__) or path.name == "test_old_name_guard.py":
+                continue  # exact negative guard fixtures, never executable dependencies
+            try:
                 source = path.read_text()
-                if not ENGINE_SPELLINGS.search(source):
-                    continue
-                references = engine_references(path.relative_to(ROOT), source)
-                if references:
-                    found[str(path.relative_to(ROOT))] = sorted(references)
+            except UnicodeDecodeError:
+                continue  # binary fixtures have no executable module target
+            if not ENGINE_SPELLINGS.search(source):
+                continue
+            references = engine_references(path.relative_to(ROOT), source)
+            if references:
+                found[name] = sorted(references)
         self.assertEqual(found, {})
 
     def test_the_reference_guard_refuses_planted_imports_strings_and_engine_classes(self) -> None:
@@ -152,6 +167,13 @@ class InstallationRetirementTests(unittest.TestCase):
                 Path("src/ummanu/planted.py"), "from ummanu.board.transitions import transition_for"
             )
         )
+        for path, source in (
+            ("packaging/planted.toml", '[scripts]\nretired = "ummanu.transition.commands:run_transition"'),
+            ("scripts/planted.sh", "python -m ummanu.transition.commands --apply"),
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(ENGINE_SPELLINGS.search(source))
+                self.assertTrue(engine_references(Path(path), source))
 
     def test_the_entrypoint_runbook_locator_names_current_guidance(self) -> None:
         path, heading = RUNBOOK.split(" §")
