@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from ummanu.dispatch.types import DispatcherError
 from ummanu.dispatch.worker_lifecycle import (
@@ -133,136 +133,127 @@ class GatePublishedRef:
         return {"branch": self.branch, "sha": self.sha}
 
 
-class PersistedGateReceipt(dict[str, Any]):
-    """One durable exact-SHA gate receipt with an exact compatibility projection."""
+class _PersistedMapping(dict[str, Any]):
+    """Preserve a raw shallow mapping while subclasses own their typed-view policy."""
 
-    __slots__ = ("_receipt",)
+    __slots__ = ()
 
     def __init__(self, value: Any = None) -> None:
-        # Lazy to avoid dispatch.state -> gate_receipt -> dispatch.helpers -> dispatch.state
-        # at module import time. By the time a record is instantiated the modules are fully loaded.
-        from ummanu.dispatch.gate_receipt import GateReceipt
-
-        typed: GateReceipt | None = value if isinstance(value, GateReceipt) else None
+        typed = value if isinstance(value, self._value_type()) else None
         if typed is not None:
-            payload = typed.as_dict()
+            payload = self._typed_json(typed)
         elif isinstance(value, dict):
             payload = dict(value)
         else:
             payload = {}
+        # Initialize before parsing: parser normalization must never rewrite durable keys.
         dict.__init__(self, payload)
-        if typed is None and payload:
-            typed = GateReceipt.accept(payload, current_sha=str(payload.get("validated_sha") or ""))
-        self._receipt = typed
+        self._cache_view(typed, payload)
+
+    @staticmethod
+    def _value_type() -> type[Any]:
+        raise NotImplementedError
+
+    @staticmethod
+    def _typed_json(typed: Any) -> dict[str, Any]:
+        return typed.to_json()
+
+    def _cache_view(self, typed: Any, payload: dict[str, Any]) -> None:
+        # Live views parse on property access, including empty mappings.
+        pass
 
     @classmethod
-    def from_value(cls, value: Any) -> PersistedGateReceipt:
+    def from_value(cls, value: Any) -> Self:
         if isinstance(value, cls):
             return value
         return cls(value)
+
+    def to_json(self) -> dict[str, Any]:
+        return dict(self)
+
+
+class PersistedGateReceipt(_PersistedMapping):
+    """One durable exact-SHA gate receipt with an exact compatibility projection."""
+
+    __slots__ = ("_receipt",)
+
+    @staticmethod
+    def _value_type() -> type[GateReceipt]:
+        # Lazy to avoid state -> gate_receipt -> helpers -> state at import time.
+        from ummanu.dispatch.gate_receipt import GateReceipt
+
+        return GateReceipt
+
+    @staticmethod
+    def _typed_json(typed: Any) -> dict[str, Any]:
+        return typed.as_dict()
+
+    def _cache_view(self, typed: GateReceipt | None, payload: dict[str, Any]) -> None:
+        if typed is None and payload:
+            typed = self._value_type().accept(payload, current_sha=str(payload.get("validated_sha") or ""))
+        self._receipt = typed
 
     @property
     def receipt(self) -> GateReceipt | None:
         return self._receipt
 
-    def to_json(self) -> dict[str, Any]:
-        return dict(self)
 
-
-class PersistedGatePrAuthorship(dict[str, Any]):
+class PersistedGatePrAuthorship(_PersistedMapping):
     """Durable PR authorship with a canonical typed view and unchanged JSON."""
 
     __slots__ = ("_authorship",)
 
-    def __init__(self, value: Any = None) -> None:
-        typed: GatePrAuthorship | None = value if isinstance(value, GatePrAuthorship) else None
-        if typed is not None:
-            payload = typed.to_json()
-        elif isinstance(value, dict):
-            payload = dict(value)
-        else:
-            payload = {}
-        dict.__init__(self, payload)
+    @staticmethod
+    def _value_type() -> type[GatePrAuthorship]:
+        return GatePrAuthorship
+
+    def _cache_view(self, typed: GatePrAuthorship | None, payload: dict[str, Any]) -> None:
         if typed is None and payload:
             typed = GatePrAuthorship.from_json(payload)
         self._authorship = typed
-
-    @classmethod
-    def from_value(cls, value: Any) -> PersistedGatePrAuthorship:
-        if isinstance(value, cls):
-            return value
-        return cls(value)
 
     @property
     def authorship(self) -> GatePrAuthorship | None:
         return self._authorship
 
-    def to_json(self) -> dict[str, Any]:
-        return dict(self)
 
-
-class PersistedGatePublishedRef(dict[str, Any]):
+class PersistedGatePublishedRef(_PersistedMapping):
     """Durable publication lease with a canonical typed view and unchanged JSON."""
 
     __slots__ = ("_published_ref",)
 
-    def __init__(self, value: Any = None) -> None:
-        typed: GatePublishedRef | None = value if isinstance(value, GatePublishedRef) else None
-        if typed is not None:
-            payload = typed.to_json()
-        elif isinstance(value, dict):
-            payload = dict(value)
-        else:
-            payload = {}
-        dict.__init__(self, payload)
+    @staticmethod
+    def _value_type() -> type[GatePublishedRef]:
+        return GatePublishedRef
+
+    def _cache_view(self, typed: GatePublishedRef | None, payload: dict[str, Any]) -> None:
         if typed is None and payload:
             typed = GatePublishedRef.from_json(payload)
         self._published_ref = typed
-
-    @classmethod
-    def from_value(cls, value: Any) -> PersistedGatePublishedRef:
-        if isinstance(value, cls):
-            return value
-        return cls(value)
 
     @property
     def published_ref(self) -> GatePublishedRef | None:
         return self._published_ref
 
-    def to_json(self) -> dict[str, Any]:
-        return dict(self)
 
-
-class PersistedDeliveryEvidence(dict[str, Any]):
+class PersistedDeliveryEvidence(_PersistedMapping):
     """Durable prompt-delivery evidence with a typed view and exact historical mapping."""
 
     __slots__ = ("_evidence",)
 
-    def __init__(self, value: Any = None) -> None:
-        typed: DeliveryEvidence | None = value if isinstance(value, DeliveryEvidence) else None
-        if typed is not None:
-            payload = typed.to_json()
-        elif isinstance(value, dict):
-            payload = dict(value)
-        else:
-            payload = {}
-        dict.__init__(self, payload)
+    @staticmethod
+    def _value_type() -> type[DeliveryEvidence]:
+        return DeliveryEvidence
+
+    def _cache_view(self, typed: DeliveryEvidence | None, payload: dict[str, Any]) -> None:
         if typed is None and payload:
             typed = DeliveryEvidence.from_json(payload)
         self._evidence = typed
-
-    @classmethod
-    def from_value(cls, value: Any) -> PersistedDeliveryEvidence:
-        if isinstance(value, cls):
-            return value
-        return cls(value)
 
     @property
     def evidence(self) -> DeliveryEvidence | None:
         return self._evidence
 
-    def to_json(self) -> dict[str, Any]:
-        return dict(self)
 
 @dataclass(frozen=True)
 class LaunchDelivery:
@@ -290,9 +281,7 @@ class LaunchDelivery:
             next_at = 0.0
         evidence_payload = payload.get("evidence")
         evidence = (
-            DeliveryEvidence.from_json(evidence_payload)
-            if isinstance(evidence_payload, dict)
-            else None
+            DeliveryEvidence.from_json(evidence_payload) if isinstance(evidence_payload, dict) else None
         )
         return cls(
             state=str(payload.get("state") or ""),
@@ -433,32 +422,18 @@ class LaunchIntent:
         return payload
 
 
-class PersistedLaunchIntent(dict[str, Any]):
+class PersistedLaunchIntent(_PersistedMapping):
     """Durable launch intent with a typed view and exact historical JSON projection."""
 
-    def __init__(self, value: Any = None) -> None:
-        if isinstance(value, LaunchIntent):
-            payload = value.to_json()
-        elif isinstance(value, dict):
-            payload = dict(value)
-        else:
-            payload = {}
-        dict.__init__(self, payload)
-
-    @classmethod
-    def from_value(cls, value: Any) -> PersistedLaunchIntent:
-        if isinstance(value, cls):
-            return value
-        return cls(value)
+    @staticmethod
+    def _value_type() -> type[LaunchIntent]:
+        return LaunchIntent
 
     @property
     def intent(self) -> LaunchIntent | None:
         # Launch recovery still has legacy in-place mapping writes. Parse the current mapping on
         # access so the typed view cannot go stale while those call sites are migrated.
         return LaunchIntent.from_json(self)
-
-    def to_json(self) -> dict[str, Any]:
-        return dict(self)
 
 
 @dataclass(frozen=True)
@@ -530,34 +505,20 @@ class HeadlessRecoveryEpisode:
         }
 
 
-class PersistedHeadlessRecoveryEpisode(dict[str, Any]):
+class PersistedHeadlessRecoveryEpisode(_PersistedMapping):
     """Durable headless recovery state with a canonical typed view."""
 
-    def __init__(self, value: Any = None) -> None:
-        if isinstance(value, HeadlessRecoveryEpisode):
-            payload = value.to_json()
-        elif isinstance(value, dict):
-            payload = dict(value)
-        else:
-            payload = {}
-        dict.__init__(self, payload)
-
-    @classmethod
-    def from_value(cls, value: Any) -> PersistedHeadlessRecoveryEpisode:
-        if isinstance(value, cls):
-            return value
-        return cls(value)
+    @staticmethod
+    def _value_type() -> type[HeadlessRecoveryEpisode]:
+        return HeadlessRecoveryEpisode
 
     @property
     def episode(self) -> HeadlessRecoveryEpisode | None:
         # Recovery annotates the episode in place with its final refusal. Keep the typed view live.
         return HeadlessRecoveryEpisode.from_json(self)
 
-    def to_json(self) -> dict[str, Any]:
-        return dict(self)
 
-
-class PersistedHeadRun(dict[str, Any]):
+class PersistedHeadRun(_PersistedMapping):
     """One durable lifecycle HeadRun with an exact compatibility projection.
 
     The released dispatcher state stores the lifecycle run as a JSON object and a large amount of
@@ -573,15 +534,11 @@ class PersistedHeadRun(dict[str, Any]):
 
     __slots__ = ("_run",)
 
-    def __init__(self, value: Any = None) -> None:
-        typed: HeadRun | None = value if isinstance(value, HeadRun) else None
-        if typed is not None:
-            payload = typed.to_json()
-        elif isinstance(value, dict):
-            payload = dict(value)
-        else:
-            payload = {}
-        dict.__init__(self, payload)
+    @staticmethod
+    def _value_type() -> type[HeadRun]:
+        return HeadRun
+
+    def _cache_view(self, typed: HeadRun | None, payload: dict[str, Any]) -> None:
         if typed is None and payload:
             try:
                 typed = HeadRun.from_json(payload)
@@ -589,23 +546,13 @@ class PersistedHeadRun(dict[str, Any]):
                 typed = None
         self._run = typed
 
-    @classmethod
-    def from_value(cls, value: Any) -> PersistedHeadRun:
-        if isinstance(value, cls):
-            return value
-        return cls(value)
-
     @property
     def run(self) -> HeadRun | None:
         """The canonical lifecycle value when this record has the complete modern schema."""
         return self._run
 
-    def to_json(self) -> dict[str, Any]:
-        """Project the exact released dispatcher-state object."""
-        return dict(self)
 
-
-class PersistedRoutingHeadSnapshot(dict[str, Any]):
+class PersistedRoutingHeadSnapshot(_PersistedMapping):
     """One durable routing snapshot with an exact compatibility projection.
 
     The task journal already has the canonical immutable RoutingHeadSnapshot, but dispatcher state
@@ -619,15 +566,11 @@ class PersistedRoutingHeadSnapshot(dict[str, Any]):
 
     __slots__ = ("_snapshot",)
 
-    def __init__(self, value: Any = None) -> None:
-        typed: RoutingHeadSnapshot | None = value if isinstance(value, RoutingHeadSnapshot) else None
-        if typed is not None:
-            payload = typed.to_json()
-        elif isinstance(value, dict):
-            payload = dict(value)
-        else:
-            payload = {}
-        dict.__init__(self, payload)
+    @staticmethod
+    def _value_type() -> type[RoutingHeadSnapshot]:
+        return RoutingHeadSnapshot
+
+    def _cache_view(self, typed: RoutingHeadSnapshot | None, payload: dict[str, Any]) -> None:
         if typed is None and payload:
             try:
                 typed = RoutingHeadSnapshot.from_json(payload)
@@ -635,20 +578,10 @@ class PersistedRoutingHeadSnapshot(dict[str, Any]):
                 typed = None
         self._snapshot = typed
 
-    @classmethod
-    def from_value(cls, value: Any) -> PersistedRoutingHeadSnapshot:
-        if isinstance(value, cls):
-            return value
-        return cls(value)
-
     @property
     def snapshot(self) -> RoutingHeadSnapshot | None:
         """The canonical routing value when this record carries a snapshot."""
         return self._snapshot
-
-    def to_json(self) -> dict[str, Any]:
-        """Project the exact released dispatcher-state object."""
-        return dict(self)
 
 
 @dataclass
@@ -754,13 +687,15 @@ class ActivationRecovery:
     step: str
 
     def to_json(self) -> dict[str, Any]:
-        return copy.deepcopy({
-            "facts": self.facts,
-            "operation": self.operation,
-            "comment_request_id": self.comment_request_id,
-            "block_request_id": self.block_request_id,
-            "step": self.step,
-        })
+        return copy.deepcopy(
+            {
+                "facts": self.facts,
+                "operation": self.operation,
+                "comment_request_id": self.comment_request_id,
+                "block_request_id": self.block_request_id,
+                "step": self.step,
+            }
+        )
 
     @classmethod
     def from_json(cls, payload: Any) -> ActivationRecovery | None:
@@ -771,10 +706,14 @@ class ActivationRecovery:
             or not isinstance(payload.get("facts"), dict)
             or not isinstance(payload.get("operation"), dict)
             or not payload["operation"].get("request_id")
-            or any(not isinstance(payload.get(key), str) or not payload[key]
-                   for key in ("comment_request_id", "block_request_id", "step"))
+            or any(
+                not isinstance(payload.get(key), str) or not payload[key]
+                for key in ("comment_request_id", "block_request_id", "step")
+            )
         ):
-            raise DispatcherError("invalid_activation_recovery", "invalid persisted release activation recovery")
+            raise DispatcherError(
+                "invalid_activation_recovery", "invalid persisted release activation recovery"
+            )
         return cls(**copy.deepcopy(payload))
 
 
