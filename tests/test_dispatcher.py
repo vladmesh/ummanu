@@ -8061,6 +8061,70 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn(body, document)
         self.assertEqual(self.card_comments().count(f"[dispatcher]\n{original}"), 1)
 
+    def _run_handed_command(self, line: str) -> tuple[list[str], int, str]:
+        """Run one head-visible report/verdict line through the CLI, as the head would.
+
+        Only the writer's workspace is pinned (the done gate would otherwise read this repo's own
+        checkout); the argument vector, the body-file read and the protocol write are the real ones.
+        """
+        tokens = shlex.split(line)
+        argv = tokens[tokens.index("ummanu") + 1:]
+        errors = io.StringIO()
+        with (
+            mock.patch("ummanu.task_commands.card_client", return_value=self.board),
+            mock.patch(
+                "ummanu.task_commands.TaskWriter",
+                lambda client, data_dir: TaskWriter(client, data_dir=data_dir, workspace=self.data_dir),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = task_main([*argv, "--instance", str(self.data_dir), "--data-dir", str(self.data_dir)])
+        return argv, code, errors.getvalue()
+
+    def test_report_and_verdict_handoffs_read_their_body_from_the_private_data_dir(self) -> None:
+        """ummanu-241: with no override the worker's report and the reviewer's verdict are handed a
+        body path under `<data_dir>/artifacts/bodies` (0700), and the commands they hold read it
+        from there and move the card: report to validate, red verdict to assessment."""
+        # The host's own data dir: the fixture roots the fake host at `<data_dir>/workspaces`.
+        bodies = Path(self.host.data_dir) / "artifacts" / "bodies"
+        with mock.patch.dict(os.environ):
+            os.environ.pop("UMMANU_DISPATCHER_BODY_DIR", None)
+            self.start_dispatcher()
+            self.tick()
+            record = self._pilot_record()
+            workspace = record.get("workspace") or (self.data_dir / "workspaces" / "ummanu-510-pilot")
+            document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+            report_line = next(line for line in document.splitlines() if "--kind done" in line)
+            report_body = bodies / f"ummanu-report-ummanu-510-{record['report_generation']}.md"
+            self.assertIn(f"--body-file {report_body}", report_line)
+            self.assertEqual(stat.S_IMODE(bodies.stat().st_mode), 0o700)
+            report_body.write_text("worker report from the private body file", encoding="utf-8")
+
+            argv, code, errors = self._run_handed_command(report_line)
+
+            self.assertEqual((argv[:2], code, errors), (["task", "report"], 0, ""))
+            self.assertEqual(self.tick()["to"], "validate")
+            self.tick()
+            self.assertEqual(self.host.reviews, ["ummanu-510"])
+            record = self._pilot_record()
+            review = CommandHostRuntime(FakeCatalog(), self.host.data_dir, mode="noop")._review_prompt(  # type: ignore[arg-type]
+                self.reader.show("ummanu-510"), str(record["attempt_id"]), int(record["review_baseline"])
+            )
+            verdict_line = next(line for line in review.splitlines() if "--kind red" in line)
+            verdict_body = bodies / f"ummanu-verdict-ummanu-510-{record['review_baseline']}.md"
+            self.assertIn(f"--body-file {verdict_body}", verdict_line)
+            self.assertIn(f"--request-id {self._review_verdict_request_id('red')}", verdict_line)
+            verdict_body.write_text("reviewer verdict from the private body file", encoding="utf-8")
+
+            argv, code, errors = self._run_handed_command(verdict_line)
+
+            self.assertEqual((argv[:2], code, errors), (["task", "verdict"], 0, ""))
+            self.assertEqual(self.tick()["to"], "assessment")
+        bodies_on_card = [comment["body"] for comment in self.reader.show("ummanu-510")["comments"]]
+        for body in ("worker report from the private body file", "reviewer verdict from the private body file"):
+            self.assertTrue(any(body in text for text in bodies_on_card), body)
+
     def test_a_new_round_removes_the_previous_rounds_report_body(self) -> None:
         """The last thing that could make a command from a round that is over report this one.
 

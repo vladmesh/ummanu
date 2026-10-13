@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 from collections.abc import Callable
 from pathlib import Path
+from stat import S_ISREG
 
 from ummanu.board.backend import card_client
 from ummanu.board.models import CardState
@@ -486,17 +488,49 @@ def _read_body(path: str | None) -> str:
         raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
 
 
-def _reason_body(args: argparse.Namespace) -> str:
+def _read_handoff_body(path: str) -> str:
+    """A head's report/verdict body: a regular file this user owns, opened without following a link.
+
+    The dispatcher names the file in a directory private to this user, and the head writes it
+    there itself; a link, a fifo or another account's file at that name is not the head's body.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise TaskError("unsafe_body_file", f"body file {path} is a symbolic link", 2) from None
+        raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not S_ISREG(info.st_mode):
+            raise TaskError("unsafe_body_file", f"body file {path} is not a regular file", 2)
+        if info.st_uid != os.geteuid():
+            raise TaskError("unsafe_body_file", f"body file {path} belongs to another user (uid {info.st_uid})", 2)
+        try:
+            return handle.read().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
+
+
+def _reason_body(args: argparse.Namespace, *, handoff: bool = False) -> str:
     literal = getattr(args, "reason", None)
     paths = [getattr(args, name, None) for name in ("body_file", "reason_file")]
     if sum(value is not None for value in [literal, *paths]) > 1:
         raise TaskError("usage", "choose one body/reason source", 2)
-    return literal if literal is not None else _read_body(next((path for path in paths if path is not None), None))
+    if literal is not None:
+        return literal
+    path = next((path for path in paths if path is not None), None)
+    return _read_handoff_body(path) if handoff and path is not None else _read_body(path)
 
 
-def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
+def _run_task_write(
+    args: argparse.Namespace,
+    operation: Callable[[TaskWriter, str, str], object],
+    *,
+    handoff: bool = False,
+) -> int:
     def command() -> object:
-        body = _reason_body(args)
+        body = _reason_body(args, handoff=handoff)
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return operation(writer, body, args.actor or args.role)
 
@@ -607,6 +641,7 @@ def run_task_report(args: argparse.Namespace) -> int:
             classification=args.classification,
             request_id=args.request_id,
         ),
+        handoff=True,
     )
 
 
@@ -684,6 +719,7 @@ def run_task_verdict(args: argparse.Namespace) -> int:
             body=body,
             request_id=args.request_id,
         ),
+        handoff=True,
     )
 
 
