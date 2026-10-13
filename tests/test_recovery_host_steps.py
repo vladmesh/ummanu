@@ -174,7 +174,8 @@ class EmbedderEnvironmentTests(unittest.TestCase):
     def test_no_other_module_imports_the_embedding_stack(self) -> None:
         """One place sets it: every embedder (service, reindex, recover) is built through `memory_service`."""
         importers = set()
-        for path, tree in source_trees.modules(SOURCE):
+        # An import of the stack spells its top-level name, so no other file can import it.
+        for path, tree in source_trees.modules(SOURCE, naming=self.HUB_MODULES):
             for node in source_trees.imports(tree):
                 names = (
                     [alias.name for alias in node.names]

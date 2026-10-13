@@ -2192,7 +2192,8 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         po_runner = REPO / "src" / "ummanu" / "po" / "runner.py"
         substrate = "ummanu.runtime.head.local_pty"
         offenders = []
-        for path, tree in source_trees.modules(REPO / "src"):
+        # Every name of the substrate spells its last package, so no other file can import it.
+        for path, tree in source_trees.modules(REPO / "src", naming=("local_pty",)):
             if package in path.parents or path in (backend, po_runner):
                 continue
             for node in source_trees.imports(tree):
@@ -2214,7 +2215,8 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         backend, exactly one function anywhere turns that name into an object.
         """
         sites = {}
-        for path, tree in source_trees.modules(REPO / "src"):
+        # A call to a name ending in `HeadRuntime` spells that name, so no other file can build one.
+        for path, tree in source_trees.modules(REPO / "src", naming=("HeadRuntime",)):
             if path == REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py":
                 continue  # the class's own module, where it is defined rather than built
             for holder in source_trees.walk(tree):

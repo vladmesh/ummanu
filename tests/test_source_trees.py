@@ -62,6 +62,20 @@ class SourceIndexTests(unittest.TestCase):
         self.index.modules(self.root)
         self.assertEqual(self.index.parses, 6)
 
+    def test_a_named_read_parses_only_the_files_that_can_spell_the_name(self) -> None:
+        named = self.index.modules(self.root, naming=("VALUE",))
+        self.assertEqual([path.name for path, _ in named], ["b.py"])
+        self.assertEqual(self.index.parses, 1)
+        # A lookalike spelling is the same identifier once Python normalizes it, so it is read too.
+        self.write("pkg/d.py", "\uff36ALUE = 4\n")
+        named = dict(self.index.modules(self.root, naming=("VALUE",)))
+        self.assertEqual(sorted(path.name for path in named), ["b.py", "d.py"])
+        self.assertEqual(named[self.root / "pkg" / "d.py"].body[0].targets[0].id, "VALUE")  # type: ignore[attr-defined]
+        self.assertEqual(self.index.parses, 2)
+        # And the full read still answers every file, from the trees already held.
+        self.assertEqual(len(self.index.modules(self.root)), 4)
+        self.assertEqual(self.index.parses, 4)
+
     def test_a_one_pass_parse_keeps_nothing(self) -> None:
         source = "import json\n"
         tree = self.index.parse(source, retain=False)

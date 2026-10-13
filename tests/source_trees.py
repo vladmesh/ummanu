@@ -13,7 +13,9 @@ read-only. The lifecycle is explicit:
 * the key is the text, so a fixture that rewrites or swaps a file gets the new tree without a reset,
   and an unchanged file is never parsed twice;
 * `clear()` is the only reset. A one-pass scan whose trees nobody reads again (the test files
-  themselves) parses with `retain=False` and leaves nothing behind.
+  themselves) parses with `retain=False` and leaves nothing behind;
+* a check that looks only for nodes naming one identifier asks `modules(root, naming=...)`, and the
+  files that cannot spell it are not parsed at all.
 
 The cached trees are millions of long-lived container objects. Left in the collector's generations,
 each full collection would traverse all of them again, which costs more than the reparsing saved.
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import gc
+import unicodedata
 from collections import deque
 from pathlib import Path
 
@@ -51,12 +54,20 @@ class SourceIndex:
             self._frozen()
         return tree
 
-    def modules(self, root: Path) -> tuple[tuple[Path, ast.Module], ...]:
-        """Every `*.py` under `root`, sorted, with its tree. Read on every call, parsed once per text."""
+    def modules(self, root: Path, *, naming: tuple[str, ...] = ()) -> tuple[tuple[Path, ast.Module], ...]:
+        """Every `*.py` under `root`, sorted, with its tree. Read on every call, parsed once per text.
+
+        `naming` narrows the answer to the files that can hold a node naming one of those identifier
+        fragments, for a check that only ever looks for such a node: a file whose text spells none of
+        them is skipped unparsed. See :func:`may_name`.
+        """
         found = []
         parsed = False
         for path in sorted(root.rglob("*.py")):
-            tree, new = self._parse(path.read_text(encoding="utf-8"), str(path), retain=True)
+            text = path.read_text(encoding="utf-8")
+            if naming and not may_name(text, naming):
+                continue
+            tree, new = self._parse(text, str(path), retain=True)
             parsed = parsed or new
             found.append((path, tree))
         if parsed:
@@ -114,6 +125,21 @@ class SourceIndex:
     def _frozen(self) -> None:
         if self._freeze:
             gc.freeze()
+
+
+def may_name(text: str, fragments: tuple[str, ...]) -> bool:
+    """Whether `text` could parse to an identifier that contains one of `fragments`.
+
+    An identifier, and so every dotted module name, is spelled out whole in the source: no
+    continuation, string or comment splits one. Python normalizes identifiers with NFKC, so a
+    non-ASCII text is also searched in that form, where a lookalike spelling would surface.
+    """
+    if any(fragment in text for fragment in fragments):
+        return True
+    if text.isascii():
+        return False
+    normalized = unicodedata.normalize("NFKC", text)
+    return any(fragment in normalized for fragment in fragments)
 
 
 def imports(tree: ast.AST) -> tuple[ast.Import | ast.ImportFrom, ...]:
