@@ -76,7 +76,8 @@ from ummanu.sprints import (
     require_active_sprint_projects,
     sprint_guard_index_initialized,
 )
-from ummanu.tasks import TaskError, recorded_card_transition, task_audit_for
+from ummanu.task_errors import TaskError
+from ummanu.tasks import recorded_card_transition, task_audit_for
 from ummanu.webproto import sources
 from ummanu.webproto._values import _reason
 from ummanu.webproto.boundary import ProtocolBoundary

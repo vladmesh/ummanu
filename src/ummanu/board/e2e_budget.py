@@ -157,7 +157,7 @@ def cap_text(raises: list[dict[str, Any]]) -> str:
 
 
 def _refused(message: str) -> Exception:
-    from ummanu.tasks import TaskError
+    from ummanu.task_errors import TaskError
 
     return TaskError("authorization_refused", message, 3)
 

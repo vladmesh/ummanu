@@ -64,7 +64,7 @@ from ummanu.dispatch.types import (
     HeadLaunchAborted,
     HostError,
 )
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 WORKER_MARKERS = {"report:done", "report:blocked"}
 REVIEW_MARKERS = {"review:green", "review:red"}

@@ -825,7 +825,7 @@ def _episode_outcome(
     failed = turn is not None and turn.state == FAILED
     if episode is not None and (failed or time.time() - datetime.fromisoformat(
             episode["occurred_at"]).timestamp() >= 30 * 60):
-        from ummanu.tasks import TaskError
+        from ummanu.task_errors import TaskError
         reason = ("PO execution failed without its required response" if failed
                   else "PO ownership episode has no required response after 30 minutes")
         try:
@@ -867,7 +867,7 @@ def _await_owner(
     if answer is None:
         try:
             answered = owner_answer_event_ids(runtime.audit.events(ref))
-            from ummanu.tasks import TaskError
+            from ummanu.task_errors import TaskError
             for event_id in reversed(answered):
                 try:
                     runtime.writer.accept_owner_comment(actor=runtime.owner, reference=ref, event_id=event_id)

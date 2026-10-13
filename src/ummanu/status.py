@@ -38,7 +38,7 @@ from ummanu.infra.recovery_inventory import collect_recovery_inventory
 from ummanu.runtime import interactive_workspace
 from ummanu.secret_store import store_health
 from ummanu.sprints import SprintReader, budget_thresholds
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient

@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.config import InstanceReport
-from ummanu.tasks import ACTIVE_STATES, TaskError, TaskReader
+from ummanu.task_errors import TaskError
+from ummanu.tasks import ACTIVE_STATES, TaskReader
 from ummanu.webproto.errors import OwnerConflict, TaskNotFound, ValidationRefused
 from ummanu.webproto.runs import ProductRun, RunStore
 

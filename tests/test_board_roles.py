@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-from ummanu.board import Role as ExportedRole
 from ummanu.board.card_transitions import (
     CARD_TRANSITIONS,
     CardTransitionForbidden,
@@ -16,13 +15,13 @@ from ummanu.board.roles import (
     PROPOSAL_CREATE_ROLES,
     Role,
 )
-from ummanu.task_commands import _role_choices
+from ummanu.task_commands import Role as CommandRole, _role_choices
 from ummanu.tasks import TaskError, TaskWriter
 
 
 class RoleVocabularyTests(unittest.TestCase):
     def test_role_is_public_string_compatible_closed_vocabulary(self) -> None:
-        self.assertIs(ExportedRole, Role)
+        self.assertIs(CommandRole, Role)
         self.assertIs(Role("worker"), Role.WORKER)
         self.assertEqual(str(Role.WORKER), "worker")
         self.assertEqual(

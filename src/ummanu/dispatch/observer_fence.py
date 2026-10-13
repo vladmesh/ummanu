@@ -39,7 +39,7 @@ from ummanu.dispatch.observer import (
 from ummanu.dispatch.state import now_rfc3339
 from ummanu.dispatch.types import HostError
 from ummanu.sprint_observer import KIND_NONE, ObserverMetadataError
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 EVENT_FENCED = "observer_fence_raised"
 EVENT_CLEARED = "observer_fence_cleared"

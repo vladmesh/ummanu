@@ -476,7 +476,8 @@ class SqlIssueDescriptionEditTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(replay["description"], "two")
 
     def test_native_replace_refuses_other_fields_and_stale_description_evidence(self):
-        from ummanu.board import Actor, DescriptionEdit, EntityKind, EventKind, RelatedRefs, Replace
+        from ummanu.board.host import DescriptionEdit, Replace
+        from ummanu.board.models import Actor, EntityKind, EventKind, RelatedRefs
 
         issue = self._open_issue()
         host = self.store._host()
@@ -524,7 +525,8 @@ class SqlIssueDescriptionEditTests(ProductIssueFixture, unittest.TestCase):
             self.assertEqual(self._claims(stage), (1, 1))
 
     def test_pending_edit_recovery_confirms_the_exact_description_without_rewriting_it(self):
-        from ummanu.board import Actor, DescriptionEdit, EntityKind, EventKind, RelatedRefs
+        from ummanu.board.host import DescriptionEdit
+        from ummanu.board.models import Actor, EntityKind, EventKind, RelatedRefs
 
         issue = self._open_issue()
         host = self.store._host()

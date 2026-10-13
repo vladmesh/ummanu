@@ -140,18 +140,11 @@ from ummanu.runtime.references import (
 )
 from ummanu.runtime.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 
+# Preserve the class identity for existing tests and internal callers.
+from ummanu.task_errors import TaskError as TaskError
+
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient
-
-
-class TaskError(Exception):
-    """A task command failed without exposing backend credentials."""
-
-    def __init__(self, code: str, message: str, exit_code: int) -> None:
-        self.code = code
-        self.message = message
-        self.exit_code = exit_code
-        super().__init__(message)
 
 
 #: The one role/actor pair no write may carry: the observer's actor under the PO's role. The observer

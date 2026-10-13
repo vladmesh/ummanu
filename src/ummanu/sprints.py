@@ -72,9 +72,9 @@ from ummanu.sprint_observer import (
     parse_observer,
     stored_executors,
 )
+from ummanu.task_errors import TaskError
 from ummanu.tasks import (
     BOARD_STORE_KIND,
-    TaskError,
     TaskReader,
     TaskWriter,
     _digest,
@@ -950,14 +950,8 @@ class SprintWriter:
         observer: str | None = None,
         budget_by_type: tuple[tuple[str, int], ...] = (),
     ) -> None:
-        from ummanu.board import (
-            Actor,
-            EntityKind,
-            RelatedRefs,
-            SprintState,
-            SprintSupplement,
-            TransitionRequest,
-        )
+        from ummanu.board.host import SprintSupplement, TransitionRequest
+        from ummanu.board.models import Actor, EntityKind, RelatedRefs, SprintState
 
         try:
             host = self._host()

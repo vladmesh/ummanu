@@ -18,13 +18,8 @@ from tests.retired_board import LEGACY_VALUES, legacy_runtime_lines, write_stale
 from tests.sql_backend_fixtures import card_store
 from ummanu import secret_store
 from ummanu._fsutil import publish_component_entries
-from ummanu.board import (
-    Actor,
-    EntityKind,
-    Event,
-    EventKind,
-)
 from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
 from ummanu.checkpoint import (
     ANALYTICS_MANIFEST,
     PUSH_INTERVAL_SECONDS,

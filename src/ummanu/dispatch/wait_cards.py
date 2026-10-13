@@ -79,7 +79,8 @@ from ummanu.dispatch.state import (
     request_token,
 )
 from ummanu.dispatch.types import HostError
-from ummanu.tasks import TaskError, recorded_card_transition
+from ummanu.task_errors import TaskError
+from ummanu.tasks import recorded_card_transition
 
 WAIT_STEP = "wait-card"
 #: Request-id actions of a delivery, each under `delivery_request_id(<card>, <action>, <address>, <key>)`.

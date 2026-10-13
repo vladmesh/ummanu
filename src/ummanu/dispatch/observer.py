@@ -92,7 +92,8 @@ from ummanu.sprint_observer import (
     ObserverMetadataError,
     executable_observer,
 )
-from ummanu.tasks import TaskError, is_significant_observer_event
+from ummanu.task_errors import TaskError
+from ummanu.tasks import is_significant_observer_event
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"

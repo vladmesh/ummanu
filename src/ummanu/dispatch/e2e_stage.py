@@ -93,7 +93,7 @@ from ummanu.dispatch.gate_receipt import is_exact_sha
 from ummanu.dispatch.helpers import _legacy_worker_branch, safe_one_line, scrub_host_output
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id, request_token
 from ummanu.dispatch.types import HostError
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 #: The phase a red run's rework is opened under: its request id carries `gate-red`, so the sprint
 #: charges it as the red CI it is.

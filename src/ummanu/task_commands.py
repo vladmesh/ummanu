@@ -28,13 +28,8 @@ from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missin
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.runtime.head import CODEX_LAUNCH_MODES
 from ummanu.runtime.paths import add_instance_argument, instance_file, resolve_instance_path
-from ummanu.tasks import (
-    BOARD_STORE_KIND,
-    TaskError,
-    TaskReader,
-    TaskWriter,
-    task_audit_for,
-)
+from ummanu.task_errors import TaskError
+from ummanu.tasks import BOARD_STORE_KIND, TaskReader, TaskWriter, task_audit_for
 
 
 def _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:

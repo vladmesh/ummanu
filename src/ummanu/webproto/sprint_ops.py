@@ -30,7 +30,8 @@ from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.sprint_observer import observer_choice
 from ummanu.sprints import SprintWriter
-from ummanu.tasks import TaskError, _digest
+from ummanu.task_errors import TaskError
+from ummanu.tasks import _digest
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import (

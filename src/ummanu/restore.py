@@ -59,13 +59,9 @@ from ummanu.sprint_observer import (
     is_executable,
     parse_observer,
 )
+from ummanu.task_errors import TaskError
 from ummanu.task_restore import restored_entity_number, set_restore_phase
-from ummanu.tasks import (
-    TaskError,
-    TaskReader,
-    TaskWriter,
-    all_project_cards,
-)
+from ummanu.tasks import TaskReader, TaskWriter, all_project_cards
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient

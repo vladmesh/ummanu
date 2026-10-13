@@ -38,7 +38,8 @@ from ummanu.sprints import (
     public_current_task,
 )
 from ummanu.task_commands import _add_data_dir_args, _read_body, print_task_error, resolve_data_dir
-from ummanu.tasks import TaskError, admit_role
+from ummanu.task_errors import TaskError
+from ummanu.tasks import admit_role
 from ummanu.webproto.commands import (
     _EXIT_BY_CODE,
     _RUN_EXIT_BY_CODE,

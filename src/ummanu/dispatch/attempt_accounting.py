@@ -38,7 +38,8 @@ from ummanu.routing_journal import (
     HeadRun,
     routing_head_snapshot_from_launch as _routing_head_snapshot_from_launch,
 )
-from ummanu.tasks import TaskError, specification_revision
+from ummanu.task_errors import TaskError
+from ummanu.tasks import specification_revision
 
 
 def _usage_fallback_snapshot(

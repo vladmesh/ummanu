@@ -39,13 +39,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ummanu.board import owner_events
-from ummanu.board import po_origin as origin_field
+from ummanu.board import owner_events, po_origin as origin_field
 from ummanu.board.origin_outbox import DELIVERED, SKIPPED, OutboxRow, outbox_for
 from ummanu.board.production_rights import DELEGATED_RESULT_INPUT, card_facts
 from ummanu.dispatch.po_delivery import deliver, open_successor
 from ummanu.dispatch.state import request_token
-from ummanu.tasks import PO_SESSION_KEY, TaskError, recorded_card_transition
+from ummanu.task_errors import TaskError
+from ummanu.tasks import PO_SESSION_KEY, recorded_card_transition
 
 STEP = "origin-return"
 #: Request-id actions: `dispatcher-origin-return-<card>-<event id>` for the input, and

@@ -26,7 +26,8 @@ from ummanu.config import instance_data_dir
 from ummanu.runtime.codex_home import bound_data_dir
 from ummanu.runtime.paths import default_instance_path
 from ummanu.runtime.state import BoardUnavailable
-from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.task_errors import TaskError
+from ummanu.tasks import TaskReader, TaskWriter
 
 _SIGNAL_COMMANDS = frozenset({"scan", "precheck", "advance"})
 

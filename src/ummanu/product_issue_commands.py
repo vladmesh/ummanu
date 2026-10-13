@@ -10,7 +10,7 @@ from ummanu.cli_output import usage_handler
 from ummanu.product_issues import ISSUE_WRITE_ROLES, ProductIssueStore
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.task_commands import _read_body, resolve_data_dir, run_task_command
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 
 def _common(

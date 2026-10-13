@@ -28,7 +28,7 @@ _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 from ummanu.runtime.paths import instance_file as config_file
 from ummanu.sprints import budget_thresholds, open_sprint_limit_invalid
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 # schema name -> file in ummanu/schemas/
 SCHEMAS = {

@@ -9,7 +9,7 @@ import yaml
 
 from ummanu.board.sprint_close import SprintCloseDecision, SprintCloseDecisions
 from ummanu.product_issues import ISSUE_CLOSE_REASONS
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 KEEP_OPEN = "open"
 ALREADY_CLOSED = "already_closed"

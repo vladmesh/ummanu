@@ -25,7 +25,7 @@ from typing import Any
 
 from ummanu.po.client import PoServiceError, ServiceRefused
 from ummanu.po.store import PoRequest, PoStoreError, RequestConflict, SessionClosed, SessionNotFound
-from ummanu.tasks import TaskError
+from ummanu.task_errors import TaskError
 
 #: The source the PO service records for a dispatcher input (`ummanu.po.queue.SOURCES`).
 DISPATCHER_SOURCE = "dispatcher"

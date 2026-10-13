@@ -17,11 +17,11 @@ board, and a unit test gives the service a fake one.
 
 from __future__ import annotations
 
-import re
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Any
+from typing import Any, Protocol
 
 # The role and actor of what the resolver writes on a sprint: its comment and its session record.
 RESOLVER_ROLE = "po"
@@ -119,8 +119,8 @@ def seed_message(sprint: SprintRecord, why: str, documents: list[WhyDocument], *
              f"Context budget: {measured} / {threshold} {CONTEXT_METRIC}; deterministic proxy, not provider tokens.",
              f"Read the actual NOTES.md in your permanent workspace first ({notes}). "
              + ("It exists; read its current contents." if sources["notes_present"] else "It is missing; no notes are supplied."),
-             f"Full durable sprint sources: `{pointer}`. Apply current addressable standing owner decisions "
-             "before the observer resume; excerpts grant no additional consent."]
+             (f"Full durable sprint sources: `{pointer}`. Apply current addressable standing owner decisions "
+              "before the observer resume; excerpts grant no additional consent.")]
     sections = []
     sections.append("Standing owner decisions in owner-answer order (latest applicable answer wins), "
                     f"with verbatim quotation bases; full list: `{pointer}`:\n"
@@ -184,7 +184,7 @@ class BoardSprintSessions:
 
     def sprint(self, sprint_ref: str) -> SprintRecord | None:
         from ummanu.sprints import SprintReader
-        from ummanu.tasks import TaskError
+        from ummanu.task_errors import TaskError
 
         try:
             document = SprintReader(self._client(), data_dir=self.data_dir).show(
