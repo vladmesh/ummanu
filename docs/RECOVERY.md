@@ -27,15 +27,17 @@ A recovery recreates these names; nothing reads an older spelling of them.
 | Live root | `~/ummanu-data/instance`, a plain directory with no `.git`; the default of `--instance` and `UMMANU_INSTANCE` (`runtime.paths.default_instance_path`) |
 | Snapshot repository | `<data>/backup/instance.git` unless `offsite.snapshot_repo` says otherwise; bare, branch `main`, written only by the exporter (and by a recovery that lays it out) |
 | Instance remote | `offsite.instance_remote`; the private remote keeps its name. The pusher publishes the snapshot branch to it; nothing runs from a checkout of it |
-| Old live root | `~/secretary-instance`, the instance repository's work tree the live root was before the cutover. A cut-over host keeps it read-only (`chmod -R a-w`) for rollback and reference; nothing reads or writes it, and `live_root.old_path` (below) flags anything that still names it |
+| Old live root | `~/secretary-instance`, the instance repository's work tree the live root was before the cutover. A cut-over host keeps it read-only (`chmod -R a-w`) as historical recovery data and reference; no live caller uses it, and `live_root.old_path` (below) flags anything that still names it |
 | systemd units | `ummanu-*` from `packaging/systemd/` (`host.unit_prefix: ummanu-`), e.g. `ummanu-dispatcher-production.timer`, `ummanu-po.service`, `ummanu-instance-maintenance.timer` |
 | Role worktrees | `~/orca/workspaces/ummanu/<role>` |
 | Environment | `UMMANU_INSTANCE`, `UMMANU_DATA_DIR`, `UMMANU_REPO`, `UMMANU_RUNTIME_ENV_FILE`, and every other `UMMANU_*` key |
 | Board store | Compose project `ummanu-board-store`, file `/opt/ummanu/postgres-compose.yml`, container `ummanu-board-store-postgres-1`, volume `ummanu-board-store_board-db`, label `ummanu.production-board`; database `ummanu`, roles `ummanu_owner`, `ummanu_app`, `ummanu_read`; `board-store.env` keys `UMMANU_DB_*` |
 | Cold archives | `<data_dir>/backups/ummanu-backup-<kind>-<stamp>.tar`, manifest `"tool": "ummanu"` |
 
-An installation from before the product rename is moved onto these names once, by the transition in
-`docs/RENAME.md` §T3; archives taken before it restore only with the pre-transition code.
+The product rename is complete. Archives taken before it require the matching historical code and
+formats; current recovery does not translate them. Preserve old read-only roots and archive data.
+An entrypoint change requires a separately authorized installation operation
+([Operations](OPERATIONS.md#entrypoint-activation)).
 
 **Default and refusal.** A command given neither `--instance` nor `UMMANU_INSTANCE` uses the default
 live root and refuses, naming the path, when that directory does not exist
@@ -50,12 +52,10 @@ Packaged units and dispatcher-launched heads set `UMMANU_INSTANCE` explicitly.
 - `live_root.old_path`: an installed `ummanu-*` unit file, the live root's `runtime.env`, or the role
   env of a process bound to this live root (`UMMANU_INSTANCE`, `UMMANU_RUNTIME_ENV_FILE`,
   `TA_RUNTIME_ENV_FILE`) names the old live-root path, `~/secretary-instance` (the spelling lives
-  only in `ummanu.transition.names`).
+  only in `ummanu.infra.old_name_guard`).
 
-A cut-over installation has neither. An installation that has not been cut over has both by design:
-its live root is still the instance repository's work tree, and its units name it. The cutover
-(final legacy checkpoint and push, a copy of the live root without `.git`, the
-[seed](#writers), `upgrade --instance` onto the new root) clears both.
+A current installation has neither. A finding requires investigation under a separately authorized
+installation operation; ordinary recovery and release retries do not move an old live root.
 
 The instance remote is the only Git canon for the data plane: one remote, one branch, one RPO.
 

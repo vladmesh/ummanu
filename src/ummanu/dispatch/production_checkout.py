@@ -12,7 +12,7 @@ both paths reach :func:`advance`, which keeps one order:
    ``merge --ff-only`` it replaces would have;
 3. refuse a target that does not keep the entrypoint the live units execute
    (`dispatch.entrypoint_guard`, reason ``entrypoint_moved``): it lands on the remote, and only the
-   transition runbook (`docs/RENAME.md` §T3) activates it;
+   installation operation guidance (`docs/OPERATIONS.md` §Entrypoint activation) activates it;
 4. bring the board store to the target's schema (`board.release_migrations.prepare`: the target's
    own migration bundle, additive revisions only, under the migration advisory lock, verified at
    the target's head);

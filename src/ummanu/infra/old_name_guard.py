@@ -1,6 +1,6 @@
 """The old product name guard: one matcher, two allowlists.
 
-docs/RENAME.md §T5. A path or a line naming `secretary` in any case passes only when a row of the
+docs/RENAME.md, "Guard". A path or a line naming `secretary` in any case passes only when a row of the
 caller's allowlist covers the match. The product's tree is guarded by `tests/test_old_name_guard.py`
 with its own table; the live root is guarded by `ummanu config check` with `LIVE_ROOT_ALLOWLIST`
 below, ported from the instance repository's retired `tests/test_old_name_guard.py`: every row
@@ -15,7 +15,8 @@ from __future__ import annotations
 import fnmatch
 import re
 
-from ummanu.transition.names import INSTANCE_PROJECT
+#: The retained instance repository and historical live root; never an operational default.
+INSTANCE_PROJECT = "secretary-instance"
 
 OLD_NAME = re.compile(r"(?i)secretary")
 
@@ -38,7 +39,7 @@ LIVE_ROOT_ALLOWLIST: tuple[Row, ...] = (
     # The Hermes Telegram agent `secretary` keeps its name. Today it is named only inside the R paths
     # below (board cards, audit, knowledge reports); the row admits its own spellings and no others.
     ("H", re.compile(r"\bhermes-secretary(?:-roles)?\b|~/\.hermes/skills/secretary(?:-roles)?\b"), ANYWHERE),
-    # The repository name, its project id and its cards (`transition.names.INSTANCE_PROJECT`, the one
+    # The repository name, its project id and its cards (`old_name_guard.INSTANCE_PROJECT`, the one
     # spelling). The same name with `-maintenance` was a product unit, not this repository.
     ("I", re.compile(rf"\b{re.escape(INSTANCE_PROJECT)}\b(?!-maintenance)"), ANYWHERE),
     # A card ref of the old product, e.g. `secretary-1566` or `pipeline/secretary-1932`.

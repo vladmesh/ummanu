@@ -47,7 +47,6 @@ integration-board tests/test_board_store_schema.py
 integration-board tests/test_board_schema_gate_backend.py
 integration-board tests/test_release_schema_boundary.py
 unit tests/test_entrypoint_guard.py
-packaging tests/test_transition_from_secretary.py
 unit tests/test_closed_product_registry.py
 unit tests/test_old_name_guard.py
 component tests/test_config_check.py
@@ -66,8 +65,6 @@ integration-dispatcher tests/test_local_check_pytest.py
 unit tests/test_candidate_history.py
 integration-recovery tests/test_checkpoint.py
 integration-recovery tests/test_postgres_recovery.py
-integration-recovery tests/test_transition_board.py
-integration-recovery tests/test_transition_products.py
 integration-recovery tests/test_fresh_postgres_install.py
 unit tests/test_ci_shards.py
 unit tests/test_ci_selection.py
@@ -317,3 +314,4 @@ unit tests/test_owner_decisions.py
 unit tests/test_ci_lint.py
 unit tests/test_hermetic_shell.py
 integration-dispatcher tests/test_broad_check_process.py
+unit tests/test_installation_retirement.py

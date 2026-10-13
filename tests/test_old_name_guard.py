@@ -1,12 +1,12 @@
-"""The old product name stays only where docs/RENAME.md §T5 allows it.
+"""The old product name stays only where docs/RENAME.md, Guard allows it.
 
 Every tracked path and every tracked text file is checked for `secretary` in any case. A match
 passes only when a row of `ALLOWLIST` covers it: the Hermes agent (H), the instance repository (I),
-historical records (R) or the transition's own files (T). There is one table and no per-file
+historical records (R) or guard/policy source (G). There is one table and no per-file
 exemption outside those four classes, so a new mention of the old name fails here with its file,
 line and text.
 
-Class T: this file and the matcher it shares with `ummanu config check`
+Class G: this file and the matcher it shares with `ummanu config check`
 (`src/ummanu/infra/old_name_guard.py`, which holds the live root's allowlist) name the old name on
 purpose.
 """
@@ -19,9 +19,7 @@ import unittest
 from pathlib import Path
 
 from ummanu.infra import old_name_guard
-from ummanu.infra.old_name_guard import applies as _applies
-from ummanu.infra.old_name_guard import text_of
-from ummanu.transition.names import INSTANCE_PROJECT
+from ummanu.infra.old_name_guard import INSTANCE_PROJECT, applies as _applies, text_of
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -40,28 +38,17 @@ ALLOWLIST: tuple[tuple[str, re.Pattern[str] | None, tuple[str, ...]], ...] = (
     ("R", re.compile(r"\bsecretary_1727_[0-9a-f]+\.jsonl\.gz\b"), ANYWHERE),
     # A quoted historical record, replayed against its immutable audit digest byte for byte.
     ("R", None, ("tests/fixtures/gate_attestation_1883.json",)),
-    # The names of the class T files and of the transition's own command, wherever they are referenced.
-    (
-        "T",
-        re.compile(
-            r"\btransition-from-secretary\.sh\b|\btest_transition_from_secretary\b|\bfrom-secretary\b"
-        ),
-        ANYWHERE,
-    ),
-    (
-        "T",
-        None,
-        (
-            "src/ummanu/transition/*",
-            "scripts/transition-from-secretary.sh",
-            "tests/test_transition_from_secretary.py",
-            "scripts/rename_to_ummanu.py",
-            "docs/RENAME.md",
-            "tests/test_old_name_guard.py",
-            # The guard's matcher and the live root's allowlist, which names the old name as data.
-            "src/ummanu/infra/old_name_guard.py",
-        ),
-    ),
+    # Historical cwd data has one released producer (sprint:1475) and curator rebind consumer.
+    ("R", re.compile(r'^_OLD_(?:PRODUCT = "secretary"|DATA = "secretary-data")$'),
+     ("src/ummanu/automations/agents/curator/move_paths.py",)),
+    ("R", None, ("tests/fixtures/rebind_move_sprint1475.json",)),
+    # Exact negative env/package fixtures. No runtime alias is admitted.
+    ("G", re.compile(r'"(?:SECRETARY_(?:DATA_DIR|INSTANCE|RUNTIME_ENV_FILE)|TA_SECRETARY_REPO|SECRETARY_|TA_SECRETARY_|import secretary|ModuleNotFoundError: No module named \'secretary\')"'),
+     ("tests/test_env_prefix.py",)),
+    # Removal regression's former verb and exact removed script/test inventory, only here.
+    ("G", re.compile(r'"(?:from-secretary|scripts/(?:rename_to_ummanu\.py|transition-from-secretary\.sh)|tests/test_transition_from_secretary\.py)"'),
+     ("tests/test_installation_retirement.py",)),
+    ("G", None, ("docs/RENAME.md", "tests/test_old_name_guard.py", "src/ummanu/infra/old_name_guard.py")),
 )
 
 
@@ -72,20 +59,20 @@ def violations(path: str, text: str | None) -> list[str]:
     return old_name_guard.violations(path, text, ALLOWLIST)
 
 
-#: The product's source, where the instance repository's name is a transition name only (ummanu-39):
-#: the live root is `runtime.paths.default_instance_path`, the old path lives in `transition.names`.
+#: Only the policy owner may define the historical instance name; operational source imports it.
 PRODUCT_SOURCE = "src/*"
-TRANSITION_SOURCE = "src/ummanu/transition/*"
+INSTANCE_OWNER = "src/ummanu/infra/old_name_guard.py"
+INSTANCE_DEFINITION = 'INSTANCE_PROJECT = "secretary-instance"'
 
 
 def instance_literals(path: str, text: str | None) -> list[str]:
-    """Every line of a product source file outside `transition/` that spells the old live root's name."""
-    if text is None or not _applies((PRODUCT_SOURCE,), path) or _applies((TRANSITION_SOURCE,), path):
+    """Instance-name literals outside the owner's single exact definition are forbidden."""
+    if text is None or not _applies((PRODUCT_SOURCE,), path):
         return []
     return [
         f"{path}:{number}: {line.strip()}"
         for number, line in enumerate(text.splitlines(), 1)
-        if INSTANCE_PROJECT in line
+        if INSTANCE_PROJECT in line and not (path == INSTANCE_OWNER and line == INSTANCE_DEFINITION)
     ]
 
 
@@ -105,26 +92,29 @@ class OldNameGuardTests(unittest.TestCase):
                 found += violations(name, None)
                 continue
             found += violations(name, text_of(path.read_bytes()))
-        self.assertEqual(found, [], "the old product name outside docs/RENAME.md §T5:\n" + "\n".join(found))
+        self.assertEqual(found, [], "the old product name outside docs/RENAME.md, Guard:\n" + "\n".join(found))
 
-    def test_the_product_source_outside_the_transition_never_spells_the_instance_name(self) -> None:
-        """`git grep secretary-instance -- src ':!src/ummanu/transition'` stays empty, the guard included."""
+    def test_the_instance_name_has_one_policy_definition_and_no_operational_literals(self) -> None:
+        """Operational callers depend on the guard owner, never the old live-root literal."""
         found: list[str] = []
         for name in tracked_files():
             path = ROOT / name
             if path.is_file() and not path.is_symlink():
                 found += instance_literals(name, text_of(path.read_bytes()))
-        self.assertEqual(found, [], "spell it through ummanu.transition.names:\n" + "\n".join(found))
+        self.assertEqual(found, [], "import INSTANCE_PROJECT from ummanu.infra.old_name_guard:\n" + "\n".join(found))
         self.assertEqual(INSTANCE_PROJECT, "secretary-instance")
+        owner = (ROOT / INSTANCE_OWNER).read_text()
+        self.assertEqual(owner.splitlines().count(INSTANCE_DEFINITION), 1)
 
-    def test_a_reintroduced_instance_literal_fails_outside_the_transition_only(self) -> None:
+    def test_a_reintroduced_instance_literal_fails_except_the_single_owner_definition(self) -> None:
         line = 'DEFAULT = Path.home() / "secretary-instance"\n'
         self.assertEqual(
             instance_literals("src/ummanu/runtime/paths.py", line),
             ['src/ummanu/runtime/paths.py:1: DEFAULT = Path.home() / "secretary-instance"'],
         )
         self.assertEqual(len(instance_literals("src/ummanu/schemas/adapter.schema.json", line)), 1)
-        self.assertEqual(instance_literals("src/ummanu/transition/names.py", line), [])
+        self.assertEqual(len(instance_literals(INSTANCE_OWNER, line)), 1)
+        self.assertEqual(instance_literals(INSTANCE_OWNER, INSTANCE_DEFINITION), [])
         self.assertEqual(instance_literals("docs/RECOVERY.md", line), [])
         self.assertEqual(instance_literals("tests/test_x.py", line), [])
 
@@ -139,7 +129,7 @@ class OldNameGuardTests(unittest.TestCase):
                 for name in names
                 if any(pattern is None and _applies(globs, name) for _, pattern, globs in ALLOWLIST)
             },
-            "only the whole-file rows (the T files and the one R record) may carry a stray old name",
+            "only the whole-file rows (the guard/policy files and exact R records) may carry a stray old name",
         )
 
     def test_a_failure_names_the_file_line_and_match(self) -> None:
@@ -161,11 +151,11 @@ class OldNameGuardTests(unittest.TestCase):
             "docs/OPERATIONS.md": "Since secretary-1932 (branch pipeline/secretary-1932).\n",
             "tests/test_local_pty_journal_turn.py": 'FIXTURE = "secretary_1727_9c6b884b.jsonl.gz"\n',
             "tests/fixtures/local_pty_journals/secretary_1727_9c6b884b.jsonl.gz": None,
-            "src/ummanu/transition/names.py": 'OLD = "secretary"\n',
             "docs/RENAME.md": "secretary → ummanu\n",
             "tests/fixtures/gate_attestation_1883.json": '{"url": "https://github.com/vladmesh/secretary"}\n',
-            "tests/ci-shards.txt": "unit tests/test_transition_from_secretary.py\n",
-            "docs/PROTOCOLS.md": "Run `ummanu transition from-secretary --plan`.\n",
+            "src/ummanu/automations/agents/curator/move_paths.py": '_OLD_PRODUCT = "secretary"\n_OLD_DATA = "secretary-data"\n',
+            "tests/test_env_prefix.py": 'old = "SECRETARY_DATA_DIR"\n',
+            "tests/test_installation_retirement.py": '["from-secretary"]\n',
         }
         for path, text in allowed.items():
             with self.subTest(path=path):
@@ -179,6 +169,13 @@ class OldNameGuardTests(unittest.TestCase):
             "tests/test_upgrade.py": 'dist = "secretary-0.1.0.dist-info"\n',
             "tests/test_role_skills.py": "[roles.secretary]\n",
             "pyproject.toml": "[tool.secretary]\n",
+            "docs/PROTOCOLS.md": "Run `ummanu transition from-secretary --plan`.\n",
+            "tests/ci-shards.txt": "unit tests/test_transition_from_secretary.py\n",
+            "src/ummanu/automations/agents/curator/move_paths.py": 'ALIAS = "secretary"\n',
+            "src/ummanu/infra/live_root_findings.py": 'DEFAULT = "secretary"\n',
+            "docs/RECOVERY.md": "scripts/transition-from-secretary.sh\n",
+            "tests/test_env_prefix.py": 'old = "SECRETARY_DB_HOST"\n',
+            "tests/test_installation_retirement.py": 'alias = "secretary"\n',
             "src/ummanu/cli.py": 'prog="secretary"\n',
         }
         for path, text in refused.items():

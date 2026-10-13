@@ -973,9 +973,11 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
 
     def test_a_tick_interrupted_before_the_block_replays_to_one_reason_and_one_operation(self) -> None:
         record, records, payload = self.arrange()
-        with mock.patch.object(release_lifecycle, "block_merge_path", side_effect=RuntimeError("tick died")):
-            with self.assertRaisesRegex(RuntimeError, "tick died"):
-                self.release_card(record, records, payload)
+        with (
+            mock.patch.object(release_lifecycle, "block_merge_path", side_effect=RuntimeError("tick died")),
+            self.assertRaisesRegex(RuntimeError, "tick died"),
+        ):
+            self.release_card(record, records, payload)
         self.assertEqual(len(self.operations()), 1, "the operation is created before anything can be lost")
         self.assertNotEqual(self.reader.show(CARD_REF)["state"], "blocked")
 
@@ -986,7 +988,7 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         self.assertEqual(len([c for c in card["comments"] if release_activation.HEADING in c["body"]]), 1)
         self.assertEqual(len(self.operations()), 1)
 
-    def test_an_entrypoint_moved_target_lands_stays_inactive_and_names_the_transition_runbook(self) -> None:
+    def test_an_entrypoint_moved_target_lands_stays_inactive_and_names_the_installation_operation_guidance(self) -> None:
         record, records, payload = self.arrange(moved=True)
         with (
             mock.patch.object(release_migrations, "prepare", side_effect=AssertionError("schema touched")),
@@ -1017,12 +1019,12 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         [blocked] = [e for e in self.writer.audit.events(CARD_REF)
                      if (e.get("transition") or {}).get("target") == "blocked"]
         for needle in ("entrypoint_moved", "The merge landed on main", "deliberately stays on the old commit",
-                       "docs/RENAME.md §T3", "not by retrying the release or running `upgrade`"):
+                       "docs/OPERATIONS.md §Entrypoint activation", "not by retrying the release or running `upgrade`"):
             self.assertIn(needle, str(blocked))
         [operation] = self.operations()
         self.assertIn(operation["ref"], str(blocked))
         self.assertEqual((operation["sprint"], touches_production(operation)), (SPRINT, "ummanu"))
-        for needle in ("docs/RENAME.md §T3", "The merge landed on `main`", "Do not retry the release",
+        for needle in ("docs/OPERATIONS.md §Entrypoint activation", "The merge landed on `main`", "Do not retry the release",
                        self.old, self.target):
             self.assertIn(needle, operation["description"])
         self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
@@ -1034,8 +1036,8 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
     def test_the_dispatcher_creates_no_other_operation(self) -> None:
         self.start_dispatcher()
         self.instance(self.board_config(), self.data_dir)
-        base = dict(role="dispatcher", actor="ummanu-pilot", project="ummanu", task_type="operation",
-                    title="T", sprint=SPRINT)
+        base = {"role": "dispatcher", "actor": "ummanu-pilot", "project": "ummanu", "task_type": "operation",
+                "title": "T", "sprint": SPRINT}
         for extra, code in (
             ({"touches_production": "ummanu"}, "role_forbidden"),
             ({"touches_production": "ummanu", "request_id": "dispatcher-anything-1"}, "role_forbidden"),

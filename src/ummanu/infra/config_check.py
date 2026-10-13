@@ -6,7 +6,7 @@ config"). Two checks run over the live root:
 - schema validation, `config.validate_instance`, the same read the dispatcher makes every tick,
   and the cross-family fallback rule (`infra.fallback.fallback_errors`, ummanu-108): every head profile
   and PO session can fall over to the other subscription family;
-- the old-name guard (`infra.old_name_guard`, docs/RENAME.md §T5) over the files the next exporter
+- the old-name guard (`infra.old_name_guard`, docs/RENAME.md, Guard) over the files the next exporter
   cut copies. A file outside the export allowlist (`runtime.env`, `board-store.env`,
   `secrets/installation.key`, generated or local state) is never opened.
 

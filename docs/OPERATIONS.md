@@ -42,6 +42,32 @@ installs Docker and Compose from the distribution and provisions the board store
 writes no state. `doctor` reports broken invariants (`--json` for structured findings). Changing the
 host requires `reconcile plan` and a separate confirmed apply.
 
+### Entrypoint activation
+
+A target that removes `src/<PACKAGE>/dispatch/runtime_preflight.py` or the running package's
+`[project.scripts]` console script is refused with `entrypoint_moved`.
+`dispatch.entrypoint_guard` inspects the pinned target Git objects. Production release checks it
+after ancestry and before board migrations or checkout advance; `upgrade.fast_forward` applies
+the same fence before moving the checkout. Neither advances the checkout nor applies board
+migrations for a missing entrypoint. A remote PR merge can still have landed on `main`: delivery
+to the remote and activation of the live installation are separate facts.
+
+The dispatcher persists the refused activation and its owed recovery requests, blocks the source
+card, and creates one operation for the sprint PO. Request IDs deduplicate operation creation,
+comments and blocking across replay. Existing recovery records retain their original facts and
+text. Do not retry the release or run ordinary `upgrade` to activate this target; those paths
+refuse the same missing entrypoint.
+
+The PO must arrange a separate deliberate installation operation with allowed production
+authority. Its plan must name the pinned target, replacement entrypoints, callers to stop/drain,
+checkout and data paths, units and environment bindings, schema compatibility and recovery
+boundary. Stop callers of the old tree before changing those bindings together; do not bypass
+the guard or move the checkout/apply board migrations as a release retry. This is an operation
+contract, not an executable rename procedure. Record the actual checkout SHA, entrypoint and
+unit/environment checks, supported production upgrade where applicable, doctor findings and a
+successful tick before completing the operation. Preserve the operation's request identity and
+owed recovery obligation until its evidence establishes activation.
+
 ### Pointing a command at a live root
 
 A command reads its live root from `--instance <dir>` (the directory or its `instance.yaml`), else
@@ -1176,7 +1202,7 @@ It needs no Git and reads the live root the same with or without `.git`. Two che
 
 - schema validation: `instance.yaml`, every binding, adapter and onboarding draft, and the data
   manifest, the same read the dispatcher makes every tick;
-- the old-name guard ([Rename](RENAME.md#t5-guard)): every exported path and text file, as the next
+- the old-name guard ([Rename](RENAME.md#guard)): every exported path and text file, as the next
   cut copies it. The old product name passes only where an allowlist row covers it: the Hermes agent's
   own spellings, `secretary-instance`, old card refs, the `source:`/`supersedes:` lines of memory
   facts, and whole-file history (`state/knowledge`, except undated runbooks and `plans/current-*`).
@@ -3304,7 +3330,7 @@ A role-workspace move is the one supported resolution of a foreign identity: run
 workspace, or with `TA_CURATOR_WORKSPACE` set to it). Run it after a move of the curator's workspace and Claude
 project directories, such as the sprint:1475 rename, and before the next tick, which otherwise refuses with
 `belongs to a different run identity` and names this verb. It follows only the known moves
-(`transition.rewrite.claude_move_paths`), never a string replace, and runs under the cursor-settlement lock:
+(`automations.agents.curator.move_paths.claude_move_paths`), never a string replace, and runs under the cursor-settlement lock:
 
 - the pending identity is rebound only when its workspace is a known old path that no longer exists and the rebound
   identity is the current run's; the facts in the batch are kept, its cursor keys follow the same moves and its batch
