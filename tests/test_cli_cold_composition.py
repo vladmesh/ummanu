@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from dataclasses import fields
@@ -19,6 +20,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 GOLDEN = ROOT / "tests/fixtures/cli-parser-272.json"
 EVIDENCE = ROOT / ".ummanu-task-env/cli-272"
+BASE = "36d47615bad4d79e50313588d228a8fad9589e8d"
 
 
 def stable(value):
@@ -53,7 +55,7 @@ def schema(parser):
         }
         row["action"] = type(action).__name__
         if parser.prog == "ummanu data snapshot" and action.dest == "state_dir":
-            from ummanu.runtime.paths import PIPELINE_STATE_DIR
+            from ummanu.cli import PIPELINE_STATE_DIR
 
             # This legacy default binds at import, before the test's construction-time HOME.
             assert action.default == str(PIPELINE_STATE_DIR)
@@ -86,7 +88,58 @@ def outcome(argv):
     return {"argv": argv, "code": code, "stdout": out.getvalue(), "stderr": err.getvalue()}
 
 
+def parser_snapshot():
+    from ummanu.cli import build_parser
+
+    with mock.patch.dict(
+        os.environ,
+        {
+            "HOME": "/cli-contract-home",
+            "UMMANU_INSTANCE": "",
+            "UMMANU_DATA_DIR": "/cli-contract-data",
+            "BOARD_ACTOR": "cli-contract-actor",
+            "UMMANU_DISPATCHER_OWNER": "ummanu-production",
+            "UMMANU_DISPATCHER_HOST_MODE": "real",
+            "UMMANU_PO_SESSION": "",
+        },
+    ):
+        os.environ.pop("TA_HEADS_REGISTRY", None)
+        parser = build_parser()
+        commands = next(
+            action.choices for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        cases = [
+            [],
+            ["--help"],
+            ["unknown"],
+            ["--unknown"],
+            ["--hel"],
+            ["task", "show"],
+            ["config", "check", "--unknown"],
+            ["doctor", "--offl"],
+            ["task", "show", "--ref", "x", "--instance"],
+        ]
+        cases += [[name, "--help"] for name in commands if name != "automations"]
+        cases += [[name] for name in ("data", "memory", "knowledge", "config", "task", "project")]
+        return {"schema": schema(parser), "outcomes": [outcome(argv) for argv in cases]}
+
+
 class CliCompositionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Temporary Git source is the original implementation, never a second maintained parser.
+        # Both children use the candidate interpreter, dependencies, hooks and hermetic HOME.
+        EVIDENCE.mkdir(parents=True, exist_ok=True)
+        temporary = tempfile.TemporaryDirectory(dir=EVIDENCE, prefix="baseline-source-")
+        cls.addClassCleanup(temporary.cleanup)
+        cls.baseline_root = Path(temporary.name)
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", BASE, "src"], cwd=ROOT, capture_output=True, check=True
+        )
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as source:
+            source.extractall(cls.baseline_root, filter="data")
+        cls.baseline_env = dict(os.environ, PYTHONPATH=str(cls.baseline_root / "src"))
+
     def test_selected_parser_and_dispatch_seams(self):
         from ummanu import cli
 
@@ -207,56 +260,27 @@ class CliCompositionTests(unittest.TestCase):
         )
 
     def test_parser_contract(self):
-        from ummanu.cli import build_parser
-
-        with mock.patch.dict(
-            os.environ,
-            {
-                "HOME": "/cli-contract-home",
-                "UMMANU_INSTANCE": "",
-                "UMMANU_DATA_DIR": "/cli-contract-data",
-                "BOARD_ACTOR": "cli-contract-actor",
-                "UMMANU_DISPATCHER_OWNER": "ummanu-production",
-                "UMMANU_DISPATCHER_HOST_MODE": "real",
-                "UMMANU_PO_SESSION": "",
-            },
-        ):
-            os.environ.pop("TA_HEADS_REGISTRY", None)
-            parser = build_parser()
-            commands = next(
-                action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
-            ).choices
-            cases = [
-                [],
-                ["--help"],
-                ["unknown"],
-                ["--unknown"],
-                ["--hel"],
-                ["task", "show"],
-                ["config", "check", "--unknown"],
-                ["doctor", "--offl"],
-                ["task", "show", "--ref", "x", "--instance"],
-            ]
-            cases += [[name, "--help"] for name in commands if name != "automations"]
-            cases += [[name] for name in ("data", "memory", "knowledge", "config", "task", "project")]
-            result = {"schema": schema(parser), "outcomes": [outcome(argv) for argv in cases]}
-        expected = json.loads(GOLDEN.read_text())
-        # The captured Python 3.12.3 marks a '*' positional required, unlike 3.12.15.
-        # Check the production action against this interpreter's actual argparse action,
-        # then project that one stdlib distinction onto the unchanged baseline usage.
-        probe = argparse.ArgumentParser().add_argument("selectors", nargs="*", metavar="SELECTOR")
-        check_parser = commands["check"]
-        selectors = next(action for action in check_parser._actions if action.dest == "selectors")
-        self.assertEqual(selectors.required, probe.required)
-        if not probe.required:
-            check = expected["schema"]["actions"][1]["choices"]["check"]
-            action = next(action for action in check["actions"] if action["dest"] == "selectors")
-            self.assertTrue(action["required"])
-            action["required"] = False
-            check["help"] = check["help"].replace("SELECTOR ...", "[SELECTOR ...]")
-            for recorded in expected["outcomes"]:
-                if recorded["argv"] == ["check", "--help"]:
-                    recorded["stdout"] = recorded["stdout"].replace("SELECTOR ...", "[SELECTOR ...]")
+        result = parser_snapshot()
+        code = (
+            "import json,runpy,sys; n=runpy.run_path(sys.argv[1]); print(json.dumps(n['parser_snapshot']()))"
+        )
+        baseline = subprocess.run(
+            [sys.executable, "-c", code, str(Path(__file__).resolve())],
+            cwd=ROOT,
+            env=self.baseline_env,
+            capture_output=True,
+            text=True,
+            timeout=4,
+            check=False,
+        )
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        expected = json.loads(baseline.stdout)
+        (EVIDENCE / "baseline-native-parser.json").write_text(baseline.stdout)
+        (EVIDENCE / "candidate-native-parser.json").write_text(json.dumps(result) + "\n")
+        # Keep the original executed capture intact. On its interpreter, the live base snapshot
+        # must reproduce it too; on newer Python the entire actual base remains the oracle.
+        if sys.version_info[:3] == (3, 12, 3):
+            self.assertEqual(expected, json.loads(GOLDEN.read_text()))
 
         def differences(actual, expected, path=""):
             if isinstance(actual, dict) and isinstance(expected, dict):
@@ -279,6 +303,34 @@ class CliCompositionTests(unittest.TestCase):
         EVIDENCE.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
         command = [sys.executable, "-X", "importtime", "-c", "import ummanu.cli"]
+        baseline = subprocess.run(
+            command, env=self.baseline_env, cwd=ROOT, capture_output=True, text=True, timeout=4, check=False
+        )
+        self.assertEqual(baseline.returncode, 0, baseline.stderr)
+        baseline_names = sorted(
+            {
+                match.group(1)
+                for line in baseline.stderr.splitlines()
+                if (match := re.fullmatch(r"import time:\s+\d+\s+\|\s+\d+\s+\|\s+(ummanu\..+)", line))
+            }
+        )
+        (EVIDENCE / "matched-baseline-importtime.txt").write_text(baseline.stderr)
+        (EVIDENCE / "matched-baseline-imports.json").write_text(
+            json.dumps(
+                {
+                    "base": BASE,
+                    "argv": command,
+                    "pythonpath": self.baseline_env["PYTHONPATH"],
+                    "environment": {
+                        k: self.baseline_env.get(k) for k in ("HOME", "BOARD_ROLE", "PYTHONPYCACHEPREFIX")
+                    },
+                    "count": len(baseline_names),
+                    "names": baseline_names,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
         result = subprocess.run(
             command, env=env, cwd=ROOT, capture_output=True, text=True, timeout=4, check=False
         )
