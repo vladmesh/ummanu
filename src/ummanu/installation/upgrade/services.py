@@ -69,6 +69,17 @@ from ummanu.web.server import LoopbackOnly
 MEMORY_PROCESS_RECEIPT_RELATIVE = UPGRADE_RECEIPT_ROOT / "memory-process-receipt.json"
 
 
+def _source_digest(context: UpgradeContext, paths: tuple[str, ...], revision: str) -> str:
+    if context.source_cut is None:
+        return _git_tracked_digest(context.product_root, paths)
+    return context.source_cut.digest(context.product_root, paths, revision=revision)
+
+
+def _source_fence(context: UpgradeContext) -> None:
+    if context.source_cut is not None:
+        context.source_cut.check(context.product_root)
+
+
 def _unit_environment(unit_text: bytes | None, key: str) -> str | None:
     """The last ``Environment=`` assignment of ``key`` in a unit file, if it makes one."""
     if unit_text is None:
@@ -95,10 +106,12 @@ def _unit_environment(unit_text: bytes | None, key: str) -> str | None:
 
 def memory_process_inputs(context: UpgradeContext, unit: str) -> dict[str, str | None]:
     """The checkout and installed state an active memory process has to be bound to."""
+    _source_fence(context)
     model = _unit_environment(context.units.installed(unit), "MEMORY_MODEL") or DEFAULT_MEMORY_MODEL
+    revision = _product_revision(context.product_root, ReceiptError)
     return {
-        "product_revision": _product_revision(context.product_root, ReceiptError),
-        "product_sha256": _git_tracked_digest(context.product_root, PRODUCT_SOURCE_PATHS),
+        "product_revision": revision,
+        "product_sha256": _source_digest(context, PRODUCT_SOURCE_PATHS, revision),
         "dependency_sha256": _git_tracked_digest(context.product_root, DEPENDENCY_PATHS),
         "memory_model": model,
         "memory_pack_sha256": context.memory_pack_digest,
@@ -182,6 +195,7 @@ def step_memory(context: UpgradeContext) -> StepResult:
         else:
             verified, evidence = _memory_receipt_evidence(context, unit, identity, inputs)
             if verified and not reasons:
+                _source_fence(context)
                 return StepResult("memory", "unchanged", evidence)
             if not verified:
                 reasons.append(evidence)
@@ -227,6 +241,7 @@ def step_memory(context: UpgradeContext) -> StepResult:
             "memory", "failed", f"{unit} inputs changed during the restart; no receipt was written"
         )
     try:
+        _source_fence(context)
         process_receipts.write_process_receipt(
             _upgrade_receipt_path(context, MEMORY_PROCESS_RECEIPT_RELATIVE),
             process_receipts.MEMORY,
@@ -281,6 +296,7 @@ def _digest_web_units(context: UpgradeContext, name_prefix: str) -> str:
 
 def web_process_inputs(context: UpgradeContext, name_prefix: str) -> dict[str, str]:
     """The product and materialized state an active web process has to be bound to."""
+    _source_fence(context)
     revision = _product_revision(context.product_root, WebProcessReceiptError)
     try:
         snapshot = installed_pair(context.instance_path, _data_dir(context)).snapshot
@@ -294,9 +310,9 @@ def web_process_inputs(context: UpgradeContext, name_prefix: str) -> dict[str, s
         raise WebProcessReceiptError(f"cannot read head registry snapshot {snapshot}: {exc}") from None
     return {
         "product_revision": revision,
-        "product_sha256": _git_tracked_digest(context.product_root, PRODUCT_SOURCE_PATHS),
+        "product_sha256": _source_digest(context, PRODUCT_SOURCE_PATHS, revision),
         "dependency_sha256": _git_tracked_digest(context.product_root, DEPENDENCY_PATHS),
-        "schemas_sha256": _git_tracked_digest(context.product_root, SCHEMA_PATHS),
+        "schemas_sha256": _source_digest(context, SCHEMA_PATHS, revision),
         "web_units_sha256": _digest_web_units(context, name_prefix),
         "head_registry_sha256": hashlib.sha256(snapshot_bytes).hexdigest(),
     }
@@ -344,6 +360,7 @@ def _write_web_process_receipt(
     inputs: dict[str, str],
 ) -> None:
     """Publish the receipt only after a proved generation, as one private atomic replacement."""
+    _source_fence(context)
     process_receipts.write_process_receipt(
         web_process_receipt_path(context),
         process_receipts.WEB,
@@ -360,13 +377,24 @@ def _write_web_process_receipt(
 # service to restart, and a busy service exits long after the upgrade that asked has ended
 # (secretary-1759). It lives in the service's own directory, which the runtime user owns, and no
 # backup carries it (`po-service/` is outside the backed-up roots).
-def po_process_inputs(product_root: Path) -> dict[str, str]:
+def po_process_inputs(product_root: Path, *, context: UpgradeContext | None = None) -> dict[str, str]:
     """The checkout a PO process has to be bound to: its code, dependencies and bundled schemas."""
+    if context is not None:
+        if context.product_root != product_root:
+            raise ReceiptError("PO inputs selected a different product root from their upgrade context")
+        _source_fence(context)
+    revision = _product_revision(product_root, ReceiptError)
     return {
-        "product_revision": _product_revision(product_root, ReceiptError),
-        "product_sha256": _git_tracked_digest(product_root, PRODUCT_SOURCE_PATHS),
+        "product_revision": revision,
+        "product_sha256": (
+            _source_digest(context, PRODUCT_SOURCE_PATHS, revision) if context is not None
+            else _git_tracked_digest(product_root, PRODUCT_SOURCE_PATHS)
+        ),
         "dependency_sha256": _git_tracked_digest(product_root, DEPENDENCY_PATHS),
-        "schemas_sha256": _git_tracked_digest(product_root, SCHEMA_PATHS),
+        "schemas_sha256": (
+            _source_digest(context, SCHEMA_PATHS, revision) if context is not None
+            else _git_tracked_digest(product_root, SCHEMA_PATHS)
+        ),
     }
 
 
@@ -472,7 +500,7 @@ def step_po(context: UpgradeContext) -> StepResult:
             return StepResult("po", "failed", f"starting {unit} failed: {exc}")
         return StepResult("po", "changed", f"started {unit}: service was not active")
     try:
-        inputs = po_process_inputs(context.product_root)
+        inputs = po_process_inputs(context.product_root, context=context)
     except ReceiptError as exc:
         return StepResult("po", "failed", f"cannot compare the PO service with the checkout: {exc}")
     reasons = []
@@ -491,6 +519,7 @@ def step_po(context: UpgradeContext) -> StepResult:
     else:
         verified, evidence = _po_receipt_evidence(report.data_dir, identity, inputs)
         if verified and not reasons:
+            _source_fence(context)
             return StepResult("po", "unchanged", evidence)
         if not verified:
             reasons.append(evidence)
@@ -633,6 +662,7 @@ def step_web(context: UpgradeContext) -> StepResult:
     else:
         verified, receipt_reason = _receipt_evidence(context, unit, identity, inputs)
         if verified and not reasons:
+            _source_fence(context)
             return StepResult("web", "unchanged", receipt_reason)
     reasons.append(receipt_reason)
     try:
@@ -732,7 +762,7 @@ def step_verify(context: UpgradeContext) -> StepResult:
     else:
         data_dir = getattr(context.report, "data_dir", None)
         try:
-            po_inputs = po_process_inputs(context.product_root)
+            po_inputs = po_process_inputs(context.product_root, context=context)
             po_identity = context.units.process_identity(po_unit)
         except (HostCommandError, ReceiptError) as exc:
             return StepResult("verify", "failed", f"active PO process receipt cannot be verified: {exc}")
@@ -765,4 +795,5 @@ def step_verify(context: UpgradeContext) -> StepResult:
     if web_evidence:
         detail += f"; {web_evidence}"
     detail += f"; {po_evidence}"
+    _source_fence(context)
     return StepResult("verify", "unchanged", detail)

@@ -29,7 +29,6 @@ from ummanu.host_apply import (
     apply_host,
     resolve_packaged,
 )
-from ummanu.infra.process_receipts import ReceiptError as ReceiptError
 from ummanu.installation.upgrade.types import (
     MEMORY_COMPONENT,
     WEB_COMPONENT,

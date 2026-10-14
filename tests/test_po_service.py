@@ -58,10 +58,8 @@ from ummanu.host import (
 )
 from ummanu.host_apply import UnitProcessIdentity
 from ummanu.installation.upgrade import (
-    host as upgrade_host,
     services as upgrade_services,
     types as upgrade_types,
-    workspaces as upgrade_workspaces,
 )
 from ummanu.po import (
     client as po_client,
@@ -1491,7 +1489,7 @@ class PoUpgradeFixture(ServiceFixture):
     def bind(self, identity: UnitProcessIdentity) -> str:
         """What the PO service process `identity` writes when it starts on the checkout as it is now."""
         with (
-            mock.patch.object(upgrade_workspaces.os, "getpid", return_value=identity.pid),
+            mock.patch.object(upgrade_services.os, "getpid", return_value=identity.pid),
             mock.patch.object(upgrade_services, "_process_start_ticks", return_value=identity.start_ticks),
         ):
             return upgrade_services.write_po_process_receipt(
@@ -1830,10 +1828,10 @@ class ProcessReceiptTests(PoUpgradeFixture):
     def verify(self, units: FakeUnitInstaller) -> upgrade_types.StepResult:
         with (
             mock.patch.object(upgrade_services, "step_host", return_value=upgrade_types.StepResult("host", "unchanged")),
-            mock.patch.object(upgrade_workspaces.role_skills, "audit", return_value={"ok": True}),
+            mock.patch.object(upgrade_services.role_skills, "audit", return_value={"ok": True}),
             mock.patch.object(upgrade_services, "assert_snapshot_current"),
             mock.patch.object(upgrade_services, "installed_heads"),
-            mock.patch.object(upgrade_host.state_repo, "status", return_value=""),
+            mock.patch("ummanu.state_repo.status", return_value=""),
         ):
             return upgrade_services.step_verify(self.context(units, code_changed=False))
 

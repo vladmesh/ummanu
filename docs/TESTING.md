@@ -49,11 +49,30 @@ These file-only fixtures prove no installed process, backend, network, systemd o
 behavior. Original upgrade, portable, recovery, dependency, web and PO fixtures retain their
 native CI owners; package inclusion is validated by the existing packaging shard.
 
+`tests.test_upgrade_source_cut` and `tests.test_upgrade_source_cut_faults` (unit) exercise the actual
+install/recover materializer and memory/web/PO/verify steps on temporary files. Host planning,
+Git selection, process identities and probes are explicit doubles. At N/2N tracked files they
+count actual payload streams/bytes and digest feeds per file, separately from metadata, Git
+enumeration, manifests and shipped units. They cover dirty schemas, untracked/bytecode exclusion,
+scope cleanup, repeated contexts/roots, standalone PO acquisition, file/stat/descriptor/HEAD/path
+faults, runtime inputs, generations, current/publication decisions and pending/idle/busy PO restarts.
+No fixture claims real systemd, kernel, backend, socket or packaging evidence. Original guard
+tests keep their native owners and failure precedence.
+
+An opt-in `UMMANU_SOURCE_CUT_BASE` directory may supply external `upgrade.py` and `services.py`
+from exact base `360509c3898e51bf71089bd2d6373506ab2aab0c`; their SHA256s are checked before
+loading. The same fixture executes actual base/candidate producers and compares process receipt
+bytes and service results. Supporting checkout/receipt helpers and installation composition are
+the candidate's. This is a file-only historical comparison, not a pristine historical suite or
+permanent old-implementation CI oracle. `UMMANU_SOURCE_CUT_PACKET_OUT` writes both packets,
+including N/2N reads/bytes/hash evidence. Routine CI needs neither environment variable.
+
 The related DUP-I1 cleanup uses the shared reader's decoded web `ProcessReceipt`, preserving
 identity-before-input diagnostics without decoding identity twice or relying on an assertion.
 The existing receipt fixture owns the shared producer/golden assertion used by both receipt test
-classes. Hash acquisition and change/race checks are unchanged; INEF-09 hash-once work remains
-open. This extraction does not close all of slot15 or ARCH-01.
+classes. Upgrade source acquisition now shares one invocation cut with conservative metadata
+invalidation ([Protocols](PROTOCOLS.md#upgrade-source-coherence)); archive/restore INEF-09 remains
+open. Neither change closes all of slot15 or ARCH-01.
 
 `tests.test_request_index` (unit) guards DUP-W4's shared digest/read/match/write delegation and
 exception identity, including planted duplicate implementations. Its file-only fixture captures

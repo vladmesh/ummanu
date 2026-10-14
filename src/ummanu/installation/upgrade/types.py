@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ummanu.dispatch.entrypoint_guard import EntrypointMoved
 from ummanu.host import (
@@ -16,6 +16,9 @@ from ummanu.host_apply import (
 from ummanu.infra.process_receipts import ReceiptError as ReceiptError
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime.paths import component_enabled
+
+if TYPE_CHECKING:
+    from ummanu.installation.upgrade.fingerprints import SourceCut
 
 MEMORY_COMPONENT = "memory"
 
@@ -109,6 +112,8 @@ class UpgradeContext:
     handoff_after: str | None = None
     pulled_before: str | None = None
     pulled_after: str | None = None
+    # Invocation-owned; replace() shares it, and run_steps closes all such copies on exit.
+    source_cut: SourceCut | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
