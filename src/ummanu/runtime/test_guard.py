@@ -13,6 +13,8 @@ import shlex
 import sys
 from pathlib import Path
 
+from ummanu.runtime.procfs import PPID, proc_stat_fields
+
 MODULE_FILE = "_ummanu_test_guard.py"
 STARTUP_FILE = "01-ummanu-test-guard.pth"
 WORKSPACE_STARTUP_DIR = ".ummanu-task-env/test-guard"
@@ -34,8 +36,8 @@ def reviewer_head() -> bool:
         try:
             if b"BOARD_ROLE=reviewer" in proc.joinpath("environ").read_bytes().split(b"\0"):
                 return True
-            fields = proc.joinpath("stat").read_text().rsplit(")", 1)[1].split()
-            pid = int(fields[1])
+            fields = proc_stat_fields(proc.joinpath("stat").read_text(), skip_separator=False)
+            pid = int(fields[PPID])
         except (OSError, UnicodeError, ValueError, IndexError):
             break
     return False
@@ -77,8 +79,8 @@ def authorized(workspace: str, digest: str) -> bool:
             if bootstrap_authorizes(argv, workspace, digest):
                 return True
             # comm can contain spaces and parentheses; fields after its final ')' are stable.
-            fields = proc.joinpath("stat").read_text().rsplit(")", 1)[1].split()
-            pid = int(fields[1])
+            fields = proc_stat_fields(proc.joinpath("stat").read_text(), skip_separator=False)
+            pid = int(fields[PPID])
     except (OSError, UnicodeError, ValueError, IndexError):
         pass
     return False
@@ -117,6 +119,22 @@ def install(workspace: str, digest: str) -> None:
     sys.addaudithook(audit)
 
 
+def standalone_source() -> str:
+    """Inline the pure leaf at the existing source-materialization boundary.
+
+    Only the installed artifact contains a deployment copy. Startup executes no
+    product imports; installer-only imports below remain dormant in that artifact.
+    """
+    from ummanu.runtime import procfs
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    binding = "from ummanu.runtime.procfs import PPID, proc_stat_fields\n"
+    if source.count(binding) != 1:
+        raise ValueError("standalone guard parser binding changed")
+    leaf = Path(procfs.__file__).read_text(encoding="utf-8")
+    return source.replace(binding, leaf, 1)
+
+
 def install_environment(workspace: Path, environment: Path) -> None:
     """Materialize only a real candidate-local venv, never a live/shared interpreter."""
     from ummanu._fsutil import write_text_atomic
@@ -134,7 +152,7 @@ def install_environment(workspace: Path, environment: Path) -> None:
         raise ValueError(f"test guard requires a candidate-local venv at {environment}")
     digest = hashlib.sha256(_PROVENANCE_BOOTSTRAP.encode()).hexdigest()
     files = {
-        MODULE_FILE: Path(__file__).read_text(encoding="utf-8"),
+        MODULE_FILE: standalone_source(),
         STARTUP_FILE: f"import _ummanu_test_guard; _ummanu_test_guard.install({str(root)!r}, {digest!r})\n",
     }
     for name, body in files.items():
@@ -163,7 +181,7 @@ def install_workspace(workspace: Path) -> None:
         raise ValueError("workspace test guard directory escapes its namespace")
     digest = hashlib.sha256(_PROVENANCE_BOOTSTRAP.encode()).hexdigest()
     files = {
-        MODULE_FILE: Path(__file__).read_text(encoding="utf-8"),
+        MODULE_FILE: standalone_source(),
         "sitecustomize.py": f"import _ummanu_test_guard; _ummanu_test_guard.install({str(root)!r}, {digest!r})\n",
     }
     for name, body in files.items():

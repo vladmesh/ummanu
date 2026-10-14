@@ -69,6 +69,17 @@ on:
       - src/ummanu/infra/doctor_provider.py
       # Candidate-only parser/import regressions exercise the composition edges.
       - tests/test_cli_cold_composition.py
+      - src/ummanu/runtime/procfs.py
+      - src/ummanu/runtime/test_guard.py
+      - src/ummanu/runtime/head/identity.py
+      - src/ummanu/runtime/head/children.py
+      - src/ummanu/runtime/head/local_pty/scoped_lifecycle.py
+      - src/ummanu/runtime/head/local_pty/supervisor.py
+      - src/ummanu/runtime/state.py
+      - src/ummanu/po/runner.py
+      - src/ummanu/host_apply.py
+      - tests/test_procfs.py
+      - tests/test_test_guard_interpreters.py
   workflow_dispatch:
 
 permissions:

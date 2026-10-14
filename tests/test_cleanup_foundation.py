@@ -44,7 +44,7 @@ ummanu.runtime.head.command ummanu.runtime.head.memory ummanu.runtime.head.opera
 ummanu.runtime.head.run ummanu.runtime.head.runtime ummanu.runtime.head.spec
 ummanu.runtime.head.task_ref ummanu.runtime.head_run_binding ummanu.runtime.head_runtimes
 ummanu.runtime.heads ummanu.runtime.launch_prefix ummanu.runtime.onboarding_storage
-ummanu.runtime.paths ummanu.runtime.prompt_document ummanu.runtime.role_env
+ummanu.runtime.paths ummanu.runtime.procfs ummanu.runtime.prompt_document ummanu.runtime.role_env
 ummanu.runtime.test_guard ummanu.runtime.tui_delivery ummanu.runtime_env ummanu.schemas
 """.split())
 

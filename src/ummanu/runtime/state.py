@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from ummanu.runtime.paths import env_value
+from ummanu.runtime.procfs import STARTTIME, proc_stat_fields
 
 STATE_ROOT = Path(env_value("UMMANU_STATE", str(Path.home() / "ummanu-data" / "automation-state")))
 
@@ -339,7 +340,7 @@ def _process_start(pid: int) -> int | None:
     """Start time of `pid` in clock ticks since boot (`/proc/<pid>/stat` field 22), if known."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-        return int(stat[stat.rindex(")") + 2 :].split()[19])
+        return int(proc_stat_fields(stat)[STARTTIME])
     except (OSError, ValueError, IndexError):
         return None
 

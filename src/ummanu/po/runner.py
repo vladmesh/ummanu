@@ -50,6 +50,7 @@ from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError
 from ummanu.runtime.head.spec import HeadSpec, load_head_specs
 from ummanu.runtime.heads import HeadRegistryError, Registry, load_registry
+from ummanu.runtime.procfs import STARTTIME, proc_stat_fields
 from ummanu.runtime.provider_errors import (
     CODEX_QUOTA_ERROR_INFOS,
     KIND_QUOTA,
@@ -100,10 +101,10 @@ def process_identity(pid: int) -> str | None:
     except OSError:
         return None
     # Field 2 (comm) may contain spaces and parentheses; the rest starts after the last ')'.
-    fields = stat[stat.rindex(")") + 2 :].split()
-    if len(fields) < 20:
+    fields = proc_stat_fields(stat)
+    if len(fields) <= STARTTIME:
         return None
-    return f"{boot_id}:{fields[19]}"
+    return f"{boot_id}:{fields[STARTTIME]}"
 
 
 def still_running(pid: int | None, identity: str | None) -> bool:
@@ -117,7 +118,7 @@ def still_running(pid: int | None, identity: str | None) -> bool:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return stat[stat.rindex(")") + 2 :].split()[:1] not in (["Z"], ["X"])
+    return proc_stat_fields(stat)[:1] not in (["Z"], ["X"])
 
 
 def turn_environment(
