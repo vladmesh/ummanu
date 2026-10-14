@@ -93,6 +93,13 @@ class IntegrationBaseRuleTests(unittest.TestCase):
         self.assertIn("object id", integration_base_refusal("5" * 40))
         self.assertEqual(seed_ref_refusal("5" * 40), "")
 
+    def test_an_abbreviated_object_id_is_refused_as_a_seed(self) -> None:
+        refusal = seed_ref_refusal("7afdabc")
+
+        self.assertIn("abbreviated object id", refusal)
+        self.assertIn("40-character", refusal)
+        self.assertEqual(seed_ref_refusal("release-9"), "")
+
     def test_a_ref_that_is_not_a_ref_is_refused_before_it_reaches_git(self) -> None:
         for value in ("--upload-pack=evil", "a//b", "../etc", "main/"):
             with self.subTest(value=value):
