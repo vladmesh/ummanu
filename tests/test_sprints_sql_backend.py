@@ -131,12 +131,14 @@ class SqlSprintAtomicityTests(SprintFixture):
             self.assertEqual([s["ref"] for s in listed], ["sprint:atomic"])
             default = reader.show("sprint:atomic")
             self.assertEqual([card["ref"] for card in default["cards"]], ["ummanu-1"])
-            self.assertIn("read comment", [entry["body"] for entry in default["comments"]])
+            self.assertEqual([entry["body"] for entry in default["comments"]],
+                             ["[po]\nread comment", "[sprint:resume]\ncontinue"])
             self.assertIn("resume_freshness", default)
             explicit = reader.show("sprint:atomic", include_cards=True, include_comments=False, include_resume_freshness=True)
             self.assertEqual(json.dumps(default), json.dumps(explicit))
             comments = reader.show("sprint:atomic", include_comments=True)
-            self.assertIn("read comment", [entry["body"] for entry in comments["comments"]])
+            self.assertEqual([entry["body"] for entry in comments["comments"]],
+                             ["[po]\nread comment", "[sprint:resume]\ncontinue"])
             shallow = reader.show("sprint:atomic", include_cards=False, include_resume_freshness=False)
             self.assertNotIn("cards", shallow)
             self.assertNotIn("resume_freshness", shallow)
