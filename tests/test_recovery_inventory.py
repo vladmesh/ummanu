@@ -274,6 +274,26 @@ class RecoveryInventoryTests(unittest.TestCase):
         self.assertEqual(run_matching["source"], "environment-override")
         self.assertEqual(run_conflicting["state"], "conflicting-override")
 
+    def test_pipeline_run_state_action_names_the_variable_that_was_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance, report = self.fixture(root)
+            bound = {"UMMANU_INSTANCE": str(instance), "UMMANU_WORKSPACES_ROOT": str(root / "workspaces")}
+            actions = {}
+            for name in ("UMMANU_PIPELINE_STATE_DIR", "TA_PIPELINE_STATE_DIR"):
+                with mock.patch.dict(os.environ, {**bound, name: str(root / "other-state")}, clear=True):
+                    inventory = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
+                row = next(row for row in inventory["paths"] if row["capability"] == "pipeline-run-state")
+                actions[name] = row["supported_next_action"]
+
+        self.assertEqual(
+            actions,
+            {
+                name: f"remove {name} or make it match the declared workspaces-root contract"
+                for name in ("UMMANU_PIPELINE_STATE_DIR", "TA_PIPELINE_STATE_DIR")
+            },
+        )
+
     def test_status_and_doctor_leave_recovery_inputs_unchanged_and_launch_no_heads(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

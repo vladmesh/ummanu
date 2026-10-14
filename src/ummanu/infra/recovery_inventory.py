@@ -19,7 +19,7 @@ from ummanu.infra.github_credential import (
     checkpoint_credential_readiness_for_child,
     project_remote_execution,
 )
-from ummanu.runtime.paths import configured_product_root, env_value
+from ummanu.runtime.paths import configured_product_root, env_value, legacy_name
 from ummanu.runtime.role_env import RUNTIME_ENV_FILE_ENVS
 from ummanu.secret_store import (
     SecretStoreError,
@@ -444,14 +444,18 @@ def _path_rows(report) -> list[dict[str, Any]]:
         Path(workspaces_override).expanduser() if workspaces_override else Path.home() / "orca" / "workspaces"
     )
     canonical_state = (workspaces / "ummanu" / "pipeline" / "state" / "pipeline").resolve(strict=False)
-    state_override = env_value("UMMANU_PIPELINE_STATE_DIR", nonempty=True) if environment_is_bound else None
+    state_env = "UMMANU_PIPELINE_STATE_DIR"
+    state_override = env_value(state_env, nonempty=True) if environment_is_bound else None
+    state_variable = next(
+        (name for name in (state_env, legacy_name(state_env)) if os.environ.get(name)), state_env
+    )
     rows.append(
         _path_row(
             "pipeline-run-state",
             canonical_state,
             state_override,
             canonical_state,
-            "remove UMMANU_PIPELINE_STATE_DIR or make it match the declared workspaces-root contract",
+            f"remove {state_variable} or make it match the declared workspaces-root contract",
         )
     )
     return rows
