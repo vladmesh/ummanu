@@ -46,6 +46,61 @@ from ummanu.runtime.local_pty_head import runtime_scope_inventory
 
 
 class RuntimeScopeConsumerTests(unittest.TestCase):
+    def test_rotated_original_authority_survives_the_secure_fd_reader_and_native_refusals(self):
+        from tests.test_local_pty_journal_retention import small_limits
+        from ummanu.runtime.head.local_pty import journal as events
+
+        small_limits(self)
+        owner, directory, unit = self.owner()
+        path = directory / protocol.JOURNAL_NAME
+        original = events.read_events(path).events
+        with JournalWriter(path, owner.run_id) as writer:
+            for _ in range(160):
+                writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+            retained = events.read_events(path)
+            self.assertTrue(retained.partial_head)
+            self.assertEqual(retained.events[:2], original)
+            real_read = reader.read_events
+            witnessed = []
+
+            def read_open_descriptor(open_path):
+                self.assertTrue(str(open_path).startswith("/proc/self/fd/"))
+                before = real_read(open_path)
+                inode = path.stat().st_ino
+                while path.stat().st_ino == inode:
+                    writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+                after = real_read(open_path)
+                self.assertEqual(after.events[:2], before.events[:2])
+                self.assertFalse(after.malformed or after.truncated_tail)
+                witnessed.append(after)
+                return after
+
+            with mock.patch.object(reader, "read_events", side_effect=read_open_descriptor):
+                result = runtime_scope_inventory(self.data, {unit})
+            self.assertFalse(result.errors, result.errors)
+            self.assertIn(unit, result.scopes)
+            self.assertTrue(witnessed, "inventory must use the already-open secure descriptor")
+        saved = path.read_bytes()
+        owner_record = owner.read_owner(directory)
+        owner.update_owner(directory, {**owner_record, "generation": "foreign-generation"})
+        self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        owner.update_owner(directory, owner_record)
+        native = dict(self.native[unit])
+        for key, value in (("InvocationID", "foreign"), ("ControlGroup", "/wrong")):
+            self.native[unit] = {**native, key: value}
+            self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        self.native[unit] = native
+        for damaged in (saved.replace(b'"binding":', b'"binding":{},"binding":', 1),
+                        saved.replace(b'"cgroup":[', b'"cgroup":[true,', 1),
+                        saved + saved.splitlines()[0] + b"\n"):
+            path.write_bytes(damaged)
+            self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        path.write_bytes(saved)
+        foreign = directory / "foreign-journal"
+        path.rename(foreign)
+        path.symlink_to(foreign)
+        self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.data = self.root / "data"

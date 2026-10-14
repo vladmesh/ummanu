@@ -45,7 +45,7 @@ from ummanu.po.store import (
 from ummanu.po.workspace import workspace_dir
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import HeadHandle, spawn_head
-from ummanu.runtime.head.local_pty.journal import RUN_EXITED, read_events
+from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, read_events
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError
 from ummanu.runtime.head.spec import HeadSpec, load_head_specs
@@ -265,8 +265,20 @@ class ScopedPoProcess:
     def wait(self, timeout: float | None = None) -> int:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            for event in reversed(read_events(self.handle.journal_path).events):
+            reading = read_events(self.handle.journal_path)
+            if reading.truncated_tail or reading.malformed or not reading.ordered:
+                raise RunnerError("PO head journal is damaged; exit outcome is unavailable")
+            starts = reading.of_kind(RUN_STARTED)
+            if self.handle.journal_started_seq and (
+                not starts or starts[-1]["seq"] != self.handle.journal_started_seq
+            ):
+                raise RunnerError("PO head journal incarnation changed; exit outcome is unavailable")
+            for event in reversed(reading.events):
+                if event.get("kind") == RUN_STARTED:
+                    break  # No exit from a previous incarnation answers for this handle.
                 if event.get("kind") == RUN_EXITED and event.get("run_id") == self.handle.run_id:
+                    if event.get("head_pid") != self.handle.head_pid:
+                        break
                     self.head_loss_reason = event.get("head_loss_reason")
                     code = event.get("exit_code")
                     number = event.get("signal")

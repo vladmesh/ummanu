@@ -156,7 +156,7 @@ def _handoff_progress(read: Any, subject: str, floor: int) -> _HandoffProgress:
     if read.malformed or not read.ordered:
         return _HandoffProgress(unknown="the head's journal tail is not readable in order")
     events = [event for event in read.events if isinstance(event.get("seq"), int)]
-    if read.partial_head and (not events or events[0]["seq"] > floor + 1):
+    if not read.covers_since(floor):
         return _HandoffProgress(unknown="the head's journal window no longer reaches this handoff's floor")
     submit = f"{subject}:submit"
     typed: Mapping[str, Any] | None = None

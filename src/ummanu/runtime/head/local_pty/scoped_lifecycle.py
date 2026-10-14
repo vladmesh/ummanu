@@ -301,7 +301,10 @@ class ScopedHeadLifecycle:
         from .journal import RUN_STARTED, read_events
 
         run_dir, log_path, timeout = Path(arguments[0]), Path(arguments[1]), float(arguments[2])
-        since = len(read_events(run_dir / protocol.JOURNAL_NAME).events)
+        prior = read_events(run_dir / protocol.JOURNAL_NAME)
+        if prior.truncated_tail or prior.malformed or not prior.ordered:
+            raise MemoryScopeError("the launch journal is damaged")
+        sequence_floor = max((event["seq"] for event in prior.events), default=0)
         # The child cannot invoke systemd until its launch identity is durable. EOF on
         # the barrier (launcher death before release) makes it exit without creating work.
         with ScopedHeadLifecycle.owner_lock(run_dir):
@@ -348,10 +351,10 @@ class ScopedHeadLifecycle:
                 os.close(write_fd)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if any(
-                event.get("kind") == RUN_STARTED
-                for event in read_events(run_dir / protocol.JOURNAL_NAME).events[since:]
-            ):
+            reading = read_events(run_dir / protocol.JOURNAL_NAME)
+            if (not (reading.truncated_tail or reading.malformed or not reading.ordered)
+                    and any(event.get("kind") == RUN_STARTED and event["seq"] > sequence_floor
+                            for event in reading.events)):
                 return 0
             if (run_dir / protocol.STARTUP_ERROR_NAME).exists():
                 try:
@@ -432,7 +435,7 @@ class ScopedHeadLifecycle:
         """A completed short head is still a successful launch with a durable exit to read."""
         from .journal import RUN_EXITED, RUN_STARTED
 
-        fresh = events[since:]
+        fresh = [event for event in events if int(event.get("seq") or 0) > since]
         started = [event for event in fresh if event.get("kind") == RUN_STARTED]
         if not started:
             return None

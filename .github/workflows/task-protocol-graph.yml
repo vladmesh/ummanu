@@ -75,6 +75,10 @@ on:
       - src/ummanu/runtime/head/children.py
       - src/ummanu/runtime/head/local_pty/scoped_lifecycle.py
       - src/ummanu/runtime/head/local_pty/supervisor.py
+      - src/ummanu/runtime/head/local_pty/journal.py
+      - src/ummanu/runtime/head/local_pty/client.py
+      - tests/test_local_pty_journal_retention.py
+      - tests/test_local_pty_journal_consumers.py
       - src/ummanu/runtime/state.py
       - src/ummanu/po/runner.py
       - src/ummanu/host_apply.py

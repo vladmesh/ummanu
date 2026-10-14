@@ -81,6 +81,110 @@ a still-visible line progress again. Windows with no new line emit nothing; thei
 all turn output; `turn.finished.folded_windows` includes remaining folds. Quiet-turn timing is
 unchanged. See `runtime/head/local_pty/journal.py` for the journal contract.
 
+`JournalWriter`, under the existing exclusive supervisor lifecycle lock, owns bounded JSONL
+retention. Schema 1, event kinds, run IDs and original increasing sequence numbers are unchanged.
+An ordinary successful append is one complete `O_APPEND` write and fsync. Encoded records,
+including their newline, may occupy up to 1 MiB. Commands and scope proofs exceed 256 bytes;
+64 KiB is a tail-reader window, not a record-size assumption. The 1 MiB ceiling accommodates
+the native single-argument command limit even with JSON escaping, the launch metadata and
+scope binding, and the 64 KiB input / bounded request-envelope producers. An unusually large
+record receives `journal_record_too_large` before disk or sequence mutation; no command, proof
+or JSON is truncated, and the refusal contains no record contents.
+
+The active `journal.jsonl` occupies at most 8 MiB after every successful append. Before an
+append would cross that limit, the writer streams the old file into a retained set: the first
+`run.started` for historical UI metadata, plus the current incarnation's original `scope.bound`,
+`run.started`, `drain.requested`, `run.stopping` and `run.exited`, and at most 1 MiB of recent
+complete records. The six anchors cost at most 6 MiB, the replacement at most 7 MiB; records
+shared by prefix and suffix are written once, in original sequence order. A new scope binding
+begins the next scoped incarnation before its start, so a pre-head crash keeps its authority.
+Old optional progress, inputs and turn boundaries may be evicted. Current terminal outcomes,
+including the typed memory-limit reason, and launch-time native attestation remain original
+records, never reconstructions from mutable scope ownership.
+
+There are no archives. During rotation the active file and one fixed `journal.jsonl.retaining`
+staging file total at most 15 MiB (8 + 7), including an interrupted staging write. The writer
+fsyncs staging, atomically replaces the canonical name, switches its append descriptor and
+fsyncs the directory. It refuses substituted paths, symlinks, hard links and files outside
+owner-only regular-file permissions. Any append, short-write, fsync, publication or reopen
+failure closes the writer and returns no success. An uncertain fsync may leave a complete
+record; reopen continues beyond its sequence rather than reusing it. A torn or malformed
+canonical journal is refused, not trimmed or silently converted into clean history. Under the
+same exclusive supervisor lock, reopen discards only the bounded owner-only fixed staging
+file left by an interrupted publication, after validating the canonical journal. No backup
+or separate scope-proof sidecar supplies authority.
+
+An atomic replacement never removes the canonical name between generations. A reader holding
+the old descriptor, including scope inventory's securely opened `/proc/self/fd` reader, sees
+the original inode; the writer stops appending to it after publication. A reader opening the
+name sees the old or new retained set; an in-progress ordinary append may be explicitly torn.
+An external reader may keep an unlinked old inode alive until it closes its descriptor; the
+15 MiB bound covers writer-owned active/staging files and descriptors, not arbitrary readers'
+descriptor lifetimes. No bounded archive discovery or foreign-path fallback is needed.
+
+Released unrotated schema-1 journals remain readable. Reopen streams a valid legacy input once
+with bounded record, anchor and suffix memory, preserving exact original authority and last
+sequence. If that input is already larger than 8 MiB, its one-time conversion begins with those
+existing bytes plus at most 7 MiB staging; it never makes another full-size copy. It removes the
+legacy excess before open returns and before the first successful append. Existing records
+over 1 MiB receive the same named refusal without mutation. Untouched old running supervisors
+continue their released append behavior until normal supported replacement or upgrade; this
+card performs no live rewrite, deployment or migration and claims no retroactive cap.
+
+`read_events`, `HeadHandle.events` and `head_run_journal_read` return the retained records and
+report `partial_head` for either an evicted prefix or an interior sequence gap. The tuple-only
+`head_run_journal` is retained history, not a completeness witness. `read_tail` and `tail_window`
+keep their 64 KiB byte window and expose the same incompleteness. Torn, malformed and unordered
+remain distinct damage readings. `head_view` exposes partial history. `head_run_first_record`
+reads at most two maximum records (binding then start) and returns only task, role, run ID and
+time, never command or proof. Reused directories retain the first start's historical metadata.
+Terminal readers inspect the retained set and fence exits to the current incarnation; PO wait
+also matches the launched head PID and internal handle's start sequence and refuses damaged
+exit evidence. Handles constructed by released callers without that sequence retain their
+PID-based fallback; new launches always capture the sequence.
+
+Both launch owners, `client.spawn_head` (including failure cleanup) and
+`ScopedHeadLifecycle.launch_until_started` / `started_or_exited`, use original sequence floors,
+not list lengths. A retained start or exit above the captured floor remains a positive launch
+witness even if intervening progress was evicted. Admission refuses partial journal history;
+live supervisor status keeps its existing authority. Vitality resets its fold at every gap, so
+an old retained turn or start cannot answer for newer unknown state. Handoff and journal delivery
+recovery require every sequence above their floor, including interior gaps after an older
+pinned anchor. Missing typed/submit evidence then means unavailable, never nothing landed or
+permission to replay input. A complete recent suffix above a floor can still witness delivery.
+Supervisor stderr logs, output tails and run-directory garbage collection are separate policies.
+
+## Supported protocol and prompt contracts (CON-13 / CON-14)
+
+CON-13 is intentionally retained. `SupervisorClient.attach`, `resize`, `next_event` and `stream`,
+the attach/resize opcodes and pushed output/dropped/exited events remain supported protocol
+surface. `LocalPtyHeadRuntime.attach` is the product consumer of attach; the public runtime
+verb returns the connected stream. Resize and direct pushed-event iteration have native
+supervisor/client coverage, but no additional current product caller. Push is the supervisor's
+event stream, not a separate public client `push` method. `next_event` intentionally returns
+`None` for both timeout and closed/unreadable stream. Consumers needing a lifecycle conclusion
+use status, launch identity and journal evidence, not that ambiguity. Protected runtime attach
+and request-drain behavior remains unchanged. The local-PTY path policy is conservatively
+100 UTF-8 bytes (`protocol.SUN_PATH_MAX`), distinct from PO service's native 107-byte socket
+bound; neither policy changes here. The old under-256-byte journal claim is corrected above.
+
+CON-14 is intentionally retained at the current trusted-input boundary. Dispatcher worker,
+reviewer and observer handoffs use `NudgePointer.at_document`: full prompts live in task
+documents, and `prompt_document.nudge_for` bounds the document pointer plus note to 256 bytes.
+`NudgePointer.line` also supports caller-supplied instructions and imposes no validation itself.
+Local-PTY `_payload_of` sends `pointer.text + "\n"`; its composer path sends the line and then
+Enter separately. Supervisor input admission applies the 64 KiB input and bounded frame rules.
+These callers supply trusted product-generated text or authorized operator instructions; this
+path does not promise control-character validation or bracketed-paste framing.
+
+`agent_prompt_transport.prepare_agent_prompt` is a distinct policy API: it normalizes CR/CRLF,
+rejects ESC and C0 except tab/newline, requires valid UTF-8, frames Codex bracketed paste,
+and bounds the framed body to 64 KiB (Claude uses a plain body). Current source has no product
+caller of that API; its dedicated tests establish the policy, not local-PTY prompt coverage.
+No assertion that all prompts pass through it is supported. This disposition preserves the
+trusted-input contract and existing size/transport rules; journal retention adds no prompt
+validation, framing or protocol redesign.
+
 ## Production prompt handoffs
 
 Prompt delivery types the line, waits for its echo turn to close, sends Enter alone and confirms
@@ -172,12 +276,14 @@ unchanged. An existing supervisor finishes its turn; a later usable tick finds t
 busy-skips or brings up a replacement after it ends. A completed turn whose head stays idle is
 stopped conditionally after `IDLE_HEAD_GRACE_SECONDS`, with `action="supervised-idle-stop"`.
 
-Read the last `automation-state/<agent>/runs.jsonl` entry under `TA_STATE` (normally
+Read the last `automation-state/<agent>/runs.jsonl` entry under `UMMANU_STATE` (normally
 `~/ummanu-data/automation-state`): `action="no-supervised-head"`, `result="error"` and `error`
 give the cause, also written to `journalctl -u ummanu-<agent>.service`. Any remaining
 `terminal_handle.json`, even empty, unreadable or lacking a handle, refuses with
 `action="supervised-owner-conflict"` and exit 1. The tick neither deletes it nor launches beside
 it; remove it only after confirming the pane-era head it names is gone.
+`TA_STATE` remains a compatibility alias; an explicitly present `UMMANU_STATE` wins, including
+an empty value. Recovery guidance must name whichever alias the installation actually selected.
 
 The generation and profile sidecar APIs are retired. `head_run.json` carries the current
 head's resolved profile in its typed spec and records its ownership. Existing
