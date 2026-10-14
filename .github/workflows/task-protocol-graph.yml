@@ -104,6 +104,7 @@ jobs:
           pathlib.Path(os.environ['RUNNER_TEMP']+'/task-protocol-graph/uncut.json').write_text(json.dumps(result,indent=2));
           print(json.dumps(result,indent=2)); assert len(groups[0])<=60; assert len(config)<=10"
       - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
         with:
           name: task-protocol-graph-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/task-protocol-graph

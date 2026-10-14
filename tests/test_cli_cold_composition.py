@@ -241,6 +241,22 @@ class CliCompositionTests(unittest.TestCase):
             cases += [[name] for name in ("data", "memory", "knowledge", "config", "task", "project")]
             result = {"schema": schema(parser), "outcomes": [outcome(argv) for argv in cases]}
         expected = json.loads(GOLDEN.read_text())
+        # The captured Python 3.12.3 marks a '*' positional required, unlike 3.12.15.
+        # Check the production action against this interpreter's actual argparse action,
+        # then project that one stdlib distinction onto the unchanged baseline usage.
+        probe = argparse.ArgumentParser().add_argument("selectors", nargs="*", metavar="SELECTOR")
+        check_parser = commands["check"]
+        selectors = next(action for action in check_parser._actions if action.dest == "selectors")
+        self.assertEqual(selectors.required, probe.required)
+        if not probe.required:
+            check = expected["schema"]["actions"][1]["choices"]["check"]
+            action = next(action for action in check["actions"] if action["dest"] == "selectors")
+            self.assertTrue(action["required"])
+            action["required"] = False
+            check["help"] = check["help"].replace("SELECTOR ...", "[SELECTOR ...]")
+            for recorded in expected["outcomes"]:
+                if recorded["argv"] == ["check", "--help"]:
+                    recorded["stdout"] = recorded["stdout"].replace("SELECTOR ...", "[SELECTOR ...]")
 
         def differences(actual, expected, path=""):
             if isinstance(actual, dict) and isinstance(expected, dict):

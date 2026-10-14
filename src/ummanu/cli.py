@@ -101,10 +101,60 @@ def run_automations(argv: list[str]) -> int:
     return automations_main(list(argv))
 
 
+def _add_family(subparsers, family, selected):
+    """Register every root in order, expanding only the selected family (None means all)."""
+    from ummanu.runtime.cli_composition import ROOT_COMMANDS, add_command_parser
+
+    if selected is not None and selected not in {name for name, _ in ROOT_COMMANDS[family]}:
+        for name, _ in ROOT_COMMANDS[family]:
+            add_command_parser(subparsers, name)
+        return
+    if family == "doctor-record":
+        from ummanu.infra.doctor_record import add_subcommand as register
+    elif family == "dispatcher":
+        from ummanu.dispatch.commands import add_dispatcher_subcommands as register
+    elif family == "pause":
+        from ummanu.dispatch.commands import add_pause_commands as register
+    elif family == "head-status":
+        from ummanu.dispatch.commands import add_head_status_command as register
+    elif family == "check":
+        from ummanu.check_commands import add_check_subcommands as register
+    elif family == "web-read":
+        from ummanu.webproto.commands import add_web_read_subcommands as register
+    elif family == "web-run":
+        from ummanu.webproto.commands import add_web_run_subcommands as register
+    elif family == "web-serve":
+        from ummanu.web.commands import add_web_serve_subcommands as register
+    elif family == "web-front":
+        from ummanu.webfront.commands import add_web_front_subcommands as register
+    elif family == "po-serve":
+        from ummanu.po.service import add_po_serve_subcommands as register
+    elif family == "po":
+        from ummanu.po.commands import add_po_subcommands as register
+    elif family == "owner-events":
+        from ummanu.board.owner_event_commands import add_owner_event_subcommands as register
+    elif family == "upgrade":
+        from ummanu.upgrade import add_upgrade_command as register
+    elif family == "install":
+        from ummanu.installation.commands import add_install_commands as register
+    elif family == "sprint":
+        from ummanu.sprint_commands import add_sprint_subcommands as register
+    elif family == "restore":
+        from ummanu.restore_commands import add_restore_subcommands as register
+    elif family == "task":
+        from ummanu.task_commands import add_task_subcommands as register
+    elif family == "product":
+        from ummanu.product_issue_commands import add_product_issue_subcommands as register
+    elif family == "secret":
+        from ummanu.secret_commands import add_secret_subcommands as register
+    else:
+        raise ValueError(f"unknown command family: {family}")
+    register(subparsers)
+
+
 def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     """Return the full inspection tree by default, or compose for one invocation's argv."""
     from ummanu.role_skills import add_role_skills_subcommands
-    from ummanu.runtime.cli_composition import add_family
 
     selected = None if argv is None else next((arg for arg in argv if not arg.startswith("-")), "")
     if argv and argv[0] in {"--help", "-h"}:
@@ -112,18 +162,18 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
 
     parser = StructuredArgumentParser(prog="ummanu")
     subparsers = parser.add_subparsers(dest="command")
-    add_family(subparsers, 'doctor-record', selected)
-    add_family(subparsers, 'dispatcher', selected)
-    add_family(subparsers, 'pause', selected)
-    add_family(subparsers, 'head-status', selected)
-    add_family(subparsers, 'check', selected)
-    add_family(subparsers, 'web-read', selected)
-    add_family(subparsers, 'web-run', selected)
-    add_family(subparsers, 'web-serve', selected)
-    add_family(subparsers, 'web-front', selected)
-    add_family(subparsers, 'po-serve', selected)
-    add_family(subparsers, 'po', selected)
-    add_family(subparsers, 'owner-events', selected)
+    _add_family(subparsers, 'doctor-record', selected)
+    _add_family(subparsers, 'dispatcher', selected)
+    _add_family(subparsers, 'pause', selected)
+    _add_family(subparsers, 'head-status', selected)
+    _add_family(subparsers, 'check', selected)
+    _add_family(subparsers, 'web-read', selected)
+    _add_family(subparsers, 'web-run', selected)
+    _add_family(subparsers, 'web-serve', selected)
+    _add_family(subparsers, 'web-front', selected)
+    _add_family(subparsers, 'po-serve', selected)
+    _add_family(subparsers, 'po', selected)
+    _add_family(subparsers, 'owner-events', selected)
     automations = subparsers.add_parser(
         "automations",
         add_help=False,
@@ -171,10 +221,10 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     config_check.set_defaults(handler=run_config_check)
     config.set_defaults(handler=usage_handler("config subcommand required"))
 
-    add_family(subparsers, 'upgrade', selected)
-    add_family(subparsers, 'install', selected)
+    _add_family(subparsers, 'upgrade', selected)
+    _add_family(subparsers, 'install', selected)
     add_role_skills_subcommands(subparsers)
-    add_family(subparsers, 'sprint', selected)
+    _add_family(subparsers, 'sprint', selected)
 
     reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
@@ -304,7 +354,7 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     backup_verify.set_defaults(handler=run_backup_verify)
     backup.set_defaults(handler=not_implemented("backup"))
 
-    add_family(subparsers, 'restore', selected)
+    _add_family(subparsers, 'restore', selected)
 
     checkpoint = subparsers.add_parser("checkpoint-run", help="prepare and push the instance checkpoint")
     _add_instance(checkpoint, help="path to an instance dir or instance.yaml")
@@ -357,8 +407,8 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     gate.set_defaults(handler=run_project_gate)
     project.set_defaults(handler=not_implemented("project"))
 
-    add_family(subparsers, 'task', selected)
-    add_family(subparsers, 'product', selected)
+    _add_family(subparsers, 'task', selected)
+    _add_family(subparsers, 'product', selected)
 
     shell = subparsers.add_parser(
         "shell",
@@ -466,7 +516,7 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     knowledge_list.set_defaults(handler=run_knowledge_list)
     knowledge.set_defaults(handler=not_implemented("knowledge"))
 
-    add_family(subparsers, 'secret', selected)
+    _add_family(subparsers, 'secret', selected)
 
     return parser
 
