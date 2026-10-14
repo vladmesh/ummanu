@@ -1424,6 +1424,29 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
         self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
         self.assertIn("cut the next card", waiting["reason"])
 
+    def test_a_finished_card_under_post_merge_ci_waits_on_that_ci_until_it_answers(self) -> None:
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "Done")
+        sha = "ab12cd34ef56" + "0" * 28
+        watch = {"ref": card, "base": "main", "merge_sha": sha, "started_at": 1788650000.0, "result": None}
+        state = self.data_dir / "dispatcher" / "production-state.json"
+
+        def write(watched: dict[str, Any]) -> None:
+            payload = {"phase": "production", "records": {}, "observers": {}, "post_merge_watches": watched}
+            state.write_text(json.dumps(payload), encoding="utf-8")
+
+        write({card: watch})
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation):
+                waiting = work["waiting"]
+                self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
+                self.assertIn(f"watching the CI of {sha[:12]} on main since 2026-09-05T23:13:20Z", waiting["reason"])
+                self.assertEqual(waiting["card"], card)
+
+        write({card: {**watch, "result": {"result": "green"}}})
+        waiting = self._entry(self.reads().sprint_list(), reference)["waiting"]
+        self.assertIn("cut the next card", waiting["reason"])
+
     def test_an_active_column_with_no_record_still_prefers_what_the_board_settled(self) -> None:
         """The dispatcher answered, and holds no record: the column is the better answer where it
         has one, and the bare "no record" is what is left where it does not."""

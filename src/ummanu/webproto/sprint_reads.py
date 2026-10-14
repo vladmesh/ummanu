@@ -51,6 +51,7 @@ from ummanu.dispatch.observer import (
     delivery_evidence_summary,
     observer_snapshot,
 )
+from ummanu.dispatch.post_merge import WATCHES_KEY
 from ummanu.head_registry import HeadRegistryConfigError, installed_heads, installed_pair
 from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import ProductIssueStore, registered_projects
@@ -255,6 +256,12 @@ class _Production:
         records = self.payload.get("records")
         record = records.get(card) if isinstance(records, dict) else None
         return record if isinstance(record, dict) else None
+
+    def post_merge_watch(self, card: str) -> dict[str, Any] | None:
+        """The dispatcher's post-merge CI watch for one card while CI has not answered, else `None`."""
+        live = self.payload.get(WATCHES_KEY)
+        watch = live.get(card) if isinstance(live, dict) else None
+        return watch if isinstance(watch, dict) and not watch.get("result") else None
 
 
 #: One sprint's board row and status view, or `(None, None)` when the sprint board did not answer.
@@ -607,6 +614,7 @@ class SprintSections(SectionSet):
           once handed over;
         * the dispatcher: `working`, degraded `blocked`, or no record. A column alone is not evidence a
           head runs (`docs/OPERATIONS.md`);
+        * a Done card whose post-merge CI the dispatcher still watches: `waiting` on that CI;
         * otherwise the board's `waiting` for Ready, Issues or Done.
 
         `card` is the sprint's current card, or null.
@@ -668,6 +676,23 @@ class SprintSections(SectionSet):
                 "card": current,
             }
 
+        def post_merge_ci(sprint: _Sprint, production: _Production) -> dict[str, Any] | None:
+            _reference, _status, current = _subject(sprint)
+            if sprint[1] is None or current is None:
+                return None
+            watch = production.post_merge_watch(current)
+            if watch is None:
+                return None
+            sha = str(watch.get("merge_sha") or "")[:12] or "its merge"
+            base = str(watch.get("base") or "") or "the base"
+            started = watch.get("started_at")
+            since = f" since {sources.isoformat(float(started))}" if isinstance(started, int | float) else ""
+            return {
+                "state": WAITING_WAITING,
+                "reason": f"{current} is done: the dispatcher is watching the CI of {sha} on {base}{since}",
+                "card": current,
+            }
+
         def board_settled(sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
             current, card = _card_of(sprint, linked)
             settled = _board_wait(current, card)
@@ -690,6 +715,7 @@ class SprintSections(SectionSet):
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_holds_it),
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), with_the_po),
             Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), dispatcher_holds_it),
+            Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), post_merge_ci),
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_settled),
             Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), nothing_claimed),
             blank={"state": WAITING_UNKNOWN, "reason": None, "card": None},
