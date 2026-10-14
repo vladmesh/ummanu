@@ -12223,6 +12223,26 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(any("gh pr merge pipeline/ummanu-510 --merge" in c for c in cmds))
         self.assertTrue(any(c.endswith("git -C /home/dev/ummanu fetch origin main") for c in cmds))
 
+    def test_complete_green_reports_the_push_landing_when_a_diverged_checkout_cannot_fast_forward(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp))
+            original_run = host._run
+
+            def fail_fast_forward(args, label, *, cwd=None):
+                if label == "post-merge fast-forward":
+                    raise HostError("post-merge fast-forward failed: Diverging branches")
+                return original_run(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "_run", side_effect=fail_fast_forward):
+                landing = host.complete_green(
+                    {"ref": "ummanu-510", "project": "ummanu"},
+                    SimpleNamespace(workspace=str(Path(tmp) / "ws")),
+                )
+
+        self.assertEqual((landing.path, landing.base), ("push", "main"))
+
     def test_complete_green_survives_default_checkout_fetch_failure_after_pr_merge(self) -> None:
         """The remote merge is complete even when the checkout cannot refresh from origin."""
         from types import SimpleNamespace

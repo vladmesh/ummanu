@@ -1132,16 +1132,25 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
                 sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci
             )
             raise
+        except HostError:
+            # The push already landed. Only the production checkout's refresh activates the merged
+            # code, so only its failure stays a release failure for the next tick to replay.
+            if self._is_production_checkout(repo):
+                raise
         with tick_stage("release_runtime"):
             self._require_production_runtime("release-after")
         return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
 
     def _advance_checkout(self, repo: Path, ref: str) -> None:
         """Fast-forward a project checkout to `ref` after a merge."""
-        if self.mode != "noop" and _same_repo(repo, Path(self.production_runtime.product_root)):
+        if self._is_production_checkout(repo):
             production_checkout.advance(self._run, repo, ref, instance_dir=self.catalog.instance_dir)
             return
         self._run(["git", "-C", str(repo), "merge", "--ff-only", ref], "post-merge fast-forward")
+
+    def _is_production_checkout(self, repo: Path) -> bool:
+        """Whether `repo` is the checkout the dispatcher itself runs from."""
+        return self.mode != "noop" and _same_repo(repo, Path(self.production_runtime.product_root))
 
     def _pushed_branch_head(self, record: DispatcherRecord, branch: str) -> str:
         """The commit a `branch:base` push just landed. A non-fast-forward push is rejected, so after
