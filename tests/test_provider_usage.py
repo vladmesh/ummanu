@@ -707,6 +707,7 @@ class InstallationCodexHomeTest(unittest.TestCase):
         data_dir = self.root / "data"
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("UMMANU_CODEX_HOME", None)
+            os.environ.pop("TA_CODEX_HOME", None)
             self.assertIsNone(installation_codex_dir(data_dir))
             write(self.codex_home / "auth.json", {"tokens": {"access_token": "x"}})
             self.assertEqual(installation_codex_dir(data_dir), self.codex_home)

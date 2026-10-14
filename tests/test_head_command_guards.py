@@ -40,11 +40,6 @@ class HeadCommandGuardTests(unittest.TestCase):
                     "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false"}
             for role in ("worker", "reviewer"):
                 with self.subTest(role=role), mock.patch.dict(os.environ, base, clear=True):
-                    env = role_env.runtime_env(role, base_env=base, workspace=root, env_file=parent / "absent.env")
-                    result = subprocess.run([git, "-C", str(root), "rev-parse", "--git-dir"],
-                                            env=env, capture_output=True, text=True, check=False, timeout=5)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("missing config key GIT_CONFIG_KEY_0", result.stderr)
                     repaired = role_git_env(root, base)
                     env = role_env.runtime_env(role, base_env=repaired, workspace=root, env_file=parent / "absent.env")
                     with mock.patch.dict(os.environ, env, clear=True):

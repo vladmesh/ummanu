@@ -16,11 +16,10 @@ from ummanu.cli import main
 
 
 def role_git_env(root: Path, environment: dict[str, str]) -> dict[str, str]:
-    """Keep suite Git maintenance controls valid through role credential filtering.
+    """Keep suite Git maintenance controls through role credential filtering.
 
-    tests/__init__.py supplies a GIT_CONFIG_COUNT/KEY/VALUE bundle. Role filtering
-    removes KEY names, leaving an invalid bundle. Use repository-local settings
-    for this isolated fixture instead, without changing production filtering.
+    Role filtering drops the GIT_CONFIG_COUNT/KEY/VALUE bundle tests/__init__.py supplies,
+    so this fixture repository carries the same settings locally.
     """
     env = {name: value for name, value in environment.items()
            if name != "GIT_CONFIG_COUNT" and not name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))}
