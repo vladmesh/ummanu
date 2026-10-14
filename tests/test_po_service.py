@@ -1769,11 +1769,12 @@ class ProcessReceiptTests(PoUpgradeFixture):
         before = self.receipt().read_bytes()
 
         with (
-            mock.patch.object(upgrade.os, "replace", side_effect=OSError("disk full")),
+            mock.patch.object(upgrade.process_receipts.os, "replace", side_effect=OSError("disk full")) as replace,
             self.assertRaises(upgrade.ReceiptError),
         ):
             self.bind(FakeUnitInstaller._new_identity())
 
+        replace.assert_called_once()
         self.assertEqual(self.receipt().read_bytes(), before)
         self.assertEqual(list(self.receipt().parent.glob("*.tmp")), [])
 

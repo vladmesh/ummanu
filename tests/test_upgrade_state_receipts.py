@@ -439,7 +439,7 @@ def _hostile(body, *, extras_key: str) -> dict[str, str | None]:
         "extra key": body(unexpected=1),
         "wrong type": body(**{extras_key: "dev"}),
         "null field": body(**{extras_key: None}),
-        "oversized": body(padding="x" * (upgrade.RECEIPT_MAX_BYTES + 1)),
+        "oversized": body(padding="x" * (upgrade.process_receipts.RECEIPT_MAX_BYTES + 1)),
         "directory": "<directory>",
         "symlink": "<symlink>",
     }

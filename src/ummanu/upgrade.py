@@ -21,7 +21,6 @@ import shlex
 import stat
 import subprocess
 import sys
-import tempfile
 import time
 import tomllib
 from collections.abc import Callable
@@ -30,7 +29,6 @@ from pathlib import Path
 from typing import Any
 
 from ummanu import _proc, role_skills, state_repo
-from ummanu._fsutil import fsync_directory
 from ummanu.board.migrate import migrate_instance
 from ummanu.board.provision import (
     provision as provision_board_store,
@@ -70,7 +68,8 @@ from ummanu.host_apply import (
     resolve_packaged,
     resolve_runtime_owner,
 )
-from ummanu.infra import git_worktree
+from ummanu.infra import git_worktree, process_receipts
+from ummanu.infra.process_receipts import ReceiptError as ReceiptError
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.client_config import (
     CODEX_HOME_SEEDED_FILES,
@@ -422,15 +421,9 @@ def _ruff_runtime_problem(product_root: Path, venv_python: Path) -> str:
 UPGRADE_RECEIPT_ROOT = Path("upgrade")
 DEPENDENCY_RECEIPT_RELATIVE = UPGRADE_RECEIPT_ROOT / "dependency-receipt.json"
 DEPENDENCY_RECEIPT_VERSION = 1
-# A receipt is a few hundred bytes; anything much larger is not one of ours.
-RECEIPT_MAX_BYTES = 64 * 1024
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 EXTRA_NAME_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 REQUIREMENT_NAME_RE = re.compile(r"\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)")
-
-
-class ReceiptError(RuntimeError):
-    """A receipt or one of the inputs it binds cannot be read or written."""
 
 
 def _upgrade_receipt_path(context: UpgradeContext, relative: Path) -> Path:
@@ -438,28 +431,6 @@ def _upgrade_receipt_path(context: UpgradeContext, relative: Path) -> Path:
     if not isinstance(data_dir, Path):
         raise ReceiptError("instance has no resolved data directory")
     return data_dir / relative
-
-
-def _load_receipt(path: Path, label: str) -> tuple[dict[str, Any] | None, str]:
-    """Read one receipt as a JSON object, totally: every way it can be wrong is "no receipt"."""
-    try:
-        info = path.lstat()
-    except FileNotFoundError:
-        return None, f"the {label} is missing"
-    except OSError as exc:
-        return None, f"the {label} cannot be read: {exc}"
-    if not stat.S_ISREG(info.st_mode) or info.st_size > RECEIPT_MAX_BYTES:
-        return None, f"the {label} is malformed"
-    try:
-        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-        with os.fdopen(descriptor, "rb") as source:
-            raw = source.read(RECEIPT_MAX_BYTES + 1)
-        payload = json.loads(raw.decode("utf-8")) if len(raw) <= RECEIPT_MAX_BYTES else None
-    except (OSError, UnicodeError, ValueError, RecursionError):
-        return None, f"the {label} is malformed"
-    if not isinstance(payload, dict):
-        return None, f"the {label} is malformed"
-    return payload, ""
 
 
 def _normalized_name(name: str) -> str:
@@ -523,7 +494,7 @@ def _read_dependency_receipt(context: UpgradeContext, venv: Path) -> tuple[dict[
         path = _upgrade_receipt_path(context, DEPENDENCY_RECEIPT_RELATIVE)
     except ReceiptError as exc:
         return None, f"the dependency receipt cannot be located: {exc}"
-    payload, reason = _load_receipt(path, "dependency receipt")
+    payload, reason = process_receipts.load_receipt(path, "dependency receipt")
     if payload is None:
         return None, reason
     malformed = "the dependency receipt is malformed"
@@ -560,7 +531,9 @@ def _write_dependency_receipt(
         "dependency_sha256": digest,
         "extras": list(extras),
     }
-    _write_private_receipt(path, payload, context.runtime_user, ReceiptError, "dependency receipt")
+    process_receipts.write_private_receipt(
+        path, payload, context.runtime_user, ReceiptError, "dependency receipt"
+    )
 
 
 def step_dependencies(context: UpgradeContext) -> StepResult:
@@ -1550,15 +1523,6 @@ def _process_unit_enabled(context: UpgradeContext, component: str, unit: str) ->
 
 
 MEMORY_PROCESS_RECEIPT_RELATIVE = UPGRADE_RECEIPT_ROOT / "memory-process-receipt.json"
-MEMORY_PROCESS_RECEIPT_VERSION = 1
-MEMORY_PROCESS_INPUT_KEYS = (
-    "product_revision",
-    "product_sha256",
-    "dependency_sha256",
-    "memory_model",
-    "memory_pack_sha256",
-)
-MEMORY_MODEL_RE = re.compile(r"[\x21-\x7e]{1,256}")
 
 
 def _unit_environment(unit_text: bytes | None, key: str) -> str | None:
@@ -1597,24 +1561,6 @@ def memory_process_inputs(context: UpgradeContext, unit: str) -> dict[str, str |
     }
 
 
-def _valid_memory_inputs(value: object) -> dict[str, str | None] | None:
-    if not isinstance(value, dict) or set(value) != set(MEMORY_PROCESS_INPUT_KEYS):
-        return None
-    revision = value["product_revision"]
-    model = value["memory_model"]
-    pack = value["memory_pack_sha256"]
-    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40,64}", revision):
-        return None
-    for key in ("product_sha256", "dependency_sha256"):
-        if not isinstance(value[key], str) or not SHA256_RE.fullmatch(value[key]):
-            return None
-    if not isinstance(model, str) or not MEMORY_MODEL_RE.fullmatch(model):
-        return None
-    if pack is not None and (not isinstance(pack, str) or not SHA256_RE.fullmatch(pack)):
-        return None
-    return {key: value[key] for key in MEMORY_PROCESS_INPUT_KEYS}
-
-
 def _read_memory_process_receipt(
     context: UpgradeContext, unit: str
 ) -> tuple[tuple[UnitProcessIdentity, dict[str, str | None]] | None, str]:
@@ -1622,26 +1568,8 @@ def _read_memory_process_receipt(
         path = _upgrade_receipt_path(context, MEMORY_PROCESS_RECEIPT_RELATIVE)
     except ReceiptError as exc:
         return None, f"the memory process receipt cannot be located: {exc}"
-    payload, reason = _load_receipt(path, "memory process receipt")
-    if payload is None:
-        return None, reason
-    malformed = "the memory process receipt is malformed"
-    if set(payload) != {"version", "unit", "process", "inputs"}:
-        return None, malformed
-    version = payload["version"]
-    if type(version) is not int or version != MEMORY_PROCESS_RECEIPT_VERSION or payload["unit"] != unit:
-        return None, malformed
-    identity = _receipt_identity(payload["process"])
-    inputs = _valid_memory_inputs(payload["inputs"])
-    if identity is None or inputs is None:
-        return None, malformed
-    return (identity, inputs), ""
-
-
-def _short(value: str | None) -> str:
-    if value is None:
-        return "none"
-    return value[:12] if re.fullmatch(r"[0-9a-f]{40,64}", value) else value
+    receipt, reason = process_receipts.read_process_receipt(path, process_receipts.MEMORY, unit)
+    return ((receipt.identity, receipt.inputs), "") if receipt is not None else (None, reason)
 
 
 def _memory_receipt_evidence(
@@ -1657,24 +1585,20 @@ def _memory_receipt_evidence(
     if receipt is None:
         return False, reason
     recorded_identity, recorded = receipt
-    if recorded_identity != identity:
-        return False, "the memory process receipt belongs to a different process generation"
-    moved = [
-        f"{key.replace('_', ' ')} {_short(recorded[key])} -> {_short(inputs[key])}"
-        for key in MEMORY_PROCESS_INPUT_KEYS
-        if recorded[key] != inputs[key]
-    ]
-    if moved:
-        return False, "; ".join(moved)
+    mismatch = process_receipts.mismatch(
+        process_receipts.MEMORY, recorded_identity, recorded, identity, inputs
+    )
+    if mismatch:
+        return False, mismatch
     return True, f"memory process receipt verified: pid {identity.pid}; {_memory_inputs_summary(inputs)}"
 
 
 def _memory_inputs_summary(inputs: dict[str, str | None]) -> str:
     return (
-        f"product revision {_short(inputs['product_revision'])}, "
-        f"product sha256 {_short(inputs['product_sha256'])}, "
-        f"deps sha256 {_short(inputs['dependency_sha256'])}, "
-        f"model {inputs['memory_model']}, pack sha256 {_short(inputs['memory_pack_sha256'])}"
+        f"product revision {process_receipts.short(inputs['product_revision'])}, "
+        f"product sha256 {process_receipts.short(inputs['product_sha256'])}, "
+        f"deps sha256 {process_receipts.short(inputs['dependency_sha256'])}, "
+        f"model {inputs['memory_model']}, pack sha256 {process_receipts.short(inputs['memory_pack_sha256'])}"
     )
 
 
@@ -1758,19 +1682,15 @@ def step_memory(context: UpgradeContext) -> StepResult:
         return StepResult(
             "memory", "failed", f"{unit} inputs changed during the restart; no receipt was written"
         )
-    payload = {
-        "version": MEMORY_PROCESS_RECEIPT_VERSION,
-        "unit": unit,
-        "process": _receipt_process(after_probe),
-        "inputs": final_inputs,
-    }
     try:
-        _write_private_receipt(
+        process_receipts.write_process_receipt(
             _upgrade_receipt_path(context, MEMORY_PROCESS_RECEIPT_RELATIVE),
-            payload,
+            process_receipts.MEMORY,
+            after_probe,
+            final_inputs,
             context.runtime_user,
             ReceiptError,
-            "memory process receipt",
+            unit,
         )
     except ReceiptError as exc:
         return StepResult("memory", "failed", f"restarted and authenticated {unit} but {exc}")
@@ -1783,15 +1703,6 @@ def step_memory(context: UpgradeContext) -> StepResult:
 
 
 WEB_PROCESS_RECEIPT_RELATIVE = Path("web") / "process-receipt.json"
-WEB_PROCESS_RECEIPT_VERSION = 1
-WEB_PROCESS_INPUT_KEYS = (
-    "product_revision",
-    "product_sha256",
-    "dependency_sha256",
-    "schemas_sha256",
-    "web_units_sha256",
-    "head_registry_sha256",
-)
 
 
 class WebProcessReceiptError(ReceiptError):
@@ -1891,71 +1802,11 @@ def web_process_inputs(context: UpgradeContext, name_prefix: str) -> dict[str, s
     }
 
 
-def _receipt_process(identity: UnitProcessIdentity) -> dict[str, int | str]:
-    return {
-        "pid": identity.pid,
-        "start_ticks": identity.start_ticks,
-        "invocation_id": identity.invocation_id,
-    }
-
-
-def _receipt_identity(value: object) -> UnitProcessIdentity | None:
-    if not isinstance(value, dict) or set(value) != {"pid", "start_ticks", "invocation_id"}:
-        return None
-    pid = value.get("pid")
-    start_ticks = value.get("start_ticks")
-    invocation_id = value.get("invocation_id")
-    if (
-        type(pid) is not int
-        or pid <= 0
-        or type(start_ticks) is not int
-        or start_ticks <= 0
-        or not isinstance(invocation_id, str)
-        or not invocation_id
-    ):
-        return None
-    return UnitProcessIdentity(pid, start_ticks, invocation_id)
-
-
-def _valid_receipt_inputs(value: object) -> dict[str, str] | None:
-    if not isinstance(value, dict) or set(value) != set(WEB_PROCESS_INPUT_KEYS):
-        return None
-    result = {}
-    for key in WEB_PROCESS_INPUT_KEYS:
-        item = value.get(key)
-        if not isinstance(item, str) or not re.fullmatch(r"[0-9a-f]{64}", item):
-            if key == "product_revision" and isinstance(item, str) and re.fullmatch(r"[0-9a-f]{40,64}", item):
-                result[key] = item
-                continue
-            return None
-        result[key] = item
-    return result
-
-
 def _read_web_process_receipt(context: UpgradeContext, unit: str) -> tuple[dict[str, Any] | None, str]:
-    try:
-        path = web_process_receipt_path(context)
-        info = path.lstat()
-    except FileNotFoundError:
-        return None, "the web process receipt is missing"
-    except OSError as exc:
-        return None, f"the web process receipt cannot be read: {exc}"
-    if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        return None, "the web process receipt is malformed"
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None, "the web process receipt is malformed"
-    if not isinstance(payload, dict) or set(payload) != {"version", "unit", "process", "inputs"}:
-        return None, "the web process receipt is malformed"
-    if payload.get("version") != WEB_PROCESS_RECEIPT_VERSION or payload.get("unit") != unit:
-        return None, "the web process receipt is malformed"
-    if (
-        _receipt_identity(payload.get("process")) is None
-        or _valid_receipt_inputs(payload.get("inputs")) is None
-    ):
-        return None, "the web process receipt is malformed"
-    return payload, ""
+    receipt, reason = process_receipts.read_process_receipt(
+        web_process_receipt_path(context), process_receipts.WEB, unit
+    )
+    return (receipt.payload, "") if receipt is not None else (None, reason)
 
 
 def _receipt_evidence(
@@ -1969,10 +1820,13 @@ def _receipt_evidence(
     receipt, reason = _read_web_process_receipt(context, unit)
     if receipt is None:
         return False, reason
-    if _receipt_identity(receipt["process"]) != identity:
-        return False, "the web process receipt belongs to a different process generation"
-    if _valid_receipt_inputs(receipt["inputs"]) != inputs:
-        return False, "the web process receipt inputs do not match the materialized state"
+    recorded_identity = process_receipts.process_identity(receipt["process"])
+    assert recorded_identity is not None  # The common reader validated the envelope.
+    mismatch = process_receipts.mismatch(
+        process_receipts.WEB, recorded_identity, receipt["inputs"], identity, inputs
+    )
+    if mismatch:
+        return False, mismatch
     evidence = (
         f"web process receipt verified: pid {identity.pid}, start ticks {identity.start_ticks}, "
         f"invocation {identity.invocation_id}; product revision {inputs['product_revision']}; "
@@ -1983,16 +1837,6 @@ def _receipt_evidence(
     return True, evidence
 
 
-def _receipt_owner(runtime_user: str | None, error: type[ReceiptError]) -> tuple[int, int] | None:
-    if not runtime_user or os.geteuid() != 0:
-        return None
-    try:
-        account = pwd.getpwnam(runtime_user)
-    except KeyError:
-        raise error(f"runtime user {runtime_user!r} does not exist") from None
-    return account.pw_uid, account.pw_gid
-
-
 def _write_web_process_receipt(
     context: UpgradeContext,
     unit: str,
@@ -2000,60 +1844,10 @@ def _write_web_process_receipt(
     inputs: dict[str, str],
 ) -> None:
     """Publish the receipt only after a proved generation, as one private atomic replacement."""
-    payload = {
-        "version": WEB_PROCESS_RECEIPT_VERSION,
-        "unit": unit,
-        "process": _receipt_process(identity),
-        "inputs": inputs,
-    }
-    _write_private_receipt(
-        web_process_receipt_path(context),
-        payload,
-        context.runtime_user,
-        WebProcessReceiptError,
-        "web process receipt",
+    process_receipts.write_process_receipt(
+        web_process_receipt_path(context), process_receipts.WEB, identity, inputs,
+        context.runtime_user, WebProcessReceiptError, unit,
     )
-
-
-def _write_private_receipt(
-    path: Path,
-    payload: dict[str, Any],
-    runtime_user: str | None,
-    error: type[ReceiptError],
-    label: str,
-) -> None:
-    """Write one receipt as a private (0600, runtime-owned) atomic replacement."""
-    temporary: Path | None = None
-    try:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        owner = _receipt_owner(runtime_user, error)
-        parent_info = path.parent.lstat()
-        if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
-            raise OSError("receipt directory is not a real directory")
-        if owner is not None:
-            os.chown(path.parent, *owner, follow_symlinks=False)
-            os.chmod(path.parent, 0o700, follow_symlinks=False)
-        descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-        temporary = Path(name)
-        if owner is not None:
-            os.fchown(descriptor, *owner)
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
-            json.dump(payload, output, sort_keys=True, separators=(",", ":"))
-            output.write("\n")
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, path)
-        temporary = None
-        fsync_directory(path.parent)
-    except OSError as exc:
-        raise error(f"could not write {label} {path}: {exc}") from None
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def _po_unit(report: Any) -> str:
@@ -2065,10 +1859,6 @@ def _po_unit(report: Any) -> str:
 # service to restart, and a busy service exits long after the upgrade that asked has ended
 # (secretary-1759). It lives in the service's own directory, which the runtime user owns, and no
 # backup carries it (`po-service/` is outside the backed-up roots).
-PO_PROCESS_RECEIPT_VERSION = 1
-PO_PROCESS_INPUT_KEYS = ("product_revision", "product_sha256", "dependency_sha256", "schemas_sha256")
-
-
 def po_process_inputs(product_root: Path) -> dict[str, str]:
     """The checkout a PO process has to be bound to: its code, dependencies and bundled schemas."""
     return {
@@ -2077,18 +1867,6 @@ def po_process_inputs(product_root: Path) -> dict[str, str]:
         "dependency_sha256": _git_tracked_digest(product_root, DEPENDENCY_PATHS),
         "schemas_sha256": _git_tracked_digest(product_root, SCHEMA_PATHS),
     }
-
-
-def _valid_po_inputs(value: object) -> dict[str, str] | None:
-    if not isinstance(value, dict) or set(value) != set(PO_PROCESS_INPUT_KEYS):
-        return None
-    revision = value["product_revision"]
-    if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40,64}", revision):
-        return None
-    for key in PO_PROCESS_INPUT_KEYS[1:]:
-        if not isinstance(value[key], str) or not SHA256_RE.fullmatch(value[key]):
-            return None
-    return {key: value[key] for key in PO_PROCESS_INPUT_KEYS}
 
 
 def write_po_process_receipt(
@@ -2111,29 +1889,18 @@ def write_po_process_receipt(
         raise ReceiptError(f"cannot read the start ticks of pid {pid}")
     identity = UnitProcessIdentity(pid, start_ticks, invocation_id)
     inputs = po_process_inputs(product_root)
-    payload = {"version": PO_PROCESS_RECEIPT_VERSION, "process": _receipt_process(identity), "inputs": inputs}
     path = po_client.process_receipt_path(data_dir)
-    _write_private_receipt(path, payload, None, ReceiptError, "PO process receipt")
+    process_receipts.write_process_receipt(path, process_receipts.PO, identity, inputs, None, ReceiptError)
     return f"wrote the PO process receipt {path}: pid {pid}; {_po_inputs_summary(inputs)}"
 
 
 def _read_po_process_receipt(
     data_dir: Path,
 ) -> tuple[tuple[UnitProcessIdentity, dict[str, str]] | None, str]:
-    payload, reason = _load_receipt(po_client.process_receipt_path(data_dir), "PO process receipt")
-    if payload is None:
-        return None, reason
-    malformed = "the PO process receipt is malformed"
-    if set(payload) != {"version", "process", "inputs"}:
-        return None, malformed
-    version = payload["version"]
-    if type(version) is not int or version != PO_PROCESS_RECEIPT_VERSION:
-        return None, malformed
-    identity = _receipt_identity(payload["process"])
-    inputs = _valid_po_inputs(payload["inputs"])
-    if identity is None or inputs is None:
-        return None, malformed
-    return (identity, inputs), ""
+    receipt, reason = process_receipts.read_process_receipt(
+        po_client.process_receipt_path(data_dir), process_receipts.PO
+    )
+    return ((receipt.identity, receipt.inputs), "") if receipt is not None else (None, reason)
 
 
 def _po_receipt_evidence(
@@ -2148,24 +1915,20 @@ def _po_receipt_evidence(
     if receipt is None:
         return False, reason
     recorded_identity, recorded = receipt
-    if recorded_identity != identity:
-        return False, "the PO process receipt belongs to a different process generation"
-    moved = [
-        f"{key.replace('_', ' ')} {_short(recorded[key])} -> {_short(inputs[key])}"
-        for key in PO_PROCESS_INPUT_KEYS
-        if recorded[key] != inputs[key]
-    ]
-    if moved:
-        return False, f"the PO process receipt is stale: {'; '.join(moved)}"
+    mismatch = process_receipts.mismatch(
+        process_receipts.PO, recorded_identity, recorded, identity, inputs
+    )
+    if mismatch:
+        return False, mismatch
     return True, f"PO process receipt verified: pid {identity.pid}, {_po_inputs_summary(inputs)}"
 
 
 def _po_inputs_summary(inputs: dict[str, str]) -> str:
     return (
-        f"revision {_short(inputs['product_revision'])}, "
-        f"product sha256 {_short(inputs['product_sha256'])}, "
-        f"deps sha256 {_short(inputs['dependency_sha256'])}, "
-        f"schemas sha256 {_short(inputs['schemas_sha256'])}"
+        f"revision {process_receipts.short(inputs['product_revision'])}, "
+        f"product sha256 {process_receipts.short(inputs['product_sha256'])}, "
+        f"deps sha256 {process_receipts.short(inputs['dependency_sha256'])}, "
+        f"schemas sha256 {process_receipts.short(inputs['schemas_sha256'])}"
     )
 
 

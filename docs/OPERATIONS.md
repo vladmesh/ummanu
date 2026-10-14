@@ -3195,9 +3195,13 @@ plus any declared extra whose distributions the venv already carries. The receip
 excluded from backups). A missing, unreadable or malformed receipt means the work is done, never
 `unchanged`; do not copy or edit them.
 
-**First run after this change.** An installation has no receipts yet, so its first upgrade (the final
-upgrade included) reinstalls the product into the venv once and restarts the memory service once, then
-writes both receipts. The next run reports both steps `unchanged`.
+Process receipts for memory, web (`DATA_DIR/web/process-receipt.json`) and PO
+(`DATA_DIR/po-service/process-receipt.json`) share the bounded reader and private atomic publisher in
+`ummanu.infra.process_receipts`. Their released version-1 paths and JSON bytes are unchanged: memory
+and web bind a unit; PO publishes its own process identity without a unit field. Reads reject
+nonregular files, final symlinks, files over 64 KiB and malformed envelopes, including boolean versions.
+Existing valid receipts need no migration or deletion. Missing or stale receipts are repaired by the
+normal producer: upgrade after a successful memory/web probe, or the PO service when it starts.
 
 The packaged systemd timers are the only schedule owner of the background roles (curator, retro,
 steward). Before sprint:1459 they ran as Orca automations; upgrade no longer creates, repoints or
