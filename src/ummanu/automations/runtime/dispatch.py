@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from ummanu.head_health import HeadHealth, failure_status, failure_until, resolve_head_chain, until_text
-from ummanu.infra.env import env_value
 from ummanu.runtime import claude_env
 from ummanu.runtime.codex_preflight import (
     CodexPreflightError,
@@ -45,6 +44,7 @@ from ummanu.runtime.head import (
 from ummanu.runtime.head.identity import head_process_status
 from ummanu.runtime.head_runtime_backends import build_head_runtime
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.state import AgentState
 
 from .production_telemetry import data_dir as _installation_data_dir

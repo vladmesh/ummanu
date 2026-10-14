@@ -11,12 +11,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ummanu.infra.env import env_value
 from ummanu.runtime.codex_preflight import (
     CodexPreflightError,
     ensure_codex_workspace_trusted as _preflight_codex_workspace,
     reject_symlinked_config as _reject_symlinked_config,
 )
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.role_env import (
     RoleEnvError,
     runtime_env,

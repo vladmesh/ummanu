@@ -71,7 +71,6 @@ from ummanu.host_apply import (
     resolve_runtime_owner,
 )
 from ummanu.infra import git_worktree
-from ummanu.infra.env import env_value
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.client_config import (
     CODEX_HOME_SEEDED_FILES,
@@ -85,7 +84,7 @@ from ummanu.po import client as po_client, token as po_token, workspace as po_wo
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import interactive_workspace
 from ummanu.runtime.cli_composition import add_command_parser
-from ummanu.runtime.paths import add_instance_argument, component_enabled, configured_product_root
+from ummanu.runtime.paths import add_instance_argument, component_enabled, configured_product_root, env_value
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.web.health import WebProbeError, probe_web, target_from_unit
 from ummanu.web.server import LoopbackOnly

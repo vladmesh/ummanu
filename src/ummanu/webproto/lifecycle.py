@@ -19,7 +19,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from ummanu.infra.env import env_value
 from ummanu.runtime.codex_preflight import CodexPreflightError, preflight_codex_launch
 from ummanu.runtime.head.command import HeadCommandError, render_head_command
 from ummanu.runtime.head.operations import NudgePointer
@@ -27,6 +26,7 @@ from ummanu.runtime.head.run import HeadRun, HeadRunError, StopInitiator
 from ummanu.runtime.head.runtime import HEAD_BUSY, HEAD_OK
 from ummanu.runtime.head.spec import HeadSpec
 from ummanu.runtime.head.task_ref import TaskRef
+from ummanu.runtime.paths import env_value
 from ummanu.webproto import run_state as run_state_reads
 from ummanu.webproto.errors import (
     OwnerConflict,

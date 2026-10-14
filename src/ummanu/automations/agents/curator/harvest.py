@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ummanu.infra.env import env_value, legacy_name
+from ummanu.runtime.paths import env_value, legacy_name
 from ummanu.runtime.redact import redact
 
 from . import discover

@@ -12,7 +12,6 @@ from typing import Any
 from ummanu import _proc, head_registry, state_repo
 from ummanu.checkpoint import DEFAULT_REMOTE
 from ummanu.head_health import PROBE_TTL_SECONDS, HeadHealth, HeadReadiness, run_probe
-from ummanu.infra.env import env_value
 from ummanu.infra.github_credential import (
     CredentialError,
     CredentialReadiness,
@@ -20,7 +19,7 @@ from ummanu.infra.github_credential import (
     checkpoint_credential_readiness_for_child,
     project_remote_execution,
 )
-from ummanu.runtime.paths import configured_product_root
+from ummanu.runtime.paths import configured_product_root, env_value
 from ummanu.runtime.role_env import RUNTIME_ENV_FILE_ENVS
 from ummanu.secret_store import (
     SecretStoreError,

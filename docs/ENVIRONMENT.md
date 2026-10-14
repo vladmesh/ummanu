@@ -5,7 +5,7 @@ overrides using only the listed TA names remain supported. No runtime.env rewrit
 secret migration or process-global normalization is required. New managed service
 output, launcher assignments and CI fixture pins use canonical names.
 
-`infra.env.env_value` owns Python alias lookup. Each row below names a canonical
+`runtime.paths.env_value` owns Python alias lookup. Each row below names a canonical
 suffix: prepend `UMMANU_` for its canonical name and `TA_` for its explicit legacy
 name. For example, `RUNTIME_ENV_FILE` means `UMMANU_RUNTIME_ENV_FILE` and
 `TA_RUNTIME_ENV_FILE`. This inventory covers actual reads and writes, including
@@ -98,8 +98,8 @@ pins win file entries; only that binding seam emits normalized canonical pins.
 Both provider spellings use the same sensitive-name filter and exact-value
 redaction. Worker, reviewer and observer do not gain provider credentials.
 BOARD_ROLE/BOARD_ACTOR, HOME/PATH/CODEX_HOME and third-party provider env/file
-keys retain their separate protocols. Removed SECRETARY_* and TA_SECRETARY_*
-names remain negative fixtures and receive no compatibility fallback.
+keys retain their separate protocols. Removed product-prefix names remain
+negative fixtures and receive no compatibility fallback.
 
 `test_environment_aliases` supplies deterministic unit consumer vectors;
 existing role/launch, packaging, gate and curator suites retain their original

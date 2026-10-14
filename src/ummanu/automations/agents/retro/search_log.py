@@ -18,7 +18,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ummanu.infra.env import env_value
+from ummanu.runtime.paths import env_value
 
 DEFAULT_SEARCH_LOG = Path.home() / "ummanu-data" / "memory" / "search-log.jsonl"
 SEARCH_LOG = Path(env_value("UMMANU_SEARCH_LOG", str(DEFAULT_SEARCH_LOG)))

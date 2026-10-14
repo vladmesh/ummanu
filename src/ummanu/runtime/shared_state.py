@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ummanu.infra.env import env_value
+from ummanu.runtime.paths import env_value
 
 WORKSPACES_ROOT = Path(env_value("UMMANU_WORKSPACES_ROOT", nonempty=True) or Path.home() / "orca" / "workspaces").resolve()
 AGENTS_PROJECT = os.environ.get("UMMANU_ORCA_PROJECT", "ummanu")

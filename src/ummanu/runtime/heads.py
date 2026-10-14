@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]  # no PyYAML stubs in the typecheck extra
 
-from ummanu.infra.env import env_value
+from ummanu.runtime.paths import env_value
 
 from .head.command import (
     HeadCommandError,

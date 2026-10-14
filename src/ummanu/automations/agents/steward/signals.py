@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypedDict
 
-from ummanu.infra.env import env_value
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.state import AgentState
 
 from ...runtime import production_telemetry

@@ -19,9 +19,8 @@ import sqlite3
 from pathlib import Path
 
 from ummanu.config import ConfigError, load_config
-from ummanu.infra.env import env_value
 from ummanu.runtime.codex_home import session_roots
-from ummanu.runtime.paths import default_instance_path, instance_dir
+from ummanu.runtime.paths import default_instance_path, env_value, instance_dir
 from ummanu.sprints import SPRINT_REFERENCE_PREFIX, SprintReader, sprint_client
 
 # Claude project-dir naming: every non-alphanumeric cwd character becomes "-".

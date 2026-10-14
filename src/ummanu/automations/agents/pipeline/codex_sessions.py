@@ -22,8 +22,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from ummanu.infra.env import env_value
 from ummanu.runtime.codex_home import session_roots
+from ummanu.runtime.paths import env_value
 
 
 def sessions_roots() -> list[Path]:

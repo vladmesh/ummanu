@@ -28,9 +28,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ummanu.infra.env import env_value
 from ummanu.runtime.codex_home import installation_codex_home
 from ummanu.runtime.codex_preflight import CodexHomeLoginMissing
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.provider_errors import (
     KIND_AUTH,
     KIND_QUOTA,

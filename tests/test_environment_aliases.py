@@ -13,8 +13,8 @@ from unittest import mock
 from ummanu.automations.agents.pipeline import codex_sessions
 from ummanu.automations.runtime import production_telemetry
 from ummanu.dispatch import pause, tui
-from ummanu.infra.env import env_value, legacy_name
 from ummanu.runtime import codex_preflight, heads, resource_probe, role_env, shared_state
+from ummanu.runtime.paths import env_value, legacy_name
 
 
 def vectors(name, canonical="/fake/canonical", legacy="/fake/legacy"):

@@ -20,7 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
-from ummanu.infra.env import env_value
+from ummanu.runtime.paths import env_value
 
 STATE_ROOT = Path(env_value("UMMANU_STATE", str(Path.home() / "ummanu-data" / "automation-state")))
 

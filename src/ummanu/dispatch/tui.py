@@ -19,13 +19,13 @@ from ummanu.dispatch.worker_lifecycle import (
     ContinuationProviderCondition,
     head_run_binding,
 )
-from ummanu.infra.env import env_value
 from ummanu.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,
 )
 from ummanu.runtime.codex_home import session_roots
 from ummanu.runtime.head import HeadRun, HeadRunError
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.tui_delivery import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,

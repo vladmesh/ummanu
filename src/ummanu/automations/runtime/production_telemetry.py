@@ -34,8 +34,7 @@ from ummanu.config import (
     validate,
 )
 from ummanu.head_health import resource_health_path as _resource_health_path
-from ummanu.infra.env import env_value
-from ummanu.runtime.paths import default_instance_path, instance_file as _config_file
+from ummanu.runtime.paths import default_instance_path, env_value, instance_file as _config_file
 
 DEFAULT_INSTANCE = default_instance_path()
 

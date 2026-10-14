@@ -17,9 +17,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from ummanu.board.local_run import parse_local_run_policy
-from ummanu.infra.env import env_value, legacy_name
 from ummanu.runtime import docker_guard, test_guard
-from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path
+from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path, env_value, legacy_name
 from ummanu.runtime_env import RuntimeEnvError, parse_runtime_env
 
 # The one module every launcher runs as `python3 -P -m <this> exec --role ...`.

@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ummanu.infra.env import env_value
+from ummanu.runtime.paths import env_value
 
 from .head_run_binding import head_run_binding
 

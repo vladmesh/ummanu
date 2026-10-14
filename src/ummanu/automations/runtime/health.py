@@ -32,8 +32,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from ummanu.infra.env import env_value
-from ummanu.runtime.paths import component_enabled, configured_product_root
+from ummanu.runtime.paths import component_enabled, configured_product_root, env_value
 from ummanu.runtime.state import AgentState
 
 from . import production_telemetry

@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 from ummanu._fsutil import write_json
-from ummanu.infra.env import env_value
+from ummanu.runtime.paths import env_value
 
 
 class PauseMode(StrEnum):

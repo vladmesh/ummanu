@@ -1,6 +1,6 @@
 """Only the `UMMANU_*` environment configures the product, and the old package is gone (docs/RENAME.md, "Guard").
 
-The retired SECRETARY prefix is ignored, never read as a fallback, and the old package does not
+The retired package prefix is ignored, never read as a fallback, and the old package does not
 import. The old spellings below are negative fixtures, never runtime aliases.
 """
 
