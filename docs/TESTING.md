@@ -713,6 +713,45 @@ base=$(git merge-base main HEAD)
 
 `xargs -r` makes an empty set a no-op instead of letting Ruff default to the whole repository.
 
+## Style of added lines
+
+The CI `lint` job runs `scripts/check_style.py` after Ruff. It judges only the lines the candidate adds
+since its merge base with the PR base, against the rules in
+[packaging/worker-style.md](../packaging/worker-style.md). A line equal to one the same diff deletes is
+moved, not added, so old prose and moved code are never judged.
+
+Red, exit 1 with `file:line`:
+
+- a new test function, or an added module-level line of a test module, that reads product source as
+  text (`inspect.getsource`, `source_trees.parse` or `modules`, `read_text`/`open` of a `.py` path or of
+  `__file__`, a `*.py` glob under a repository root) or reads docs, skills, prompts or Markdown. A
+  repository root is an upper-case name such as `ROOT`, `SRC` or `PACKAGE_ROOT`, `__file__`,
+  `importlib.resources.files(...)` or a relative `Path("docs/...")`; a test's temporary directory is not
+  one. Edits inside an existing test are not judged, and `tests/source_trees.py` is exempt;
+- a card, sprint, issue or PR id or a date in an added docstring or comment, or such an id or date in
+  an added function or class name;
+- an em dash in an added docstring, comment or file name;
+- a new `X as X` re-export in `src/` that no tracked Python file imports through `from module import X`,
+  `module.X` or a `"module.X"` patch target.
+
+An architecture guard that has to read the tree carries `# architecture-guard: <reason>` on the line
+above its `def`, `class` or statement. The marker sits on the guard itself rather than in a file
+allowlist, so every new reader shows up in the diff with its reason for the reviewer to judge (S1), and
+`rg 'architecture-guard:'` lists them all.
+
+Warnings are printed and annotated on the `lint` check without failing it: a prose share of added lines
+(docstring and comment lines, plus code lines with an inline comment, per code line) above 0.25 outside
+tests or 0.15 in tests once at least 20 code lines were added; a new private top-level helper whose
+arguments and body equal an existing one; a new test shaped like an absence check
+(`assertFalse(hasattr(...))`, `find_spec(...)`, `assertNotIn(name, source)`). The reviewer reaches them
+through the `lint` check the gate receipt lists, as annotations and the job summary.
+
+Run it on committed work from the repository root:
+
+```bash
+python3 -m scripts.check_style --base-sha "$(git merge-base origin/main HEAD)"
+```
+
 ## Feature test boundaries
 
 Where a change's tests live. Behaviour contracts are in [Recovery](RECOVERY.md),

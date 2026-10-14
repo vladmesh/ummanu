@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import shlex
 import tempfile
 import unittest
@@ -731,6 +732,26 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertIn("source_event: observer-decision-1", reviewer)
         self.assertIn("BLOCKER-later: deferred; issue: issue:abc123", reviewer)
         self.assertIn("перенести в интеграционный шард", reviewer)
+
+    def test_every_worker_gets_the_style_rules_and_a_code_reviewer_the_style_checklist(self):
+        fixture = PacketFixture()
+        host = self.host(fixture)
+        for project, kind in (("ummanu", "code"), ("codegen-orchestrator", "code"), ("ummanu", "research")):
+            fixture.task.update(project=project, type=kind)
+            with self.subTest(project=project, kind=kind):
+                worker = host._worker_task_doc(
+                    fixture.task, "main", "attempt-1", 3, fixture.decision, record=self.record()
+                )
+                style = worker.split("\n## Code style\n", 1)[1].split("\n## ", 1)[0]
+                self.assertLessEqual(len(style), 2500)
+                self.assertEqual(re.findall(r"^(\d+)\. ", style, re.MULTILINE), [str(n) for n in range(1, 14)])
+                self.assertLess(worker.index("## Code style"), worker.index("## Prior blocker dispositions"))
+                reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
+                code = kind == "code"
+                self.assertEqual(
+                    re.findall(r"^(S\d)\. ", reviewer, re.MULTILINE), [f"S{n}" for n in range(1, 8)] * code
+                )
+                self.assertEqual("`BLOCKER-style-S<n>`" in reviewer, code)
 
     def test_no_candidate_reviewer_keeps_header_and_dispositions(self):
         fixture = PacketFixture()

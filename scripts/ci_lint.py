@@ -14,12 +14,26 @@ def git(root: Path, *arguments: str) -> bytes:
     return subprocess.check_output(["git", "-C", str(root), *arguments], stderr=subprocess.PIPE)
 
 
-def changed_python(root: Path, base: str, head: str) -> list[str]:
+def require_candidate(root: Path, base: str, head: str) -> None:
     for sha in (base, head):
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise ValueError("lint revisions must be full commit SHAs")
     if git(root, "rev-parse", "HEAD").decode().strip() != head:
         raise ValueError("lint checkout does not match the candidate SHA")
+
+
+def candidate_base(root: Path, base: str, candidate: str) -> str:
+    """The given base; for a manual run the candidate's parent, for an initial push the empty tree."""
+    if base and base != "0" * 40:
+        return base
+    parents = git(root, "rev-list", "--parents", "-n", "1", candidate).decode().split()
+    return (
+        parents[1] if len(parents) > 1 else git(root, "hash-object", "-t", "tree", "--stdin").decode().strip()
+    )
+
+
+def changed_python(root: Path, base: str, head: str) -> list[str]:
+    require_candidate(root, base, head)
     paths = git(root, "diff", "--name-only", "-z", "--diff-filter=ACMRT", base, head, "--", "*.py")
     return sorted(path.decode() for path in paths.split(b"\0") if path)
 
@@ -31,16 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
     try:
-        base = args.base_sha
-        if not base or base == "0" * 40:
-            # Manual runs compare the candidate to its parent. An initial push has no parent.
-            parents = git(root, "rev-list", "--parents", "-n", "1", args.candidate_sha).decode().split()
-            base = (
-                parents[1]
-                if len(parents) > 1
-                else git(root, "hash-object", "-t", "tree", "--stdin").decode().strip()
-            )
-        paths = changed_python(root, base, args.candidate_sha)
+        paths = changed_python(
+            root, candidate_base(root, args.base_sha, args.candidate_sha), args.candidate_sha
+        )
         if not paths:
             print("No changed Python files; Ruff has no applicable paths.")
             return 0

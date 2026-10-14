@@ -163,6 +163,9 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -172,11 +175,12 @@ jobs:
         with:
           extras: dev
       - name: Check changed Python files
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: >-
           python3 scripts/ci_lint.py --base-sha "$BASE_SHA" --candidate-sha "$CANDIDATE_SHA"
+      - name: Check the style of added lines
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 -m scripts.check_style --base-sha "$BASE_SHA" --candidate-sha "$CANDIDATE_SHA"
 
   test:
     name: test
