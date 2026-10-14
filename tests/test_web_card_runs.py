@@ -252,6 +252,32 @@ class CardRunRenderTests(unittest.TestCase):
             self.ops.card_runs("ummanu-1")
         self.assertEqual(refused.exception.code, "backend_unavailable")
 
+    def test_unreadable_target_record_names_its_path_and_preserves_the_rest_of_the_page(self):
+        self.legacy(record("pr-broken"), record("pr-foreign", "foreign-card"))
+        self.ops.prepare_card_runs()
+        self.store._run_path("pr-broken").write_text("{not json", encoding="utf-8")
+        self.store._run_path("pr-foreign").write_text("{also not json", encoding="utf-8")
+        before = {p: p.read_bytes() for p in self.store.root.rglob("*") if p.is_file()}
+        for _ in range(2):
+            with counted(self.data) as counts:
+                response = self.guarded_render("ummanu-1")
+            self.assertEqual(response.status, 200)
+            self.assertIn(b"The target card", response.body)
+            self.assertIn(b"could not find out this card's product runs:", response.body)
+            self.assertIn(b"pr-broken.json", response.body)
+            self.assertNotIn(b"pr-foreign.json", response.body)
+            self.assertEqual(counts["canonical"], ["pr-broken.json"])
+            self.assertEqual(len(counts["lookup"]), 3)
+            self.assertEqual(counts["mutations"], [])
+        with counted(self.data) as counts:
+            response = self.guarded_render("no-target")
+        self.assertEqual(response.status, 200)
+        self.assertNotIn(b"could not find out this card's product runs:", response.body)
+        self.assertEqual(counts["canonical"], [])
+        self.assertEqual(len(counts["lookup"]), 2)
+        self.assertEqual(counts["mutations"], [])
+        self.assertEqual({p: p.read_bytes() for p in before}, before)
+
     def test_web_startup_prepares_history_before_serve_and_refuses_failed_bootstrap(self):
         self.legacy(record())
         args = Namespace(
