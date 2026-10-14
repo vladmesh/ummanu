@@ -1159,19 +1159,29 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         with tick_stage("release_landed"):
             return pr_merge_commit(self._run, branch, Path(record.workspace))
 
-    def _require_pr_base(self, record: DispatcherRecord, branch: str, base: str) -> None:
-        """Refuse the merge unless the open pull request for `branch` targets `base`."""
+    def _prepare_pr_merge(self, record: DispatcherRecord, branch: str, base: str) -> None:
+        """Refuse the merge unless the open pull request for `branch` targets `base`.
+
+        A draft pull request is marked ready: the pipeline owns it, and GitHub refuses to merge a draft.
+        """
+        workspace = Path(record.workspace)
         completed = self._run(
-            ["gh", "pr", "view", branch, "--json", "baseRefName", "-q", ".baseRefName"],
-            "merge pr base",
-            cwd=Path(record.workspace),
+            ["gh", "pr", "view", branch, "--json", "baseRefName,isDraft"], "merge pr base", cwd=workspace
         )
-        observed = (completed.stdout or "").strip()
+        try:
+            view = json.loads(completed.stdout or "")
+            observed, draft = view["baseRefName"], view["isDraft"]
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HostError(
+                f"pull request for {branch!r} is unreadable ({completed.stdout!r}); nothing was merged"
+            ) from exc
         if observed != base:
             raise HostError(
                 f"pull request for {branch!r} targets {observed or '(unreadable)'!r}, not the "
                 f"integration base {base!r}; nothing was merged"
             )
+        if draft:
+            self._run(["gh", "pr", "ready", branch], "merge pr ready", cwd=workspace)
 
     def _merge_github_pr(
         self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str
@@ -1182,7 +1192,7 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         Verify PR base before merge; local refresh is best-effort except production activation refusal.
         """
         with tick_stage("release_merge"):
-            self._require_pr_base(record, branch, base)
+            self._prepare_pr_merge(record, branch, base)
             self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         default_branch = self.catalog.project_default_branch(task["project"])

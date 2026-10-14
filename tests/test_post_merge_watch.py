@@ -723,8 +723,8 @@ class _MergeHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
-        if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
-            return _completed("main\n")
+        if args[:3] == ["gh", "pr", "view"] and "baseRefName,isDraft" in args:
+            return _completed(json.dumps({"baseRefName": "main", "isDraft": False}))
         if args[:3] == ["gh", "pr", "view"] and "mergeCommit" in args:
             return _completed(SHA + "\n")
         if args[-2:] == ["rev-parse", BRANCH]:
