@@ -590,6 +590,8 @@ class PoTurnFailedTests(HandedOverFixture):
 
         self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
         self.assertEqual(self.settled(session, 3).state, "failed")
+        # The durable row precedes on_failed; join the existing waiter before reading its notice.
+        self.services[-1].runner.wait(session, 3, timeout=2)
 
         outcome = self.tick(runtime)
         self.assertEqual(outcome["action"], "po-card-owner-answer-turn-ended")
@@ -610,6 +612,7 @@ class PoTurnFailedTests(HandedOverFixture):
         session = created["session_id"]
         service.submit(session_id=session, text="FAIL at once", request_id="s-1")
         self.assertEqual(self.settled(session, 1).state, "failed")
+        service.runner.wait(session, 1, timeout=2)
         service.submit(session_id=session, text="GATE hold", request_id="s-2")
         self.reached_gate(session, 2)
         service.stop_turn(session_id=session, seq=2)
