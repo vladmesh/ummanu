@@ -63,6 +63,8 @@ on:
       - src/ummanu/task_commands.py
       - src/ummanu/upgrade.py
       - src/ummanu/web/commands.py
+      - src/ummanu/web/page*.py
+      - src/ummanu/web/static/**
       - src/ummanu/webfront/commands.py
       - src/ummanu/webproto/commands.py
       - src/ummanu/runtime/cli_composition.py

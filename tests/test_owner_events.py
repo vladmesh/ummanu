@@ -42,7 +42,7 @@ from ummanu.board.owner_events import (
 from ummanu.board.owner_handover import mark_values, waiting_owner
 from ummanu.sprints import BUDGET_EVENT_TYPES
 from ummanu.tasks import TaskWriter
-from ummanu.web import pages
+from ummanu.web import page_assets, pages
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import OwnerConflict, OwnerEventMissing, RuntimeUnavailable
 from ummanu.webproto.owner_events import OwnerEventLayer
@@ -817,8 +817,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('<span class="bell-count">5</span>', self.get("/doctor"))
 
     def test_the_list_page_works_at_phone_width(self) -> None:
-        self.assertIn("ol.owner-events li { display: flex; flex-wrap: wrap;", pages.STYLE)
-        self.assertIn("overflow-wrap: anywhere", pages.STYLE)
+        self.assertIn("ol.owner-events li { display: flex; flex-wrap: wrap;", page_assets.STYLE)
+        self.assertIn("overflow-wrap: anywhere", page_assets.STYLE)
 
 
 # --- the carried fixes ------------------------------------------------------------------------

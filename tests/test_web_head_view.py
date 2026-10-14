@@ -257,12 +257,13 @@ class HostileJournalValuesTests(HeadViewFixture):
         self.assertEqual(head_reads.journal_record(["not", "a", "record"]), ({}, 0))
 
     def test_a_section_that_cannot_be_drawn_says_so_and_the_page_is_served(self) -> None:
-        from ummanu.web import pages
+        from ummanu.web import page_card
 
         self.run_dir(WORKER, tail=b"x\n")
         for section in ("_head_header", "_head_journal"):
-            with self.subTest(section=section), mock.patch.object(pages, section, side_effect=RuntimeError("boom")):
+            with self.subTest(section=section), mock.patch.object(page_card, section, side_effect=RuntimeError("boom")) as failed:
                 status, page = self.get(f"/tasks/{REF}/heads/{WORKER}")
+                failed.assert_called_once()
                 self.assertEqual(status, 200)
                 self.assertIn("this section could not be shown (RuntimeError)", page)
 

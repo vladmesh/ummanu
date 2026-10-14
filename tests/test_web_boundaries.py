@@ -12,7 +12,7 @@ from pathlib import Path
 from threading import Thread
 from unittest import mock
 
-from ummanu.web import pages
+from ummanu.web import page_shell
 from ummanu.web.app import MAX_BODY_BYTES, Response
 from ummanu.web.server import build_server
 from ummanu.webproto import command_reads, pause_reads
@@ -192,7 +192,7 @@ class SourceBoundaryTests(unittest.TestCase):
         self.assertFalse(layer._production(self.data, now=self.clock).answered)
 
     def test_the_page_shell_loads_no_external_stylesheet(self) -> None:
-        markup = pages._page("Test", "<p>Content</p>")
+        markup = page_shell._page("Test", "<p>Content</p>")
         self.assertNotIn('rel="stylesheet"', markup)
         self.assertNotIn('rel="preconnect"', markup)
         self.assertIn("system-ui", markup)

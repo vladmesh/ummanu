@@ -23,7 +23,7 @@ from tests.po_fake_store import FakePoStore
 from tests.web_fakes import Recording
 from ummanu.board.e2e_record import e2e_view
 from ummanu.po import token as po_token
-from ummanu.web import pages
+from ummanu.web import page_assets, page_po, pages
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import RuntimeUnavailable
 from ummanu.webproto.po_auth import PoTokenLayer
@@ -446,7 +446,7 @@ class PoSessionPageTests(PageFixture):
         polled = json.loads(self.po_get(f"/po/api/sessions/{SESSION}", reads, query="cards=0").body)
         self.assertIsNone(polled["delegated"])
         self.assertEqual(len(reads.calls), 1, "the poll reads no board")
-        self.assertIn("?cards=0", pages._PO_SESSION_SCRIPT)
+        self.assertIn("?cards=0", page_assets._PO_SESSION_SCRIPT)
 
     def test_a_session_that_delegated_nothing_says_so(self) -> None:
         reads = Recording(po_delegated={**self.DELEGATED, "items": []})
@@ -493,12 +493,12 @@ class PoSessionPageTests(PageFixture):
         html = self.po_get(f"/po/sessions/{SESSION}", reads).body.decode()
         start = html.index('<details class="panel po-delegated"')
         end = html.index("</details>", start)
-        self.assertNotIn("po-delegated", pages.PO_SESSION_BLOCKS)
+        self.assertNotIn("po-delegated", page_po.PO_SESSION_BLOCKS)
         # #po-head is the one swapped block above the panel, and it closes before the rename form;
         # every other swapped block opens after the panel has closed, so none of them contains it.
         self.assertLess(html.index('id="po-head"'), html.index('id="po-title"'))
         self.assertLess(html.index('id="po-title"'), start)
-        for block in pages.PO_SESSION_BLOCKS:
+        for block in page_po.PO_SESSION_BLOCKS:
             if block != "po-head":
                 self.assertLess(end, html.index(f'id="{block}"'), f"#{block} opens after the panel")
 

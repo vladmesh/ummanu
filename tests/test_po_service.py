@@ -404,7 +404,7 @@ class CommentDeliveryTests(ServiceFixture):
     def test_refusal_and_rendering_do_not_consume_comments_and_pending_acceptance_does(self) -> None:
         from tests.po_card_fakes import card
         from ummanu.dispatch.po_cards import _po_record, render_po_card_input
-        from ummanu.web import pages
+        from ummanu.web import page_po
 
         self.sprints = FakeSprints({"sprint:50": None})
         service = self.service(run=False, sprints=self.sprints)
@@ -435,7 +435,7 @@ class CommentDeliveryTests(ServiceFixture):
         self.assertEqual(pending[0]["metadata"], first.metadata)
         self.assertIn("comment-049", pending[0]["text"])
         self.assertIn('<details class="po-service-input">',
-                      pages._po_queued_entry(pending[0]))
+                      page_po._po_queued_entry(pending[0]))
         replay = service.submit(session_id=session, text="First", request_id="accepted", source="dispatcher",
                                 card=self.facts(52))
         self.assertTrue(replay["repeated"])
@@ -2033,7 +2033,7 @@ class SprintSessionTests(ServiceFixture):
 
     def test_native_durable_seed_has_decisions_summary_bounded_why_answer_and_notes(self):
         from ummanu.po.context_budget import conversation_bytes
-        from ummanu.web import pages
+        from ummanu.web import page_po
         service, sprints, old = self.budget_resolver(threshold=65536)
         quotation = "No further runs.\nВладелец сказал нет."
         decisions = [{"id": "grant", "scope": "sprint", "kind": "e2e_grant", "value": 3, "quotation": "Three runs."},
@@ -2060,14 +2060,14 @@ class SprintSessionTests(ServiceFixture):
                          "Read the actual NOTES.md", self.DOC, "[Excerpt;", f"/po/sessions/{old}"):
             self.assertIn(expected, seed.text)
         self.assertLess(len(seed.text.encode("utf-8")), 16384)
-        html = pages._po_input_text({"text": seed.text, "metadata": seed.metadata})
+        html = page_po._po_input_text({"text": seed.text, "metadata": seed.metadata})
         self.assertIn(f'href="/po/sessions/{old}"', html)
         self.assertIn(f'href="/po/sessions/{new}"', html)
         self.assertIn("predecessor history", html)
         self.assertIn('<details class="po-service-input">', html)
         self.assertNotIn("<details open", html)
         from datetime import UTC, datetime
-        row = pages._po_session_row({"session_id": new, "title": "sprint:1", "first_message": seed.text,
+        row = page_po._po_session_row({"session_id": new, "title": "sprint:1", "first_message": seed.text,
                                      "first_message_metadata": seed.metadata}, closed=False, now=datetime.now(UTC))
         self.assertIn("Context rollover", row)
         self.assertIn(f'href="/po/sessions/{old}"', row)

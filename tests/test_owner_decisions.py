@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import copy
+import json
 import tempfile
-from pathlib import Path
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -141,7 +141,7 @@ class DecisionTests(unittest.TestCase):
         self.assertIn("Do not ask the owner again", context)
 
     def test_native_page_exposes_ids_quotes_and_attribution_with_html_escaping(self):
-        from ummanu.web.pages import _sprint_tabs
+        from ummanu.web.page_sprint import _sprint_tabs
         from ummanu.webproto.sprint_reads import _sprint_value
         entry = recorded(dict(answer(), quotation="<script>quoted</script>"))
         value = _sprint_value({"owner_decisions": [entry]})

@@ -23,8 +23,7 @@ from urllib.parse import urlencode
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
 from tests.sql_backend_fixtures import PostgresBoard
 from tests.web_fakes import Recording
-from ummanu.po import store as po_store
-from ummanu.po import token as po_token
+from ummanu.po import store as po_store, token as po_token
 from ummanu.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS
 from ummanu.po.queue import PoQueue
 from ummanu.po.runner import PoRunner
@@ -293,7 +292,8 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual((listed["effort"], listed["resolved_model"]), ("high", "claude-sonnet-5"))
 
     def test_the_new_session_form_preselects_the_first_model_of_the_chosen_cli(self) -> None:
-        from ummanu.web.pages import _PO_FORM_SCRIPT, _po_new_session_form
+        from ummanu.web.page_assets import _PO_FORM_SCRIPT
+        from ummanu.web.page_po import _po_new_session_form
 
         models = {cli: list(values) for cli, values in DEFAULT_MODELS.items()}
         efforts = {cli: list(values) for cli, values in DEFAULT_EFFORTS.items()}
@@ -387,7 +387,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn("this installation offers no model for a PO session", closed)
 
     def test_enter_sends_the_message_once_and_shift_enter_keeps_a_newline(self) -> None:
-        from ummanu.web.pages import _PO_SESSION_SCRIPT
+        from ummanu.web.page_assets import _PO_SESSION_SCRIPT
 
         page = self.page(self.create())
         self.assertIn("Enter to send, Shift+Enter for a new line", page)
@@ -996,7 +996,7 @@ class PoWebOperationTests(unittest.TestCase):
 
     def test_the_send_button_reaches_its_form_from_outside_it_because_a_form_holds_no_form(self) -> None:
         """`close` and `new session` are forms of their own, so `send` is bound by `form=` instead."""
-        from ummanu.web.pages import _PO_SESSION_SCRIPT
+        from ummanu.web.page_assets import _PO_SESSION_SCRIPT
 
         page = self.page(self.create())
         send = page[page.index('<form class="sprint" id="po-send"') : page.index("</form>")]
