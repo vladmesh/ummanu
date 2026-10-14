@@ -145,10 +145,11 @@ class JournalRetentionTests(unittest.TestCase):
         self.assertEqual(result.of_kind(j.SCOPE_BOUND), (binding,))
 
     def test_empty_and_large_legacy_input_enforce_cap_without_copying_whole_input(self):
-        self.write(b"")
-        with j.JournalWriter(self.path, "run") as writer:
-            self.assertEqual(writer.seq, 0)
-            writer.append(j.RUN_STARTED, command="c" * 3000)
+        for empty in (b"", b"\n\n"):
+            self.write(empty)
+            with j.JournalWriter(self.path, "run") as writer:
+                self.assertEqual(writer.seq, 0)
+                writer.append(j.RUN_STARTED, command="c" * 3000)
         legacy = encoded(1, j.RUN_STARTED, command="legacy-secret" * 200)
         legacy += b"".join(encoded(seq, padding="x" * 2000) for seq in range(2, 2001))
         self.write(legacy)

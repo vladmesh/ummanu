@@ -297,11 +297,15 @@ def _retained(descriptor: int, run_id: str) -> tuple[bytes, int]:
         while line := stream.readline(JOURNAL_RECORD_BYTES + 1):
             if len(line) > JOURNAL_RECORD_BYTES:
                 raise JournalError("journal_record_too_large: existing record exceeds journal limit")
+            if not line.endswith(b"\n"):
+                raise JournalError("existing journal has a torn tail")
+            if not line.strip():
+                continue  # Released schema-1 readers allow complete blank separators.
             try:
                 raw = json.loads(line, object_pairs_hook=_unique)
             except (ValueError, UnicodeDecodeError) as exc:
                 raise JournalError("existing journal is damaged") from exc
-            if (not line.endswith(b"\n") or not isinstance(raw, dict)
+            if (not isinstance(raw, dict)
                     or type(raw.get("seq")) is not int
                     or type(raw.get("schema_version")) is not int or _usable(raw) is None
                     or raw["seq"] <= previous
