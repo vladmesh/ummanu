@@ -286,7 +286,12 @@ def runtime_env(
 
     env: dict[str, str] = {}
     for key, value in base.items():
-        if key in source and key not in allowed and key not in UNIT_BOUND_ENV:
+        if (
+            key in source
+            and key not in allowed
+            and key not in RUNTIME_ENV_FILE_ENVS
+            and key not in RUNTIME_PYTHONPATH_ENVS
+        ):
             continue
         if _is_sensitive_name(key) and key not in allowed:
             continue

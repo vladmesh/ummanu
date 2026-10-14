@@ -210,6 +210,14 @@ class EnvironmentAliasTests(unittest.TestCase):
                 self.assertFalse(any(value.startswith("fake-") for value in output.values()))
                 for name in ("UMMANU_OPENROUTER_KEY", "TA_OPENROUTER_KEY", "UMMANU_OPENROUTER_ENV_KEY", "TA_OPENROUTER_ENV_KEY"):
                     self.assertTrue(role_env.is_sensitive_env_name(name))
+        with mock.patch.object(role_env, "load_env_file", return_value=injected), mock.patch.object(role_env, "_docker_bindings", return_value={}):
+            output = role_env.runtime_env("worker", base_env={
+                "UMMANU_OBSERVER_SPRINT": "fake-parent-binding",
+                "UMMANU_RUNTIME_ENV_FILE": "/fake/canonical/runtime.env",
+                "TA_RUNTIME_ENV_FILE": "/fake/legacy/runtime.env",
+            })
+            self.assertNotIn("UMMANU_OBSERVER_SPRINT", output)
+            self.assertEqual(output["UMMANU_RUNTIME_ENV_FILE"], "/fake/canonical/runtime.env")
 
     def test_agent_limits_and_identity_use_aliases_at_call_time(self):
         from ummanu.automations.agents.curator import discover, harvest
