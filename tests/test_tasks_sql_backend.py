@@ -678,7 +678,7 @@ class SqlTaskWriterTests(SqlBoardCase):
         card = self.reader.show(result["task"]["ref"])
         self.assertEqual(card["project"], "ummanu")
         self.assertEqual(card["type"], "code")
-        self.assertEqual(card["metadata"]["record_type"], "task")
+        self.assertEqual(card["record_type"], "task")
 
     def test_driver_failure_after_create_metadata_rolls_back_card_request_and_event(self) -> None:
         original = psycopg.Cursor.execute
