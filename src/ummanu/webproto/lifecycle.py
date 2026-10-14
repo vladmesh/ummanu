@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import time
 import uuid
 from pathlib import Path
@@ -27,6 +26,7 @@ from ummanu.runtime.head.run import HeadRun, HeadRunError, StopInitiator
 from ummanu.runtime.head.runtime import HEAD_BUSY, HEAD_OK
 from ummanu.runtime.head.spec import HeadSpec
 from ummanu.runtime.head.task_ref import TaskRef
+from ummanu.runtime.paths import env_value
 from ummanu.webproto import run_state as run_state_reads
 from ummanu.webproto.errors import (
     OwnerConflict,
@@ -49,7 +49,7 @@ from ummanu.webproto.runs import (
 INITIATOR = "ummanu.webproto"
 
 #: Where a Claude head's first-run answers live; same file and env override as the pipeline's pane driver.
-CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
+CLAUDE_JSON = Path(env_value("UMMANU_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 
 #: The composer's "send" key, delivered as its own payload after the line. A raw-mode TUI reads a bare
 #: line feed as a newline inside the message, and reads text plus carriage return in one burst as a

@@ -15,7 +15,6 @@ EnvironmentFile=-{{UMMANU_INSTANCE_PATH}}/runtime.env
 Environment=UMMANU_INSTANCE={{UMMANU_INSTANCE_PATH}}
 Environment=UMMANU_REPO={{UMMANU_PRODUCT_ROOT}}
 Environment=UMMANU_RUNTIME_ENV_FILE={{UMMANU_INSTANCE_PATH}}/runtime.env
-Environment=TA_RUNTIME_ENV_FILE={{UMMANU_INSTANCE_PATH}}/runtime.env
 Environment=UMMANU_DISPATCHER_OWNER=ummanu-production
 Environment=PATH={{UMMANU_RUNTIME_HOME}}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart={{UMMANU_PRODUCT_ROOT}}/.venv/bin/python3 -I {{UMMANU_PRODUCT_ROOT}}/src/ummanu/dispatch/runtime_preflight.py --product-root {{UMMANU_PRODUCT_ROOT}} --interpreter {{UMMANU_PRODUCT_ROOT}}/.venv/bin/python3 --data-dir {{UMMANU_DATA_DIR}} -- {{UMMANU_PRODUCT_ROOT}}/.venv/bin/ummanu dispatcher production-tick --instance {{UMMANU_INSTANCE_PATH}}

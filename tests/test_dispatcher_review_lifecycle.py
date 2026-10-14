@@ -1699,7 +1699,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.runtime.pause_pipeline(mode="freeze", actor="ummanu-backup", reason="backup")
         self.age_the_pause(3600)
 
-        with mock.patch.dict(os.environ, {"TA_HARD_PAUSE_AUTO_RESUME_TTL_S": "0"}):
+        with mock.patch.dict(os.environ, {"UMMANU_HARD_PAUSE_AUTO_RESUME_TTL_S": "0"}):
             self.assertEqual(self.runtime.production_tick()["status"], "skipped")
 
         self.assertEqual(self.runtime.production_tick()["auto_resume"]["resumed"], True)
@@ -1759,7 +1759,7 @@ class ProductionPauseTests(unittest.TestCase):
     def test_the_mirror_lands_where_the_background_roles_look(self) -> None:
         """resolve_pipeline_state_dir's own order: a mirror written elsewhere sheds nothing."""
         state_dir = self.data_dir / "ta-state"
-        with mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(state_dir)}):
+        with mock.patch.dict(os.environ, {"UMMANU_PIPELINE_STATE_DIR": str(state_dir)}):
             os.environ.pop("UMMANU_LEGACY_PAUSE_FILE", None)
             self.pause("drain")
 

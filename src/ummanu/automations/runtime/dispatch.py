@@ -44,12 +44,13 @@ from ummanu.runtime.head import (
 from ummanu.runtime.head.identity import head_process_status
 from ummanu.runtime.head_runtime_backends import build_head_runtime
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.state import AgentState
 
 from .production_telemetry import data_dir as _installation_data_dir
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
+CLAUDE_JSON = Path(env_value("UMMANU_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 
 #: The `runs.jsonl` action of a tick that failed closed because it had no supervised head to raise.
 NO_SUPERVISED_HEAD = "no-supervised-head"
@@ -89,7 +90,7 @@ class NoSupervisedHead(Exception):
 
 
 def _workspace(agent: str) -> str:
-    return os.environ.get("TA_WORKSPACE") or str(Path.home() / "orca/workspaces/ummanu" / agent)
+    return env_value("UMMANU_WORKSPACE", nonempty=True) or str(Path.home() / "orca/workspaces/ummanu" / agent)
 
 
 def _load_spec(agent: str) -> dict:
@@ -360,7 +361,7 @@ def _memory_bound_launch(agent: str, run: HeadRun, command: str) -> str:
         )
     )
     # `exec env`, not bare `exec`: the rendered head command leads with installation assignments
-    # (`TA_RUNTIME_ENV_FILE=… UMMANU_INSTANCE=… python3 …`) and POSIX `exec` takes them as the program
+    # (`UMMANU_RUNTIME_ENV_FILE=… UMMANU_INSTANCE=… python3 …`) and POSIX `exec` takes them as the program
     # name, so the head exits 127 before its prompt is delivered.
     launch = f'grant="$({grant})"; export "$grant"; exec env {command}'
     return f"/bin/sh -c {shlex.quote(launch)}"

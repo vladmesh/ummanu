@@ -214,7 +214,7 @@ def plan_rebind(st, *, home: Path, projects: Path, current: dict[str, str]) -> R
             raise RebindRefused(
                 "identity-not-current",
                 f"the rebound workspace {known[workspace]} is not this run's identity {current}; "
-                "run from the role workspace or set TA_CURATOR_WORKSPACE",
+                "run from the role workspace or set UMMANU_CURATOR_WORKSPACE",
             )
         plan.identity = "rebound"
         plan.old_workspace, plan.new_workspace = workspace, known[workspace]

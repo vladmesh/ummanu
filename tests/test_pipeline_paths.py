@@ -54,7 +54,7 @@ class LauncherCheckoutTests(unittest.TestCase):
     """Which checkout a launched process imports the product from.
 
     The launchers answer the same question and have to answer it the same way: the explicit
-    ``TA_RUNTIME_PYTHONPATH``, then the checkout the installation is configured with, then a home
+    ``UMMANU_RUNTIME_PYTHONPATH``, then the checkout the installation is configured with, then a home
     default. A launcher that skipped the configured name would start an installation materialized
     from an alternate checkout out of ``~/ummanu`` — a version nobody upgraded, or nothing.
     """
@@ -85,7 +85,7 @@ class LauncherCheckoutTests(unittest.TestCase):
     def test_every_launcher_prefers_the_explicit_runtime_path(self):
         env = {
             "HOME": "/home/nobody",
-            "TA_RUNTIME_PYTHONPATH": "/srv/named",
+            "UMMANU_RUNTIME_PYTHONPATH": "/srv/named",
             "UMMANU_REPO": "/srv/configured",
         }
         for script in self.LAUNCHERS:
@@ -157,7 +157,7 @@ class OpenRouterKeyTests(unittest.TestCase):
                 mock.patch.object(health, "_OPENROUTER_ENV_FILE", env),
                 mock.patch.dict(os.environ, {}, clear=False),
             ):
-                os.environ.pop("TA_OPENROUTER_KEY", None)
+                os.environ.pop("UMMANU_OPENROUTER_KEY", None)
                 self.assertEqual(health._read_openrouter_key(), "sk-or-hermes")
 
     def test_reads_legacy_key_name(self):
@@ -168,21 +168,21 @@ class OpenRouterKeyTests(unittest.TestCase):
                 mock.patch.object(health, "_OPENROUTER_ENV_FILE", env),
                 mock.patch.dict(os.environ, {}, clear=False),
             ):
-                os.environ.pop("TA_OPENROUTER_KEY", None)
+                os.environ.pop("UMMANU_OPENROUTER_KEY", None)
                 self.assertEqual(health._read_openrouter_key(), "sk-or-legacy")
 
     def test_env_key_override_wins(self):
-        override = os.environ.get("TA_OPENROUTER_KEY")
-        with mock.patch.dict(os.environ, {"TA_OPENROUTER_KEY": "sk-or-override"}):
+        override = os.environ.get("UMMANU_OPENROUTER_KEY")
+        with mock.patch.dict(os.environ, {"UMMANU_OPENROUTER_KEY": "sk-or-override"}):
             self.assertEqual(health._read_openrouter_key(), "sk-or-override")
-        self.assertEqual(os.environ.get("TA_OPENROUTER_KEY"), override)
+        self.assertEqual(os.environ.get("UMMANU_OPENROUTER_KEY"), override)
 
     def test_missing_file_yields_no_key(self):
         with (
             mock.patch.object(health, "_OPENROUTER_ENV_FILE", Path("/no/such/hermes/.env")),
             mock.patch.dict(os.environ, {}, clear=False),
         ):
-            os.environ.pop("TA_OPENROUTER_KEY", None)
+            os.environ.pop("UMMANU_OPENROUTER_KEY", None)
             self.assertIsNone(health._read_openrouter_key())
 
 
@@ -193,8 +193,8 @@ class LegacyMirrorPathTests(unittest.TestCase):
     ENV = (
         "UMMANU_LEGACY_PAUSE_FILE",
         "UMMANU_LEGACY_PIPELINE_STATE_DIR",
-        "TA_PIPELINE_STATE_DIR",
-        "TA_STATE",
+        "UMMANU_PIPELINE_STATE_DIR",
+        "UMMANU_STATE",
     )
 
     def test_legacy_mirror_path_is_not_the_removed_checkout(self):
@@ -208,7 +208,7 @@ class LegacyMirrorPathTests(unittest.TestCase):
     def test_legacy_mirror_path_points_at_ummanu(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root)}, clear=False):
+            with mock.patch.dict(os.environ, {"UMMANU_WORKSPACES_ROOT": str(root)}, clear=False):
                 for name in self.ENV:
                     os.environ.pop(name, None)
                 path = dispatcher_pause.legacy_mirror_path()

@@ -1,6 +1,6 @@
 """Only the `UMMANU_*` environment configures the product, and the old package is gone (docs/RENAME.md, "Guard").
 
-There is no alias: the old prefix is ignored, never read as a fallback, and the old package does not
+The retired package prefix is ignored, never read as a fallback, and the old package does not
 import. The old spellings below are negative fixtures, never runtime aliases.
 """
 
@@ -36,7 +36,7 @@ def _clean_environ() -> dict[str, str]:
         key: value
         for key, value in os.environ.items()
         if not key.startswith(("SECRETARY_", "UMMANU_", "TA_SECRETARY_"))
-        and key != role_env.RUNTIME_ENV_FILE_ENV
+        and key not in role_env.RUNTIME_ENV_FILE_ENVS
     }
 
 

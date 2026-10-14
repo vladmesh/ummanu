@@ -1126,7 +1126,7 @@ class MaterializeCase(EnvStoreCase):
         ambient = Path(self.tmpdir.name) / "live" / "runtime.env"
         entry = {"materialize": {"target": "runtime-env"}}
         with (
-            mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": str(ambient)}, clear=True),
+            mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(ambient)}, clear=True),
             installation_credentials._runtime_environment({"UMMANU_RUNTIME_ENV_FILE": str(pinned)}),
         ):
             self.assertEqual(secret_store.materialize_path(self.instance_dir, entry), pinned)

@@ -99,7 +99,7 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.product = _product_with_a_role_worktree(self.root)
         self.worktree = self.root / "workspaces" / "ummanu" / "curator"
-        patcher = mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(self.root / "workspaces")})
+        patcher = mock.patch.dict(os.environ, {"UMMANU_WORKSPACES_ROOT": str(self.root / "workspaces")})
         patcher.start()
         self.addCleanup(patcher.stop)
 

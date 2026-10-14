@@ -84,7 +84,7 @@ from ummanu.po import client as po_client, token as po_token, workspace as po_wo
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import interactive_workspace
 from ummanu.runtime.cli_composition import add_command_parser
-from ummanu.runtime.paths import add_instance_argument, component_enabled, configured_product_root
+from ummanu.runtime.paths import add_instance_argument, component_enabled, configured_product_root, env_value
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.web.health import WebProbeError, probe_web, target_from_unit
 from ummanu.web.server import LoopbackOnly
@@ -1115,7 +1115,7 @@ def workspaces_root(home: Path | str | None = None) -> Path:
     as root or against another account's installation. Materializing root's workspace paths for
     units the owner then runs is how a workspace ends up somewhere nothing materialized.
     """
-    configured = os.environ.get("TA_WORKSPACES_ROOT")
+    configured = env_value("UMMANU_WORKSPACES_ROOT", nonempty=True)
     if configured:
         return Path(configured)
     return Path(home if home is not None else Path.home()) / "orca" / "workspaces"

@@ -11567,7 +11567,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             catalog._heads = {  # type: ignore[attr-defined]
                 "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
             }
-            with mock.patch.dict(os.environ, {"TA_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}):
                 launch = catalog.head_launch(  # type: ignore[attr-defined]
                     "claude-opus",
                     "TASK.md",
@@ -11647,7 +11647,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             catalog._heads = {  # type: ignore[attr-defined]
                 "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
             }
-            with mock.patch.dict(os.environ, {"TA_CLAUDE_JSON": str(config)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_JSON": str(config)}):
                 command = catalog.head_launch(
                     "claude-opus",
                     "TASK.md",

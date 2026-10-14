@@ -11,7 +11,7 @@ EnvironmentFile=-{{UMMANU_INSTANCE_PATH}}/runtime.env
 Environment=HOME={{UMMANU_RUNTIME_HOME}}
 Environment=UMMANU_INSTANCE={{UMMANU_INSTANCE_PATH}}
 Environment=UMMANU_REPO={{UMMANU_PRODUCT_ROOT}}
-Environment=TA_RUNTIME_ENV_FILE={{UMMANU_INSTANCE_PATH}}/runtime.env
+Environment=UMMANU_RUNTIME_ENV_FILE={{UMMANU_INSTANCE_PATH}}/runtime.env
 Environment=PATH={{UMMANU_RUNTIME_HOME}}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Nice=10
 # The product kills the collector process group after 40 seconds. This outer

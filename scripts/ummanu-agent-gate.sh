@@ -43,12 +43,12 @@
 set -u
 
 export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-# Which checkout the role runs out of: the launcher's explicit TA_RUNTIME_PYTHONPATH, else the
+# Which checkout the role runs out of: the launcher's explicit UMMANU_RUNTIME_PYTHONPATH, else the
 # product checkout this installation is configured with, else the home default. An installation
 # materialized from an alternate checkout sets UMMANU_REPO in the unit it renders, and
 # skipping that name here would start the role out of ~/ummanu — a checkout the operator may
 # never have upgraded, or may not have at all.
-product_root="${TA_RUNTIME_PYTHONPATH:-${UMMANU_REPO:-$HOME/ummanu}}"
+product_root="${UMMANU_RUNTIME_PYTHONPATH:-${TA_RUNTIME_PYTHONPATH:-${UMMANU_REPO:-$HOME/ummanu}}}"
 selected_product_root="$product_root"
 
 # Resolve the root once, before starting a Python process, so the source tree, managed interpreter
@@ -107,11 +107,11 @@ if [ -n "$variant" ]; then
 fi
 
 # How long the gate keeps re-attempting a precheck that could not reach the board: attempts spaced
-# by TA_GATE_BOARD_WAIT seconds, on top of the retry window the client itself already spends inside
+# by UMMANU_GATE_BOARD_WAIT seconds, on top of the retry window the client itself already spends inside
 # each attempt. The total has to comfortably cover a board coming up a minute or two after a reboot,
 # and has to stay bounded so a board that is really gone still ends the unit `failed` and visible.
-board_attempts="${TA_GATE_BOARD_ATTEMPTS:-5}"
-board_wait="${TA_GATE_BOARD_WAIT:-120}"
+board_attempts="${UMMANU_GATE_BOARD_ATTEMPTS:-${TA_GATE_BOARD_ATTEMPTS:-5}}"
+board_wait="${UMMANU_GATE_BOARD_WAIT:-${TA_GATE_BOARD_WAIT:-120}}"
 
 attempt=1
 while : ; do

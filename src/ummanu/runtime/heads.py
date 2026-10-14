@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]  # no PyYAML stubs in the typecheck extra
 
+from ummanu.runtime.paths import env_value
+
 from .head.command import (
     HeadCommandError,
     validate_launch_shape,
@@ -27,7 +29,7 @@ HEADS_TOML = Path(__file__).with_name("heads.toml")
 # keeps reading the product default.
 INSTANCE_ENV = "UMMANU_INSTANCE"
 # Points one process at another registry without moving its installation (tests, diffing).
-REGISTRY_ENV = "TA_HEADS_REGISTRY"
+REGISTRY_ENV = "UMMANU_HEADS_REGISTRY"
 
 
 def installed_registry_path() -> Path | None:
@@ -52,7 +54,7 @@ def registry_path() -> Path:
 
     Resolved per call, not at import.
     """
-    override = os.environ.get(REGISTRY_ENV)
+    override = env_value(REGISTRY_ENV, nonempty=True)
     if override:
         return Path(override).expanduser()
     return installed_registry_path() or HEADS_TOML
@@ -124,8 +126,8 @@ def default_head(registry: Registry | None = None) -> str:
 
 
 def reviewer_head(registry: Registry | None = None) -> str:
-    """The head a card that names no reviewer is reviewed by; `TA_REVIEWER_HEAD` overrides."""
-    override = os.environ.get("TA_REVIEWER_HEAD")
+    """The head a card that names no reviewer is reviewed by; `UMMANU_REVIEWER_HEAD` overrides."""
+    override = env_value("UMMANU_REVIEWER_HEAD", nonempty=True)
     if override:
         return override
     return role_head("reviewer", registry)

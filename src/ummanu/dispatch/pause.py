@@ -13,7 +13,7 @@ Semantics:
            nothing at all. Workspaces and worktrees are never removed.
 
 A freeze set by automation carries a TTL and is resumed by the next tick once it outlives
-`TA_HARD_PAUSE_AUTO_RESUME_TTL_S`, because `ummanu backup create` resumes in its `finally` and
+`UMMANU_HARD_PAUSE_AUTO_RESUME_TTL_S`, because `ummanu backup create` resumes in its `finally` and
 a backup killed before that block would otherwise leave the dispatcher frozen forever. A freeze
 held by a human is a maintenance window and never expires.
 """
@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 from ummanu._fsutil import write_json
+from ummanu.runtime.paths import env_value
 
 
 class PauseMode(StrEnum):
@@ -100,7 +101,7 @@ def normalize_pause_mode(mode: str | None) -> PauseMode | Literal[""]:
 def auto_resume_ttl_seconds() -> int:
     """TTL for an automation-owned freeze, 0 when auto-resume is turned off."""
     try:
-        ttl = int(os.environ.get("TA_HARD_PAUSE_AUTO_RESUME_TTL_S", str(AUTO_RESUME_TTL_DEFAULT)))
+        ttl = int(env_value("UMMANU_HARD_PAUSE_AUTO_RESUME_TTL_S", str(AUTO_RESUME_TTL_DEFAULT)))
     except ValueError:
         ttl = AUTO_RESUME_TTL_DEFAULT
     return max(0, ttl)
@@ -108,7 +109,7 @@ def auto_resume_ttl_seconds() -> int:
 
 def auto_resume_actors() -> tuple[str, ...]:
     """Actors whose freeze expires. Anything else is a human maintenance window and is held."""
-    raw = os.environ.get("TA_HARD_PAUSE_AUTO_RESUME_ACTORS", AUTO_RESUME_ACTORS_DEFAULT)
+    raw = env_value("UMMANU_HARD_PAUSE_AUTO_RESUME_ACTORS", AUTO_RESUME_ACTORS_DEFAULT)
     return tuple(item.strip() for item in raw.split(",") if item.strip())
 
 
@@ -276,11 +277,11 @@ def legacy_mirror_path() -> Path:
     explicit = os.environ.get("UMMANU_LEGACY_PAUSE_FILE")
     if explicit:
         return Path(explicit)
-    for name in ("UMMANU_LEGACY_PIPELINE_STATE_DIR", "TA_PIPELINE_STATE_DIR"):
-        value = os.environ.get(name)
+    for name in ("UMMANU_LEGACY_PIPELINE_STATE_DIR", "UMMANU_PIPELINE_STATE_DIR"):
+        value = (env_value(name, nonempty=True) if name == "UMMANU_PIPELINE_STATE_DIR" else os.environ.get(name))
         if value:
             return Path(value) / "pause.json"
-    workspaces_root = Path(os.environ.get("TA_WORKSPACES_ROOT") or Path.home() / "orca" / "workspaces")
+    workspaces_root = Path(env_value("UMMANU_WORKSPACES_ROOT", nonempty=True) or Path.home() / "orca" / "workspaces")
     return workspaces_root / "ummanu" / "pipeline" / "state" / "pipeline" / "pause.json"
 
 

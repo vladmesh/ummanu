@@ -12,8 +12,8 @@ upstream. Exit non-zero if any agent is red.
 
 Both sources here are the live data plane, not a checkout (secretary-833):
 
-  * curator/steward/retro write runs.jsonl through `AgentState`, whose root is TA_STATE or
-    `~/ummanu-data/automation-state` — the packaged units set neither TA_STATE nor a different
+  * curator/steward/retro write runs.jsonl through `AgentState`, whose root is UMMANU_STATE or
+    `~/ummanu-data/automation-state` — the packaged units set neither UMMANU_STATE nor a different
     HOME, so that default is where their real records land. Reading a `state/` dir inside the
     agent's worktree instead reported `no runs.jsonl yet` for agents that were ticking fine.
   * the pipeline line is the production dispatcher's own tick telemetry
@@ -32,12 +32,13 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from ummanu.runtime.paths import component_enabled, configured_product_root
+from ummanu.runtime.paths import component_enabled, configured_product_root, env_value
 from ummanu.runtime.state import AgentState
 
 from . import production_telemetry
 
-_ENV_MAX_AGE = os.environ.get("TA_HEALTH_MAX_AGE_S")  # global override, wins for every agent
+_ENV_MAX_AGE_NAME = "UMMANU_HEALTH_MAX_AGE_S" if os.environ.get("UMMANU_HEALTH_MAX_AGE_S") else "TA_HEALTH_MAX_AGE_S"
+_ENV_MAX_AGE = env_value("UMMANU_HEALTH_MAX_AGE_S", nonempty=True)  # global override, wins for every agent
 # Units are the packaged ones under host.unit_prefix, not the decommissioned
 # ta-* names. Most agents map to <prefix><agent>.timer; the pipeline's clock is
 # the production dispatcher's timer, which is named after the component rather
@@ -93,7 +94,7 @@ def _max_age_from_spec(spec: dict) -> int:
     health = spec.get("health", {})
     systemd = spec.get("systemd", {})
     if not isinstance(health, dict) or not isinstance(systemd, dict):
-        raise ValueError("health or systemd table is not an object")
+        raise ValueError("health or systemd table is not an object")  # noqa: TRY004 - public validation contract
     explicit = health.get("max_age_s")
     if explicit is not None:
         if isinstance(explicit, bool):
@@ -107,7 +108,7 @@ def _max_age_from_spec(spec: dict) -> int:
         return max_age_s
     cadence = systemd.get("calendar", "hourly")
     if not isinstance(cadence, str):
-        raise ValueError("systemd.calendar is not a string")
+        raise ValueError("systemd.calendar is not a string")  # noqa: TRY004 - public validation contract
     return _CADENCE_MAX_AGE_S.get(cadence, 3 * 3600)
 
 
@@ -145,9 +146,9 @@ def _role_expectations(agents: tuple[str, ...]) -> tuple[dict[str, RoleExpectati
             try:
                 max_age_s = int(_ENV_MAX_AGE)
             except ValueError:
-                return None, "TA_HEALTH_MAX_AGE_S is not an integer"
+                return None, f"{_ENV_MAX_AGE_NAME} is not an integer"
             if max_age_s <= 0:
-                return None, "TA_HEALTH_MAX_AGE_S is not positive"
+                return None, f"{_ENV_MAX_AGE_NAME} is not positive"
         else:
             try:
                 max_age_s = _max_age_from_spec(spec)
@@ -163,7 +164,7 @@ def timer_unit(agent: str, unit_prefix: str | None = None) -> str:
 
 def _timer_active(agent: str, unit_prefix: str | None = None) -> bool:
     p = subprocess.run(
-        ["systemctl", "is-active", timer_unit(agent, unit_prefix)], capture_output=True, text=True
+        ["systemctl", "is-active", timer_unit(agent, unit_prefix)], capture_output=True, text=True, check=False
     )
     return p.stdout.strip() == "active"
 
@@ -182,7 +183,7 @@ def _runs(agent: str) -> list[dict]:
 
 
 def _age_s(ts: str) -> float:
-    then = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    then = datetime.datetime.fromisoformat(ts)
     if then.tzinfo is None:
         then = then.replace(tzinfo=datetime.UTC)
     return (datetime.datetime.now(datetime.UTC) - then).total_seconds()

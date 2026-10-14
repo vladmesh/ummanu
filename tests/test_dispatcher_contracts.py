@@ -840,7 +840,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 env = self.unit_env(name)
                 if name == "ummanu-dispatcher-production.service":
                     self.assertEqual(env["UMMANU_RUNTIME_ENV_FILE"], expected)
-                self.assertEqual(env["TA_RUNTIME_ENV_FILE"], expected)
+                self.assertEqual(env["UMMANU_RUNTIME_ENV_FILE"], expected)
 
     def test_the_runtime_env_file_cannot_hand_a_role_another_instance(self) -> None:
         """The launcher's binding wins over the file's own line, for a head and a standing role."""
@@ -869,7 +869,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 # The gate-launched services also import from it directly; the dispatcher runs the
                 # checkout's own venv entry point and needs no PYTHONPATH of its own.
                 self.assertEqual(
-                    env.get("TA_RUNTIME_PYTHONPATH", str(self.root / "product")),
+                    env.get("UMMANU_RUNTIME_PYTHONPATH", str(self.root / "product")),
                     str(self.root / "product"),
                 )
 
@@ -885,7 +885,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 rendered = render_systemd_unit(
                     (SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout
                 ).decode()
-                self.assertIn(f"Environment=TA_RUNTIME_PYTHONPATH={self.root / 'product'}", rendered)
+                self.assertIn(f"Environment=UMMANU_RUNTIME_PYTHONPATH={self.root / 'product'}", rendered)
                 self.assertIn(f"Environment=UMMANU_REPO={self.root / 'product'}", rendered)
                 self.assertIn(f"ExecStart={self.root / 'product'}/scripts/ummanu-agent-gate.sh", rendered)
 
@@ -1190,7 +1190,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
                     catalog = object.__new__(InstanceCatalog)
                     catalog._heads = canon  # type: ignore[attr-defined]
 
-                    with mock.patch.dict(os.environ, {"TA_CODEX_HOME": str(home)}):
+                    with mock.patch.dict(os.environ, {"UMMANU_CODEX_HOME": str(home)}):
                         catalog.prepare_head_workspace(head, str(workspace), role=role)
 
                     trusted = (home / "config.toml").read_text(encoding="utf-8")
@@ -1313,7 +1313,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         with self.assertRaisesRegex(heads.HeadRegistryError, r"role_defaults\.new_card"):
             heads.default_head(registry)
         with mock.patch.dict(os.environ, {}, clear=False) as env:
-            env.pop("TA_REVIEWER_HEAD", None)
+            env.pop("UMMANU_REVIEWER_HEAD", None)
             with self.assertRaisesRegex(heads.HeadRegistryError, r"role_defaults\.reviewer"):
                 heads.reviewer_head(registry)
 

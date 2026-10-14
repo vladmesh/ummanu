@@ -1142,8 +1142,8 @@ def fast_environment(root: Path, fixture_root: Path) -> dict[str, str]:
     guard = fixture_root / "guard"
     paths = {
         "HOME": home,
-        "TA_CODEX_HOME": fixture_root / "codex-home",
-        "TA_PIPELINE_STATE_DIR": fixture_root / "pipeline-state",
+        "UMMANU_CODEX_HOME": fixture_root / "codex-home",
+        "UMMANU_PIPELINE_STATE_DIR": fixture_root / "pipeline-state",
         "TEMP": fixture_root / "tmp",
         "TMP": fixture_root / "tmp",
         "TMPDIR": fixture_root / "tmp",

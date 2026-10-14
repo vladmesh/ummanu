@@ -550,11 +550,13 @@ class CuratorBaselineTests(unittest.TestCase):
         foreign = harvest.pending_record(batch, self.identity, {str(alpha): None, str(beta): None}, project="alpha")
         self.state.pending_file.write_text(json.dumps(foreign), encoding="utf-8")
         before_pending = self.state.pending_file.read_bytes()
-        with mock.patch("ummanu.automations.agents.curator.discover.claude_sessions", return_value=sessions):
-            with self.assertRaisesRegex(harvest.PendingError, "foreign"):
-                cli.baseline_settlement(
-                    project="alpha", actor="operator", reason="approved batch", batch_id=foreign["batch_id"]
-                )
+        with (
+            mock.patch("ummanu.automations.agents.curator.discover.claude_sessions", return_value=sessions),
+            self.assertRaisesRegex(harvest.PendingError, "foreign"),
+        ):
+            cli.baseline_settlement(
+                project="alpha", actor="operator", reason="approved batch", batch_id=foreign["batch_id"]
+            )
         self.assertEqual(self.state.load_watermark(), {})
         self.assertEqual(self.state.pending_file.read_bytes(), before_pending)
         self.assertFalse((self.state.dir / "baseline-audit.ndjson").exists())
@@ -610,12 +612,12 @@ class CuratorCliPreparationTests(unittest.TestCase):
             mock.patch.dict(
                 "os.environ",
                 {
-                    "TA_CURATOR_MAX_TURNS": "2",
-                    "TA_CURATOR_MAX_INPUT_BYTES": "10000",
-                    "TA_CURATOR_MAX_SOURCES": "8",
-                    "TA_CURATOR_MAX_ROWS_PER_SOURCE": "2",
-                    "TA_CURATOR_MAX_RECORD_BYTES": "4096",
-                    "TA_CURATOR_MAX_MEMORY_BYTES": "4096",
+                    "UMMANU_CURATOR_MAX_TURNS": "2",
+                    "UMMANU_CURATOR_MAX_INPUT_BYTES": "10000",
+                    "UMMANU_CURATOR_MAX_SOURCES": "8",
+                    "UMMANU_CURATOR_MAX_ROWS_PER_SOURCE": "2",
+                    "UMMANU_CURATOR_MAX_RECORD_BYTES": "4096",
+                    "UMMANU_CURATOR_MAX_MEMORY_BYTES": "4096",
                 },
                 clear=False,
             ),

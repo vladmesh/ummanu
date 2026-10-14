@@ -20,28 +20,28 @@ from pathlib import Path
 
 from ummanu.config import ConfigError, load_config
 from ummanu.runtime.codex_home import session_roots
-from ummanu.runtime.paths import default_instance_path, instance_dir
+from ummanu.runtime.paths import default_instance_path, env_value, instance_dir
 from ummanu.sprints import SPRINT_REFERENCE_PREFIX, SprintReader, sprint_client
 
 # Claude project-dir naming: every non-alphanumeric cwd character becomes "-".
-# Overridable via TA_CLAUDE_PROJECTS_DIR so a run (e.g. an e2e on fixtures) can point the
+# Overridable via UMMANU_CLAUDE_PROJECTS_DIR so a run (e.g. an e2e on fixtures) can point the
 # scan at a synthetic tree instead of the live ~/.claude/projects.
-CLAUDE_PROJECTS = Path(os.environ.get("TA_CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
+CLAUDE_PROJECTS = Path(env_value("UMMANU_CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
 
-# Hermes home. Overridable via TA_HERMES_HOME_DIR for the same reason as
-# TA_CLAUDE_PROJECTS_DIR above. On this host Hermes 0.17.0 stores sessions in a shared
+# Hermes home. Overridable via UMMANU_HERMES_HOME_DIR for the same reason as
+# UMMANU_CLAUDE_PROJECTS_DIR above. On this host Hermes 0.17.0 stores sessions in a shared
 # SQLite DB (hermes_state.py: "replacing the per-session JSONL file approach") rather than
 # the per-session `session_*.json` files under a `sessions/` dir that the Orca ai-vault
 # scanner (our format reference) still expects -- that dir exists but is always empty here.
 # We read the live schema instead of the stale file-based reference.
-HERMES_HOME = Path(os.environ.get("TA_HERMES_HOME_DIR", str(Path.home() / ".hermes")))
+HERMES_HOME = Path(env_value("UMMANU_HERMES_HOME_DIR", str(Path.home() / ".hermes")))
 HERMES_STATE_DB = HERMES_HOME / "state.db"
 HERMES_MEMORY_DIR = HERMES_HOME / "memories"
 
 # Sessions of the CODEX_HOMEs pipeline Codex heads run with. Overridable in tests for the same
 # reason as CLAUDE_PROJECTS/HERMES_HOME; unset, every home a head may be writing into is scanned
 # (`codex_home.session_roots`), so the move to `<data_dir>/codex-home` loses no live head's sessions.
-_CODEX_SESSIONS_OVERRIDE = os.environ.get("TA_CODEX_SESSIONS_DIR")
+_CODEX_SESSIONS_OVERRIDE = env_value("UMMANU_CODEX_SESSIONS_DIR", nonempty=True)
 CODEX_SESSIONS: Path | None = Path(_CODEX_SESSIONS_OVERRIDE) if _CODEX_SESSIONS_OVERRIDE else None
 
 ROUTE_UNKNOWN = "unknown"
@@ -145,7 +145,7 @@ def _within(path: Path, root: Path) -> bool:
 
 
 def _workspace_root() -> Path:
-    return Path(os.environ.get("TA_WORKSPACES_ROOT") or Path.home() / "orca" / "workspaces")
+    return Path(env_value("UMMANU_WORKSPACES_ROOT", nonempty=True) or Path.home() / "orca" / "workspaces")
 
 
 def _observer_reference(cwd: Path) -> str | None:
@@ -248,11 +248,11 @@ def _with_route(source: dict, *, resolver: RouteResolver, global_source: bool = 
 
 def curator_workspace() -> Path:
     """The one workspace this curator run must not feed back into itself."""
-    return Path(os.environ.get("TA_CURATOR_WORKSPACE") or Path.cwd()).resolve(strict=False)
+    return Path(env_value("UMMANU_CURATOR_WORKSPACE", nonempty=True) or Path.cwd()).resolve(strict=False)
 
 
 def curator_session_id() -> str:
-    return os.environ.get("TA_CURATOR_SESSION_ID", "")
+    return env_value("UMMANU_CURATOR_SESSION_ID", "")
 
 
 def _cwd_from_claude_dir(dirname: str) -> str:

@@ -41,7 +41,7 @@ class RetroPendingTests(unittest.TestCase):
         self.sessions: list[dict] = []
         patches = [
             mock.patch.object(cli, "STATE", self.state),
-            mock.patch.dict("os.environ", {"TA_CURATOR_WORKSPACE": str(self.workspace)}),
+            mock.patch.dict("os.environ", {"UMMANU_CURATOR_WORKSPACE": str(self.workspace)}),
             mock.patch.object(cli.discover, "claude_sessions", side_effect=lambda: list(self.sessions)),
             mock.patch.object(cli.discover, "codex_sessions", return_value=[]),
             mock.patch.object(cli.discover, "hermes_sessions", return_value=[]),

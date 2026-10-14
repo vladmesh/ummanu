@@ -4,13 +4,13 @@ secretary-1173 made every Codex head interactive, and an interactive Codex asks 
 trust before it takes a prompt. The product answers that question by writing `config.toml` in the
 `CODEX_HOME` the head will run with, before the pane exists — so from that card on, *any* test that
 reaches a worker, reviewer or service bring-up performs a write, whether or not it thought about
-trust. With no `codex_home` in the fixture registry and no `TA_CODEX_HOME` in the environment, that
+trust. With no `codex_home` in the fixture registry and no `UMMANU_CODEX_HOME` in the environment, that
 write lands in the installation's `<data_dir>/codex-home/config.toml` wherever `UMMANU_DATA_DIR`
 names one (the legacy `~/.config/orca/...` home until secretary-1723): installation state shared
 by every Codex head on the host, where a permanent `trusted` grant for a since-deleted `/tmp`
 workspace would accumulate one entry per suite run with nothing to prune it.
 
-`tests/__init__.py` closes that by claiming one throwaway `TA_CODEX_HOME` for the whole run before
+`tests/__init__.py` closes that by claiming one throwaway `UMMANU_CODEX_HOME` for the whole run before
 any test module is imported. These tests prove the default is actually installed, that an ordinary
 worker/reviewer bring-up cannot write outside the tree this run owns, and that a test wanting its
 own home can still say so locally.
@@ -65,7 +65,7 @@ def _config_stat(path: Path) -> tuple[int, int] | None:
 
 class HermeticCodexHomeTests(unittest.TestCase):
     def test_the_suite_owns_the_codex_home_every_bring_up_writes_into(self) -> None:
-        suite_home = Path(os.environ["TA_CODEX_HOME"])
+        suite_home = Path(os.environ["UMMANU_CODEX_HOME"])
 
         self.assertEqual(suite_home, _SUITE_CODEX_HOME)
         self.assertTrue(suite_home.is_dir())
@@ -77,7 +77,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
         # (Readers also scan the installation homes that exist, read-only, for live heads.)
         self.assertEqual(codex_preflight.codex_home({}), str(suite_home))
         with mock.patch.dict(os.environ):
-            os.environ.pop("TA_CODEX_SESSIONS", None)
+            os.environ.pop("UMMANU_CODEX_SESSIONS", None)
             os.environ.pop("UMMANU_CODEX_SESSIONS", None)
             self.assertEqual(dispatcher_tui._sessions_roots()[0], suite_home / "sessions")
             self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], suite_home / "sessions")
@@ -85,7 +85,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
     def test_a_worker_and_a_reviewer_bring_up_write_only_where_the_run_owns(self) -> None:
         """The regression proper: the two roles whose launch tests wrote into the live config.
 
-        Nothing here patches `TA_CODEX_HOME`. That is the point — these calls are exactly what an
+        Nothing here patches `UMMANU_CODEX_HOME`. That is the point — these calls are exactly what an
         ordinary launcher test does, and they have to be safe without the test knowing that a Codex
         bring-up writes anything at all.
         """
@@ -108,12 +108,12 @@ class HermeticCodexHomeTests(unittest.TestCase):
             with mock.patch.object(codex_preflight, "_save_codex_config", recording_save):
                 for role in ("worker", "reviewer"):
                     with self.subTest(role=role):
-                        catalog.head_launch(
+                        self.assertTrue(catalog.head_launch(
                             "codex-hermetic",
                             "TASK.md",
                             workspace=str(workspace),
                             role=role,
-                        ).command
+                        ).command)
 
             # Not vacuous: these bring-ups really did answer the trust question.
             self.assertTrue(written)
@@ -149,7 +149,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
                 },
             }
 
-            with mock.patch.dict(os.environ, {"TA_CODEX_HOME": str(local_home)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CODEX_HOME": str(local_home)}):
                 catalog.prepare_head_workspace(  # type: ignore[attr-defined]
                     "codex-hermetic", str(workspace), role="worker"
                 )
@@ -162,7 +162,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
                     trusted = (home / codex_preflight.CODEX_CONFIG_FILE).read_text(encoding="utf-8")
                     self.assertIn(str(workspace.resolve()), trusted)
             # The suite default is back, undisturbed, for whatever runs next.
-            self.assertEqual(os.environ["TA_CODEX_HOME"], str(_SUITE_CODEX_HOME))
+            self.assertEqual(os.environ["UMMANU_CODEX_HOME"], str(_SUITE_CODEX_HOME))
 
 
 if __name__ == "__main__":
