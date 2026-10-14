@@ -16,11 +16,27 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+import psycopg
+
 from tests.fakes.tasks import open_sprint, reader_seed, writer_seed
 from tests.sql_backend_fixtures import CardStoreCase
 from ummanu.board import backend
 from ummanu.board.sql_cards import _COLUMN_ID_BY_STATE
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
+
+
+@contextlib.contextmanager
+def metadata_statements():
+    """Count native driver calls without replacing their execution or results."""
+    executed = []
+    original = psycopg.Cursor.execute
+
+    def counting(cursor, query, *args, **kwargs):
+        executed.append(str(query))
+        return original(cursor, query, *args, **kwargs)
+
+    with mock.patch.object(psycopg.Cursor, "execute", counting):
+        yield executed
 
 
 class SqlBoardCase(CardStoreCase):
@@ -630,6 +646,59 @@ class SqlTaskWriterTests(SqlBoardCase):
             [("committed", "created", reference)],
         )
 
+    def test_real_create_metadata_updates_one_task_row(self) -> None:
+        phases = {}
+        handler = self.client._rpc_saveTaskMetadata
+        create = self.client._rpc_createTask
+
+        def measured_metadata(**params):
+            with metadata_statements() as statements:
+                result = handler(**params)
+            phases["metadata"] = statements
+            return result
+
+        def measured_create(**params):
+            with metadata_statements() as statements:
+                result = create(**params)
+            phases["create"] = statements
+            return result
+
+        with (
+            mock.patch.object(self.client, "_rpc_saveTaskMetadata", side_effect=measured_metadata),
+            mock.patch.object(self.client, "_rpc_createTask", side_effect=measured_create),
+        ):
+            result = self._create(request_id="rq-count-create")
+        self.assertEqual(len(phases["metadata"]), 3, phases)
+        self.assertEqual(sum(sql.startswith("UPDATE tasks ") for sql in phases["metadata"]), 1)
+        self.assertEqual(sum(sql.startswith("INSERT INTO projects ") for sql in phases["metadata"]), 1)
+        self.assertEqual(sum(sql.startswith("SELECT task_ref ") for sql in phases["metadata"]), 1)
+        self.assertEqual(sum(sql.startswith("INSERT INTO tasks ") for sql in phases["create"]), 1)
+        print("create metadata phase: tasks UPDATE=1, reference SELECT=1, projects INSERT=1; "
+              f"createTask phase statements={len(phases['create'])}, tasks INSERT=1")
+        card = self.reader.show(result["task"]["ref"])
+        self.assertEqual(card["project"], "ummanu")
+        self.assertEqual(card["type"], "code")
+        self.assertEqual(card["record_type"], "task")
+
+    def test_driver_failure_after_create_metadata_rolls_back_card_request_and_event(self) -> None:
+        original = psycopg.Cursor.execute
+
+        def failing(cursor, query, *args, **kwargs):
+            result = original(cursor, query, *args, **kwargs)
+            if str(query).startswith("UPDATE tasks SET ") and "project_id = %s" in str(query):
+                raise psycopg.errors.CheckViolation("metadata driver failure")
+            return result
+
+        with (
+            mock.patch.object(psycopg.Cursor, "execute", failing),
+            self.assertRaises(TaskError),
+        ):
+            self._create(request_id="rq-create-driver-failure", title="Rollback metadata create")
+        self.assertNothingSurvived("rq-create-driver-failure")
+        self.assertEqual(self.client._query(
+            "SELECT count(*) FROM tasks WHERE title = %s", ("Rollback metadata create",)
+        ), [(0,)])
+
     def test_a_create_that_fails_after_its_claim_leaves_no_row_of_any_kind(self) -> None:
         """The boundary the same defect sat on: one transaction from the claim to the record.
 
@@ -682,6 +751,175 @@ class SqlTaskWriterTests(SqlBoardCase):
             self.client._query("SELECT count(*) FROM requests WHERE request_id = %s", ("rq-4",)),
             [(0,)],
         )
+
+
+class SqlMetadataWriteTests(SqlBoardCase):
+    """Metadata row count, JSONB preservation and clocks on native PostgreSQL."""
+
+    old_time = datetime(2001, 2, 3, 4, 5, 6, 123456, tzinfo=UTC)
+    new_time = datetime(2026, 10, 1, 2, 3, 4, 654321, tzinfo=UTC)
+
+    def setUp(self) -> None:
+        self.client = self.client_for(writer_seed())
+        self.key = self.client.key_of("ummanu-468")
+        self.seed({"extra": {"swimlane": "ummanu", "keep": "untouched"}})
+
+    def seed(self, extensions) -> None:
+        with self.client.transaction():
+            self.client._execute(
+                "UPDATE tasks SET extensions = %s::jsonb, updated_at = %s WHERE board_key = %s",
+                (json.dumps(extensions), self.old_time, self.key),
+            )
+
+    def row(self):
+        return self.client._query(
+            "SELECT extensions, updated_at, created_at, date_moved, task_ref, board_key, "
+            "claim_worker, complexity, family_preference, live_impact, retry_same, retry_switch, "
+            "quota_snapshot_at, project_id FROM tasks WHERE board_key = %s", (self.key,)
+        )[0]
+
+    def write(self, values):
+        with mock.patch("ummanu.board.sql_cards._now", return_value=self.new_time), metadata_statements() as sql:
+            self.client.call("saveTaskMetadata", task_id=self.key, values=values)
+        self.assertEqual(sum(query.startswith("UPDATE tasks ") for query in sql), int(bool(values)), sql)
+        self.assertEqual(sum(query.startswith("SELECT task_ref ") for query in sql), 1, sql)
+        return sql
+
+    def test_mixed_round_trip_preserves_markers_and_counts_satellite_work(self) -> None:
+        strange_key = "unknown'\\\"; UPDATE tasks SET title = 'oops'; --"
+        strange_value = "value'\\\"\n雪"
+        extensions = {"marker": {"request": [1, 2]}, "nested": {"a": {"b": True}}, "extra": {
+            "swimlane": "ummanu", "keep": "untouched", "claim": "stale", "project": "stale",
+            "live_impact": "stale", "retry_heads": "stale", "drop": "old",
+            "retry_same": "legacy counter", "retry_switch": "legacy switch",
+        }}
+        self.seed(extensions)
+        before = self.row()
+        sql = self.write({
+            "claim": "worker", "project": "ummanu", "record_type": "task", "drop": "",
+            strange_key: strange_value, "live_impact": "false", "retry_same": "0", "retry_switch": "-3",
+            "quota_snapshot_at": "2026-09-30T23:04:05.123456+02:00", "retry_heads": "head-a, head-b",
+        })
+        after = self.row()
+        expected = {**extensions, "extra": {
+            "swimlane": "ummanu", "keep": "untouched", "record_type": "task",
+            "retry_same": "legacy counter", "retry_switch": "legacy switch", strange_key: strange_value,
+        }}
+        self.assertEqual(after[0], expected)
+        self.assertEqual(after[1], self.new_time)
+        self.assertEqual(after[2:6], before[2:6])
+        self.assertEqual(after[6], "worker")
+        self.assertEqual(after[9:12], (False, 0, 0))
+        self.assertEqual(after[12], datetime(2026, 9, 30, 21, 4, 5, 123456, tzinfo=UTC))
+        self.assertEqual(sum(q.startswith("INSERT INTO projects ") for q in sql), 1)
+        self.assertEqual(sum(q.startswith("DELETE FROM task_retry_heads ") for q in sql), 1)
+        self.assertEqual(sum(q.startswith("INSERT INTO task_retry_heads ") for q in sql), 1)
+        self.assertEqual(len(sql), 5, sql)
+        self.assertEqual(self.client._query(
+            "SELECT ordinal, head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal",
+            ("ummanu-468",)
+        ), [(0, "head-a"), (1, "head-b")])
+        meta = self.client.metadata(self.key)
+        self.assertEqual(meta["claim"], "worker")
+        self.assertEqual(meta[strange_key], strange_value)
+        self.assertEqual(meta["retry_heads"], "head-a,head-b")
+        print("mixed metadata: tasks UPDATE=1, reference SELECT=1, projects INSERT=1, "
+              "retry_heads DELETE=1/INSERT=1; total=5")
+
+    def test_empty_typed_values_keep_markers_defaults_and_false_values(self) -> None:
+        self.seed({"extra": {"claim": "stale", "complexity": "stale", "live_impact": "stale"}})
+        self.write({"claim": "", "complexity": "", "family_preference": "", "project": "",
+                    "live_impact": "false", "retry_same": "invalid", "retry_switch": "0",
+                    "quota_snapshot_at": "", "retry_heads": ""})
+        after = self.row()
+        self.assertEqual(after[0], {"extra": {
+            "claim": "", "complexity": "", "family_preference": "", "project": "",
+            "quota_snapshot_at": "", "retry_heads": "",
+        }})
+        self.assertEqual(after[6:14], (None, "standard", "auto", False, 0, 0, None, None))
+        self.assertEqual(after[1], self.new_time)
+
+    def test_timestamp_invalid_naive_and_offset_preserve_parsing_and_precision(self) -> None:
+        for text, expected in (
+            ("invalid", None),
+            ("2026-10-01T01:02:03.456789", datetime(2026, 10, 1, 1, 2, 3, 456789, tzinfo=UTC)),
+            ("2026-10-01T01:02:03.456789Z", datetime(2026, 10, 1, 1, 2, 3, 456789, tzinfo=UTC)),
+        ):
+            with self.subTest(text=text):
+                self.seed({"extra": {"quota_snapshot_at": "stale"}})
+                self.write({"quota_snapshot_at": text})
+                self.assertEqual(self.row()[12], expected)
+                self.assertEqual(self.row()[0], {"extra": {}})
+
+    def test_write_modes_and_one_or_ten_unknown_keys_preserve_exact_clock_policy(self) -> None:
+        for count in (1, 10):
+            for mode in ("mixed", "add", "typed", "remove", "empty"):
+                with self.subTest(count=count, mode=mode):
+                    initial = {"extra": {"keep": "untouched", **{f"drop{i}": "old" for i in range(count)}}}
+                    self.seed(initial)
+                    before = self.row()
+                    values = {}
+                    if mode in {"mixed", "add"}:
+                        values.update({f"add{i}": "new" for i in range(count)})
+                    if mode in {"mixed", "remove"}:
+                        values.update({f"drop{i}": "" for i in range(count)})
+                    if mode in {"mixed", "typed"}:
+                        values["retry_same"] = "2"
+                    sql = self.write(values)
+                    after = self.row()
+                    self.assertEqual(len(sql), 1 + int(bool(values)))
+                    self.assertEqual(after[1], self.old_time if mode in {"remove", "empty"} else self.new_time)
+                    self.assertEqual(after[2:6], before[2:6])
+                    expected = dict(initial["extra"])
+                    expected.update({key: val for key, val in values.items() if val and key != "retry_same"})
+                    for key, val in values.items():
+                        if not val:
+                            expected.pop(key, None)
+                    self.assertEqual(after[0], {"extra": expected})
+
+    def test_missing_empty_and_json_null_extra_keep_baseline_jsonb_results(self) -> None:
+        for initial, expected in (
+            ({}, {"extra": {"new": "value"}}),
+            ({"marker": {"a": 1}}, {"marker": {"a": 1}, "extra": {"new": "value"}}),
+            ({"extra": {}}, {"extra": {"new": "value"}}),
+            ({"extra": None}, {"extra": [None, {"new": "value"}]}),
+        ):
+            with self.subTest(initial=initial):
+                self.seed(initial)
+                self.write({"new": "value", "claim": "worker", "missing": ""})
+                self.assertEqual(self.row()[0], expected)
+
+    def test_scalar_extensions_fail_without_repair_and_invalid_kind_never_writes(self) -> None:
+        self.seed(None)  # JSON null is schema-valid; SQL NULL is not.
+        before = self.row()
+        with self.assertRaises(TaskError):
+            self.write({"new": "value", "claim": "worker"})
+        self.assertEqual(self.row(), before)
+        for kind in ("product", "issue", "epic"):
+            with self.subTest(kind=kind), metadata_statements() as sql, self.assertRaisesRegex(TaskError, "is a task"):
+                self.client.call("saveTaskMetadata", task_id=self.key, values={"record_type": kind, "claim": "worker"})
+            self.assertEqual(len(sql), 1, sql)
+            self.assertTrue(sql[0].startswith("SELECT task_ref "))
+        self.assertEqual(self.row(), before)
+
+    def test_outer_and_nested_rollback_leave_no_metadata_or_satellite_effect(self) -> None:
+        before = self.row()
+        heads_before = self.client._query(
+            "SELECT head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal", ("ummanu-468",)
+        )
+        for nested in (False, True):
+            with (
+                self.subTest(nested=nested),
+                self.assertRaisesRegex(RuntimeError, "abort metadata"),
+                self.client.transaction(),
+                self.client.transaction() if nested else contextlib.nullcontext(),
+            ):
+                self.write({"claim": "worker", "new": "value", "keep": "", "retry_heads": "head-a"})
+                raise RuntimeError("abort metadata")
+            self.assertEqual(self.row(), before)
+            self.assertEqual(self.client._query(
+                "SELECT head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal", ("ummanu-468",)
+            ), heads_before)
 
 
 if __name__ == "__main__":  # pragma: no cover
