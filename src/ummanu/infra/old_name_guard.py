@@ -31,10 +31,7 @@ ANYWHERE = ("*",)
 #: history row below does not cover them even though they sit under `state/knowledge/`.
 LIVE_KNOWLEDGE = ("state/knowledge/runbooks/[!0-9]*", "state/knowledge/plans/current-*")
 
-#: Memory facts, whose `source:` and `supersedes:` front-matter lines are records, not instructions.
-FACTS = ("state/memory/facts/*",)
-
-#: The live root's allowlist (issue:5e6fbd902e77172ee112 says why facts are guarded).
+#: The live root's allowlist.
 LIVE_ROOT_ALLOWLIST: tuple[Row, ...] = (
     # The Hermes Telegram agent `secretary` keeps its name. Today it is named only inside the R paths
     # below (board cards, audit, knowledge reports); the row admits its own spellings and no others.
@@ -47,9 +44,6 @@ LIVE_ROOT_ALLOWLIST: tuple[Row, ...] = (
     # A knowledge directory named after the old product (`projects/secretary/`, kept by D9): a path
     # reference to a record, not a live name.
     ("R", re.compile(r"\bprojects/secretary/"), ("state/knowledge/*",)),
-    # Who wrote a fact (`source: secretary:memory-refresh`) and which retired fact ids it replaced
-    # (`supersedes: secretary-merge-deployment-boundary`): records of the past, not live names.
-    ("R", re.compile(r"^(?:source|supersedes):.*$"), FACTS),
     (
         "R",
         None,
@@ -62,6 +56,9 @@ LIVE_ROOT_ALLOWLIST: tuple[Row, ...] = (
             "state/knowledge/*",
             # Run records and claims, appended by the checkpoint.
             "state/runs/*",
+            # Curated memory facts: the curator writes them outside any gate, and a fact quotes the
+            # cards, logs and paths it was learned from under the names they had.
+            "state/memory/facts/*",
         ),
     ),
     # The instance guard's rows for gate and provision receipts at the root are not ported: the

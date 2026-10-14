@@ -147,25 +147,11 @@ class ConfigCheckTests(LiveRootCase):
         self.assertTrue(any("enabled" in line for line in findings), findings)
         self.assertIn(f"{len(findings)} finding(s)", summary)
 
-    def test_an_uncovered_old_name_in_a_fact_body_is_refused_by_line(self) -> None:
-        """issue:5e6fbd90: a curator fact naming the old product as a live name."""
-        self.write(
-            "state/memory/facts/ummanu/venv.md",
-            f"---\nsource: curator\n---\nThe product venv is `/home/dev/{OLD}/.venv`.\n",
-        )
-
-        code, findings, _ = self.check()
-
-        self.assertEqual(code, 1)
-        self.assertEqual(len(findings), 1, findings)
-        self.assertTrue(
-            findings[0].startswith(f"state/memory/facts/ummanu/venv.md:4: '{OLD}' in "), findings[0]
-        )
-
-    def test_a_source_line_of_a_fact_is_covered(self) -> None:
+    def test_a_memory_fact_quoting_the_old_name_is_a_record(self) -> None:
         self.write(
             "state/memory/facts/ummanu/old.md",
-            f"---\nsource: {OLD}:memory-refresh\nsupersedes: {OLD}-merge-deployment-boundary\n---\nUmmanu does it.\n",
+            f"---\nsource: {OLD}:memory-refresh\nsupersedes: {OLD}-merge-deployment-boundary\n---\n"
+            f"The checkout was `/home/dev/{OLD}`; do not revive `{OLD}`.\n",
         )
 
         self.assertEqual(self.check()[:2], (0, []))
@@ -256,12 +242,10 @@ class PortedAllowlistTests(unittest.TestCase):
             # I
             "README.md": f"# {OLD}-instance\n\nRemote `vladmesh/{OLD}-instance`, card {OLD}-instance-12.\n",
             f"projects/{OLD}-instance.yaml": f"id: {OLD}-instance\n",
-            # R: card refs, fact provenance, history paths
+            # R: card refs, history paths, memory facts
             "heads/heads.toml": f'provider = "no-such-provider-{OLD}-1566"\n',
-            "state/memory/facts/ummanu/x.md": (
-                f"---\nsource: {OLD}:memory-refresh\nsupersedes: {OLD}-merge-deployment-boundary\n"
-                f"---\nUmmanu does it ({OLD}-1805).\n"
-            ),
+            "state/memory/facts/ummanu/x.md": f"---\nsource: curator\n---\nSee `/home/dev/{OLD}/.venv`.\n",
+            f"state/memory/facts/{OLD}-instance/z.md": f"Product code belongs to `{OLD}`.\n",
             f"state/board/cards/{OLD}-1.json": f'{{"title": "{OLD} doctor"}}\n',
             "state/knowledge/decisions/x.md": f"Run `{OLD} upgrade`.\n",
             "state/knowledge/runbooks/2026-07-25-x.md": f"Run `{OLD} upgrade`.\n",
@@ -281,12 +265,8 @@ class PortedAllowlistTests(unittest.TestCase):
             "tests/test_instance_config.py": f'dist = "{OLD}-0.1.0.dist-info"\n',
             # The manifest's old role table.
             "skills/manifest.toml": f"[roles.{OLD}]\n",
-            # A `source:` line is provenance only in a fact; a body line is a live statement.
-            "state/memory/facts/ummanu/y.md": f"---\nsource: curator\n---\nSee `/home/dev/{OLD}/.venv`.\n",
+            # A `source:` line outside a fact is a live statement.
             "heads/README.md": f"source: {OLD}\n",
-            # Product prose and live names in facts.
-            "state/memory/facts/global/z.md": f"Stop `{OLD}-dispatcher-production.timer`.\n",
-            f"state/memory/facts/{OLD}-instance/z.md": f"Product code belongs to `{OLD}`.\n",
             "instance.yaml": f"unit_prefix: {OLD}-\n",
             # Undated runbooks and current plans are live instructions, not history.
             "state/knowledge/runbooks/x.md": f"Run `{OLD} upgrade`.\n",
@@ -313,13 +293,18 @@ class PortedAllowlistTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertTrue(found[0].startswith(f"CONTEXT.md:3: '{OLD.title()}' in "), found[0])
         self.assertEqual(
-            live_root_violations(f"state/memory/facts/ummanu/{OLD}-helper.md", ""),
-            [f"state/memory/facts/ummanu/{OLD}-helper.md: path carries '{OLD}'"],
+            live_root_violations(f"persona/{OLD}-helper.md", ""),
+            [f"persona/{OLD}-helper.md: path carries '{OLD}'"],
         )
         self.assertEqual(len(live_root_violations("persona/AGENTS.md", f"{OLD.upper()}_DATA_DIR=1\n")), 1)
 
     def test_only_history_rows_admit_a_stray_old_name(self) -> None:
-        for path in ("state/board/cards.ndjson", "state/knowledge/decisions/x.md", "state/runs/runs.ndjson"):
+        for path in (
+            "state/board/cards.ndjson",
+            "state/knowledge/decisions/x.md",
+            "state/runs/runs.ndjson",
+            "state/memory/facts/global/x.md",
+        ):
             with self.subTest(path=path):
                 self.assertEqual(live_root_violations(path, OLD), [])
         for path in (
@@ -328,7 +313,6 @@ class PortedAllowlistTests(unittest.TestCase):
             "skills/manifest.toml",
             "state/knowledge/runbooks/destructive-recovery-drill.md",
             "state/knowledge/plans/current-product-work-plan.md",
-            "state/memory/facts/global/x.md",
         ):
             with self.subTest(path=path):
                 self.assertEqual(len(live_root_violations(path, OLD)), 1)
