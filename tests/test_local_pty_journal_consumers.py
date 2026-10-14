@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.test_local_pty_journal_retention import small_limits
+from tests.support.local_pty_journal import small_limits
 from ummanu.po.runner import RunnerError, ScopedPoProcess
 from ummanu.runtime import local_pty_journal as views
 from ummanu.runtime.head.local_pty import client, journal as j, protocol

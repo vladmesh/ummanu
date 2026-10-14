@@ -17,19 +17,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.support.local_pty_journal import small_limits
 from ummanu.runtime.head.local_pty import journal as j
-
-
-def small_limits(test: unittest.TestCase) -> None:
-    for name, value in {
-        "JOURNAL_RECORD_BYTES": 4096,
-        "JOURNAL_ANCHOR_BYTES": 24576,
-        "JOURNAL_RECENT_BYTES": 4096,
-        "JOURNAL_RETAIN_BYTES": 28672,
-        "JOURNAL_MAX_BYTES": 32768,
-        "JOURNAL_TRANSIENT_BYTES": 61440,
-    }.items():
-        test.enterContext(mock.patch.object(j, name, value))
 
 
 def encoded(seq: int, kind: str = j.PROVIDER_PROGRESSED, **extra) -> bytes:

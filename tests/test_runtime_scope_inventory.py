@@ -47,7 +47,7 @@ from ummanu.runtime.local_pty_head import runtime_scope_inventory
 
 class RuntimeScopeConsumerTests(unittest.TestCase):
     def test_rotated_original_authority_survives_the_secure_fd_reader_and_native_refusals(self):
-        from tests.test_local_pty_journal_retention import small_limits
+        from tests.support.local_pty_journal import small_limits
         from ummanu.runtime.head.local_pty import journal as events
 
         small_limits(self)

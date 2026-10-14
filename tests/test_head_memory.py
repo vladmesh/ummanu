@@ -17,7 +17,13 @@ from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.runtime.head.command import with_pid_heartbeat
 from ummanu.runtime.head.local_pty import protocol, scope_bootstrap, scope_launcher
 from ummanu.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
-from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
+from ummanu.runtime.head.local_pty.journal import (
+    RUN_EXITED,
+    RUN_STARTED,
+    JournalReadResult,
+    JournalWriter,
+    read_events,
+)
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
 from ummanu.runtime.head.memory import (
@@ -480,12 +486,12 @@ class HeadMemoryTests(unittest.TestCase):
                 run_dir = protocol.run_dir_for(temp, run_id)
                 run_dir.mkdir(parents=True)
                 protocol.socket_path_for(run_dir).touch()
-                started = {"kind": "run.started", "head_pid": 12, "supervisor_pid": 11}
+                started = {"kind": "run.started", "seq": 1, "head_pid": 12, "supervisor_pid": 11}
                 fake_process = SimpleNamespace(wait=lambda: 0)
                 with (
                     mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", return_value=fake_process) as popen,
                     mock.patch("ummanu.runtime.head.local_pty.client.read_events", side_effect=[
-                        SimpleNamespace(events=()), SimpleNamespace(events=(started,))
+                        JournalReadResult(events=()), JournalReadResult(events=(started,))
                     ]),
                     mock.patch("ummanu.runtime.head.local_pty.client._identity_written", return_value=True),
                     mock.patch("ummanu.runtime.head.local_pty.client._answers", return_value=True),
@@ -506,10 +512,10 @@ class HeadMemoryTests(unittest.TestCase):
             owner = ScopedHeadLifecycle("launcher", 1)
             owner.persist(Path(temp))
             scope = SimpleNamespace(pid=123, poll=mock.Mock(side_effect=AssertionError("started scope was polled")))
-            started = SimpleNamespace(events=({"kind": RUN_STARTED},))
+            started = JournalReadResult(events=({"kind": RUN_STARTED, "seq": 1},))
             with (
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope) as popen,
-                mock.patch("ummanu.runtime.head.local_pty.journal.read_events", side_effect=[SimpleNamespace(events=()), started]),
+                mock.patch("ummanu.runtime.head.local_pty.journal.read_events", side_effect=[JournalReadResult(events=()), started]),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value="boot:123"),
                 mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.os.write"),
             ):
@@ -553,7 +559,7 @@ class HeadMemoryTests(unittest.TestCase):
             with (
                 mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 0)),
                 mock.patch("ummanu.runtime.head.local_pty.client.read_events", side_effect=[
-                    SimpleNamespace(events=()), SimpleNamespace(events=(started, exited)),
+                    JournalReadResult(events=()), JournalReadResult(events=(started, exited)),
                 ]),
                 mock.patch("ummanu.runtime.head.local_pty.client._identity_written", return_value=True),
                 mock.patch("ummanu.runtime.head.local_pty.client._answers", side_effect=AssertionError("dead socket probed")),
