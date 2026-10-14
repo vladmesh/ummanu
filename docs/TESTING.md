@@ -31,11 +31,14 @@ fixtures retain their CI owners.
 `tests.test_request_index` (unit) guards DUP-W4's shared digest/read/match/write delegation and
 exception identity, including planted duplicate implementations. Its file-only fixture captures
 both real stores' paths and bytes, result types/values, claim flags, exception messages/causes and
-read/build/lock/write order. With `UMMANU_INDEX_BASE_SOURCE` pointing at the two store files from
-`2347277b18f281505dfb82d39b6134035cdd003a`, it verifies their SHA256s and compares base/candidate
-packets; CI supplies those bytes with `git show` and archives the packet in the unit evidence.
-`UMMANU_INDEX_PACKET_OUT` selects the local artifact path. This executes the new fixture on base
-store bytes with unchanged supporting helpers, not a pristine historical whole-suite run.
+read/build/lock/write order. Routine CI runs the candidate-only supported-contract assertions and
+does not supply a historical baseline. For this extraction, a developer may explicitly set
+`UMMANU_INDEX_BASE_SOURCE` to external store files from
+`2347277b18f281505dfb82d39b6134035cdd003a` to verify their SHA256s and compare base/candidate
+packets. `UMMANU_INDEX_PACKET_OUT` selects an optional artifact path. This opt-in capture executes
+the new fixture on base store bytes with unchanged supporting helpers, not a pristine historical
+whole-suite run. Historical whole-store equivalence is extraction evidence; future changes to
+supported store, record and diagnostic contracts are governed by their current contract tests.
 The original web run/sprint protocol, transport and staged-reference recovery cases remain in
 integration-board; the original uncut coupling scanner remains in CI. INEF-04's ref lookup and
 run-state settlement/audit recovery remain separate work.
