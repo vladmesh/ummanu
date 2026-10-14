@@ -52,9 +52,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
-from ummanu.runtime.procfs import STARTTIME, STATE, proc_stat_fields
-
 from ...._fsutil import fsync_directory
+from ...procfs import STARTTIME, STATE, proc_stat_fields
 from ..command import with_pid_heartbeat
 from ..memory import OOM_STREAM_ENV, MemoryScopeError, ScopeEvidence, read_oom_victim
 from . import protocol

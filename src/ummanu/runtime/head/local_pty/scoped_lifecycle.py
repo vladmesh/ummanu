@@ -17,9 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ummanu.runtime.procfs import PGRP, STARTTIME, STATE, proc_stat_fields
-
 from ...._fsutil import fsync_directory
+from ...procfs import PGRP, STARTTIME, STATE, proc_stat_fields
 from ..memory import (
     CGROUP_ROOT,
     MEMORY_LIMIT_REASON,
