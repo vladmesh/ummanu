@@ -13,6 +13,7 @@ import sys
 import time
 from collections.abc import Callable
 
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 from ummanu.web.provider_usage import ProviderUsageLayer
@@ -38,10 +39,7 @@ EXIT_VALIDATION = 2
 
 def add_web_serve_subcommands(subparsers) -> None:
     """Register the group beside `web-read` and `web-run`."""
-    group = subparsers.add_parser(
-        "web-serve",
-        help="serve the local dashboard and card pages over the web-read and web-run operations",
-    )
+    group = add_command_parser(subparsers, 'web-serve')
     add_instance_argument(group, help="path to an instance dir or instance.yaml")
     group.add_argument(
         "--data-dir",

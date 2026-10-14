@@ -90,6 +90,7 @@ from ummanu.po.store import (
     session_fingerprint,
     sprint_session_fingerprint,
 )
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument, instance_file
 
 # How often the service looks at its queue, its restart marker and a recovery that did not run yet,
@@ -1093,10 +1094,7 @@ def listening(service: PoService) -> Iterator[Path]:
 
 
 def add_po_serve_subcommands(subparsers) -> None:
-    command = subparsers.add_parser(
-        "po-serve",
-        help="run the PO head service: the one owner of PO turns, fed by a durable queue over a local socket",
-    )
+    command = add_command_parser(subparsers, 'po-serve')
     add_instance_argument(command, help="path to an instance dir or instance.yaml")
     command.add_argument(
         "--data-dir",

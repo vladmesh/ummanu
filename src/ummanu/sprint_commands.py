@@ -30,6 +30,7 @@ from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, load_config
 from ummanu.kernel.errors import TaskError
 from ummanu.po import PO_SESSION_ENV
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import instance_file
 from ummanu.sprint_observer import observer_choice
 from ummanu.sprints import (
@@ -56,7 +57,7 @@ from ummanu.webproto.sprint_reads import SprintReadLayer
 
 
 def add_sprint_subcommands(subparsers) -> None:
-    sprint = subparsers.add_parser("sprint", help="manage sprint entities on the dedicated sprint board")
+    sprint = add_command_parser(subparsers, 'sprint')
     commands = sprint.add_subparsers(dest="sprint_command")
     listed = commands.add_parser("list")
     listed.add_argument("--status", action="append", choices=("open", "closed", "stopped"))

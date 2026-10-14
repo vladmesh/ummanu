@@ -47,7 +47,7 @@ for dry in (True, False):
         raise RuntimeError("host reconcile changed the runtime owner")
     if unit in (data / "host-managed.json").read_text():
         raise RuntimeError("host reconcile persisted a runtime scope in the packaged manifest")
-with mock.patch.object(cli, "resolve_installed_packaged", return_value=packaged):
+with mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=packaged):
     _, collected, diffs = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=str(fixture)))
 if collected.errors or unit in diffs["units"].unmanaged_on_host or unit in diffs["units"].missing_on_host:
     raise RuntimeError("doctor did not preserve its own owned runtime scope")
@@ -83,7 +83,7 @@ for dry in (True, False):
     results.append(result.status)
     if owner.read_bytes() != before:
         raise RuntimeError("native host reconciliation changed its runtime owner")
-with mock.patch.object(cli, "resolve_installed_packaged", return_value=[]):
+with mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=[]):
     _, native_collected, native_diffs = cli.collect_host_inventory(native_report, SimpleNamespace(host_fixture=None))
 if (native_collected.errors or unit in native_diffs["units"].unmanaged_on_host
         or unit in native_diffs["units"].missing_on_host):

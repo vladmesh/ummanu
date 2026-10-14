@@ -893,7 +893,7 @@ class CreateRuleTests(unittest.TestCase):
                 clean = {k: v for k, v in os.environ.items() if not k.startswith("UMMANU_PO_")}
                 with (
                     mock.patch.dict(os.environ, {**clean, **environment}, clear=True),
-                    mock.patch("ummanu.task_commands.TaskWriter", writer),
+                    mock.patch("ummanu.tasks.TaskWriter", writer),
                     mock.patch("ummanu.task_commands.card_client"),
                     contextlib.redirect_stdout(io.StringIO()),
                     tempfile.TemporaryDirectory() as tmp,
@@ -933,7 +933,7 @@ class CreateRuleTests(unittest.TestCase):
                     clean = {k: v for k, v in os.environ.items() if not k.startswith("UMMANU_PO_")}
                     with (
                         mock.patch.dict(os.environ, {**clean, **environment}, clear=True),
-                        mock.patch("ummanu.task_commands.TaskWriter", writer),
+                        mock.patch("ummanu.tasks.TaskWriter", writer),
                         mock.patch("ummanu.task_commands.card_client"),
                         contextlib.redirect_stdout(io.StringIO()),
                         tempfile.TemporaryDirectory() as tmp,
@@ -965,7 +965,7 @@ class CreateRuleTests(unittest.TestCase):
                 self.subTest(flag=flag),
                 contextlib.redirect_stdout(io.StringIO()),
                 contextlib.redirect_stderr(io.StringIO()),
-                mock.patch("ummanu.task_commands.TaskWriter") as writer,
+                mock.patch("ummanu.tasks.TaskWriter") as writer,
             ):
                 code = main(
                     [

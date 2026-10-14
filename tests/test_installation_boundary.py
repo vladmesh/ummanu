@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ast
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -16,10 +17,32 @@ from unittest import mock
 
 from tests import source_dependencies, source_trees
 from ummanu.installation import clone, commands, credentials, materialize, models, provision, support
+from ummanu.runtime import cli_composition
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE = ROOT / "src" / "ummanu" / "installation"
 INVENTORY = ROOT / "docs" / "installation-boundary-inventory.json"
+
+
+class CliRootRegistration(ast.NodeTransformer):
+    """Expand the shared root facts when comparing the existing installation registrar.
+
+    The historical source capture stays intact. Only the two add_parser expressions moved
+    in ummanu-272; their names, help, nested arguments and handler AST must still match it.
+    """
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name) and node.func.id == "add_command_parser":
+            if len(node.args) != 2 or node.keywords:
+                raise AssertionError("root registration must name its subparsers and one command")
+            name = ast.literal_eval(node.args[1])
+            options = dict(cli_composition.ROOT_COMMANDS["install"])[name]
+            return ast.Call(
+                func=ast.Attribute(value=node.args[0], attr="add_parser", ctx=ast.Load()),
+                args=[ast.Constant(name)],
+                keywords=[ast.keyword(arg=key, value=ast.Constant(value)) for key, value in options.items()],
+            )
+        return self.generic_visit(node)
 
 
 class InstallationBoundaryTests(unittest.TestCase):
@@ -44,6 +67,9 @@ class InstallationBoundaryTests(unittest.TestCase):
                 else:
                     continue
                 self.assertNotIn(name, found)
+                if name == "add_install_commands":
+                    self.assertIs(commands.add_command_parser, cli_composition.add_command_parser)
+                    node = CliRootRegistration().visit(copy.deepcopy(node))
                 found[name] = {
                     "owner": path.stem,
                     "ast_sha256": hashlib.sha256(ast.dump(node, include_attributes=False).encode()).hexdigest(),

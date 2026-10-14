@@ -567,8 +567,7 @@ class DispatcherProducerTests(unittest.TestCase):
             cli, "checkpoint_findings", return_value=[]
         ), mock.patch.object(cli, "secret_store_findings", return_value=[]), mock.patch.object(
             cli, "_load_dispatcher_state", return_value={}
-        ), mock.patch.object(cli, "checkpoint_snapshot", return_value={}), mock.patch.object(
-            cli, "collect_recovery_inventory", return_value={"resources": []}
+        ), mock.patch('ummanu.checkpoint.checkpoint_snapshot', return_value={}), mock.patch('ummanu.infra.recovery_inventory.collect_recovery_inventory', return_value={"resources": []}
         ), mock.patch.object(cli, "_restore_findings", return_value=[]), mock.patch.object(
             cli, "_codex_home_status", return_value={"login_missing": "", "codex_required": False}
         ), mock.patch.object(cli, "_recovery_findings", return_value=[]):

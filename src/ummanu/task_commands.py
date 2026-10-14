@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable
 from pathlib import Path
 from stat import S_ISREG
+from typing import TYPE_CHECKING
 
 from ummanu.board.backend import card_client
 from ummanu.board.models import CardState
@@ -27,9 +28,11 @@ from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_con
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missing_snapshot
 from ummanu.kernel.errors import TaskError
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
-from ummanu.runtime.head import CODEX_LAUNCH_MODES
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument, instance_file, resolve_instance_path
-from ummanu.tasks import BOARD_STORE_KIND, TaskReader, TaskWriter, task_audit_for
+
+if TYPE_CHECKING:
+    from ummanu.tasks import TaskReader, TaskWriter
 
 
 def _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:
@@ -79,7 +82,7 @@ def _instance(args: argparse.Namespace) -> str:
 
 
 def add_task_subcommands(subparsers) -> None:
-    task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
+    task = add_command_parser(subparsers, 'task')
     task_subcommands = task.add_subparsers(dest="task_command")
     task_list = task_subcommands.add_parser("list")
     task_list.add_argument(
@@ -429,6 +432,7 @@ def run_task_show(args: argparse.Namespace) -> int:
 
 def run_task_repair_references_preview(args: argparse.Namespace) -> int:
     from ummanu.board.reference_repair import preview_reference_repair
+    from ummanu.tasks import TaskWriter
 
     return run_task_command(
         lambda: preview_reference_repair(
@@ -439,6 +443,7 @@ def run_task_repair_references_preview(args: argparse.Namespace) -> int:
 
 def run_task_repair_references_apply(args: argparse.Namespace) -> int:
     from ummanu.board.reference_repair import apply_reference_repair
+    from ummanu.tasks import TaskWriter
 
     return run_task_command(
         lambda: apply_reference_repair(
@@ -454,6 +459,8 @@ def run_task_repair_references_apply(args: argparse.Namespace) -> int:
 
 
 def _run_task_read(args: argparse.Namespace, operation: Callable[[TaskReader], object]) -> int:
+    from ummanu.tasks import TaskReader
+
     return run_task_command(lambda: operation(TaskReader(card_client(_instance(args)))))
 
 
@@ -524,6 +531,8 @@ def _run_task_write(
     *,
     handoff: bool = False,
 ) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
         body = _reason_body(args, handoff=handoff)
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
@@ -542,6 +551,8 @@ def run_task_comment(args: argparse.Namespace) -> int:
 
 
 def run_task_create(args: argparse.Namespace) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
         _validate_codex_mode_for_create(args)
         description = _read_body(args.body_file) if args.body_file else args.description
@@ -605,6 +616,8 @@ def _po_turn_origin(role: str) -> dict[str, str] | None:
 
 
 def run_task_edit(args: argparse.Namespace) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
         description = _read_body(args.body_file) if args.body_file else args.description
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
@@ -778,6 +791,8 @@ def run_task_claim(args: argparse.Namespace) -> int:
 
 
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
         repaired, unresolved = TaskWriter(
             card_client(_instance(args)),
@@ -797,6 +812,8 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
     secretary-1614 was declared stalled by. The exit contract is unchanged: 0 when nothing is staged, 1 when something is, and
     the named `TaskError` status of any command that cannot reach its backend.
     """
+    from ummanu.tasks import BOARD_STORE_KIND, task_audit_for
+
 
     def command() -> object:
         client = card_client(_instance(args))
@@ -808,6 +825,8 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
 
 
 def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:
+    from ummanu.runtime.head import CODEX_LAUNCH_MODES
+
     if not args.codex_mode:
         return
     mode = str(args.codex_mode).strip()

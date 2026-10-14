@@ -25,6 +25,7 @@ from ummanu.dispatch.head_status import head_status
 from ummanu.dispatch.pause import PAUSE_MODES, normalize_pause_mode
 from ummanu.dispatch.types import DispatcherError, HostError
 from ummanu.kernel.errors import TaskError
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.codex_home import bound_data_dir
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND
@@ -34,7 +35,7 @@ from ummanu.webproto.pause_reads import DRAIN, PauseReadLayer
 
 
 def add_dispatcher_subcommands(subparsers) -> None:
-    dispatcher = subparsers.add_parser("dispatcher", help="run the task and sprint dispatcher")
+    dispatcher = add_command_parser(subparsers, 'dispatcher')
     commands = dispatcher.add_subparsers(dest="dispatcher_command")
 
     for name, handler in (
@@ -67,10 +68,7 @@ def add_pause_commands(subparsers) -> None:
     and not one of the dispatcher's own steps. The legacy `pipeline pause` entry refuses and points
     here, so the two implementations cannot drift apart in silence.
     """
-    pause = subparsers.add_parser(
-        "pause",
-        help="stop the pipeline: drain (no new claims) or freeze (heads stopped too)",
-    )
+    pause = add_command_parser(subparsers, 'pause')
     add_common(pause)
     pause.add_argument("mode", choices=(*PAUSE_MODES, "soft", "hard"))
     reason = pause.add_mutually_exclusive_group()
@@ -84,19 +82,15 @@ def add_pause_commands(subparsers) -> None:
     )
     pause.set_defaults(handler=run_pause)
 
-    resume = subparsers.add_parser("resume", help="clear the pause and put back what a freeze stopped")
+    resume = add_command_parser(subparsers, 'resume')
     add_common(resume)
     resume.set_defaults(handler=run_resume)
 
-    status = subparsers.add_parser("pause-status", help="read the production dispatcher's pause state")
+    status = add_command_parser(subparsers, 'pause-status')
     add_common(status)
     status.set_defaults(handler=run_pause_status)
 
-    scope = subparsers.add_parser(
-        "pause-scope",
-        help="read what a pause would reach before issuing one: the flag, the open sprints and "
-        "cards inside the pipeline-wide scope, and the heads a drain would leave running",
-    )
+    scope = add_command_parser(subparsers, 'pause-scope')
     add_common(scope)
     scope.set_defaults(handler=run_pause_scope)
 
@@ -111,10 +105,7 @@ def add_head_status_command(subparsers) -> None:
     dispatcher state -- the records naming which head serves which card in which workspace -- while
     `host_commands` is about host resources the dispatcher does not own.
     """
-    command = subparsers.add_parser(
-        "head-status",
-        help="read whether the dispatcher's heads in a workspace are alive, and what proved it",
-    )
+    command = add_command_parser(subparsers, 'head-status')
     add_common(command)
     command.add_argument(
         "--workspace",

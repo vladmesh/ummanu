@@ -24,21 +24,6 @@ from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
 
-from ummanu import restore_commands
-from ummanu.backup_policy import ARCHIVE_ROOT
-from ummanu.board.sql_cards import SqlCardClient
-from ummanu.cli import main as cli_main
-from ummanu.data import export_memory, init_layout
-from ummanu.host import CollectResult, HostInventory, build_plan
-from ummanu.host_apply import resolve_packaged
-from ummanu.restore import (
-    RestoreError,
-    import_normalized_board,
-    restore_backup,
-    restore_findings,
-    restore_state,
-)
-from tests.runtime_account_fixtures import fixture_runtime_account
 from tests.restore_fixtures import (
     _producer_exports,
     _restore_card,
@@ -49,7 +34,22 @@ from tests.restore_fixtures import (
     create_backup,
     fake_engine_dump,
 )
+from tests.runtime_account_fixtures import fixture_runtime_account
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.backup_policy import ARCHIVE_ROOT
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.cli import main as cli_main
+from ummanu.config import validate_instance
+from ummanu.data import export_memory, init_layout
+from ummanu.host import CollectResult, HostInventory, build_plan
+from ummanu.host_apply import resolve_packaged
+from ummanu.restore import (
+    RestoreError,
+    import_normalized_board,
+    restore_backup,
+    restore_findings,
+    restore_state,
+)
 
 _UNSET = object()
 
@@ -233,7 +233,7 @@ def _reindex_script(root: Path) -> Path:
 def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
     with fixture_runtime_account(root):
-        report = restore_commands.validate_instance(instance)
+        report = validate_instance(instance)
         packaged = resolve_packaged(
             report.instance,
             instance_path=report.instance_path.parent,
@@ -254,7 +254,7 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
         inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
         live = mock.Mock()
         live.collect.return_value = CollectResult(inventory=inventory)
-        with mock.patch.object(restore_commands, "LiveHostSource", return_value=live):
+        with mock.patch('ummanu.host.LiveHostSource', return_value=live):
             return main(["restore-reconcile", "--instance", str(instance)])
 
 
@@ -498,7 +498,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
 
             source = mock.Mock()
             source.collect.return_value = CollectResult(inventory=HostInventory(units=set()))
-            with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
+            with mock.patch('ummanu.host.LiveHostSource', return_value=source):
                 self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 1)
 
             self.assertIn("managed reconcile has not been applied", restore_findings(data_dir))

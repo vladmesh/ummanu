@@ -114,6 +114,14 @@ jobs:
           python3 scripts/ci_test_shards.py --summary
           --report-dir "$RUNNER_TEMP/ci-evidence/${{ matrix.suite }}"
           >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload cold CLI process evidence
+        if: ${{ always() && matrix.suite == 'unit' && hashFiles('.ummanu-task-env/cli-272/candidate-imports.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-cold-composition-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .ummanu-task-env/cli-272
+          include-hidden-files: true
+          if-no-files-found: error
       - name: Upload suite JUnit and bounded log
         if: ${{ always() }}
         continue-on-error: true

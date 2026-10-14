@@ -83,6 +83,7 @@ from ummanu.memory.pack import MemoryPackError, load_product_pack, materialize_p
 from ummanu.po import client as po_client, token as po_token, workspace as po_workspace
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import interactive_workspace
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument, component_enabled, configured_product_root
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.web.health import WebProbeError, probe_web, target_from_unit
@@ -2824,10 +2825,7 @@ def _exec_pulled_upgrade(
 
 
 def add_upgrade_command(subparsers) -> None:
-    upgrade = subparsers.add_parser(
-        "upgrade",
-        help="pull the current product version and re-materialize this installation",
-    )
+    upgrade = add_command_parser(subparsers, 'upgrade')
     add_instance_argument(upgrade)
     upgrade.add_argument("--dry-run", action="store_true", help="decide every step but write nothing")
     upgrade.add_argument("--no-pull", action="store_true", help="re-materialize without moving the checkout")

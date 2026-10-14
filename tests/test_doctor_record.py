@@ -32,7 +32,7 @@ class RootDiskFindingTests(unittest.TestCase):
         root = Path("/configured/data")
         for free, code in ((ROOT_FREE_MIN_BYTES - 1, "root_disk_low"),
                            (ROOT_FREE_MIN_BYTES, None), (None, "root_disk_unavailable")):
-            with self.subTest(free=free), mock.patch.object(cli, "disk_free_bytes", return_value=free):
+            with self.subTest(free=free), mock.patch('ummanu.status.disk_free_bytes', return_value=free):
                 finding = cli.root_disk_finding(root)
                 self.assertEqual(finding["code"] if finding else None, code)
                 if finding is not None:
@@ -242,7 +242,7 @@ class DoctorRecordTests(unittest.TestCase):
         command = ["doctor", "--instance", str(self.instance), "--host-fixture", str(self.root / "missing-host")]
         def run(structured):
             out = io.StringIO()
-            with contextlib.redirect_stdout(out), mock.patch.object(cli, "disk_free_bytes", return_value=ROOT_FREE_MIN_BYTES):
+            with contextlib.redirect_stdout(out), mock.patch('ummanu.status.disk_free_bytes', return_value=ROOT_FREE_MIN_BYTES):
                 code = main([*command, "--json"] if structured else command)
             return code, json.loads(out.getvalue()) if structured else out.getvalue()
         code, payload = run(True)
@@ -407,7 +407,7 @@ class DoctorRecordTests(unittest.TestCase):
                 replace = records.os.replace
                 calls = 0
 
-                def fail_once(*args):
+                def fail_once(*args, failure_at=failure_at, replace=replace):
                     nonlocal calls
                     calls += 1
                     if calls == failure_at:

@@ -23,6 +23,7 @@ from typing import Any
 from ummanu._fsutil import fsync_directory
 from ummanu.config import validate_instance
 from ummanu.infra.doctor_findings import accepted, active_findings
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument, instance_file
 
 RESULT_PATH = Path("doctor/latest.json")
@@ -271,7 +272,7 @@ def _timestamp(value: Any) -> float:
 
 
 def add_subcommand(subparsers: Any) -> None:
-    command = subparsers.add_parser("doctor-record", help="atomically record one bounded real doctor attempt")
+    command = add_command_parser(subparsers, 'doctor-record')
     add_instance_argument(command, type=Path)
     command.add_argument("--data-dir", type=Path, help="override the result data root")
     command.add_argument("--offline", action="store_true")

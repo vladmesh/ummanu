@@ -27,12 +27,11 @@ from ummanu.board.owner_decisions import stored_decisions
 from ummanu.config import validate
 from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot
+from ummanu.runtime.paths import PIPELINE_STATE_DIR
 from ummanu.tasks import TaskReader, task_audit_for
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
-PIPELINE_WORKTREE = Path.home() / "orca" / "workspaces" / "ummanu" / "pipeline"
 ORCA_WORKSPACES_ROOT = Path.home() / "orca" / "workspaces"
-PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state" / "pipeline"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 

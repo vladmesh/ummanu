@@ -519,7 +519,7 @@ class TaskCliTests(CardStoreCase):
             writer.return_value.create.return_value = {"action": "created"}
             with (
                 tempfile.TemporaryDirectory() as tmp,
-                mock.patch("ummanu.task_commands.TaskWriter", writer),
+                mock.patch("ummanu.tasks.TaskWriter", writer),
                 mock.patch("ummanu.task_commands.card_client"),
                 mock.patch.dict("os.environ", {}, clear=True),
                 contextlib.redirect_stdout(io.StringIO()),

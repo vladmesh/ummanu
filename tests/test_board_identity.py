@@ -137,11 +137,12 @@ class BoardClientTests(unittest.TestCase):
 
     def test_a_missing_board_store_env_prints_a_named_refusal(self) -> None:
         from ummanu import task_commands
+        from ummanu.tasks import TaskReader
 
         stderr = StringIO()
         with redirect_stderr(stderr):
             code = task_commands.run_task_command(
-                lambda: task_commands.TaskReader(
+                lambda: TaskReader(
                     backend.card_client(Path("/nonexistent-instance"))
                 ).list()
             )

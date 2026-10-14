@@ -70,6 +70,7 @@ from ummanu.restore import (
     restore_findings,
     restore_state,
 )
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.secret_store import key_path
@@ -609,10 +610,7 @@ def add_install_commands(subparsers) -> None:
         parser.add_argument("--host-fixture", help=argparse.SUPPRESS)
         parser.set_defaults(handler=run_install)
 
-    fresh = subparsers.add_parser("install", help="install or resume from a private instance remote")
+    fresh = add_command_parser(subparsers, 'install')
     arguments(fresh, recovery_default=False)
-    recover = subparsers.add_parser(
-        "recover",
-        help="recover a lost installation from a private instance remote",
-    )
+    recover = add_command_parser(subparsers, 'recover')
     arguments(recover, recovery_default=True)
