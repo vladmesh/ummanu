@@ -45,7 +45,7 @@ from ummanu.po.store import (
 from ummanu.po.workspace import workspace_dir
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import HeadHandle, spawn_head
-from ummanu.runtime.head.local_pty.journal import RUN_EXITED, read_events
+from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, read_events
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError
 from ummanu.runtime.head.spec import HeadSpec, load_head_specs
@@ -265,17 +265,33 @@ class ScopedPoProcess:
     def wait(self, timeout: float | None = None) -> int:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            for event in reversed(read_events(self.handle.journal_path).events):
-                if event.get("kind") == RUN_EXITED and event.get("run_id") == self.handle.run_id:
-                    self.head_loss_reason = event.get("head_loss_reason")
-                    code = event.get("exit_code")
-                    number = event.get("signal")
-                    return int(code) if code is not None else -int(number or 0)
+            reading = read_events(self.handle.journal_path)
+            if reading.malformed or not reading.ordered:
+                raise RunnerError("PO head journal is damaged; exit outcome is unavailable")
+            if not reading.truncated_tail:
+                starts = reading.of_kind(RUN_STARTED)
+                if self.handle.journal_started_seq and (
+                    not starts or starts[-1]["seq"] != self.handle.journal_started_seq
+                ):
+                    raise RunnerError("PO head journal incarnation changed; exit outcome is unavailable")
+                for event in reversed(reading.events):
+                    if event.get("kind") == RUN_STARTED:
+                        break  # No exit from a previous incarnation answers for this handle.
+                    if event.get("kind") == RUN_EXITED and event.get("run_id") == self.handle.run_id:
+                        if event.get("head_pid") != self.handle.head_pid:
+                            break
+                        self.head_loss_reason = event.get("head_loss_reason")
+                        code = event.get("exit_code")
+                        number = event.get("signal")
+                        return int(code) if code is not None else -int(number or 0)
+            # An in-progress append is pending while the exact supervisor still runs. Even an
+            # older complete exit cannot answer through that torn current record.
             if not still_running(self.handle.supervisor_pid, self._supervisor_identity):
                 raise RunnerError(f"PO head supervisor {self.handle.supervisor_pid} exited without a run.exited record")
-            if deadline is not None and time.monotonic() >= deadline:
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
                 raise subprocess.TimeoutExpired("PO head", timeout)
-            time.sleep(0.05)
+            time.sleep(0.05 if left is None else min(0.05, left))
 
 
 class PoRunner:

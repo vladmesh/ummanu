@@ -14,6 +14,12 @@ from typing import Any
 
 from ummanu.runtime.head import local_pty
 from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty.journal import (
+    JOURNAL_MAX_BYTES,
+    JOURNAL_RECORD_BYTES,
+    SCOPE_BOUND,
+    _unique,
+)
 from ummanu.runtime.local_pty_values import _Address
 
 
@@ -46,7 +52,13 @@ class _JournalReplay:
 def _replay_journal(events: Any) -> _JournalReplay:
     """Fold one run's usable records, never raising on a value a record should not hold."""
     replay = _JournalReplay()
+    previous = None
     for event in events:
+        seq = event.get("seq")
+        if previous is not None and seq != previous + 1:
+            # A retained old turn/start cannot supply state across an eviction gap.
+            replay = _JournalReplay()
+        previous = seq if type(seq) is int else None
         kind = str(event.get("kind") or "")
         if kind == local_pty.RUN_STARTED:
             # A new incarnation: nothing an older one wrote, its times included, answers for it.
@@ -233,7 +245,7 @@ def _strict_record(line: bytes, run_id: str, previous: dict[str, Any] | None) ->
     failure refuses the whole window.
     """
     try:
-        record = json.loads(line.decode("utf-8"))
+        record = json.loads(line.decode("utf-8"), object_pairs_hook=_unique)
     except (UnicodeDecodeError, ValueError):
         return "is not a JSON record"
     if not isinstance(record, dict):
@@ -281,7 +293,7 @@ def _has_exited(address: _Address) -> bool:
     final records belong to. The launch identity remains the primary stop witness.
     """
     try:
-        reading = local_pty.read_tail(address.journal_path)
+        reading = local_pty.read_events(address.journal_path)
     except OSError:
         return False
     if reading.truncated_tail or reading.malformed or not reading.ordered:
@@ -298,9 +310,9 @@ def _has_exited(address: _Address) -> bool:
 
 
 def head_run_journal(run_dir: str | os.PathLike[str]) -> tuple[dict[str, Any], ...]:
-    """Everything one head's supervisor wrote about it, read whole from outside its lifecycle.
+    """Retained records from one head's supervisor, read from outside its lifecycle.
 
-    Whole rather than a tail, so a finished run's `run.exited` is always found. A missing file is
+    Includes pinned terminal records; use `head_run_journal_read` for partial-history flags. A missing file is
     an empty journal; `OSError` propagates, so "unreadable" stays distinct from "empty".
     """
     return head_run_journal_read(run_dir).events
@@ -319,22 +331,30 @@ def head_run_first_record(run_dir: str | os.PathLike[str]) -> dict[str, Any] | N
 
     Only those four fields, never the record itself: `run.started` carries the head's command,
     and the command carries the head's memory token. `None` when there is no journal; the read is
-    bounded to the first `JOURNAL_TAIL_BYTES`, and a first line that is not a `run.started`
+    incremental, at most `JOURNAL_MAX_BYTES` with a per-record `JOURNAL_RECORD_BYTES` cap.
+    Multiple pre-head crash bindings may precede the first start. No complete `run.started`
     record raises `ValueError`. `OSError` propagates, as it does from the other readers here.
     """
     path = Path(run_dir) / protocol.JOURNAL_NAME
     try:
         with open(path, "rb") as journal:
-            head = journal.read(local_pty.JOURNAL_TAIL_BYTES)
+            remaining = JOURNAL_MAX_BYTES
+            while remaining:
+                line = journal.readline(min(JOURNAL_RECORD_BYTES + 1, remaining))
+                remaining -= len(line)
+                if len(line) > JOURNAL_RECORD_BYTES or not line.endswith(b"\n"):
+                    raise ValueError("the journal's first start is outside a complete bounded record")
+                if not line.strip():
+                    continue
+                record = json.loads(line.decode("utf-8"), object_pairs_hook=_unique)
+                if isinstance(record, dict) and record.get("kind") == SCOPE_BOUND:
+                    continue
+                if not isinstance(record, dict) or record.get("kind") != local_pty.RUN_STARTED:
+                    raise ValueError("the journal does not begin with scope bindings or run.started")
+                return {key: record.get(key) for key in ("task", "role", "run_id", "at")}
     except FileNotFoundError:
         return None
-    line, newline, _rest = head.partition(b"\n")
-    if not newline:
-        raise ValueError("the journal's first record is not a complete line")
-    record = json.loads(line.decode("utf-8"))
-    if not isinstance(record, dict) or record.get("kind") != local_pty.RUN_STARTED:
-        raise ValueError("the journal does not begin with run.started")
-    return {key: record.get(key) for key in ("task", "role", "run_id", "at")}
+    raise ValueError("the journal's first start is outside the metadata read limit")
 
 
 def head_run_journal_tail(run_dir: str | os.PathLike[str]) -> local_pty.JournalReadResult:
@@ -351,10 +371,12 @@ def head_run_loss_reason(root: str | os.PathLike[str], run_id: str) -> str | Non
     from ummanu.runtime.head.memory import MEMORY_LIMIT_REASON
 
     try:
-        events = head_run_journal_tail(protocol.run_dir_for(root, run_id)).events
+        reading = head_run_journal_read(protocol.run_dir_for(root, run_id))
     except (OSError, ValueError):
         return None
-    for event in reversed(events):
+    if reading.truncated_tail or reading.malformed or not reading.ordered:
+        return None
+    for event in reversed(reading.events):
         if event.get("run_id") != run_id:
             continue
         if event.get("kind") == local_pty.RUN_STARTED:

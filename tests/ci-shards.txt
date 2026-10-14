@@ -141,6 +141,8 @@ unit tests/test_head_vitality_guard.py
 unit tests/test_wait_outcome.py
 unit tests/test_local_pty_vitality.py
 unit tests/test_local_pty_journal_turn.py
+unit tests/test_local_pty_journal_retention.py
+unit tests/test_local_pty_journal_consumers.py
 integration-heads tests/test_head_vitality_guard_sites.py
 integration-heads tests/test_head_vitality_legacy_path.py
 unit tests/test_head_vitality_policy.py

@@ -527,9 +527,12 @@ class DeliveryMixin(_RuntimeState):
         The floor keeps an earlier incarnation's record with the same delivery id from answering.
         """
         try:
-            events = local_pty.read_tail(address.journal_path).of_kind(local_pty.INPUT_ACCEPTED)
+            reading = local_pty.read_tail(address.journal_path)
         except OSError:
             return ()
+        if not reading.covers_since(floor):
+            return ()
+        events = reading.of_kind(local_pty.INPUT_ACCEPTED)
         return tuple(event for event in events if int(event.get("seq") or 0) > floor)
 
     def _unreachable_refusal(self, address: _Address, run: HeadRun, exc: BaseException) -> _Refusal:

@@ -46,6 +46,153 @@ from ummanu.runtime.local_pty_head import runtime_scope_inventory
 
 
 class RuntimeScopeConsumerTests(unittest.TestCase):
+    def test_distinct_prehead_rebind_is_retained_on_legacy_and_new_writer_secure_fd_paths(self):
+        from tests.support.local_pty_journal import small_limits
+        from ummanu.runtime.head.local_pty import journal as events
+        from ummanu.runtime.local_pty_journal import head_run_first_record
+
+        small_limits(self)
+        for legacy in (True, False):
+            with self.subTest(legacy=legacy):
+                owner, directory, unit = self.owner(run_id=f"rebind-{legacy}")
+                path = directory / protocol.JOURNAL_NAME
+                bound, start = events.read_events(path).events
+                previous = {**bound, "seq": 1, "binding": {**bound["binding"],
+                            "invocation_id": "failed-prehead", "admitted": {
+                                **bound["binding"]["admitted"], "generation": "prior-generation"}}}
+                current = {**bound, "seq": 2}
+                started = {**start, "seq": 3}
+                if legacy:
+                    path.write_bytes(b"".join((json.dumps(event, sort_keys=True, separators=(",", ":"))
+                                             + "\n").encode() for event in (previous, current, started)))
+                else:
+                    path.write_bytes(b"")
+                    with JournalWriter(path, owner.run_id) as writer:
+                        writer.append(SCOPE_BOUND, binding=previous["binding"])
+                    with JournalWriter(path, owner.run_id) as writer:
+                        self.assertEqual(writer.seq, 1)
+                        current = writer.append(SCOPE_BOUND, binding=bound["binding"])
+                    # Before run.started, the latest distinct binding alone is native authority.
+                    self.assertFalse(runtime_scope_inventory(self.data, {unit}).errors)
+                    with JournalWriter(path, owner.run_id) as writer:
+                        self.assertEqual(writer.seq, 2)
+                        started = writer.append(RUN_STARTED, **{key: value for key, value in start.items()
+                                                 if key not in ("schema_version", "seq", "run_id", "kind", "at")})
+                original_lines = path.read_bytes().splitlines()[1:3]
+                with JournalWriter(path, owner.run_id) as writer:
+                    self.assertEqual(writer.seq, 3)
+                    inodes = set()
+                    for _ in range(160):
+                        writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+                        inodes.add(path.stat().st_ino)
+                        self.assertLessEqual(path.stat().st_size, events.JOURNAL_MAX_BYTES)
+                self.assertGreater(len(inodes), 1)
+                for line in original_lines:
+                    self.assertIn(line, path.read_bytes().splitlines())
+                with JournalWriter(path, owner.run_id) as writer:
+                    self.assertEqual(writer.seq, 163)
+                reads = []
+                actual_read = reader.read_events
+
+                def read_fd(open_path, actual_read=actual_read, reads=reads):
+                    self.assertTrue(str(open_path).startswith("/proc/self/fd/"))
+                    result = actual_read(open_path)
+                    reads.append(result)
+                    return result
+
+                with mock.patch.object(reader, "read_events", side_effect=read_fd):
+                    self.assertFalse(runtime_scope_inventory(self.data, {unit}).errors)
+                self.assertTrue(reads)
+                self.assertEqual(reads[-1].of_kind(SCOPE_BOUND), (current,))
+                self.assertEqual(reads[-1].of_kind(RUN_STARTED), (started,))
+                self.assertEqual(head_run_first_record(directory), {key: started.get(key)
+                                 for key in ("task", "role", "run_id", "at")})
+                saved = path.read_bytes()
+                # Same native invocation remains a duplicate, including after a successful start.
+                with JournalWriter(path, owner.run_id) as writer:
+                    writer.append(SCOPE_BOUND, binding=current["binding"])
+                self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                with self.assertRaises(events.JournalError):
+                    JournalWriter(path, owner.run_id).open()
+                path.write_bytes(saved)
+                record = owner.read_owner(directory)
+                owner.update_owner(directory, {**record, "generation": "wrong-generation"})
+                self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                owner.update_owner(directory, record)
+                native = dict(self.native[unit])
+                for key, value in (("InvocationID", "wrong"), ("ControlGroup", "/wrong")):
+                    self.native[unit] = {**native, key: value}
+                    self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                self.native[unit] = native
+                lines = saved.splitlines(keepends=True)
+                wrong_native = json.loads(lines[0])
+                wrong_native["binding"]["cgroup"][1] += 1
+                wrong_cgroup = (json.dumps(wrong_native) + "\n").encode() + b"".join(lines[1:])
+                for damaged in (saved.replace(b'"cgroup":[', b'"cgroup":[true,', 1),
+                                saved.replace(b'"binding":', b'"binding":{},"binding":', 1), wrong_cgroup):
+                    path.write_bytes(damaged)
+                    self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                path.write_bytes(saved)
+                foreign = directory / "foreign-journal"
+                path.rename(foreign)
+                path.symlink_to(foreign)
+                self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+
+    def test_rotated_original_authority_survives_the_secure_fd_reader_and_native_refusals(self):
+        from tests.support.local_pty_journal import small_limits
+        from ummanu.runtime.head.local_pty import journal as events
+
+        small_limits(self)
+        owner, directory, unit = self.owner()
+        path = directory / protocol.JOURNAL_NAME
+        original = events.read_events(path).events
+        with JournalWriter(path, owner.run_id) as writer:
+            for _ in range(160):
+                writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+            retained = events.read_events(path)
+            self.assertTrue(retained.partial_head)
+            self.assertEqual(retained.events[:2], original)
+            real_read = reader.read_events
+            witnessed = []
+
+            def read_open_descriptor(open_path):
+                self.assertTrue(str(open_path).startswith("/proc/self/fd/"))
+                before = real_read(open_path)
+                inode = path.stat().st_ino
+                while path.stat().st_ino == inode:
+                    writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+                after = real_read(open_path)
+                self.assertEqual(after.events[:2], before.events[:2])
+                self.assertFalse(after.malformed or after.truncated_tail)
+                witnessed.append(after)
+                return after
+
+            with mock.patch.object(reader, "read_events", side_effect=read_open_descriptor):
+                result = runtime_scope_inventory(self.data, {unit})
+            self.assertFalse(result.errors, result.errors)
+            self.assertIn(unit, result.scopes)
+            self.assertTrue(witnessed, "inventory must use the already-open secure descriptor")
+        saved = path.read_bytes()
+        owner_record = owner.read_owner(directory)
+        owner.update_owner(directory, {**owner_record, "generation": "foreign-generation"})
+        self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        owner.update_owner(directory, owner_record)
+        native = dict(self.native[unit])
+        for key, value in (("InvocationID", "foreign"), ("ControlGroup", "/wrong")):
+            self.native[unit] = {**native, key: value}
+            self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        self.native[unit] = native
+        for damaged in (saved.replace(b'"binding":', b'"binding":{},"binding":', 1),
+                        saved.replace(b'"cgroup":[', b'"cgroup":[true,', 1),
+                        saved + saved.splitlines()[0] + b"\n"):
+            path.write_bytes(damaged)
+            self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        path.write_bytes(saved)
+        foreign = directory / "foreign-journal"
+        path.rename(foreign)
+        path.symlink_to(foreign)
+        self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.data = self.root / "data"
