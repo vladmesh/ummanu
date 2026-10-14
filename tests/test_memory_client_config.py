@@ -52,6 +52,21 @@ class MemoryClientConfigTests(unittest.TestCase):
         self.assertFalse(reconcile_codex(path, self.command, self.data_dir))
         self.assertEqual(path.read_text(encoding="utf-8"), first)
 
+    def test_codex_leaves_a_current_entry_alone_when_tables_follow_it(self) -> None:
+        path = self.root / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text("", encoding="utf-8")
+        reconcile_codex(path, self.command, self.data_dir)
+        with path.open("a", encoding="utf-8") as config:
+            config.write('\n[projects."/srv/workspace"]\ntrust_level = "trusted"\n')
+        settled = path.read_text(encoding="utf-8")
+
+        self.assertFalse(reconcile_codex(path, self.command, self.data_dir, dry_run=True))
+        self.assertFalse(reconcile_codex(path, self.command, self.data_dir))
+        self.assertEqual(path.read_text(encoding="utf-8"), settled)
+
+        self.assertTrue(reconcile_codex(path, self.root / "moved-bridge", self.data_dir, dry_run=True))
+
     def test_claude_preserves_login_state_and_unrelated_servers(self) -> None:
         path = self.root / ".claude.json"
         path.write_text(

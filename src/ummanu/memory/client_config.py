@@ -50,15 +50,18 @@ def _bridge_env(data_dir: Path) -> dict[str, str]:
     }
 
 
-def _codex_section(command: Path, data_dir: Path) -> str:
-    env = _bridge_env(data_dir)
+def _codex_entry(command: Path, data_dir: Path) -> dict[str, Any]:
+    return {"command": str(command), "args": [], "env": _bridge_env(data_dir)}
+
+
+def _codex_section(entry: dict[str, Any]) -> str:
     return "\n".join(
         (
             f"[mcp_servers.{PO_SERVER}]",
-            f"command = {json.dumps(str(command))}",
+            f"command = {json.dumps(entry['command'])}",
             "args = []",
             "env = { "
-            + ", ".join(f"{key} = {json.dumps(value)}" for key, value in sorted(env.items()))
+            + ", ".join(f"{key} = {json.dumps(value)}" for key, value in sorted(entry["env"].items()))
             + " }",
             "",
         )
@@ -94,7 +97,11 @@ def _owned_codex_sections(payload: dict[str, Any]) -> set[str]:
 
 
 def reconcile_codex(path: Path, command: Path, data_dir: Path, *, dry_run: bool = False) -> bool:
-    """Replace only Ummanu's legacy/direct entry with the operator bridge."""
+    """Replace only Ummanu's legacy/direct entry with the operator bridge.
+
+    The parsed entry decides: one that already equals the bridge entry is left where it is, whatever
+    tables follow it.
+    """
     _reject_symlink(path, "Codex")
     try:
         current = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -104,6 +111,9 @@ def reconcile_codex(path: Path, command: Path, data_dir: Path, *, dry_run: bool 
     if not isinstance(payload, dict):
         raise ClientConfigError(f"Codex config {path} is not a table")
     owned = _owned_codex_sections(payload)
+    entry = _codex_entry(command, data_dir)
+    if owned == {PO_SERVER} and payload["mcp_servers"][PO_SERVER] == entry:
+        return False
     lines = current.splitlines(keepends=True)
     remove: set[int] = set()
     for name, start, end in _section_ranges(lines):
@@ -112,9 +122,7 @@ def reconcile_codex(path: Path, command: Path, data_dir: Path, *, dry_run: bool 
         ):
             remove.update(range(start, end))
     retained = "".join(line for index, line in enumerate(lines) if index not in remove).rstrip()
-    desired = (retained + ("\n\n" if retained else "") + _codex_section(command, data_dir)).rstrip() + "\n"
-    if desired == current:
-        return False
+    desired = (retained + ("\n\n" if retained else "") + _codex_section(entry)).rstrip() + "\n"
     if dry_run:
         return True
     try:
