@@ -63,3 +63,7 @@ the explicit contract assertions, independent of that optional worker archive.
 The ownership regression scans source for maintained close/space tokenization,
 tests planted duplicates, and allows the embedded writer through its source
 boundary rather than freezing the historical reader bodies.
+
+`test_shared_owner_closures_exclude_runtime_effects` includes the new pure leaf
+in its explicit HeadRun parser closure inventory. Its forbidden runtime-effect
+owners, source-edge walker and cold-import assertions remain unchanged.
