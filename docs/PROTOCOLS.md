@@ -4718,7 +4718,11 @@ while rendering. A settled run retains its recorded ending and result. The API r
 Before serving, `web-serve` calls `ops.prepare_card_runs` / `RunStore.prepare_ref_lookup` under
 `.runs.lock`. This explicit, repeatable preparation scans released root run JSON, validates each
 path/id/ref and rebuilds derived membership without rewriting canonical bytes or the request-id
-index. Failed preparation refuses startup. A never-created store stays absent, without writes;
+index. A typed preparation failure is logged and serving continues with product runs unavailable,
+preserving the other pages and canonical/history/request-index bytes. The lookup stays incomplete;
+GET performs no repair. Dirty lookup after an interrupted write is recovered by explicit
+preparation at restart; unrepaired canonical corruption keeps runs unavailable on that restart.
+A never-created store stays absent, without writes;
 its first writer initializes empty membership under the lock before claiming a canonical run.
 
 The derived `runs/refs/complete.json` is a small versioned completeness token. For a card, SHA-256

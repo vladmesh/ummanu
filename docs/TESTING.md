@@ -55,8 +55,12 @@ identity is injected; these fixtures prove no kernel liveness or installed servi
 File-only cases cover released-history bootstrap, repeat preparation, subsequent claims,
 missing/dirty/corrupt lookup, interrupted canonical/membership/presence/complete phases, ordered
 reader/writer overlap, recovery, request replay/settlement and canonical admission refusal.
-The web startup fixture replaces serving and touches no socket. Original real runtime/backend,
-API/CLI lifecycle, transport and recovery checks remain in their native CI shards.
+The command startup fixture corrupts a canonical record before preparation, verifies a typed
+diagnostic and continued serving, and counts repeated HTML reads of the unavailable runs section
+with no repair/writes and preserved canonical/history/request-index bytes. Target corruption after
+successful preparation remains separately covered with its precise filename/error envelope.
+The startup fixtures replace serving and unrelated read sources and touch no socket. Original real
+runtime/backend, API/CLI lifecycle, transport and recovery checks remain in their native CI shards.
 
 `tests.test_task_protocol_owners` (unit) checks DEC-01's six task files, unique owning
 definitions and exact baseline ASTs (including decorators/defaults/annotations), operative

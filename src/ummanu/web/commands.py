@@ -113,8 +113,9 @@ def run_web_serve(args: argparse.Namespace) -> int:
     try:
         ops.prepare_card_runs()
     except ReadError as refused:
+        # A refused runs source leaves that section unavailable; it must not stop the other pages.
+        # RunStore keeps its incomplete lookup until a later explicit preparation succeeds.
         print_error(refused.to_json(), stderr=True)
-        return EXIT_VALIDATION
     app = WebApp(
         reads,
         ops,

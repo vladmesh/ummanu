@@ -14,9 +14,10 @@ from pathlib import Path
 from unittest import mock
 
 from tests.support.card_run_fixtures import record
-from tests.web_fakes import Recording
+from tests.web_fakes import Recording, system_snapshot
 from ummanu.web import commands, pages
 from ummanu.web.app import WebApp
+from ummanu.web.server import LoopbackOnly
 from ummanu.webproto import commands as run_commands, run_events, run_state, store_io
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.ops import OperationLayer
@@ -278,9 +279,8 @@ class CardRunRenderTests(unittest.TestCase):
         self.assertEqual(counts["mutations"], [])
         self.assertEqual({p: p.read_bytes() for p in before}, before)
 
-    def test_web_startup_prepares_history_before_serve_and_refuses_failed_bootstrap(self):
-        self.legacy(record())
-        args = Namespace(
+    def _startup_args(self):
+        return Namespace(
             instance=str(self.ops.instance),
             data_dir=str(self.data),
             heads_registry=None,
@@ -288,6 +288,35 @@ class CardRunRenderTests(unittest.TestCase):
             host="127.0.0.1",
             port=0,
         )
+
+    @contextmanager
+    def _command_startup(self, serve):
+        # The command, OperationLayer, RunStore and WebApp are real; unrelated sources are
+        # documents, so this fixture neither queries providers/the board nor opens a socket.
+        reads = Recording(task_snapshot=snapshot("ummanu-1"), system_snapshot=system_snapshot())
+        with (
+            mock.patch.object(commands, "hold_store_exclusion", return_value=None),
+            mock.patch.object(commands, "health_layers", return_value=(reads, None)),
+            mock.patch.object(commands, "ProviderUsageLayer", return_value=Recording(usage_snapshot={})),
+            mock.patch.object(
+                commands,
+                "OwnerEventLayer",
+                return_value=Recording(unread_count={"state": "available", "count": 0}),
+            ),
+            mock.patch.object(commands, "PoLayer", return_value=Recording(po_running_count={})),
+            mock.patch.object(
+                commands, "SprintReadLayer", return_value=Recording(sprint_list={"sprints": {"items": []}})
+            ),
+            mock.patch.object(
+                commands, "PauseReadLayer", return_value=Recording(pause_state={"state": {}, "heads": {}})
+            ),
+            mock.patch.object(commands, "serve", side_effect=serve) as serving,
+            mock.patch.object(sys, "stderr", io.StringIO()) as diagnostic,
+        ):
+            yield serving, diagnostic
+
+    def test_web_startup_prepares_history_before_serve(self):
+        self.legacy(record())
         served = []
 
         def serve(app, **kwargs):
@@ -299,12 +328,97 @@ class CardRunRenderTests(unittest.TestCase):
             mock.patch.object(commands, "hold_store_exclusion", return_value=None),
             mock.patch.object(commands, "serve", side_effect=serve),
         ):
-            self.assertEqual(commands.run_web_serve(args), 0)
+            self.assertEqual(commands.run_web_serve(self._startup_args()), 0)
             self.assertEqual(len(served), 1)
-            self.store._run_path("pr-one").write_text("{", encoding="utf-8")
-            with mock.patch.object(sys, "stderr", io.StringIO()):
-                self.assertEqual(commands.run_web_serve(args), 2)
-            self.assertEqual(len(served), 1)
+
+    def test_corruption_before_startup_is_diagnosed_and_only_runs_remain_unavailable(self):
+        self.legacy(record())
+        canonical = self.store._run_path("pr-one")
+        canonical.write_text("{not json", encoding="utf-8")
+        self.store.requests.mkdir()
+        request = self.store.index.path("request/雪")
+        request.write_text('{"request_id":"request/雪","run_id":"pr-one"}', encoding="utf-8")
+        history = self.data / "board/events.ndjson"
+        history.parent.mkdir()
+        history.write_text('{"kind":"product_run.finished"}\n', encoding="utf-8")
+        before = {path: path.read_bytes() for path in (canonical, request, history)}
+        served = []
+
+        with self._command_startup(lambda app, **_: served.append(app) or 0) as (serving, diagnostic):
+            with counted(self.data) as bootstrap:
+                self.assertEqual(commands.run_web_serve(self._startup_args()), 0)
+            serving.assert_called_once()
+            self.assertEqual(bootstrap["canonical"], ["pr-one.json"])
+            self.assertGreater(len(bootstrap["mutations"]), 0)
+            error = json.loads(diagnostic.getvalue())["error"]
+            self.assertEqual(error["code"], "backend_unavailable")
+            self.assertIn("pr-one.json", error["message"])
+            self.assertEqual({path: path.read_bytes() for path in before}, before)
+            self.assertFalse(json.loads(self.store.refs.marker.read_text())["complete"])
+            app = served[0]
+            self.assertIsInstance(app.ops, OperationLayer)
+            after_preparation = {p: p.read_bytes() for p in self.data.rglob("*") if p.is_file()}
+            with (
+                mock.patch.object(
+                    OperationLayer, "prepare_card_runs", side_effect=AssertionError("GET prepared")
+                ),
+                mock.patch.object(OperationLayer, "run_state", side_effect=AssertionError("lifecycle")),
+                mock.patch.object(OperationLayer, "run_list", side_effect=AssertionError("mutating listing")),
+                mock.patch.object(OperationLayer, "_lifecycle", side_effect=AssertionError("lifecycle")),
+                mock.patch.object(OperationLayer, "_runtime", side_effect=AssertionError("runtime")),
+                mock.patch.object(OperationLayer, "_audit", side_effect=AssertionError("audit lookup")),
+                mock.patch.object(OperationLayer, "_republish", side_effect=AssertionError("publication")),
+                mock.patch.object(RunStore, "save", side_effect=AssertionError("save")),
+                mock.patch.object(RunStore, "settle", side_effect=AssertionError("settle")),
+                mock.patch.object(store_io, "write_text_atomic", side_effect=AssertionError("write")),
+            ):
+                for _ in range(2):
+                    with counted(self.data) as counts:
+                        response = app.handle("GET", "/tasks/ummanu-1")
+                    self.assertEqual(response.status, 200)
+                    self.assertIn(b"The target card", response.body)
+                    self.assertIn(b"could not find out this card's product runs:", response.body)
+                    self.assertIn(b"explicit preparation/recovery", response.body)
+                    self.assertEqual(counts["canonical"], [])
+                    self.assertEqual(counts["lookup"], ["complete.json"])
+                    self.assertEqual(counts["mutations"], [])
+                with counted(self.data) as counts:
+                    response = app.handle("GET", "/")
+                self.assertEqual(response.status, 200)
+                self.assertEqual(counts["canonical"], [])
+                self.assertEqual(counts["lookup"], [])
+                self.assertEqual(counts["mutations"], [])
+            self.assertEqual({p: p.read_bytes() for p in after_preparation}, after_preparation)
+
+    def test_startup_does_not_suppress_defects_or_unrelated_security_and_bind_failures(self):
+        with (
+            self._command_startup(lambda app, **_: 0) as (serving, _diagnostic),
+            mock.patch.object(
+                OperationLayer, "prepare_card_runs", side_effect=TypeError("preparation defect")
+            ),
+            self.assertRaisesRegex(TypeError, "preparation defect"),
+        ):
+            commands.run_web_serve(self._startup_args())
+        serving.assert_not_called()
+        with (
+            self._command_startup(lambda app, **_: 0) as (serving, _diagnostic),
+            mock.patch.object(commands, "PoTokenLayer", side_effect=RuntimeError("security setup defect")),
+            self.assertRaisesRegex(RuntimeError, "security setup defect"),
+        ):
+            commands.run_web_serve(self._startup_args())
+        serving.assert_not_called()
+        with self._command_startup(mock.Mock(side_effect=LoopbackOnly("outside loopback"))) as (
+            serving,
+            diagnostic,
+        ):
+            self.assertEqual(commands.run_web_serve(self._startup_args()), 2)
+        serving.assert_called_once()
+        self.assertEqual(json.loads(diagnostic.getvalue())["error"]["code"], "validation")
+        with (
+            self._command_startup(mock.Mock(side_effect=OSError("bind failed"))),
+            self.assertRaisesRegex(OSError, "bind failed"),
+        ):
+            commands.run_web_serve(self._startup_args())
 
     def test_api_and_cli_listing_keep_the_supported_mutating_entry(self):
         with mock.patch.object(self.ops, "run_list", return_value={"items": []}) as listing:
