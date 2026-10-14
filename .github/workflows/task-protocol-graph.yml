@@ -67,6 +67,11 @@ on:
       - src/ummanu/web/static/**
       - src/ummanu/webfront/commands.py
       - src/ummanu/webproto/commands.py
+      - src/ummanu/webproto/request_index.py
+      - src/ummanu/webproto/runs.py
+      - src/ummanu/webproto/sprint_requests.py
+      - tests/test_request_index.py
+      - tests/support/request_index_packets.py
       - src/ummanu/runtime/cli_composition.py
       - src/ummanu/infra/doctor_provider.py
       # Candidate-only parser/import regressions exercise the composition edges.

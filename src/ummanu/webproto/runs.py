@@ -27,6 +27,7 @@ from typing import Any
 
 from ummanu._fsutil import file_lock
 from ummanu.webproto._values import _float, _text
+from ummanu.webproto.request_index import RequestIndex, RequestMismatch as RequestMismatch
 from ummanu.webproto.store_io import RunStoreError, write_document
 
 #: Which side of the demonstration scenario a run is; there is no third.
@@ -73,12 +74,7 @@ REVIEW_OPERATION = "run_review"
 # (`IMPLEMENTATION_FAILURES` and others import it from this module).
 
 
-class RequestMismatch(RunStoreError):
-    """This request id already owns a different operation, or the same one with different inputs.
-
-    Idempotency covers a retry of the same request only; another command reusing the id is refused
-    rather than aliased to the first run.
-    """
+# RequestMismatch stays importable here for ops.py and sprint_ops.py.
 
 
 def request_fingerprint(operation: str, request: dict[str, Any]) -> str:
@@ -291,6 +287,7 @@ class RunStore:
         self.root = Path(os.fspath(data_dir)) / RUNS_RELATIVE
         self.requests = self.root / "requests"
         self.lock_path = self.root / ".runs.lock"
+        self.index = RequestIndex(self.requests)
 
     # -- paths -----------------------------------------------------------------------------
 
@@ -298,10 +295,6 @@ class RunStore:
         if not run_id or "/" in run_id or run_id in (".", ".."):
             raise RunStoreError(f"a product run is named by a run id, not by {run_id!r}")
         return self.root / f"{run_id}.json"
-
-    def _request_path(self, request_id: str) -> Path:
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
-        return self.requests / f"{digest}.json"
 
     def _prepare(self) -> None:
         try:
@@ -330,27 +323,16 @@ class RunStore:
         With `operation`/`fingerprint`, a disagreeing record raises :class:`RequestMismatch`. With
         neither, the record is read as it stands (for listings and repairs).
         """
-        path = self._request_path(request_id)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        document = self.index.read(request_id, label="product run request index")
+        if document is None:
             return None
-        except (OSError, ValueError) as exc:
-            raise RunStoreError(f"the product run request index at {path} could not be read: {exc}") from None
+        path, payload = document
         if not isinstance(payload, dict):
             raise RunStoreError(f"the product run request index at {path} is not an object")
-        owned_operation = _text(payload.get("operation"))
-        owned_fingerprint = _text(payload.get("fingerprint"))
-        if operation and owned_operation and owned_operation != operation:
-            raise RequestMismatch(
-                f"request id {request_id!r} already owns a {owned_operation} run; a request id is "
-                f"the idempotency key of one operation and cannot be reused for {operation}"
-            )
-        if fingerprint and owned_fingerprint and owned_fingerprint != fingerprint:
-            raise RequestMismatch(
-                f"request id {request_id!r} already owns a {owned_operation or operation} run made "
-                "with different inputs; a repeat is a retry of the same request, not a new one"
-            )
+        self.index.match(
+            request_id, _text(payload.get("operation")), _text(payload.get("fingerprint")),
+            operation=operation, fingerprint=fingerprint, noun="run",
+        )
         run_id = _text(payload.get("run_id"))
         return self.get(run_id) if run_id else None
 
@@ -398,18 +380,12 @@ class RunStore:
             if not isinstance(run, ProductRun):
                 raise RunStoreError("a product run record is built as a ProductRun")
             self._write(run)
-            write_document(
-                self._request_path(request_id),
-                json.dumps(
-                    {
-                        "request_id": request_id,
-                        "run_id": run.run_id,
-                        "operation": operation,
-                        "fingerprint": fingerprint,
-                    },
-                    sort_keys=True,
-                ),
-            )
+            self.index.write(request_id, {
+                "request_id": request_id,
+                "run_id": run.run_id,
+                "operation": operation,
+                "fingerprint": fingerprint,
+            })
             return run, True
 
     def save(self, run: ProductRun) -> ProductRun:

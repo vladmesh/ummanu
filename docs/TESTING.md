@@ -28,6 +28,18 @@ stay in the small unit profile. The existing twelve kernel and fifteen cleanup f
 remain in their original local shards. Install/recovery, snapshot/PostgreSQL and packaging
 fixtures retain their CI owners.
 
+`tests.test_request_index` (unit) guards DUP-W4's shared digest/read/match/write delegation and
+exception identity, including planted duplicate implementations. Its file-only fixture captures
+both real stores' paths and bytes, result types/values, claim flags, exception messages/causes and
+read/build/lock/write order. With `UMMANU_INDEX_BASE_SOURCE` pointing at the two store files from
+`2347277b18f281505dfb82d39b6134035cdd003a`, it verifies their SHA256s and compares base/candidate
+packets; CI supplies those bytes with `git show` and archives the packet in the unit evidence.
+`UMMANU_INDEX_PACKET_OUT` selects the local artifact path. This executes the new fixture on base
+store bytes with unchanged supporting helpers, not a pristine historical whole-suite run.
+The original web run/sprint protocol, transport and staged-reference recovery cases remain in
+integration-board; the original uncut coupling scanner remains in CI. INEF-04's ref lookup and
+run-state settlement/audit recovery remain separate work.
+
 `tests.test_task_protocol_owners` (unit) checks DEC-01's six task files, unique owning
 definitions and exact baseline ASTs (including decorators/defaults/annotations), operative
 instance and owner-global patches, shared error identities and recovery refusal distinctions.
