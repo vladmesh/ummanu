@@ -849,7 +849,7 @@ class BoundedCleanupReplayTests(unittest.TestCase):
             return native(owner, intent, current)
         with mock.patch.object(CleanupOwner, "_settle_without_identity", autospec=True, side_effect=changed), \
                 mock.patch.object(CleanupOwner, "_settle_claim_admitted", autospec=True,
-                                  side_effect=lambda owner, intent: settled.append(intent)):
+                                  side_effect=lambda owner, intent, current: settled.append(intent)):
             result, _ = self.replay()
         # The claim admission refused before its settlement; the outcome's commit refused to publish.
         self.assertEqual(result[0]["status"], "pending")
