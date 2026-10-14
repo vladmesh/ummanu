@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
+from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
 from ummanu import sprints
 from ummanu.board.sql_sprints import sprint_key
@@ -116,10 +117,11 @@ class SqlSprintAtomicityTests(SprintFixture):
         self._create()
         # This fixture intentionally has no seeded Cards. Arrange the linked card through
         # the public writer before starting statement/audit measurement.
-        TaskWriter(self.client, data_dir=self.tmp.name).create(
-            role="po", actor="operator", project="ummanu", task_type="research", title="read card",
-            reference="ummanu-1", sprint="sprint:atomic", request_id="read-card",
-        )
+        with as_observer("sprint:atomic"):
+            TaskWriter(self.client, data_dir=self.tmp.name).create(
+                role="observer", actor="observer", project="ummanu", task_type="research", title="read card",
+                reference="ummanu-1", sprint="sprint:atomic", request_id="read-card",
+            )
         self.writer.comment(role="po", actor="operator", reference="sprint:atomic", body="read comment", request_id="read-comment")
         self.writer.resume(role="po", actor="operator", reference="sprint:atomic", entry=self._resume_entry(), request_id="read-resume")
         before = self._read_state()
