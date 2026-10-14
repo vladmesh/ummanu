@@ -184,7 +184,7 @@ class RouteFixture(unittest.TestCase):
         # about the bar, and a page that also has an unreadable section is the harder case for it.
         self.layers = [
             self.reads,
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             self.sprint_reads,
             Recording(),
             Recording(pause_state=unreadable),
@@ -616,7 +616,7 @@ class ResetCreditsCostTests(BarCostsNoExtraReadTests):
 
 
 class ResetCreditsLabelTests(unittest.TestCase):
-    """The folded label :func:`pages._bar_reset_credits` draws, in every case the card names."""
+    """The folded label :func:`page_shell._bar_reset_credits` draws, in every case the card names."""
 
     EXPIRES = "2026-10-16T10:00:00Z"  # 25d 22h after RENDERED_AT
 

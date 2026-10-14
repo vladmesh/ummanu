@@ -21,7 +21,7 @@ BASE_HASHES = {
 
 
 def base_modules(directory):
-    """Load only exact base store bytes supplied by the worker or CI, never a historical suite."""
+    """Load exact base store bytes from an explicit external developer/worker capture."""
     loaded = []
     for name, digest in BASE_HASHES.items():
         path = Path(directory) / f"{name}.py"
@@ -86,15 +86,29 @@ def packets(modules=(runs, sprint_requests)):
                     claimed = None
                     if isinstance(value, tuple):
                         value, claimed = value
-                    packet = {"type": type(value).__name__, "value": value.to_json() if value else None,
-                              "claimed": claimed}
-                except (store_io.RunStoreError, OSError, ValueError, OverflowError, TypeError, AttributeError) as exc:
-                    packet = {"error": type(exc).__name__, "message": normalize(exc),
-                              "cause": type(exc.__cause__).__name__ if exc.__cause__ else None,
-                              "context": type(exc.__context__).__name__ if exc.__context__ else None,
-                              "suppress_context": exc.__suppress_context__}
-                packet["files"] = {normalize(p): p.read_bytes().hex() for p in sorted(root.rglob("*"))
-                                   if p.is_file()}
+                    packet = {
+                        "type": type(value).__name__,
+                        "value": value.to_json() if value else None,
+                        "claimed": claimed,
+                    }
+                except (
+                    store_io.RunStoreError,
+                    OSError,
+                    ValueError,
+                    OverflowError,
+                    TypeError,
+                    AttributeError,
+                ) as exc:
+                    packet = {
+                        "error": type(exc).__name__,
+                        "message": normalize(exc),
+                        "cause": type(exc.__cause__).__name__ if exc.__cause__ else None,
+                        "context": type(exc.__context__).__name__ if exc.__context__ else None,
+                        "suppress_context": exc.__suppress_context__,
+                    }
+                packet["files"] = {
+                    normalize(p): p.read_bytes().hex() for p in sorted(root.rglob("*")) if p.is_file()
+                }
                 packet["directories"] = [normalize(p) for p in sorted(root.rglob("*")) if p.is_dir()]
                 packet["root_exists"] = root.exists()
                 packet["events"] = list(events)
@@ -103,9 +117,11 @@ def packets(modules=(runs, sprint_requests)):
                 return packet
 
             def claim(operation="op", fingerprint="fp"):
-                return (store.claim(request_id, build, operation=operation, fingerprint=fingerprint)
-                        if kind == 0 else store.claim(request_id, operation=operation,
-                                                     fingerprint=fingerprint, now=12.5))
+                return (
+                    store.claim(request_id, build, operation=operation, fingerprint=fingerprint)
+                    if kind == 0
+                    else store.claim(request_id, operation=operation, fingerprint=fingerprint, now=12.5)
+                )
 
             original = store.by_request
 
@@ -114,10 +130,12 @@ def packets(modules=(runs, sprint_requests)):
                 return original(*args, **kwargs)
 
             steps = []
-            with (mock.patch.object(module, "file_lock", lock),
-                  mock.patch.object(store_io, "write_text_atomic", write),
-                  mock.patch.object(store, "by_request", lookup),
-                  mock.patch.object(modules[0], "new_run_id", side_effect=["pr-one", "pr-two", "pr-three"])):
+            with (
+                mock.patch.object(module, "file_lock", lock),
+                mock.patch.object(store_io, "write_text_atomic", write),
+                mock.patch.object(store, "by_request", lookup),
+                mock.patch.object(modules[0], "new_run_id", side_effect=["pr-one", "pr-two", "pr-three"]),
+            ):
                 if kind == 0:
                     original_get = store.get
 
@@ -136,8 +154,16 @@ def packets(modules=(runs, sprint_requests)):
                 call(lambda request_id=request_id: store.by_request(request_id))
                 call(claim)
                 call(claim)
-                call(lambda request_id=request_id: store.by_request(request_id, operation="other", fingerprint="other"))
-                call(lambda request_id=request_id: store.by_request(request_id, operation="op", fingerprint="other"))
+                call(
+                    lambda request_id=request_id: store.by_request(
+                        request_id, operation="other", fingerprint="other"
+                    )
+                )
+                call(
+                    lambda request_id=request_id: store.by_request(
+                        request_id, operation="op", fingerprint="other"
+                    )
+                )
                 call(lambda request_id=request_id: store.by_request(request_id, operation="", fingerprint=""))
                 other = modules[kind].RunStore(root) if kind == 0 else modules[kind].SprintRequestStore(root)
                 call(lambda other=other, request_id=request_id: other.by_request(request_id))
@@ -146,18 +172,41 @@ def packets(modules=(runs, sprint_requests)):
                     call(lambda request_id=request_id: store.record_reference(request_id, "sprint:7"))
                     call(lambda request_id=request_id: store.record_reference(request_id, "sprint:999"))
 
-        documents = [None, [], "scalar", 3, False, {}, {"run_id": "pr-one"},
-                     {"operation": "", "fingerprint": "", "run_id": "pr-one"},
-                     {"operation": "old", "fingerprint": "old", "run_id": "pr-one"},
-                     {"fingerprint": "old", "run_id": "pr-one"},
-                     {"operation": "old", "run_id": "pr-one"},
-                     {"request_id": 7, "operation": [], "fingerprint": False, "run_id": 7,
-                      "reference": [], "claimed_at": True},
-                     {"claimed_at": "12"}, {"claimed_at": 12.5}, {"claimed_at": 10 ** 400,
-                      "operation": "old", "fingerprint": "old"}, {"run_id": "../invalid"}]
-        documents += [{"operation": value, "fingerprint": value, "reference": value,
-                       "claimed_at": value, "run_id": value}
-                      for value in (None, False, 0, 2.5, [], {}, "")]
+        documents = [
+            None,
+            [],
+            "scalar",
+            3,
+            False,
+            {},
+            {"run_id": "pr-one"},
+            {"operation": "", "fingerprint": "", "run_id": "pr-one"},
+            {"operation": "old", "fingerprint": "old", "run_id": "pr-one"},
+            {"fingerprint": "old", "run_id": "pr-one"},
+            {"operation": "old", "run_id": "pr-one"},
+            {
+                "request_id": 7,
+                "operation": [],
+                "fingerprint": False,
+                "run_id": 7,
+                "reference": [],
+                "claimed_at": True,
+            },
+            {"claimed_at": "12"},
+            {"claimed_at": 12.5},
+            {"claimed_at": 10**400, "operation": "old", "fingerprint": "old"},
+            {"run_id": "../invalid"},
+        ]
+        documents += [
+            {
+                "operation": value,
+                "fingerprint": value,
+                "reference": value,
+                "claimed_at": value,
+                "run_id": value,
+            }
+            for value in (None, False, 0, 2.5, [], {}, "")
+        ]
         for number, payload in enumerate(documents):
             for target in ("missing", "valid", "corrupt") if kind == 0 else ("none",):
                 with fixture(kind, f"json-{number}-{target}") as (store, root, call, claim):
@@ -168,9 +217,14 @@ def packets(modules=(runs, sprint_requests)):
                     if target in ("valid", "corrupt"):
                         run_payload = modules[0].ProductRun("pr-one", "request/雪", "ref", "p", "worker", "x")
                         (store.root / "pr-one.json").write_text(
-                            json.dumps(run_payload.to_json()) if target == "valid" else "{", encoding="utf-8")
+                            json.dumps(run_payload.to_json()) if target == "valid" else "{", encoding="utf-8"
+                        )
                     for operation, fingerprint in (("", ""), ("op", "fp"), ("", "fp"), ("old", "fp")):
-                        call(lambda operation=operation, fingerprint=fingerprint: store.by_request("request/雪", operation=operation, fingerprint=fingerprint))
+                        call(
+                            lambda operation=operation, fingerprint=fingerprint: store.by_request(
+                                "request/雪", operation=operation, fingerprint=fingerprint
+                            )
+                        )
 
         for name, content in (("malformed", b"{"), ("utf8", b"\xff"), ("empty", b"")):
             with fixture(kind, name) as (store, root, call, claim):
@@ -179,9 +233,15 @@ def packets(modules=(runs, sprint_requests)):
                 digest = hashlib.sha256("request/雪".encode()).hexdigest()
                 (index_root / f"{digest}.json").write_bytes(content)
                 call(lambda: store.by_request("request/雪"))
-        for error in (OSError("read refused"), PermissionError("permission refused"), FileNotFoundError("gone")):
-            with (fixture(kind, type(error).__name__) as (store, root, call, claim),
-                  mock.patch.object(Path, "read_text", side_effect=error)):
+        for error in (
+            OSError("read refused"),
+            PermissionError("permission refused"),
+            FileNotFoundError("gone"),
+        ):
+            with (
+                fixture(kind, type(error).__name__) as (store, root, call, claim),
+                mock.patch.object(Path, "read_text", side_effect=error),
+            ):
                 call(lambda: store.by_request("request/雪"))
         with fixture(kind, "empty-directory") as (store, root, call, claim):
             store.root.mkdir(parents=True)
@@ -190,24 +250,46 @@ def packets(modules=(runs, sprint_requests)):
             with fixture(kind, "builder-failure") as (store, root, call, claim):
                 call(lambda: store.claim("request/雪", lambda rid: None))
                 call(claim)
-        with (fixture(kind, "prepare-failure") as (store, root, call, claim),
-              mock.patch.object(Path, "mkdir", side_effect=PermissionError("mkdir refused"))):
+        with (
+            fixture(kind, "prepare-failure") as (store, root, call, claim),
+            mock.patch.object(Path, "mkdir", side_effect=PermissionError("mkdir refused")),
+        ):
             call(claim)
         for failure in (1, 2) if kind == 0 else (1,):
-            for error in (RuntimeError("disk refused"), OSError("disk refused"), store_io.RunStoreError("typed")):
+            for error in (
+                RuntimeError("disk refused"),
+                OSError("disk refused"),
+                store_io.RunStoreError("typed"),
+            ):
                 with fixture(kind, f"write-{failure}-{type(error).__name__}") as (store, root, call, claim):
                     real_write = store_io.write_text_atomic
                     count = 0
 
-                    def fail(path, payload, failure=failure, error=error, real_write=real_write, kind=kind, root=root):
+                    def fail(
+                        path,
+                        payload,
+                        failure=failure,
+                        error=error,
+                        real_write=real_write,
+                        kind=kind,
+                        root=root,
+                    ):
                         nonlocal count
+                        # Failure 1/2 continues to address canonical/request writes. Derived card
+                        # lookup interruption has its own file-only protocol fixtures.
+                        if kind == 0 and Path(path).is_relative_to(root / "webproto/runs/refs"):
+                            return real_write(path, payload)
                         count += 1
                         if count == failure:
                             # Record the attempted boundary even when no file reaches disk.
-                            result[f"{'run' if kind == 0 else 'sprint'}/write-attempt-{failure}-{type(error).__name__}"] = {
-                                "path": str(path).replace(str(root), "<data>"), "payload": payload,
-                                "prior_files": sorted(str(p).replace(str(root), "<data>")
-                                                      for p in root.rglob("*.json")),
+                            result[
+                                f"{'run' if kind == 0 else 'sprint'}/write-attempt-{failure}-{type(error).__name__}"
+                            ] = {
+                                "path": str(path).replace(str(root), "<data>"),
+                                "payload": payload,
+                                "prior_files": sorted(
+                                    str(p).replace(str(root), "<data>") for p in root.rglob("*.json")
+                                ),
                             }
                             raise error
                         real_write(path, payload)
@@ -220,7 +302,9 @@ def packets(modules=(runs, sprint_requests)):
             with fixture(kind, "reference-failure") as (store, root, call, claim):
                 call(lambda: store.record_reference("request/雪", "sprint:7"))
                 call(claim)
-                with mock.patch.object(store_io, "write_text_atomic", side_effect=RuntimeError("reference refused")):
+                with mock.patch.object(
+                    store_io, "write_text_atomic", side_effect=RuntimeError("reference refused")
+                ):
                     call(lambda: store.record_reference("request/雪", "sprint:7"))
                 call(claim)
                 call(lambda: store.record_reference("request/雪", "sprint:7"))

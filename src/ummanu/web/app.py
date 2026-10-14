@@ -120,12 +120,20 @@ ROUTES: tuple[Route, ...] = (
     # The owner's bell: list, mark one read, mark all read (notices only); board `owner_events` only.
     Route("GET", "/owner-events", "owner_events_page", "owner_events.owner_event_list", page=True),
     Route(
-        "POST", "/owner-events/read-all", "owner_events_read_all", "owner_events.mark_all_read",
-        body=FORM_BODY, page=True,
+        "POST",
+        "/owner-events/read-all",
+        "owner_events_read_all",
+        "owner_events.mark_all_read",
+        body=FORM_BODY,
+        page=True,
     ),
     Route(
-        "POST", "/owner-events/{event_id}/read", "owner_event_read", "owner_events.mark_read",
-        body=FORM_BODY, page=True,
+        "POST",
+        "/owner-events/{event_id}/read",
+        "owner_event_read",
+        "owner_events.mark_read",
+        body=FORM_BODY,
+        page=True,
     ),
 )
 
@@ -275,7 +283,9 @@ class WebApp:
             pages.bell_source(self._bell_section if self.owner_events is not None else None),
             pages.from_post(method == "POST"),
             self._one_health_reading(),
-            self.owner_events.one_reading() if isinstance(self.owner_events, OwnerEventLayer) else nullcontext(),
+            self.owner_events.one_reading()
+            if isinstance(self.owner_events, OwnerEventLayer)
+            else nullcontext(),
         ):
             return self._handle(method, path, query=query, body=body, headers=headers)
 
@@ -643,7 +653,7 @@ class WebApp:
         A refused run listing does not take the card page down.
         """
         try:
-            return {"available": True, "reason": None, "items": self.ops.run_list(ref)["items"]}
+            return {"available": True, "reason": None, "items": self.ops.card_runs(ref)["items"]}
         except ReadError as exc:
             return {"available": False, "reason": exc.message, "items": []}
 
@@ -1281,6 +1291,8 @@ def _redirect(location: str, *, what: str = "this sprint is open") -> Response:
 def _owner_read_feedback(marked: int, document: dict[str, Any]) -> str:
     held = document["held_count"]
     needs = document["needs_owner_count"]
-    return (f"Marked {marked} notices read; {needs} owner-attention events remain: "
-            f"{held} held by an unanswered handover or unresolved escalation, "
-            f"{needs - held} can be marked read individually. Bulk read marks notices only.")
+    return (
+        f"Marked {marked} notices read; {needs} owner-attention events remain: "
+        f"{held} held by an unanswered handover or unresolved escalation, "
+        f"{needs - held} can be marked read individually. Bulk read marks notices only."
+    )

@@ -148,7 +148,7 @@ class HeadViewFixture(unittest.TestCase):
     def app(self) -> WebApp:
         return WebApp(
             self.layer(),
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             Recording(),
             Recording(),
             Recording(),

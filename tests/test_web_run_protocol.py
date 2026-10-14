@@ -673,7 +673,6 @@ class AdmissionTests(ProductRuntimeFixture):
         # 5. the dispatcher's record, before this layer's own runs.
         self.assertIn("durable record", refusal("ummanu-run-3"))
 
-
     # -- the fence reads one fact ---------------------------------------------------------------
 
     def _record(self, run_id: str, **overrides: Any) -> ProductRun:
@@ -1001,13 +1000,14 @@ class EventVisibilityTests(ProductRuntimeFixture):
         once. The retry the idempotency contract invites finds the record -- and must publish the
         event it owes rather than only hand the document back, or the launch is invisible forever.
         """
-        with mock.patch.object(
-            ops_module.run_events, "publish_started", side_effect=RuntimeUnavailable("journal down")
-        ), self.assertRaises(RuntimeUnavailable):
+        with (
+            mock.patch.object(
+                ops_module.run_events, "publish_started", side_effect=RuntimeUnavailable("journal down")
+            ),
+            self.assertRaises(RuntimeUnavailable),
+        ):
             self.start(request_id="lost-start-event")
-        self.assertEqual(
-            self.reads().task_events("ummanu-run-1", None, limit=10)["items"], []
-        )
+        self.assertEqual(self.reads().task_events("ummanu-run-1", None, limit=10)["items"], [])
 
         again = self.start(request_id="lost-start-event")
         self.assertEqual(len(self.runtime.starts), 1)
@@ -1020,9 +1020,12 @@ class EventVisibilityTests(ProductRuntimeFixture):
         """The same hole under `run_state`: the settle is durable before its publication is."""
         run_id = self.start()["run"]["run_id"]
         self.runtime.publish_result(run_id, {"status": "done"})
-        with mock.patch.object(
-            ops_module.run_events, "publish_finished", side_effect=RuntimeUnavailable("journal down")
-        ), self.assertRaises(RuntimeUnavailable):
+        with (
+            mock.patch.object(
+                ops_module.run_events, "publish_finished", side_effect=RuntimeUnavailable("journal down")
+            ),
+            self.assertRaises(RuntimeUnavailable),
+        ):
             self.layer().run_state(run_id)
         kinds = [item["kind"] for item in self.reads().task_events("ummanu-run-1", None, limit=10)["items"]]
         self.assertEqual(kinds, [run_events.STARTED])
@@ -1456,7 +1459,11 @@ class RealHeadFixture(ProductRuntimeFixture):
             for name, group in (("head.pid", True), ("supervisor.pid", False)):
                 try:
                     raw = (run_dir / name).read_text(encoding="utf-8")
-                    pid = int(json.loads(raw)["pid"] if name.endswith(".pid") and raw.strip().startswith("{") else raw)
+                    pid = int(
+                        json.loads(raw)["pid"]
+                        if name.endswith(".pid") and raw.strip().startswith("{")
+                        else raw
+                    )
                 except (OSError, ValueError, KeyError, TypeError):
                     continue
                 for number in (signal.SIGTERM, signal.SIGKILL):
@@ -1530,8 +1537,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
         head_pid = int(json.loads(pid_file.read_text(encoding="utf-8"))["pid"])
         expected = run_state.expected_identity(stored)
         self._await(
-            lambda: head_process_status(str(pid_file), expected=expected)["state"]
-            == HEARTBEAT_LIVE_MATCH,
+            lambda: head_process_status(str(pid_file), expected=expected)["state"] == HEARTBEAT_LIVE_MATCH,
             "the head's launch identity never became a live match",
         )
         self.assertTrue(_alive(head_pid), "the head's process is running")
@@ -1555,7 +1561,6 @@ class RealHeadOwnershipTests(RealHeadFixture):
         self.assertEqual(head_process_status(str(pid_file))["state"], HEARTBEAT_DEAD)
         self.assertIn(RUN_EXITED, [record.get("kind") for record in head_run_journal(run_dir)])
         self.assertFalse(_alive(head_pid), "the head's process is gone")
-
 
 
 #: What the real children below publish: a worker's report and a reviewer's verdict, in the shape
@@ -1591,17 +1596,13 @@ class RealBackendContractTests(RealHeadFixture):
         root, backend = self.real_backend()
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(self._publishing(REAL_RESULT)):
-            started = layer.run_start(
-                "ummanu-run-1", request_id="req-real-result", profile=REVIEWER_PROFILE
-            )
+            started = layer.run_start("ummanu-run-1", request_id="req-real-result", profile=REVIEWER_PROFILE)
         run_id = started["run"]["run_id"]
         self.assertEqual(started["state"]["value"], "running")
 
         stored = RunStore(self.data_dir).get(run_id)
         self.assertEqual(Path(stored.result_path).parent, root / run_id)
-        self._await(
-            lambda: Path(stored.result_path).exists(), "the head never published its result file"
-        )
+        self._await(lambda: Path(stored.result_path).exists(), "the head never published its result file")
 
         # The product owns the process, so the read that sees a published result ends the head.
         document = layer.run_state(run_id)
@@ -1616,13 +1617,9 @@ class RealBackendContractTests(RealHeadFixture):
         _root, backend = self.real_backend()
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(f"{self.PRODUCT_CHILD} exit 7"):
-            started = layer.run_start(
-                "ummanu-run-1", request_id="req-real-failure", profile=REVIEWER_PROFILE
-            )
+            started = layer.run_start("ummanu-run-1", request_id="req-real-failure", profile=REVIEWER_PROFILE)
         run_id = started["run"]["run_id"]
-        self._await(
-            lambda: layer.run_state(run_id)["state"]["ended"], "the head never ended", timeout=30.0
-        )
+        self._await(lambda: layer.run_state(run_id)["state"]["ended"], "the head never ended", timeout=30.0)
 
         document = layer.run_state(run_id)
         state = document["state"]
@@ -1650,9 +1647,9 @@ class RealBackendContractTests(RealHeadFixture):
         root, backend = self.real_backend()
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(self._publishing(REAL_RESULT), self._publishing(REAL_VERDICT)):
-            worker = layer.run_start(
-                "ummanu-run-1", request_id="req-real-worker", profile=REVIEWER_PROFILE
-            )["run"]["run_id"]
+            worker = layer.run_start("ummanu-run-1", request_id="req-real-worker", profile=REVIEWER_PROFILE)[
+                "run"
+            ]["run_id"]
             self._await(
                 lambda: layer.run_state(worker)["state"]["ended"],
                 "the worker never ended",
@@ -1666,9 +1663,7 @@ class RealBackendContractTests(RealHeadFixture):
         review_id = review["review"]["run"]["run_id"]
         self.assertEqual(review["review"]["run"]["parent_run_id"], worker)
         # The review reads the work, so it runs where the work is.
-        self.assertEqual(
-            review["review"]["run"]["workspace"], review["worker"]["run"]["workspace"]
-        )
+        self.assertEqual(review["review"]["run"]["workspace"], review["worker"]["run"]["workspace"])
         prompt = (root / review_id / "REVIEW.md").read_text(encoding="utf-8")
         self.assertIn(worker, prompt)
         self.assertIn(review["worker"]["run"]["result_path"], prompt)
@@ -1700,7 +1695,6 @@ def _alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
-
 
 
 class ErrorContractTests(ProductRuntimeFixture):
@@ -1744,6 +1738,8 @@ class ErrorContractTests(ProductRuntimeFixture):
         ),
         "run_state": lambda layer: layer.run_state("pr-contract"),
         "run_list": lambda layer: layer.run_list("ummanu-run-1"),
+        "card_runs": lambda layer: layer.card_runs("ummanu-run-1"),
+        "prepare_card_runs": lambda layer: layer.prepare_card_runs(),
     }
 
     # -- what the roster is worth -------------------------------------------------------------
@@ -1763,9 +1759,9 @@ class ErrorContractTests(ProductRuntimeFixture):
 
     def _each_operation(self) -> list[tuple[str, Any]]:
         reads, ops = self.reads(), self.layer()
-        return [(f"reads.{name}", lambda call=call: call(reads)) for name, call in self.READ_CALLS.items()] + [
-            (f"ops.{name}", lambda call=call: call(ops)) for name, call in self.OPERATION_CALLS.items()
-        ]
+        return [
+            (f"reads.{name}", lambda call=call: call(reads)) for name, call in self.READ_CALLS.items()
+        ] + [(f"ops.{name}", lambda call=call: call(ops)) for name, call in self.OPERATION_CALLS.items()]
 
     def _assert_typed(self, label: str) -> None:
         for name, call in self._each_operation():
@@ -1892,7 +1888,7 @@ class FileWriteSeamTests(unittest.TestCase):
     #: Every module of the layer that puts a file on disk, so the scan above cannot pass by the
     #: layer having stopped writing anything. A fourth one is welcome; a fourth one that writes its
     #: own way is what the scan refuses.
-    SEAM_CALLERS = ("ops.py", "runs.py", "request_index.py")
+    SEAM_CALLERS = ("ops.py", "runs.py", "request_index.py", "ref_lookup.py")
 
     def test_the_seam_is_where_this_layer_actually_writes(self) -> None:
         writers: set[str] = set()

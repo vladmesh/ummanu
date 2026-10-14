@@ -154,7 +154,7 @@ class PageFixture(unittest.TestCase):
     def app(self, reads: Recording, *, sprint_reads: Recording | None = None, po: Any = "default") -> WebApp:
         layers = [
             reads,
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             sprint_reads or Recording(),
             Recording(),
             Recording(),
@@ -554,27 +554,46 @@ class CardWaitsTests(unittest.TestCase):
 
     def test_neutral_hotfix_receipt_keeps_the_generic_blocked_observer_wait(self) -> None:
         receipt = {
-            "operation": "ummanu-599", "status": "neutral", "action": "",
-            "holder": "", "reason": "Operation completed without a structured E2E disposition",
+            "operation": "ummanu-599",
+            "status": "neutral",
+            "action": "",
+            "holder": "",
+            "reason": "Operation completed without a structured E2E disposition",
         }
         card = {
-            "ref": "ummanu-590", "type": "code", "state": "blocked", "blocked_by": None,
-            "extensions": {"extra": {"e2e": json.dumps({
-                "hotfix_route": {"carrier": "ummanu-561", "run": "run-1", "result": receipt},
-            })}},
+            "ref": "ummanu-590",
+            "type": "code",
+            "state": "blocked",
+            "blocked_by": None,
+            "extensions": {
+                "extra": {
+                    "e2e": json.dumps(
+                        {
+                            "hotfix_route": {"carrier": "ummanu-561", "run": "run-1", "result": receipt},
+                        }
+                    )
+                }
+            },
         }
         card["e2e"] = e2e_view(card)
         self.assertEqual(card["e2e"]["hotfix_route"]["result"], receipt)
-        self.assertEqual(card_waits(card), [{
-            "kind": "observer", "card": "ummanu-590",
-            "detail": "Blocked work returns to the sprint observer",
-        }])
+        self.assertEqual(
+            card_waits(card),
+            [
+                {
+                    "kind": "observer",
+                    "card": "ummanu-590",
+                    "detail": "Blocked work returns to the sprint observer",
+                }
+            ],
+        )
         self.assertIsNone(card["blocked_by"])
         self.assertEqual(card["e2e"]["hotfix_route"]["result"], receipt)
 
     def test_each_kind(self) -> None:
-        schema = json.loads((Path(__file__).resolve().parents[1] /
-                             "src/ummanu/schemas/web-sprint.schema.json").read_text())
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "src/ummanu/schemas/web-sprint.schema.json").read_text()
+        )
         entry_schema = schema["$defs"]["work"]["properties"]["waiting_on"]["items"]
         validator = Draft202012Validator(entry_schema)
         handed = {
@@ -744,9 +763,7 @@ class AfterMergeWaitsTests(unittest.TestCase):
     def test_green_red_and_declined_wait_for_nothing(self) -> None:
         for state in ("green", "red", "declined"):
             with self.subTest(state=state):
-                self.assertEqual(
-                    card_waits(merged("ummanu-560", am_mark(state, hotfix="ummanu-590"))), []
-                )
+                self.assertEqual(card_waits(merged("ummanu-560", am_mark(state, hotfix="ummanu-590"))), [])
 
     def test_a_carrier_whose_run_answered_does_not_wait_on_it_while_its_mark_still_says_covered(self) -> None:
         carrier = merged("ummanu-561", am_mark("covered", "b" * 40), carried=[am_run("success")])

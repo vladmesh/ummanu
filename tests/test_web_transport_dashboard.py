@@ -168,7 +168,7 @@ class FakeAppFixture(unittest.TestCase):
                 "agents": {"source": available(), "items": []},
             }
         )
-        self.ops = Recording(run_list={"items": []})
+        self.ops = Recording(card_runs={"items": []})
         self.sprint_reads = Recording(sprint_list=sprint_listing([sprint_item()]))
         self.sprint_ops = Recording(
             sprint_comment={"kind": "sprint_comment", "comment_id": "evt-c", "saved": True},
@@ -177,9 +177,7 @@ class FakeAppFixture(unittest.TestCase):
         self.pause_reads = Recording(pause_state=pause_document())
         self.pause_ops = Recording(pause_drain={"kind": "pause_drain"}, pause_resume={"kind": "pause_resume"})
         self.command_reads = Recording(
-            command_history=history(
-                [command("card.assessed", "ummanu-9", outcome="", reason="review:red")]
-            )
+            command_history=history([command("card.assessed", "ummanu-9", outcome="", reason="review:red")])
         )
         self.card_ops = Recording(task_comment={"kind": "card_commented"}, task_move={"kind": "card_moved"})
 
@@ -453,9 +451,7 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn("the pipeline is paused (freeze)", page)
 
     def test_the_history_page_links_to_the_older_page_by_cursor(self) -> None:
-        self.command_reads = Recording(
-            command_history=history([command("routing", "ummanu-9")], more=True)
-        )
+        self.command_reads = Recording(command_history=history([command("routing", "ummanu-9")], more=True))
         page = self.text(self.get("/history"))
         self.assertIn("routing", page)
         self.assertIn('href="/history?cursor=c-2&amp;limit=25"', page)

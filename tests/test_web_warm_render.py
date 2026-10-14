@@ -82,9 +82,7 @@ def tearDownModule() -> None:
 
 class WarmDashboardRenderTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.enterContext(
-            mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
-        )
+        self.enterContext(mock.patch.dict(os.environ, {"BOARD_ROLE": ""}))
         self.enterContext(mock.patch.dict(store._HELD, clear=True))
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.data_dir = self.tmp / "data"
@@ -151,7 +149,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         reads, doctor = health_layers(str(self.instance), data_dir=str(self.data_dir), offline=True)
         return WebApp(
             reads,
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             SprintReadLayer(self.instance, data_dir=self.data_dir),
             Recording(),
             PauseReadLayer(self.instance, data_dir=self.data_dir),
@@ -218,9 +216,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         app = self.app()
         other_reader = SqlCardClient(self.config.for_role("read"), self.instance)
         self.addCleanup(other_reader.close)
-        self.assertEqual(
-            TaskReader(other_reader).show("ummanu-468")["title"], "Readonly task protocol"
-        )
+        self.assertEqual(TaskReader(other_reader).show("ummanu-468")["title"], "Readonly task protocol")
         other_pid = other_reader.connection.info.backend_pid
 
         def current_cards() -> list[dict[str, Any]]:
@@ -251,9 +247,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
             (card["value"]["ref"], card["value"]["title"]),
             ("ummanu-468", "Readonly task protocol"),
         )
-        self.assertEqual(
-            TaskReader(other_reader).show("ummanu-468")["title"], "Readonly task protocol"
-        )
+        self.assertEqual(TaskReader(other_reader).show("ummanu-468")["title"], "Readonly task protocol")
         self.assertEqual(other_reader.connection.info.backend_pid, other_pid)
 
 
