@@ -202,6 +202,7 @@ unit tests/test_retro_pending.py
 integration-heads tests/test_role_env.py
 unit tests/test_runtime_env.py
 runtime-component tests/test_docker_guard.py
+unit tests/test_procfs.py
 unit tests/test_test_guard.py
 component tests/test_head_command_guards.py
 integration-dispatcher tests/test_test_guard_interpreters.py

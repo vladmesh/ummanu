@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ummanu.runtime.procfs import PGRP, STARTTIME, STATE, proc_stat_fields
+
 from ...._fsutil import fsync_directory
 from ..memory import (
     CGROUP_ROOT,
@@ -89,10 +91,17 @@ def _unit_not_loaded(returncode: int, detail: str) -> bool:
     return returncode == SYSTEMCTL_UNIT_NOT_LOADED and "not loaded" in detail
 
 
+def _launch_stat_fields(text: str) -> list[str]:
+    try:
+        return proc_stat_fields(text, skip_separator=False)
+    except ValueError:
+        raise IndexError("list index out of range") from None
+
+
 def launch_identity(pid: int) -> str | None:
     try:
         try:
-            fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+            fields = _launch_stat_fields(Path(f"/proc/{pid}/stat").read_text())
         except (FileNotFoundError, ProcessLookupError):
             # ENOENT and ESRCH both mean this process disappeared, not a boot-id failure.
             return None
@@ -101,7 +110,7 @@ def launch_identity(pid: int) -> str | None:
         return None
     except (OSError, IndexError) as exc:
         raise MemoryScopeError(f"could not inspect scope launcher {pid}: {exc}") from exc
-    return None if fields[0] in ("Z", "X") else f"{boot}:{fields[19]}"
+    return None if fields[STATE] in ("Z", "X") else f"{boot}:{fields[STARTTIME]}"
 
 
 def launch_group_present(pid: int, identity: str) -> bool:
@@ -115,19 +124,19 @@ def launch_group_present(pid: int, identity: str) -> bool:
     if not identity.startswith(boot + ":"):
         return False
     try:
-        leader = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        leader = _launch_stat_fields(Path(f"/proc/{pid}/stat").read_text())
     except (FileNotFoundError, ProcessLookupError):
         leader = None
-    if leader is not None and identity != f"{boot}:{leader[19]}":
+    if leader is not None and identity != f"{boot}:{leader[STARTTIME]}":
         return False
     for entry in Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
         try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            fields = _launch_stat_fields((entry / "stat").read_text())
         except (FileNotFoundError, ProcessLookupError):
             continue
-        if fields[2] == str(pid) and fields[0] not in ("Z", "X"):
+        if fields[PGRP] == str(pid) and fields[STATE] not in ("Z", "X"):
             return True
     return False
 

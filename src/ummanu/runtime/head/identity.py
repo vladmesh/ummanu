@@ -16,6 +16,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+from ummanu.runtime.procfs import STARTTIME, proc_stat_fields
+
 #: Any other record version is inconclusive, not dead.
 HEARTBEAT_VERSION = 1
 
@@ -33,11 +35,13 @@ def _proc_starttime_ticks(pid: int) -> str:
     token 19.
     """
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    close = stat.rfind(")")
-    fields = stat[close + 2 :].split()
-    if close < 0 or len(fields) <= 19:
+    try:
+        fields = proc_stat_fields(stat)
+    except ValueError:
+        raise ValueError("/proc stat has no process start time") from None
+    if len(fields) <= STARTTIME:
         raise ValueError("/proc stat has no process start time")
-    return fields[19]
+    return fields[STARTTIME]
 
 
 def _boot_id() -> str:

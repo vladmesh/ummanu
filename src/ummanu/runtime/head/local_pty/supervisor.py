@@ -52,6 +52,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, cast
 
+from ummanu.runtime.procfs import STARTTIME, STATE, proc_stat_fields
+
 from ...._fsutil import fsync_directory
 from ..command import with_pid_heartbeat
 from ..memory import OOM_STREAM_ENV, MemoryScopeError, ScopeEvidence, read_oom_victim
@@ -1249,15 +1251,17 @@ def _live_head(pid_file: Path, run_id: str) -> int:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return 0
-    close = stat.rfind(")")
-    fields = stat[close + 2 :].split()
-    if close < 0 or len(fields) <= 19:
+    try:
+        fields = proc_stat_fields(stat)
+    except ValueError:
         return 0
-    if fields[0] == "Z":
+    if len(fields) <= STARTTIME:
+        return 0
+    if fields[STATE] == "Z":
         return 0
     if str(record.get("boot_id") or "") != boot_id:
         return 0
-    if str(record.get("proc_starttime_ticks") or "") != fields[19]:
+    if str(record.get("proc_starttime_ticks") or "") != fields[STARTTIME]:
         return 0
     return pid
 

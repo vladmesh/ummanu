@@ -73,6 +73,32 @@ class GuardInterpreterTests(LocalCheckFixture, unittest.TestCase):
         self.assertFalse((self.scratch / "docker-calls").exists())
         print(f"negative argv={result.args!r} rc=125 test_imported=false: {result.stderr.strip()}")
 
+    def test_rendered_startup_preloads_no_product_modules(self) -> None:
+        import hashlib
+        import inspect
+        import json
+
+        from ummanu.runtime.procfs import proc_stat_fields
+
+        parser_hash = hashlib.sha256(inspect.getsource(proc_stat_fields).encode()).hexdigest()
+        code = """import sys
+preloaded = sorted(n for n in sys.modules if n.startswith('ummanu.'))
+import hashlib, inspect, json, _ummanu_test_guard as guard
+parser_hash = hashlib.sha256(inspect.getsource(guard.proc_stat_fields).encode()).hexdigest()
+import ummanu.cli
+print(json.dumps({'preloaded': preloaded, 'guard': guard.__file__, 'parser_hash': parser_hash,
+                  'cli': ummanu.cli.__file__}))
+"""
+        for python in (self.default, self.declared):
+            result = self.launch("worker", [str(python), "-c", code])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            evidence = json.loads(result.stdout)
+            self.assertEqual(evidence["preloaded"], [])
+            self.assertEqual(evidence["parser_hash"], parser_hash)
+            self.assertTrue(Path(evidence["guard"]).is_relative_to(python.parent.parent))
+            self.assertEqual(Path(evidence["cli"]), Path(__file__).resolve().parents[1] / "src/ummanu/cli.py")
+            print(json.dumps(evidence, sort_keys=True))
+
     def test_both_roles_aliases_absolute_interpreters_and_console_refuse_before_import(self) -> None:
         for role in ("worker", "reviewer"):
             for python in ("python", "python3", str(self.default), str(self.declared)):
