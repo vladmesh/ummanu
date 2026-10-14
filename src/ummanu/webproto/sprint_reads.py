@@ -1114,7 +1114,7 @@ class SprintReadLayer(ProtocolBoundary):
         if not reference:
             raise TaskNotFound("a sprint reference is required")
         report, installation = self._installation(now=now)
-        read = self._read_once(report, installation, self.data_dir(report), now=now)
+        read = self._read_once(report, installation, self.data_dir(report), now=now, sprint=reference)
         row, view = _find(read, reference)
         if row is None and read.answered(SOURCE_SPRINTS):
             raise TaskNotFound(f"the board holds no sprint {reference!r}")
@@ -1266,6 +1266,7 @@ class SprintReadLayer(ProtocolBoundary):
         *,
         now: float,
         listing: frozenset[str] | None = None,
+        sprint: str | None = None,
     ) -> SourceSet:
         """Every source a sprint document is built from, read once each, never once per sprint.
 
@@ -1273,8 +1274,9 @@ class SprintReadLayer(ProtocolBoundary):
         not inside `status_views`, so an unreadable `board/events.ndjson` cannot fail the sprint board.
 
         `listing` is the listing's status filter; with it the journal is read as a slice covering only
-        kept non-terminal sprints (`_journal_references`). Other documents read the whole journal,
-        since comment delivery is placed by position in the whole stream.
+        kept non-terminal sprints (`_journal_references`). `sprint` keeps that one sprint's row and
+        its slice. Other documents read the whole journal, since comment delivery is placed by
+        position in the whole stream.
 
         Uses `SprintReader.list(create=False)`, never `show` (which creates the board).
         """
@@ -1288,6 +1290,8 @@ class SprintReadLayer(ProtocolBoundary):
         refused: Exception | None = None
         try:
             rows = reader.list(statuses=set(listing or ()), create=False)
+            if sprint is not None:
+                rows = [row for row in rows if str(row.get("ref") or "") == sprint]
         except Exception as exc:  # noqa: BLE001 -- confined to this source read
             refused = exc
         journal = self._journal(
@@ -1295,7 +1299,11 @@ class SprintReadLayer(ProtocolBoundary):
             client=client,
             now=now,
             # With no rows the slice is empty; the journal's mark then comes from the store's probe.
-            references=None if listing is None else _journal_references(rows or [], linked),
+            references=(
+                None
+                if listing is None and sprint is None
+                else _journal_references(rows or [], linked)
+            ),
         )
         try:
             if rows is None:

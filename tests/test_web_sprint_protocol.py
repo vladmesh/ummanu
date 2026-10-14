@@ -1061,6 +1061,25 @@ class CurrentCardStateTests(SprintWorkFixture):
         self.assertIsNone(standing["age_seconds"])
         self.assertIn("no current card", standing["reason"])
 
+    def test_the_watched_page_reads_only_its_own_sprint_slice_of_the_journal(self) -> None:
+        """Another sprint's card history never reaches this page, and the page still dates its card."""
+        self.add_sprint_row("sprint:1004", status="open", current_task="ummanu-9004")
+        self._typed_move(self.LAST, "ready", "in_progress")
+        self._typed_move(self.AFTER, "ready", "in_progress", ref="ummanu-9004")
+        audit_type = type(task_audit_for(self.board))
+        asked: list[Any] = []
+        original = audit_type.events
+
+        def recording(audit, *args, **kwargs):
+            asked.append(kwargs.get("references"))
+            return original(audit, *args, **kwargs)
+
+        with mock.patch.object(audit_type, "events", recording):
+            watched = self.reads().sprint_state(self.reference)
+
+        self.assertEqual(asked, [{self.reference, self.card}])
+        self.assertEqual(watched["work"]["current_card_state"]["since"], self.LAST)
+
     def test_a_journal_nobody_can_read_takes_away_this_and_nothing_else(self) -> None:
         """Criterion 2: the new part is unavailable, and the card's own fields still stand."""
         self._typed_move(self.LAST, "ready", "in_progress")
