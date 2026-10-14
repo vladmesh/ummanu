@@ -140,6 +140,12 @@ live in `runtime/head/handoff.py`, `runtime/head/local_pty/client.py` and `dispa
 `runtime.head_runtimes` owns names and absent-key meanings; `runtime.head_runtime_backends`
 alone turns a name into a backend.
 
+`runtime.local_pty_head` keeps the concrete lifecycle class and consumed reader exports.
+Its method mixins live in `local_pty_handoff` (prompt delivery and production budgets) and
+`local_pty_delivery` (admission, socket/journal witnesses and outcomes). `local_pty_durable`
+owns recovered state, `local_pty_journal` the journal fold and readers, `local_pty_inspection`
+leases and cleanup fences, and `local_pty_values` shared values and refusal tokens.
+
 - Profiles: `HEAD_RUNTIMES=("local-pty",)` and `DEFAULT_HEAD_RUNTIME="local-pty"`. An absent
   profile key selects it. Any other name, including `orca-legacy`, refuses at registry validation
   with the profile ID and the fix: set `runtime = "local-pty"` or drop the key. No profile is

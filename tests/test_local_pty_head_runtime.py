@@ -25,7 +25,6 @@ legacy one. What is in this file beside it is what only this backend can be aske
 
 from __future__ import annotations
 
-import ast
 import inspect
 import json
 import os
@@ -41,6 +40,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests import source_trees
+from tests.support import local_pty_owners
 from tests.support.head_runtime_contract import HeadRuntimeContract
 from ummanu.codex_provider_events import CodexProviderEventIngress
 from ummanu.dispatch.watchdog import clear_head_heartbeat, head_process_status
@@ -2187,24 +2187,15 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
     """
 
     def test_the_substrate_is_reached_only_through_its_scoped_consumers(self) -> None:
-        package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"
-        backend = REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py"
-        po_runner = REPO / "src" / "ummanu" / "po" / "runner.py"
-        substrate = "ummanu.runtime.head.local_pty"
-        offenders = []
-        # Every name of the substrate spells its last package, so no other file can import it.
-        for path, tree in source_trees.modules(REPO / "src", naming=("local_pty",)):
-            if package in path.parents or path in (backend, po_runner):
-                continue
-            for node in source_trees.imports(tree):
-                names = []
-                if isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                    names = [node.module]
-                if any(name == substrate or name.startswith(substrate + ".") for name in names):
-                    offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is reached outside its runtime and PO consumers")
+        sources = {
+            str(path.relative_to(REPO)): path.read_text()
+            for path, _tree in source_trees.modules(REPO / "src", naming=("local_pty",))
+        }
+        self.assertEqual(
+            local_pty_owners.substrate_offenders(sources),
+            [],
+            "the substrate is reached outside its runtime and PO consumers",
+        )
 
     def test_the_product_builds_its_backends_in_exactly_one_place(self) -> None:
         """Criterion 4 of secretary-1467, criterion 1 of secretary-1474: one build site.
@@ -2214,21 +2205,12 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         assertion is now over the whole product rather than over one module of it: whoever names a
         backend, exactly one function anywhere turns that name into an object.
         """
-        sites = {}
-        # A call to a name ending in `HeadRuntime` spells that name, so no other file can build one.
-        for path, tree in source_trees.modules(REPO / "src", naming=("HeadRuntime",)):
-            if path == REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py":
-                continue  # the class's own module, where it is defined rather than built
-            for holder in source_trees.walk(tree):
-                if not isinstance(holder, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                for node in ast.walk(holder):
-                    if (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id.endswith("HeadRuntime")
-                    ):
-                        sites.setdefault(holder.name, set()).add(node.func.id)
+        # Only the defining class owner is exempt, never the extracted owners.
+        sources = {
+            str(path.relative_to(REPO)): path.read_text()
+            for path, _tree in source_trees.modules(REPO / "src", naming=("HeadRuntime",))
+        }
+        sites = local_pty_owners.construction_sites(sources)
 
         self.assertEqual(sorted(sites), ["build_head_runtime"], "a second place builds a backend")
         # secretary-1722: the Orca backend is no longer built anywhere.
