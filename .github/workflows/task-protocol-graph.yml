@@ -64,8 +64,8 @@ on:
       - src/ummanu/webproto/commands.py
       - src/ummanu/runtime/cli_composition.py
       - src/ummanu/infra/doctor_provider.py
+      # Candidate-only parser/import regressions exercise the composition edges.
       - tests/test_cli_cold_composition.py
-      - tests/fixtures/cli-parser-272.json
   workflow_dispatch:
 
 permissions:

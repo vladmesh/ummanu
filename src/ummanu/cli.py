@@ -162,18 +162,18 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
 
     parser = StructuredArgumentParser(prog="ummanu")
     subparsers = parser.add_subparsers(dest="command")
-    _add_family(subparsers, 'doctor-record', selected)
-    _add_family(subparsers, 'dispatcher', selected)
-    _add_family(subparsers, 'pause', selected)
-    _add_family(subparsers, 'head-status', selected)
-    _add_family(subparsers, 'check', selected)
-    _add_family(subparsers, 'web-read', selected)
-    _add_family(subparsers, 'web-run', selected)
-    _add_family(subparsers, 'web-serve', selected)
-    _add_family(subparsers, 'web-front', selected)
-    _add_family(subparsers, 'po-serve', selected)
-    _add_family(subparsers, 'po', selected)
-    _add_family(subparsers, 'owner-events', selected)
+    _add_family(subparsers, "doctor-record", selected)
+    _add_family(subparsers, "dispatcher", selected)
+    _add_family(subparsers, "pause", selected)
+    _add_family(subparsers, "head-status", selected)
+    _add_family(subparsers, "check", selected)
+    _add_family(subparsers, "web-read", selected)
+    _add_family(subparsers, "web-run", selected)
+    _add_family(subparsers, "web-serve", selected)
+    _add_family(subparsers, "web-front", selected)
+    _add_family(subparsers, "po-serve", selected)
+    _add_family(subparsers, "po", selected)
+    _add_family(subparsers, "owner-events", selected)
     automations = subparsers.add_parser(
         "automations",
         add_help=False,
@@ -221,10 +221,10 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     config_check.set_defaults(handler=run_config_check)
     config.set_defaults(handler=usage_handler("config subcommand required"))
 
-    _add_family(subparsers, 'upgrade', selected)
-    _add_family(subparsers, 'install', selected)
+    _add_family(subparsers, "upgrade", selected)
+    _add_family(subparsers, "install", selected)
     add_role_skills_subcommands(subparsers)
-    _add_family(subparsers, 'sprint', selected)
+    _add_family(subparsers, "sprint", selected)
 
     reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
@@ -354,7 +354,7 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     backup_verify.set_defaults(handler=run_backup_verify)
     backup.set_defaults(handler=not_implemented("backup"))
 
-    _add_family(subparsers, 'restore', selected)
+    _add_family(subparsers, "restore", selected)
 
     checkpoint = subparsers.add_parser("checkpoint-run", help="prepare and push the instance checkpoint")
     _add_instance(checkpoint, help="path to an instance dir or instance.yaml")
@@ -407,8 +407,8 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     gate.set_defaults(handler=run_project_gate)
     project.set_defaults(handler=not_implemented("project"))
 
-    _add_family(subparsers, 'task', selected)
-    _add_family(subparsers, 'product', selected)
+    _add_family(subparsers, "task", selected)
+    _add_family(subparsers, "product", selected)
 
     shell = subparsers.add_parser(
         "shell",
@@ -516,7 +516,7 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     knowledge_list.set_defaults(handler=run_knowledge_list)
     knowledge.set_defaults(handler=not_implemented("knowledge"))
 
-    _add_family(subparsers, 'secret', selected)
+    _add_family(subparsers, "secret", selected)
 
     return parser
 
@@ -647,7 +647,6 @@ def run_doctor(args: argparse.Namespace) -> int:
         return 1
     print("status: ok")
     return 0
-
 
 
 def _codex_home_status(report) -> dict[str, object]:
@@ -1114,8 +1113,6 @@ def print_board_schema_status(board_schema: dict[str, object] | None) -> None:
     else:
         print(f"board schema: {str(state).replace('_', ' ')}: {board_schema.get('reason')}")
 
-
-#: The probe verdicts that put a provider in front of the owner, and what each one means to them.
 
 def record_provider_owner_events(report, resources: list[object]) -> int:
     """One `provider_red` notice per provider, condition and UTC day: repeated doctor runs add nothing.

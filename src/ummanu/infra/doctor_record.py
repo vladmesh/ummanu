@@ -272,7 +272,7 @@ def _timestamp(value: Any) -> float:
 
 
 def add_subcommand(subparsers: Any) -> None:
-    command = add_command_parser(subparsers, 'doctor-record')
+    command = add_command_parser(subparsers, "doctor-record")
     add_instance_argument(command, type=Path)
     command.add_argument("--data-dir", type=Path, help="override the result data root")
     command.add_argument("--offline", action="store_true")

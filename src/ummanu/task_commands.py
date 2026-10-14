@@ -82,7 +82,7 @@ def _instance(args: argparse.Namespace) -> str:
 
 
 def add_task_subcommands(subparsers) -> None:
-    task = add_command_parser(subparsers, 'task')
+    task = add_command_parser(subparsers, "task")
     task_subcommands = task.add_subparsers(dest="task_command")
     task_list = task_subcommands.add_parser("list")
     task_list.add_argument(
@@ -813,7 +813,6 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
     the named `TaskError` status of any command that cannot reach its backend.
     """
     from ummanu.tasks import BOARD_STORE_KIND, task_audit_for
-
 
     def command() -> object:
         client = card_client(_instance(args))

@@ -349,7 +349,7 @@ class StatusLineTests(Fixture):
             "checkpoint": {"lag_minutes": 0},
         }
         out = io.StringIO()
-        with mock.patch('ummanu.status.collect_status', return_value=snapshot), redirect_stdout(out):
+        with mock.patch("ummanu.status.collect_status", return_value=snapshot), redirect_stdout(out):
             code = cli.main(["status", "--offline", "--instance", str(self.instance)])
 
         self.assertEqual(code, 0, out.getvalue())

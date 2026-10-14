@@ -36,7 +36,7 @@ _EXIT_BY_CODE = {"not_found": 2, "validation": 2, "backend_unavailable": 1}
 
 def add_web_read_subcommands(subparsers) -> None:
     """Register the group. Read-only: none of these three takes an actor or writes anything."""
-    group = add_command_parser(subparsers, 'web-read')
+    group = add_command_parser(subparsers, "web-read")
     commands = group.add_subparsers(dest="web_read_command")
 
     system = commands.add_parser(
@@ -249,7 +249,7 @@ _RUN_EXIT_BY_CODE = {
 
 def add_web_run_subcommands(subparsers) -> None:
     """Register the group beside `web-read`."""
-    group = add_command_parser(subparsers, 'web-run')
+    group = add_command_parser(subparsers, "web-run")
     commands = group.add_subparsers(dest="web_run_command")
 
     start = commands.add_parser("start", help="raise a worker head for one card")

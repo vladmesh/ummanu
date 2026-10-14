@@ -137,7 +137,7 @@ class ResolvedCheck:
 
 
 def add_check_subcommands(subparsers) -> None:
-    check = add_command_parser(subparsers, 'check')
+    check = add_command_parser(subparsers, "check")
     _common(check)
     check.add_argument("check_command", nargs="?", default="", metavar="SELECTOR|broad|show")
     check.add_argument("selectors", nargs="*", metavar="SELECTOR")

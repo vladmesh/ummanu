@@ -511,7 +511,7 @@ class TickReaderTests(unittest.TestCase):
             ):
                 stack.enter_context(mock.patch.object(status, name, return_value=value))
             stack.enter_context(mock.patch.object(status, "store_health", return_value={}))
-            stack.enter_context(mock.patch('ummanu.config.validate_instance', return_value=report))
+            stack.enter_context(mock.patch("ummanu.config.validate_instance", return_value=report))
             stack.enter_context(
                 mock.patch.object(interactive_workspace, "status_line", return_value="workspace")
             )
@@ -527,7 +527,7 @@ class TickReaderTests(unittest.TestCase):
                 snapshot = status.collect_status(
                     report, offline=True, sprints=False, recovery={"resources": []}
                 )
-                with mock.patch('ummanu.status.collect_status', return_value=snapshot):
+                with mock.patch("ummanu.status.collect_status", return_value=snapshot):
                     for json_output in (True, False):
                         args = SimpleNamespace(
                             instance=str(report.instance_path),
@@ -579,7 +579,7 @@ class TickReaderTests(unittest.TestCase):
                 mock.patch.object(cli, "production_runtime_provenance_finding", return_value=None)
             )
             stack.enter_context(
-                mock.patch('ummanu.infra.recovery_inventory.collect_recovery_inventory', return_value={"resources": []})
+                mock.patch("ummanu.infra.recovery_inventory.collect_recovery_inventory", return_value={"resources": []})
             )
             stack.enter_context(
                 mock.patch.object(cli, "_codex_home_status", return_value={"login_missing": False})

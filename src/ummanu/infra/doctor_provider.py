@@ -2,6 +2,7 @@
 
 from ummanu.head_health import PROBE_BROKEN, PROBE_TIMED_OUT
 
+#: The probe verdicts that put a provider in front of the owner, and what each one means to them.
 PROVIDER_RED_STATES = {
     "unauthenticated": "its key is expired or its login is missing",
     "exhausted": "its quota is spent",

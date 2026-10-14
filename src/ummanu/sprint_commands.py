@@ -57,7 +57,7 @@ from ummanu.webproto.sprint_reads import SprintReadLayer
 
 
 def add_sprint_subcommands(subparsers) -> None:
-    sprint = add_command_parser(subparsers, 'sprint')
+    sprint = add_command_parser(subparsers, "sprint")
     commands = sprint.add_subparsers(dest="sprint_command")
     listed = commands.add_parser("list")
     listed.add_argument("--status", action="append", choices=("open", "closed", "stopped"))

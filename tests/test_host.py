@@ -482,8 +482,8 @@ class ReconcilePlanTests(unittest.TestCase):
         )
         collected = CollectResult(HostInventory(), {})
         with (
-            unittest.mock.patch('ummanu.host_apply.resolve_installed_packaged', return_value=[]),
-            unittest.mock.patch('ummanu.host.load_managed_manifest',
+            unittest.mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=[]),
+            unittest.mock.patch("ummanu.host.load_managed_manifest",
                 return_value=([], "managed manifest is unreadable"),
             ),
         ):
@@ -1789,7 +1789,7 @@ class DoctorHostCliTests(unittest.TestCase):
                 states["ummanu-memory.service"] = ("enabled", "failed")
                 return CollectResult(HostInventory(units=expected.units, unit_states=states), {})
 
-        with unittest.mock.patch('ummanu.host.LiveHostSource', return_value=HealthyFilesFailedRuntime()):
+        with unittest.mock.patch("ummanu.host.LiveHostSource", return_value=HealthyFilesFailedRuntime()):
             code, output = run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertEqual(code, 1, output)
@@ -1826,7 +1826,7 @@ class DoctorHostCliTests(unittest.TestCase):
                         {"projects": expected.project_error},
                     )
 
-            with unittest.mock.patch('ummanu.host.LiveHostSource', return_value=ExpectedCheckoutUnavailable()
+            with unittest.mock.patch("ummanu.host.LiveHostSource", return_value=ExpectedCheckoutUnavailable()
             ):
                 code, output = run_cli(["doctor", "--host", "--instance", str(instance)])
 

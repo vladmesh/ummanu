@@ -35,7 +35,7 @@ from ummanu.webproto.pause_reads import DRAIN, PauseReadLayer
 
 
 def add_dispatcher_subcommands(subparsers) -> None:
-    dispatcher = add_command_parser(subparsers, 'dispatcher')
+    dispatcher = add_command_parser(subparsers, "dispatcher")
     commands = dispatcher.add_subparsers(dest="dispatcher_command")
 
     for name, handler in (
@@ -68,7 +68,7 @@ def add_pause_commands(subparsers) -> None:
     and not one of the dispatcher's own steps. The legacy `pipeline pause` entry refuses and points
     here, so the two implementations cannot drift apart in silence.
     """
-    pause = add_command_parser(subparsers, 'pause')
+    pause = add_command_parser(subparsers, "pause")
     add_common(pause)
     pause.add_argument("mode", choices=(*PAUSE_MODES, "soft", "hard"))
     reason = pause.add_mutually_exclusive_group()
@@ -82,15 +82,15 @@ def add_pause_commands(subparsers) -> None:
     )
     pause.set_defaults(handler=run_pause)
 
-    resume = add_command_parser(subparsers, 'resume')
+    resume = add_command_parser(subparsers, "resume")
     add_common(resume)
     resume.set_defaults(handler=run_resume)
 
-    status = add_command_parser(subparsers, 'pause-status')
+    status = add_command_parser(subparsers, "pause-status")
     add_common(status)
     status.set_defaults(handler=run_pause_status)
 
-    scope = add_command_parser(subparsers, 'pause-scope')
+    scope = add_command_parser(subparsers, "pause-scope")
     add_common(scope)
     scope.set_defaults(handler=run_pause_scope)
 
@@ -105,7 +105,7 @@ def add_head_status_command(subparsers) -> None:
     dispatcher state -- the records naming which head serves which card in which workspace -- while
     `host_commands` is about host resources the dispatcher does not own.
     """
-    command = add_command_parser(subparsers, 'head-status')
+    command = add_command_parser(subparsers, "head-status")
     add_common(command)
     command.add_argument(
         "--workspace",

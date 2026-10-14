@@ -113,7 +113,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                                  data_dir=self.data, instance_path=self.root / "instance" / "instance.yaml",
                                  name="disposable", projects=[])
         with (
-            mock.patch('ummanu.host_apply.resolve_installed_packaged', return_value=self.packaged),
+            mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=self.packaged),
             mock.patch.object(status, "resolve_installed_packaged", return_value=self.packaged),
         ):
             _, collected, diffs = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=str(self.fixture)))
@@ -162,7 +162,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
             self.assertNotEqual(result.status, "failed", result)
             self.assertTrue(all(name != unit for _, name in installer.calls))
             self.assertNotIn(unit, (self.data / "host-managed.json").read_text() if not dry else "")
-        with mock.patch('ummanu.host_apply.resolve_installed_packaged', return_value=self.packaged):
+        with mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=self.packaged):
             _, collected, diffs = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=str(self.fixture)))
         self.assertFalse(collected.errors)
         self.assertNotIn(unit, diffs["units"].unmanaged_on_host)
@@ -219,7 +219,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                 self.assertEqual(result.status, "failed")
                 self.assertIn("system manager/bus unavailable", result.detail)
                 self.assertEqual(installer.calls, [])
-            with mock.patch('ummanu.host_apply.resolve_installed_packaged', return_value=self.packaged):
+            with mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=self.packaged):
                 _, collected, _ = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=None))
             self.assertIn("system manager/bus unavailable", collected.errors["units"])
             self.assertEqual(collected.inventory.units, set())

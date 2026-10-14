@@ -38,7 +38,7 @@ EXIT_VALIDATION = 2
 
 def add_web_serve_subcommands(subparsers) -> None:
     """Register the group beside `web-read` and `web-run`."""
-    group = add_command_parser(subparsers, 'web-serve')
+    group = add_command_parser(subparsers, "web-serve")
     add_instance_argument(group, help="path to an instance dir or instance.yaml")
     group.add_argument(
         "--data-dir",

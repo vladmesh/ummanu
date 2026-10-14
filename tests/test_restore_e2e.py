@@ -254,7 +254,7 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
         inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
         live = mock.Mock()
         live.collect.return_value = CollectResult(inventory=inventory)
-        with mock.patch('ummanu.host.LiveHostSource', return_value=live):
+        with mock.patch("ummanu.host.LiveHostSource", return_value=live):
             return main(["restore-reconcile", "--instance", str(instance)])
 
 
@@ -498,7 +498,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
 
             source = mock.Mock()
             source.collect.return_value = CollectResult(inventory=HostInventory(units=set()))
-            with mock.patch('ummanu.host.LiveHostSource', return_value=source):
+            with mock.patch("ummanu.host.LiveHostSource", return_value=source):
                 self.assertEqual(main(["restore-reconcile", "--instance", str(instance)]), 1)
 
             self.assertIn("managed reconcile has not been applied", restore_findings(data_dir))

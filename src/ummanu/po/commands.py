@@ -22,7 +22,7 @@ from ummanu.webproto.errors import ReadError
 
 
 def add_po_subcommands(subparsers) -> None:
-    command = add_command_parser(subparsers, 'po')
+    command = add_command_parser(subparsers, "po")
     verbs = command.add_subparsers(dest="po_command", required=True)
     rename = verbs.add_parser(
         "rename", help="set a PO session's title; an empty title clears it, a repeat changes nothing"

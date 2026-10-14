@@ -1094,7 +1094,7 @@ def listening(service: PoService) -> Iterator[Path]:
 
 
 def add_po_serve_subcommands(subparsers) -> None:
-    command = add_command_parser(subparsers, 'po-serve')
+    command = add_command_parser(subparsers, "po-serve")
     add_instance_argument(command, help="path to an instance dir or instance.yaml")
     command.add_argument(
         "--data-dir",

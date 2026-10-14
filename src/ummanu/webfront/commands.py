@@ -68,7 +68,7 @@ SITES_SETTING = "host.web_front.sites"
 
 
 def add_web_front_subcommands(subparsers) -> None:
-    group = add_command_parser(subparsers, 'web-front')
+    group = add_command_parser(subparsers, "web-front")
     commands = group.add_subparsers(dest="web_front_command")
 
     password = commands.add_parser(

@@ -54,7 +54,7 @@ DEFAULT_ACTOR = "operator"
 
 
 def add_secret_subcommands(subparsers) -> None:
-    secret = add_command_parser(subparsers, 'secret')
+    secret = add_command_parser(subparsers, "secret")
     secret_subcommands = secret.add_subparsers(dest="secret_command")
 
     init = secret_subcommands.add_parser(

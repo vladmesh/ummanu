@@ -2825,7 +2825,7 @@ def _exec_pulled_upgrade(
 
 
 def add_upgrade_command(subparsers) -> None:
-    upgrade = add_command_parser(subparsers, 'upgrade')
+    upgrade = add_command_parser(subparsers, "upgrade")
     add_instance_argument(upgrade)
     upgrade.add_argument("--dry-run", action="store_true", help="decide every step but write nothing")
     upgrade.add_argument("--no-pull", action="store_true", help="re-materialize without moving the checkout")

@@ -14,7 +14,7 @@ from ummanu.runtime.paths import add_instance_argument
 def add_restore_subcommands(subparsers) -> None:
     from ummanu.installation.credentials import add_bootstrap_credential_arguments
 
-    bootstrap = add_command_parser(subparsers, 'bootstrap')
+    bootstrap = add_command_parser(subparsers, "bootstrap")
     bootstrap.add_argument("--empty", action="store_true", help="create an empty ummanu-data target")
     add_instance_argument(bootstrap, help="live instance for --empty; unused for host bootstrap")
     bootstrap.add_argument("--instance-remote", help="private instance remote for host bootstrap")
@@ -24,23 +24,23 @@ def add_restore_subcommands(subparsers) -> None:
     bootstrap.add_argument("--dry-run", action="store_true")
     bootstrap.set_defaults(handler=run_bootstrap)
 
-    restore = add_command_parser(subparsers, 'restore')
+    restore = add_command_parser(subparsers, "restore")
     restore.add_argument("archive")
     add_instance_argument(restore)
     restore.add_argument("--dry-run", action="store_true")
     restore.set_defaults(handler=run_restore)
 
-    postgres_restore = add_command_parser(subparsers, 'restore-postgres')
+    postgres_restore = add_command_parser(subparsers, "restore-postgres")
     postgres_restore.add_argument("archive")
     add_instance_argument(postgres_restore)
     postgres_restore.add_argument("--dry-run", action="store_true")
     postgres_restore.set_defaults(handler=run_restore_postgres)
 
-    board = add_command_parser(subparsers, 'restore-board')
+    board = add_command_parser(subparsers, "restore-board")
     add_instance_argument(board)
     board.set_defaults(handler=run_restore_board)
 
-    reconcile = add_command_parser(subparsers, 'restore-reconcile')
+    reconcile = add_command_parser(subparsers, "restore-reconcile")
     add_instance_argument(reconcile)
     reconcile.set_defaults(handler=run_restore_reconcile)
 

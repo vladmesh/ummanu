@@ -28,7 +28,7 @@ def _common(
 
 
 def add_product_issue_subcommands(subparsers) -> None:
-    product = add_command_parser(subparsers, 'product')
+    product = add_command_parser(subparsers, "product")
     product_sub = product.add_subparsers(dest="product_command")
     create = product_sub.add_parser("create")
     _common(create, write=True, roles=("po",))
@@ -77,7 +77,7 @@ def add_product_issue_subcommands(subparsers) -> None:
     transaction.set_defaults(handler=usage_handler("product transaction subcommand required"))
     product.set_defaults(handler=usage_handler("product subcommand required"))
 
-    issue = add_command_parser(subparsers, 'issue')
+    issue = add_command_parser(subparsers, "issue")
     issue_sub = issue.add_subparsers(dest="issue_command")
     create = issue_sub.add_parser("create")
     _common(create, write=True)

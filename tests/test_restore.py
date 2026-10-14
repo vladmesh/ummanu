@@ -852,7 +852,7 @@ class RestoreTests(unittest.TestCase):
                 inventory = HostInventory(units=live_units)
                 source = mock.Mock()
                 source.collect.return_value = CollectResult(inventory=inventory)
-                with mock.patch('ummanu.host.LiveHostSource', return_value=source):
+                with mock.patch("ummanu.host.LiveHostSource", return_value=source):
                     self.assertEqual(
                         main(["restore-reconcile", "--instance", str(instance)]),
                         0,
@@ -876,9 +876,9 @@ class RestoreTests(unittest.TestCase):
 
             # A duplicated shipped resource is invalid desired state; legacy heads are ignored.
             with (
-                mock.patch('ummanu.host_apply.resolve_installed_packaged', return_value=[unit, unit]),
-                mock.patch('ummanu.host.LiveHostSource') as inventory,
-                mock.patch('ummanu.restore.mark_reconcile_applied', wraps=mark_reconcile_applied
+                mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=[unit, unit]),
+                mock.patch("ummanu.host.LiveHostSource") as inventory,
+                mock.patch("ummanu.restore.mark_reconcile_applied", wraps=mark_reconcile_applied
                 ) as mark,
                 contextlib.redirect_stdout(output),
             ):

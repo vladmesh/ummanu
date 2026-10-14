@@ -21,7 +21,7 @@ EXIT_UNAVAILABLE = 1
 
 
 def add_owner_event_subcommands(subparsers) -> None:
-    command = add_command_parser(subparsers, 'owner-events')
+    command = add_command_parser(subparsers, "owner-events")
     verbs = command.add_subparsers(dest="owner_events_command", required=True)
     listing = verbs.add_parser("list", help="list owner events: what needs the owner first, then newest first")
     add_instance_argument(listing, help="path to an instance dir or instance.yaml")

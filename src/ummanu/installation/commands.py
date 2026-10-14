@@ -610,7 +610,7 @@ def add_install_commands(subparsers) -> None:
         parser.add_argument("--host-fixture", help=argparse.SUPPRESS)
         parser.set_defaults(handler=run_install)
 
-    fresh = add_command_parser(subparsers, 'install')
+    fresh = add_command_parser(subparsers, "install")
     arguments(fresh, recovery_default=False)
-    recover = add_command_parser(subparsers, 'recover')
+    recover = add_command_parser(subparsers, "recover")
     arguments(recover, recovery_default=True)
