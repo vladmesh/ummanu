@@ -14,7 +14,7 @@ import time
 import unittest
 from typing import Any, ClassVar
 
-from ummanu.web import pages
+from ummanu.web import page_assets, pages
 from ummanu.web.markdown import render
 
 ALLOWED_TAGS = {
@@ -268,18 +268,18 @@ class FeedPageTest(unittest.TestCase):
         self.assertLess(page.index("old answer"), page.index("old question"))
 
     def test_rendered_agent_block_does_not_pre_wrap_while_owner_text_does(self) -> None:
-        self.assertIn(".po-entry .text { white-space: pre-wrap;", pages.STYLE)
-        md_rules = [rule for rule in pages.STYLE.splitlines() if ".po-entry .md" in rule]
+        self.assertIn(".po-entry .text { white-space: pre-wrap;", page_assets.STYLE)
+        md_rules = [rule for rule in page_assets.STYLE.splitlines() if ".po-entry .md" in rule]
         self.assertTrue(md_rules)
         self.assertFalse([rule for rule in md_rules if "pre-wrap" in rule])
         self.assertTrue([rule for rule in md_rules if ".md pre" in rule and "overflow-x:auto" in rule])
 
     def test_feed_content_is_constrained_to_the_panel_width(self) -> None:
-        self.assertIn(".po-feed {", pages.STYLE)
-        self.assertIn("min-width:0; max-width:100%;", pages.STYLE)
-        self.assertIn(".po-entry .md { overflow-wrap:anywhere; word-break:break-word;", pages.STYLE)
-        self.assertIn(".po-entry .md pre { white-space:pre; max-width:100%; min-width:0; overflow-x:auto;", pages.STYLE)
-        self.assertIn(".panel > .body { padding: .75rem .9rem; min-width:0; max-width:100%; }", pages.STYLE)
+        self.assertIn(".po-feed {", page_assets.STYLE)
+        self.assertIn("min-width:0; max-width:100%;", page_assets.STYLE)
+        self.assertIn(".po-entry .md { overflow-wrap:anywhere; word-break:break-word;", page_assets.STYLE)
+        self.assertIn(".po-entry .md pre { white-space:pre; max-width:100%; min-width:0; overflow-x:auto;", page_assets.STYLE)
+        self.assertIn(".panel > .body { padding: .75rem .9rem; min-width:0; max-width:100%; }", page_assets.STYLE)
 
 
 class PageShellTest(unittest.TestCase):
@@ -293,9 +293,9 @@ class PageShellTest(unittest.TestCase):
         self.assertIn("document.documentElement.dataset.theme", page)
 
     def test_explicit_light_and_dark_themes_pin_the_browser_color_scheme(self) -> None:
-        self.assertIn(':root[data-theme="light"] { color-scheme: light; }', pages.STYLE)
-        self.assertIn(':root[data-theme="dark"] {', pages.STYLE)
-        self.assertIn("color-scheme: dark;", pages.STYLE)
+        self.assertIn(':root[data-theme="light"] { color-scheme: light; }', page_assets.STYLE)
+        self.assertIn(':root[data-theme="dark"] {', page_assets.STYLE)
+        self.assertIn("color-scheme: dark;", page_assets.STYLE)
 
 
 if __name__ == "__main__":

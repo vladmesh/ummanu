@@ -58,7 +58,7 @@ from ummanu.po import store as po_store
 from ummanu.po.queue import PoQueue
 from ummanu.po.sprints import SprintRecord
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
-from ummanu.web import pages
+from ummanu.web import page_parts, pages
 from ummanu.webproto import sources
 from ummanu.webproto.reads import _card_value
 from ummanu.webproto.section import Reading, SourceSet, render
@@ -990,7 +990,7 @@ class SprintWaitingTests(unittest.TestCase):
             "goal": "g",
             "waiting": {"state": "waiting", "reason": f"{REF} (decision) is handed to the owner: {REASON}", "card": REF},
         }
-        html = pages._compact_sprint_card(item)
+        html = page_parts._compact_sprint_card(item)
         self.assertIn("is handed to the owner: Pay the relay provider", html)
         self.assertIn(f'href="/tasks/{REF}"', html)
 

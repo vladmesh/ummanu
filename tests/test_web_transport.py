@@ -50,7 +50,7 @@ from ummanu.runtime.head.runtime import (
 )
 from ummanu.runtime.heads import Registry
 from ummanu.tasks import task_audit_for
-from ummanu.web import pages
+from ummanu.web import page_shell, pages
 from ummanu.web.app import ROUTES, WebApp
 from ummanu.web.server import (
     DEFAULT_HOST,
@@ -950,7 +950,7 @@ class PageTests(TransportFixture):
         for path in ("/", "/tasks/ummanu-run-1"):
             with self.subTest(path=path):
                 self.assertIn("local only", self.text_of(self.get(path)))
-        self.assertIn("no password", pages.LOOPBACK_NOTICE)
+        self.assertIn("no password", page_shell.LOOPBACK_NOTICE)
 
 
 # -- criterion 4: a repeated POST is one run ------------------------------------------------------

@@ -26,11 +26,13 @@ run before the restart rather than after it.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from dataclasses import replace
@@ -38,13 +40,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest import mock
+from zipfile import ZipFile
 
 from jsonschema import Draft202012Validator
 
 from tests.fakes.upgrade import FakeUnitInstaller
+from tests.support.web_render_packets import ASSETS, NOW, packets
 from ummanu import upgrade
 from ummanu.config import load_schema, validate
 from ummanu.host_apply import HostCommandError
+from ummanu.web import page_assets, pages
 from ummanu.web.health import (
     WebProbeError,
     WebTarget,
@@ -55,6 +60,108 @@ from ummanu.web.server import LoopbackOnly
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "onboarding" / "happy-path.json"
+
+
+class InstalledPresentationTests(unittest.TestCase):
+    """Build the sdist, build its wheel and render from an installation outside either tree."""
+
+    def test_sdist_wheel_and_installed_pages_carry_the_canonical_resources(self):
+        with tempfile.TemporaryDirectory(prefix="ummanu-installed-presentation-") as temporary:
+            scratch = Path(temporary)
+            distributions = scratch / "distributions"
+            distributions.mkdir()
+            built = subprocess.run(
+                [sys.executable, "-c", ("from setuptools.build_meta import build_sdist; "
+                 "import sys; build_sdist(sys.argv[1])"), str(distributions)],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            expected = {str(path.relative_to(REPO_ROOT / "src")) for path in
+                        [*(REPO_ROOT / "src/ummanu/web").glob("page*.py"),
+                         *(REPO_ROOT / "src/ummanu/web/static").iterdir()]}
+            unpacked = scratch / "sdist"
+            with tarfile.open(next(distributions.glob("*.tar.gz"))) as archive:
+                members = archive.getnames()
+                for name in expected:
+                    self.assertTrue(any(member.endswith("/src/" + name) for member in members), name)
+                archive.extractall(unpacked, filter="data")
+            sdist_root = next(unpacked.iterdir())
+            built = subprocess.run(
+                [sys.executable, "-c", ("from setuptools.build_meta import build_wheel; "
+                 "import sys; build_wheel(sys.argv[1])"), str(distributions)],
+                cwd=sdist_root, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            wheel = next(distributions.glob("*.whl"))
+            with ZipFile(wheel) as archive:
+                self.assertTrue(expected <= set(archive.namelist()), expected - set(archive.namelist()))
+            installed = scratch / "installed"
+            installation = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--no-deps", "--no-index", "--target", str(installed), str(wheel)],
+                cwd=scratch, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(installation.returncode, 0, installation.stdout + installation.stderr)
+            cases = list(packets())
+            expected_packets = {}
+            with pages.render_clock(lambda: NOW):
+                for label, name, args, kwargs in cases:
+                    try:
+                        expected_packets[label] = {"value": getattr(pages, name)(*args, **kwargs)}
+                    except Exception as exc:  # noqa: BLE001 - compare malformed-input behavior too
+                        expected_packets[label] = {"exception": type(exc).__name__, "message": str(exc)}
+            payload = {"cases": cases, "assets": ASSETS, "now": NOW.isoformat()}
+            child = subprocess.run(
+                [sys.executable, "-I", "-c", _INSTALLED_PRESENTATION, str(installed)],
+                input=json.dumps(payload, default=lambda value: value.isoformat()),
+                cwd=scratch, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+            actual = json.loads(child.stdout)
+            self.assertEqual(actual["packets"], expected_packets)
+            self.assertEqual(actual["assets"], {name: hashlib.sha256(getattr(page_assets, name).encode()).hexdigest()
+                                               for name in ASSETS})
+            self.assertEqual(actual["max_tabs"], page_assets.MAX_TABS)
+
+
+_INSTALLED_PRESENTATION = '''
+import ast, hashlib, json, sys
+from datetime import datetime
+from pathlib import Path
+from importlib.resources import files
+target = Path(sys.argv[1])
+sys.path.insert(0, str(target))
+from ummanu.web import pages, page_assets
+assert Path(pages.__file__).is_relative_to(target), pages.__file__
+assert Path(page_assets.__file__).is_relative_to(target), page_assets.__file__
+payload = json.load(sys.stdin)
+now = datetime.fromisoformat(payload['now'])
+packets = {}
+with pages.render_clock(lambda: now):
+    for label, name, args, kwargs in payload['cases']:
+        if name == 'po_page':
+            kwargs['now'] = now
+        try:
+            packets[label] = {'value': getattr(pages, name)(*args, **kwargs)}
+        except Exception as exc:
+            packets[label] = {'exception': type(exc).__name__, 'message': str(exc)}
+web = target / 'ummanu/web'
+for path in web.rglob('*.py'):
+    tree = ast.parse(path.read_text(encoding='utf-8'))
+    for node in ast.walk(tree):
+        names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+                [node.module or ''] if isinstance(node, ast.ImportFrom) else []
+        assert not any(n.split('.')[0] in {'subprocess', 'os.system', 'shutil', 'pty'} for n in names), path
+static = files('ummanu.web').joinpath('static')
+for resource in static.iterdir():
+    text = resource.read_text(encoding='utf-8')
+    assert '</script' not in text.lower() and '</style' not in text.lower() and '@import' not in text
+assert 'TAB_RULES' in static.joinpath('style.css').read_text(encoding='utf-8')
+assert 'TAB_RULES' not in page_assets.STYLE
+for n in range(1, page_assets.MAX_TABS + 1):
+    assert f'.tab-panel:nth-of-type({n}) {{ display: block; }}' in page_assets.STYLE
+print(json.dumps({'packets': packets, 'max_tabs': page_assets.MAX_TABS,
+    'assets': {name: hashlib.sha256(getattr(page_assets, name).encode()).hexdigest() for name in payload['assets']}}))
+'''
 
 UNIT_PREFIX = "ummanu-"
 WEB_UNIT = f"{UNIT_PREFIX}web.service"

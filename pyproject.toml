@@ -220,6 +220,7 @@ where = ["src"]
 include = ["ummanu*"]
 
 [tool.setuptools.package-data]
+"ummanu.web" = ["static/*.css", "static/*.js"]
 "ummanu.schemas" = ["*.json"]
 # Alembic reads its environment, template and revisions from the installed tree by path, so
 # they ship with the package rather than only existing in the checkout.
