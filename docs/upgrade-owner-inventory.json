@@ -1,4 +1,34 @@
 {
+  "source_cut_update": {
+    "base": "360509c3898e51bf71089bd2d6373506ab2aab0c",
+    "owner": "src/ummanu/installation/upgrade/fingerprints.py",
+    "lifetime_owner": "ummanu.upgrade.run_steps",
+    "binding": "ummanu.installation.upgrade.types.UpgradeContext.source_cut",
+    "binding_type": "types._SourceCutOwner structural seam; types stays a leaf",
+    "consumers": {
+      "services.memory_process_inputs": "context cut for product; model, pack and dependencies remain fresh",
+      "services.web_process_inputs": "context cut for product/schema; units, registry and dependencies remain fresh",
+      "services.po_process_inputs": "optional keyword context supplied only by step_po and step_verify; default fresh",
+      "services.write_po_process_receipt": "standalone po_process_inputs(root), no context or borrowed process provenance",
+      "services.step_verify": "replace shares active scope; host failure precedes receipt checks; final source fence",
+      "installation.materialize.materialize_host": "same public run_steps; recovery's pre-host scope stays lazy"
+    },
+    "retained_explicit_receipterror_exports": [
+      "types.ReceiptError: tests.test_po_service and other shared type consumers",
+      "services.ReceiptError: tests.test_upgrade_owners and process receipt consumers"
+    ],
+    "cleanup": {
+      "OBS-unused-receipterror-reexports": "host/workspaces imports removed; checkout/dependencies imports local",
+      "OBS-patch-paths-through-non-owner-alias": [
+        "tests/test_upgrade.py execve -> ummanu.upgrade.os.execve",
+        "tests/test_upgrade.py verify audit -> services.role_skills.audit",
+        "tests/test_po_service.py getpid -> services.os.getpid",
+        "tests/test_po_service.py verify audit -> services.role_skills.audit",
+        "tests/test_po_service.py status -> canonical ummanu.state_repo.status; services has no status binding/call on this base"
+      ]
+    },
+    "note": "Follow-up ownership/patch capture, not a frozen API; extraction inventory below remains historical. Cleanup fixed claims require independent review."
+  },
   "base": "aa816323315719f5b59a2d8c972b11204afc396b",
   "base_tree": "8594ad424291e7cbaab9f4f0fd19efb476bb2064",
   "base_source_sha256": "b7123bdf554317a65560afe6217436cf11a64b10cf1a5e9024766cfb53f893f1",

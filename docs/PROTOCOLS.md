@@ -3723,6 +3723,40 @@ service, stale or denied identity, malformed MCP reply or missing expected row f
 upgrade step visibly; a denial is final, not retried into a timeout. The list tool may return one JSON
 text block per row or structured content; the probe normalizes every supported form to rows.
 
+### Upgrade source coherence
+
+`upgrade.run_steps` owns a lazy `installation.upgrade.fingerprints.SourceCut`. The first
+memory/web/PO input consumer, after pull or pulled-code handoff, selects the resolved product root,
+exact HEAD and ordered Git tracked path sets for `src/` and its bundled-schema subset. It observes
+all regular files before acquisition, opens each source payload once through a no-follow,
+nonblocking descriptor, compares descriptor metadata before/after the read with the path metadata,
+and checks the whole selection again. The same bytes feed the released product and schema digest
+domains, in their original path order. Dirty tracked bytes count; untracked files and bytecode do
+not. Dependency manifests retain their separate acquisition and wire contract.
+
+Every reuse checks root resolution, directory identity, HEAD, tracked membership and each file's
+device, inode, mode, link count, uid/gid, size and nanosecond mtime/ctime. Step boundaries, current
+decisions and memory/web publication check the cut again. Verify's `dataclasses.replace` shares the
+active owner; exiting `run_steps`, including exceptions, closes it and clears the context binding.
+A copied context holding the closed owner cannot reacquire through it. A new invocation receives
+a new lazy owner. Standalone helpers and PO startup have no shared owner and read fresh inputs;
+PO self-publication remains bound to its own pid, start ticks and invocation ID. Runtime model/pack,
+web units and registry, process identities, probes and pending PO restart checks remain fresh.
+
+`SourceCutInvalidated`, a common `ReceiptError` and `WebProcessReceiptError` subtype, produces the
+existing failed-step/CLI exit envelope with `source cut acquisition failed:` or
+`source cut invalidated:` detail. Changed or unavailable evidence forbids publication/current;
+the invocation never retries with another cut, and existing receipt bytes remain intact. Even a
+harmless touch is conservatively invalidated. Incomplete stat evidence is refused. Unrelated
+directory timestamp changes from creating bytecode do not invalidate regular tracked payloads.
+
+This proof assumes a local filesystem whose identity and nanosecond mtime/ctime expose normal
+writes, replacement and permission changes. Metadata observations are bounded fresh fences, not
+a filesystem transaction or cryptographic attestation against metadata forgery, coarse/unreliable
+timestamps, hostile mount changes or writers acting after the last observation. The owner provides
+no process-global/persisted cache and no proof of what another process imported. Archive/restore's
+INEF-09 half and the remaining DUP-I1 restart framework are separate work.
+
 ## Reading the pipeline
 
 `ummanu.webproto` is one read layer for "what is running", "what is this card doing" and "what

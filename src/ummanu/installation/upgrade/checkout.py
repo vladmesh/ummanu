@@ -11,7 +11,7 @@ from pathlib import Path
 from ummanu import _proc, state_repo
 from ummanu.dispatch import entrypoint_guard
 from ummanu.dispatch.entrypoint_guard import EntrypointMoved
-from ummanu.infra.process_receipts import ReceiptError as ReceiptError
+from ummanu.infra.process_receipts import ReceiptError
 from ummanu.installation.upgrade.types import (
     MEMORY_CODE_PATHS,
     PACKAGED_UNIT_ROOT,

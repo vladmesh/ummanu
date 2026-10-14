@@ -18,7 +18,6 @@ from ummanu.head_registry import (
     record_source,
 )
 from ummanu.infra import git_worktree
-from ummanu.infra.process_receipts import ReceiptError as ReceiptError
 from ummanu.installation.upgrade.checkout import (
     _git,
     fast_forward,

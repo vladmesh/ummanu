@@ -10,6 +10,8 @@ unit tests/test_host_owners.py
 unit tests/test_gate_owners.py
 unit tests/test_sprint_lifecycle_owners.py
 unit tests/test_upgrade_owners.py
+unit tests/test_upgrade_source_cut.py
+unit tests/test_upgrade_source_cut_faults.py
 unit tests/test_installation_boundary.py
 integration-recovery tests/test_kernel_source_graph.py
 unit tests/test_cleanup_foundation.py

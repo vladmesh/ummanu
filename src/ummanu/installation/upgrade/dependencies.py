@@ -12,7 +12,7 @@ from typing import Any
 from ummanu import _proc
 from ummanu.board.store import store_path
 from ummanu.infra import process_receipts
-from ummanu.infra.process_receipts import ReceiptError as ReceiptError
+from ummanu.infra.process_receipts import ReceiptError
 from ummanu.installation.upgrade.checkout import (
     _git_tracked_digest,
     _touches,

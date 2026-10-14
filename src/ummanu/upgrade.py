@@ -32,6 +32,7 @@ from ummanu.installation.upgrade.dependencies import (
     step_dependencies,
     step_dependency_provenance,
 )
+from ummanu.installation.upgrade.fingerprints import SourceCut, SourceCutInvalidated
 from ummanu.installation.upgrade.host import (
     step_board_store,
     step_board_store_provision,
@@ -108,14 +109,24 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
 
 def run_steps(context: UpgradeContext, steps=STEPS) -> UpgradeResult:
     result = UpgradeResult()
-    for step in steps:
-        try:
-            outcome = step(context)
-        except HostCommandError as exc:
-            outcome = StepResult(step.__name__.removeprefix("step_"), "failed", str(exc))
-        result.steps.append(outcome)
-        if outcome.failed:
-            break
+    cut = SourceCut()
+    context.source_cut = cut
+    try:
+        for step in steps:
+            try:
+                cut.check(context.product_root)
+                outcome = step(context)
+                # Preserve an existing step failure and its diagnostic precedence.
+                if not outcome.failed:
+                    cut.check(context.product_root)
+            except (HostCommandError, SourceCutInvalidated) as exc:
+                outcome = StepResult(step.__name__.removeprefix("step_"), "failed", str(exc))
+            result.steps.append(outcome)
+            if outcome.failed:
+                break
+    finally:
+        cut.close()
+        context.source_cut = None
     return result
 
 

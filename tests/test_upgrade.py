@@ -915,7 +915,7 @@ class UpgradeStepTests(unittest.TestCase):
                 host_fixture="/tmp/host-fixture",
                 json=True,
             )
-            with mock.patch('ummanu.installation.upgrade.workspaces.os.execve') as execute:
+            with mock.patch('ummanu.upgrade.os.execve') as execute:
                 upgrade._exec_pulled_upgrade(
                     args,
                     root,
@@ -1627,7 +1627,7 @@ class HeadRegistryPairTests(unittest.TestCase):
 
         with (
             mock.patch('ummanu.installation.upgrade.services.step_host', return_value=upgrade_types.StepResult("host", "unchanged")),
-            mock.patch('ummanu.installation.upgrade.workspaces.role_skills.audit', return_value={"ok": True}),
+            mock.patch('ummanu.installation.upgrade.services.role_skills.audit', return_value={"ok": True}),
         ):
             verified = upgrade_services.step_verify(self.context)
 
