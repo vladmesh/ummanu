@@ -30,6 +30,7 @@ from ummanu.head_registry import (
     installed_pair,
 )
 from ummanu.installation import materialize as installation_materialize
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.onboarding import OnboardingStorage
 from ummanu.runtime import heads
 
@@ -83,10 +84,10 @@ class LiveRootPairIgnoredTests(unittest.TestCase):
         heads._load_registry.cache_clear()
         self.addCleanup(heads._load_registry.cache_clear)
 
-    def upgrade_step(self) -> upgrade.StepResult:
+    def upgrade_step(self) -> upgrade_types.StepResult:
         report = validate_instance(self.instance)
         self.assertTrue(report.ok, report.errors)
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=upgrade.running_product_root(),
             base_branch="main",
@@ -94,7 +95,7 @@ class LiveRootPairIgnoredTests(unittest.TestCase):
             units=mock.Mock(),
             report=report,
         )
-        return upgrade.step_head_registry(context)
+        return upgrade_workspaces.step_head_registry(context)
 
     def readers(self) -> dict[str, object]:
         """What every reader of the pair sees right now: its answer, or its error's text."""
@@ -236,8 +237,8 @@ class RecoverRegenerationTests(unittest.TestCase):
         """The recover materializer, with only its head-registry step running."""
 
         def head_registry_only(context, steps=installation_materialize.STEPS):
-            self.assertIn(upgrade.step_head_registry, steps)
-            return upgrade.run_steps(context, steps=(upgrade.step_head_registry,))
+            self.assertIn(upgrade_workspaces.step_head_registry, steps)
+            return upgrade.run_steps(context, steps=(upgrade_workspaces.step_head_registry,))
 
         with (
             mock.patch.object(installation_materialize, "run_steps", side_effect=head_registry_only),

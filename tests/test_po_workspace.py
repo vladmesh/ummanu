@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ummanu import cli, upgrade
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.memory import client_config
 from ummanu.po import workspace
 from ummanu.role_skills import (
@@ -87,8 +88,8 @@ class PoWorkspaceStepTests(unittest.TestCase):
         self.data = self.root / "data"
         self.po = self.data / workspace.WORKSPACE_NAME
 
-    def run_step(self, *, dry_run: bool = False) -> upgrade.StepResult:
-        context = upgrade.UpgradeContext(
+    def run_step(self, *, dry_run: bool = False) -> upgrade_types.StepResult:
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -96,7 +97,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
             units=None,
             report=SimpleNamespace(data_dir=self.data),
         )
-        return upgrade.step_po_workspace(context)
+        return upgrade_workspaces.step_po_workspace(context)
 
     def snapshot(self) -> dict[str, tuple[bytes, int]]:
         return {
@@ -118,7 +119,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
 
     def test_a_root_invoker_hands_the_whole_workspace_to_the_runtime_user_on_every_run(self) -> None:
         """Skill roots role-skills creates as root are handed over, and repaired on a later run."""
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -127,7 +128,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
             report=SimpleNamespace(data_dir=self.data),
             runtime_user="po-runtime",
         )
-        upgrade.step_po_workspace(context)
+        upgrade_workspaces.step_po_workspace(context)
         (self.root / "instance").mkdir()
         with mock.patch.dict(os.environ, {BIN_DIR_ENV: str(self.root / "bin")}):
             sync(
@@ -142,14 +143,14 @@ class PoWorkspaceStepTests(unittest.TestCase):
         (self.po / "link").symlink_to(outside)
         account = SimpleNamespace(pw_uid=4321, pw_gid=4321)
 
-        runs: list[tuple[upgrade.StepResult, set[Path]]] = []
+        runs: list[tuple[upgrade_types.StepResult, set[Path]]] = []
         for _ in range(2):
             with (
-                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("ummanu.upgrade.os.chown") as chown,
+                mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+                mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=account),
+                mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
             ):
-                result = upgrade.step_po_workspace_owner(context)
+                result = upgrade_workspaces.step_po_workspace_owner(context)
             runs.append((result, {Path(call.args[0]) for call in chown.call_args_list}))
 
         for result, owned in runs:
@@ -168,8 +169,8 @@ class PoWorkspaceStepTests(unittest.TestCase):
                 self.assertNotIn(outside, owned)
 
     def test_a_non_root_invoker_skips_the_handover(self) -> None:
-        upgrade.step_po_workspace(
-            upgrade.UpgradeContext(
+        upgrade_workspaces.step_po_workspace(
+            upgrade_types.UpgradeContext(
                 instance_path=self.root / "instance",
                 product_root=self.product,
                 base_branch="main",
@@ -178,7 +179,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
                 report=SimpleNamespace(data_dir=self.data),
             )
         )
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -189,10 +190,10 @@ class PoWorkspaceStepTests(unittest.TestCase):
         )
 
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=1000),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=1000),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
-            result = upgrade.step_po_workspace_owner(context)
+            result = upgrade_workspaces.step_po_workspace_owner(context)
 
         self.assertEqual(result.status, "skipped")
         chown.assert_not_called()

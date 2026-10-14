@@ -43,6 +43,12 @@ from ummanu.installation import (
     provision as installation_provision,
 )
 from ummanu.installation.models import InstallError, ProjectProvisionResult
+from ummanu.installation.upgrade import (
+    checkout as upgrade_checkout,
+    host as upgrade_host,
+    types as upgrade_types,
+    workspaces as upgrade_workspaces,
+)
 from ummanu.secret_store import generate_recovery_phrase, initialize_store, set_secret
 from ummanu.sprint_observer import head_choice
 from ummanu.web.app import ROUTES
@@ -78,7 +84,7 @@ def _product_with_a_role_worktree(root: Path) -> Path:
     return product
 
 
-def _context(product: Path, **overrides) -> upgrade.UpgradeContext:
+def _context(product: Path, **overrides) -> upgrade_types.UpgradeContext:
     values = {
         "instance_path": product.parent / "instance",
         "product_root": product,
@@ -87,7 +93,7 @@ def _context(product: Path, **overrides) -> upgrade.UpgradeContext:
         "units": mock.Mock(),
     }
     values.update(overrides)
-    return upgrade.UpgradeContext(**values)
+    return upgrade_types.UpgradeContext(**values)
 
 
 class RoleWorktreeRegistrationTests(unittest.TestCase):
@@ -104,10 +110,10 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_a_registered_worktree_whose_directory_was_lost_is_added_again(self) -> None:
-        self.assertEqual(upgrade.step_worktrees(_context(self.product)).status, "changed")
+        self.assertEqual(upgrade_workspaces.step_worktrees(_context(self.product)).status, "changed")
         shutil.rmtree(self.worktree)
 
-        result = upgrade.step_worktrees(_context(self.product))
+        result = upgrade_workspaces.step_worktrees(_context(self.product))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertEqual(result.detail, "created curator")
@@ -116,15 +122,15 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
             _git("-C", str(self.worktree), "rev-parse", "HEAD"),
             _git("-C", str(self.product), "rev-parse", "HEAD"),
         )
-        self.assertEqual(upgrade.step_worktrees(_context(self.product)).status, "unchanged")
+        self.assertEqual(upgrade_workspaces.step_worktrees(_context(self.product)).status, "unchanged")
 
     def test_a_genuine_refusal_reports_gits_fatal_line_not_its_progress_line(self) -> None:
-        upgrade.step_worktrees(_context(self.product))
+        upgrade_workspaces.step_worktrees(_context(self.product))
         # A lock is the operator's word that the registration stays: one `--force` does not override it.
         _git("-C", str(self.product), "worktree", "lock", str(self.worktree))
         shutil.rmtree(self.worktree)
 
-        result = upgrade.step_worktrees(_context(self.product))
+        result = upgrade_workspaces.step_worktrees(_context(self.product))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("curator: git worktree: fatal:", result.detail)
@@ -133,12 +139,12 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
 
     def test_a_failure_without_a_fatal_line_reports_the_last_line(self) -> None:
         self.assertEqual(
-            upgrade._git_failure_reason("Preparing worktree\nerror: one\nlast words\n"), "last words"
+            upgrade_checkout._git_failure_reason("Preparing worktree\nerror: one\nlast words\n"), "last words"
         )
         self.assertEqual(
-            upgrade._git_failure_reason("hint: try\nfatal: the cause\nhint: more\n"), "fatal: the cause"
+            upgrade_checkout._git_failure_reason("hint: try\nfatal: the cause\nhint: more\n"), "fatal: the cause"
         )
-        self.assertEqual(upgrade._git_failure_reason(""), "failed")
+        self.assertEqual(upgrade_checkout._git_failure_reason(""), "failed")
 
 
 class EmbedderEnvironmentTests(unittest.TestCase):
@@ -551,9 +557,9 @@ class RuntimeOwnershipTests(unittest.TestCase):
     @contextlib.contextmanager
     def as_root(self):
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=self.account),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+            mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=self.account),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
             yield chown
 
@@ -572,8 +578,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
         (self.root / "instance").mkdir()
 
         with self.as_root() as chown:
-            result = upgrade.step_role_skills(context)
-            unchanged = upgrade.step_role_skills(context)
+            result = upgrade_workspaces.step_role_skills(context)
+            unchanged = upgrade_workspaces.step_role_skills(context)
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertEqual(unchanged.status, "unchanged", unchanged.detail)
@@ -658,10 +664,10 @@ class WebFrontSitesTests(unittest.TestCase):
             )
         return instance
 
-    def context(self, instance: Path) -> upgrade.UpgradeContext:
+    def context(self, instance: Path) -> upgrade_types.UpgradeContext:
         report = validate_instance(instance)
         self.assertTrue(report.ok, report.errors)
-        return upgrade.UpgradeContext(
+        return upgrade_types.UpgradeContext(
             instance_path=instance,
             product_root=self.root / "product",
             base_branch="main",
@@ -681,7 +687,7 @@ class WebFrontSitesTests(unittest.TestCase):
 
     def test_the_render_runs_before_the_host_step(self) -> None:
         self.assertLess(
-            upgrade.STEPS.index(upgrade.step_web_front_config), upgrade.STEPS.index(upgrade.step_host)
+            upgrade.STEPS.index(upgrade_host.step_web_front_config), upgrade.STEPS.index(upgrade_host.step_host)
         )
 
     def test_install_and_recover_render_a_guarded_front_before_their_host_step(self) -> None:
@@ -689,12 +695,12 @@ class WebFrontSitesTests(unittest.TestCase):
         instance = self.instance()
         seen = []
 
-        def host(context: upgrade.UpgradeContext) -> upgrade.StepResult:
+        def host(context: upgrade_types.UpgradeContext) -> upgrade_types.StepResult:
             seen.append(self.caddyfile.read_text(encoding="utf-8"))
-            return upgrade.StepResult("host", "unchanged", "")
+            return upgrade_types.StepResult("host", "unchanged", "")
 
         with (
-            mock.patch.object(installation_materialize, "STEPS", (upgrade.step_web_front_config, host)),
+            mock.patch.object(installation_materialize, "STEPS", (upgrade_host.step_web_front_config, host)),
             mock.patch.object(installation_materialize, "step_host", host),
             mock.patch.object(installation_materialize, "check_product_runtime"),
         ):
@@ -715,12 +721,12 @@ class WebFrontSitesTests(unittest.TestCase):
 
     def test_a_current_front_is_not_rewritten(self) -> None:
         context = self.context(self.instance())
-        self.assertEqual(upgrade.step_web_front_config(context).status, "changed")
+        self.assertEqual(upgrade_host.step_web_front_config(context).status, "changed")
         self.assertTrue(context.web_front_config_changed)
         before = (self.caddyfile.read_bytes(), self.caddyfile.stat().st_mtime_ns)
 
         again = self.context(context.instance_path)
-        result = upgrade.step_web_front_config(again)
+        result = upgrade_host.step_web_front_config(again)
 
         self.assertEqual(result.status, "unchanged", result.detail)
         self.assertFalse(again.web_front_config_changed)
@@ -734,8 +740,8 @@ class WebFrontSitesTests(unittest.TestCase):
         self.caddyfile.chmod(0o600)
         before = self.file_state()
 
-        with mock.patch("ummanu.upgrade.state_repo.run_as_git_child") as render:
-            result = upgrade.step_web_front_config(context)
+        with mock.patch('ummanu.installation.upgrade.host.state_repo.run_as_git_child') as render:
+            result = upgrade_host.step_web_front_config(context)
 
         render.assert_not_called()
         self.assertEqual(result.status, "unchanged", result.detail)
@@ -744,14 +750,14 @@ class WebFrontSitesTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.caddyfile.parent.iterdir()), ["Caddyfile"])
 
     def test_an_upgrade_with_neither_sites_nor_a_file_names_the_setting_and_writes_nothing(self) -> None:
-        result = upgrade.step_web_front_config(self.context(self.instance(sites=False)))
+        result = upgrade_host.step_web_front_config(self.context(self.instance(sites=False)))
 
         self.assertEqual(result.status, "skipped")
         self.assertIn("host.web_front.sites", result.detail)
         self.assertFalse(self.caddyfile.parent.exists())
 
     def test_a_front_without_a_password_fails_and_names_set_password(self) -> None:
-        result = upgrade.step_web_front_config(self.context(self.instance(password=False)))
+        result = upgrade_host.step_web_front_config(self.context(self.instance(password=False)))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("ummanu web-front set-password", result.detail)
@@ -764,7 +770,7 @@ class WebFrontSitesTests(unittest.TestCase):
             config.read_text(encoding="utf-8") + "  components:\n    web-front:\n      enabled: false\n",
             encoding="utf-8",
         )
-        result = upgrade.step_web_front_config(self.context(instance))
+        result = upgrade_host.step_web_front_config(self.context(instance))
 
         self.assertEqual(result.status, "skipped")
         self.assertFalse(self.caddyfile.exists())

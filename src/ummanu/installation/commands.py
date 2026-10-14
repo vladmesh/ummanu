@@ -60,6 +60,7 @@ from ummanu.installation.support import (
     _named_path,
     _set_installation_owner,
 )
+from ummanu.installation.upgrade.types import UpgradeContext
 from ummanu.memory.config import index_matches, memory_config
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.restore import (
@@ -74,7 +75,7 @@ from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.secret_store import key_path
-from ummanu.upgrade import UpgradeContext, default_product_root
+from ummanu.upgrade import default_product_root
 
 
 def _validated_instance(instance_dir: Path):

@@ -1133,7 +1133,8 @@ def run_po_serve(args: argparse.Namespace) -> int:
 
 def _write_process_receipt(data_dir: Path) -> str:
     """Bind this process to the checkout its code was imported from; a journal line either way."""
-    from ummanu.upgrade import ReceiptError, write_po_process_receipt
+    from ummanu.infra.process_receipts import ReceiptError
+    from ummanu.installation.upgrade.services import write_po_process_receipt
 
     # src/ummanu/po/service.py: the checkout this process runs, not the one it was pointed at.
     product_root = Path(__file__).resolve().parents[3]

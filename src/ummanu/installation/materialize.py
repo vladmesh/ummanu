@@ -29,23 +29,17 @@ from ummanu.host_apply import SystemdUnitInstaller, resolve_runtime_owner
 from ummanu.installation.credentials import _runtime_environment
 from ummanu.installation.models import InstallError, PipelineStateMaterialization
 from ummanu.installation.support import _checked_data_target, _data_target_entries, _set_installation_owner
+from ummanu.installation.upgrade.dependencies import _snapshot_install
+from ummanu.installation.upgrade.host import step_host, step_pipeline_state
+from ummanu.installation.upgrade.types import UpgradeContext, UpgradeResult
+from ummanu.installation.upgrade.workspaces import step_head_registry, workspaces_root
 from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime.paths import component_enabled
 from ummanu.runtime.shared_state import resolve_pipeline_state_dir
 from ummanu.tasks import TaskReader
-from ummanu.upgrade import (
-    STEPS,
-    UpgradeContext,
-    UpgradeResult,
-    _snapshot_install,
-    run_steps,
-    step_head_registry,
-    step_host,
-    step_pipeline_state,
-    workspaces_root,
-)
+from ummanu.upgrade import STEPS, run_steps
 from ummanu.webfront.commands import configured_sites, missing_sites_message
 
 CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")

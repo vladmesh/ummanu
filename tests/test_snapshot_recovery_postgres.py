@@ -44,6 +44,7 @@ from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_REF, SnapshotExporter,
 from ummanu.data import init_layout
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.installation import commands as installation_commands, materialize as installation_materialize
+from ummanu.installation.upgrade import workspaces as upgrade_workspaces
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import DEFAULT_MEMORY_DIM, restore_state
@@ -358,7 +359,7 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
 
         def head_registry_only(context, steps=installation_materialize.STEPS):
             return upgrade.run_steps(
-                context, steps=tuple(step for step in steps if step is upgrade.step_head_registry)
+                context, steps=tuple(step for step in steps if step is upgrade_workspaces.step_head_registry)
             )
 
         args = SimpleNamespace(

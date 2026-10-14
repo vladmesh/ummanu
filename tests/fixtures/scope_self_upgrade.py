@@ -10,8 +10,9 @@ from unittest import mock
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_scope_fixtures import host_fixture
-from ummanu import cli, status, upgrade
+from ummanu import cli, status
 from ummanu.host_apply import SystemdUnitInstaller
+from ummanu.installation.upgrade import host as upgrade_host, types as upgrade_types
 from ummanu.runtime.head.memory import scope_unit
 
 root, data, run_id = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
@@ -34,9 +35,9 @@ results = []
 effects = []
 for dry in (True, False):
     installer = FakeUnitInstaller()
-    context = upgrade.UpgradeContext(instance_path=instance_dir, product_root=root, base_branch="main",
+    context = upgrade_types.UpgradeContext(instance_path=instance_dir, product_root=root, base_branch="main",
                                       dry_run=dry, units=installer, report=report, host_fixture=fixture)
-    result = upgrade.step_host(context)
+    result = upgrade_host.step_host(context)
     if result.status == "failed":
         raise RuntimeError(result.detail)
     results.append(result.status)
@@ -75,9 +76,9 @@ class NativeInstaller(SystemdUnitInstaller):
 
 for dry in (True, False):
     installer = NativeInstaller(unit_dir=root / "native-units", sudo=False)
-    context = upgrade.UpgradeContext(instance_path=instance_dir, product_root=native_product,
+    context = upgrade_types.UpgradeContext(instance_path=instance_dir, product_root=native_product,
                                       base_branch="main", dry_run=dry, units=installer, report=native_report)
-    result = upgrade.step_host(context)
+    result = upgrade_host.step_host(context)
     if result.status == "failed":
         raise RuntimeError(result.detail)
     results.append(result.status)

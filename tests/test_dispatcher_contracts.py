@@ -76,6 +76,7 @@ from ummanu.head_registry import (
 )
 from ummanu.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from ummanu.host_apply import resolve_packaged
+from ummanu.installation.upgrade import workspaces as upgrade_workspaces
 from ummanu.runtime import heads, role_env
 from ummanu.runtime.head import (
     HEAD_ALIVE,
@@ -1393,7 +1394,7 @@ class ShippedRegistryTiersTests(unittest.TestCase):
         )
 
     def test_shipped_automation_specs_name_shipped_tiers(self) -> None:
-        agents = upgrade.agents_root(Path(upgrade.running_product_root()))
+        agents = upgrade_workspaces.agents_root(Path(upgrade.running_product_root()))
         assert agents is not None
         specs = sorted(agents.glob("*/automation.toml"))
         self.assertTrue(specs, agents)
