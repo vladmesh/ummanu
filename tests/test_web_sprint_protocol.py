@@ -20,6 +20,7 @@ import hashlib
 import inspect
 import io
 import json
+import os
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -1621,7 +1622,13 @@ class SprintReadCommandTests(SprintProtocolFixture):
 
     def test_an_installation_that_does_not_validate_is_the_backend_status(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+        with (
+            mock.patch.dict("os.environ"),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            for name in ("UMMANU_INSTANCE", "UMMANU_RUNTIME_ENV_FILE", "UMMANU_DATA_DIR"):
+                os.environ.pop(name, None)
             code = main(["sprint", "list", "--instance", str(self.tmp / "not-an-instance")])
 
         self.assertEqual(code, _EXIT_BY_CODE["backend_unavailable"])

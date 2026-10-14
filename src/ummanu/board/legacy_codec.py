@@ -60,7 +60,7 @@ def null_if_empty(value: Any) -> str | None:
 def positive_int(value: Any) -> int | None:
     try:
         number = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
     return number if number > 0 else None
 
@@ -68,7 +68,7 @@ def positive_int(value: Any) -> int | None:
 def nonnegative_int(value: Any) -> int:
     try:
         return max(0, int(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 

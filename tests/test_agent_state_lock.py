@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import signal
@@ -95,11 +97,13 @@ class AgentStateLockTest(unittest.TestCase):
         return ran
 
     def _assert_refused(self, holder: int) -> None:
-        with self.assertRaises(SystemExit) as caught, self.state.lock():
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as caught, self.state.lock():
             self.fail("body must not run under a live holder")
+        self.assertEqual(caught.exception.code, 0)
         self.assertEqual(
-            str(caught.exception.code),
-            f"curator: another run holds the lock ({self.state.lockfile}, pid {holder})",
+            errors.getvalue(),
+            f"curator: another run holds the lock ({self.state.lockfile}, pid {holder})\n",
         )
         self.assertEqual(_events(self.state_dir, "lock-refused")[-1]["holder_pid"], holder)
         self.assertTrue(self.state.lockfile.exists())
@@ -177,7 +181,7 @@ class AgentStateLockTest(unittest.TestCase):
         go.write_text("go")
         outcomes = [child.communicate(timeout=30) for child in contenders]
         codes = sorted(child.returncode for child in contenders)
-        self.assertEqual(codes, [0, 1], outcomes)
+        self.assertEqual(codes, [0, 0], outcomes)
         self.assertEqual(sum("won" in stdout for stdout, _ in outcomes), 1)
         self.assertEqual(sum("another run holds the lock" in stderr for _, stderr in outcomes), 1)
         self.assertEqual(len(_events(self.state_dir, "lock-reclaimed")), 1)

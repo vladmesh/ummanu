@@ -95,6 +95,12 @@ def default_packaging_root() -> Path:
     return packaging_root(configured_product_root())
 
 
+# The production dispatcher timer is a product constant: the shipped timer renders these values and
+# the desired-state spec that reconcile and doctor compare against reports the same ones.
+DISPATCHER_ON_BOOT_SEC = "30s"
+DISPATCHER_ON_UNIT_ACTIVE_SEC = "60s"
+
+
 @dataclass(frozen=True)
 class SystemdLayout:
     """Installation-specific values substituted into shipped systemd templates."""
@@ -129,6 +135,8 @@ def render_systemd_unit(template: bytes, layout: SystemdLayout) -> bytes:
         b"{{UMMANU_MEMORY_MODEL}}": layout.memory_model.encode(),
         b"{{UMMANU_MEMORY_DIM}}": str(layout.memory_dim).encode(),
         b"{{UMMANU_MEMORY_THREADS}}": str(layout.memory_threads).encode(),
+        b"{{UMMANU_DISPATCHER_ON_BOOT_SEC}}": DISPATCHER_ON_BOOT_SEC.encode(),
+        b"{{UMMANU_DISPATCHER_ON_UNIT_ACTIVE_SEC}}": DISPATCHER_ON_UNIT_ACTIVE_SEC.encode(),
     }
     rendered = template
     for marker, value in values.items():
@@ -231,8 +239,8 @@ def _production_dispatcher_units(prefix: str, digests: dict[str, str]) -> list[P
         "component": "dispatcher-production",
         "managed_by": "ummanu",
         "service": service,
-        "on_boot_sec": "30s",
-        "on_unit_active_sec": "60s",
+        "on_boot_sec": DISPATCHER_ON_BOOT_SEC,
+        "on_unit_active_sec": DISPATCHER_ON_UNIT_ACTIVE_SEC,
     }
     for name, spec in ((service, service_spec), (timer, timer_spec)):
         if digest := digests.get(name):

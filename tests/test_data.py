@@ -958,6 +958,19 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(watermarks["files"][0]["path"], "pipeline/cards.json")
         self.assertIn("ummanu-353", cards["cards"])
 
+    def test_export_runs_of_an_absent_state_dir_publishes_zero_runs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+
+            result = export_runs(root / "ummanu-data", state_dir=root / "absent")
+            runs_dir = root / "ummanu-data" / "runs"
+            runs = (runs_dir / "runs.ndjson").read_text(encoding="utf-8")
+            summary = json.loads((runs_dir / "export.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.count, 0)
+        self.assertEqual(runs, "")
+        self.assertEqual((summary["run_record_count"], summary["card_mapping_count"]), (0, 0))
+
     def test_export_runs_fails_on_invalid_jsonl(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

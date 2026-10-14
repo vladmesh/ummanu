@@ -251,7 +251,7 @@ A reslice successor inherits the predecessor's content as a seed, never its bran
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \
   --project <project> --type code --title '<title>' --body-file <spec.md> --sprint <sprint-ref> \
-  --seed-ref <predecessor candidate sha> --supersedes <predecessor card ref>
+  --seed-ref <predecessor candidate full 40-character sha> --supersedes <predecessor card ref>
 ```
 
 ### Classifying RED and Blocked evidence

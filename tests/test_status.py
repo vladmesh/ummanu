@@ -28,6 +28,7 @@ from ummanu.host import (
     packaging_root,
 )
 from ummanu.host_apply import resolve_packaged
+from ummanu.kernel.errors import TaskError
 from ummanu.secret_store import initialize_store, set_secret
 from ummanu.sprints import SprintWriter
 from ummanu.status import collect_status
@@ -450,6 +451,42 @@ class StatusCliTests(unittest.TestCase):
             open_sprint = next(item for item in items if item["status"] == "open")
             self.assertEqual(open_sprint["resume_freshness"]["error"], "resume_stale")
             self.assertEqual(open_sprint["resume_freshness"]["last_event_at"], "2026-07-27T00:00:00Z")
+
+    def test_status_closes_the_board_client_it_opened_for_the_sprint_read(self):
+        outcomes = ([], TaskError("backend_error", "store unreachable", 1))
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                data_dir = root / "data"
+                (data_dir / "dispatcher").mkdir(parents=True)
+                (data_dir / "dispatcher" / "production-state.json").write_text(
+                    json.dumps({"records": {}}), encoding="utf-8"
+                )
+                instance = root / "instance.yaml"
+                instance.write_text(
+                    "version: 1\nname: test\n"
+                    f"data_dir: {data_dir}\n"
+                    "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+                    "host:\n  unit_prefix: ummanu-\n",
+                    encoding="utf-8",
+                )
+                client = mock.Mock()
+                reader = mock.Mock()
+                if isinstance(outcome, TaskError):
+                    reader.statuses.side_effect = outcome
+                else:
+                    reader.statuses.return_value = outcome
+                with (
+                    mock.patch("ummanu.status.board_client", return_value=client),
+                    mock.patch("ummanu.status.SprintReader", return_value=reader),
+                    mock.patch("ummanu.status.checkpoint_snapshot", return_value={}),
+                ):
+                    snapshot = collect_status(validate_instance(instance), offline=True)
+
+                sprints = snapshot["installation"]["sprints"]
+                self.assertEqual(sprints["items"], [])
+                self.assertEqual(sprints["error"] is not None, isinstance(outcome, TaskError))
+                client.close.assert_called_once_with()
 
     def test_invalid_status_json_uses_the_documented_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
