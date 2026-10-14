@@ -48,6 +48,7 @@ from ummanu.board.sql_rows import (
     board_row,
     comment_marker,
     comment_row,
+    epoch as _epoch,  # noqa: F401 - the shared-clock ownership guard imports this name
     grouped as _grouped,
     json_document,
     now as _now,
