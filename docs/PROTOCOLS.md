@@ -4836,6 +4836,8 @@ python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
   --path decisions/2026-07-25-sprint-1.md --file DOC.md
 python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
   --path projects/codegen-orchestrator/brainstorms/qa-node.md --file DOC.md
+python3 -P -m ummanu knowledge delete --instance INSTANCE --actor ACTOR \
+  --path decisions/2026-07-25-sprint-1.md
 python3 -P -m ummanu knowledge list --instance INSTANCE
 ```
 
@@ -4845,6 +4847,10 @@ checkpoint (the legacy tick's commit or the exporter's cut) carries it out (no m
 A document containing a secret is rejected with code 2 and nothing reaches disk. Rewriting identical
 content reports `changed: false` and writes nothing. The answer's `commit` is the content revision
 of what was written (`sha256:...`), not a Git commit ([Recovery](RECOVERY.md#writers)).
+
+`delete` removes one document under the same lock, with any directory it leaves empty; the next
+checkpoint drops it and the repository history keeps it. Its `commit` is the content revision of the
+removed document. A path that names no document is refused with code 2.
 
 `write` takes exactly one of `--file` and `--dir`. With `--dir`, `--path` names a directory below
 `state/knowledge` (same segment rules, no `..`, not absolute), and under one writer lock its whole

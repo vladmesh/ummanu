@@ -16,6 +16,7 @@ from ummanu.data import DataExport
 from ummanu.knowledge_write import (
     KnowledgeError,
     KnowledgeValidationError,
+    delete_knowledge_document,
     list_knowledge_documents,
     write_knowledge_directory,
     write_knowledge_document,
@@ -241,6 +242,45 @@ class KnowledgeWriteTests(KnowledgeRepoCase):
         )
         self.assertEqual(legacy.read_text(encoding="utf-8"), "plain markdown, no frontmatter\n")
         self.assertIn("state/knowledge/brainstorms/old.md", self.head_files())
+
+
+class KnowledgeDeleteTests(KnowledgeRepoCase):
+    def delete(self, document: str = DOCUMENT) -> tuple[int, dict]:
+        with mock.patch("builtins.print") as printed:
+            code = cli_main(
+                ["knowledge", "delete", "--instance", str(self.instance_dir), "--actor", "po", "--path", document]
+            )
+        return code, json.loads(printed.call_args.args[0])
+
+    def test_delete_removes_the_document_and_its_empty_parents_and_names_the_removed_revision(self):
+        written = self.write(document="decisions/old/runbook.md")
+        kept = self.write(document="decisions/keep.md")
+
+        code, answer = self.delete("decisions/old/runbook.md")
+
+        self.assertEqual(code, 0)
+        self.assertEqual((answer["op"], answer["changed"], answer["commit"]), ("delete", True, written.commit))
+        self.assertEqual(list_knowledge_documents(self.instance_dir), (kept.document,))
+        self.assertFalse((self.instance_dir / "state" / "knowledge" / "decisions" / "old").exists())
+
+    def test_the_next_checkpoint_drops_the_deleted_document(self):
+        self.write()
+        self.assertEqual(self.checkpoint().status, "committed")
+
+        delete_knowledge_document(self.instance_dir, document=DOCUMENT, actor="po")
+
+        self.assertEqual(self.checkpoint().status, "committed")
+        self.assertNotIn(f"state/knowledge/{DOCUMENT}", self.head_files())
+
+    def test_a_missing_document_or_a_bad_path_is_a_validation_error(self):
+        code, answer = self.delete()
+        self.assertEqual((code, answer["error"]), (2, "validation"))
+        with self.assertRaises(KnowledgeValidationError) as caught:
+            delete_knowledge_document(self.instance_dir, document=DOCUMENT, actor="po")
+        self.assertEqual(caught.exception.reason, "missing")
+        for bad in ("../instance.yaml", "decisions/../../escape.md", "note.txt"):
+            with self.subTest(path=bad), self.assertRaises(KnowledgeValidationError):
+                delete_knowledge_document(self.instance_dir, document=bad, actor="po")
 
 
 class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):

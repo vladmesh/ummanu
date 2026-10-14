@@ -38,7 +38,7 @@ class KnowledgeValidationError(KnowledgeError):
     """The document or its path is not something this writer accepts.
 
     `reason` is a short fixed word a caller can branch on (`path`, `source_missing`, `source_empty`,
-    `special_file`, `secret`, `size_cap`); `""` where no caller needs one.
+    `special_file`, `secret`, `size_cap`, `missing`); `""` where no caller needs one.
     """
 
     def __init__(self, message: str, reason: str = "") -> None:
@@ -242,6 +242,42 @@ def write_knowledge_directory(
         path=target,
         commit=revision,
         actor=checked.actor,
+        changed=True,
+    )
+
+
+def delete_knowledge_document(instance_dir: Path, *, document: str, actor: str) -> KnowledgeWriteResult:
+    """Remove one document from `state/knowledge` under the writer lock, with any parent it leaves empty.
+
+    `commit` is the content revision of the removed document. A document that is not there is refused
+    with reason `missing`.
+    """
+    actor = _clean_actor(actor)
+    relative = _clean_document(document)
+    root = _live_root(instance_dir)
+    knowledge = state_repo.knowledge_dir(root)
+    target = knowledge / relative
+    with state_repo.state_repo_lock(root):
+        _recover_interrupted_swaps(root)
+        payload = _current_bytes(target)
+        if payload is None:
+            raise KnowledgeValidationError(f"state/knowledge/{relative} is not a document", "missing")
+        try:
+            target.unlink()
+        except OSError as exc:
+            raise KnowledgeError(f"could not remove state/knowledge/{relative}: {exc}") from None
+        parent = target.parent
+        while parent != knowledge and knowledge in parent.parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    return KnowledgeWriteResult(
+        document=str(relative),
+        path=target,
+        commit=content_revision({str(relative): hashlib.sha256(payload).hexdigest()}),
+        actor=actor,
         changed=True,
     )
 

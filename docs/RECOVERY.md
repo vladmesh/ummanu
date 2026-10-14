@@ -267,7 +267,7 @@ exporter is the only code that commits, and only into the snapshot repository:
 |---|---|---|---|
 | snapshot exporter (`checkpoint.SnapshotExporter`, picked by `checkpoint.tick_checkpoint_writer`) | the snapshot repository's `main`; reads the live root, never writes it | the checkpoint service, at the [cadence](#cadence-and-rpo) | the checkpoint singleton lock, then the shared writer lock |
 | memory writer (`memory_write`, `memory.canon`) | `state/memory` | `memory commit`/`supersede`, the memory pack of `upgrade` | `<data>/memory/.write.lock`, then the shared writer lock |
-| knowledge writer (`knowledge_write`) | `state/knowledge` | `knowledge write`, the sprint-close closeout, the dispatcher's research-report transfer | the shared writer lock |
+| knowledge writer (`knowledge_write`) | `state/knowledge` | `knowledge write`/`delete`, the sprint-close closeout, the dispatcher's research-report transfer | the shared writer lock |
 | secret writer (`secret_store`) | `secrets/` | `secret init/set/import/remove`, `secret checkpoint-github set`, every re-encryption of a value (`list` and `materialize` write no store file) | the shared writer lock |
 | onboarding (`onboarding`, `provision`, `gate`) | `projects/<id>.yaml`, `adapters/<id>.yaml`; drafts, provision runs and gate receipts in `<data>/onboarding/` | `project add`, `provision-apply`, `gate` | `<data>/locks/onboarding/<id>.lock` |
 | config edit | the other config files ([Layout](#layout)) | an operation card, then `ummanu config check` | none |
