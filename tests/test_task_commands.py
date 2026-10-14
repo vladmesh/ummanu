@@ -370,7 +370,7 @@ class HandoffBodyFileTests(unittest.TestCase):
         with (
             mock.patch("ummanu.task_commands._instance", return_value=str(self.root)),
             mock.patch("ummanu.task_commands.card_client"),
-            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(errors),
         ):

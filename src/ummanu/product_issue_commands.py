@@ -9,6 +9,7 @@ from ummanu.board.backend import PRODUCT_ISSUE, board_client
 from ummanu.cli_output import usage_handler
 from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import ISSUE_WRITE_ROLES, ProductIssueStore
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.task_commands import _read_body, resolve_data_dir, run_task_command
 
@@ -27,7 +28,7 @@ def _common(
 
 
 def add_product_issue_subcommands(subparsers) -> None:
-    product = subparsers.add_parser("product", help="manage durable Product records")
+    product = add_command_parser(subparsers, "product")
     product_sub = product.add_subparsers(dest="product_command")
     create = product_sub.add_parser("create")
     _common(create, write=True, roles=("po",))
@@ -76,7 +77,7 @@ def add_product_issue_subcommands(subparsers) -> None:
     transaction.set_defaults(handler=usage_handler("product transaction subcommand required"))
     product.set_defaults(handler=usage_handler("product subcommand required"))
 
-    issue = subparsers.add_parser("issue", help="manage durable Product issues")
+    issue = add_command_parser(subparsers, "issue")
     issue_sub = issue.add_subparsers(dest="issue_command")
     create = issue_sub.add_parser("create")
     _common(create, write=True)

@@ -8,126 +8,20 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ummanu import state_repo
-from ummanu.backup import create_backups, verify_backup
-from ummanu.board.owner_event_commands import add_owner_event_subcommands
-from ummanu.check_commands import add_check_subcommands
-from ummanu.checkpoint import (
-    SnapshotExporter,
-    checkpoint_snapshot,
-    render_checkpoint_lines,
-    rpo_problem,
-    snapshot_foreign_commits,
-)
 from ummanu.cli_output import EXIT_USAGE, error_line, usage_handler
-from ummanu.config import (
-    DataDirError,
-    instance_data_dir,
-    load_config,
-    validate,
-    validate_instance,
-)
-from ummanu.data import (
-    PIPELINE_STATE_DIR,
-    export_all,
-    export_artifacts,
-    export_board,
-    export_memory,
-    export_runs,
-    export_transcripts,
-    init_layout,
-)
-from ummanu.dispatch.commands import (
-    add_dispatcher_subcommands,
-    add_head_status_command,
-    add_pause_commands,
-)
-from ummanu.dispatch.pause import ProductionPause
-from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
-from ummanu.dispatch.tick_telemetry import tick_p95_finding, tick_statistics
-from ummanu.gate import run_gate
-from ummanu.head_health import (
-    PROBE_BROKEN,
-    PROBE_TIMED_OUT,
-    HeadReadiness,
-)
-from ummanu.head_registry import HeadRegistryConfigError, installed_heads, read_source
-from ummanu.host import (
-    FIXTURE_UNIT_FILES_DIR,
-    KINDS,
-    CollectResult,
-    FixtureHostSource,
-    KindDiff,
-    LiveHostSource,
-    assess_unit_runtime,
-    build_doctor_expectations,
-    build_plan,
-    foreign_units,
-    inventory,
-    load_managed_manifest,
-    plan_changes,
-)
-from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
-from ummanu.host_commands import add_reconcile_subcommands
-from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
-from ummanu.infra.doctor_findings import accepted, active_findings, apply_acceptance
-from ummanu.infra.fallback import fallback_errors
-from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
-from ummanu.infra.recovery_inventory import collect_recovery_inventory
-from ummanu.installation.commands import add_install_commands
-from ummanu.knowledge_write import (
-    KnowledgeError,
-    KnowledgeValidationError,
-    list_knowledge_documents,
-    write_knowledge_directory,
-    write_knowledge_document,
-)
-from ummanu.memory_journal import verify_memory_journal
-from ummanu.memory_write import (
-    MemoryExportPublishError,
-    MemoryLockError,
-    MemoryPermissionError,
-    MemoryValidationError,
-    commit_memory_proposal,
-    propose_memory_fact,
-    supersede_memory_fact,
-)
-from ummanu.onboarding import project_add, render_artifact
-from ummanu.po.commands import add_po_subcommands
-from ummanu.po.service import add_po_serve_subcommands
-from ummanu.product_issue_commands import add_product_issue_subcommands
-from ummanu.provision import apply_provision_result, render_result, start_provision
-from ummanu.restore import RestoreError, _target, restore_findings
-from ummanu.restore_commands import add_restore_subcommands, run_memory_reindex
-from ummanu.role_skills import add_role_skills_subcommands
-from ummanu.runtime import interactive_workspace
-from ummanu.runtime.codex_preflight import (
-    CODEX_HOME_DATA_DIR,
-    CODEX_HOME_ENV,
-    CODEX_HOME_PROFILE,
-    CodexHomeLoginMissing,
-    data_dir_codex_home,
-    resolve_codex_home,
-)
 from ummanu.runtime.paths import (
+    PIPELINE_STATE_DIR,
     MissingDefaultInstance,
     add_instance_argument,
     instance_file,
     resolve_instance_argument,
 )
-from ummanu.secret_commands import add_secret_subcommands
-from ummanu.secret_store import store_findings as _secret_store_findings
-from ummanu.session import run_shell
-from ummanu.sprint_commands import add_sprint_subcommands
-from ummanu.state_repo import StateRepoError
-from ummanu.status import collect_status, disk_free_bytes
-from ummanu.task_commands import add_task_subcommands
-from ummanu.upgrade import add_upgrade_command
-from ummanu.web.commands import add_web_serve_subcommands
-from ummanu.webfront.commands import add_web_front_subcommands
-from ummanu.webproto.commands import add_web_read_subcommands, add_web_run_subcommands
+
+if TYPE_CHECKING:
+    from ummanu.head_health import HeadReadiness
+    from ummanu.host import CollectResult, KindDiff
 
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
 MEMORY_EXIT_VALIDATION = 2
@@ -179,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         # The background agents own their argv, help and output: hand it over untouched, before
         # this parser can claim `--help` or reject an agent's own flags.
         return run_automations(argv[1:])
-    parser = build_parser()
+    parser = build_parser(argv)
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -207,23 +101,79 @@ def run_automations(argv: list[str]) -> int:
     return automations_main(list(argv))
 
 
-def build_parser() -> argparse.ArgumentParser:
-    from ummanu.infra.doctor_record import add_subcommand as add_doctor_record
+def _add_family(subparsers, family, selected):
+    """Register every root in order, expanding only the selected family (None means all)."""
+    from ummanu.runtime.cli_composition import ROOT_COMMANDS, add_command_parser
+
+    if selected is not None and selected not in {name for name, _ in ROOT_COMMANDS[family]}:
+        for name, _ in ROOT_COMMANDS[family]:
+            add_command_parser(subparsers, name)
+        return
+    if family == "doctor-record":
+        from ummanu.infra.doctor_record import add_subcommand as register
+    elif family == "dispatcher":
+        from ummanu.dispatch.commands import add_dispatcher_subcommands as register
+    elif family == "pause":
+        from ummanu.dispatch.commands import add_pause_commands as register
+    elif family == "head-status":
+        from ummanu.dispatch.commands import add_head_status_command as register
+    elif family == "check":
+        from ummanu.check_commands import add_check_subcommands as register
+    elif family == "web-read":
+        from ummanu.webproto.commands import add_web_read_subcommands as register
+    elif family == "web-run":
+        from ummanu.webproto.commands import add_web_run_subcommands as register
+    elif family == "web-serve":
+        from ummanu.web.commands import add_web_serve_subcommands as register
+    elif family == "web-front":
+        from ummanu.webfront.commands import add_web_front_subcommands as register
+    elif family == "po-serve":
+        from ummanu.po.service import add_po_serve_subcommands as register
+    elif family == "po":
+        from ummanu.po.commands import add_po_subcommands as register
+    elif family == "owner-events":
+        from ummanu.board.owner_event_commands import add_owner_event_subcommands as register
+    elif family == "upgrade":
+        from ummanu.upgrade import add_upgrade_command as register
+    elif family == "install":
+        from ummanu.installation.commands import add_install_commands as register
+    elif family == "sprint":
+        from ummanu.sprint_commands import add_sprint_subcommands as register
+    elif family == "restore":
+        from ummanu.restore_commands import add_restore_subcommands as register
+    elif family == "task":
+        from ummanu.task_commands import add_task_subcommands as register
+    elif family == "product":
+        from ummanu.product_issue_commands import add_product_issue_subcommands as register
+    elif family == "secret":
+        from ummanu.secret_commands import add_secret_subcommands as register
+    else:
+        raise ValueError(f"unknown command family: {family}")
+    register(subparsers)
+
+
+def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
+    """Return the full inspection tree by default, or compose for one invocation's argv."""
+    from ummanu.role_skills import add_role_skills_subcommands
+
+    selected = None if argv is None else next((arg for arg in argv if not arg.startswith("-")), "")
+    if argv and argv[0] in {"--help", "-h"}:
+        selected = ""
 
     parser = StructuredArgumentParser(prog="ummanu")
     subparsers = parser.add_subparsers(dest="command")
-    add_doctor_record(subparsers)
-    add_dispatcher_subcommands(subparsers)
-    add_pause_commands(subparsers)
-    add_head_status_command(subparsers)
-    add_check_subcommands(subparsers)
-    add_web_read_subcommands(subparsers)
-    add_web_run_subcommands(subparsers)
-    add_web_serve_subcommands(subparsers)
-    add_web_front_subcommands(subparsers)
-    add_po_serve_subcommands(subparsers)
-    add_po_subcommands(subparsers)
-    add_owner_event_subcommands(subparsers)
+    _add_family(subparsers, "doctor-record", selected)
+    _add_family(subparsers, "dispatcher", selected)
+    _add_family(subparsers, "pause", selected)
+    _add_family(subparsers, "head-status", selected)
+    _add_family(subparsers, "check", selected)
+    _add_family(subparsers, "web-read", selected)
+    _add_family(subparsers, "web-run", selected)
+    _add_family(subparsers, "web-serve", selected)
+    _add_family(subparsers, "web-front", selected)
+    _add_family(subparsers, "po-serve", selected)
+    _add_family(subparsers, "po", selected)
+    _add_family(subparsers, "owner-events", selected)
     automations = subparsers.add_parser(
         "automations",
         add_help=False,
@@ -271,14 +221,17 @@ def build_parser() -> argparse.ArgumentParser:
     config_check.set_defaults(handler=run_config_check)
     config.set_defaults(handler=usage_handler("config subcommand required"))
 
-    add_upgrade_command(subparsers)
-    add_install_commands(subparsers)
+    _add_family(subparsers, "upgrade", selected)
+    _add_family(subparsers, "install", selected)
     add_role_skills_subcommands(subparsers)
-    add_sprint_subcommands(subparsers)
+    _add_family(subparsers, "sprint", selected)
 
     reconcile = subparsers.add_parser("reconcile", help="render or apply the host plan")
     reconcile_subcommands = reconcile.add_subparsers(dest="reconcile_command")
-    add_reconcile_subcommands(reconcile_subcommands)
+    if selected is None or selected == "reconcile":
+        from ummanu.host_commands import add_reconcile_subcommands
+
+        add_reconcile_subcommands(reconcile_subcommands)
     reconcile.set_defaults(handler=not_implemented("reconcile"))
 
     data = subparsers.add_parser("data", help="manage the ummanu-data layout")
@@ -401,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
     backup_verify.set_defaults(handler=run_backup_verify)
     backup.set_defaults(handler=not_implemented("backup"))
 
-    add_restore_subcommands(subparsers)
+    _add_family(subparsers, "restore", selected)
 
     checkpoint = subparsers.add_parser("checkpoint-run", help="prepare and push the instance checkpoint")
     _add_instance(checkpoint, help="path to an instance dir or instance.yaml")
@@ -454,8 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
     gate.set_defaults(handler=run_project_gate)
     project.set_defaults(handler=not_implemented("project"))
 
-    add_task_subcommands(subparsers)
-    add_product_issue_subcommands(subparsers)
+    _add_family(subparsers, "task", selected)
+    _add_family(subparsers, "product", selected)
 
     shell = subparsers.add_parser(
         "shell",
@@ -485,7 +438,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the resolved launch command and exit without starting the head",
     )
-    shell.set_defaults(handler=run_shell)
+    if selected is None or selected == "shell":
+        from ummanu.session import run_shell
+
+        shell.set_defaults(handler=run_shell)
 
     memory = subparsers.add_parser("memory", help="manage the memory journal")
     memory_subcommands = memory.add_subparsers(dest="memory_command")
@@ -500,7 +456,10 @@ def build_parser() -> argparse.ArgumentParser:
         "reindex", help="rebuild the derived memory index from the local journal"
     )
     _add_instance(memory_reindex)
-    memory_reindex.set_defaults(handler=run_memory_reindex)
+    if selected is None or selected == "memory":
+        from ummanu.restore_commands import run_memory_reindex
+
+        memory_reindex.set_defaults(handler=run_memory_reindex)
 
     memory_propose = memory_subcommands.add_parser("propose")
     add_memory_write_common(memory_propose)
@@ -557,7 +516,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_list.set_defaults(handler=run_knowledge_list)
     knowledge.set_defaults(handler=not_implemented("knowledge"))
 
-    add_secret_subcommands(subparsers)
+    _add_family(subparsers, "secret", selected)
 
     return parser
 
@@ -603,6 +562,10 @@ def run_config_check(args: argparse.Namespace) -> int:
 
 
 def run_doctor(args: argparse.Namespace) -> int:
+    from ummanu.config import validate_instance
+    from ummanu.infra.doctor_findings import accepted, active_findings
+    from ummanu.runtime import interactive_workspace
+
     instance_path = Path(args.instance)
     report = validate_instance(instance_path)
 
@@ -686,13 +649,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
-_CODEX_HOME_KINDS = {
-    CODEX_HOME_PROFILE: "profile codex_home",
-    CODEX_HOME_ENV: "TA_CODEX_HOME override",
-    CODEX_HOME_DATA_DIR: "data-dir home",
-}
-
-
 def _codex_home_status(report) -> dict[str, object]:
     """The CODEX_HOME a Codex head of this installation launches with now, and which rung chose it.
 
@@ -700,6 +656,8 @@ def _codex_home_status(report) -> dict[str, object]:
     own message, which names the fix. `codex_required` says whether any installed profile runs
     Codex: only then is a missing login a finding (`collect_doctor_inspection`).
     """
+    from ummanu.runtime.codex_preflight import CodexHomeLoginMissing, data_dir_codex_home, resolve_codex_home
+
     assert report.data_dir is not None
     data_dir_home = str(data_dir_codex_home(report.data_dir))
     required = _codex_required(report.instance_path.parent)
@@ -725,6 +683,8 @@ def _codex_home_status(report) -> dict[str, object]:
 def _codex_required(instance_dir: Path) -> bool:
     """Whether an installed head profile runs on the `codex` adapter; a registry that cannot be read
     cannot rule one out, so it counts as yes."""
+    from ummanu.head_registry import HeadRegistryConfigError, installed_heads
+
     try:
         profiles = installed_heads(instance_dir).get("profiles", {})
     except HeadRegistryConfigError:
@@ -742,6 +702,14 @@ def _codex_home_lines(status: dict[str, object]) -> list[str]:
         if status["codex_required"]:
             return [f"error: codex home: {status['login_missing']} (docs/OPERATIONS.md)"]
         return [f"codex home: none, and no installed profile runs Codex ({status['login_missing']})"]
+    from ummanu.runtime.codex_preflight import CODEX_HOME_DATA_DIR, CODEX_HOME_ENV, CODEX_HOME_PROFILE
+
+    _CODEX_HOME_KINDS = {
+        CODEX_HOME_PROFILE: "profile codex_home",
+        CODEX_HOME_ENV: "TA_CODEX_HOME override",
+        CODEX_HOME_DATA_DIR: "data-dir home",
+    }
+
     kind = str(status["kind"])
     return [f"codex home: {status['path']} ({_CODEX_HOME_KINDS.get(kind, kind)})"]
 
@@ -765,6 +733,10 @@ def _is_temporary_directory(path: Path) -> bool:
 
 
 def run_status(args: argparse.Namespace) -> int:
+    from ummanu.config import validate_instance
+    from ummanu.runtime import interactive_workspace
+    from ummanu.status import collect_status
+
     report = validate_instance(Path(args.instance))
     if not report.ok:
         payload = {
@@ -827,6 +799,8 @@ def run_status(args: argparse.Namespace) -> int:
 
 
 def _print_tick_measurements(dispatcher: dict[str, Any]) -> None:
+    from ummanu.dispatch.tick_telemetry import tick_statistics
+
     statistics = dispatcher.get("tick_statistics") or tick_statistics({})
     count = statistics["sample_count"]
     if count:
@@ -865,6 +839,9 @@ def _duration_text(value: float | None) -> str:
 
 def run_doctor_json(args: argparse.Namespace, report) -> int:
     """Structured counterpart to doctor without changing its default transcript."""
+    from ummanu.infra.doctor_findings import active_findings
+    from ummanu.status import collect_status
+
     if not report.ok:
         print(
             json.dumps(
@@ -904,6 +881,14 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
 
 def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspection:
     """Collect invariant failures once for the text and JSON doctor renderers."""
+    from ummanu.checkpoint import checkpoint_snapshot
+    from ummanu.dispatch.tick_telemetry import tick_p95_finding
+    from ummanu.head_health import PROBE_BROKEN, HeadReadiness
+    from ummanu.infra.checkpoint_run import load_checkpoint_state
+    from ummanu.infra.doctor_findings import apply_acceptance
+    from ummanu.infra.fallback import fallback_errors
+    from ummanu.infra.recovery_inventory import collect_recovery_inventory
+
     findings: list[dict[str, object]] = []
     disk_unavailable = False
     if not args.offline and (not args.dry_run or args.host or args.host_fixture):
@@ -1026,6 +1011,8 @@ def doctor_live_root_findings(report, args: argparse.Namespace, *, inspect_host:
     systemd directory, or a fixture host's `unit-files/`. A test that replaces the live host source
     with one that names no unit directory reads none.
     """
+    from ummanu.host import FIXTURE_UNIT_FILES_DIR, LiveHostSource
+    from ummanu.host_apply import resolve_runtime_owner
     from ummanu.infra.live_root_findings import live_root_findings
 
     live_root = report.instance_path.parent
@@ -1057,6 +1044,9 @@ def automation_busy_findings(data_dir: Path | None) -> list[dict[str, object]]:
 
 def root_disk_finding(data_dir: Path) -> dict[str, object] | None:
     """The configured data root's filesystem, with unknown distinct from sufficient space."""
+    from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
+    from ummanu.status import disk_free_bytes
+
     free = disk_free_bytes(data_dir)
     if free is None:
         return {"code": "root_disk_unavailable", "threshold_bytes": ROOT_FREE_MIN_BYTES,
@@ -1124,16 +1114,6 @@ def print_board_schema_status(board_schema: dict[str, object] | None) -> None:
         print(f"board schema: {str(state).replace('_', ' ')}: {board_schema.get('reason')}")
 
 
-#: The probe verdicts that put a provider in front of the owner, and what each one means to them.
-PROVIDER_RED_STATES = {
-    "unauthenticated": "its key is expired or its login is missing",
-    "exhausted": "its quota is spent",
-    "unavailable": "its provider does not answer",
-    PROBE_TIMED_OUT: "its provider gave the probe no answer in time, so claims on it are held",
-    PROBE_BROKEN: "its probe cannot run, so claims on it are not gated by health",
-}
-
-
 def record_provider_owner_events(report, resources: list[object]) -> int:
     """One `provider_red` notice per provider, condition and UTC day: repeated doctor runs add nothing.
 
@@ -1141,6 +1121,7 @@ def record_provider_owner_events(report, resources: list[object]) -> int:
     dry run records nothing, and an installation without a board store has nowhere to record.
     """
     from ummanu.board import owner_events
+    from ummanu.infra.doctor_provider import PROVIDER_RED_STATES
 
     day = datetime.now(UTC).strftime("%Y-%m-%d")
     recorded = 0
@@ -1164,6 +1145,8 @@ def record_provider_owner_events(report, resources: list[object]) -> int:
 
 def _recovery_findings(recovery: dict[str, object]) -> list[dict[str, object]]:
     """Actionable recovery defects, kept distinct by capability and resource."""
+    from ummanu.head_health import PROBE_BROKEN
+
     findings: list[dict[str, object]] = []
     for row in recovery.get("resources", []):
         if not isinstance(row, dict) or row.get("state") in {"ready", "unknown", "stale"}:
@@ -1235,6 +1218,8 @@ def print_restore_status(report, *, findings: list[str] | None = None) -> list[s
 
 
 def _restore_findings(report) -> list[str]:
+    from ummanu.restore import RestoreError, _target, restore_findings
+
     if report.data_dir is None:
         return []
     try:
@@ -1247,6 +1232,8 @@ def _restore_findings(report) -> list[str]:
 
 
 def run_project_add(args: argparse.Namespace) -> int:
+    from ummanu.onboarding import project_add, render_artifact
+
     code, artifact = project_add(
         args.path_or_url, args.instance, dry_run=args.dry_run, re_onboard=args.re_onboard
     )
@@ -1255,18 +1242,25 @@ def run_project_add(args: argparse.Namespace) -> int:
 
 
 def run_project_provision_start(args: argparse.Namespace) -> int:
+    from ummanu.provision import render_result, start_provision
+
     code, result = start_provision(args.instance, args.project_id)
     print(render_result(result), end="")
     return code
 
 
 def run_project_provision_apply(args: argparse.Namespace) -> int:
+    from ummanu.provision import apply_provision_result, render_result
+
     code, result = apply_provision_result(args.instance, args.project_id, args.result)
     print(render_result(result), end="")
     return code
 
 
 def run_project_gate(args: argparse.Namespace) -> int:
+    from ummanu.gate import run_gate
+    from ummanu.provision import render_result
+
     code, result = run_gate(args.instance, args.project_id)
     print(render_result(result), end="")
     return code
@@ -1279,6 +1273,8 @@ def print_dispatcher_status(
     inspect_live: bool,
     findings: list[str] | None = None,
 ) -> bool:
+    from ummanu.dispatch.pause import ProductionPause
+
     if report.data_dir is None:
         return False
     data_dir = report.data_dir
@@ -1354,6 +1350,9 @@ def production_runtime_provenance_finding(
     to the process's configured checkout in that case would make an offline Doctor accidentally
     inspect a developer's live venv, so only an explicit installation pin authorizes this probe.
     """
+    from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
+    from ummanu.head_registry import HeadRegistryConfigError, read_source
+
     try:
         source = read_source(report.instance_path.parent)
     except HeadRegistryConfigError:
@@ -1439,6 +1438,8 @@ def _probe_finding(readiness: HeadReadiness) -> str:
 
 def print_recovery_inventory(recovery: dict[str, object]) -> None:
     """Render the same recovery facts exposed by structured status."""
+    from ummanu.head_health import PROBE_BROKEN, HeadReadiness
+
     resources = recovery.get("resources") if isinstance(recovery.get("resources"), list) else []
     if resources:
         print()
@@ -1514,6 +1515,9 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     Last commit, last push, lag, the gate's blocking reason and the
     `remote diverged` alarm.
     """
+    from ummanu.checkpoint import checkpoint_snapshot, render_checkpoint_lines
+    from ummanu.infra.checkpoint_run import load_checkpoint_state
+
     if report.data_dir is None:
         return []
     data_dir = report.data_dir
@@ -1568,6 +1572,9 @@ def checkpoint_unit_findings(expected, collected: CollectResult) -> list[dict[st
 
 
 def checkpoint_cut_lag_findings(report) -> list[dict[str, object]]:
+    from ummanu.checkpoint import checkpoint_snapshot
+    from ummanu.infra.checkpoint_run import load_checkpoint_state
+
     if report.data_dir is None:
         return []
     state = load_checkpoint_state(report.data_dir)
@@ -1591,6 +1598,9 @@ def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
     its sentence names what stopped it: the gate's blocked reason and since when, or the push
     failure.
     """
+    from ummanu.checkpoint import checkpoint_snapshot, rpo_problem
+    from ummanu.infra.checkpoint_run import load_checkpoint_state
+
     if report.data_dir is None:
         return []
     production = load_checkpoint_state(report.data_dir)
@@ -1622,6 +1632,8 @@ def snapshot_foreign_commit_findings(report) -> list[dict[str, object]]:
     Absent in legacy mode and while there is no snapshot repository (docs/RECOVERY.md, "Snapshot
     repository").
     """
+    from ummanu.checkpoint import snapshot_foreign_commits
+
     if report.data_dir is None:
         return []
     message = snapshot_foreign_commits(report.instance_path.parent, report.data_dir)
@@ -1639,6 +1651,10 @@ def snapshot_foreign_commit_findings(report) -> list[dict[str, object]]:
 
 
 def checkpoint_findings(report) -> list[str]:
+    from ummanu import state_repo
+    from ummanu.checkpoint import checkpoint_snapshot
+    from ummanu.infra.checkpoint_run import load_checkpoint_state
+
     if report.data_dir is None:
         return []
     production = load_checkpoint_state(report.data_dir)
@@ -1698,6 +1714,8 @@ def print_secret_store_status(report, *, findings: list[str] | None = None) -> l
 
 
 def secret_store_findings(report) -> list[str]:
+    from ummanu.secret_store import store_findings as _secret_store_findings
+
     return list(_secret_store_findings(report.instance_path.parent))
 
 
@@ -1710,6 +1728,9 @@ def _load_dispatcher_state(path: Path) -> dict[str, object]:
 
 
 def _production_host_findings(report, data_dir: Path, collected_host: CollectResult | None) -> list[str]:
+    from ummanu.host import build_plan, foreign_units, load_managed_manifest, plan_changes
+    from ummanu.host_apply import resolve_installed_packaged
+
     if collected_host is None or collected_host.errors.get("units"):
         return []
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
@@ -1736,6 +1757,9 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
 
 
 def run_data_init(args: argparse.Namespace) -> int:
+    from ummanu.config import load_config, validate
+    from ummanu.data import init_layout
+
     data_dir = _data_dir_from_args(args, validate_tree=False)
     if data_dir is None:
         return 1
@@ -1762,6 +1786,8 @@ def run_data_init(args: argparse.Namespace) -> int:
 
 
 def run_data_export(args: argparse.Namespace) -> int:
+    from ummanu.data import export_all
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -1780,6 +1806,8 @@ def run_data_export(args: argparse.Namespace) -> int:
 
 
 def run_export_board(args: argparse.Namespace) -> int:
+    from ummanu.data import export_board
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -1795,6 +1823,8 @@ def run_export_board(args: argparse.Namespace) -> int:
 
 
 def run_export_memory(args: argparse.Namespace) -> int:
+    from ummanu.data import export_memory
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -1810,6 +1840,8 @@ def run_export_memory(args: argparse.Namespace) -> int:
 
 
 def run_memory_verify(args: argparse.Namespace) -> int:
+    from ummanu.memory_journal import verify_memory_journal
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -1835,6 +1867,8 @@ def run_memory_verify(args: argparse.Namespace) -> int:
 
 
 def run_memory_propose(args: argparse.Namespace) -> int:
+    from ummanu.memory_write import propose_memory_fact
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -1868,6 +1902,8 @@ def run_memory_propose(args: argparse.Namespace) -> int:
 
 
 def run_memory_commit(args: argparse.Namespace) -> int:
+    from ummanu.memory_write import commit_memory_proposal
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -1885,6 +1921,8 @@ def run_memory_commit(args: argparse.Namespace) -> int:
 
 
 def run_memory_supersede(args: argparse.Namespace) -> int:
+    from ummanu.memory_write import supersede_memory_fact
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -1908,6 +1946,14 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
 
 
 def run_knowledge_write(args: argparse.Namespace) -> int:
+    from ummanu.knowledge_write import (
+        KnowledgeError,
+        KnowledgeValidationError,
+        write_knowledge_directory,
+        write_knowledge_document,
+    )
+    from ummanu.state_repo import StateRepoError
+
     try:
         if args.dir is not None:
             result = write_knowledge_directory(
@@ -1944,6 +1990,9 @@ def run_knowledge_write(args: argparse.Namespace) -> int:
 
 
 def run_knowledge_list(args: argparse.Namespace) -> int:
+    from ummanu.knowledge_write import KnowledgeError, list_knowledge_documents
+    from ummanu.state_repo import StateRepoError
+
     try:
         documents = list_knowledge_documents(_instance_dir(args.instance))
     except (KnowledgeError, StateRepoError) as exc:
@@ -1970,6 +2019,13 @@ def _print_memory_write_result(result) -> None:
 
 
 def _print_memory_error(op: str, exc: Exception) -> int:
+    from ummanu.memory_write import (
+        MemoryExportPublishError,
+        MemoryLockError,
+        MemoryPermissionError,
+        MemoryValidationError,
+    )
+
     if isinstance(exc, MemoryExportPublishError):
         result = exc.result
         _print_json(
@@ -2015,6 +2071,8 @@ def _split_csv(value: str) -> list[str]:
 
 
 def run_export_runs(args: argparse.Namespace) -> int:
+    from ummanu.data import export_runs
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -2036,6 +2094,8 @@ def run_data_snapshot(args: argparse.Namespace) -> int:
     still a Git work tree without touching its repository. Nothing is pushed. With `--seed-from`
     it runs no window and seeds the empty repository from the legacy branch tip instead.
     """
+    from ummanu.checkpoint import SnapshotExporter
+
     data_dir = _data_dir_from_args(args, validate_tree=False)
     if data_dir is None:
         return 1
@@ -2055,6 +2115,8 @@ def run_data_snapshot(args: argparse.Namespace) -> int:
 
 
 def run_export_transcripts(args: argparse.Namespace) -> int:
+    from ummanu.data import export_transcripts
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -2071,6 +2133,8 @@ def run_export_transcripts(args: argparse.Namespace) -> int:
 
 
 def run_export_artifacts(args: argparse.Namespace) -> int:
+    from ummanu.data import export_artifacts
+
     data_dir = _data_dir_from_args(args, validate_tree=True)
     if data_dir is None:
         return 1
@@ -2086,6 +2150,8 @@ def run_export_artifacts(args: argparse.Namespace) -> int:
 
 
 def run_backup_create(args: argparse.Namespace) -> int:
+    from ummanu.backup import create_backups
+
     kinds = ("core", "full") if args.kind == "both" else (args.kind,)
     try:
         results = create_backups(
@@ -2109,6 +2175,7 @@ def run_backup_create(args: argparse.Namespace) -> int:
 def run_checkpoint_command(args: argparse.Namespace) -> int:
     from ummanu.dispatch.bootstrap import runtime_from_args
     from ummanu.dispatch.types import DispatcherError, HostError
+    from ummanu.infra.checkpoint_run import run_checkpoint
 
     try:
         runtime = runtime_from_args(args.instance, None, host_mode="real", owner="checkpoint")
@@ -2121,6 +2188,8 @@ def run_checkpoint_command(args: argparse.Namespace) -> int:
 
 
 def run_instance_maintenance(args: argparse.Namespace) -> int:
+    from ummanu import state_repo
+
     if getattr(args, "residue_inventory", False) or getattr(args, "residue_replay", False):
         return run_residue_maintenance(args)
     if getattr(args, "project", None) or getattr(args, "target", None) or getattr(args, "manifest", None):
@@ -2178,6 +2247,8 @@ def run_residue_maintenance(args: argparse.Namespace) -> int:
 
 
 def run_backup_verify(args: argparse.Namespace) -> int:
+    from ummanu.backup import verify_backup
+
     result = verify_backup(Path(args.archive))
     print(f"archive: {args.archive}")
     if result.manifest:
@@ -2216,6 +2287,8 @@ def print_host_inventory(
 
     Returns True if any kind could not be inspected (reported as unavailable).
     """
+    from ummanu.host import KINDS
+
     if expected is None or collected is None or diffs is None:
         expected, collected, diffs = collect_host_inventory(report, args)
 
@@ -2241,6 +2314,9 @@ def print_host_inventory(
 
 
 def collect_host_inventory(report, args: argparse.Namespace):
+    from ummanu.host import FixtureHostSource, LiveHostSource, build_doctor_expectations, inventory
+    from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
+
     assert report.data_dir is not None
     runtime_user, _ = resolve_runtime_owner(report.instance_path.parent)
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource(runtime_user)
@@ -2279,6 +2355,8 @@ def _print_unit_runtime(expected, collected: CollectResult) -> bool:
 
 
 def _unit_runtime_findings(expected, collected: CollectResult) -> list[str]:
+    from ummanu.host import assess_unit_runtime
+
     return [finding.render() for finding in assess_unit_runtime(expected.unit_runtime, collected)]
 
 
@@ -2296,6 +2374,8 @@ def _instance_dir(value: str) -> Path:
 
 
 def _data_dir_from_args(args: argparse.Namespace, *, validate_tree: bool) -> Path | None:
+    from ummanu.config import DataDirError, instance_data_dir, validate_instance
+
     if args.data_dir:
         return Path(args.data_dir).expanduser()
 

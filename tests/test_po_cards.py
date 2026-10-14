@@ -535,7 +535,7 @@ class CreateValidationTests(unittest.TestCase):
             writer.return_value.create.return_value = {"action": "created"}
             with (
                 tempfile.TemporaryDirectory() as tmp,
-                mock.patch("ummanu.task_commands.TaskWriter", writer),
+                mock.patch("ummanu.tasks.TaskWriter", writer),
                 mock.patch("ummanu.task_commands.card_client"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -551,7 +551,7 @@ class CreateValidationTests(unittest.TestCase):
         writer.return_value.complete.return_value = {"action": "completed"}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
             mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):

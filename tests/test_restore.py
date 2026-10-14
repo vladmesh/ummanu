@@ -22,9 +22,9 @@ from tests.restore_fixtures import (
 )
 from tests.runtime_account_fixtures import fixture_runtime_account
 from tests.sql_backend_fixtures import card_store
-from ummanu import restore_commands
 from ummanu.checkpoint import _validate_board
 from ummanu.cli import main as cli_main
+from ummanu.config import validate_instance
 from ummanu.data import (
     export_board,
     init_layout,
@@ -819,7 +819,7 @@ class RestoreTests(unittest.TestCase):
             )
 
             with fixture_runtime_account(root):
-                report = restore_commands.validate_instance(instance)
+                report = validate_instance(instance)
                 packaged = resolve_packaged(
                     report.instance,
                     instance_path=report.instance_path.parent,
@@ -852,7 +852,7 @@ class RestoreTests(unittest.TestCase):
                 inventory = HostInventory(units=live_units)
                 source = mock.Mock()
                 source.collect.return_value = CollectResult(inventory=inventory)
-                with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
+                with mock.patch("ummanu.host.LiveHostSource", return_value=source):
                     self.assertEqual(
                         main(["restore-reconcile", "--instance", str(instance)]),
                         0,
@@ -876,10 +876,9 @@ class RestoreTests(unittest.TestCase):
 
             # A duplicated shipped resource is invalid desired state; legacy heads are ignored.
             with (
-                mock.patch.object(restore_commands, "resolve_installed_packaged", return_value=[unit, unit]),
-                mock.patch.object(restore_commands, "LiveHostSource") as inventory,
-                mock.patch.object(
-                    restore_commands, "mark_reconcile_applied", wraps=mark_reconcile_applied
+                mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=[unit, unit]),
+                mock.patch("ummanu.host.LiveHostSource") as inventory,
+                mock.patch("ummanu.restore.mark_reconcile_applied", wraps=mark_reconcile_applied
                 ) as mark,
                 contextlib.redirect_stdout(output),
             ):

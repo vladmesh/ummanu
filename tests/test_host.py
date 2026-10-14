@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_account_fixtures import fixture_runtime_account
-from ummanu import cli, host_commands
+from ummanu import cli, host, host_commands
 from ummanu.cli import main
 from ummanu.config import validate_instance
 from ummanu.host import (
@@ -482,10 +482,8 @@ class ReconcilePlanTests(unittest.TestCase):
         )
         collected = CollectResult(HostInventory(), {})
         with (
-            unittest.mock.patch.object(cli, "resolve_installed_packaged", return_value=[]),
-            unittest.mock.patch.object(
-                cli,
-                "load_managed_manifest",
+            unittest.mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=[]),
+            unittest.mock.patch("ummanu.host.load_managed_manifest",
                 return_value=([], "managed manifest is unreadable"),
             ),
         ):
@@ -1563,12 +1561,12 @@ class DoctorHostCliTests(unittest.TestCase):
             def __init__(self):
                 raise AssertionError("offline doctor touched host")
 
-        original = cli.LiveHostSource
-        cli.LiveHostSource = ForbiddenHost
+        original = host.LiveHostSource
+        host.LiveHostSource = ForbiddenHost
         try:
             code, output = run_cli(["doctor", "--offline", "--instance", str(EXAMPLE_INSTANCE)])
         finally:
-            cli.LiveHostSource = original
+            host.LiveHostSource = original
         self.assertEqual(code, 0, output)
         self.assertNotIn("host inventory", output)
 
@@ -1791,7 +1789,7 @@ class DoctorHostCliTests(unittest.TestCase):
                 states["ummanu-memory.service"] = ("enabled", "failed")
                 return CollectResult(HostInventory(units=expected.units, unit_states=states), {})
 
-        with unittest.mock.patch.object(cli, "LiveHostSource", return_value=HealthyFilesFailedRuntime()):
+        with unittest.mock.patch("ummanu.host.LiveHostSource", return_value=HealthyFilesFailedRuntime()):
             code, output = run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertEqual(code, 1, output)
@@ -1828,8 +1826,7 @@ class DoctorHostCliTests(unittest.TestCase):
                         {"projects": expected.project_error},
                     )
 
-            with unittest.mock.patch.object(
-                cli, "LiveHostSource", return_value=ExpectedCheckoutUnavailable()
+            with unittest.mock.patch("ummanu.host.LiveHostSource", return_value=ExpectedCheckoutUnavailable()
             ):
                 code, output = run_cli(["doctor", "--host", "--instance", str(instance)])
 
@@ -1896,12 +1893,12 @@ class DoctorHostCliTests(unittest.TestCase):
                     errors={"units": "systemctl not found"},
                 )
 
-        original = cli.LiveHostSource
-        cli.LiveHostSource = StubSource
+        original = host.LiveHostSource
+        host.LiveHostSource = StubSource
         try:
             code, output = run_cli(["doctor", "--dry-run", "--instance", str(EXAMPLE_INSTANCE), "--host"])
         finally:
-            cli.LiveHostSource = original
+            host.LiveHostSource = original
 
         self.assertEqual(code, 2, output)
         self.assertIn("units:\n  unavailable: systemctl not found", output)
@@ -1932,12 +1929,12 @@ class DoctorHostCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            original = cli.LiveHostSource
-            cli.LiveHostSource = QuietHost
+            original = host.LiveHostSource
+            host.LiveHostSource = QuietHost
             try:
                 code, output = run_cli(["doctor", "--dry-run", "--instance", str(instance), "--host"])
             finally:
-                cli.LiveHostSource = original
+                host.LiveHostSource = original
 
             self.assertEqual(code, 2, output)
         self.assertNotIn(secret, output)

@@ -97,7 +97,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 )
 
             with (
-                mock.patch("ummanu.restore_commands.restore_backup", side_effect=restoring_archive),
+                mock.patch("ummanu.restore.restore_backup", side_effect=restoring_archive),
                 mock.patch("sys.stdout", output),
             ):
                 code = main(["restore", str(archive), "--instance", str(instance)])
@@ -505,12 +505,12 @@ class RestoreArchiveTests(unittest.TestCase):
                     raise OSError("disk error")
                 return real_replace(source, destination)
 
-            with mock.patch("ummanu.restore.os.replace", side_effect=fail_publish):
-                with self.assertRaisesRegex(RestoreError, "restore staging failed"):
-                    restore_backup(
-                        archive,
-                        instance,
-                    )
+            with (mock.patch("ummanu.restore.os.replace", side_effect=fail_publish),
+                  self.assertRaisesRegex(RestoreError, "restore staging failed")):
+                restore_backup(
+                    archive,
+                    instance,
+                )
             self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_state_write_failure_leaves_target_unpublished(self):

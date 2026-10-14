@@ -613,7 +613,7 @@ class CreateValidationTests(unittest.TestCase):
         writer.return_value.cancel.return_value = {"action": "wait_cancelled"}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
             mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):

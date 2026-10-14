@@ -20,6 +20,10 @@ INSTANCE_DIRNAME = "instance"
 PRODUCT_DIRNAME = "ummanu"
 INSTANCE_CONFIG_NAME = "instance.yaml"
 
+# The legacy pipeline export source, shared by the data exporter and its CLI default.
+PIPELINE_WORKTREE = Path.home() / "orca" / "workspaces" / "ummanu" / "pipeline"
+PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state" / "pipeline"
+
 
 class MissingDefaultInstance(RuntimeError):
     """Nothing named a live root and the default one does not exist."""

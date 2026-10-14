@@ -797,7 +797,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         with (
             self.native_boundary(),
             mock.patch("ummanu.infra.systemd._proc.run", side_effect=reply),
-            mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
+            mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")),
         ):
             result = self.verify(host_fixture=None)
             self.assertEqual(result.status, "unchanged", result.detail)
@@ -864,7 +864,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         with (
             self.native_boundary(),
             mock.patch("ummanu.infra.systemd._proc.run", side_effect=reply),
-            mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
+            mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")),
         ):
             result = self.verify(host_fixture=None)
             self.assertTrue(result.failed, result.detail)
@@ -969,7 +969,7 @@ class PackagedRuntimeParityTests(PortableFixture):
 
                 with (
                     mock.patch.object(upgrade, "LiveHostSource", side_effect=source),
-                    mock.patch.object(cli_module, "LiveHostSource", side_effect=source),
+                    mock.patch("ummanu.host.LiveHostSource", side_effect=source),
                 ):
                     result = self.verify(host_fixture=None)
                     expected, collected, diffs = cli_module.collect_host_inventory(
@@ -995,7 +995,7 @@ class PackagedRuntimeParityTests(PortableFixture):
             self.assertTrue(result.failed, result.detail)
             self.assertIn(f"{name}: expected active, got inactive", result.detail)
             self.assertFalse(SystemdUnitInstaller(sudo=False).is_active(name))
-            with mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")):
+            with mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")):
                 text_code, output = self.run_cli(
                     [
                         "doctor",
@@ -1045,8 +1045,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                     installer = SystemdUnitInstaller(sudo=False, runtime_user="operator")
                     with self.assertRaisesRegex(HostCommandError, "manager/bus connection failed"):
                         installer.is_active("ummanu-steward.timer")
-                    with mock.patch.object(
-                        cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")
+                    with mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")
                     ):
                         text_code, output = self.run_cli(
                             [

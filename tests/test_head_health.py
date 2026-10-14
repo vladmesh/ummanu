@@ -605,7 +605,8 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
         run.assert_called_once()
 
     def test_doctor_shows_timed_out_like_the_other_non_ready_statuses(self) -> None:
-        from ummanu.cli import PROVIDER_RED_STATES, _recovery_findings
+        from ummanu.cli import _recovery_findings
+        from ummanu.infra.doctor_provider import PROVIDER_RED_STATES
 
         self.assertIn(head_health.PROBE_TIMED_OUT, PROVIDER_RED_STATES)
         findings = _recovery_findings(

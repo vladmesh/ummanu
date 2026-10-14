@@ -8114,7 +8114,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         with (
             mock.patch("ummanu.task_commands.card_client", return_value=self.board),
             mock.patch(
-                "ummanu.task_commands.TaskWriter",
+                "ummanu.tasks.TaskWriter",
                 lambda client, data_dir: TaskWriter(client, data_dir=data_dir, workspace=self.data_dir),
             ),
             contextlib.redirect_stdout(io.StringIO()),

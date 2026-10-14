@@ -113,7 +113,7 @@ class CreateValidationTests(unittest.TestCase):
         writer = mock.Mock()
         writer.return_value.create.return_value = {"action": "created"}
         with (
-            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
             mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -715,9 +715,9 @@ class SprintRecordTests(unittest.TestCase):
         for comments in (None, {}, [None]):
             with self.subTest(comments=comments), tempfile.TemporaryDirectory() as tmp:
                 client = sprint_client(SPRINT, comments)
-                with mock.patch("ummanu.board.backend.board_client", return_value=client):
-                    with self.assertRaisesRegex(TaskError, "comments could not be read completely"):
-                        BoardSprintSessions(tmp, tmp).sprint(SPRINT)
+                with (mock.patch("ummanu.board.backend.board_client", return_value=client),
+                      self.assertRaisesRegex(TaskError, "comments could not be read completely")):
+                    BoardSprintSessions(tmp, tmp).sprint(SPRINT)
         with tempfile.TemporaryDirectory() as tmp:
             client = sprint_client(SPRINT, [])
             with mock.patch("ummanu.board.backend.board_client", return_value=client):

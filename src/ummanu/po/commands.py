@@ -15,13 +15,14 @@ import os
 
 from ummanu.cli_output import print_error
 from ummanu.po import PO_SESSION_ENV
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND, EXIT_VALIDATION
 from ummanu.webproto.errors import ReadError
 
 
 def add_po_subcommands(subparsers) -> None:
-    command = subparsers.add_parser("po", help="act on the PO head's sessions through the PO service")
+    command = add_command_parser(subparsers, "po")
     verbs = command.add_subparsers(dest="po_command", required=True)
     rename = verbs.add_parser(
         "rename", help="set a PO session's title; an empty title clears it, a repeat changes nothing"

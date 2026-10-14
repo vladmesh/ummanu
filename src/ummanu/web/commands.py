@@ -19,7 +19,7 @@ from ummanu.web.provider_usage import ProviderUsageLayer
 from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from ummanu.webproto.card_ops import CardOperationLayer
 from ummanu.webproto.command_reads import CommandReadLayer
-from ummanu.webproto.commands import add_instance_argument, print_error
+from ummanu.webproto.commands import add_command_parser, add_instance_argument, print_error
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -38,10 +38,7 @@ EXIT_VALIDATION = 2
 
 def add_web_serve_subcommands(subparsers) -> None:
     """Register the group beside `web-read` and `web-run`."""
-    group = subparsers.add_parser(
-        "web-serve",
-        help="serve the local dashboard and card pages over the web-read and web-run operations",
-    )
+    group = add_command_parser(subparsers, "web-serve")
     add_instance_argument(group, help="path to an instance dir or instance.yaml")
     group.add_argument(
         "--data-dir",

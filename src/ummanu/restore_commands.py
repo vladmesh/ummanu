@@ -7,39 +7,14 @@ from functools import wraps
 from pathlib import Path
 
 from ummanu.cli_output import print_json
-from ummanu.config import validate_instance
-from ummanu.host import (
-    LiveHostSource,
-    build_expectations,
-    build_plan,
-    foreign_units,
-    load_managed_manifest,
-    plan_changes,
-    plan_input_errors,
-)
-from ummanu.host_apply import resolve_installed_packaged
-from ummanu.installation.credentials import add_bootstrap_credential_arguments
-from ummanu.memory.config import memory_config
-from ummanu.projects.availability import ProjectAvailability
-from ummanu.restore import (
-    RestoreError,
-    _target,
-    bootstrap_empty,
-    import_normalized_board,
-    mark_reconcile_applied,
-    plan_as_json,
-    rebuild_memory_index,
-    restore_backup,
-    restore_postgres_backup,
-    restore_state,
-)
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument
 
 
 def add_restore_subcommands(subparsers) -> None:
-    bootstrap = subparsers.add_parser(
-        "bootstrap", help="bootstrap a host or create an empty ummanu-data target"
-    )
+    from ummanu.installation.credentials import add_bootstrap_credential_arguments
+
+    bootstrap = add_command_parser(subparsers, "bootstrap")
     bootstrap.add_argument("--empty", action="store_true", help="create an empty ummanu-data target")
     add_instance_argument(bootstrap, help="live instance for --empty; unused for host bootstrap")
     bootstrap.add_argument("--instance-remote", help="private instance remote for host bootstrap")
@@ -49,25 +24,23 @@ def add_restore_subcommands(subparsers) -> None:
     bootstrap.add_argument("--dry-run", action="store_true")
     bootstrap.set_defaults(handler=run_bootstrap)
 
-    restore = subparsers.add_parser("restore", help="restore ummanu-data from an archive")
+    restore = add_command_parser(subparsers, "restore")
     restore.add_argument("archive")
     add_instance_argument(restore)
     restore.add_argument("--dry-run", action="store_true")
     restore.set_defaults(handler=run_restore)
 
-    postgres_restore = subparsers.add_parser(
-        "restore-postgres", help="restore a PostgreSQL full archive into an empty local board store"
-    )
+    postgres_restore = add_command_parser(subparsers, "restore-postgres")
     postgres_restore.add_argument("archive")
     add_instance_argument(postgres_restore)
     postgres_restore.add_argument("--dry-run", action="store_true")
     postgres_restore.set_defaults(handler=run_restore_postgres)
 
-    board = subparsers.add_parser("restore-board", help="import the normalized board into an empty backend")
+    board = add_command_parser(subparsers, "restore-board")
     add_instance_argument(board)
     board.set_defaults(handler=run_restore_board)
 
-    reconcile = subparsers.add_parser("restore-reconcile", help="verify live managed reconcile after restore")
+    reconcile = add_command_parser(subparsers, "restore-reconcile")
     add_instance_argument(reconcile)
     reconcile.set_defaults(handler=run_restore_reconcile)
 
@@ -76,6 +49,8 @@ def _restore_command(action: str):
     def decorate(command):
         @wraps(command)
         def run(args: argparse.Namespace) -> int:
+            from ummanu.restore import RestoreError
+
             try:
                 payload = command(args)
             except RestoreError as exc:
@@ -93,6 +68,8 @@ def _restore_command(action: str):
 
 @_restore_command("bootstrap")
 def run_bootstrap(args: argparse.Namespace) -> int:
+    from ummanu.restore import bootstrap_empty, plan_as_json
+
     if not args.empty:
         required = (args.instance_remote, args.instance_dir, args.installation_user)
         if not all(required):
@@ -119,6 +96,8 @@ def run_bootstrap(args: argparse.Namespace) -> int:
 
 @_restore_command("restore")
 def run_restore(args: argparse.Namespace) -> int:
+    from ummanu.restore import plan_as_json, restore_backup
+
     return plan_as_json(
         restore_backup(Path(args.archive), Path(args.instance), dry_run=args.dry_run),
         action="restore",
@@ -128,6 +107,8 @@ def run_restore(args: argparse.Namespace) -> int:
 
 @_restore_command("restore-postgres")
 def run_restore_postgres(args: argparse.Namespace) -> int:
+    from ummanu.restore import plan_as_json, restore_postgres_backup
+
     return plan_as_json(
         restore_postgres_backup(Path(args.archive), Path(args.instance), dry_run=args.dry_run),
         action="restore-postgres",
@@ -137,6 +118,8 @@ def run_restore_postgres(args: argparse.Namespace) -> int:
 
 @_restore_command("restore-board")
 def run_restore_board(args: argparse.Namespace) -> int:
+    from ummanu.restore import _target, import_normalized_board, restore_state
+
     instance_path, data_dir, _ = _target(Path(args.instance))
     count = import_normalized_board(data_dir, instance=instance_path.parent)
     sprints = restore_state(data_dir).get("sprint_count", 0)
@@ -144,6 +127,20 @@ def run_restore_board(args: argparse.Namespace) -> int:
 
 
 def run_restore_reconcile(args: argparse.Namespace) -> int:
+    from ummanu.config import validate_instance
+    from ummanu.host import (
+        LiveHostSource,
+        build_expectations,
+        build_plan,
+        foreign_units,
+        load_managed_manifest,
+        plan_changes,
+        plan_input_errors,
+    )
+    from ummanu.host_apply import resolve_installed_packaged
+    from ummanu.projects.availability import ProjectAvailability
+    from ummanu.restore import RestoreError, _target, mark_reconcile_applied
+
     report = validate_instance(Path(args.instance))
     if not report.ok:
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid instance config"})
@@ -207,6 +204,10 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
 
 @_restore_command("memory-reindex")
 def run_memory_reindex(args: argparse.Namespace) -> int:
+    from ummanu.config import validate_instance
+    from ummanu.memory.config import memory_config
+    from ummanu.restore import _target, rebuild_memory_index
+
     instance_path, data_dir, _ = _target(Path(args.instance))
     report = validate_instance(instance_path)
     host = report.host if isinstance(report.host, dict) else {}

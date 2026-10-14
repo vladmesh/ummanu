@@ -135,7 +135,7 @@ class CliLiveDefaultsTests(unittest.TestCase):
         body.write_text("file reason\nКириллица", encoding="utf-8")
         with (
             mock.patch("ummanu.task_commands.card_client"),
-            mock.patch("ummanu.task_commands.TaskWriter") as writer,
+            mock.patch("ummanu.tasks.TaskWriter") as writer,
         ):
             for verb, extra, method, key in [
                 ("decide", ["--kind", "release"], "decide", "body"),
@@ -242,7 +242,7 @@ class CliLiveDefaultsTests(unittest.TestCase):
         ]
         with (
             mock.patch("ummanu.task_commands.card_client"),
-            mock.patch("ummanu.task_commands.TaskWriter"),
+            mock.patch("ummanu.tasks.TaskWriter"),
             mock.patch(
                 "ummanu.board.reference_repair.apply_reference_repair", return_value={"ok": True}
             ) as apply,

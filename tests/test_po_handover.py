@@ -366,7 +366,7 @@ class OwnerCommentTests(WriterFixture):
         writer.return_value.handover.return_value = {"action": HANDED_TO_OWNER}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
             mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
@@ -397,7 +397,7 @@ class OwnerCommentTests(WriterFixture):
         writer = mock.Mock()
         writer.return_value.record_owner_answer.return_value = {"action": "owner_answer_recorded"}
         with (tempfile.TemporaryDirectory() as tmp,
-              mock.patch("ummanu.task_commands.TaskWriter", writer),
+              mock.patch("ummanu.tasks.TaskWriter", writer),
               mock.patch("ummanu.task_commands.card_client"),
               contextlib.redirect_stdout(io.StringIO())):
             body = Path(tmp) / "answer.md"

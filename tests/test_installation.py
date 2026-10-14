@@ -1093,16 +1093,14 @@ class InstallationTests(unittest.TestCase):
             source.collect.return_value = CollectResult(inventory=HostInventory())
 
             with (
-                mock.patch.object(restore_commands, "validate_instance", return_value=report),
-                mock.patch.object(restore_commands, "resolve_installed_packaged", return_value=[]),
-                mock.patch.object(
-                    restore_commands,
-                    "_target",
+                mock.patch("ummanu.config.validate_instance", return_value=report),
+                mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=[]),
+                mock.patch("ummanu.restore._target",
                     return_value=(report.instance_path, report.data_dir, {}),
                 ),
-                mock.patch.object(restore_commands, "LiveHostSource", return_value=source),
+                mock.patch("ummanu.host.LiveHostSource", return_value=source),
                 mock.patch.object(restore_commands, "_print_json") as emit,
-                mock.patch.object(restore_commands, "mark_reconcile_applied") as mark_applied,
+                mock.patch("ummanu.restore.mark_reconcile_applied") as mark_applied,
             ):
                 code = restore_commands.run_restore_reconcile(
                     SimpleNamespace(instance=str(report.instance_path.parent))
@@ -2150,7 +2148,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
             (layout.memory_model, layout.memory_dim, layout.memory_threads),
         )
         with (
-            mock.patch.object(restore_commands, "rebuild_memory_index", return_value=1) as explicit,
+            mock.patch("ummanu.restore.rebuild_memory_index", return_value=1) as explicit,
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(

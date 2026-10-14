@@ -43,6 +43,29 @@ on:
       - src/ummanu/board/task_protocol/**
       - tests/fixtures/task_protocol_coupling.py.txt
       - .github/workflows/task-protocol-graph.yml
+      - src/ummanu/board/owner_event_commands.py
+      - src/ummanu/check_commands.py
+      - src/ummanu/cli.py
+      - src/ummanu/data.py
+      - src/ummanu/dispatch/commands.py
+      - src/ummanu/infra/doctor_record.py
+      - src/ummanu/installation/commands.py
+      - src/ummanu/po/commands.py
+      - src/ummanu/po/service.py
+      - src/ummanu/product_issue_commands.py
+      - src/ummanu/restore_commands.py
+      - src/ummanu/runtime/paths.py
+      - src/ummanu/secret_commands.py
+      - src/ummanu/sprint_commands.py
+      - src/ummanu/task_commands.py
+      - src/ummanu/upgrade.py
+      - src/ummanu/web/commands.py
+      - src/ummanu/webfront/commands.py
+      - src/ummanu/webproto/commands.py
+      - src/ummanu/runtime/cli_composition.py
+      - src/ummanu/infra/doctor_provider.py
+      # Candidate-only parser/import regressions exercise the composition edges.
+      - tests/test_cli_cold_composition.py
   workflow_dispatch:
 
 permissions:
@@ -77,10 +100,11 @@ jobs:
           product={k:{v for v in values if v.startswith('ummanu')} for k,values in graph.items() if k.startswith('ummanu')};
           groups=sorted((sorted(g) for g in m['tarjan'](product) if len(g)>1),key=lambda g:(-len(g),g));
           config=sorted(n for n in m['closure_forward'](graph,'ummanu.config') if n.startswith('ummanu'));
-          result={'sha':os.environ['CANDIDATE_SHA'],'product_modules':len(product),'sccs':groups,'config_closure':config};
+          result={'sha':os.environ['CANDIDATE_SHA'],'source_modules':len([n for n in snap.modules if n.startswith('ummanu')]),'nodes':len(graph),'product_modules':len(product),'product_membership':sorted(product),'sccs':groups,'config_closure':config};
           pathlib.Path(os.environ['RUNNER_TEMP']+'/task-protocol-graph/uncut.json').write_text(json.dumps(result,indent=2));
           print(json.dumps(result,indent=2)); assert len(groups[0])<=60; assert len(config)<=10"
       - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
         with:
           name: task-protocol-graph-${{ github.event.pull_request.head.sha || github.sha }}
           path: ${{ runner.temp }}/task-protocol-graph

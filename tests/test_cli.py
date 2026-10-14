@@ -514,7 +514,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch("ummanu.cli.create_backups") as create:
+            with mock.patch("ummanu.backup.create_backups") as create:
                 create.return_value = [
                     mock.Mock(archive=Path("/tmp/core.tar"), manifest={"version": 1, "backup_kind": "core"}),
                     mock.Mock(archive=Path("/tmp/full.tar"), manifest={"version": 1, "backup_kind": "full"}),
@@ -657,7 +657,7 @@ class CliTests(unittest.TestCase):
             )
 
             with mock.patch(
-                "ummanu.cli.init_layout",
+                "ummanu.data.init_layout",
                 side_effect=RuntimeError("could not write data manifest: full"),
             ):
                 code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
