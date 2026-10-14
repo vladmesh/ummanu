@@ -3918,6 +3918,12 @@ PR. The head's process is held by the product's supervisor under `<data>/webprot
 `head.pid`, `journal.jsonl`, `supervisor.log`, the task document and `result.json`. The run record is
 `<data>/webproto/runs/<run-id>.json`. All paths are on the run document.
 
+`RunStore` and `SprintRequestStore` share `webproto.request_index.RequestIndex` for request-id
+digest paths, index document I/O and operation/fingerprint matching. Each store keeps its own
+lock and record conversion. Run claims write the run before its compact request index; sprint
+claims write the full indented request record before the board operation. A recorded sprint
+reference is final, and an empty reference leaves the outcome unknown. Reads prepare no directory.
+
 A head receives `UMMANU_RUN_RESULT` (the only place a result may appear), `UMMANU_RUN_ID`,
 `UMMANU_RUN_ROLE`, `UMMANU_RUN_REF` and `UMMANU_RUN_WORKSPACE`. A `run_state` that finds the
 result file ends the head holding it. A run that publishes nothing is ended at its deadline

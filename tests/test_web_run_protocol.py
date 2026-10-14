@@ -1892,7 +1892,7 @@ class FileWriteSeamTests(unittest.TestCase):
     #: Every module of the layer that puts a file on disk, so the scan above cannot pass by the
     #: layer having stopped writing anything. A fourth one is welcome; a fourth one that writes its
     #: own way is what the scan refuses.
-    SEAM_CALLERS = ("ops.py", "runs.py", "sprint_requests.py")
+    SEAM_CALLERS = ("ops.py", "runs.py", "request_index.py")
 
     def test_the_seam_is_where_this_layer_actually_writes(self) -> None:
         writers: set[str] = set()

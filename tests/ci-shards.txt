@@ -306,6 +306,7 @@ integration-board tests/test_web_warm_render.py
 unit tests/test_web_markdown.py
 unit tests/test_web_page_parts.py
 unit tests/test_web_render_packets.py
+unit tests/test_request_index.py
 unit tests/test_web_renderer_owners.py
 unit tests/test_web_boundaries.py
 unit tests/test_web_cursor.py
