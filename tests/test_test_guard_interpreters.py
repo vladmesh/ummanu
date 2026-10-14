@@ -95,7 +95,11 @@ print(json.dumps({'preloaded': preloaded, 'guard': guard.__file__, 'parser_hash'
             evidence = json.loads(result.stdout)
             self.assertEqual(evidence["preloaded"], [])
             self.assertEqual(evidence["parser_hash"], parser_hash)
-            self.assertTrue(Path(evidence["guard"]).is_relative_to(python.parent.parent))
+            site = next(python.parent.parent.glob("lib/python3*/site-packages"))
+            claimed = self.root / test_guard.WORKSPACE_STARTUP_DIR / test_guard.MODULE_FILE
+            guard = Path(evidence["guard"])
+            self.assertIn(guard, {site / test_guard.MODULE_FILE, claimed})
+            self.assertEqual(guard.read_text(), test_guard.standalone_source())
             self.assertEqual(Path(evidence["cli"]), Path(__file__).resolve().parents[1] / "src/ummanu/cli.py")
             print(json.dumps(evidence, sort_keys=True))
 
