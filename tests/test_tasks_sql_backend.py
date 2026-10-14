@@ -685,7 +685,7 @@ class SqlTaskWriterTests(SqlBoardCase):
 
         def failing(cursor, query, *args, **kwargs):
             result = original(cursor, query, *args, **kwargs)
-            if str(query).startswith("UPDATE tasks SET project_id ="):
+            if str(query).startswith("UPDATE tasks SET ") and "project_id = %s" in str(query):
                 raise psycopg.errors.CheckViolation("metadata driver failure")
             return result
 
@@ -904,6 +904,9 @@ class SqlMetadataWriteTests(SqlBoardCase):
 
     def test_outer_and_nested_rollback_leave_no_metadata_or_satellite_effect(self) -> None:
         before = self.row()
+        heads_before = self.client._query(
+            "SELECT head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal", ("ummanu-468",)
+        )
         for nested in (False, True):
             with (
                 self.subTest(nested=nested),
@@ -915,8 +918,8 @@ class SqlMetadataWriteTests(SqlBoardCase):
                 raise RuntimeError("abort metadata")
             self.assertEqual(self.row(), before)
             self.assertEqual(self.client._query(
-                "SELECT head FROM task_retry_heads WHERE task_ref = %s", ("ummanu-468",)
-            ), [])
+                "SELECT head FROM task_retry_heads WHERE task_ref = %s ORDER BY ordinal", ("ummanu-468",)
+            ), heads_before)
 
 
 if __name__ == "__main__":  # pragma: no cover
