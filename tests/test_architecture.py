@@ -9,6 +9,7 @@ import shlex
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 from tests import source_trees
@@ -309,19 +310,23 @@ def _orca_references(relative: str, source: str) -> list[OrcaFinding]:
     for lineno, module in _imported_modules(relative, source):
         if _names_banned_module(module):
             found.add(OrcaFinding(lineno, -1, f"imports {module}", module))
-    parents = source_trees.parents(tree)
+    parents = None
     for node in source_trees.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             text = node.value
             # `importlib.import_module("…")` and friends name a module by string.
             if _DOTTED_NAME.fullmatch(text) and text.rsplit(".", 1)[-1] in BANNED_ORCA_LAST_COMPONENTS:
                 found.add(OrcaFinding(node.lineno, node.col_offset, f"names module {text}", text))
-            if _is_orca_program(_first_shell_word(text)) and not _is_path_operand(
-                node, parents.get(id(node))
-            ):
-                found.add(
-                    OrcaFinding(node.lineno, node.col_offset, f"names the orca program: {text[:60]!r}", text)
-                )
+            if _is_orca_program(_first_shell_word(text)):
+                # Most modules have no program candidate and need no parent map.
+                if parents is None:
+                    parents = source_trees.parents(tree)
+                if not _is_path_operand(node, parents.get(id(node))):
+                    found.add(
+                        OrcaFinding(
+                            node.lineno, node.col_offset, f"names the orca program: {text[:60]!r}", text
+                        )
+                    )
         if isinstance(node, (ast.List, ast.Tuple)):
             words = [
                 element.value
@@ -399,13 +404,104 @@ class NoOrcaInSourceTests(unittest.TestCase):
     def test_each_allowlist_entry_still_excuses_a_real_line(self) -> None:
         """An entry cannot outlive its code: it must match a line that the rule would flag."""
         excused: list[OrcaAllowance] = []
-        for relative, source in self._sources():
+        # Only an entry's own file can spend it; the ban test above scans every source.
+        for relative in sorted({allowance.path for allowance in ORCA_ALLOWLIST}):
+            path = ROOT / relative
+            self.assertTrue(path.is_relative_to(SOURCE_ROOT) and path.name.endswith(".py"), relative)
+            self.assertNotIn("..", path.parts, relative)
+            self.assertEqual(path.relative_to(ROOT).as_posix(), relative)
+            source = path.read_text(encoding="utf-8")
             excused.extend(_apply_allowlist(relative, source)[1])
         self.assertEqual(len(excused), len(set(excused)))
         for allowance in ORCA_ALLOWLIST:
             with self.subTest(path=allowance.path, line=allowance.line):
                 self.assertTrue(allowance.reason)
                 self.assertIn(allowance, excused, "no flagged line matches this entry any more")
+
+    def test_liveness_reads_a_future_allowance_file_once_and_ban_scans_siblings(self) -> None:
+        relative = "src/ummanu/future.py"
+        allowances = tuple(
+            OrcaAllowance(relative, f"{name} =", value, "fixture decision")
+            for name, value in (("FIRST", "orca"), ("SECOND", "orca-cli"))
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            (root / relative).write_text('FIRST = "orca"\nSECOND = "orca-cli"\n', encoding="utf-8")
+            (source_root / "sibling.py").write_text('FIRST = "orca"\n', encoding="utf-8")
+            with mock.patch.multiple(__name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=allowances):
+                with (
+                    mock.patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as reads,
+                    mock.patch(f"{__name__}._apply_allowlist", wraps=_apply_allowlist) as apply,
+                ):
+                    NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
+                self.assertEqual([call.args[0] for call in reads.call_args_list], [root / relative])
+                self.assertEqual([call.args[0] for call in apply.call_args_list], [relative])
+                with self.assertRaisesRegex(AssertionError, "sibling.py"):
+                    NoOrcaInSourceTests().test_no_module_imports_or_names_orca()
+
+    def test_liveness_rejects_missing_or_stale_allowance_files(self) -> None:
+        relative = "src/ummanu/future.py"
+        allowance = OrcaAllowance(relative, "VALUE =", "orca", "fixture decision")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            (source_root / "sibling.py").write_text('VALUE = "orca"\n', encoding="utf-8")
+            with mock.patch.multiple(
+                __name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=(allowance,)
+            ):
+                for source in (None, 'VALUE = "retired"\n', 'OTHER = "orca"\n', 'VALUE = Path("orca")\n'):
+                    with self.subTest(source=source):
+                        if source is not None:
+                            (root / relative).write_text(source, encoding="utf-8")
+                        with self.assertRaises((FileNotFoundError, AssertionError)):
+                            NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
+
+    def test_liveness_rejects_allowance_paths_outside_the_source_universe(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            for relative in ("outside.py", "src/ummanu/future.txt", "src/ummanu/future.py"):
+                (root / relative).write_text('VALUE = "orca"\n', encoding="utf-8")
+            for relative in (
+                "outside.py",
+                "src/ummanu/future.txt",
+                "src/ummanu/../../outside.py",
+                "src/ummanu/./future.py",
+                "src//ummanu/future.py",
+                str(source_root / "future.py"),
+            ):
+                allowance = OrcaAllowance(relative, "VALUE =", "orca", "fixture decision")
+                with (
+                    self.subTest(path=relative),
+                    mock.patch.multiple(
+                        __name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=(allowance,)
+                    ),
+                    self.assertRaises(AssertionError),
+                ):
+                    NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
+
+    def test_parent_maps_are_built_only_for_program_candidates_in_a_cold_index(self) -> None:
+        for source, parent_maps, values in (
+            ("import math\nVALUE = sum(range(100))\n", 0, []),
+            ('DOC = "mentions orca without naming a program"\n', 0, []),
+            ("from . import orca_rpc as rpc\n", 0, ["ummanu.runtime.orca_rpc"]),
+            ("ROOT = Path('or' 'ca')\n", 1, []),
+            ("FIRST = 'or' 'ca'\nSECOND = '\\x6f\\x72\\x63\\x61'\n", 1, ["orca", "orca"]),
+        ):
+            index = source_trees.SourceIndex(freeze=False)
+            with (
+                self.subTest(source=source),
+                mock.patch.multiple(source_trees, parse=index.parse, walk=index.walk),
+                mock.patch.object(source_trees, "parents", wraps=index.parents) as parents,
+            ):
+                findings = _orca_references("src/ummanu/runtime/planted.py", source)
+                self.assertEqual([finding.value for finding in findings], values)
+                self.assertEqual(index.parses, 1)
+                self.assertEqual(parents.call_count, parent_maps)
 
     def test_each_planted_route_to_orca_fails_the_rule(self) -> None:
         planted = "src/ummanu/runtime/planted.py"
@@ -415,6 +511,9 @@ class NoOrcaInSourceTests(unittest.TestCase):
             "from subprocess import run as launch\nlaunch('orca-cli')\n",
             "import subprocess\nsubprocess.run(['/bin/sh', '-c', 'orca terminal list'])\n",
             "import os\nos.system('orca')\n",
+            "BIN = '\\x6f\\x72\\x63\\x61'\n",
+            "BIN = 'or' 'ca'\n",
+            "launch(['sh', '-c', 'cd /tmp && \\157rca'])\n",
             "from importlib import import_module\nimport_module('ummanu.runtime.pane_host')\n",
             # Beyond the card's six: a later word under `-c`, a path, the imports in each form.
             "import subprocess\nsubprocess.run(['sh', '-c', 'cd /tmp && orca terminal list'])\n",
@@ -480,17 +579,26 @@ class SourceLayoutTests(unittest.TestCase):
     def test_board_double_static_imports_need_no_expression_walk(self) -> None:
         for source, expected in (
             ("from ummanu.board.models import Event\nVALUE = sum(range(100))\n", []),
-            ("from ummanu.board.fake import MemoryAudit\n", [
-                "src/ummanu/probe.py:1: ummanu.board.fake",
-                "src/ummanu/probe.py:1: ummanu.board.fake.MemoryAudit",
-            ]),
-            ("if True:\n    from tests.fakes import board\n", [
-                "src/ummanu/probe.py:2: tests.fakes",
-                "src/ummanu/probe.py:2: tests.fakes.board",
-            ]),
+            (
+                "from ummanu.board.fake import MemoryAudit\n",
+                [
+                    "src/ummanu/probe.py:1: ummanu.board.fake",
+                    "src/ummanu/probe.py:1: ummanu.board.fake.MemoryAudit",
+                ],
+            ),
+            (
+                "if True:\n    from tests.fakes import board\n",
+                [
+                    "src/ummanu/probe.py:2: tests.fakes",
+                    "src/ummanu/probe.py:2: tests.fakes.board",
+                ],
+            ),
         ):
-            with self.subTest(source=source), mock.patch.object(
-                source_trees, "walk", side_effect=AssertionError("unnecessary expression walk")
+            with (
+                self.subTest(source=source),
+                mock.patch.object(
+                    source_trees, "walk", side_effect=AssertionError("unnecessary expression walk")
+                ),
             ):
                 self.assertEqual(_board_fake_offenders("src/ummanu/probe.py", source), expected)
 
