@@ -334,3 +334,4 @@ unit tests/test_hermetic_shell.py
 integration-dispatcher tests/test_broad_check_process.py
 unit tests/test_installation_retirement.py
 unit tests/test_cli_cold_composition.py
+unit tests/test_process_receipts.py

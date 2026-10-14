@@ -215,9 +215,10 @@ class WebProcessReceiptTests(unittest.TestCase):
                 self.assertFalse(upgrade.web_process_receipt_path(context).exists())
 
     def test_receipt_write_is_atomic_and_a_write_failure_leaves_no_partial_evidence(self) -> None:
-        with mock.patch.object(upgrade.os, "replace", side_effect=OSError("disk full")):
+        with mock.patch.object(upgrade.process_receipts.os, "replace", side_effect=OSError("disk full")) as replace:
             result = upgrade.step_web(self.context)
 
+        replace.assert_called_once()
         self.assertEqual(result.status, "failed", result.detail)
         self.assertFalse(self.receipt_path().exists())
         self.assertEqual(list(self.receipt_path().parent.glob("*.tmp")), [])
