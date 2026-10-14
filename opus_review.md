@@ -1,5 +1,414 @@
 # opus_review — аудит репозитория `vladmesh/ummanu`
 
+## Статус на 2026-10-14 (main `5868d1c33d565847ed6c252af4a873fa8b2c110d`)
+
+Итоговая сверка после всей ремедиации: 15 PR вне спринта #730–#744 (группы A1–A5, B1–B10,
+2026-10-12/13) и sprint:1490 (35 карточек Done, PR #745–#779; владелец закрыл спринт досрочно
+2026-10-14, ummanu-289 снята в полёте). Номера PR спринта на GitHub заканчиваются #779, а не #791.
+Ветка #668 подтянула этот main обычным merge. PR остаётся открытым и не мержится.
+
+Каждый статус проверен по коду main, а не по названию карточки. Ссылки `file:line` без префикса
+относятся к `src/ummanu/` на `5868d1c3`. Остальные пути указаны от корня репозитория.
+Тесты, `ummanu check` и workflow при этой сверке не запускались. Числа CI и local broad взяты
+из сохранённых чужих прогонов, для каждого указано дерево. Статусы:
+
+- ✅: конкретное обязательство ID выполнено, есть место в коде или удалённый файл;
+- ◐: выполнено частично, остаток назван;
+- открыт: исходное наблюдение подтверждается текущим кодом, место указано;
+- решение владельца: ID закрыт решением оставить или удалить, а не правкой по исходной формулировке.
+
+Сверки 10-06, 10-08, 10-11 и дельты #719–#729 ниже сохранены как история; §12 побайтно прежний.
+Единый список остатка находится в §10. В §11.3 больше нет второго списка.
+
+#### Merge и guard старого имени
+
+Merge дал конфликт в `docs/RENAME.md` и `tests/test_old_name_guard.py`.
+Оба файла взяты из main: ummanu-232 (#734) сжал RENAME до old-name policy, а guard по решению владельца
+2026-10-14 снимается (issue:538e5e28627b91acea59). Прежняя exact-path классификация отчёта
+(класс R, путь `opus_review.md`, тест `test_historical_audit_is_allowed_only_at_its_declared_path`,
+абзац RENAME §T5) существовала на ветке с 2026-10-06 по `2ebd17eb` и теперь живёт только в истории ветки.
+Сейчас diff PR к main состоит из одного `opus_review.md`. Селектор CI считает такой PR docs-only
+(`scripts/ci_selection.py:68-72`) и наборы не запускает. Полный прогон этого дерева отверг бы
+10 вхождений старого имени в 9 строках отчёта, 4 из них в неизменяемом §12. Это не дефект продукта.
+Ошибка уйдёт вместе с guard'ом.
+
+### Поставки, по которым шла сверка
+
+| Группа | PR (merge) | Карточка | Заявленные ID |
+|---|---|---|---|
+| A1 | #730 `43344495` | ummanu-227 | TDEAD-07 L1a/L2/L3/L10, 42 удаления |
+| A2 | #731 `4645adcb` | ummanu-228 | TDEAD-07 L4/L5, 24 удаления; TDEAD-01…06 |
+| A3 | #732 `04ad5dcc` | ummanu-230 | DEAD-04/05/06/10/11/12/15/20/24 |
+| A4 | #733 `b4b4afff` | ummanu-231 | DOC-08, DOC-10, DOC-15 без ROADMAP, мелкое §8.3 |
+| A5 | #734 `9820906a` | ummanu-232 | §8.3: RENAME, HEAD_RUNTIME |
+| B1 | #735 `21d537e6` | ummanu-235 | BUG-04/05, CON-10 часть, DUP-C1/C3, BUG-24 config |
+| B2 | #736 `8c1ea4cd` | ummanu-236 | BUG-12/DUP-C4, DUP-C2/C5/C7 |
+| B3 | #737 `62921217` | ummanu-237 | BUG-24 board, CON-08/INEF-10, DUP-B1/B2/B4/B5, INEF-16, 0004 |
+| B4 | #738 `5de45712` | ummanu-238 | CON-02/07, BUG-24 webproto, INEF-12/15/17, DUP-W2/W3 |
+| B5 | #739 `b8b7e51f` | ummanu-239 | DUP-D1/D2/D13/D18, INEF-14 |
+| B10 | #740 `170ee3d4` | ummanu-240 | флейк measurement script (issue:e536892b9e59f8f43e05, resolved) |
+| B6 | #741 `c052a18c` | ummanu-241 | BUG-24 runtime/backup, DUP-R1/R3/R4, DUP-I2/I3/I5 |
+| B7 | #742 `91edee17` | ummanu-242 | TDEAD-07 L1b/L8/L9 и rewrite-остатки L2–L5 |
+| B8 | #743 `1b3f4c7f` | ummanu-244 | TDEAD-07 L6/L7, TEST-03 |
+| B9 | #744 `2dcb919e` | ummanu-246 | §8.3 промпты: observe-sprint, steward, owner decisions |
+| Слот 5 | #745–#750 | ummanu-248/249/251/252/253/254 | CON-04/INEF-03, CON-03, DUP-D14/15/16, CON-17, CON-06, DUP-D19 |
+| Шов ядра | #751–#754 | ummanu-255…258 | ARCH-04 (slice M ummanu-220), installation как пакет |
+| Удаления | #755, #756 | ummanu-259, 260 | DEAD-T, DEAD-21 |
+| Разрезы | #757–#760, #769, #772, #776 | ummanu-261/262/263/264/276/279/284 | DEC-01/02, DUP-D3, ARCH-08, DEC-05, DEC-07/DUP-W5, upgrade |
+| SQL | #761–#765 | ummanu-265…268, 270 | CON-11, ARCH-13/CON-12, INEF-02, DUP-B1/B3, DUP-B6 |
+| CLI/env | #766, #768 | ummanu-272, 275 | ARCH-12/INEF-18, CON-15 |
+| Local-pty | #770, #771 | ummanu-277, 278 | DUP-R2, INEF-05, CON-13/14 |
+| Web | #773, #774 | ummanu-280, 281 | DUP-W4, INEF-04 |
+| Backup/upgrade | #775, #777 | ummanu-282, 285 | DUP-I1, INEF-09 (upgrade) |
+| Хотфиксы | #767, #778, #779 | ummanu-274, 286, 287 | /proc при scoped cleanup, цена Orca-скана, гонка PO fixture |
+
+### Матрица: баги (BUG)
+
+| ID | Статус | Доказательство на main / остаток |
+|---|---|---|
+| BUG-01 | ✅ #677 | `web/server.py:68` `_BodyRefused`, `:162-164` закрывает соединение |
+| BUG-02 | ✅ #680 | `README.md:40`, `CONTRIBUTING.md:18-19`; `installation/materialize.py:424-439` отвергает не-editable runtime |
+| BUG-03 | ✅ #678 | `scripts/ci_test_shards.py:81` `FAST_MODULES`, `:1206` запуск под guard |
+| BUG-04 | ✅ #735 | `dispatch/commands.py:178-181` ловит `DispatcherError`, `:259-265` usage, код 2 |
+| BUG-05 | ✅ #735 | `sprint_commands.py:302-316`: `resolve_data_dir` внутри `try` |
+| BUG-06 | ✅ #680 | `gate.py:318` проверяет `result`/`input_revision` как объекты |
+| BUG-07 | ✅ #677 | `webproto/reads.py:524` `_agents`, `:566` `_attempt` локализуют отказ записи |
+| BUG-08 | ✅ #680 | `secret_store.py:273-275` контролируемый отказ параметров, `:1095` `_read_value` |
+| BUG-09 | ✅ #680 | `memory/canon.py:98` единый `parse_frontmatter` |
+| BUG-10 | ✅ #683 | `automations/agents/steward/signals.py:41-48` → `<data_dir>/workspaces` |
+| BUG-11 | ✅ #683 | `runtime/local_pty_head.py:993`: живой supervisor главнее мёртвой старой identity |
+| BUG-12 | ✅ #736 | `board/task_protocol/rows.py:692` `_create_metadata` (`:717` record_type, `:727` touches_production) пишет и обычный create (`tasks.py:1359`), и repair (`rows.py:762-766` через `task_protocol/recovery.py:943`) |
+| BUG-13 | ✅ #680 | `memory/config.py:25` `memory_config` для всех путей |
+| BUG-14 | ✅ #669 | `infra/instance_maintenance.py:278` `--git-dir`, `:286` `skipped` |
+| BUG-15 | ✅ #719, seam #747 | `dispatch/head_vitality_episode.py:391-400` курсоры только при совпавшем run_id; `wait_vitality.py:1083`, `head_status.py:219`; регрессия `tests/test_dispatcher_runtime_isolation.py:102` |
+| BUG-16 | ✅ #683 | `runtime/local_pty_journal.py:288-309`: `run.exited` после последнего `run.started` |
+| BUG-17 | ✅ #720 | `dispatch/observer_state.py:176/229/274` `state_reason`, `observer.py:221/532`; регрессии `tests/test_freeze_observer_state_contracts.py:124-166` (unit) |
+| BUG-18 | ✅ #719, seam #747 | `dispatch/gate_lifecycle.py:867` без наблюдения возвращает `None`; регрессия `tests/test_dispatcher_runtime_isolation.py:130` |
+| BUG-19 | ✅ #720 | `dispatch/pause_ops.py:410` `_freeze_heads`: отказ одной роли не пропускает другую; регрессии `tests/test_freeze_observer_state_contracts.py:15-114` |
+| BUG-20 | ✅ #677 | `fonts.googleapis` в `src`: 0 |
+| BUG-21 | ✅ #680 | `secret_store.py:93-95` пределы scrypt, `:362/:1223` `mkstemp` |
+| BUG-22 | ◐ #678/#740 | Assertions и env исправлены. #740 перевёл measurement script на виртуальные часы. Root-only тесты по-прежнему не идут в CI. Timing-гипотезы не перепроверены |
+| BUG-23 | ✅ #678 | `tests/support/shell.py:9` `--noprofile --norc` |
+| BUG-24 | ✅ #735/#737/#738/#741 | config `config.py:236/244/313`; board `board/sql_cards.py:1512-1514` (createComment), `:1530` (removeTask); webproto `webproto/errors.py:60-70`; `dispatch/head_vitality_episode.py:133` OverflowError; `time.time()` в supervisor: 0; teardown `dispatch/host.py:1212-1216` + `tests/test_dispatcher_contracts.py:436`; body-файлы в `<data_dir>/artifacts/bodies` (`dispatch/host_runtime/packets.py:104`, решение PO A); `memory/access.py:325-335` один владелец fd; `checkpoint.py:2304` через `state_repo.read_blobs`; `backup.py:129-135` staging в `backups/`, `:175` replace |
+
+#### Поправка к issue:c61d9dcc95b28c165672
+
+В дополнении 2026-10-14 (п. 3) сказано, что регрессий
+на BUG-17/18/19 нет. Это не так: их поставили #719/#720 до спринта. `tests/test_freeze_observer_state_contracts.py`
+добавлен в `6d3e39c6` (#720) и включён в unit (`tests/ci-shards.txt:23`).
+`TickVitalityContractTests` добавлены в `e293e065` (#719) и включены в integration-dispatcher
+(`tests/ci-shards.txt:216`). В спринте ни одна карточка их не называла. Поэтому в closeout они
+стоят как open.
+
+### Матрица: контракты и схемы (CON)
+
+| ID | Статус | Доказательство / остаток |
+|---|---|---|
+| CON-01 | ✅ #680 | `schemas/instance.schema.json:150`: `orca_repos` объявлен ignored compatibility |
+| CON-02 | ◐ #738 | `schemas/web-run.schema.json:141` принимает `product_runs`; добавлены `web-card`/`web-provider`. Без схемы остались `head_view` и `po_*` (причины записаны в PROTOCOLS); `additionalProperties: false` на верхнем уровне нет. issue:c61d9dcc95b28c165672 |
+| CON-03 | ✅ #719/#746 | `dispatch/production.py:1074`: fence по `to == blocked` или `status == blocked`; `tests/test_dispatcher_runtime_isolation.py:144` |
+| CON-04 | ✅ #745 | `dispatch/claim.py:786-801`: один проход audit, суффиксы цикла по префиксу |
+| CON-05 | открыт | набор маркеров трижды: `board/events.py:75`, `board/host.py:189`, `board/sql_host.py:530` |
+| CON-06 | ✅ #749 | `dispatch/card_roles.py:7-15`: единственная таблица review/reviewer |
+| CON-07 | ✅ #738 | `webproto/pause_reads.py:412`, `command_reads.py:459`: `InstallationUnavailable` (503) |
+| CON-08 | ✅ #737 | `board/sql_rows.py:26` единый `rfc3339`; микросекунды оставлены намеренно и названы: `board/task_protocol/rows.py:632-638` (charge), `board/sql_sprints.py:36-42` |
+| CON-09 | ✅ #680 | `runtime_env.py:71` `parse_runtime_env` |
+| CON-10 | ◐ #735 | data/config/memory: JSON usage, код 2 (`cli.py:222/322/490`); `cli_output.py:23` `ensure_ascii=False`; `run_owner_decisions`/`run_resume` код 2 (`sprint_commands.py:505-517/614`). Голые `reconcile`/`backup`/`project` всё ещё печатают «not implemented…» и выходят с 1 (`cli.py:235/355/408`, `:2396-2401`) |
+| CON-11 | ✅ #761 | `sprints.py:409` `list(create=False)`, `:606` `show` по умолчанию без создания |
+| CON-12 | ✅ #762, документированный scope | fake перенесён (ARCH-13); отличия от SQL перечислены в `tests/fakes/board.py:1-10`. Сведение fake с SQL отвергнуто (§11.2) |
+| CON-13 | ✅ #771, намеренно | `docs/HEAD_RUNTIME.md:196-207`; ложный комментарий «under 256 bytes» удалён |
+| CON-14 | ✅ #771, намеренно | `docs/HEAD_RUNTIME.md:208-222`: граница доверенного ввода |
+| CON-15 | ✅ #768 | `runtime/paths.py:17-19` `legacy_name` (явный TA_-alias), `:23-34` `env_value`; `docs/ENVIRONMENT.md` |
+| CON-16 | ✅ #680 | `schemas/data-manifest.schema.json:5/18` |
+| CON-17 | ✅ #748 | `dispatch/release_lifecycle.py:102`: обязательный `blocked_reason`; классификации по подстроке больше нет |
+| CON-18 | ✅ #719 | `dispatch/wait_vitality.py:389/418/586` `recovery_policy_outcome` |
+| CON-19 | открыт | issue:546b738187a8b0a7b1ef (open) |
+
+### Матрица: неэффективности (INEF)
+
+| ID | Статус | Доказательство / остаток |
+|---|---|---|
+| INEF-01 | ◐ | `dispatch/cleanup.py:437-466` `remember_record`. `_workspace_identity` (`:454-455`) по-прежнему считается до сравнения с кэшем, `dispatch/runtime.py:904` `save_records` без изменений. issue:c61d9dcc95b28c165672 |
+| INEF-02 | ◐ #763 | `board/sql_cards.py:1335` → один `UPDATE tasks` (`:1415`). Тройное чтение строки в `SqlTaskAudit` и повторные `show` в `marker_comment` не трогались |
+| INEF-03 | ✅ #745 | см. CON-04 |
+| INEF-04 | ✅ #774 | `webproto/ops.py:395-406` read-only `product_runs` через `read_for_ref`, `:410` `prepare_card_runs` |
+| INEF-05 | ✅ #771 | `runtime/head/local_pty/journal.py:27-33` пределы записи, хвоста и retain |
+| INEF-06 | ◐ #687 | `tasks.py:495` `show_id` → `board/sql_cards.py:1048`; non-SQL fallback и retirement reads не перепроверялись |
+| INEF-07 | ◐ | `dispatch/runtime.py:904` пишет state безусловно; `dispatch/review_verdict.py:139` `parks_for_decision` |
+| INEF-08 | ◐ | разорванный payload: `checkpoint.py:2304` через `state_repo.read_blobs`. Цену `redact` никто не замерил, хотя DoD sprint:1490 этого требовал; в closeout замера нет |
+| INEF-09 | ◐ #777 | upgrade читает исходники один раз: `installation/upgrade/fingerprints.py:54` `SourceCut`, `installation/upgrade/services.py:72/114/313`. Restore проверяет архив дважды: `restore.py:1396`, затем `:1458` → `:1350`. ummanu-289 снята, её правки лежат незакоммиченными в workspace `ummanu-289-restore-archive-once`, ветки в origin нет |
+| INEF-10 | ✅ #737 | см. CON-08 |
+| INEF-11 | открыт | `web/page_assets.py:7` вставляет `static/style.css` (34,9 тыс.) в каждую страницу; `encode` в Caddyfile нет |
+| INEF-12 | ✅ #738 | `po/store.py:63` пул `IDLE_CONNECTIONS`, `:304` |
+| INEF-13 | ◐ #693/#694 | `runtime/local_pty_head.py:214` опрос раз в 0,25 с; `runtime/local_pty_handoff.py:936/962/971` ожидания |
+| INEF-14 | ✅ #739 | `scripts/ummanu-agent-gate.sh:130-132`: rc=100 → выход 0 без cleanup-процесса |
+| INEF-15 | ✅ #738 | `webproto/sprint_reads.py:1230-1233` один snapshot на листинг |
+| INEF-16 | ✅ #737 | `board/sql_cards.py:1421-1456` и `board/sql_sprints.py:375`: `unnest`; `board/sql_product_issues.py:488/492` |
+| INEF-17 | ✅ #738 | `web/app.py:275-281`: лимиты через `limits_source`; `del limits` нет |
+| INEF-18 | ✅ #766 | см. ARCH-12 |
+
+### Матрица: дублирование (DUP)
+
+| ID | Статус | Доказательство / остаток |
+|---|---|---|
+| DUP-D1 | ✅ #739 | `dispatch/worker_lifecycle.py:57`; вызовы `observer.py:1261`, `worker_continuation.py:1317` |
+| DUP-D2 | ✅ #739 | `dispatch/runtime_preflight.py:390` `record_incident`; `production.py:50/340` |
+| DUP-D3 | ✅ #759 | `dispatch/state.py:136` `_PersistedMapping`, наследники `:175/201/220/239…`; golden `tests/support/persisted_mapping_goldens.json` |
+| DUP-D4 | открыт | `dispatch/host_runtime/lifecycle.py:107/175` stop_review/stop_worker, `:144/220` `*_lifecycle_run` |
+| DUP-D5 | открыт | 11 вызовов `_head_status(` в `dispatch/host.py` и `host_runtime/` |
+| DUP-D6 | открыт | `dispatch/host.py:1298/1326`: две ветки (noop и реальная) с одинаковым `_preflight_launch_run` |
+| DUP-D7 | открыт | в `dispatch/observer.py` 34 литерала `"observer-reconcile"` |
+| DUP-D8 | открыт | `dispatch/worker_lifecycle.py:502/555`: длинные `cls(...)` |
+| DUP-D9 | открыт | 8 повторов `_stop_worker_confirmed` в `dispatch/worker_report.py` |
+| DUP-D10 | открыт | в `dispatch/production.py` 11 `_unexpected_error`, 11 `skipped.append` |
+| DUP-D11 | открыт | `dispatch/e2e_stage.py:417` против `e2e_after_merge.py:904` |
+| DUP-D12 | ✅ #673 | `dispatch/e2e.py:261/325/356` `_gh_status` |
+| DUP-D13 | ✅ #739 | `dispatch/github_ci.py:98` `_answer`, `:160` `_actions_run_id`; `dispatch/gate.py:305` `_rev_parse` |
+| DUP-D14 | ✅ #747 | `dispatch/head_vitality_episode.py:391`, вызовы в `head_status.py:219`, `wait_vitality.py:1083` |
+| DUP-D15 | ✅ #747 | `dispatch/head_vitality.py:656`, вызовы в `wait_vitality.py:1071`, `gate_lifecycle.py:867` |
+| DUP-D16 | ✅ #747 | `dispatch/head_vitality.py:105` `PROGRESS_SOURCES`, импорт в `head_vitality_guard.py:15` |
+| DUP-D17 | открыт | `dispatch/review_verdict.py:298` (трижды `merge-gate-result-blocked`, `:359/383/399`) против `release_lifecycle.py:298` |
+| DUP-D18 | ✅ #739 | `infra/git_worktree.py:20` `parse_list`; `dispatch/cleanup.py:154`, `host_runtime/workspace.py:81`, `host_runtime/observer_io.py:140`, `installation/upgrade/workspaces.py:573` |
+| DUP-D19 | ◐ #750 | outcome собирает один `_wait_outcome` (`dispatch/wait_vitality.py:76`). Обращение к полям роли не обобщено: 6 выражений `review_X if kind == "review" else worker_X` (`:790/793/794/922/1062/1252`) |
+| DUP-C1 | ✅ #735 | `cli_output.py:32` `print_error`, `:44` `usage_handler` |
+| DUP-C2 | ✅ #736 | `_fsutil.py:212` `file_lock`, `:219` `held_lock` |
+| DUP-C3 | ✅ #735 | `runtime/paths.py:143` `instance_file`, `:153` `instance_dir`; встроенных копий выражения 0 |
+| DUP-C4 | ✅ #736 | см. BUG-12 |
+| DUP-C5 | ✅ #736 | `board/task_protocol/rows.py:606` |
+| DUP-C6 | открыт | `tasks.py:2379` ≡ `:2508`: блок `_guard_sprint_write` в fresh и replay move |
+| DUP-C7 | ✅ #736 | `board/task_protocol/rows.py:601-603`; вне `tasks` осталась одна копия текста в `task_restore.py:717` |
+| DUP-C8 | открыт | advisory lock `1_600`: `sprints.py:864` и `board/sprint_protocol/shared.py:30` |
+| DUP-I1 | ✅ #775 | `infra/process_receipts.py:22/70-96/134/177/202`: size cap, `O_NOFOLLOW`. Хореография restart/probe у memory, web и PO разная намеренно, `_restart_probe_bind` не нужен |
+| DUP-I2 | ✅ #741 | `state_repo.py:331` `git_failure_detail` |
+| DUP-I3 | ✅ #741 | `state_repo.py:381` `read_blobs`; `checkpoint.py:2304`, `infra/snapshot_tree.py:246` |
+| DUP-I4 | открыт | свои атомарные писатели: `secret_store.py:357`, `memory/access.py:325`, `backup.py:473` |
+| DUP-I5 | ✅ #741 | `task_restore.py:42/55`; `backup_verify.py:283`; `_fsutil.py:315`; литерал модели только в `memory/__init__.py:6` |
+| DUP-B1 | ✅ #737/#764 | `board/sql_rows.py:21/26/56/61` |
+| DUP-B2 | ✅ #737 | `board/events.py:48` `event_id` |
+| DUP-B3 | ✅ #764 | `board/sql_rows.py:72/108/113/119` |
+| DUP-B4 | ✅ #737 | `board/extension_bag.py:23/30` |
+| DUP-B5 | ✅ #737 | `render_marker_comment` полагается на проверку `models` |
+| DUP-B6 | ✅ #765 | `board/models.py:694-705` → `validate_attempt_outcome_data`; константы из `attempt_outcome.py:45` |
+| §6.3, заморозка 0004 | ✅ #737 | `board/migrations/versions/0004_product_issue_sql.py:19`: замороженная копия `record_key` вместо живого импорта |
+| DUP-R1 | ✅ #741 | `automations/runtime/dispatch.py:378` `_move_report` |
+| DUP-R2 | ✅ #770 | `runtime/procfs.py:18`; `host_apply.py:287`, `runtime/state.py:343`, `runtime/head/identity.py:39`, `runtime/test_guard.py:39/82` |
+| DUP-R3 | ✅ #741 | `runtime/head/local_pty/protocol.py:216` |
+| DUP-R4 | ✅ #741 | `_fsutil.py:45` `fsync_directory`; копия `dispatch/cleanup_journal.py:238` оставлена решением PO |
+| DUP-R5 | открыт | 5 конструкций `AttachReceipt`, `_receipt_at` нет |
+| DUP-R6 | открыт | поиск `run.exited` в 4 местах: `runtime/local_pty_journal.py:288`, `po/runner.py:280`, `webproto/run_state.py:241`, `runtime/head/local_pty/scoped_lifecycle.py:434` |
+| DUP-R7 | открыт | `runtime/tui_delivery.py:153` `to_json` вручную |
+| DUP-W1 | открыт | 7 копий `data_dir()` (`webproto/card_ops.py:78`, `ops.py:143`, `reads.py:108`…); 9 копий выражения `instance.parent if is_file()` |
+| DUP-W2 | ✅ #738 | `webproto/section.py:86` `read_installation` |
+| DUP-W3 | ✅ #738 | `webproto/_values.py:12/17/22/27` |
+| DUP-W4 | ✅ #773 | `webproto/request_index.py:17` `RequestIndex` |
+| DUP-W5 | ◐ #772 | `web/page_values.py:75` один `_mapping`; в `web/static/*.js` остались 3 fallback `crypto.randomUUID` |
+
+### Матрица: мёртвый код (DEAD)
+
+| ID | Статус | Доказательство / остаток |
+|---|---|---|
+| DEAD-01/02/03/07/08/13/14/17/18 | ✅ #673 | grep по `src`/`scripts`: 0 определений. `html_url` в `dispatch/github_ci.py:164` и `TOKEN_ENV` в других модулях относятся к другим именам. Живой SQL-lock `board/sql_audit.py:641` |
+| DEAD-04 | ✅ #732 | удалено 30 реэкспортов (в аудите 31, найдено 30); `host.VitalityVerdict` читается в `host.py` и оставлен |
+| DEAD-05, -06, -12, -20 | ✅ #732 | `head_runtime`, `idle-recovering`, `persisted_payload`, `class BoardHost`: grep 0 |
+| DEAD-09 | открыт | `dispatch/head_vitality.py:513` `from_pane_readiness`, вызов `:697` |
+| DEAD-10 | ✅ #732 | все параметры сняты, кроме `_trigger_wait_watchdog(stall=)`: он читается |
+| DEAD-11 | ✅ #732, решение владельца | `EXECUTION_RECEIPT`, `REQUEST_DRAIN`, `STAGNANT`: grep 0 |
+| DEAD-15 | ✅ #732 | `_enum_or_default`, `_split_heads`, sprints-реэкспорты `BUDGET_*`: 0 |
+| DEAD-16 | открыт | API только для тестов: `broad_check.py:531/880`, `product_issues.py:674`, `runtime/onboarding_storage.py:54`, `dispatch/runtime.py:327`, `dispatch/watchdog.py:110`, `dispatch/git_workspace.py:124`, `upgrade.py:133`, `host.py:43`, `state_repo.py:33` |
+| DEAD-19 | ◐ #673 | `board/sql_audit.py:94/573`, `board/sql_product_issues.py:217` |
+| DEAD-21 | ✅ #756, решение владельца (scope DoD) | terminal generation/handle и `head_profile.json`: grep 0. Остатки из исходного списка (`automations/agents/pipeline/codex_sessions.py`, `pipeline/naming.py:15`, `pipeline/pause.py:23`, `runtime/head/runtime.py:247` `left_alive`, `local_pty/client.py:505`, `local_pty/journal.py:472`) перенесены в ARCH-10 |
+| DEAD-22 | решение владельца: оставить | `runtime/local_pty_head.py:635` `request_drain`, `:793` `attach`; issue:64da373d89e8f6695e9c |
+| DEAD-23 | ◐ #673 | `FORM_TYPE`, `FEED_LIMIT`, `DEFAULT_SITES`, `RUN_ROLES`, `CLOSE_STATES`, `at_phase`, `_BOARD_SETTLED_STATES` встречаются только в своих определениях |
+| DEAD-24 | ✅ #732 | три скрипта удалены; `scripts/role_skills.py` жив |
+| DEAD-25 | решение владельца: оставить | `cli.py:341` скрытый `--no-copy-transcripts` |
+| DEAD-T | ✅ #755, решение владельца | `src/ummanu/transition/`, оба скрипта и `tests/test_transition_*` удалены; команды `transition` в `cli.py` нет |
+| DEAD-R | открыт (Г) | `board/reference_repair.py` на месте |
+| DEAD-H1 | оставлено с причиной | `board/sql_host.py:519/632/653/676` `recover_*`. Причина: типизированные staged-запросы поддерживаются, а отсутствие таких строк на проде не доказывает недостижимость. Записана в evidence ummanu-261/272. В closeout только «handled in 261» |
+
+### Матрица: декомпозиция и архитектура (DEC, ARCH)
+
+| ID | Статус | Доказательство / остаток |
+|---|---|---|
+| DEC-01 | ✅ #757 | `tasks.py` 5 802 → 2 861; `board/task_protocol/{dispatcher,recovery,rows,sprint_guard}.py` |
+| DEC-02 | ✅ #758 | `dispatch/host.py` 5 122 → 2 222; `dispatch/host_runtime/*` (6 модулей) |
+| DEC-03 | ◐ #764 | Общие проекции вынесены в `board/sql_rows.py` (130 строк). `sql_host.py` 1 451 → 1 508 и `sql_cards.py` 1 536 не разрезаны |
+| DEC-04 | ◐ #725/#726 | `dispatch/observer.py` 2 910 строк, самый большой файл `src`; `_persist_quietly` `:732/1277/1481`; DUP-D7 |
+| DEC-05 | ✅ #769 | `runtime/local_pty_head.py` 3 809 → 1 412; `runtime/local_pty_{delivery,durable,handoff,inspection,journal,values}.py` |
+| DEC-06 | открыт | `webproto/sprint_reads.py` 2 312 строк, не разрезан |
+| DEC-07 | ◐ #772 | `web/pages.py` 4 590 → 23; `web/page_*.py`, `web/static/*`, `pyproject.toml:223`. `web/app.py` 1 298 (routes/forms на месте, `ROUTES` `:74`) |
+| ARCH-01 | ◐ | Доля прозы в `src` (tokenize+ast): 26,3 % на e310833 → 21,3 % на 0c9bdd00 → 21,7 % на main. Спринт прозу не сжимал, новые модули добавили docstrings |
+| ARCH-02 | ◐ | приватных импортов из `ummanu.tasks`: 51 → 8 в 6 модулях (`restore.py:367`, `webproto/sprint_ops.py:34`, `command_reads.py:28`, `pause_reads.py:37`, `dispatch/assessment_decision.py:24`, `product_issues.py`) |
+| ARCH-03 | открыт, вырос | импортов внутри функций 336 (e310833) → 393 (0c9bdd00) → 537. Часть роста намеренная: ленивая сборка CLI #766 |
+| ARCH-04 | ✅ #751–#754 | `kernel/errors.py:6` `TaskError` без доменных импортов; `board/__init__.py:1` только docstring; `config.py:28-29` импортирует только kernel и `runtime.paths`; `tests/test_kernel_import_boundary.py:63-170`; замеры ниже |
+| ARCH-05 | открыт | `board/owner_event_commands.py`, `done_retention.py`, `steward_reports.py`, `import_order.py` |
+| ARCH-06 | ◐ #678 | `pyproject.toml:55`; массовой перестройки импортов не было |
+| ARCH-07 | ✅ #732 | = DEAD-04 |
+| ARCH-08 | ◐ #760 | `dispatch/gate.py` 324 + `github_ci.py` 419 + `gate_pr.py` 417 + `gate_workflows.py` 131 + `gate_types.py` 49. Приватный API остался: 18 импортов `_name` из `github_ci` (`post_merge`, `e2e`, `e2e_stage`) |
+| ARCH-09 | открыт | `state_repo.py:41` `PACKING_CONTROLS` и прочий legacy live-root |
+| ARCH-10 | ◐ #756 | `runtime/head/__init__.py:57-60` `OBSERVE_*`; `~/orca/workspaces` по умолчанию в `automations/runtime/dispatch.py:93`, `dispatch/git_workspace.py:30`; `runtime/agent_prompt_transport.py` (100 строк); остатки DEAD-21. issue:538e5e28627b91acea59 |
+| ARCH-11 | открыт, косвенно лучше | `runtime/head/__init__.py:14` импортирует `.command` сразу → `runtime/role_env.py:19-20` → `runtime/docker_guard.py:17` → `board.local_run`. Барель board снят, но import-time на main не мерили |
+| ARCH-12 | ✅ #766 | `tests/test_cli_cold_composition.py:237-271` (≤100 модулей `ummanu.*`); в GREEN-ревью ummanu-272: холодный импорт 4 модуля против 321 на базе |
+| ARCH-13 | ✅ #762 | `src/ummanu/board/fake.py` удалён, `tests/fakes/board.py` |
+| ARCH-14 | открыт | одинаковые basename: `commands.py` ×6, `host.py` ×4, `provision.py` ×3, `sprint_close.py`/`sprints.py`/`gate.py` ×2 |
+| ARCH-15 | открыт | 15 `getattr(runtime.host, "…")` и 5 `getattr(host/self.host, "…")` |
+| ARCH-16 | ✅ #677 | `webproto/section.py:65` `read_source` |
+| ARCH-17 | открыт | `po/service.py:292` `pump` под `self._lock` (`:152`) |
+
+### Матрица: документация (DOC)
+
+| ID | Статус | Доказательство / остаток |
+|---|---|---|
+| DOC-01 | открыт, не начат | `docs/PROTOCOLS.md` 382 643 символа, `docs/OPERATIONS.md` 228 506: оба выросли. issue:c61d9dcc95b28c165672 п. 1 |
+| DOC-02 | ✅ #672/#680 | `README.md:40`, `CONTRIBUTING.md:18-19` |
+| DOC-03 | ✅ #672 | `README.md:19` |
+| DOC-04 | ✅ #672/#733 | `docs/OWNED_CLEANUP.md` удалён |
+| DOC-05 | ✅ #672 | `skills/roles/steward/steward/SKILL.md:3`, `packaging/systemd/ummanu-steward.timer:5` |
+| DOC-06 | ✅ #681 | `skills/manifest.toml:86-92` цели `.agents/skills` |
+| DOC-07 | ✅ #672 | `packaging/codex-home/AGENTS.md:5` |
+| DOC-08 | ✅ #733 | `packaging/memory/product-ummanu/sprints-and-reservations.md:8` |
+| DOC-09 | ✅ #672/#674/#733 | `dispatcher_watchdog` в `dispatch/state.py`: 0 |
+| DOC-10 | ✅ #733 | `docs/BOARD_STORE.md:316` (`e2e_refusal`), `:662-691` (DDL `po_*`, owner_events, origin_returns, 0028) |
+| DOC-11 | ✅ #672 | `docs/OPERATIONS.md:3177` |
+| DOC-12 | ✅ #683 | `packaging/interactive-workspace/AGENTS.md`: PO-полномочий нет |
+| DOC-13 | ✅ #672 | `docs/ARCHITECTURE.md:49` |
+| DOC-14 | ✅ #672/#674/#678 | `tests/broad.py:1`, `tests/README.md:15/21`, `docs/TESTING.md:732` |
+| DOC-15 | ◐ | осталась только гипотеза про `docs/ROADMAP.md`; `SECURITY.md:33`, `packaging/systemd/README.md:86` исправлены #733 |
+| §8.3 мелкое | ✅ #733/#734/#744 | `REQUESTS_GROWTH`/`OUTCOME_LINEAGE`/`OWNED_CLEANUP` удалены; RENAME 61 219 → 4 818 символов; observe-sprint 34 615 → 19 911, steward 21 714 → 13 404; owner decisions в одном месте (`packaging/po-workspace/AGENTS.md:153`, указатель `skills/roles/ummanu/open-sprint/SKILL.md:242`). HEAD_RUNTIME 45 757 → 14 208 (#734), к main снова 26 788: добавлены разделы CON-13/14 и журнала (цель ≤15 тыс. теперь не выполнена) |
+
+### Матрица: тесты и CI (TEST, TDEAD, TDUP, TORG, CI)
+
+| ID | Статус | Доказательство / остаток |
+|---|---|---|
+| TEST-01 | открыт | `tests/test_dispatcher.py` 15 372 строки; `setUpModule:200` требует PostgreSQL для всех 27 классов |
+| TEST-02 | ◐ #678 | своя `def git(` в 19 тестовых файлах, `_dead_pid` в 8; `tests/support/git.py` используют 7 |
+| TEST-03 | ✅ #743 | `tests/source_trees.py:35` `SourceIndex`; в `tests/test_local_pty_head_runtime.py` и `tests/test_recovery_host_steps.py` прямого `ast.parse` нет. Ещё 15 тестовых модулей парсят сами |
+| TDEAD-01/02/04/05 | ✅ #727 | см. дельту #727 |
+| TDEAD-03 | ✅ #722/#731 | `board_writes` живой, оставлен |
+| TDEAD-06 | ✅ #731 | `RequestIdOwnershipFixture` без test_*-методов |
+| TDEAD-07 | ◐ #730/#731/#742/#743 | CSV ummanu-221 против AST main: все 80 delete отсутствуют. Из 47 rewrite 25 заменены под новым именем, 18 переписаны на месте. 4 строки L10 не тронуты: `tests/test_board_store.py` `ExclusionEnforcementTests::test_enforcement_is_the_only_door_to_a_configured_store`, `tests/test_ci_shards.py` `::test_workflow_publishes_and_preserves_reported_suite_evidence` и `::test_workflow_aggregate_downloads_and_classifies_all_suite_evidence`, `tests/test_default_live_root.py` `::test_the_memory_service_canon_defaults_under_the_live_root`. Запрета таких тестов в промптах нет (issue:e515244ce9d2e3417b1e) |
+| TDUP-01…05 | открыт | например, 17 `self.writer.report(` в `tests/test_tasks.py` (было 15) |
+| TORG-01 | открыт | 33 вспомогательных модуля в корне `tests/`; `tests/fakes/` (12) и `tests/support/` (30+, внутри ещё `support/fakes`) |
+| CI-01 | ◐ | Selective CI есть: `scripts/ci_selection.py`, matrix по suite (`.github/workflows/ci.yml:62-64`). Добавлен структурный `task-protocol-graph.yml`. Ускорения code-PR нет, post-merge повторяет зелёный прогон на том же tree. issue:7ba9a9f32675119f8149, issue:cab27d92d2ab69d2a668 |
+
+### Измеримое до/после
+
+Метод: Git objects и `ast`/`tokenize`, продукт не импортировался. Скрипты лежат рядом с отчётом
+ummanu-290 (`measure.py`, `prose.py`, `coupling/`, `tdead07_check.py`). Опорные точки:
+e310833 (база аудита), 0c9bdd00 (#729, до групп A/B), 5868d1c3 (итог).
+
+#### Двенадцать крупнейших модулей `src/ummanu`, строки `wc -l`
+
+| e310833 | 0c9bdd00 | 5868d1c3 |
+|---|---|---|
+| tasks.py 5 934 | tasks.py 5 802 | dispatch/observer.py 2 910 |
+| dispatch/host.py 5 004 | dispatch/host.py 5 122 | tasks.py 2 861 |
+| web/pages.py 4 996 | web/pages.py 4 590 | sprints.py 2 616 |
+| sprints.py 3 824 | runtime/local_pty_head.py 3 809 | checkpoint.py 2 583 |
+| dispatch/observer.py 3 603 | sprints.py 3 667 | cli.py 2 402 |
+| runtime/local_pty_head.py 3 445 | dispatch/cleanup.py 3 028 | webproto/sprint_reads.py 2 312 |
+| upgrade.py 2 852 | dispatch/observer.py 2 922 | dispatch/host.py 2 222 |
+| webproto/sprint_reads.py 2 773 | upgrade.py 2 852 | dispatch/cleanup.py 1 983 |
+| checkpoint.py 2 617 | checkpoint.py 2 612 | dispatch/production.py 1 802 |
+| installation.py 2 349 | installation.py 2 398 | dispatch/e2e_after_merge.py 1 773 |
+| cli.py 2 265 | cli.py 2 315 | restore.py 1 626 |
+| dispatch/production.py 1 951 | webproto/sprint_reads.py 2 306 | board/sql_cards.py 1 536 |
+
+Файлов больше 3 000 строк: 6 → 6 → 0. Больше 1 500: 14 → 19 → 15. `upgrade.py` 306,
+`installation.py` стал пакетом `installation/`. DoD-цели ≤1 500 строк не выполнены для `checkpoint.py`
+(2 583) и `restore.py` (1 626). Всего `src/ummanu/**/*.py`: 376 файлов / 166 173 строки / 7,37 млн
+символов → 389 / 168 130 / 7,29 млн → 441 / 166 344 / 7,17 млн.
+
+#### Связность по `coupling.py` ummanu-220
+
+Копия лежит рядом с отчётом ummanu-290. Скрипт отработал на новом дереве без правок
+и воспроизвёл числа b612ad3a (225/276).
+
+| Метрика | b612ad3a | 0c9bdd00 | 5868d1c3 | DoD |
+|---|---|---|---|---|
+| Модулей продукта в графе | 386 | 389 | 441 | |
+| Крупнейший SCC, selector edges (lazy+strings+package) | 225 | 228 | 27 | ≤60 ✅ |
+| Крупнейший SCC, top-level imports | 24 | 24 | 27 | |
+| Замыкание `ummanu.config` | 276 | 279 | 10 | ≤10 ✅ |
+| Замыкание `ummanu.board.models` | 276 | 279 | 7 | |
+| Замыкание `ummanu.tasks` | 276 | 279 | 141 | |
+| Медиана замыкания теста / тестов с замыканием >200 | 277 / 278 | 280 / 279 | 257 / 224 | |
+
+Крупнейший цикл top-level imports вырос с 24 до 27 модулей, хотя цикл selector edges упал на порядок.
+Медиана замыкания теста почти не изменилась. Вывод ummanu-220 подтвердился: шов ядра убрал
+гигантский цикл, но тесты по-прежнему тянут больше 200 модулей.
+
+#### Тесты (top-level `tests/test_*.py`, AST)
+
+| | e310833 | b612ad3a | 0c9bdd00 | 5868d1c3 |
+|---|---|---|---|---|
+| Модулей (= строк manifest) | 265 | 294 | 295 | 336 |
+| test-функций, прямые / с вложенными | 7 336 | 7 938 / 7 960 | 7 950 / 7 972 | 8 316 / 8 338 |
+| Модулей unit в manifest | 123 | 125 | 126 | 167 |
+
+Группы A/B удалили 80 тестов, а новые регрессии и тесты владельцев добавили больше.
+
+#### Документация и промпты (символы)
+
+| | e310833 | 0c9bdd00 | 5868d1c3 |
+|---|---|---|---|
+| `docs/*.md`, файлов / символов | 15 / 965 006 | 15 / 1 044 613 | 18 / 1 020 933 |
+| PROTOCOLS / OPERATIONS | 364 743 / 219 825 | 374 453 / 225 251 | 382 643 / 228 506 |
+| `skills/**/SKILL.md` | 108 427 | 110 169 | 86 213 |
+| Доля прозы в `src` | 26,3 % | 21,3 % | 21,7 % |
+
+#### CI main, полный push-прогон
+
+| Run | headSha | Wall | Job-секунды | Самый длинный job |
+|---|---|---|---|---|
+| [38101574608](https://github.com/vladmesh/ummanu/actions/runs/38101574608) | b612ad3a | 556 с | 2 150 | integration-dispatcher 500 с |
+| [38180468414](https://github.com/vladmesh/ummanu/actions/runs/38180468414) | 0c9bdd00 | 698 с | 2 280 | integration-dispatcher 650 с |
+| [38648304764](https://github.com/vladmesh/ummanu/actions/runs/38648304764) | 5868d1c3 | 625 с | 2 160 | integration-dispatcher 566 с, runtime-component 361 с |
+
+Все три success. Для 5868d1c3 unit по артефакту 11933875378: 2 787 тестов, 6 skips, 80,452 с.
+
+#### Local broad
+
+Квитанция `broad-054069af4f69b18c.json` из workspace ummanu-286.
+Её tree `4838269f82f0bbffc29d557c9b911c63783ab969` совпадает с tree итогового main.
+complete/passed, exit 0, 3 083 теста, 2 skips, wrapper 134,397 с, native 130,406 с.
+receipt_digest `1aca0ae990928464309f034af21617827596542d02ffc16cd2ca8deb46e44008`.
+Import provenance принадлежит workspace ummanu-286; это чужой прогон, а не прогон аудитора.
+Для сравнения, ummanu-214 на b612ad3a: 2 681 тест, 96,648 с. Local broad вырос примерно на 38 с,
+потому что unit вырос со 125 до 167 модулей.
+
+## Чему научились (для следующих аудитов)
+
+1. Привычки моделей важнее отдельных дефектов. По ummanu-288 (889 влитых PR, июль–октябрь):
+   Claude пишет в 3,3–4,2 раза больше прозы на строку кода, чем Codex, и в 6,4 раза больше ссылок
+   на карточки и даты. На Claude приходится 87 % написанной прозы. «Левых» тестов у Claude 1,43 на
+   100 новых, у Codex 0,84. Compat-реэкспорты `X as X` при разрезах в sprint:1490 оставлял
+   codex-sol61-high: 19 из 20 сейчас в `src`. Ни в TASK.md, ни в REVIEW.md нет правил против этих
+   привычек. Стилевые находки ревьюер записывает необязательными наблюдениями, и они уходят в main.
+   Следующий аудит должен считать эти метрики по diff, а не только по дереву. Правила должны
+   доходить до обеих семей голов (рекомендация ummanu-288: стайлгайд в TASK.md и чек-лист в REVIEW.md).
+2. Guard-тесты на историю стоят дороже, чем защищают. Скан всего `src` на слово из прошлого
+   (Orca allowlist) упёрся в бюджет 5 с на тест и потребовал хотфикса ummanu-286. Guard старого имени
+   продукта заставлял этот отчёт держать exact-path исключение. Счётные guard'ы инвентаря
+   (`tests/test_sprint_fixture_guards.py`) приходилось править при каждом удалении тестов. Владелец
+   решил снять оба history-guard'а (issue:538e5e28627b91acea59). Аудит должен отличать guard
+   поведения от guard'а истории и не предлагать новые сканы дерева.
+3. Флейки реального времени ловятся только CI. Measurement script (#740, issue:e536892b9e59f8f43e05)
+   зависел от планировщика раннера. PO-fixture гонялась с живым сервисом (#779). `/proc` процесса
+   исчезал между чтениями (#767). Во всех трёх случаях тест опирался на настенные часы или чужой
+   процесс; локальный broad проходил. Помогли виртуальные часы и детерминированный fixture.
+   Повторный прогон того же SHA только проверяет гипотезу о флейке и не считается исправлением.
+4. Закрытие по названию не проверено. Матрица выше нашла расхождения с board и closeout:
+   BUG-17/18/19 закрыты кодом и тестами до спринта, а issue их числит открытыми; DUP-D19 закрыт
+   только наполовину; у TDEAD-07 четыре rewrite L10 не взяла ни одна карточка; замер `redact`
+   из DoD не сделан; HEAD_RUNTIME после #734 снова вырос. Сверять надо по AST и `file:line`
+   финального main.
+5. Метрика DoD должна совпадать с метрикой цели. «SCC ≤60» выполнена, а медиана замыкания
+   теста почти не изменилась. «Нет файлов >3 000 строк» выполнена, а `observer.py` 2 910 и
+   `checkpoint.py` 2 583 остались вне разрезов. Аудиту стоит формулировать измеримое
+   рядом с эффектом, который оно должно дать (контекст агента, CI-секунды).
+
+---
+
 ## Дельта 2026-10-12: ARCH-01 PO/automation prose, #729 на main `0c9bdd0048a82e84f336a4b1fb0c6b2e3a174c4e`
 
 [PR #729](https://github.com/vladmesh/ummanu/pull/729) смёржен (squash) из exact head `3ad5dae3965077c5efd1e7eadf4152ae69c460e8`. [Exact-head CI #38179563334](https://github.com/vladmesh/ummanu/actions/runs/38179563334) **completed/success**: CI selection, lint, typecheck, все девять suite owners и aggregate `test` — 13 зелёных checks. Отдельный [post-merge main CI #38180468414](https://github.com/vladmesh/ummanu/actions/runs/38180468414) также **completed/success**: полный push-профиль, все девять suites, lint, typecheck и aggregate `test` — 13 зелёных checks.
@@ -24,7 +433,7 @@ ARCH-01 по остальным модулям остаётся частичны
 
 ---
 
-> Этот PR содержит `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
+> (История до 2026-10-14; с merge `5868d1c3` diff PR состоит из одного `opus_review.md`, см. статус в начале.) Этот PR содержал `opus_review.md` и его точную классификацию как исторической записи в `tests/test_old_name_guard.py` / `docs/RENAME.md` (§T5). Guard сохраняет запрет старого имени вне объявленных архивных путей. Продуктовые исправления поставлены отдельными PR; аудит остаётся открытым.
 
 ## Дельта 2026-10-11: TDEAD-01/02/04/05, #727 на main `599857387b66a14bd85c2ee5679e4ee0daf207ce`
 
@@ -119,7 +528,7 @@ ARCH-01 по остальным модулям остаётся частичны
 
 Сверка #718 ниже сохранена как историческая; сведения о #719 в строках матрицы и соответствующих разделах точечно обновлены.
 
-## Статус на 2026-10-11 (main `b612ad3a564a03986502f8ef4c9b4e61b669b13d`, #718)
+## Историческая сверка на 2026-10-11 (main `b612ad3a564a03986502f8ef4c9b4e61b669b13d`, #718)
 
 Аудит прочитан целиком и сверен с main после sprint:1488. Ветка #668 подтянула этот main
 обычным merge; сам PR остаётся открытым и не предназначен для мержа. Предыдущая сверка
@@ -1563,7 +1972,47 @@ main CI 38101574608; секунды прошлых PR смоделированы
 - #683: candidate `a64d5a053c06a73588940d44cee344a26d358afd`, exact-SHA CI run `37527062690` — **success**: lint, typecheck, unit, component/runtime-component, integration-dispatcher/board/heads/recovery/memory, packaging и агрегат `test`.
 - #683 merge/main: `72f7849478882ec160b1f305463a0e545ea0bd04`; post-merge CI run `37528487367` — **success**: lint, typecheck, все suites и агрегат `test` зелёные. Scope #683: 8 файлов, без CON-13/14/15 и без расширения в provider fallback #682.
 
-## 10. План от 2026-10-08 (исторический бюджет, отсчёт с #677)
+## 10. План от 2026-10-08 (закрыт 2026-10-14; исторический бюджет, отсчёт с #677)
+
+### Статус 2026-10-14: план закрыт
+
+План слотов 1–17 закрыт итоговой сверкой на main `5868d1c3`. Ремедиация шла с #677 по #779:
+#677–#729 (сверки 10-06…10-12), 15 PR групп A/B (#730–#744) и sprint:1490 (#745–#779). Бюджет 15–17 PR по решению
+владельца остаётся ориентиром, а не лимитом. Таблицы ниже сохранены как история 2026-10-08.
+Решения владельца, закрывающие ID без исходной правки: DEAD-T удалён (#755), DEAD-21 удалён в объёме
+DoD (#756), DEAD-11 снят (#732), DEAD-22 attach/drain оставлен (issue:64da373d89e8f6695e9c),
+DEAD-25 оставлен.
+
+Остаток. Это единственный список «что осталось»; доказательства для каждого ID в матрице в начале отчёта.
+
+1. issue:c61d9dcc95b28c165672, структурный остаток:
+   - DOC-01: разбить PROTOCOLS/OPERATIONS (не начато, оба выросли);
+   - `restore.py` 1 626 строк и вторая проверка архива в restore (половина INEF-09). Правки ummanu-289
+     лежат незакоммиченными в её workspace;
+   - `checkpoint.py` 2 583 строки, INEF-08 (замер `redact`);
+   - DEC-03/04/06, `web/app.py` из DEC-07;
+   - DUP-D4…D11, D17, вторая половина D19; DUP-C6/C8, DUP-I4, DUP-R5…R7, DUP-W1, JS-часть W5;
+   - CON-02 (head_view, po_*), CON-05, остаток CON-10 (голые reconcile/backup/project);
+   - INEF-01/02/06/07/11/13;
+   - ARCH-01/02/03/05/06/09/11/14/15/17 и приватный API `github_ci` (ARCH-08);
+   - DEAD-09/16/19/23, DEAD-R (Г), DEAD-H1 (оставлен, причину перенести в код или docs);
+   - BUG-22 root-only, DOC-15 (ROADMAP), размер HEAD_RUNTIME.
+2. issue:538e5e28627b91acea59: ARCH-10 и остатки DEAD-21 (`~/orca/workspaces`, `orca-legacy`,
+   `OBSERVE_*`, `codex_sessions.py`). Снять guard'ы NoOrcaInSourceTests и `tests/test_old_name_guard.py`
+   вместе со ссылками RENAME §T5 (решение владельца 2026-10-14).
+3. issue:e515244ce9d2e3417b1e, качество тестов:
+   - 4 rewrite L10 из TDEAD-07;
+   - запрет absence/doc/source/tautology в промптах воркера и ревьюера (рекомендация ummanu-288);
+   - TEST-01, остаток TEST-02 и TEST-03 (15 модулей с прямым `ast.parse`), TDUP-01…05, TORG-01.
+4. issue:7ba9a9f32675119f8149 (связан issue:4224875dd82d356b0a98): CI-01, ускорение code-PR и разрез
+   тяжёлых владельцев integration-dispatcher и runtime-component.
+5. issue:cab27d92d2ab69d2a668: не гонять post-merge CI повторно на tree, уже проверенном в PR.
+6. issue:546b738187a8b0a7b1ef: CON-19.
+7. issue:64da373d89e8f6695e9c: attach/drain как фича (DEAD-22, протокольная часть CON-13).
+
+Production-upgrade после закрытия спринта (DoD п. 12) выполняет PO. В этой сверке он не проверялся.
+
+### История: план от 2026-10-08
 
 Поправка 2026-10-11: ниже сохранена прежняя группировка и её расчёт PR, не текущая
 очередь и не обязательство открыть рефакторинговый спринт. Новая матрица в начале
@@ -1679,22 +2128,11 @@ INEF-13 не был причиной **измеренного тика 5 окт�
 - **Дробление ради метрики строк.** Многие маленькие модули `board/*` — связные листья с двумя и более импортёрами (`extension_bag` — 15, `roles` — 13, `local_run` — 9). Их не надо сливать или дробить дальше.
 - **DI-контейнер или реестр сервисов вместо 17 «утиных» проб.** Проще дополнить тестовые фейки и удалить пробы.
 
-### 11.3 Главные гипотезы, требующие проверки (по убыванию ценности)
+### 11.3 Главные гипотезы, требующие проверки
 
-Текущий список (2026-10-08); прежние свидетельства остаются в §12.
-
-1. **CON-03/18, BUG-15/17/18/19.** Policy intent/outcome/freeze failure semantics в slot 5;
-   BUG-11 и DOC-06 уже закрыты #681/#683 и больше не входят в список незавершённых гипотез.
-2. **INEF-01/07.** Git identity на cache hit, observer commit, no-op/дубли state writes и
-   non-head reconcile: counters и профиль текущего main, не повтор §12.17 fixes. Slot 7/8.
-3. **INEF-13/ARCH-11/12.** Остальные PTY/CLI import и journal costs; production handoff
-   имеет budget #694, automatic cleanup — #695. Секунды старого профиля не текущий baseline.
-4. **DEAD-H1/R/T/22/25.** Отсутствие staged rows в старом окне не доказывает недостижимость
-   recovery/API на всех поддерживаемых хостах. Удаление остаётся решением о поддержке.
-5. **BUG-12/24 и INEF-08/09.** Pending-create parity и повреждённые archive/checkpoint paths;
-   batching и timer сами по себе их не закрывают. Performance `redact` проверять отдельно.
-6. **DOC-15 (ROADMAP), root-only/timing BUG-22.** Нет нового полного acceptance/coverage
-   доказательства; обновлять с владельцем подсистемы и в финальной сверке.
+Список 2026-10-08 закрыт итоговой сверкой. CON-03/18 и BUG-15/17/18/19 закрыты кодом и регрессиями.
+Статусы INEF-*, DEAD-H1/R/T/22/25, BUG-12/22/24, INEF-08/09 и DOC-15 даны в матрице в начале отчёта.
+Всё, что осталось открытым или гипотезой, перечислено один раз в §10.
 
 ## 12. Проверка на production-хосте (2026-10-05, прод на 6b0d85c7)
 
