@@ -50,6 +50,7 @@ from ummanu.installation import (
 from ummanu.installation.clone import _clone_or_reuse
 from ummanu.installation.commands import _product_root, install
 from ummanu.installation.materialize import (
+    MaterializeError,
     check_prerequisites,
     materialize_checkpoint,
     materialize_pipeline_state,
@@ -59,7 +60,7 @@ from ummanu.installation.models import InstallError
 from ummanu.installation.provision import provision_codex_home, provision_project_checkouts
 from ummanu.installation.support import _ensure_installation_user
 from ummanu.installation.upgrade.host import step_host
-from ummanu.installation.upgrade.types import UpgradeResult
+from ummanu.installation.upgrade.types import StepResult, UpgradeResult
 from ummanu.memory.config import MemoryConfig, index_matches, memory_config
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.routing_journal import attempts
@@ -1248,7 +1249,7 @@ class InstallationTests(unittest.TestCase):
             )
             self.assertIn(mock.call(target, getpass.getuser()), owner.call_args_list)
 
-    def test_partial_materializer_failure_reaches_final_ownership_barrier(self):
+    def test_partial_materializer_failure_lists_its_steps_and_reaches_final_ownership_barrier(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / "instance"
@@ -1300,7 +1301,12 @@ class InstallationTests(unittest.TestCase):
 
             def fail_after_pipeline_state(*_args, before_host=None, **_kwargs):
                 before_host(SimpleNamespace(runtime_home=root / "home"))
-                raise InstallError("safe materializer tail failed")
+                raise MaterializeError(
+                    [
+                        StepResult("web-front-config", "changed", "rendered Caddyfile"),
+                        StepResult("host", "failed", "safe materializer tail failed"),
+                    ]
+                )
 
             with (
                 mock.patch("ummanu.installation.commands._ensure_installation_user"),
@@ -1330,7 +1336,14 @@ class InstallationTests(unittest.TestCase):
                 result = installation_commands.install(args)
 
             self.assertEqual(result.status, "failed")
-            self.assertIn("safe materializer tail failed", result.steps[-1].detail)
+            self.assertEqual(
+                [(step.name, step.status, step.detail) for step in result.steps[-3:]],
+                [
+                    ("host:web-front-config", "changed", "rendered Caddyfile"),
+                    ("host:host", "failed", "safe materializer tail failed"),
+                    ("install", "failed", "materializer host failed: safe materializer tail failed"),
+                ],
+            )
             self.assertEqual(
                 owner.call_args_list[-3:],
                 [

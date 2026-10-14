@@ -40,6 +40,7 @@ from ummanu.installation.credentials import (
     add_bootstrap_credential_arguments,
 )
 from ummanu.installation.materialize import (
+    MaterializeError,
     _publish_recovered_memory_export,
     _read_recovery_progress,
     _recovery_identity,
@@ -517,6 +518,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                 if secrets.complete
                 else f"board and memory are ready, but {secrets.summary()}",
             )
+    except MaterializeError as exc:
+        for step in exc.steps:
+            result.add(f"host:{step.name}", step.status, step.detail)
+        result.add("install", "failed", str(exc))
     except (InstallError, RestoreError, RuntimeError) as exc:
         result.add("install", "failed", str(exc))
     finally:
