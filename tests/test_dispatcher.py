@@ -14756,10 +14756,9 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertNotIn("one or more jobs failed", result.log)
 
     def test_github_gate_red_fragment_keeps_unmarked_error_ahead_of_the_runner_echo(self) -> None:
-        """secretary-766 review: gh only tags its own generic completion line with `##[error]`;
-        the actual Python exception above it usually carries no marker at all. Filtering the
-        fragment down to `##[error]`-only lines then keeps just the completion echo and drops
-        the real cause — reproduced here with the exact two-line log from the review."""
+        """A red gate fragment keeps the unmarked exception line, not only the runner's error-marked echo.
+
+        The runner marks only its generic completion line; the real cause above it carries no marker."""
         run_log = "tests\tRun script\tFileNotFoundError: absent\ntests\tRun script\t##[error]Process completed with exit code 1."
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")
