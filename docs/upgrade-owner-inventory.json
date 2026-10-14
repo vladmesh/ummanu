@@ -4,6 +4,7 @@
     "owner": "src/ummanu/installation/upgrade/fingerprints.py",
     "lifetime_owner": "ummanu.upgrade.run_steps",
     "binding": "ummanu.installation.upgrade.types.UpgradeContext.source_cut",
+    "binding_type": "types._SourceCutOwner structural seam; types stays a leaf",
     "consumers": {
       "services.memory_process_inputs": "context cut for product; model, pack and dependencies remain fresh",
       "services.web_process_inputs": "context cut for product/schema; units, registry and dependencies remain fresh",

@@ -88,6 +88,7 @@ class InstallationBoundaryTests(unittest.TestCase):
             "commands": {"models", "support", "credentials", "clone", "materialize", "provision", "upgrade.types"},
             "upgrade.types": set(),
             "upgrade.checkout": {"upgrade.types"},
+            "upgrade.fingerprints": {"upgrade.checkout", "upgrade.types"},
             "upgrade.dependencies": {"upgrade.checkout", "upgrade.types"},
             "upgrade.workspaces": {"models", "provision", "upgrade.checkout", "upgrade.types"},
             "upgrade.host": {"materialize", "models", "upgrade.types", "upgrade.workspaces"},

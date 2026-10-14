@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from ummanu.dispatch.entrypoint_guard import EntrypointMoved
 from ummanu.host import (
@@ -16,9 +16,6 @@ from ummanu.host_apply import (
 from ummanu.infra.process_receipts import ReceiptError as ReceiptError
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime.paths import component_enabled
-
-if TYPE_CHECKING:
-    from ummanu.installation.upgrade.fingerprints import SourceCut
 
 MEMORY_COMPONENT = "memory"
 
@@ -74,6 +71,14 @@ class StepResult:
         return self.status == "failed"
 
 
+class _SourceCutOwner(Protocol):
+    """Context seam without a dependency from shared types back to acquisition."""
+
+    def check(self, selected: Path) -> None: ...
+
+    def digest(self, selected: Path, paths: tuple[str, ...], *, revision: str | None = None) -> str: ...
+
+
 @dataclass
 class UpgradeContext:
     """Everything the steps share, resolved once before the first of them runs."""
@@ -113,7 +118,7 @@ class UpgradeContext:
     pulled_before: str | None = None
     pulled_after: str | None = None
     # Invocation-owned; replace() shares it, and run_steps closes all such copies on exit.
-    source_cut: SourceCut | None = field(default=None, repr=False, compare=False)
+    source_cut: _SourceCutOwner | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
