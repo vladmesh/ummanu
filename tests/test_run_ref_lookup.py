@@ -9,14 +9,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from tests.support.card_run_fixtures import record
 from ummanu.webproto import admission, runs, store_io
 from ummanu.webproto.errors import OwnerConflict
 from ummanu.webproto.ref_lookup import digest
-from ummanu.webproto.runs import ProductRun, RunStore, RunStoreError
-
-
-def record(run_id="pr-one", ref="ummanu-1", **changes):
-    return replace(ProductRun(run_id, "request/雪", ref, "ummanu", "worker", "profile"), **changes)
+from ummanu.webproto.runs import RunStore, RunStoreError
 
 
 class RefLookupTests(unittest.TestCase):

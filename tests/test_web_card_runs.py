@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from tests.test_run_ref_lookup import record
+from tests.support.card_run_fixtures import record
 from tests.web_fakes import Recording
 from ummanu.web import commands, pages
 from ummanu.web.app import WebApp
