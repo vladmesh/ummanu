@@ -428,14 +428,32 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
         (source / "link.md").symlink_to(source / "report.md")
         self.assert_refused(source, "special_file")
 
-    def test_every_git_named_entry_is_refused(self):
-        """secretary-1640 remark: `.gitignore`, `.gitattributes`, `.gitmodules` change what git records."""
-        for name in (".git", ".gitignore", ".gitattributes", ".gitmodules", "data/.gitignore", "data/.git-keep"):
+    def test_every_name_git_reads_is_refused(self):
+        for name in (
+            ".git",
+            ".gitignore",
+            ".gitattributes",
+            ".gitmodules",
+            "data/.gitignore",
+            "data/.gitmodules",
+        ):
             with self.subTest(entry=name):
                 self.assert_refused(self.source({"report.md": "one\n", name: "x\n"}), "special_file")
         source = self.source({"report.md": "one\n"})
         (source / "nested" / ".git").mkdir(parents=True)
         self.assert_refused(source, "special_file")
+
+    def test_a_dot_name_git_does_not_read_is_copied(self):
+        files = {
+            "report.md": "one\n",
+            "evidence/.github/workflows/ci.yml": "on: push\n",
+            "data/.git-keep": "",
+        }
+
+        result = self.write_dir(self.source(files))
+
+        self.assertTrue(result.changed)
+        self.assertEqual(self.report_files(), sorted(f"state/knowledge/{REPORT}/{name}" for name in files))
 
     def swap_leftovers(self) -> list[str]:
         """Every swap-shaped name under `state/knowledge`, where a checkpoint would find it."""

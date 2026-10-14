@@ -4858,8 +4858,8 @@ python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
 ```
 
 Refused with code 2 before anything is written: a missing source or one with no files; a symlink,
-special file or an entry whose name starts with `.git` (`.git`, `.gitignore`, `.gitattributes`,
-`.gitmodules`) anywhere in it; a text file (UTF-8 without NUL bytes) that contains a secret; a total
+special file or an entry Git reads (`.git`, `.gitignore`, `.gitattributes`, `.gitmodules`)
+anywhere in it (any other dot name, `.github` included, is copied); a text file (UTF-8 without NUL bytes) that contains a secret; a total
 size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned. Empty
 subdirectories are not kept. If the write fails at any step the previous directory is put back and
 `state/knowledge` is byte-identical to before.
