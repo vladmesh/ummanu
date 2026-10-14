@@ -102,8 +102,8 @@ from ummanu.dispatch.types import (
 )
 from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 from ummanu.projects.contract import (
+    ADAPTER_INVALID,
     BROAD_CHECK_NOT_DECLARED,
-    CANNOT_ATTEST_PROJECT,
     CONTRACT_REFUSALS,
     UNDECIDABLE_NO_REGISTERED_PROJECT,
     UNDECIDABLE_PROJECT_UNAVAILABLE,
@@ -7077,7 +7077,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(len(targets), 2, "the card was claimed once and blocked once")
         return events[targets[0] + 1 : targets[1]]
 
-    def _preflight_blocked(self, shape: str = CANNOT_ATTEST_PROJECT) -> dict:
+    def _preflight_blocked(self, shape: str = ADAPTER_INVALID) -> dict:
         self._refused_contract(shape)
         self.start_dispatcher()
         return self.tick()
@@ -7139,14 +7139,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 self.assertFalse((self.data_dir / "workspaces").exists())
 
     def test_an_adapter_that_declares_no_broad_check_blocks_before_the_claim(self) -> None:
-        """The shape this issue adds, on the seam the other refusals already use.
-
-        It is worth its own test beside the loop because it is the live case: eight registered
-        projects said `cannot_attest_project` before this change and say this instead. What is
-        asserted is the boundary — the card is refused before `writer.claim` does anything with a
-        workspace or a head — and that the refusal carried is the new shape rather than the one it
-        used to be masked by.
-        """
+        """The card is refused before `writer.claim` does anything with a workspace or a head, and
+        the refusal carried names the undeclared contract."""
         message = self._refused_contract(BROAD_CHECK_NOT_DECLARED)
         self.start_dispatcher()
 
@@ -7158,7 +7152,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             blocked["contract_refusal"],
             {"shape": BROAD_CHECK_NOT_DECLARED, "adapter": "ummanu", "detail": message},
         )
-        self.assertNotIn(CANNOT_ATTEST_PROJECT, self.reader.show(CARD_REF)["comments"][-1]["body"])
         self.assertEqual(
             self.asked_while,
             [("ummanu", "ready", [])],
@@ -10745,7 +10738,7 @@ class HeadPromptTests(unittest.TestCase):
             ),
             (
                 "unfit",
-                ContractVerdict.as_refused(CANNOT_ATTEST_PROJECT, "example", "cannot attest"),
+                ContractVerdict.as_refused(ADAPTER_INVALID, "example", "invalid adapter"),
                 False,
             ),
             (

@@ -46,7 +46,7 @@ from ummanu.infra.github_credential import (
     project_remote_execution,
 )
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
-from ummanu.projects.contract import CANNOT_ATTEST_PROJECT, ContractVerdict
+from ummanu.projects.contract import ADAPTER_INVALID, ContractVerdict
 from ummanu.secret_words import RECOVERY_WORDS
 from ummanu.state_repo import GitChildIdentity, StateRepoError
 
@@ -635,7 +635,7 @@ class GitAccessClaimPreflightTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_a_contract_refusal_keeps_its_outcome_and_asks_no_git_question(self) -> None:
         self.catalog.broad_check_state = ContractVerdict.as_refused(
-            CANNOT_ATTEST_PROJECT, "ummanu", "fixture adapter cannot attest"
+            ADAPTER_INVALID, "ummanu", "fixture adapter is invalid"
         )
         self.host.git_access = ProjectGitAccess(
             "refused", "github-https", "managed-store", "credential-missing"

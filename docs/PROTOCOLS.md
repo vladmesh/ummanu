@@ -1389,7 +1389,7 @@ treats an unrecognised answer as permission:
 
 - `fit` — the card is issued;
 - `refused(shape)` — one of `adapter_unavailable`, `adapter_invalid`, `broad_check_incomplete`,
-  `broad_check_not_declared`, `interpreter_unavailable`, `cannot_attest_project`. Always before the
+  `broad_check_not_declared`, `interpreter_unavailable`. Always before the
   card is put in work (no workspace, head or round). The card is blocked through the
   [bring-up](#bring-up-outcomes) vocabulary as infrastructure, with action token
   `contract-preflight-blocked` and the refusal shape as evidence;
@@ -1403,8 +1403,7 @@ only that it is complete and that the named interpreter starts; what a run actua
 caught by the receipt's provenance.
 
 Declaring `broad_check` is mandatory for every project that gets cards. An adapter without one is
-refused as `broad_check_not_declared` and its cards block at preflight. `cannot_attest_project` means
-a declared contract that cannot attest its own checkout.
+refused as `broad_check_not_declared` and its cards block at preflight.
 
 Observers consume the worker report, reviewer verdict and gate receipt before code/CI exploration. A
 valid executed gate receipt suppresses a routine broad rerun; none/noop or missing evidence does not.

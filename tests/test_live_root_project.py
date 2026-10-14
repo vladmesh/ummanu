@@ -21,7 +21,7 @@ from ummanu.dispatch.host import CommandHostRuntime, live_root_project_refusal
 from ummanu.dispatch.runtime_provenance import RuntimeProvenance
 from ummanu.dispatch.types import HostError
 from ummanu.head_health import HeadReadiness
-from ummanu.projects.contract import CANNOT_ATTEST_PROJECT, ContractVerdict
+from ummanu.projects.contract import ADAPTER_INVALID, ContractVerdict
 
 
 class _Catalog:
@@ -54,7 +54,7 @@ class _Catalog:
 
     def broad_check_verdict(self, project: str) -> ContractVerdict:
         self.verdicts.append(project)
-        return ContractVerdict.as_refused(CANNOT_ATTEST_PROJECT, "instance", "stand-in refusal")
+        return ContractVerdict.as_refused(ADAPTER_INVALID, "instance", "stand-in refusal")
 
 
 class _ClaimRuntime:
