@@ -147,6 +147,16 @@ class ConfigCheckTests(LiveRootCase):
         self.assertTrue(any("enabled" in line for line in findings), findings)
         self.assertIn(f"{len(findings)} finding(s)", summary)
 
+    def test_an_infinite_sprint_budget_is_a_schema_finding(self) -> None:
+        path = self.live / "instance.yaml"
+        path.write_text(path.read_text() + "sprint_budget:\n  signal: .inf\n  hard: .inf\n")
+
+        code, findings, _ = self.check()
+
+        self.assertEqual(code, 1)
+        self.assertTrue(findings)
+        self.assertTrue(all(line.startswith("schema: instance.yaml: sprint_budget") for line in findings), findings)
+
     def test_an_uncovered_old_name_in_a_fact_body_is_refused_by_line(self) -> None:
         """issue:5e6fbd90: a curator fact naming the old product as a live name."""
         self.write(
