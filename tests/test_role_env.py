@@ -181,6 +181,33 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             )
         self.assertEqual(env["UMMANU_INSTANCE"], str(instance))
 
+    def test_an_inherited_git_config_bundle_is_dropped_whole_so_git_still_runs(self) -> None:
+        bundle = {
+            "GIT_CONFIG_COUNT": "2",
+            "GIT_CONFIG_KEY_0": "gc.auto",
+            "GIT_CONFIG_VALUE_0": "0",
+            "GIT_CONFIG_KEY_1": "http.extraHeader",
+            "GIT_CONFIG_VALUE_1": "Authorization: Bearer secret",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "--quiet", str(root)], check=True)
+            env = role_env.runtime_env(
+                "pipeline",
+                base_env={"PATH": os.environ["PATH"], "HOME": str(root), **bundle},
+                env_file=root / "absent.env",
+            )
+            result = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "--git-dir"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(set(bundle) & set(env))
+
 
 class NoBoardTransportGateTests(unittest.TestCase):
     """The board is the PostgreSQL store, so no role's launch demands a transport."""
