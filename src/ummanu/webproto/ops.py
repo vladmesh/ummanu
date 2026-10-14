@@ -222,9 +222,7 @@ class OperationLayer(ProtocolBoundary):
         fingerprint = request_fingerprint(
             START_OPERATION, {"ref": ref, "profile": profile, "instruction": instruction}
         )
-        existing = self._existing(
-            store, request_id, operation=START_OPERATION, fingerprint=fingerprint
-        )
+        existing = self._existing(store, request_id, operation=START_OPERATION, fingerprint=fingerprint)
         if existing is not None:
             return self._document(existing, now=now, state=self._republish(data_dir, existing, now=now))
 
@@ -256,9 +254,7 @@ class OperationLayer(ProtocolBoundary):
             workspace = provision(admission.repo, Path(run.workspace), base=admission.default_branch)
             document = self._worker_document(run, admission, instruction=instruction, base=workspace)
             run = prepared(
-                lifecycle.advance(
-                    run, RAISING, now=now, spec=spec, profile=profile_table, document=document
-                )
+                lifecycle.advance(run, RAISING, now=now, spec=spec, profile=profile_table, document=document)
             )
         run = lifecycle.advance(
             run,
@@ -294,9 +290,7 @@ class OperationLayer(ProtocolBoundary):
         fingerprint = request_fingerprint(
             REVIEW_OPERATION, {"ref": ref, "worker_run_id": worker_run_id, "profile": profile}
         )
-        existing = self._existing(
-            store, request_id, operation=REVIEW_OPERATION, fingerprint=fingerprint
-        )
+        existing = self._existing(store, request_id, operation=REVIEW_OPERATION, fingerprint=fingerprint)
         if existing is not None:
             self._republish(data_dir, existing, now=now)
             return self._review_document(existing, store, now=now)
@@ -342,9 +336,7 @@ class OperationLayer(ProtocolBoundary):
         with self._closing_before_any_spawn(lifecycle, run, now=now) as prepared:
             document = self._review_prompt(run, worker, worker_state)
             run = prepared(
-                lifecycle.advance(
-                    run, RAISING, now=now, spec=spec, profile=profile_table, document=document
-                )
+                lifecycle.advance(run, RAISING, now=now, spec=spec, profile=profile_table, document=document)
             )
         run = lifecycle.advance(
             run,
@@ -398,6 +390,25 @@ class OperationLayer(ProtocolBoundary):
             "ref": ref,
             "items": [self.run_state(run.run_id) for run in store.for_ref(ref)],
         }
+
+    def card_runs(self, ref: str) -> dict[str, Any]:
+        """Read-only product-run documents for HTML, using the existing evidence and framing.
+
+        This observes even deadline/result/terminal evidence without advancing the lifecycle or
+        looking up audit events. The supported run_state and run_list contracts remain separate.
+        """
+        now = self._clock()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "product_runs",
+            "observed_at": sources.isoformat(now),
+            "ref": ref,
+            "items": [self._document(run, now=now) for run in self.store().read_for_ref(ref)],
+        }
+
+    def prepare_card_runs(self) -> None:
+        """Prepare/recover derived membership before serving HTML; never an implicit read step."""
+        self.store().prepare_ref_lookup()
 
     # -- the pieces the operations are made of ----------------------------------------------
 

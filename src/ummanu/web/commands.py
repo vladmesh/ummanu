@@ -25,6 +25,7 @@ from ummanu.webproto.commands import (
     heads_registry_default,
     print_error,
 )
+from ummanu.webproto.errors import ReadError
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -108,9 +109,15 @@ def run_web_serve(args: argparse.Namespace) -> int:
     # The bar reads the Codex account the heads run on: `<data_dir>/codex-home`, not `~/.codex`.
     usage = ProviderUsageLayer(codex_home=codex_usage_home(args.data_dir))
     owner_events = OwnerEventLayer(args.instance)
+    ops = OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry)
+    try:
+        ops.prepare_card_runs()
+    except ReadError as refused:
+        print_error(refused.to_json(), stderr=True)
+        return EXIT_VALIDATION
     app = WebApp(
         reads,
-        OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
+        ops,
         SprintReadLayer(args.instance, data_dir=args.data_dir, owner_events=owner_events),
         SprintOperationLayer(args.instance, data_dir=args.data_dir, owner_events=owner_events),
         PauseReadLayer(args.instance, data_dir=args.data_dir),

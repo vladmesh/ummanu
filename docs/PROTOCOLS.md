@@ -4709,6 +4709,42 @@ answer a repeat with the existing run, so a repeated POST raises no second head.
 
 ### What a card page says about a product run
 
+HTML `/tasks/{ref}` uses `ops.card_runs`: `RunStore.read_for_ref` reads only this card's canonical
+records, and `_document` uses the existing `run_state.observe` evidence and framing. Deadline,
+result and terminal evidence do not settle/save, start/stop a head, or look up/publish audit events
+while rendering. A settled run retains its recorded ending and result. The API run/list routes and
+`web-run state/list` retain their lifecycle and publication/republication behavior.
+
+Before serving, `web-serve` calls `ops.prepare_card_runs` / `RunStore.prepare_ref_lookup` under
+`.runs.lock`. This explicit, repeatable preparation scans released root run JSON, validates each
+path/id/ref and rebuilds derived membership without rewriting canonical bytes or the request-id
+index. Failed preparation refuses startup. A never-created store stays absent, without writes;
+its first writer initializes empty membership under the lock before claiming a canonical run.
+
+The derived `runs/refs/complete.json` is a small versioned completeness token. For a card, SHA-256
+of its ref names `refs/cards/<digest>.json` (ref and run IDs) and `refs/present/<digest>.json` (ref
+and membership checksum). Both absent under a complete token mean no history for that ref; one
+missing, a checksum/ref/id/path mismatch, an unavailable lookup directory, or a missing/dirty/corrupt
+token is `backend_unavailable`. All canonical writers (`claim`, `save`, `settle`) enter
+`RunStore._write` under the same lock: synced incomplete token, canonical record, affected card
+membership/presence, synced complete token with a fresh identity. Ref reassignment updates both
+memberships. Unprepared/dirty legacy stores can continue canonical lifecycle writes, leaving the
+lookup incomplete until explicit recovery. Preparation discards stale derived membership only.
+
+The HTML reader creates no lock or directories and never repairs. It checks the same complete
+token before and after reading membership and canonical records; an overlapping writer refuses the
+listing, including an absence proof, rather than returning a partial result. Each populated-card
+read opens four lookup documents (two token reads and that card's pair) plus its canonical runs;
+an absent-card read opens two tokens. Foreign history does not change those counts. Admission and
+worker selection retain their canonical scan, so lookup incompleteness cannot admit a second head.
+
+The supported restart/upgrade boundary stops released writers before preparation and serves only
+writers participating in this protocol afterward. An old writer running concurrently does not
+invalidate the token and is unsupported. Recovery is explicit preparation from canonical records,
+never a GET. Filesystem edits outside RunStore, including deleting both halves of a card's
+membership while retaining a complete token, do not participate in the completeness protocol.
+Production activation is a separate operator action.
+
 One row per run:
 
 | column | what it is |
@@ -4716,7 +4752,7 @@ One row per run:
 | `state` | what the run's *process* did: one of `running`, `finished`, `process_failed`, `source_unavailable`, `unknown`, with the reason the evidence gave and `(open)` or `(over)` beside it |
 | `outcome` | what the run *produced*: the verdict when the result carries one (`state.result.verdict`), the head's own result summary, and the exit status or signal the supervisor recorded |
 
-Both come straight from the `product_run` document (as `/api/runs/{run_id}` returns). A finished run
+Both come straight from the read-only `product_run` document, with the same framing as the run API. A finished run
 shows its result (a review its `green` or `red` verdict); a failed run shows `process_failed`, its exit
 status and that no result was published; an open run says it has produced nothing yet.
 

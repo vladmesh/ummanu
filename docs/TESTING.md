@@ -40,8 +40,23 @@ the new fixture on base store bytes with unchanged supporting helpers, not a pri
 whole-suite run. Historical whole-store equivalence is extraction evidence; future changes to
 supported store, record and diagnostic contracts are governed by their current contract tests.
 The original web run/sprint protocol, transport and staged-reference recovery cases remain in
-integration-board; the original uncut coupling scanner remains in CI. INEF-04's ref lookup and
-run-state settlement/audit recovery remain separate work.
+integration-board; the original uncut coupling scanner remains in CI. Historical whole-store
+packet equality does not describe the added INEF-04 derived files; canonical/request-index bytes
+and replay remain the supported contract. The write-fault fixture still targets canonical/request
+writes, and counts its canonical orphan independently of the derived lookup.
+
+`tests.test_run_ref_lookup` and `tests.test_web_card_runs` (unit) cover INEF-04 with temporary files.
+The real `WebApp.handle` card rendering path separately counts bootstrap reads, canonical opens
+and decoding, lookup opens and mutations at N/2N foreign history. First and repeated GETs use
+three target records plus four lookup reads, or zero canonical records plus two lookup reads for
+an absent card, with no mutations or lifecycle/audit calls. Claimed, unknown/unresolved, running,
+deadline, result, unavailable and stored terminal evidence use the existing observer. Process
+identity is injected; these fixtures prove no kernel liveness or installed service behavior.
+File-only cases cover released-history bootstrap, repeat preparation, subsequent claims,
+missing/dirty/corrupt lookup, interrupted canonical/membership/presence/complete phases, ordered
+reader/writer overlap, recovery, request replay/settlement and canonical admission refusal.
+The web startup fixture replaces serving and touches no socket. Original real runtime/backend,
+API/CLI lifecycle, transport and recovery checks remain in their native CI shards.
 
 `tests.test_task_protocol_owners` (unit) checks DEC-01's six task files, unique owning
 definitions and exact baseline ASTs (including decorators/defaults/annotations), operative

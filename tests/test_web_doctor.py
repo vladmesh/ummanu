@@ -82,7 +82,11 @@ def health_snapshot(status: dict[str, Any]) -> dict[str, Any]:
         "schema_version": 1,
         "kind": "health",
         "observed_at": "2026-09-20T12:00:00Z",
-        "health": {"source": available(), "status": health_summary(status), "doctor": {"state": "available", "findings": [], "run_at": "2026-09-20T11:59:30Z"}},
+        "health": {
+            "source": available(),
+            "status": health_summary(status),
+            "doctor": {"state": "available", "findings": [], "run_at": "2026-09-20T11:59:30Z"},
+        },
     }
 
 
@@ -259,7 +263,7 @@ class TransportFixture(unittest.TestCase):
         unreadable = InstallationUnavailable("not part of this test")
         return WebApp(
             Recording(system_snapshot=system_snapshot()),
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             Recording(sprint_list={"kind": "sprint_list", "sprints": {"source": available(), "items": []}}),
             Recording(),
             Recording(pause_state=unreadable),
@@ -478,13 +482,22 @@ class OneReadingTests(SprintProtocolFixture):
         super().setUp()
         self.clock = NOW
         from ummanu.infra.doctor_record import RESULT_PATH, identity, publish, utc
+
         (self.data_dir / RESULT_PATH).parent.mkdir(parents=True)
-        publish(self.data_dir / RESULT_PATH, {
-            "schema_version": 1, "installation": identity(self.instance, self.data_dir),
-            "run_at": utc(NOW), "completed_at": utc(NOW), "exit_code": 0,
-            "outcome": "result", "reason": None, "mode": "live",
-            "result": {"schema_version": 1, "ok": True, "findings": []},
-        })
+        publish(
+            self.data_dir / RESULT_PATH,
+            {
+                "schema_version": 1,
+                "installation": identity(self.instance, self.data_dir),
+                "run_at": utc(NOW),
+                "completed_at": utc(NOW),
+                "exit_code": 0,
+                "outcome": "result",
+                "reason": None,
+                "mode": "live",
+                "result": {"schema_version": 1, "ok": True, "findings": []},
+            },
+        )
         self.collected = 0
         self.status: dict[str, Any] = NOTHING_WRONG
 
@@ -514,8 +527,13 @@ class OneReadingTests(SprintProtocolFixture):
 
     def test_union_preserves_status_and_doctor_findings_identity_and_the_recorded_run_time(self):
         from ummanu.infra.doctor_record import utc
-        finding = {"code": "recovery_bypass", "message": "ambient Git credential configuration exists",
-                   "capability": "checkpoint-git-authentication", "kind": "credential-helper"}
+
+        finding = {
+            "code": "recovery_bypass",
+            "message": "ambient Git credential configuration exists",
+            "capability": "checkpoint-git-authentication",
+            "kind": "credential-helper",
+        }
         self.stored(findings=[finding])
         doctor_only = self.doctor.doctor_snapshot()
         self.assertEqual(doctor_only["colour"], "yellow")
@@ -542,14 +560,28 @@ class OneReadingTests(SprintProtocolFixture):
 
     def test_missing_corrupt_expired_failed_wrong_installation_and_unavailable_are_explicit(self):
         from ummanu.infra.doctor_record import RESULT_PATH, utc
+
         self.status = EVERY_PROBLEM
         path = self.data_dir / RESULT_PATH
         original = path.read_bytes()
         cases = (
-            ("unknown", None), ("malformed", b"{broken"),
+            ("unknown", None),
+            ("malformed", b"{broken"),
             ("stale", {"run_at": utc(NOW - 181), "completed_at": utc(NOW - 180)}),
-            ("failed", {"outcome": "failed", "reason": "deadline exceeded", "result": None, "exit_code": None}),
-            ("unknown", {"outcome": "collecting", "reason": "unfinished attempt", "completed_at": None, "result": None, "exit_code": None}),
+            (
+                "failed",
+                {"outcome": "failed", "reason": "deadline exceeded", "result": None, "exit_code": None},
+            ),
+            (
+                "unknown",
+                {
+                    "outcome": "collecting",
+                    "reason": "unfinished attempt",
+                    "completed_at": None,
+                    "result": None,
+                    "exit_code": None,
+                },
+            ),
             ("wrong_installation", {"installation": {"instance": "another", "data_dir": "another"}}),
             ("unavailable", {"outcome": "unavailable", "reason": "bus unavailable", "exit_code": 2}),
         )
@@ -569,15 +601,22 @@ class OneReadingTests(SprintProtocolFixture):
                 self.assertIn("unit.failed", [item["code"] for item in document["problems"]])
                 if expected == "unknown":
                     self.assertNotIn("health.unreadable", [item["code"] for item in document["problems"]])
-                    self.assertIn("unknown / not yet collected", self.app().handle("GET", "/doctor").body.decode())
+                    self.assertIn(
+                        "unknown / not yet collected", self.app().handle("GET", "/doctor").body.decode()
+                    )
                 else:
-                    self.assertIn("recorded doctor is " + expected, self.app().handle("GET", "/doctor").body.decode())
+                    self.assertIn(
+                        "recorded doctor is " + expected, self.app().handle("GET", "/doctor").body.decode()
+                    )
 
     def test_periodic_producer_preserves_baseline_and_cached_pages_through_completion(self):
         from ummanu.infra import doctor_record as records
 
-        finding = {"code": "recovery_bypass", "message": "ambient credential configuration",
-                   "capability": "checkpoint-git-authentication"}
+        finding = {
+            "code": "recovery_bypass",
+            "message": "ambient credential configuration",
+            "capability": "checkpoint-git-authentication",
+        }
         self.stored(findings=[finding])
         app = self.app()
         before = self.doctor.doctor_snapshot()
@@ -596,10 +635,16 @@ class OneReadingTests(SprintProtocolFixture):
                 self.assertIn("run in progress since " + records.utc(self.clock), page)
                 self.assertNotIn("health.unreadable", page)
             self.clock += 2
-            return 1, {"schema_version": 1, "ok": False,
-                       "findings": [{"code": "unit.failed", "message": "a.service is failed"}]}
+            return 1, {
+                "schema_version": 1,
+                "ok": False,
+                "findings": [{"code": "unit.failed", "message": "a.service is failed"}],
+            }
 
-        with mock.patch.object(records.time, "time", side_effect=lambda: self.clock), mock.patch.object(records, "collect", collect):
+        with (
+            mock.patch.object(records.time, "time", side_effect=lambda: self.clock),
+            mock.patch.object(records, "collect", collect),
+        ):
             self.assertEqual(records.record(self.instance, data_dir=self.data_dir), 0)
         self.assertEqual(self.doctor.doctor_snapshot()["problems"], before["problems"])
         self.clock += CACHE_SECONDS + 1
@@ -619,18 +664,25 @@ class OneReadingTests(SprintProtocolFixture):
         app = self.app()
         self.assertEqual(self.doctor.doctor_snapshot()["colour"], "unknown")
         start = self.clock
-        records.publish(path, {
-            "schema_version": 2, "installation": records.identity(self.instance, self.data_dir),
-            "completed": None, "collecting": {"run_at": records.utc(start), "mode": "live"},
-        })
-        for elapsed in (0, records.STUCK_SECONDS, records.STUCK_SECONDS + .01):
+        records.publish(
+            path,
+            {
+                "schema_version": 2,
+                "installation": records.identity(self.instance, self.data_dir),
+                "completed": None,
+                "collecting": {"run_at": records.utc(start), "mode": "live"},
+            },
+        )
+        for elapsed in (0, records.STUCK_SECONDS, records.STUCK_SECONDS + 0.01):
             self.clock = start + elapsed
             self.doctor._cached = None
             stuck = elapsed > records.STUCK_SECONDS
             colour = "red" if stuck else "unknown"
             document = self.doctor.doctor_snapshot()
             self.assertEqual(document["colour"], colour)
-            self.assertEqual([item["code"] for item in document["problems"]], ["doctor.collection_stuck"] if stuck else [])
+            self.assertEqual(
+                [item["code"] for item in document["problems"]], ["doctor.collection_stuck"] if stuck else []
+            )
             self.assertEqual(self.panel()["combined"]["colour"], colour)
             for route in ("/", "/doctor"):
                 page = app.handle("GET", route).body.decode()
@@ -647,7 +699,7 @@ class OneReadingTests(SprintProtocolFixture):
         unreadable = InstallationUnavailable("not part of this test")
         return WebApp(
             self.reads,
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             Recording(sprint_list={"kind": "sprint_list", "sprints": {"source": available(), "items": []}}),
             Recording(),
             Recording(pause_state=unreadable),
