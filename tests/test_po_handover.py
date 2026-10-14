@@ -14,6 +14,7 @@ import contextlib
 import copy
 import io
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +57,7 @@ from ummanu.dispatch.po_cards import (
 from ummanu.dispatch.state import attempt_request_id
 from ummanu.po import store as po_store
 from ummanu.po.queue import PoQueue
+from ummanu.po.service import PoService
 from ummanu.po.sprints import SprintRecord
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
 from ummanu.web import page_parts, pages
@@ -866,14 +868,30 @@ class SetAsideInputTests(DispatcherFixture):
     """5a: an input the PO service set aside in `po-queue/refused/` Blocks the card, with its reason."""
 
     def test_a_set_aside_input_blocks_the_card_with_the_services_reason(self) -> None:
+        advance = threading.Lock()
+        pump = PoService.pump
+
+        def controlled_pump(service: PoService) -> None:
+            if not advance.acquire(blocking=False):
+                return
+            try:
+                pump(service)
+            finally:
+                advance.release()
+
+        # Installed before start so the background pump cannot take the input between put and refuse.
+        self.enterContext(mock.patch.object(PoService, "pump", controlled_pump))
         self.start()
         runtime = self.runtime(card())
         queue = PoQueue(self.data)
 
         class SetsItAside(ServicePoChannel):
             def submit(self, **fields: Any) -> dict[str, Any]:
-                item = queue.put(source="dispatcher", **{k: fields[k] for k in ("session_id", "text", "request_id")})
-                queue.refuse(item, "PO session s-1 is closed; open a new session to continue")
+                with advance:
+                    item = queue.put(
+                        source="dispatcher", **{k: fields[k] for k in ("session_id", "text", "request_id")}
+                    )
+                    queue.refuse(item, "PO session s-1 is closed; open a new session to continue")
                 return {"session_id": fields["session_id"], "queued": True, "seq": None}
 
         channel = SetsItAside(self.data, None)
