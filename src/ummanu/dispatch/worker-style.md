@@ -1,1 +1,0 @@
-../../../packaging/worker-style.md

@@ -7,7 +7,6 @@ import os
 import re
 import shlex
 import subprocess
-from importlib.resources import files
 from pathlib import Path
 from stat import S_IMODE, S_ISDIR
 from typing import Any
@@ -99,9 +98,12 @@ def _gate_attestation_for_prompt(
         return receipt.as_dict() if receipt.validated_sha == current_sha else {}
     return _accepted_gate_receipt(source, current_sha)
 
+WORKER_STYLE = Path(__file__).resolve().parents[4] / "packaging" / "worker-style.md"
+
+
 def _worker_style() -> str:
-    """The code style every worker is given, from the package's `worker-style.md`."""
-    return files("ummanu.dispatch").joinpath("worker-style.md").read_text(encoding="utf-8").strip()
+    """The code style every worker is given, from the checkout this dispatcher runs."""
+    return WORKER_STYLE.read_text(encoding="utf-8").strip()
 
 
 def _body_file_path(data_dir: Path, kind: str, reference: str, review_round: int) -> str:

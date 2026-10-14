@@ -3182,8 +3182,8 @@ held for validation, paused or between rounds is sent nothing and nothing is rec
 ### Code style in the worker and review packets
 
 Every worker `TASK.md`, for any project, card kind and head family, carries `## Code style`: the text of
-`packaging/worker-style.md`, shipped as `ummanu.dispatch` package data, before the report dispositions.
-A project's `AGENTS.md` wins on conflict.
+`packaging/worker-style.md`, before the report dispositions. The dispatcher reads the file from the
+checkout it runs from, like the other `packaging/` assets. A project's `AGENTS.md` wins on conflict.
 
 A code card's `REVIEW.md` carries the style checklist S1-S7 for the lines the diff adds. It is the one
 exception to the rule that a RED blocker states a concrete reachable scenario: a violation of S1-S4 (a
