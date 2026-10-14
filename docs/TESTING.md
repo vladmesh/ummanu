@@ -28,6 +28,33 @@ stay in the small unit profile. The existing twelve kernel and fifteen cleanup f
 remain in their original local shards. Install/recovery, snapshot/PostgreSQL and packaging
 fixtures retain their CI owners.
 
+`tests.test_upgrade_owners` (unit) covers the upgrade/install owner seams, shared type identity,
+import-bound default steps, file bounds and selected CLI/materializer observations. The public
+composition remains `upgrade.py`; checkout fingerprints, dependencies, workspaces, host
+materialization and service evidence live in `installation/upgrade/`. The package root contains
+only its description. `docs/upgrade-owner-inventory.json` records the extraction's definitions,
+global reads, import/attribute consumers and patch moves; it is a capture, not a frozen API.
+The source graph scanner and its SCC/config closure budgets are unchanged.
+
+For the extraction comparison, `UMMANU_UPGRADE_BASE_SOURCE` may name an external copy of
+`src/ummanu/upgrade.py` from `aa816323315719f5b59a2d8c972b11204afc396b`. The fixture checks
+its SHA256 before loading it and compares actual base/candidate packets. Supporting helpers and
+installation composition are the candidate's; this is not a pristine historical suite run.
+`UMMANU_UPGRADE_PACKET_OUT` selects an optional packet artifact. Routine CI asserts the supported
+candidate contracts without any historical source. The packet covers selected CLI JSON/text and
+error exits, step order/stop/context/result, mock exec argv/inherited environment, handoff refusal
+and no-second-pull, dependency and workspace traces, service evidence and all four receipt bytes.
+Install/recover observations use the actual composition with a small substituted step sequence.
+These file-only fixtures prove no installed process, backend, network, systemd or packaging
+behavior. Original upgrade, portable, recovery, dependency, web and PO fixtures retain their
+native CI owners; package inclusion is validated by the existing packaging shard.
+
+The related DUP-I1 cleanup uses the shared reader's decoded web `ProcessReceipt`, preserving
+identity-before-input diagnostics without decoding identity twice or relying on an assertion.
+The existing receipt fixture owns the shared producer/golden assertion used by both receipt test
+classes. Hash acquisition and change/race checks are unchanged; INEF-09 hash-once work remains
+open. This extraction does not close all of slot15 or ARCH-01.
+
 `tests.test_request_index` (unit) guards DUP-W4's shared digest/read/match/write delegation and
 exception identity, including planted duplicate implementations. Its file-only fixture captures
 both real stores' paths and bytes, result types/values, claim flags, exception messages/causes and

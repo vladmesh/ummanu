@@ -16,7 +16,7 @@ from unittest import mock
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_scope_fixtures import host_fixture
 from tests.scoped_environment_fixtures import deployed_scope_argv
-from ummanu import cli, status, upgrade
+from ummanu import cli, status
 from ummanu.host import (
     FixtureHostSource,
     LiveHostSource,
@@ -27,6 +27,7 @@ from ummanu.host import (
 )
 from ummanu.host_apply import ApplyInputs, apply_host
 from ummanu.infra.systemd import CommandResult
+from ummanu.installation.upgrade import host as upgrade_host, types as upgrade_types
 from ummanu.runtime.head.local_pty import (
     protocol,
     scope_environment,
@@ -302,10 +303,10 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                                  data_dir=self.data, instance_path=self.root / "instance" / "instance.yaml")
         for dry in (True, False):
             installer = FakeUnitInstaller()
-            context = upgrade.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
+            context = upgrade_types.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
                                               base_branch="main", dry_run=dry, units=installer,
                                               report=report, host_fixture=self.fixture)
-            result = upgrade.step_host(context)
+            result = upgrade_host.step_host(context)
             self.assertNotEqual(result.status, "failed", result)
             self.assertTrue(all(name != unit for _, name in installer.calls))
             self.assertNotIn(unit, (self.data / "host-managed.json").read_text() if not dry else "")
@@ -360,9 +361,9 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         with mock.patch.object(LiveHostSource, "_run", side_effect=native_reply):
             for dry in (True, False):
                 installer = FakeUnitInstaller()
-                context = upgrade.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
+                context = upgrade_types.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
                                                   base_branch="main", dry_run=dry, units=installer, report=report)
-                result = upgrade.step_host(context)
+                result = upgrade_host.step_host(context)
                 self.assertEqual(result.status, "failed")
                 self.assertIn("system manager/bus unavailable", result.detail)
                 self.assertEqual(installer.calls, [])

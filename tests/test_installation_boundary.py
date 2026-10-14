@@ -80,21 +80,28 @@ class InstallationBoundaryTests(unittest.TestCase):
     def test_owner_dependencies_are_directed_and_share_one_error(self) -> None:
         allowed = {
             "models": set(),
-            "support": {"models"},
+            "support": {"models", "upgrade.types", "upgrade.workspaces"},
             "credentials": {"models", "support"},
             "clone": {"models", "support"},
-            "materialize": {"models", "support", "credentials"},
+            "materialize": {"models", "support", "credentials", "upgrade.dependencies", "upgrade.host", "upgrade.types", "upgrade.workspaces"},
             "provision": {"models", "support", "materialize"},
-            "commands": {"models", "support", "credentials", "clone", "materialize", "provision"},
+            "commands": {"models", "support", "credentials", "clone", "materialize", "provision", "upgrade.types"},
+            "upgrade.types": set(),
+            "upgrade.checkout": {"upgrade.types"},
+            "upgrade.dependencies": {"upgrade.checkout", "upgrade.types"},
+            "upgrade.workspaces": {"models", "provision", "upgrade.checkout", "upgrade.types"},
+            "upgrade.host": {"materialize", "models", "upgrade.types", "upgrade.workspaces"},
+            "upgrade.services": {"upgrade.checkout", "upgrade.host", "upgrade.types", "upgrade.workspaces"},
         }
-        for path in PACKAGE.glob("*.py"):
+        for path in PACKAGE.rglob("*.py"):
+            source_owner = ".".join(path.relative_to(PACKAGE).with_suffix("").parts)
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("ummanu.installation"):
                     self.assertFalse(node.level)
                     self.assertNotEqual(node.module, "ummanu.installation")
                     owner = node.module.removeprefix("ummanu.installation.")
-                    self.assertIn(owner, allowed[path.stem])
+                    self.assertIn(owner, allowed[source_owner])
                     self.assertTrue(all(alias.name != "*" for alias in node.names))
         for owner in (clone, commands, credentials, materialize, provision, support):
             self.assertIs(owner.InstallError, models.InstallError)
@@ -103,7 +110,7 @@ class InstallationBoundaryTests(unittest.TestCase):
 
     def test_import_and_patch_seams_resolve_to_existing_owner_bindings(self) -> None:
         bindings = {}
-        for path in PACKAGE.glob("*.py"):
+        for path in PACKAGE.rglob("*.py"):
             names = set()
             for node in ast.parse(path.read_text()).body:
                 if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
@@ -112,26 +119,41 @@ class InstallationBoundaryTests(unittest.TestCase):
                     names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
                 elif isinstance(node, ast.Assign):
                     names.update(target.id for target in node.targets if isinstance(target, ast.Name))
-            bindings[path.stem] = names
+            owner = ".".join(path.relative_to(PACKAGE).with_suffix("").parts)
+            if path.name == "__init__.py":
+                owner = owner.removesuffix(".__init__")
+                names.update(child.stem for child in path.parent.glob("*.py"))
+            bindings[owner] = names
         for directory in (ROOT / "src", ROOT / "tests"):
             for path, tree in source_trees.modules(directory, naming=("ummanu.installation",)):
                 aliases = {}
                 for node in source_trees.imports(tree):
-                    if isinstance(node, ast.ImportFrom) and node.module == "ummanu.installation":
+                    if isinstance(node, ast.ImportFrom) and node.module and (
+                        node.module == "ummanu.installation" or node.module.startswith("ummanu.installation.")
+                    ):
+                        prefix = node.module.removeprefix("ummanu.installation").lstrip(".")
                         for alias in node.names:
-                            self.assertIn(alias.name, bindings, (path, node.lineno))
-                            aliases[alias.asname or alias.name] = alias.name
+                            owner = f"{prefix}.{alias.name}" if prefix else alias.name
+                            if owner in bindings:
+                                aliases[alias.asname or alias.name] = owner
+                            elif prefix:
+                                self.assertIn(alias.name, bindings[prefix], (path, node.lineno))
+                            else:
+                                self.fail((path, node.lineno, owner))
                 for node in source_trees.walk(tree):
                     if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or not node.args:
                         continue
                     target = node.args[0]
                     if node.func.attr == "patch" and isinstance(target, ast.Constant) and isinstance(target.value, str):
-                        match = re.match(r"^ummanu\.installation\.([A-Za-z_]+)\.([A-Za-z_]+)", target.value)
+                        match = re.match(r"^ummanu\.installation\.([A-Za-z_.]+)", target.value)
                         if target.value.startswith("ummanu.installation."):
                             self.assertIsNotNone(match, (path, node.lineno, target.value))
                             assert match is not None
-                            owner, name = match.groups()
-                            self.assertIn(owner, bindings, (path, node.lineno))
+                            parts = match.group(1).split(".")
+                            owner = next((".".join(parts[:index]) for index in range(len(parts) - 1, 0, -1)
+                                          if ".".join(parts[:index]) in bindings), "")
+                            self.assertIn(owner, bindings, (path, node.lineno, target.value))
+                            name = parts[len(owner.split("."))]
                             self.assertIn(name, bindings[owner], (path, node.lineno, target.value))
                     elif node.func.attr == "object" and isinstance(target, ast.Name) and target.id in aliases and len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
                         self.assertIn(node.args[1].value, bindings[aliases[target.id]], (path, node.lineno))

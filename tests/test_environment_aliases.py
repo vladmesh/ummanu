@@ -123,7 +123,7 @@ class EnvironmentAliasTests(unittest.TestCase):
 
     def test_workspace_and_recovery_bound_environment(self):
         from ummanu.infra import recovery_inventory
-        from ummanu.upgrade import workspaces_root
+        from ummanu.installation.upgrade.workspaces import workspaces_root
 
         for env, selected in vectors("UMMANU_WORKSPACES_ROOT"):
             with self.subTest(env=env), mock.patch.dict(os.environ, env, clear=True):

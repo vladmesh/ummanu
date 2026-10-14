@@ -168,7 +168,7 @@ ORCA_ALLOWLIST = (
         "a kind, not a program",
     ),
     OrcaAllowance(
-        "src/ummanu/upgrade.py",
+        "src/ummanu/installation/upgrade/workspaces.py",
         'workspace_root.parent.name == "orca"',
         "orca",
         "owner decision, step 11: the role worktree root `~/orca/workspaces`, compared by name; "
@@ -453,12 +453,12 @@ class NoOrcaInSourceTests(unittest.TestCase):
                 ["imports ummanu.runtime.pane_host"],
             ),
             (
-                "src/ummanu/upgrade.py",
+                "src/ummanu/installation/upgrade/workspaces.py",
                 'workspace_root.parent.name == "orca"; os.system("orca-cli")\n',
                 ["names the orca program: 'orca-cli'"],
             ),
             (
-                "src/ummanu/upgrade.py",
+                "src/ummanu/installation/upgrade/workspaces.py",
                 'workspace_root.parent.name == "orca"; os.system("orca")\n',
                 ["names the orca program: 'orca'"],
             ),

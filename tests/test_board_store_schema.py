@@ -38,13 +38,14 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.container_cleanup import cleanup_test_project, remove_test_container
 from ummanu import upgrade
 from ummanu.board import migrate, provision, schema, schema_gate
 from ummanu.board.backend import record_key
 from ummanu.board.store import BoardStoreConfig
-from ummanu.runtime.container_labels import TEST_BOARD_LABEL
 from ummanu.host_apply import SystemdUnitInstaller
-from tests.container_cleanup import cleanup_test_project, remove_test_container
+from ummanu.installation.upgrade import host as upgrade_host, types as upgrade_types
+from ummanu.runtime.container_labels import TEST_BOARD_LABEL
 
 IMAGE = "postgres:16"
 DATABASE = "board_store_test"
@@ -157,7 +158,7 @@ class ProductionLayoutUpgradeTests(unittest.TestCase):
             try:
                 defaults = dict(provision.provision.__kwdefaults__ or {})
                 defaults["compose_path"] = compose
-                context = upgrade.UpgradeContext(
+                context = upgrade_types.UpgradeContext(
                     instance_path=root, product_root=upgrade.running_product_root(),
                     base_branch="main", dry_run=False, units=SystemdUnitInstaller(),
                     report=SimpleNamespace(data_dir=root),
@@ -168,7 +169,7 @@ class ProductionLayoutUpgradeTests(unittest.TestCase):
                     mock.patch("ummanu.board.provision._inspect_container"),
                     mock.patch("ummanu.board.provision._wait_ready"),
                 ):
-                    result = upgrade.step_board_store_provision(context)
+                    result = upgrade_host.step_board_store_provision(context)
                 self.assertEqual(result.status, "changed", result.detail)
                 self.assertIn("production ownership marker", result.detail)
                 updated = compose.stat()
@@ -421,6 +422,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     def test_0030_preserves_feed_bytes_and_blocks_loss_of_native_delivery_metadata(self) -> None:
         from alembic import command
+
         from ummanu.board.release_migrations import admit_additive
         from ummanu.po.store import PoStore
 
@@ -462,6 +464,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     def test_0029_preserves_released_resume_and_cursor_and_refuses_lossy_downgrade(self) -> None:
         from alembic import command
+
         from ummanu.board.release_migrations import admit_additive
 
         connection = self.owner_connection()
@@ -520,6 +523,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     def test_0027_preserves_released_permissions_budget_and_paid_runs_without_inventing_quotes(self) -> None:
         from alembic import command
+
         from ummanu.board.release_migrations import admit_additive
 
         connection = self.owner_connection()
@@ -542,8 +546,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     def test_0028_reclassifies_routine_rows_preserving_ids_quotes_read_history_and_handover(self) -> None:
         from alembic import command
-        from ummanu.board.release_migrations import admit_additive
+
         from ummanu.board.owner_events import OwnerEventStore, ReadRefused
+        from ummanu.board.release_migrations import admit_additive
         connection = self.owner_connection()
         config = migrate.alembic_config(connection=connection, passwords=self.passwords)
         command.upgrade(config, "0027_sprint_owner_decisions")
@@ -1202,7 +1207,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         return path
 
     def context(self, instance: Path, *, dry_run: bool = False):
-        return upgrade.UpgradeContext(
+        return upgrade_types.UpgradeContext(
             instance_path=instance,
             product_root=instance,
             base_branch="main",
@@ -1215,7 +1220,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             instance = Path(tmp)
             self.write_store(instance)
 
-            preview = upgrade.step_board_store(self.context(instance, dry_run=True))
+            preview = upgrade_host.step_board_store(self.context(instance, dry_run=True))
             self.assertEqual(preview.status, "would-change")
             self.assertIn("0001", preview.detail)
             self.assertIn("0002", preview.detail)
@@ -1227,12 +1232,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
             )
             connection.close()
 
-            applied = upgrade.step_board_store(self.context(instance))
+            applied = upgrade_host.step_board_store(self.context(instance))
             self.assertEqual(applied.status, "changed")
             self.assertIn("0001", applied.detail)
             self.assertIn("0002", applied.detail)
 
-            again = upgrade.step_board_store(self.context(instance))
+            again = upgrade_host.step_board_store(self.context(instance))
             self.assertEqual(again.status, "unchanged")
 
         self.assertEqual(self.counts(self.owner_connection()), DOCUMENTED_COUNTS)
@@ -1250,7 +1255,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             )
             path.chmod(0o600)
 
-            result = upgrade.step_board_store(self.context(instance))
+            result = upgrade_host.step_board_store(self.context(instance))
 
         self.assertTrue(result.failed)
         self.assertIn("board store", result.detail)

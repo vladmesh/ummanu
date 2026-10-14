@@ -58,12 +58,13 @@ from ummanu.installation.materialize import (
 from ummanu.installation.models import InstallError
 from ummanu.installation.provision import provision_codex_home, provision_project_checkouts
 from ummanu.installation.support import _ensure_installation_user
+from ummanu.installation.upgrade.host import step_host
+from ummanu.installation.upgrade.types import UpgradeResult
 from ummanu.memory.config import MemoryConfig, index_matches, memory_config
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.routing_journal import attempts
 from ummanu.runtime_env import RuntimeEnvError
 from ummanu.secret_words import RECOVERY_WORDS
-from ummanu.upgrade import UpgradeResult, step_host
 
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:

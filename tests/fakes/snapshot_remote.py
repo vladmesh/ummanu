@@ -27,6 +27,7 @@ from ummanu.installation import (
     commands as installation_commands,
     materialize as installation_materialize,
 )
+from ummanu.installation.upgrade import workspaces as upgrade_workspaces
 
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 ROLES = ("new_card", "reviewer", "observer", "curator", "retro", "steward")
@@ -227,7 +228,7 @@ def recovery_args(fixture, **overrides) -> SimpleNamespace:
 def _head_registry_only(context, steps=installation_materialize.STEPS):
     """The recover materializer with only its head-registry step running (the host is not this test's)."""
     return upgrade.run_steps(
-        context, steps=tuple(step for step in steps if step is upgrade.step_head_registry)
+        context, steps=tuple(step for step in steps if step is upgrade_workspaces.step_head_registry)
     )
 
 

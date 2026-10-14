@@ -5,14 +5,20 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.upgrade import FakeUnitInstaller
-from ummanu import upgrade
 from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
 from ummanu.host_apply import HostCommandError, SystemdUnitInstaller, UnitProcessIdentity
+from ummanu.installation.upgrade import (
+    host as upgrade_host,
+    services as upgrade_services,
+    types as upgrade_types,
+    workspaces as upgrade_workspaces,
+)
 
 WEB_UNIT = "ummanu-web.service"
 UNIT_TEXT = b"[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n"
@@ -41,7 +47,7 @@ class WebProcessReceiptTests(unittest.TestCase):
             data_dir=self.data,
             bindings=[],
         )
-        self.context = upgrade.UpgradeContext(
+        self.context = upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
@@ -50,7 +56,7 @@ class WebProcessReceiptTests(unittest.TestCase):
             pull=False,
             report=self.report,
         )
-        self.probe = self.enterContext(mock.patch.object(upgrade, "probe_web", return_value=200))
+        self.probe = self.enterContext(mock.patch.object(upgrade_services, "probe_web", return_value=200))
 
     def _write_product(self) -> None:
         for relative, text in {
@@ -85,10 +91,10 @@ class WebProcessReceiptTests(unittest.TestCase):
         )
 
     def receipt_path(self) -> Path:
-        return upgrade.web_process_receipt_path(self.context)
+        return upgrade_services.web_process_receipt_path(self.context)
 
     def establish(self) -> None:
-        result = upgrade.step_web(self.context)
+        result = upgrade_services.step_web(self.context)
         self.assertEqual(result.status, "changed", result.detail)
         self.assertTrue(self.receipt_path().is_file())
 
@@ -99,7 +105,7 @@ class WebProcessReceiptTests(unittest.TestCase):
         old_identity = self.units.process_identity(WEB_UNIT)
         self._advance_checkout()  # Dispatcher release moved this editable checkout, not this invocation.
 
-        result = upgrade.step_web(self.context)
+        result = upgrade_services.step_web(self.context)
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("receipt inputs do not match", result.detail)
@@ -115,7 +121,7 @@ class WebProcessReceiptTests(unittest.TestCase):
         self.units.calls.clear()
         self.probe.reset_mock()
 
-        result = upgrade.step_web(self.context)
+        result = upgrade_services.step_web(self.context)
 
         self.assertEqual(result.status, "unchanged", result.detail)
         self.assertIn("web process receipt verified", result.detail)
@@ -130,7 +136,7 @@ class WebProcessReceiptTests(unittest.TestCase):
                 self.receipt_path().write_text(body, encoding="utf-8")
                 self.units.calls.clear()
 
-                result = upgrade.step_web(self.context)
+                result = upgrade_services.step_web(self.context)
 
                 self.assertEqual(result.status, "changed", result.detail)
                 self.assertIn("web process receipt is malformed", result.detail)
@@ -141,12 +147,12 @@ class WebProcessReceiptTests(unittest.TestCase):
         self.establish()
         self._advance_checkout()
 
-        checkout = upgrade.step_web(self.context)
+        checkout = upgrade_services.step_web(self.context)
         self.assertEqual(checkout.status, "changed", checkout.detail)
         self.assertIn("receipt inputs do not match", checkout.detail)
 
         self.units.files[WEB_UNIT] = UNIT_TEXT.replace(b"8787", b"8899")
-        unit = upgrade.step_web(self.context)
+        unit = upgrade_services.step_web(self.context)
         self.assertEqual(unit.status, "changed", unit.detail)
         self.assertIn("receipt inputs do not match", unit.detail)
 
@@ -154,7 +160,7 @@ class WebProcessReceiptTests(unittest.TestCase):
         heads = self.data / "heads" / "heads.yaml"
         heads.parent.mkdir(parents=True, exist_ok=True)
         heads.write_text("profiles: {}\n", encoding="utf-8")
-        registry = upgrade.step_web(self.context)
+        registry = upgrade_services.step_web(self.context)
         self.assertEqual(registry.status, "changed", registry.detail)
         self.assertIn("receipt inputs do not match", registry.detail)
 
@@ -166,7 +172,7 @@ class WebProcessReceiptTests(unittest.TestCase):
             prior.pid, prior.start_ticks + 1, prior.invocation_id
         )
 
-        result = upgrade.step_web(self.context)
+        result = upgrade_services.step_web(self.context)
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("different process generation", result.detail)
@@ -178,22 +184,22 @@ class WebProcessReceiptTests(unittest.TestCase):
         self._advance_checkout()
         self.units.restart = lambda name: (_ for _ in ()).throw(HostCommandError(f"restart {name}: exited 1"))
 
-        restart = upgrade.step_web(self.context)
+        restart = upgrade_services.step_web(self.context)
 
         self.assertEqual(restart.status, "failed")
         self.assertEqual(self.receipt_path().read_bytes(), before)
 
         self.units.restart = FakeUnitInstaller.restart.__get__(self.units, FakeUnitInstaller)
-        self.probe.side_effect = upgrade.WebProbeError("no 200")
-        probe = upgrade.step_web(self.context)
+        self.probe.side_effect = upgrade_services.WebProbeError("no 200")
+        probe = upgrade_services.step_web(self.context)
 
         self.assertEqual(probe.status, "failed")
         self.assertEqual(self.receipt_path().read_bytes(), before)
 
     def test_dry_run_reports_missing_process_evidence_without_writing_or_restarting(self) -> None:
-        dry = upgrade.replace(self.context, dry_run=True)
+        dry = replace(self.context, dry_run=True)
 
-        result = upgrade.step_web(dry)
+        result = upgrade_services.step_web(dry)
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("would restart", result.detail)
@@ -208,15 +214,15 @@ class WebProcessReceiptTests(unittest.TestCase):
             (FakeUnitInstaller(present={WEB_UNIT: UNIT_TEXT}), "not active"),
         ):
             with self.subTest(expected=expected):
-                context = upgrade.replace(self.context, units=units)
-                result = upgrade.step_web(context)
+                context = replace(self.context, units=units)
+                result = upgrade_services.step_web(context)
                 self.assertEqual(result.status, "skipped")
                 self.assertIn(expected, result.detail)
-                self.assertFalse(upgrade.web_process_receipt_path(context).exists())
+                self.assertFalse(upgrade_services.web_process_receipt_path(context).exists())
 
     def test_receipt_write_is_atomic_and_a_write_failure_leaves_no_partial_evidence(self) -> None:
-        with mock.patch.object(upgrade.process_receipts.os, "replace", side_effect=OSError("disk full")) as replace:
-            result = upgrade.step_web(self.context)
+        with mock.patch.object(upgrade_services.process_receipts.os, "replace", side_effect=OSError("disk full")) as replace:
+            result = upgrade_services.step_web(self.context)
 
         replace.assert_called_once()
         self.assertEqual(result.status, "failed", result.detail)
@@ -228,13 +234,13 @@ class WebProcessReceiptTests(unittest.TestCase):
 
     def test_verify_refuses_an_active_web_process_without_valid_receipt_evidence(self) -> None:
         with (
-            mock.patch.object(upgrade, "step_host", return_value=upgrade.StepResult("host", "unchanged")),
-            mock.patch.object(upgrade.role_skills, "audit", return_value={"ok": True}),
-            mock.patch.object(upgrade, "assert_snapshot_current"),
-            mock.patch.object(upgrade, "installed_heads"),
-            mock.patch.object(upgrade.state_repo, "status", return_value=""),
+            mock.patch.object(upgrade_services, "step_host", return_value=upgrade_types.StepResult("host", "unchanged")),
+            mock.patch.object(upgrade_workspaces.role_skills, "audit", return_value={"ok": True}),
+            mock.patch.object(upgrade_services, "assert_snapshot_current"),
+            mock.patch.object(upgrade_services, "installed_heads"),
+            mock.patch.object(upgrade_host.state_repo, "status", return_value=""),
         ):
-            result = upgrade.step_verify(self.context)
+            result = upgrade_services.step_verify(self.context)
 
         self.assertEqual(result.status, "failed", result.detail)
         self.assertIn("active web process receipt is not current", result.detail)

@@ -20,6 +20,7 @@ from unittest import mock
 from ummanu import cli, session, upgrade
 from ummanu.infra.export_allowlist import is_exported
 from ummanu.installation import materialize as installation_materialize
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.memory import client_config
 from ummanu.po import workspace as po_workspace
 from ummanu.role_skills import BIN_DIR_ENV, MANIFEST, sync
@@ -58,8 +59,8 @@ class Fixture(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
 
-    def context(self, *, dry_run: bool = False, runtime_user: str | None = None) -> upgrade.UpgradeContext:
-        return upgrade.UpgradeContext(
+    def context(self, *, dry_run: bool = False, runtime_user: str | None = None) -> upgrade_types.UpgradeContext:
+        return upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
@@ -69,8 +70,8 @@ class Fixture(unittest.TestCase):
             runtime_user=runtime_user,
         )
 
-    def run_step(self, **kwargs) -> upgrade.StepResult:
-        return upgrade.step_interactive_workspace(self.context(**kwargs))
+    def run_step(self, **kwargs) -> upgrade_types.StepResult:
+        return upgrade_workspaces.step_interactive_workspace(self.context(**kwargs))
 
     def agents(self) -> bytes:
         return (self.workspace / iw.AGENTS_FILE).read_bytes()
@@ -177,9 +178,9 @@ class UpgradeStepTests(Fixture):
     def test_a_root_invoker_hands_the_workspace_to_the_runtime_user(self) -> None:
         account = SimpleNamespace(pw_uid=4321, pw_gid=4321)
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+            mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=account),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
             result = self.run_step(runtime_user="runtime")
 
@@ -190,8 +191,8 @@ class UpgradeStepTests(Fixture):
 
     def test_a_non_root_invoker_changes_no_owner(self) -> None:
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=1000),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=1000),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
             result = self.run_step(runtime_user="runtime")
 
@@ -221,8 +222,8 @@ class RecoverTests(Fixture):
         (live_root / "persona" / "AGENTS.md").write_bytes(PERSONAL)
 
         def interactive_only(context, steps=installation_materialize.STEPS):
-            self.assertIn(upgrade.step_interactive_workspace, steps)
-            return upgrade.run_steps(context, steps=(upgrade.step_interactive_workspace,))
+            self.assertIn(upgrade_workspaces.step_interactive_workspace, steps)
+            return upgrade.run_steps(context, steps=(upgrade_workspaces.step_interactive_workspace,))
 
         with (
             mock.patch.object(installation_materialize, "run_steps", side_effect=interactive_only),
@@ -262,7 +263,7 @@ class NoLeakTests(Fixture):
 
         context = self.context()
         with mock.patch.dict(os.environ, {"HOME": str(home), BIN_DIR_ENV: str(self.root / "bin")}):
-            for step in (upgrade.step_po_workspace, upgrade.step_interactive_workspace):
+            for step in (upgrade_workspaces.step_po_workspace, upgrade_workspaces.step_interactive_workspace):
                 self.assertFalse(step(context).failed)
             sync(
                 instance_path=self.instance,

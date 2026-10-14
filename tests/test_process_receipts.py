@@ -12,9 +12,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.upgrade import FakeUnitInstaller
-from ummanu import upgrade
 from ummanu.host_apply import UnitProcessIdentity
 from ummanu.infra import process_receipts as receipts
+from ummanu.installation.upgrade import services as upgrade_services, types as upgrade_types
 
 IDENTITY = UnitProcessIdentity(123, 456, "invocation")
 PROCESS = {"pid": 123, "start_ticks": 456, "invocation_id": "invocation"}
@@ -33,7 +33,7 @@ class ProcessReceiptFixture(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.data = Path(temporary.name)
         self.units = FakeUnitInstaller()
-        self.context = upgrade.UpgradeContext(
+        self.context = upgrade_types.UpgradeContext(
             instance_path=self.data / "instance", product_root=self.data / "product",
             base_branch="main", dry_run=False, units=self.units,
             report=SimpleNamespace(data_dir=self.data, host={"unit_prefix": "ummanu-"}),
@@ -58,20 +58,23 @@ class ProcessReceiptFixture(unittest.TestCase):
 
     def read(self, family: str):
         if family == "PO":
-            return upgrade._read_po_process_receipt(self.data)
-        reader = getattr(upgrade, f"_read_{family}_process_receipt")
-        return reader(self.context, f"ummanu-{family}.service")
+            return upgrade_services._read_po_process_receipt(self.data)
+        reader = getattr(upgrade_services, f"_read_{family}_process_receipt")
+        receipt, reason = reader(self.context, f"ummanu-{family}.service")
+        if family == "web" and receipt is not None:
+            self.assertIsInstance(receipt, receipts.ProcessReceipt)
+            return receipt.payload, reason
+        return receipt, reason
 
     def evidence(self, family: str, identity=IDENTITY, inputs=None):
         inputs = INPUTS[family] if inputs is None else inputs
         if family == "PO":
-            return upgrade._po_receipt_evidence(self.data, identity, inputs)
-        reader = upgrade._receipt_evidence if family == "web" else upgrade._memory_receipt_evidence
+            return upgrade_services._po_receipt_evidence(self.data, identity, inputs)
+        reader = upgrade_services._receipt_evidence if family == "web" else upgrade_services._memory_receipt_evidence
         return reader(self.context, f"ummanu-{family}.service", identity, inputs)
 
 
-class ProcessReceiptContracts(ProcessReceiptFixture):
-    def test_actual_producers_publish_released_bytes_and_probe_order(self) -> None:
+    def assert_actual_producers_publish_released_bytes_and_probe_order(self) -> None:
         for family in INPUTS:
             with self.subTest(family=family):
                 trace = []
@@ -82,22 +85,22 @@ class ProcessReceiptContracts(ProcessReceiptFixture):
                     mock.patch.object(self.units, "restart", side_effect=lambda name, trace=trace: trace.append("restart")),
                     mock.patch.object(self.units, "process_identity", side_effect=lambda name, trace=trace: (
                         trace.append("identity") or IDENTITY)),
-                    mock.patch.object(upgrade, f"{family.lower() if family != 'PO' else 'po'}_process_inputs",
+                    mock.patch.object(upgrade_services, f"{family.lower() if family != 'PO' else 'po'}_process_inputs",
                                       side_effect=lambda *args, trace=trace, family=family: trace.append("inputs") or INPUTS[family]),
-                    mock.patch.object(upgrade, "probe_web", side_effect=lambda *a, trace=trace, **kw: trace.append("probe") or 200),
-                    mock.patch.object(upgrade, "probe_memory", side_effect=lambda *a, trace=trace, **kw: trace.append("probe")),
-                    mock.patch.object(upgrade.os, "getpid", return_value=123) as pid,
-                    mock.patch.object(upgrade, "_process_start_ticks", return_value=456) as ticks,
+                    mock.patch.object(upgrade_services, "probe_web", side_effect=lambda *a, trace=trace, **kw: trace.append("probe") or 200),
+                    mock.patch.object(upgrade_services, "probe_memory", side_effect=lambda *a, trace=trace, **kw: trace.append("probe")),
+                    mock.patch.object(upgrade_services.os, "getpid", return_value=123) as pid,
+                    mock.patch.object(upgrade_services, "_process_start_ticks", return_value=456) as ticks,
                 ):
                     if family == "PO":
-                        line = upgrade.write_po_process_receipt(
+                        line = upgrade_services.write_po_process_receipt(
                             self.data, self.context.product_root, environ={"INVOCATION_ID": "invocation"})
                         self.assertTrue(line.startswith(f"wrote the PO process receipt {self.path(family)}: pid 123;"))
                         pid.assert_called_with()
                         ticks.assert_called_once_with(123)
                         self.assertEqual(trace, ["inputs"])
                     else:
-                        result = getattr(upgrade, f"step_{family}")(self.context)
+                        result = getattr(upgrade_services, f"step_{family}")(self.context)
                         self.assertEqual(result.status, "changed", result.detail)
                         self.assertEqual(trace, ["inputs", "identity", "restart", "identity", "probe", "identity", "inputs"])
                 # The explicit envelope also fixes PO's absence of unit and compact sorted wire order.
@@ -119,6 +122,18 @@ class ProcessReceiptContracts(ProcessReceiptFixture):
                 }
                 self.assertEqual(self.evidence(family), (True, summaries[family]))
                 self.path(family).unlink()
+
+
+class ProcessReceiptContracts(ProcessReceiptFixture):
+    def test_actual_producers_publish_released_bytes_and_probe_order(self) -> None:
+        self.assert_actual_producers_publish_released_bytes_and_probe_order()
+
+    def test_web_evidence_uses_the_identity_decoded_by_the_shared_reader(self) -> None:
+        self.plant("web", self.payload("web"))
+        with mock.patch.object(receipts, "process_identity", wraps=receipts.process_identity) as decode:
+            verified, evidence = self.evidence("web")
+        self.assertTrue(verified, evidence)
+        decode.assert_called_once_with(PROCESS)
 
     def test_envelope_identity_and_input_faults_are_family_malformed_evidence(self) -> None:
         for family in INPUTS:
@@ -194,9 +209,9 @@ class SharedReceiptFaults(ProcessReceiptFixture):
 
         with (
             mock.patch.dict(os.environ, {"INVOCATION_ID": "invocation"}),
-            mock.patch.object(upgrade.os, "getpid", return_value=123),
-            mock.patch.object(upgrade, "_process_start_ticks", return_value=456) as ticks,
-            mock.patch.object(upgrade, "po_process_inputs", return_value=INPUTS["PO"]) as inputs,
+            mock.patch.object(upgrade_services.os, "getpid", return_value=123),
+            mock.patch.object(upgrade_services, "_process_start_ticks", return_value=456) as ticks,
+            mock.patch.object(upgrade_services, "po_process_inputs", return_value=INPUTS["PO"]) as inputs,
             mock.patch.object(receipts, "write_process_receipt", wraps=receipts.write_process_receipt) as write,
         ):
             line = service._write_process_receipt(self.data)
@@ -223,15 +238,15 @@ class SharedReceiptFaults(ProcessReceiptFixture):
                 changed = UnitProcessIdentity(123, 789, "invocation")
                 identities = [IDENTITY, IDENTITY, changed if fault == "generation" else IDENTITY]
                 final = {**INPUTS[family], "product_revision": "d" * 40} if fault == "inputs" else INPUTS[family]
-                error = upgrade.WebProbeError if family == "web" else upgrade.MemoryProbeError
+                error = upgrade_services.WebProbeError if family == "web" else upgrade_services.MemoryProbeError
                 with (
                     self.subTest(family=family, fault=fault),
                     mock.patch.object(self.units, "process_identity", side_effect=identities),
-                    mock.patch.object(upgrade, f"{family}_process_inputs", side_effect=[INPUTS[family], final]),
-                    mock.patch.object(upgrade, f"probe_{family}", side_effect=error("fault") if fault == "probe" else None),
+                    mock.patch.object(upgrade_services, f"{family}_process_inputs", side_effect=[INPUTS[family], final]),
+                    mock.patch.object(upgrade_services, f"probe_{family}", side_effect=error("fault") if fault == "probe" else None),
                     mock.patch.object(receipts, "write_process_receipt") as write,
                 ):
-                    result = getattr(upgrade, f"step_{family}")(self.context)
+                    result = getattr(upgrade_services, f"step_{family}")(self.context)
                 self.assertEqual(result.status, "failed", result.detail)
                 write.assert_not_called()
                 self.assertEqual(self.path(family).read_bytes(), before)
@@ -242,12 +257,12 @@ class SharedReceiptFaults(ProcessReceiptFixture):
             mock.patch.object(receipts, "read_process_receipt", wraps=receipts.read_process_receipt) as read,
             mock.patch.object(receipts, "mismatch", wraps=receipts.mismatch) as compare,
         ):
-            ProcessReceiptContracts.test_actual_producers_publish_released_bytes_and_probe_order(self)
+            self.assert_actual_producers_publish_released_bytes_and_probe_order()
         self.assertEqual([call.args[-1] for call in write.call_args_list],
                          ["memory process receipt", "web process receipt", "PO process receipt"])
         self.assertEqual({call.args[1] for call in read.call_args_list}, {receipts.MEMORY, receipts.WEB, receipts.PO})
         self.assertEqual([call.args[0] for call in compare.call_args_list], [receipts.MEMORY, receipts.WEB, receipts.PO])
-        self.assertIs(upgrade.ReceiptError, receipts.ReceiptError)
+        self.assertIs(upgrade_types.ReceiptError, receipts.ReceiptError)
 
     def test_input_boundaries_and_exact_family_keys_through_actual_readers(self) -> None:
         for family in INPUTS:
@@ -334,8 +349,8 @@ class SharedReceiptFaults(ProcessReceiptFixture):
                 mock.patch.object(receipts.os, failure, side_effect=OSError("fault")) as operation,
                 mock.patch.object(receipts.os, "close", wraps=receipts.os.close) as close,
             ):
-                with self.assertRaisesRegex(upgrade.WebProcessReceiptError, "could not write fixture .*: fault"):
-                    receipts.write_private_receipt(path, new, "runtime", upgrade.WebProcessReceiptError, "fixture")
+                with self.assertRaisesRegex(upgrade_types.WebProcessReceiptError, "could not write fixture .*: fault"):
+                    receipts.write_private_receipt(path, new, "runtime", upgrade_types.WebProcessReceiptError, "fixture")
                 operation.assert_called_once()
                 if failure in ("fchown", "fchmod", "fdopen"):
                     close.assert_called_once()

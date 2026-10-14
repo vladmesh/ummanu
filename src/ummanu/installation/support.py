@@ -12,8 +12,9 @@ from pathlib import Path
 from ummanu import _proc, state_repo
 from ummanu.data import manifest_for
 from ummanu.installation.models import InstallError
+from ummanu.installation.upgrade.types import GitError
+from ummanu.installation.upgrade.workspaces import _set_runtime_owner
 from ummanu.secret_store import key_path
-from ummanu.upgrade import GitError, _set_runtime_owner
 
 
 def _run(

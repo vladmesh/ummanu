@@ -29,6 +29,7 @@ from unittest import mock
 from tests.fakes.upgrade import FakeUnitInstaller
 from ummanu import upgrade
 from ummanu.installation.provision import provision_codex_home
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.memory.client_config import bridge_executable, reconcile_clients
 from ummanu.runtime.codex_home import managed_codex_homes
 from ummanu.runtime.codex_preflight import CodexHomeLoginMissing, resolve_codex_home
@@ -171,15 +172,15 @@ class _ManagedHomes(unittest.TestCase):
         self.assertEqual((home / "auth.json").read_text(encoding="utf-8"), API_KEY_LOGIN)
         self.assertEqual(launch_config_defects(home / "config.toml", self.workspace), [])
 
-    def run_upgrade_steps(self, *only: Any) -> list[upgrade.StepResult]:
+    def run_upgrade_steps(self, *only: Any) -> list[upgrade_types.StepResult]:
         """`memory-clients` and `codex-home` in the order the upgrade runs them, or only those named."""
         steps = [
-            step for step in upgrade.STEPS if step in (upgrade.step_memory_clients, upgrade.step_codex_home)
+            step for step in upgrade.STEPS if step in (upgrade_workspaces.step_memory_clients, upgrade_workspaces.step_codex_home)
         ]
         self.assertEqual(len(steps), 2)
         if only:
             steps = [step for step in steps if step in only]
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -266,7 +267,7 @@ class CodexHomeLaunchConfigTests(_ManagedHomes):
         self.assertFalse(reconcile_clients(self.product, self.runtime_home, self.data_dir).codex_data_dir)
 
     def test_either_upgrade_step_alone_completes_a_logged_in_home_without_a_config(self) -> None:
-        for step in (upgrade.step_codex_home, upgrade.step_memory_clients):
+        for step in (upgrade_workspaces.step_codex_home, upgrade_workspaces.step_memory_clients):
             with self.subTest(step=step.__name__):
                 shutil.rmtree(self.data_dir, ignore_errors=True)
                 shutil.rmtree(self.runtime_home, ignore_errors=True)
@@ -286,7 +287,7 @@ class CodexHomeLaunchConfigTests(_ManagedHomes):
                     self.logged_in_data_home_without_config()
 
                 # `codex-home` never runs: the upgrade stopped after `memory-clients`.
-                (outcome,) = self.run_upgrade_steps(upgrade.step_memory_clients)
+                (outcome,) = self.run_upgrade_steps(upgrade_workspaces.step_memory_clients)
 
                 self.assertEqual(outcome.status, "changed", outcome)
                 if not logged_in:
@@ -323,8 +324,8 @@ class RealCodexLaunchConfigTests(_ManagedHomes):
     def test_real_codex_loads_a_logged_in_home_completed_by_any_one_path(self) -> None:
         paths = {
             "reconcile_clients": lambda: reconcile_clients(self.product, self.runtime_home, self.data_dir),
-            "codex-home": lambda: self.run_upgrade_steps(upgrade.step_codex_home),
-            "memory-clients": lambda: self.run_upgrade_steps(upgrade.step_memory_clients),
+            "codex-home": lambda: self.run_upgrade_steps(upgrade_workspaces.step_codex_home),
+            "memory-clients": lambda: self.run_upgrade_steps(upgrade_workspaces.step_memory_clients),
         }
         for name, complete in paths.items():
             with self.subTest(path=name):
