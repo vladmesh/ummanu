@@ -3472,7 +3472,7 @@ class HostLaunchContourTests(unittest.TestCase):
         """Kill a stand-in head and collect its exit status.
 
         `kill` alone leaves a zombie until the process ends, and `Popen.__del__` then reports
-        `ResourceWarning: subprocess is still running` (issue:3a06b695f4dc731da91a)."""
+        `ResourceWarning: subprocess is still running`."""
         with contextlib.suppress(ProcessLookupError):
             head.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):

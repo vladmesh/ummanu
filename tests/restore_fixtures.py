@@ -201,7 +201,7 @@ def _core_archive(root: Path, name: str) -> Path:
     board.mkdir(parents=True)
     memory.mkdir(parents=True)
     (memory / "fact.md").write_text("# fact\n", encoding="utf-8")
-    subprocess.run(["git", "init"], cwd=memory, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "init", "--quiet", "--initial-branch", "main"], cwd=memory, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=memory, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=memory, check=True)
     subprocess.run(["git", "add", "."], cwd=memory, check=True)
