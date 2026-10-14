@@ -46,7 +46,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ummanu.board import e2e_budget
-from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.extension_bag import bag_json
 
 E2E_FIELD = "e2e"
 
@@ -408,21 +408,9 @@ class E2eState:
         )
 
 
-def _json_field(task: Mapping[str, Any]) -> Any:
-    extensions = task.get("extensions")
-    bag = extensions.get(EXTENSION_BAG) if isinstance(extensions, Mapping) else None
-    raw = bag.get(E2E_FIELD) if isinstance(bag, Mapping) else None
-    if isinstance(raw, Mapping):
-        return raw
-    try:
-        return json.loads(str(raw or ""))
-    except ValueError:
-        return None
-
-
 def e2e_state(task: Mapping[str, Any]) -> E2eState:
     """The card's run records; a field that does not parse reads as none."""
-    return E2eState.from_json(_json_field(task))
+    return E2eState.from_json(bag_json(task, E2E_FIELD))
 
 
 def e2e_view(task: Mapping[str, Any]) -> dict[str, Any] | None:

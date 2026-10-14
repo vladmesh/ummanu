@@ -22,10 +22,14 @@ from ummanu.board.release_migrations import (
 )
 from ummanu.dispatch.entrypoint_guard import ENTRYPOINT_MOVED, RUNBOOK
 from ummanu.dispatch.production_checkout import ProductionActivationRefused
-from ummanu.dispatch.state import ActivationRecovery, DispatcherRecord, request_token
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
+from ummanu.dispatch.state import (
+    ActivationRecovery,
+    DispatcherRecord,
+    attempt_request_id as _attempt_request_id,
+    request_token,
+)
 from ummanu.dispatch.types import HostError
-from ummanu.tasks import TaskError
+from ummanu.kernel.errors import TaskError
 
 ACTION = "production-activation-blocked"
 COMMENT_ACTION = "production-activation-refused"
@@ -104,6 +108,7 @@ def resume_refused_activation(
         )
         outcome = block_merge_path(
             runtime, task, record, records, payload, attempt_id,
+            blocked_reason="implementation",
             action=ACTION, reason=_reason(facts), step=owed.step,
             outcome="production activation refused", request_id=owed.block_request_id,
         )
@@ -152,11 +157,11 @@ def _landing_line(facts: dict[str, Any]) -> str:
     return f"{commit} landed on `{merge.get('base')}` ({via}) and stays there"
 
 
-def _transition_only(facts: dict[str, Any]) -> str:
+def _installation_only(facts: dict[str, Any]) -> str:
     """Why an `entrypoint_moved` refusal is not retried: what to do instead."""
     return (
         f"The production checkout `{facts['checkout']}` deliberately stays on the old commit "
-        f"`{str(facts['old'])[:12]}`: activation happens only through the transition runbook in "
+        f"`{str(facts['old'])[:12]}`: activation happens only through the installation operation guidance in "
         f"`{RUNBOOK}`, not by retrying the release or running `upgrade`"
     )
 
@@ -167,7 +172,7 @@ def _reason(facts: dict[str, Any]) -> str:
     if facts["reason"] == ENTRYPOINT_MOVED:
         return (
             f"production activation refused ({facts['code']}: {facts['reason']}): {facts['message']}. "
-            f"The merge landed on main: {_landing_line(facts)}. {_transition_only(facts)}. "
+            f"The merge landed on main: {_landing_line(facts)}. {_installation_only(facts)}. "
             f"Operation card: {operation}."
         )
     return (
@@ -180,7 +185,7 @@ def _reason(facts: dict[str, Any]) -> str:
 def _comment(facts: dict[str, Any]) -> str:
     cause = (
         f"does not keep the running entrypoint ({facts['reason']}); activation happens only through the "
-        f"transition runbook in `{RUNBOOK}`"
+        f"installation operation guidance in `{RUNBOOK}`"
         if facts["reason"] == ENTRYPOINT_MOVED
         else f"was refused ({facts['reason']})"
     )
@@ -245,13 +250,13 @@ def _entrypoint_description(task: dict[str, Any], facts: dict[str, Any]) -> str:
             "## Supported recovery",
             "",
             (
-                f"Activation happens only through the transition runbook in `{RUNBOOK}`. Do not retry the "
+                f"Activation happens only through the installation operation guidance in `{RUNBOOK}`. Do not retry the "
                 "release and do not run `upgrade`: both refuse this target the same way, and every "
-                "later advance of this checkout is refused until the transition moves the installation."
+                "later advance of this checkout is refused until a deliberate installation operation activates the replacement entrypoints."
             ),
             "",
-            f"1. Drain the pipeline and run the transition as `{RUNBOOK}` describes.",
-            "2. Verify the installation the transition reports, then complete this card with what was done.",
+            f"1. Have the sprint PO arrange a deliberate installation operation under `{RUNBOOK}` with allowed production authority.",
+            "2. Record checkout, entrypoint, unit/environment, doctor and tick evidence, then complete this card with what was done.",
         ]
     )
 

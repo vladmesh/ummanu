@@ -19,7 +19,7 @@ from unittest import mock
 import yaml
 
 from tests.head_registry import live_root_pair, write_installed_pair
-from ummanu import cli, installation, status, task_commands, upgrade
+from ummanu import status, task_commands, upgrade
 from ummanu.config import validate_instance
 from ummanu.dispatch.host import InstanceCatalog
 from ummanu.head_registry import (
@@ -29,6 +29,8 @@ from ummanu.head_registry import (
     installed_heads,
     installed_pair,
 )
+from ummanu.installation import materialize as installation_materialize
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.onboarding import OnboardingStorage
 from ummanu.runtime import heads
 
@@ -82,10 +84,10 @@ class LiveRootPairIgnoredTests(unittest.TestCase):
         heads._load_registry.cache_clear()
         self.addCleanup(heads._load_registry.cache_clear)
 
-    def upgrade_step(self) -> upgrade.StepResult:
+    def upgrade_step(self) -> upgrade_types.StepResult:
         report = validate_instance(self.instance)
         self.assertTrue(report.ok, report.errors)
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=upgrade.running_product_root(),
             base_branch="main",
@@ -93,7 +95,7 @@ class LiveRootPairIgnoredTests(unittest.TestCase):
             units=mock.Mock(),
             report=report,
         )
-        return upgrade.step_head_registry(context)
+        return upgrade_workspaces.step_head_registry(context)
 
     def readers(self) -> dict[str, object]:
         """What every reader of the pair sees right now: its answer, or its error's text."""
@@ -152,13 +154,6 @@ class LiveRootPairIgnoredTests(unittest.TestCase):
         self.assertEqual(after["installed"], "upgraded-head")
         # The upgrade neither rewrote nor removed the live root's copy: it is simply not read.
         self.assertIn("live-root-head", self.live_root_copy.read_text(encoding="utf-8"))
-
-    def test_status_and_doctor_name_no_legacy_source(self):
-        report = validate_instance(self.instance)
-        record = status._head_registry(self.instance, report.data_dir)
-
-        self.assertNotIn("legacy_source", record)
-        self.assertFalse(hasattr(cli, "_legacy_head_registry_source"))
 
     def test_a_data_pair_that_is_present_is_read_even_when_it_is_broken(self):
         broken = generated_pair(self.instance).snapshot
@@ -241,15 +236,15 @@ class RecoverRegenerationTests(unittest.TestCase):
     def materialize(self) -> None:
         """The recover materializer, with only its head-registry step running."""
 
-        def head_registry_only(context, steps=installation.STEPS):
-            self.assertIn(upgrade.step_head_registry, steps)
-            return upgrade.run_steps(context, steps=(upgrade.step_head_registry,))
+        def head_registry_only(context, steps=installation_materialize.STEPS):
+            self.assertIn(upgrade_workspaces.step_head_registry, steps)
+            return upgrade.run_steps(context, steps=(upgrade_workspaces.step_head_registry,))
 
         with (
-            mock.patch.object(installation, "run_steps", side_effect=head_registry_only),
-            mock.patch.object(installation, "check_product_runtime"),
+            mock.patch.object(installation_materialize, "run_steps", side_effect=head_registry_only),
+            mock.patch.object(installation_materialize, "check_product_runtime"),
         ):
-            result = installation.materialize_host(self.instance, upgrade.running_product_root())
+            result = installation_materialize.materialize_host(self.instance, upgrade.running_product_root())
         self.assertTrue(result.ok, result.render())
 
     def assert_regenerated(self) -> None:

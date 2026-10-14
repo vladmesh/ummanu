@@ -2,17 +2,48 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
+
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-from ummanu.board.backend import record_key
 from ummanu.board.schema import APP_ROLE, READ_ROLE
 
 revision = "0004_product_issue_sql"
 down_revision = "0003_task_type_optional"
 branch_labels = None
 depends_on = None
+
+# frozen copy of record_key as of 8c1ea4cd (ummanu.board.backend): a released revision keeps
+# the key formula it backfilled with, whatever the live function later becomes.
+_RECORD_KINDS = ("sprint", "product", "issue")
+_RECORD_KEY_BASES = {"sprint": 2_000_000_000, "product": 3_000_000_000, "issue": 4_000_000_000}
+_RECORD_KEY_SPAN = 1_000_000_000
+_SPRINT_NUMBER_KEY_SPAN = _RECORD_KEY_SPAN // 2
+_ASCII_NUMBERED_SPRINT_REF = re.compile(r"^sprint:([0-9]+)$")
+
+
+def record_key(kind: str, identifier: str) -> int:
+    """frozen copy of record_key as of 8c1ea4cd: the transport key this revision backfills."""
+    if kind not in _RECORD_KINDS:
+        raise ValueError(f"a board record names one of {', '.join(_RECORD_KINDS)}, not {kind!r}")
+    text = str(identifier).strip()
+    if not text:
+        raise ValueError(f"a {kind} key needs an identifier")
+    match = _ASCII_NUMBERED_SPRINT_REF.fullmatch(text) if kind == "sprint" else None
+    if match is not None:
+        number = int(match.group(1))
+        if text != f"sprint:{number}":
+            raise ValueError(f"a numbered Sprint reference must be canonical, not {text!r}")
+        if number >= _SPRINT_NUMBER_KEY_SPAN:
+            raise ValueError(f"a numbered Sprint must be below {_SPRINT_NUMBER_KEY_SPAN}, not {number}")
+        return _RECORD_KEY_BASES[kind] + number
+    digest = hashlib.sha256(f"{kind}:{text}".encode()).digest()
+    offset = _SPRINT_NUMBER_KEY_SPAN if kind == "sprint" else 0
+    span = _SPRINT_NUMBER_KEY_SPAN if kind == "sprint" else _RECORD_KEY_SPAN
+    return _RECORD_KEY_BASES[kind] + offset + int.from_bytes(digest[:8], "big") % span
 
 
 def _populate_keys(table: str, identity: str, kind: str) -> None:

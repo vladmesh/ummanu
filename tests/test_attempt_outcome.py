@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from unittest import mock
 
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.fakes.board import MemoryAudit
 from ummanu.board.events import AnalyticsOutcomeConflict, BoardEventCanon
-from ummanu.board.fake import MemoryAudit
 from ummanu.board.models import Actor, EntityKind, Event, EventKind
 from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
 from ummanu.dispatch import attempt_accounting
@@ -169,7 +169,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_malformed_taxonomy_does_not_gate_the_lifecycle_effect(self) -> None:
         _payload, record = self._start_worker_round()
 
-        attempt_accounting.terminal_effect(self.runtime,
+        attempt_accounting.terminal_effect(
+            self.runtime,
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -191,7 +192,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             "persist_outcome_round_context",
             side_effect=TaskError("audit_pending", "context journal unavailable", 4),
         ) as persist:
-            effect = attempt_accounting.terminal_effect(self.runtime,
+            effect = attempt_accounting.terminal_effect(
+                self.runtime,
                 self.reader.show(CARD_REF),
                 record,
                 target="blocked",
@@ -258,7 +260,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         payload = self.runtime.production_state.load()
         record = self.runtime.production_state.records(payload)[CARD_REF]
-        attempt_accounting.terminal_effect(self.runtime,
+        attempt_accounting.terminal_effect(
+            self.runtime,
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -327,7 +330,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_committed_obligations_retire_before_the_next_tick(self) -> None:
         _payload, record = self._start_worker_round()
-        effect = attempt_accounting.terminal_effect(self.runtime,
+        effect = attempt_accounting.terminal_effect(
+            self.runtime,
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -353,7 +357,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             "_commit_attempt_outcome",
             side_effect=TaskError("audit_pending", "append interrupted", 4),
         ):
-            effect = attempt_accounting.terminal_effect(self.runtime,
+            effect = attempt_accounting.terminal_effect(
+                self.runtime,
                 self.reader.show(CARD_REF),
                 record,
                 target="blocked",
@@ -411,7 +416,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual((outcome["verdict"], outcome["disposition"]), ("red", "reslice"))
         self.assertEqual(outcome["terminal_state"], "blocked")
         self.assertTrue(outcome["lineage_required"]["decision"])
-        self.assertTrue(all(outcome["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
+        self.assertTrue(
+            all(outcome["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect"))
+        )
 
     def test_reviewed_green_release_has_one_sealed_outcome(self) -> None:
         self.start_dispatcher()
@@ -436,7 +443,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertFalse(outcomes[0].pending)
         data = outcomes[0].event.data
-        self.assertTrue(all(data["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
+        self.assertTrue(
+            all(data["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect"))
+        )
         self.assertTrue(data["lineage_required"]["specification_revision"])
 
     def test_second_reviewed_red_round_freezes_its_own_exact_sources(self) -> None:
@@ -467,7 +476,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         first, second = (occurrence.event.data for occurrence in outcomes)
         self.assertNotEqual(first["source_event_ids"]["verdict"], second["source_event_ids"]["verdict"])
         self.assertNotEqual(first["source_event_ids"]["decision"], second["source_event_ids"]["decision"])
-        self.assertTrue(all(second["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect")))
+        self.assertTrue(
+            all(second["source_event_ids"][name] for name in ("report", "verdict", "decision", "effect"))
+        )
 
     def test_reviewed_release_uses_the_persisted_verdict_context_not_a_mutable_baseline(self) -> None:
         self.start_dispatcher()
@@ -495,7 +506,9 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIsNotNone(outcome["source_event_ids"]["verdict"])
         self.assertTrue(outcome["lineage_required"]["verdict"])
 
-    def test_missing_forward_report_commits_an_incomplete_row_with_a_named_obligation_diagnostic(self) -> None:
+    def test_missing_forward_report_commits_an_incomplete_row_with_a_named_obligation_diagnostic(
+        self,
+    ) -> None:
         self._start_worker_round()
         report_id = self._worker_report_request_id("blocked", "external_fact")
         self.writer.report(
@@ -520,7 +533,10 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIsNone(outcome["source_event_ids"]["report"])
         self.assertTrue(outcome["lineage_required"]["report"])
         effect = next(event for event in canon.events(ref=CARD_REF) if event.kind.value == "card.blocked")
-        self.assertEqual(effect.data["attempt_outcome_owed"]["lineage_diagnostic"], "attempt_outcome_lineage_missing_report")
+        self.assertEqual(
+            effect.data["attempt_outcome_owed"]["lineage_diagnostic"],
+            "attempt_outcome_lineage_missing_report",
+        )
 
     def test_adopted_record_keeps_the_report_required_on_a_verdictless_gate_terminal(self) -> None:
         """A lost state file must not turn a round that reported into a no-report path."""
@@ -572,11 +588,11 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIs(record.outcome_terminal_path, OutcomeTerminalPath.FOLLOWS_ACCEPTED_REPORT)
         for terminal in ("review-launch", "review-wait", "post-gate"):
             with self.subTest(terminal=terminal):
-                obligation = attempt_accounting._attempt_outcome_obligation(self.runtime,
+                obligation = attempt_accounting._attempt_outcome_obligation(
+                    self.runtime,
                     self.reader.show(CARD_REF),
                     record,
                     terminal_state="blocked",
-                    disposition="blocked",
                     taxonomy=normalize_terminal_taxonomy(disposition="blocked", blocked_reason="provider"),
                     terminal_path=record.outcome_terminal_path,
                 )
@@ -586,7 +602,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
                 self.assertIsNone(obligation["source_event_ids"]["report"])
                 self.assertEqual(obligation["lineage_diagnostic"], "attempt_outcome_lineage_missing_report")
 
-        attempt_accounting.terminal_effect(self.runtime,
+        attempt_accounting.terminal_effect(
+            self.runtime,
             self.reader.show(CARD_REF),
             record,
             target="blocked",
@@ -680,7 +697,8 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             "attempt_outcome",
             side_effect=TaskError("audit_pending", "append refused", 4),
         ):
-            effect = attempt_accounting.terminal_effect(self.runtime,
+            effect = attempt_accounting.terminal_effect(
+                self.runtime,
                 task,
                 record,
                 target="blocked",

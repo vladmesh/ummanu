@@ -15,6 +15,7 @@ from typing import Any
 from ummanu.dispatch.head_vitality import (
     COMMAND_LIMIT,
     CURSOR_LIMIT,
+    PROGRESS_SOURCES,
     REASON_LIMIT,
     HeadVitalityError,
     ProcessState,
@@ -35,9 +36,6 @@ EPISODE_VERSION = 1
 # drove the verdict, bounded so one noisy batch cannot bloat a durable record.
 BASIS_TOKEN_LIMIT = 80
 BASIS_ENTRY_LIMIT = 10
-
-# Progress sources distinguish a broken observed channel from pid-only aging.
-_PROGRESS_SOURCES = frozenset({SnapshotSource.PROVIDER_CURSOR.value})
 
 # How long a *dark* progress source may freeze an episode's stall clock before the episode ages
 # anyway (secretary-1543). See ``VitalityThresholds.dark_ceiling`` for why this number.
@@ -130,7 +128,11 @@ def _finite_timestamp(value: Any, name: str) -> float:
     """Validate one epoch-seconds field shared by construction and deserialisation."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise HeadVitalityError(f"vitality episode {name} is a number")
-    stamp = float(value)
+    try:
+        stamp = float(value)
+    except OverflowError:
+        # An integer beyond the float range (a damaged file) is as unusable as inf.
+        raise HeadVitalityError(f"vitality episode {name} is finite and not negative") from None
     if not math.isfinite(stamp) or stamp < 0:
         raise HeadVitalityError(f"vitality episode {name} is finite and not negative")
     return stamp
@@ -386,6 +388,18 @@ class VitalityEpisode:
         )
 
 
+def previous_snapshot_cursors(episode: VitalityEpisode | None, run_id: str) -> dict[str, str]:
+    """Converter baselines from this nonempty run alone; a successor starts fresh."""
+    bound = episode if run_id and episode is not None and episode.run_id == run_id else None
+    cursors = (bound.evidence_cursors or {}) if bound is not None else {}
+    return {
+        "previous_cursor": cursors.get(SnapshotSource.PROVIDER_CURSOR.value, ""),
+        "previous_child_cursor": cursors.get(SnapshotSource.EXECUTION_CHILD.value, ""),
+        "previous_child_key": bound.last_child_key if bound is not None else "",
+        "previous_journal_cursor": cursors.get(SnapshotSource.SUPERVISOR_JOURNAL.value, ""),
+    }
+
+
 def reduce_vitality(
     previous: VitalityEpisode | None,
     snapshots: Sequence[VitalitySnapshot],
@@ -501,7 +515,7 @@ def reduce_vitality(
     # counted one channel as two. Darkness is therefore recorded from the absence of an answer,
     # not only from an answer of absence, which is what makes "not dark" mean "answering now".
     answered = {snapshot.source.value for snapshot in owned.values()}
-    witnessed_progress = (set(episode.evidence_cursors) | {episode.last_progress_source}) & _PROGRESS_SOURCES
+    witnessed_progress = (set(episode.evidence_cursors) | {episode.last_progress_source}) & PROGRESS_SOURCES
     for source_value in sorted(witnessed_progress - answered):
         if source_value not in episode.unavailable_since:
             episode = replace(
@@ -687,7 +701,7 @@ def reduce_vitality(
         )
         episode = replace(episode, stall_frozen_since=0.0)
         dark_progress = {
-            name: since for name, since in episode.unavailable_since.items() if name in _PROGRESS_SOURCES
+            name: since for name, since in episode.unavailable_since.items() if name in PROGRESS_SOURCES
         }
         dark_since = min(dark_progress.values()) if dark_progress else 0.0
         dark_seconds = max(0.0, now - dark_since) if dark_progress else 0.0
@@ -949,7 +963,7 @@ def recovery_outlook(
             "freeze_expires_at": since + thresholds.dark_ceiling,
         }
         for name, since in sorted(episode.unavailable_since.items())
-        if name in _PROGRESS_SOURCES
+        if name in PROGRESS_SOURCES
     ]
     frozen_until = max((entry["freeze_expires_at"] for entry in dark), default=0.0)
     note = ""

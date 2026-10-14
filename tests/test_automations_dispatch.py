@@ -61,7 +61,7 @@ class TriggeredDispatchTests(unittest.TestCase):
         self.state_root = Path(self.tmp.name) / "state"
         self.workspace = str(Path(self.tmp.name) / "workspace")
         Path(self.workspace).mkdir()
-        self.env = mock.patch.dict(os.environ, {"TA_STATE": str(self.state_root)})
+        self.env = mock.patch.dict(os.environ, {"UMMANU_STATE": str(self.state_root)})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.state_root_patch = mock.patch.object(runtime_state, "STATE_ROOT", self.state_root)
@@ -83,7 +83,7 @@ class TriggeredDispatchTests(unittest.TestCase):
 
     def test_scheduled_memory_launch_runs_a_command_led_by_env_assignments(self):
         # The rendered head command starts with installation assignments
-        # (`TA_RUNTIME_ENV_FILE=... UMMANU_INSTANCE=... python3 ...`). A bare `exec` in the launch
+        # (`UMMANU_RUNTIME_ENV_FILE=... UMMANU_INSTANCE=... python3 ...`). A bare `exec` in the launch
         # wrapper took the first assignment for the program and the head exited 127 every tick.
         data_dir = Path(self.tmp.name) / "data"
         out = Path(self.tmp.name) / "out.txt"
@@ -126,13 +126,20 @@ class TriggeredDispatchTests(unittest.TestCase):
             dispatch._steward_report_card("steward", "hourly", report_board=reports),
             "ummanu-report-1",
         )
-        dispatch._release_steward_report(state, "tick", cmd, "not dispatched", report_board=reports)
-        dispatch._escalate_steward_preflight_failure(
-            state, "tick", cmd, RuntimeError("preflight"), report_board=reports
-        )
+        ticks = dispatch._TickReports("steward", state, "tick", report_board=reports)
+        ticks.undispatched(cmd, "not dispatched")
+        ticks.preflight_failed(cmd, RuntimeError("preflight"))
 
         self.assertEqual(len(reports.created), 1)
         self.assertEqual([move[1] for move in reports.moves], ["done", "blocked"])
+        self.assertEqual(
+            [entry.kwargs for entry in state.log_run.call_args_list],
+            [
+                {"action": "dispatch-release", "result": "done", "reference": "ummanu-report-1"},
+                {"action": "dispatch-preflight", "result": "blocked", "reference": "ummanu-report-1",
+                 "error": "preflight"},
+            ],
+        )
 
 
 class StandingHeadReadinessTests(unittest.TestCase):

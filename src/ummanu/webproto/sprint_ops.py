@@ -28,9 +28,10 @@ from typing import Any
 from ummanu.board.backend import SPRINT, board_client
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.config import InstanceReport, validate_instance
+from ummanu.kernel.errors import TaskError
 from ummanu.sprint_observer import observer_choice
 from ummanu.sprints import SprintWriter
-from ummanu.tasks import TaskError, _digest
+from ummanu.tasks import _digest
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import (
@@ -41,6 +42,7 @@ from ummanu.webproto.errors import (
     RuntimeUnavailable,
     TaskNotFound,
     ValidationRefused,
+    installation_refusal,
 )
 from ummanu.webproto.runs import RequestMismatch, RunStoreError, request_fingerprint
 from ummanu.webproto.sprint_reads import SprintReadLayer
@@ -95,6 +97,8 @@ class SprintOperationLayer(ProtocolBoundary):
     """One installation's sprint operations, with no knowledge of who is asking.
 
     Construction does no I/O. `board_client` and `clock` are seams for tests or transports, not modes.
+    `owner_events` is the bell's layer the answering read layer takes, so a sprint's `attention` is
+    read rather than `unknown`.
     """
 
     def __init__(
@@ -103,11 +107,13 @@ class SprintOperationLayer(ProtocolBoundary):
         *,
         data_dir: str | Path | None = None,
         board_client: Any | None = None,
+        owner_events: Any | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.instance = Path(instance)
         self._data_dir = Path(data_dir) if data_dir is not None else None
         self._board_client = board_client
+        self.owner_events = owner_events
         self._clock = clock
 
     # -- shared plumbing -------------------------------------------------------------------
@@ -115,10 +121,7 @@ class SprintOperationLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report = validate_instance(self.instance)
         if not report.ok or report.data_dir is None:
-            raise InstallationUnavailable(
-                "this instance config does not validate: "
-                + "; ".join(str(error) for error in report.errors[:5])
-            )
+            raise InstallationUnavailable(installation_refusal(report))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
@@ -523,6 +526,7 @@ class SprintOperationLayer(ProtocolBoundary):
             self.instance,
             data_dir=self._data_dir,
             board_client=self._board_client,
+            owner_events=self.owner_events,
             clock=self._clock,
         )
 

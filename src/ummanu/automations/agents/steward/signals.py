@@ -15,13 +15,13 @@ so a crash between the two re-scans instead of silently dropping a signal.
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypedDict
 
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.state import AgentState
 
 from ...runtime import production_telemetry
@@ -35,7 +35,7 @@ STATE = AgentState("steward")
 # no watchdog times it out. If the observer never comes back to decide release, rework or reslice,
 # this signal is the only thing that notices.
 STALE_COLUMNS = ("Ready", "In progress", "Validate", "Assessment", "Blocked")
-STALE_HOURS = float(os.environ.get("TA_STEWARD_STALE_HOURS", "24"))
+STALE_HOURS = float(env_value("UMMANU_STEWARD_STALE_HOURS", "24"))
 
 
 def _workspaces_root() -> Path:

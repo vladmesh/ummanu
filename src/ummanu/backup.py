@@ -28,8 +28,6 @@ from ummanu.backup_policy import (
 )
 from ummanu.backup_retention import (
     apply_retention as _apply_retention,
-)
-from ummanu.backup_retention import (
     remove_path_quietly as _remove_path_quietly,
 )
 from ummanu.backup_verify import (
@@ -43,6 +41,7 @@ from ummanu.data import (
     export_all,
     init_layout,
 )
+from ummanu.runtime.paths import instance_file as config_file
 
 PIPELINE_PAUSE_REASON = "ummanu backup create"
 PIPELINE_PAUSE_ACTOR = "ummanu-backup"
@@ -82,7 +81,7 @@ def create_backups(
         )
     else:
         exclude_workspace = caller_workspace.expanduser().resolve()
-    instance_file = _instance_file(instance_path)
+    instance_file = config_file(instance_path.expanduser())
     data_dir = (data_dir or _load_data_dir(instance_file)).expanduser().resolve()
     from ummanu.board.postgres_recovery import PostgresRecoveryError, inspect_source
 
@@ -126,7 +125,12 @@ def create_backups(
             if "full" in kinds:
                 from ummanu.board.postgres_recovery import create_dump
 
-                dump_staging = Path(tempfile.mkdtemp(prefix=".ummanu-postgres-dump-", suffix=".tmp"))
+                # Staging lives beside the archives, never in the system temp directory: a tmpfs or
+                # a unit's PrivateTmp is another filesystem (EXDEV on the final rename) and, for the
+                # dump, a path the Docker daemon cannot see.
+                dump_staging = Path(
+                    tempfile.mkdtemp(prefix=".ummanu-postgres-dump-", suffix=".tmp", dir=backups_dir)
+                )
                 dump_staging.chmod(0o700)
                 temp_paths.append(dump_staging)
                 postgres_dump_path = dump_staging / "postgres.dump"
@@ -138,7 +142,7 @@ def create_backups(
                     raise RuntimeError(str(exc)) from None
 
             for kind, final_archive in zip(kinds, final_archives, strict=True):
-                staging = Path(tempfile.mkdtemp(prefix=".ummanu-backup-", suffix=".tmp"))
+                staging = Path(tempfile.mkdtemp(prefix=".ummanu-backup-", suffix=".tmp", dir=backups_dir))
                 temp_paths.append(staging)
                 payload = staging / ARCHIVE_ROOT
                 payload.mkdir()
@@ -408,7 +412,7 @@ def _filter_core_board_export(board_dir: Path) -> int:
         raise RuntimeError(f"could not read core board export: {exc}") from None
     cards = payload.get("cards") if isinstance(payload, dict) else None
     if not isinstance(cards, list):
-        raise RuntimeError("core board export has no cards list")
+        raise RuntimeError("core board export has no cards list")  # noqa: TRY004 - backup refusals share RuntimeError
     filtered = [
         card
         for card in cards
@@ -498,13 +502,8 @@ def _instance_identity(instance_file: Path) -> dict[str, str]:
     name = instance.get("name") if isinstance(instance, dict) else None
     remote = offsite.get("instance_remote") if isinstance(offsite, dict) else None
     if not isinstance(name, str) or not isinstance(remote, str):
-        raise RuntimeError("instance.yaml has no usable identity")
+        raise RuntimeError("instance.yaml has no usable identity")  # noqa: TRY004 - backup refusals share RuntimeError
     return {"name": name, "instance_remote": remote}
-
-
-def _instance_file(path: Path) -> Path:
-    path = path.expanduser()
-    return path / "instance.yaml" if path.is_dir() else path
 
 
 def _git_commit(repo_root: Path) -> str | None:

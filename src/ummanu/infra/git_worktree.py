@@ -17,6 +17,28 @@ from pathlib import Path
 GitRunner = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
 
+def parse_list(listing: str) -> list[dict[str, str]]:
+    """One `{attribute: value}` per worktree of a `git worktree list --porcelain [-z]` listing.
+
+    Each record's lines (`worktree <path>`, `HEAD <sha>`, `branch <ref>`, `detached`, `bare`,
+    `locked [<reason>]`, `prunable [<reason>]`) become keys; a bare label maps to its empty value.
+    With `-z` lines end in NUL and records in an empty line; without it, newlines do the same.
+    """
+    rows: list[dict[str, str]] = []
+    row: dict[str, str] = {}
+    for line in listing.split("\0") if "\0" in listing else listing.splitlines():
+        if not line:
+            if row:
+                rows.append(row)
+                row = {}
+        else:
+            key, _, value = line.partition(" ")
+            row[key] = value
+    if row:
+        rows.append(row)
+    return rows
+
+
 def add(
     git: GitRunner, repo: Path, target: Path, start: str, *, branch: str = ""
 ) -> subprocess.CompletedProcess[str]:
@@ -47,7 +69,7 @@ def remove(git: GitRunner, repo: Path, target: Path, *,
         result = git(["worktree", "list", "--porcelain", "-z"], Path(repo))
         if result.returncode:
             return None
-        return "worktree " + str(target.absolute()) in (result.stdout or "").split("\0")
+        return any(row.get("worktree") == str(target.absolute()) for row in parse_list(result.stdout or ""))
 
     registered = listed()
     if registered is None:

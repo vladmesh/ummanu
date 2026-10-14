@@ -8,6 +8,7 @@ from typing import Any
 
 from ummanu.runtime.head.handoff import PromptHandoff
 from ummanu.runtime.head_run_binding import head_run_binding
+from ummanu.runtime.tui_delivery import COMPOSER_EMPTY, COMPOSER_UNKNOWN
 
 BUSY_RETRY_INITIAL_SECONDS = 30
 BUSY_RETRY_MAX_SECONDS = 5 * 60
@@ -51,6 +52,27 @@ class ContinuationRecoveryRung(StrEnum):
     SAFE_RECOVERY_RESUME_ONCE = "safe_recovery_resume_once"
     SAFE_RECOVERY_UNAVAILABLE = "safe_recovery_unavailable"
     TERMINAL = "terminal"
+
+
+def residual_composer_class(evidence: dict[str, Any]) -> str:
+    """Classify unchanged delivery evidence without retaining or interpreting pane text.
+
+    A completed turn with a residual composer needs equal, known composer fingerprints and equal
+    output cursors before and after the delivery; everything else stays active-or-unknown.
+    """
+    composer_before = str(evidence.get("composer_before") or "")
+    composer_after = str(evidence.get("composer_after") or "")
+    cursor_before = str(evidence.get("cursor_before") or "")
+    cursor_after = str(evidence.get("cursor_after") or "")
+    if (
+        composer_before
+        and composer_before == composer_after
+        and composer_before not in {COMPOSER_EMPTY, COMPOSER_UNKNOWN}
+        and cursor_before
+        and cursor_before == cursor_after
+    ):
+        return "completed_turn_residual_composer"
+    return "active_or_unknown_turn"
 
 
 @dataclass

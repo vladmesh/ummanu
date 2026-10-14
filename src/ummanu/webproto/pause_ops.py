@@ -19,13 +19,16 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.dispatch.bootstrap import runtime_from_args
-from ummanu.dispatch.pause_ops import PauseCommandCompleted
-from ummanu.dispatch.pause_ops import pause as _pause
-from ummanu.dispatch.pause_ops import resume as _resume
+from ummanu.dispatch.pause_ops import PauseCommandCompleted, pause as _pause, resume as _resume
 from ummanu.dispatch.types import DispatcherError, HostError
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
-from ummanu.webproto.errors import OwnerConflict, RuntimeUnavailable, ValidationRefused
+from ummanu.webproto.errors import (
+    InstallationUnavailable,
+    OwnerConflict,
+    RuntimeUnavailable,
+    ValidationRefused,
+)
 from ummanu.webproto.pause_reads import (
     DRAIN,
     DRAIN_CONTRACT,
@@ -45,19 +48,19 @@ PAUSE_RESUME_OPERATION = "pause_resume"
 PAUSE_ERRORS: dict[str, tuple[str, ...]] = {
     PAUSE_DRAIN_OPERATION: ("validation", "owner_conflict", "backend_unavailable"),
     PAUSE_RESUME_OPERATION: ("validation", "backend_unavailable"),
-    "pause_state": ("validation",),
-    "pause_scope": ("validation",),
+    "pause_state": ("backend_unavailable",),
+    "pause_scope": ("backend_unavailable",),
 }
 
 #: How a `DispatcherError` code maps to this layer's codes (a mapping, never a re-decision).
 #: `pause_conflict` is `owner_conflict`: a well-formed request refused on the state of the world.
-#: `invalid_instance`/`invalid_heads` are `validation` so callers keep the exit status 2 that
-#: `runtime_from_args` gave for a config that does not validate.
+#: `invalid_instance` is `InstallationUnavailable`, the code every layer gives an instance config that
+#: cannot be used; `invalid_heads` (a head registry that does not validate) stays `validation`.
 _CODES: dict[str, Any] = {
     "validation": ValidationRefused,
     "usage": ValidationRefused,
     "pause_conflict": OwnerConflict,
-    "invalid_instance": ValidationRefused,
+    "invalid_instance": InstallationUnavailable,
     "invalid_heads": ValidationRefused,
 }
 

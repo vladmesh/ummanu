@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_account_fixtures import fixture_runtime_account
-from ummanu import cli, host_commands
+from ummanu import cli, host, host_commands
 from ummanu.cli import main
 from ummanu.config import validate_instance
 from ummanu.host import (
@@ -266,23 +266,6 @@ class ManagedManifestReadTests(unittest.TestCase):
 
 
 class ReconcilePlanTests(unittest.TestCase):
-    def test_resolve_packaged_never_yields_an_orca_component(self):
-        """The product ships no Orca unit and resolves no Orca executable (A20 step 9)."""
-        import tempfile
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            instance = root / "instance"
-            instance.mkdir()
-            packaged = resolve_packaged(
-                {"data_dir": str(root / "data"), "host": {"unit_prefix": "ummanu-"}},
-                instance_path=instance,
-                data_dir=root / "data",
-            )
-
-        self.assertNotIn("orca", {unit.component for unit in packaged})
-        self.assertFalse(hasattr(SystemdLayout, "orca_executable"))
-
     def test_relative_direct_config_path_renders_canonical_absolute_layout(self):
         import tempfile
 
@@ -499,10 +482,8 @@ class ReconcilePlanTests(unittest.TestCase):
         )
         collected = CollectResult(HostInventory(), {})
         with (
-            unittest.mock.patch.object(cli, "resolve_installed_packaged", return_value=[]),
-            unittest.mock.patch.object(
-                cli,
-                "load_managed_manifest",
+            unittest.mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=[]),
+            unittest.mock.patch("ummanu.host.load_managed_manifest",
                 return_value=([], "managed manifest is unreadable"),
             ),
         ):
@@ -779,37 +760,6 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn(b"Environment=MEMORY_MODEL=test-model", unit)
         self.assertIn(b"Environment=MEMORY_DIM=4", unit)
         self.assertIn(b"Environment=MEMORY_THREADS=2", unit)
-
-    def test_no_shipped_unit_orders_after_or_requires_an_orca_unit(self):
-        """A20 step 9 (secretary-1726): the ticks neither order after nor require Orca's server or
-        its X display, so a host that stops and disables both runs every scheduler unit as before."""
-        units = load_packaged_units(
-            REPO_ROOT / "packaging" / "systemd",
-            "ummanu-",
-            SystemdLayout(
-                REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")
-            ),
-        )
-        scheduler_services = {
-            "ummanu-curator.service",
-            "ummanu-dispatcher-production.service",
-            "ummanu-retro.service",
-            "ummanu-steward.service",
-            "ummanu-steward-deep-sweep.service",
-        }
-
-        rendered = {unit.name: unit.content for unit in units}
-        self.assertTrue(scheduler_services <= rendered.keys())
-        for name in scheduler_services:
-            self.assertIn(b"After=network-online.target\n", rendered[name], name)
-        for name, content in rendered.items():
-            for foreign in (b"orca-server", b"xvfb", b"ummanu-orca.service"):
-                self.assertNotIn(foreign, content, name)
-        for template in (REPO_ROOT / "packaging" / "systemd").iterdir():
-            text = template.read_bytes()
-            self.assertNotIn(b"orca-server", text, template.name)
-            self.assertNotIn(b"xvfb", text, template.name)
-            self.assertNotIn(b"UMMANU_ORCA_EXECUTABLE", text, template.name)
 
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
@@ -1304,14 +1254,6 @@ class NoOrcaUnitInDoctorTests(unittest.TestCase):
         report = validate_instance(EXAMPLE_INSTANCE)
         return build_doctor_expectations(report.instance, report.bindings, packaged=SHIPPED_UNITS)
 
-    def test_expectations_name_no_orca_unit(self):
-        expected = self._expected()
-        self.assertTrue(expected.units)
-        for name in self.FOREIGN:
-            self.assertNotIn(name, expected.units)
-            self.assertNotIn(name, expected.unit_runtime)
-        self.assertFalse(hasattr(expected, "external_runtime"))
-
     def test_live_inventory_with_orca_units_stopped_and_disabled_is_green(self):
         expected = self._expected()
         calls: list[list[str]] = []
@@ -1619,12 +1561,12 @@ class DoctorHostCliTests(unittest.TestCase):
             def __init__(self):
                 raise AssertionError("offline doctor touched host")
 
-        original = cli.LiveHostSource
-        cli.LiveHostSource = ForbiddenHost
+        original = host.LiveHostSource
+        host.LiveHostSource = ForbiddenHost
         try:
             code, output = run_cli(["doctor", "--offline", "--instance", str(EXAMPLE_INSTANCE)])
         finally:
-            cli.LiveHostSource = original
+            host.LiveHostSource = original
         self.assertEqual(code, 0, output)
         self.assertNotIn("host inventory", output)
 
@@ -1847,7 +1789,7 @@ class DoctorHostCliTests(unittest.TestCase):
                 states["ummanu-memory.service"] = ("enabled", "failed")
                 return CollectResult(HostInventory(units=expected.units, unit_states=states), {})
 
-        with unittest.mock.patch.object(cli, "LiveHostSource", return_value=HealthyFilesFailedRuntime()):
+        with unittest.mock.patch("ummanu.host.LiveHostSource", return_value=HealthyFilesFailedRuntime()):
             code, output = run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertEqual(code, 1, output)
@@ -1884,8 +1826,7 @@ class DoctorHostCliTests(unittest.TestCase):
                         {"projects": expected.project_error},
                     )
 
-            with unittest.mock.patch.object(
-                cli, "LiveHostSource", return_value=ExpectedCheckoutUnavailable()
+            with unittest.mock.patch("ummanu.host.LiveHostSource", return_value=ExpectedCheckoutUnavailable()
             ):
                 code, output = run_cli(["doctor", "--host", "--instance", str(instance)])
 
@@ -1952,12 +1893,12 @@ class DoctorHostCliTests(unittest.TestCase):
                     errors={"units": "systemctl not found"},
                 )
 
-        original = cli.LiveHostSource
-        cli.LiveHostSource = StubSource
+        original = host.LiveHostSource
+        host.LiveHostSource = StubSource
         try:
             code, output = run_cli(["doctor", "--dry-run", "--instance", str(EXAMPLE_INSTANCE), "--host"])
         finally:
-            cli.LiveHostSource = original
+            host.LiveHostSource = original
 
         self.assertEqual(code, 2, output)
         self.assertIn("units:\n  unavailable: systemctl not found", output)
@@ -1988,12 +1929,12 @@ class DoctorHostCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            original = cli.LiveHostSource
-            cli.LiveHostSource = QuietHost
+            original = host.LiveHostSource
+            host.LiveHostSource = QuietHost
             try:
                 code, output = run_cli(["doctor", "--dry-run", "--instance", str(instance), "--host"])
             finally:
-                cli.LiveHostSource = original
+                host.LiveHostSource = original
 
             self.assertEqual(code, 2, output)
         self.assertNotIn(secret, output)

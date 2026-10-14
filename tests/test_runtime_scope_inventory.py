@@ -13,7 +13,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import cli, status, upgrade
+from tests.fakes.upgrade import FakeUnitInstaller
+from tests.runtime_scope_fixtures import host_fixture
+from tests.scoped_environment_fixtures import deployed_scope_argv
+from ummanu import cli, status
 from ummanu.host import (
     FixtureHostSource,
     LiveHostSource,
@@ -24,9 +27,13 @@ from ummanu.host import (
 )
 from ummanu.host_apply import ApplyInputs, apply_host
 from ummanu.infra.systemd import CommandResult
-from ummanu.runtime.head.local_pty import protocol
-from ummanu.runtime.head.local_pty import scope_inventory as reader
-from ummanu.runtime.head.local_pty import scope_environment, scope_launcher
+from ummanu.installation.upgrade import host as upgrade_host, types as upgrade_types
+from ummanu.runtime.head.local_pty import (
+    protocol,
+    scope_environment,
+    scope_inventory as reader,
+    scope_launcher,
+)
 from ummanu.runtime.head.local_pty.journal import RUN_STARTED, SCOPE_BOUND, JournalWriter
 from ummanu.runtime.head.local_pty.scoped_lifecycle import (
     LAUNCH_BINDING_ENV,
@@ -37,12 +44,156 @@ from ummanu.runtime.head.local_pty.scoped_lifecycle import (
 from ummanu.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
 from ummanu.runtime.head.memory import MemoryScopeError, scope_unit
 from ummanu.runtime.local_pty_head import runtime_scope_inventory
-from tests.fakes.upgrade import FakeUnitInstaller
-from tests.runtime_scope_fixtures import host_fixture
-from tests.scoped_environment_fixtures import deployed_scope_argv
 
 
 class RuntimeScopeConsumerTests(unittest.TestCase):
+    def test_distinct_prehead_rebind_is_retained_on_legacy_and_new_writer_secure_fd_paths(self):
+        from tests.support.local_pty_journal import small_limits
+        from ummanu.runtime.head.local_pty import journal as events
+        from ummanu.runtime.local_pty_journal import head_run_first_record
+
+        small_limits(self)
+        for legacy in (True, False):
+            with self.subTest(legacy=legacy):
+                owner, directory, unit = self.owner(run_id=f"rebind-{legacy}")
+                path = directory / protocol.JOURNAL_NAME
+                bound, start = events.read_events(path).events
+                previous = {**bound, "seq": 1, "binding": {**bound["binding"],
+                            "invocation_id": "failed-prehead", "admitted": {
+                                **bound["binding"]["admitted"], "generation": "prior-generation"}}}
+                current = {**bound, "seq": 2}
+                started = {**start, "seq": 3}
+                if legacy:
+                    path.write_bytes(b"".join((json.dumps(event, sort_keys=True, separators=(",", ":"))
+                                             + "\n").encode() for event in (previous, current, started)))
+                else:
+                    path.write_bytes(b"")
+                    with JournalWriter(path, owner.run_id) as writer:
+                        writer.append(SCOPE_BOUND, binding=previous["binding"])
+                    with JournalWriter(path, owner.run_id) as writer:
+                        self.assertEqual(writer.seq, 1)
+                        current = writer.append(SCOPE_BOUND, binding=bound["binding"])
+                    # Before run.started, the latest distinct binding alone is native authority.
+                    self.assertFalse(runtime_scope_inventory(self.data, {unit}).errors)
+                    with JournalWriter(path, owner.run_id) as writer:
+                        self.assertEqual(writer.seq, 2)
+                        started = writer.append(RUN_STARTED, **{key: value for key, value in start.items()
+                                                 if key not in ("schema_version", "seq", "run_id", "kind", "at")})
+                original_lines = path.read_bytes().splitlines()[1:3]
+                with JournalWriter(path, owner.run_id) as writer:
+                    self.assertEqual(writer.seq, 3)
+                    inodes = set()
+                    for _ in range(160):
+                        writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+                        inodes.add(path.stat().st_ino)
+                        self.assertLessEqual(path.stat().st_size, events.JOURNAL_MAX_BYTES)
+                self.assertGreater(len(inodes), 1)
+                for line in original_lines:
+                    self.assertIn(line, path.read_bytes().splitlines())
+                with JournalWriter(path, owner.run_id) as writer:
+                    self.assertEqual(writer.seq, 163)
+                reads = []
+                actual_read = reader.read_events
+
+                def read_fd(open_path, actual_read=actual_read, reads=reads):
+                    self.assertTrue(str(open_path).startswith("/proc/self/fd/"))
+                    result = actual_read(open_path)
+                    reads.append(result)
+                    return result
+
+                with mock.patch.object(reader, "read_events", side_effect=read_fd):
+                    self.assertFalse(runtime_scope_inventory(self.data, {unit}).errors)
+                self.assertTrue(reads)
+                self.assertEqual(reads[-1].of_kind(SCOPE_BOUND), (current,))
+                self.assertEqual(reads[-1].of_kind(RUN_STARTED), (started,))
+                self.assertEqual(head_run_first_record(directory), {key: started.get(key)
+                                 for key in ("task", "role", "run_id", "at")})
+                saved = path.read_bytes()
+                # Same native invocation remains a duplicate, including after a successful start.
+                with JournalWriter(path, owner.run_id) as writer:
+                    writer.append(SCOPE_BOUND, binding=current["binding"])
+                self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                with self.assertRaises(events.JournalError):
+                    JournalWriter(path, owner.run_id).open()
+                path.write_bytes(saved)
+                record = owner.read_owner(directory)
+                owner.update_owner(directory, {**record, "generation": "wrong-generation"})
+                self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                owner.update_owner(directory, record)
+                native = dict(self.native[unit])
+                for key, value in (("InvocationID", "wrong"), ("ControlGroup", "/wrong")):
+                    self.native[unit] = {**native, key: value}
+                    self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                self.native[unit] = native
+                lines = saved.splitlines(keepends=True)
+                wrong_native = json.loads(lines[0])
+                wrong_native["binding"]["cgroup"][1] += 1
+                wrong_cgroup = (json.dumps(wrong_native) + "\n").encode() + b"".join(lines[1:])
+                for damaged in (saved.replace(b'"cgroup":[', b'"cgroup":[true,', 1),
+                                saved.replace(b'"binding":', b'"binding":{},"binding":', 1), wrong_cgroup):
+                    path.write_bytes(damaged)
+                    self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+                path.write_bytes(saved)
+                foreign = directory / "foreign-journal"
+                path.rename(foreign)
+                path.symlink_to(foreign)
+                self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+
+    def test_rotated_original_authority_survives_the_secure_fd_reader_and_native_refusals(self):
+        from tests.support.local_pty_journal import small_limits
+        from ummanu.runtime.head.local_pty import journal as events
+
+        small_limits(self)
+        owner, directory, unit = self.owner()
+        path = directory / protocol.JOURNAL_NAME
+        original = events.read_events(path).events
+        with JournalWriter(path, owner.run_id) as writer:
+            for _ in range(160):
+                writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+            retained = events.read_events(path)
+            self.assertTrue(retained.partial_head)
+            self.assertEqual(retained.events[:2], original)
+            real_read = reader.read_events
+            witnessed = []
+
+            def read_open_descriptor(open_path):
+                self.assertTrue(str(open_path).startswith("/proc/self/fd/"))
+                before = real_read(open_path)
+                inode = path.stat().st_ino
+                while path.stat().st_ino == inode:
+                    writer.append(events.PROVIDER_PROGRESSED, turn=1, output_bytes=1, padding="x" * 1100)
+                after = real_read(open_path)
+                self.assertEqual(after.events[:2], before.events[:2])
+                self.assertFalse(after.malformed or after.truncated_tail)
+                witnessed.append(after)
+                return after
+
+            with mock.patch.object(reader, "read_events", side_effect=read_open_descriptor):
+                result = runtime_scope_inventory(self.data, {unit})
+            self.assertFalse(result.errors, result.errors)
+            self.assertIn(unit, result.scopes)
+            self.assertTrue(witnessed, "inventory must use the already-open secure descriptor")
+        saved = path.read_bytes()
+        owner_record = owner.read_owner(directory)
+        owner.update_owner(directory, {**owner_record, "generation": "foreign-generation"})
+        self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        owner.update_owner(directory, owner_record)
+        native = dict(self.native[unit])
+        for key, value in (("InvocationID", "foreign"), ("ControlGroup", "/wrong")):
+            self.native[unit] = {**native, key: value}
+            self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        self.native[unit] = native
+        for damaged in (saved.replace(b'"binding":', b'"binding":{},"binding":', 1),
+                        saved.replace(b'"cgroup":[', b'"cgroup":[true,', 1),
+                        saved + saved.splitlines()[0] + b"\n"):
+            path.write_bytes(damaged)
+            self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+        path.write_bytes(saved)
+        foreign = directory / "foreign-journal"
+        path.rename(foreign)
+        path.symlink_to(foreign)
+        self.assertTrue(runtime_scope_inventory(self.data, {unit}).errors)
+
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.data = self.root / "data"
@@ -57,9 +208,9 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         self.enterContext(mock.patch.object(reader, "CGROUP_ROOT", self.root / "cgroups"))
         self.enterContext(mock.patch.object(reader, "_unit_state", side_effect=lambda unit: dict(
-            self.native.get(unit, dict(Id=unit, LoadState="loaded", ActiveState="active", SubState="running",
-                                       ControlGroup=f"/system.slice/{unit}", InvocationID="unowned-invocation",
-                                       ActiveEnterTimestampMonotonic="1500000", Transient="yes")))))
+            self.native.get(unit, {"Id": unit, "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+                                       "ControlGroup": f"/system.slice/{unit}", "InvocationID": "unowned-invocation",
+                                       "ActiveEnterTimestampMonotonic": "1500000", "Transient": "yes"}))))
 
     def owner(self, role="po", run_id="po-self", directory_root="po-heads", pending=False):
         directory = self.data / directory_root / run_id
@@ -71,9 +222,9 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                       launch_allowed=not pending)
         owner.update_owner(directory, record)
         heartbeat = directory / protocol.PID_FILE_NAME
-        heartbeat.write_text(json.dumps(dict(version=1, pid=99999998, boot_id=self.boot,
-                                            proc_starttime_ticks="200", run_id=run_id,
-                                            role=role, task=record["task"])))
+        heartbeat.write_text(json.dumps({"version": 1, "pid": 99999998, "boot_id": self.boot,
+                                            "proc_starttime_ticks": "200", "run_id": run_id,
+                                            "role": role, "task": record["task"]}))
         unit = scope_unit(run_id)
         group = reader.CGROUP_ROOT / "system.slice" / unit
         group.mkdir(parents=True)
@@ -82,15 +233,15 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         child = group / "detached-descendants"
         child.mkdir()
         (child / "cgroup.procs").write_text("99999996\n")
-        self.native[unit] = dict(Id=unit, LoadState="loaded", ActiveState="active", SubState="running",
-                                 ControlGroup=f"/system.slice/{unit}", InvocationID="original-invocation",
-                                 ActiveEnterTimestampMonotonic="1500000", Transient="yes")
+        self.native[unit] = {"Id": unit, "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+                                 "ControlGroup": f"/system.slice/{unit}", "InvocationID": "original-invocation",
+                                 "ActiveEnterTimestampMonotonic": "1500000", "Transient": "yes"}
         admitted = launch_binding(record, directory)
         self.native[unit]["Description"] = binding_description(admitted)
         with JournalWriter(directory / protocol.JOURNAL_NAME, run_id).open() as writer:
             info = group.stat()
-            writer.append(SCOPE_BOUND, binding=dict(admitted=admitted, invocation_id="original-invocation",
-                          activation="1500000", cgroup=[info.st_dev, info.st_ino]))
+            writer.append(SCOPE_BOUND, binding={"admitted": admitted, "invocation_id": "original-invocation",
+                          "activation": "1500000", "cgroup": [info.st_dev, info.st_ino]})
             writer.append(RUN_STARTED, head_pid=99999998, supervisor_pid=99999997,
                           role=role, task=record["task"], pid_file=str(heartbeat),
                           socket_path=str(directory / protocol.SOCKET_NAME))
@@ -110,7 +261,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                                  data_dir=self.data, instance_path=self.root / "instance" / "instance.yaml",
                                  name="disposable", projects=[])
         with (
-            mock.patch.object(cli, "resolve_installed_packaged", return_value=self.packaged),
+            mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=self.packaged),
             mock.patch.object(status, "resolve_installed_packaged", return_value=self.packaged),
         ):
             _, collected, diffs = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=str(self.fixture)))
@@ -152,14 +303,14 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                                  data_dir=self.data, instance_path=self.root / "instance" / "instance.yaml")
         for dry in (True, False):
             installer = FakeUnitInstaller()
-            context = upgrade.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
+            context = upgrade_types.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
                                               base_branch="main", dry_run=dry, units=installer,
                                               report=report, host_fixture=self.fixture)
-            result = upgrade.step_host(context)
+            result = upgrade_host.step_host(context)
             self.assertNotEqual(result.status, "failed", result)
             self.assertTrue(all(name != unit for _, name in installer.calls))
             self.assertNotIn(unit, (self.data / "host-managed.json").read_text() if not dry else "")
-        with mock.patch.object(cli, "resolve_installed_packaged", return_value=self.packaged):
+        with mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=self.packaged):
             _, collected, diffs = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=str(self.fixture)))
         self.assertFalse(collected.errors)
         self.assertNotIn(unit, diffs["units"].unmanaged_on_host)
@@ -195,7 +346,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.assertEqual((directory / "scope-owner.json").read_bytes(), before)
 
     def test_loaded_scope_enumeration_failure_refuses_upgrade_and_doctor(self):
-        _, directory, unit = self.owner()
+        _, directory, _unit = self.owner()
         report = SimpleNamespace(instance=self.instance, bindings=[], host=self.instance["host"],
                                  data_dir=self.data, instance_path=self.root / "instance" / "instance.yaml")
         before = (directory / "scope-owner.json").read_bytes()
@@ -210,13 +361,13 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         with mock.patch.object(LiveHostSource, "_run", side_effect=native_reply):
             for dry in (True, False):
                 installer = FakeUnitInstaller()
-                context = upgrade.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
+                context = upgrade_types.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
                                                   base_branch="main", dry_run=dry, units=installer, report=report)
-                result = upgrade.step_host(context)
+                result = upgrade_host.step_host(context)
                 self.assertEqual(result.status, "failed")
                 self.assertIn("system manager/bus unavailable", result.detail)
                 self.assertEqual(installer.calls, [])
-            with mock.patch.object(cli, "resolve_installed_packaged", return_value=self.packaged):
+            with mock.patch("ummanu.host_apply.resolve_installed_packaged", return_value=self.packaged):
                 _, collected, _ = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=None))
             self.assertIn("system manager/bus unavailable", collected.errors["units"])
             self.assertEqual(collected.inventory.units, set())
@@ -475,9 +626,8 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
             raise Executed()
         saved_stdin = os.dup(0)
         try:
-            with mock.patch("os.execve", side_effect=native_exec), mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: "forged inherited proof"}):
-                with self.assertRaises(Executed):
-                    scope_launcher.main(child[4:])
+            with (mock.patch('os.execve', side_effect=native_exec), mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: 'forged inherited proof'}), self.assertRaises(Executed)):
+                scope_launcher.main(child[4:])
         finally:
             os.dup2(saved_stdin, 0)
             os.close(saved_stdin)
@@ -487,21 +637,16 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         group = reader.CGROUP_ROOT / "system.slice" / record["unit"]
         group.mkdir(parents=True)
         (group / "cgroup.events").write_text("populated 1\n")
-        state = dict(Id=record["unit"], LoadState="loaded", Transient="yes", InvocationID="new-incarnation",
-                     ControlGroup=f"/system.slice/{record['unit']}", Description=binding_description(binding),
-                     ActiveState="active", SubState="running", ActiveEnterTimestampMonotonic=str(
-                         int(record["launch_identity"].rsplit(":", 1)[1]) * 1_000_000 // os.sysconf("SC_CLK_TCK")))
+        state = {"Id": record["unit"], "LoadState": "loaded", "Transient": "yes", "InvocationID": "new-incarnation",
+                     "ControlGroup": f"/system.slice/{record['unit']}", "Description": binding_description(binding),
+                     "ActiveState": "active", "SubState": "running", "ActiveEnterTimestampMonotonic": str(
+                         int(record["launch_identity"].rsplit(":", 1)[1]) * 1_000_000 // os.sysconf("SC_CLK_TCK"))}
         self.native[record["unit"]] = state
-        with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: json.dumps(binding)}),
-              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
-              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
-              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=state)):
-            with owner.attest_launch(directory=directory, role="po", task=record["task"], workspace=workspace) as proof:
-                with self.assertRaises(MemoryScopeError):
-                    with owner.ownership():
-                        self.fail("attestation released admission before journal durability")
-                with JournalWriter(directory / protocol.JOURNAL_NAME, owner.run_id).open() as writer:
-                    writer.append(SCOPE_BOUND, binding=proof)
+        with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: json.dumps(binding)}), mock.patch('ummanu.runtime.head.local_pty.scoped_lifecycle.own_cgroup', return_value=group), mock.patch('ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT', reader.CGROUP_ROOT), mock.patch('ummanu.runtime.head.local_pty.scoped_lifecycle.native_scope_state', return_value=state), owner.attest_launch(directory=directory, role='po', task=record['task'], workspace=workspace) as proof):
+            with self.assertRaises(MemoryScopeError), owner.ownership():
+                self.fail("attestation released admission before journal durability")
+            with JournalWriter(directory / protocol.JOURNAL_NAME, owner.run_id).open() as writer:
+                writer.append(SCOPE_BOUND, binding=proof)
         self.assertNotIn(LAUNCH_BINDING_ENV, captured["argv"])
         self.assertFalse(self.collect(record["unit"]).errors)
         # A prospective launch requires the original caller's generation.
@@ -525,22 +670,12 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         def head_boundary():
             events = supervisor._journal.path.read_text()
             self.assertEqual(json.loads(events)["kind"], SCOPE_BOUND)
-            with self.assertRaises(MemoryScopeError):
-                with owner.ownership():
-                    self.fail("head work escaped admission serialization")
+            with self.assertRaises(MemoryScopeError), owner.ownership():
+                self.fail("head work escaped admission serialization")
             raise HeadBoundary()
         group = reader.CGROUP_ROOT / "system.slice" / unit
-        with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: json.dumps(admitted)}),
-              mock.patch.object(supervisor, "_install_signals"),
-              mock.patch.object(supervisor, "_prepare_memory_scope"),
-              mock.patch.object(supervisor, "start_head", side_effect=head_boundary),
-              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
-              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
-              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=self.native[unit]),
-              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value=record["launch_identity"]),
-              mock.patch("os.getcwd", return_value=record["workspace"])):
-            with self.assertRaises(HeadBoundary):
-                supervisor._begin()
+        with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: json.dumps(admitted)}), mock.patch.object(supervisor, '_install_signals'), mock.patch.object(supervisor, '_prepare_memory_scope'), mock.patch.object(supervisor, 'start_head', side_effect=head_boundary), mock.patch('ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT', reader.CGROUP_ROOT), mock.patch('ummanu.runtime.head.local_pty.scoped_lifecycle.own_cgroup', return_value=group), mock.patch('ummanu.runtime.head.local_pty.scoped_lifecycle.native_scope_state', return_value=self.native[unit]), mock.patch('ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity', return_value=record['launch_identity']), mock.patch('os.getcwd', return_value=record['workspace']), self.assertRaises(HeadBoundary)):
+            supervisor._begin()
         # The binding survived a pre-head process failure and still proves this
         # native scope. Missing/substituted admission never forks a head.
         self.assertFalse(self.collect(unit).errors)

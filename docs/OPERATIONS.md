@@ -42,6 +42,32 @@ installs Docker and Compose from the distribution and provisions the board store
 writes no state. `doctor` reports broken invariants (`--json` for structured findings). Changing the
 host requires `reconcile plan` and a separate confirmed apply.
 
+### Entrypoint activation
+
+A target that removes `src/<PACKAGE>/dispatch/runtime_preflight.py` or the running package's
+`[project.scripts]` console script is refused with `entrypoint_moved`.
+`dispatch.entrypoint_guard` inspects the pinned target Git objects. Production release checks it
+after ancestry and before board migrations or checkout advance; `upgrade.fast_forward` applies
+the same fence before moving the checkout. Neither advances the checkout nor applies board
+migrations for a missing entrypoint. A remote PR merge can still have landed on `main`: delivery
+to the remote and activation of the live installation are separate facts.
+
+The dispatcher persists the refused activation and its owed recovery requests, blocks the source
+card, and creates one operation for the sprint PO. Request IDs deduplicate operation creation,
+comments and blocking across replay. Existing recovery records retain their original facts and
+text. Do not retry the release or run ordinary `upgrade` to activate this target; those paths
+refuse the same missing entrypoint.
+
+The PO must arrange a separate deliberate installation operation with allowed production
+authority. Its plan must name the pinned target, replacement entrypoints, callers to stop/drain,
+checkout and data paths, units and environment bindings, schema compatibility and recovery
+boundary. Stop callers of the old tree before changing those bindings together; do not bypass
+the guard or move the checkout/apply board migrations as a release retry. This is an operation
+contract, not an executable rename procedure. Record the actual checkout SHA, entrypoint and
+unit/environment checks, supported production upgrade where applicable, doctor findings and a
+successful tick before completing the operation. Preserve the operation's request identity and
+owed recovery obligation until its evidence establishes activation.
+
 ### Pointing a command at a live root
 
 A command reads its live root from `--instance <dir>` (the directory or its `instance.yaml`), else
@@ -156,7 +182,7 @@ is refused. The script receives `--canon`, `--export`, `--target-db`, `--model` 
 product indexer and ignore both overrides.
 
 Heads run on `local-pty`, which ships with the product: no host-owned head runtime is installed,
-ordered after or reported (A20 step 9, [Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)).
+ordered after or reported (A20 step 9, [Head runtime](HEAD_RUNTIME.md#orca-migration-history)).
 
 ## Data plane
 
@@ -218,8 +244,7 @@ Every Codex head launched by the dispatcher, and the `openai-sub` resource probe
 
 With none of them the launch fails closed: no Codex head starts, and the refusal names the fix, "log
 in under `DATA_DIR/codex-home` (`CODEX_HOME=DATA_DIR/codex-home codex login`), or copy an `auth.json`
-there". There is no fallback to the legacy Orca home (`~/.config/orca/...`); A20 step 7 removed it
-(secretary-1723) once every live Codex head was proven to run on the data-dir login.
+there". There is no fallback to the legacy Orca home (`~/.config/orca/...`).
 
 Rung 3 needs to know the data dir. It comes from `UMMANU_DATA_DIR`. The production dispatcher
 tick, the background agents and `ummanu shell` set that variable for their own run from the
@@ -603,9 +628,9 @@ deferred: N turn(s) running` and does not fail. The request is the marker `DATA_
 the next process removes it at start. A stopped service is started.
 
 **Process receipt.** This run's pull delta alone cannot tell whether the service runs current code: the
-dispatcher's release fast-forwards the checkout before the PO runs `upgrade`, so the pull is empty
-(secretary-1759). So, like the web and memory services, the service is bound to what it was started
-on. Each process writes `DATA_DIR/po-service/process-receipt.json` at start, before it removes the
+dispatcher's release fast-forwards the checkout before the PO runs `upgrade`, so the pull is empty.
+Like the web and memory services, the service is bound to what it was started on. Each process
+writes `DATA_DIR/po-service/process-receipt.json` at start, before it removes the
 restart marker and takes the queue: its pid, kernel start ticks and systemd `INVOCATION_ID`, and the
 checkout it runs from — product revision and the sha256 of the tracked product source, dependencies and
 bundled schemas, computed as for the web and memory receipts. It is one private (0600) atomic
@@ -1034,7 +1059,7 @@ over on a repeat `project add`, so refreshing a draft does not reset routing.
 
 `project add` writes no `orca_binding`: a new project runs on local-pty heads in git workspaces.
 `orca_binding` is optional legacy (A20 step 8). An existing one is kept; only curator routing reads
-it, and card placement never does (secretary-1722).
+it, and card placement never does.
 
 ### Stale input or an invalid schema
 
@@ -1177,7 +1202,7 @@ It needs no Git and reads the live root the same with or without `.git`. Two che
 
 - schema validation: `instance.yaml`, every binding, adapter and onboarding draft, and the data
   manifest, the same read the dispatcher makes every tick;
-- the old-name guard ([Rename](RENAME.md#t5-guard)): every exported path and text file, as the next
+- the old-name guard ([Rename](RENAME.md#guard)): every exported path and text file, as the next
   cut copies it. The old product name passes only where an allowlist row covers it: the Hermes agent's
   own spellings, `secretary-instance`, old card refs, the `source:`/`supersedes:` lines of memory
   facts, and whole-file history (`state/knowledge`, except undated runbooks and `plans/current-*`).
@@ -1314,7 +1339,7 @@ the saved comment bytes. A crash after park intent, or after the move before sta
 the existing park and move identity. Release similarly replays its comment before the separate
 merge effect. A frozen comment never supplies current gate admission.
 
-Released old-format comments, including secretary-1883's overwritten observation timestamp,
+Released old-format comments, including an overwritten observation timestamp,
 are supported through authoritative `audit.committed_event` and `TaskReader.show` reads. Adoption
 requires successful commented kind, exact request/ref/dispatcher actor/marker, event id, one
 original board body with the immutable audit digest, the canonical receipt/reconciliation
@@ -1523,9 +1548,9 @@ issues:
     verdict: open
     reason: not reached before the sprint ended
 cards:
-  - ref: secretary-1573
+  - ref: project-1
     verdict: drop
-    reason: superseded by secretary-1577
+    reason: superseded by project-2
 ```
 
 **The closeout file** is your prose account of what was achieved, what is unfinished and what you
@@ -1755,11 +1780,23 @@ usage error, and nothing is written.
    `pending` and deletes nothing. Every save writes back only the target's own intent, so other
    intents and the replay cursor stay byte for byte as they were. `replay` reports each target's `status`, `reason` and `progress`. If a target is
    refused, read the manifest again before you retry. A target replay obeys the same hourly retry
-   policy as the tick ([Owned cleanup](OWNED_CLEANUP.md)): an intent that is not due, or that ended
+   policy as the tick: an intent that is not due, or that ended
    terminally, reports `replayed: false` with its `next_attempt_at` or terminal kind, and nothing runs.
 
 Code never chooses the targets. Protected candidates and audit branches stay until an operator
 names them.
+
+Close stages its observer handoff in the cleanup journal using the original generation and
+launch count. The external dispatcher enriches that obligation from the exact observer
+registration, waits for the existing close transaction to finish and for card cleanup or
+verified preservation, then processes the observer last. Retained observer user work appears
+as preservation in the same inventory. Pending Git removal, registration, ref or claim settlement
+blocks observer stop, including after exact card heads are stopped. Preservation permits handoff
+only when the owner verified the retained disposition, or ended it terminally, and settled heads
+and claims; missing ownership reported as preservation cannot stand in for that proof.
+A failed handoff or stop remains pending after board closure. Neither the closing observer nor
+a code worker cleans live residue. Installation and final residue proof belong to the subsequent
+authorized PO operation.
 
 ## Sprint observer heads
 
@@ -2285,9 +2322,11 @@ The stall settings are read at check time; garbage or zero falls back to the def
 
 ### Reports and verdicts
 
-Heads write bodies to `/tmp/ummanu-report-<ref>-<round>.md` and `/tmp/ummanu-verdict-<ref>-<round>.md`
-(directory from `UMMANU_DISPATCHER_BODY_DIR`); files are left in place. The round is part of the
-verdict request id.
+Heads write bodies to `ummanu-report-<ref>-<round>.md` and `ummanu-verdict-<ref>-<round>.md` in
+`<data_dir>/artifacts/bodies/` (or `UMMANU_DISPATCHER_BODY_DIR` when set), a directory the dispatcher
+keeps at mode 0700 and refuses when another user owns it; files are left in place. `task report` and
+`task verdict` read `--body-file` only as a regular file the caller owns, never through a symbolic link;
+anything else is refused with `unsafe_body_file` and exit code 2. The round is part of the verdict request id.
 
 A worker round ends only with a report under the request id the dispatcher issued, taken from the hidden
 `<!-- report-round generation=N ids=... -->` line at the end of `TASK.md`. Do not edit that line. To report
@@ -2936,7 +2975,7 @@ the upgrade put them. `upgrade --no-pull` realigns them against the moved checko
 service through their receipts, the web transport through its own (the front is `PartOf=` and comes with
 it). See [Taking the slice down, and rolling the application back a
 revision](#taking-the-slice-down-and-rolling-the-application-back-a-revision).
-For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
+For a target revision older than `bb43b5f`, that revision's `upgrade` has no
 dependency or memory receipts. After `ummanu upgrade --no-pull`, also run
 `"$HOME/ummanu/.venv/bin/pip" install -e "$HOME/ummanu[dev,memory]"` and restart
 `ummanu-memory.service`.
@@ -2981,7 +3020,7 @@ ummanu upgrade --instance INSTANCE --no-pull
 - An `upgrade` that ends `status: failed` did only the steps printed before the failure; it rolls nothing
   back.
 
-For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
+For a target revision older than `bb43b5f`, that revision's `upgrade` has no
 dependency or memory receipts. After `ummanu upgrade --no-pull`, also run
 `"$HOME/ummanu/.venv/bin/pip" install -e "$HOME/ummanu[dev,memory]"` and restart
 `ummanu-memory.service`.
@@ -3007,7 +3046,7 @@ No password, nothing written to the installation:
   ss -ltnp '( sport = :8787 or sport = :443 )'
   ummanu status --instance INSTANCE
   ummanu web-front check --instance INSTANCE
-  for path in / /api/system /api/tasks/secretary-1/events; do
+  for path in / /api/system /api/tasks/project-1/events; do
     printf '%s ' "$path"
     curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://HOST$path"
   done
@@ -3029,8 +3068,8 @@ It parses the running configuration against every published route and prints `"u
 Over the wire, an unauthorised client must get 401 and no body:
 
 ```bash
-for path in / /tasks/secretary-1 /api/system /api/tasks/secretary-1 \
-            /api/tasks/secretary-1/events /api/runs/x; do
+for path in / /tasks/project-1 /api/system /api/tasks/project-1 \
+            /api/tasks/project-1/events /api/runs/x; do
   printf '%s ' "$path"
   curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://HOST$path"
 done
@@ -3156,9 +3195,13 @@ plus any declared extra whose distributions the venv already carries. The receip
 excluded from backups). A missing, unreadable or malformed receipt means the work is done, never
 `unchanged`; do not copy or edit them.
 
-**First run after this change.** An installation has no receipts yet, so its first upgrade (the final
-upgrade included) reinstalls the product into the venv once and restarts the memory service once, then
-writes both receipts. The next run reports both steps `unchanged`.
+Process receipts for memory, web (`DATA_DIR/web/process-receipt.json`) and PO
+(`DATA_DIR/po-service/process-receipt.json`) share the bounded reader and private atomic publisher in
+`ummanu.infra.process_receipts`. Their released version-1 paths and JSON bytes are unchanged: memory
+and web bind a unit; PO publishes its own process identity without a unit field. Reads reject
+nonregular files, final symlinks, files over 64 KiB and malformed envelopes, including boolean versions.
+Existing valid receipts need no migration or deletion. Missing or stale receipts are repaired by the
+normal producer: upgrade after a successful memory/web probe, or the PO service when it starts.
 
 The packaged systemd timers are the only schedule owner of the background roles (curator, retro,
 steward). Before sprint:1459 they ran as Orca automations; upgrade no longer creates, repoints or
@@ -3291,7 +3334,7 @@ A role-workspace move is the one supported resolution of a foreign identity: run
 workspace, or with `TA_CURATOR_WORKSPACE` set to it). Run it after a move of the curator's workspace and Claude
 project directories, such as the sprint:1475 rename, and before the next tick, which otherwise refuses with
 `belongs to a different run identity` and names this verb. It follows only the known moves
-(`transition.rewrite.claude_move_paths`), never a string replace, and runs under the cursor-settlement lock:
+(`automations.agents.curator.move_paths.claude_move_paths`), never a string replace, and runs under the cursor-settlement lock:
 
 - the pending identity is rebound only when its workspace is a known old path that no longer exists and the rebound
   identity is the current run's; the facts in the batch are kept, its cursor keys follow the same moves and its batch
@@ -3497,7 +3540,7 @@ from its launch identity (state, pid), `supervisor` from the supervisor's `statu
 torn or untimed lines is `degraded`, with the reason. A source that did not answer is listed in
 `unavailable_sources`, never read as a gone head. A legacy record (a run on `orca-legacy`, or a head
 identity with no durable run) says `runtime: orca-legacy` and `legacy_record: true`, and is read through
-its pid heartbeat alone (secretary-1723 removed the pane inventory, A20 step 5).
+its pid heartbeat alone.
 
 Readings are advisory. No disconnected or unreadable source is evidence that a head is
 absent; never drop the claim, kill the workspace or restart the card on that basis. The command only reads:

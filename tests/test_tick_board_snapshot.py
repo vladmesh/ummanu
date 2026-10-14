@@ -452,5 +452,45 @@ class TickBoardSnapshotTests(unittest.TestCase):
             self.assertEqual(self.store.audit.pending, {})
 
 
+class CreateRepairMetadataTests(unittest.TestCase):
+    """A pending create whose metadata write was lost is repaired to what a fresh create writes."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (self.root / "projects").mkdir()
+        for project in ("demo", "relay"):
+            (self.root / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+        self.store = CountingStore(self.root)
+        self.enterContext(mock.patch("ummanu.board.sql_audit.SqlTaskAudit", return_value=self.store.audit))
+        sprint = {"ref": SPRINT, "status": "open", "repositories": ["demo"], "reservations": ["demo"]}
+        self.enterContext(mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint))
+        self.writer = GuardedWriter(self.store, self.root)
+
+    def create(self, request_id, task_type, **fields):
+        return self.writer.create(role="po", actor="po", project="demo", task_type=task_type, title="Card",
+                                  request_id=request_id, **fields)
+
+    def metadata(self, reference):
+        return self.store.meta[next(key for key, row in self.store.rows.items() if row["reference"] == reference)]
+
+    def test_repair_writes_the_whole_metadata_of_a_fresh_create(self):
+        # An operation card is cut into a sprint; the PO's code card here is linked to none.
+        for task_type, fields in (("operation", {"sprint": SPRINT, "touches_production": "relay"}), ("code", {})):
+            with self.subTest(task_type=task_type):
+                fresh = self.create(f"fresh-{task_type}", task_type, **fields)["task"]["ref"]
+                lost = TaskError("backend_unavailable", "the board is unavailable", 1)
+                with mock.patch.object(self.store, "_rpc_saveTaskMetadata", side_effect=lost), \
+                        self.assertRaisesRegex(TaskError, "audit repair is required"):
+                    self.create(f"lost-{task_type}", task_type, **fields)
+                pending = self.store.audit.pending_event(f"lost-{task_type}")
+                self.assertEqual(self.metadata(pending["ref"]), {})
+
+                self.writer._finish_pending_cleanup(pending, None)
+
+                self.assertEqual(self.metadata(pending["ref"]), self.metadata(fresh))
+                self.assertEqual(self.metadata(fresh)["record_type"], "task")
+                self.assertEqual(self.metadata(fresh).get("touches_production"), fields.get("touches_production"))
+
+
 if __name__ == "__main__":
     unittest.main()

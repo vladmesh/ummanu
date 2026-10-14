@@ -11,8 +11,8 @@ from unittest import mock
 
 from tests.support import cleanup_journal as journal_fixture
 from tests.support.cleanup_journal import LegacyFixture, head, intent, stored_files
-from ummanu.dispatch import cleanup
-from ummanu.dispatch.cleanup import INTENT_FILE_LIMIT, CleanupJournal, _intent_key, cleanup_record
+from ummanu.dispatch import cleanup_journal as cleanup
+from ummanu.dispatch.cleanup_journal import INTENT_FILE_LIMIT, CleanupJournal, _intent_key, cleanup_record
 from ummanu.dispatch.tick_telemetry import tick_counting
 from ummanu.dispatch.types import HostError
 from ummanu.runtime.head import HeadRun

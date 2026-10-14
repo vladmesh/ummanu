@@ -29,6 +29,7 @@ from typing import Any
 
 from ummanu.board.audit_contract import card_transition_of
 from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.sql_rows import rfc3339
 
 TABLE = "origin_returns"
 #: The columns a row is owed for.
@@ -76,7 +77,7 @@ class OutboxRow:
 
 
 def _iso(value: datetime | None) -> str | None:
-    return value.isoformat() if isinstance(value, datetime) else (str(value) if value else None)
+    return rfc3339(value, microseconds=True) if isinstance(value, datetime) else (str(value) if value else None)
 
 
 def owed_target(event: dict[str, Any]) -> str:

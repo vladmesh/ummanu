@@ -192,6 +192,36 @@ class Unmeasurable(Exception):
         self.report = report
 
 
+class Clock:
+    """The time a run is measured in, and the wait the poll's schedule is kept with.
+
+    Every reading in this file — a request's start and end, the schedule's anchor — and the one
+    wait the timer makes go through :data:`CLOCK`, so the samples and the schedule they are judged
+    against are always on the same clock. A test substitutes a virtual clock there, which makes
+    whether a poll started late a fact the test chose rather than a fact of the host it ran on;
+    a measured run never does.
+    """
+
+    def now(self) -> float:
+        return time.perf_counter()
+
+    def wait_until(self, due: float, stop: threading.Event) -> bool:
+        """Wait until `due` on this clock. False means `stop` was set instead.
+
+        Looped against the clock rather than trusting one timed wait, so this cannot return early
+        and start a poll ahead of its schedule.
+        """
+        while True:
+            remaining = due - self.now()
+            if remaining <= 0:
+                return True
+            if stop.wait(remaining):
+                return False
+
+
+CLOCK = Clock()
+
+
 @dataclass
 class Sample:
     """One request that was made and answered 2xx, and when it ran."""
@@ -384,7 +414,7 @@ def fetch(
     request = urllib.request.Request(base_url.rstrip("/") + route, method=method)
     if cookie:
         request.add_header("Cookie", cookie)
-    started = time.perf_counter()
+    started = CLOCK.now()
     if on_start is not None:
         on_start(started)
     try:
@@ -396,7 +426,7 @@ def fetch(
         status = int(exc.code)
     except (urllib.error.URLError, OSError) as exc:
         raise Unmeasurable(f"{method} {route} on {base_url} could not be made: {exc}") from None
-    ended = time.perf_counter()
+    ended = CLOCK.now()
     if 300 <= status < 400:
         raise Unmeasurable(
             f"{method} {route} on {base_url} answered {status}, a redirect. This script measures "
@@ -689,7 +719,7 @@ class SessionPoll:
         #: An idle session polled as a stand-in answers `running: false` throughout; that is not
         #: a turn ending.
         self.substitute = substitute
-        #: Start and end of every poll that answered, as `time.perf_counter` readings, in the order
+        #: Start and end of every poll that answered, as :data:`CLOCK` readings, in the order
         #: they answered — which with overlapping reads is not the order they started in.
         self.windows: list[tuple[float, float]] = []
         #: For every poll that answered, its actual start minus its scheduled one, in seconds.
@@ -748,23 +778,14 @@ class SessionPoll:
         return launch
 
     def _sleep_until(self, due: float) -> bool:
-        """Wait until `due` on the sample clock. False means the poll was stopped instead.
-
-        Looped against `time.perf_counter` rather than trusting one timed wait, so this cannot
-        return early and start a poll ahead of its schedule.
-        """
-        while True:
-            remaining = due - time.perf_counter()
-            if remaining <= 0:
-                return True
-            if self._stop.wait(remaining):
-                return False
+        """Wait until `due` on the sample clock. False means the poll was stopped instead."""
+        return CLOCK.wait_until(due, self._stop)
 
     def _run(self) -> None:
         """The timer: start poll *k* at `anchor + k * interval`, whatever earlier polls are doing."""
         # The first poll is due at once: `prepare` has already proved this session is running and
         # answers. The schedule is absolute from here, so a late wake-up does not push later ones.
-        anchor = time.perf_counter()
+        anchor = CLOCK.now()
         slot = 0
         while not self._stop.is_set():
             due = anchor + slot * POLL_INTERVAL_SECONDS

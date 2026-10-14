@@ -93,6 +93,9 @@ jobs:
           done
           echo "pull image postgres:16 failed after 4 attempts"
           exit 1
+      - name: Install the declared distribution build backend
+        if: ${{ matrix.suite == 'packaging' }}
+        run: python3 -m pip install 'setuptools>=77'
       - name: Run reported suite
         id: run_suite
         continue-on-error: true

@@ -1338,12 +1338,12 @@ class OwnedCleanupTests(unittest.TestCase):
         self.host._local_pty_root = lambda: root
         self.host.fence_cleanup_scopes = lambda *args: CommandHostRuntime.fence_cleanup_scopes(self.host, *args)
         key = self.request()
-        with mock.patch("ummanu.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
+        with mock.patch("ummanu.runtime.local_pty_inspection.runtime_scope_inventory", return_value=SimpleNamespace(
                 errors={}, disappeared=set())):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending")
         self.assertTrue(self.workspace.exists())
-        with mock.patch("ummanu.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
+        with mock.patch("ummanu.runtime.local_pty_inspection.runtime_scope_inventory", return_value=SimpleNamespace(
                 errors={}, disappeared={record["unit"]})):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])

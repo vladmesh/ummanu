@@ -24,7 +24,8 @@ from typing import Any
 
 from ummanu.cli_output import print_json
 from ummanu.config import instance_data_dir
-from ummanu.runtime.paths import add_instance_argument
+from ummanu.runtime.cli_composition import add_command_parser
+from ummanu.runtime.paths import add_instance_argument, instance_dir as _instance_dir
 from ummanu.secret_store import (
     MATERIALIZE_FILE,
     SecretStoreError,
@@ -67,10 +68,7 @@ SITES_SETTING = "host.web_front.sites"
 
 
 def add_web_front_subcommands(subparsers) -> None:
-    group = subparsers.add_parser(
-        "web-front",
-        help="the password-guarded TLS front that publishes the loopback web transport",
-    )
+    group = add_command_parser(subparsers, "web-front")
     commands = group.add_subparsers(dest="web_front_command")
 
     password = commands.add_parser(
@@ -417,11 +415,6 @@ def _write_private(path: Path, text: str) -> None:
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(text)
     os.chmod(path, 0o600)
-
-
-def _instance_dir(value: str) -> Path:
-    path = Path(value).expanduser()
-    return path.parent if path.name == "instance.yaml" else path
 
 
 def _usage(parser: argparse.ArgumentParser) -> int:

@@ -39,16 +39,21 @@ class RestoreCardObligation:
     identity: dict[str, Any]
 
 
-def _entity_number(kind: str, identity: object) -> int:
-    """A live row's backend number, read through `board/backend.py`'s one identity parser."""
+def restored_entity_number(kind: str, identity: object, *, error: type[Exception] = RuntimeError) -> int:
+    """A restored row's backend number, read through `board/backend.py`'s one identity parser.
+
+    `board/backend.py` mints `<kind>_<backend>_<n>` and reads it back; restore used to strip one
+    literal prefix and hand whatever remained to `int()`, which raised `ValueError` rather than a
+    restore refusal on any identity it did not recognise. The refusal is raised as `error`.
+    """
     number = entity_number(kind, identity)
     if number is None:
-        raise RuntimeError(f"restored row carries no usable {kind} identity: {identity!r}")
+        raise error(f"restored row carries no usable {kind} identity: {identity!r}")
     return number
 
 
-def _set_restore_phase(client: Any, phase: str) -> None:
-    """Expose restore phase boundaries to an optional benchmark observer."""
+def set_restore_phase(client: Any, phase: str) -> None:
+    """Mark a restore boundary when a diagnostic client provides a phase observer."""
     hook = getattr(client, "set_restore_phase", None)
     if callable(hook):
         hook(phase)
@@ -68,7 +73,7 @@ def _restore_create_payload(item: RestoreCardObligation, board_id: int) -> dict[
 
 
 def _restore_payload_error(item: Any, phase: str, error: Exception) -> Exception:
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     card = item.card if isinstance(item, RestoreCardObligation) else item
     reference = str(card.get("reference") or "<unknown>")
@@ -87,7 +92,7 @@ def refused_in_transaction(client: Any, error: BaseException) -> bool:
     transport loss (`backend_unavailable`, `sql_cards._driver_error`) leaves an outcome unknown,
     and only it, or a refusal outside a transaction, takes the ambiguity path.
     """
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     return (
         isinstance(error, TaskError)
@@ -98,7 +103,7 @@ def refused_in_transaction(client: Any, error: BaseException) -> bool:
 
 def store_refusal(what: str, error: BaseException) -> Exception:
     """The refusal of a restored batch, carrying what the store said."""
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     message = getattr(error, "message", str(error))
     return TaskError("backend_error", f"board store refused the restored {what}: {message}", 1)
@@ -138,8 +143,10 @@ def restore_cards_batched(
     request_prefix: str,
 ) -> None:
     """Create and initialize normalized cards without the interactive read cycle."""
+    from ummanu.board.legacy_codec import positive_int as _positive_int
+    from ummanu.board.task_protocol.rows import _matching_swimlane, _now
+    from ummanu.kernel.errors import TaskError
     from ummanu.restore import _restore_board_metadata
-    from ummanu.tasks import TaskError, _matching_swimlane, _now, _positive_int
 
     column_ids = {title: identifier for identifier, title in columns.items()}
     obligations: list[RestoreCardObligation] = []
@@ -164,7 +171,7 @@ def restore_cards_batched(
     )
     create_entries = [(item, "createTask", _restore_create_payload(item, board_id)) for item in missing]
 
-    _set_restore_phase(writer.client, "audit")
+    set_restore_phase(writer.client, "audit")
     for item in obligations:
         reference = str(item.card["reference"])
         committed = writer.audit.committed_event(item.request_id)
@@ -207,7 +214,7 @@ def restore_cards_batched(
     if missing:
         calls = [(method, payload) for _item, method, payload in create_entries]
         definite_create_failure = False
-        _set_restore_phase(writer.client, "create")
+        set_restore_phase(writer.client, "create")
         try:
             answers = writer.client.call_batch(calls)
             if any(_positive_int(answer) is None for answer in answers):
@@ -218,7 +225,7 @@ def restore_cards_batched(
             if refused_in_transaction(writer.client, exc):
                 raise store_refusal("card create batch", exc) from None
             # Transport loss or a malformed/incomplete aggregate answer is genuinely ambiguous.
-        _set_restore_phase(writer.client, "proof")
+        set_restore_phase(writer.client, "proof")
         existing = _restore_inventory(writer.client, board_id)
         _validate_restore_inventory(existing, obligations)
         absent = [
@@ -250,7 +257,7 @@ def restore_cards_batched(
             )
 
     task_ids = [_restore_task_id(existing, item) for item in obligations]
-    _set_restore_phase(writer.client, "metadata_state")
+    set_restore_phase(writer.client, "metadata_state")
     metadata_answers = writer.client.call_batch(
         ("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids
     )
@@ -307,7 +314,7 @@ def restore_cards_batched(
                 raise store_refusal("card metadata/state batch", exc) from None
             # Reconcile genuinely uncertain aggregate outcomes from fresh evidence below.
 
-    _set_restore_phase(writer.client, "proof")
+    set_restore_phase(writer.client, "proof")
     proved_rows = _restore_inventory(writer.client, board_id)
     _validate_restore_inventory(proved_rows, obligations)
     proved_ids = [_restore_task_id(proved_rows, item) for item in obligations]
@@ -347,19 +354,20 @@ def close_restored_cards_batched(
     board_id: int,
 ) -> None:
     """Close archived normalized rows in bounded calls after their comments are proved."""
-    from ummanu.tasks import TaskError, _task_is_active
+    from ummanu.board.task_protocol.rows import _task_is_active
+    from ummanu.kernel.errors import TaskError
 
     entries: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
     for card in cards:
         row = live[str(card["reference"])]
         if card.get("closed") and not row.get("closed"):
-            task_id = _entity_number("task", row["id"])
+            task_id = restored_entity_number("task", row["id"])
             entries.append((card, "closeTask", {"task_id": task_id}))
     if not entries:
         return
     owed = [int(payload["task_id"]) for _card, _method, payload in entries]
     definite_failure = False
-    _set_restore_phase(client, "closure")
+    set_restore_phase(client, "closure")
     try:
         answers = client.call_batch((method, payload) for _card, method, payload in entries)
         if any(answer is not True for answer in answers):
@@ -370,7 +378,7 @@ def close_restored_cards_batched(
         if refused_in_transaction(client, exc):
             raise store_refusal("card closure batch", exc) from None
         # Transport loss or an invalid aggregate answer needs an authoritative read.
-    _set_restore_phase(client, "proof")
+    set_restore_phase(client, "proof")
     rows = _restore_inventory(client, board_id)
     active_ids = {
         int(row["id"]) for row in rows.values() if _task_is_active(row) and str(row.get("id") or "").isdigit()
@@ -380,7 +388,7 @@ def close_restored_cards_batched(
         reference = next(
             str(card["reference"])
             for card in cards
-            if _entity_number("task", live[str(card["reference"])]["id"]) == incomplete[0]
+            if restored_entity_number("task", live[str(card["reference"])]["id"]) == incomplete[0]
         )
         if definite_failure:
             raise TaskError("backend_error", f"board store rejected restored-card closure for {reference}", 1)
@@ -395,7 +403,7 @@ def commit_restored_cards(
     request_prefix: str,
 ) -> None:
     """Publish one card obligation after its initialized row is authoritatively visible."""
-    _set_restore_phase(writer.client, "audit")
+    set_restore_phase(writer.client, "audit")
     for card in cards:
         reference = str(card["reference"])
         request_id = f"{request_prefix}card:{reference}"
@@ -404,7 +412,7 @@ def commit_restored_cards(
         event = writer.audit.pending_event(request_id)
         if event is None or event.get("kind") != "restored_bulk":
             raise RuntimeError(f"restored card has no durable obligation: {reference}")
-        task_id = _entity_number("task", live[reference]["id"])
+        task_id = restored_entity_number("task", live[reference]["id"])
         backend = BOARD_STORE_KIND
         event["task_id"] = entity_id("task", task_id)
         event["backend"]["kind"] = backend
@@ -414,7 +422,7 @@ def commit_restored_cards(
         try:
             writer.audit.append(request_id, event)
         except OSError:
-            from ummanu.tasks import TaskError
+            from ummanu.kernel.errors import TaskError
 
             raise TaskError("audit_pending", "restored card is proved; audit repair is required", 4) from None
 
@@ -441,7 +449,8 @@ def _restore_card_identity(card: dict[str, Any], metadata: dict[str, str]) -> di
 
 
 def _restore_inventory(client: Any, board_id: int) -> dict[str, dict[str, Any]]:
-    from ummanu.tasks import TaskError, all_project_cards
+    from ummanu.board.task_protocol.rows import all_project_cards
+    from ummanu.kernel.errors import TaskError
 
     result: dict[str, dict[str, Any]] = {}
     for row in all_project_cards(client, board_id):
@@ -457,7 +466,7 @@ def _restore_inventory(client: Any, board_id: int) -> dict[str, dict[str, Any]]:
 def _validate_restore_inventory(
     inventory: dict[str, dict[str, Any]], obligations: list[RestoreCardObligation]
 ) -> None:
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     seen: set[str] = set()
     for key, row in inventory.items():
@@ -480,7 +489,8 @@ def _validate_restore_inventory(
 
 
 def _restore_task_id(inventory: dict[str, dict[str, Any]], item: RestoreCardObligation) -> int:
-    from ummanu.tasks import TaskError, _positive_int
+    from ummanu.board.legacy_codec import positive_int as _positive_int
+    from ummanu.kernel.errors import TaskError
 
     reference = str(item.card["reference"])
     task_id = _positive_int(inventory.get(reference, {}).get("id"))
@@ -514,7 +524,7 @@ def _metadata_holds(live: dict[str, str], expected: dict[str, str]) -> bool:
 
 
 def _metadata_map(answer: Any) -> dict[str, str]:
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     if answer is not None and not isinstance(answer, dict):
         raise TaskError("backend_error", "board store returned invalid task metadata", 1)
@@ -528,7 +538,8 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
     promise execution order inside a batch, so this is the boundary that permits
     batching across entities without weakening order within one history.
     """
-    from ummanu.tasks import _BATCH_CHUNK, TaskError, _now
+    from ummanu.board.task_protocol.rows import _BATCH_CHUNK, _now
+    from ummanu.kernel.errors import TaskError
 
     grouped: dict[str, list[RestoreCommentOccurrence]] = {}
     for item in occurrences:
@@ -639,7 +650,7 @@ def _read_comment_histories(client: Any, subjects: list[tuple[str, int]]) -> dic
     order when several restores share the same one-second timestamp; the
     disposable backend contract canary is recorded in the recovery docs.
     """
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     answers = client.call_batch(("getAllComments", {"task_id": task_id}) for _, task_id in subjects)
     result: dict[str, list[str]] = {}
@@ -651,7 +662,8 @@ def _read_comment_histories(client: Any, subjects: list[tuple[str, int]]) -> dic
 
 
 def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any) -> dict[str, Any]:
-    from ummanu.tasks import TaskError, _digest
+    from ummanu.board.task_protocol.rows import _digest
+    from ummanu.kernel.errors import TaskError
 
     identity = {"body_sha256": _digest(item.body), "restore_occurrence": item.occurrence}
     committed = writer.audit.committed_event(item.request_id)
@@ -689,7 +701,7 @@ def _restore_comment_event(writer: Any, item: RestoreCommentOccurrence, now: Any
 def _commit_proven_comment(
     writer: Any, item: RestoreCommentOccurrence, event: dict[str, Any], history_size: int
 ) -> None:
-    from ummanu.tasks import TaskError
+    from ummanu.kernel.errors import TaskError
 
     payload = event.get("payload")
     if not isinstance(payload, dict):
@@ -735,12 +747,9 @@ def restore_card(
     request_id: str | None,
 ) -> dict[str, Any]:
     """Apply an audited restore-only metadata and placement update."""
-    from ummanu.tasks import (
-        _STATE_BY_COLUMN,
-        TaskError,
-        _CommittedWriteError,
-        _task_number,
-    )
+    from ummanu.board.legacy_codec import TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN
+    from ummanu.board.task_protocol.rows import _CommittedWriteError, _task_number
+    from ummanu.kernel.errors import TaskError
 
     if target not in _STATE_BY_COLUMN.values():
         raise TaskError("validation", "restore target is invalid", 2)
@@ -780,7 +789,7 @@ def reconcile_restore_order(
     references: list[str],
     request_id: str,
 ) -> None:
-    from ummanu.dispatch.cleanup import bulk_lane
+    from ummanu.dispatch.ownership import bulk_lane
 
     with bulk_lane(writer.data_dir, exclusive=True):
         _reconcile_restore_order(writer, column, swimlane, references, request_id)
@@ -794,7 +803,9 @@ def _reconcile_restore_order(
     request_id: str,
 ) -> None:
     """Repair one active restore group under its own resumable audit boundary."""
-    from ummanu.tasks import TaskError, _now, _positive_int
+    from ummanu.board.legacy_codec import positive_int as _positive_int
+    from ummanu.board.task_protocol.rows import _now
+    from ummanu.kernel.errors import TaskError
 
     if not column or not references or any(not reference for reference in references):
         raise TaskError("validation", "restore order identity is invalid", 2)
@@ -863,7 +874,8 @@ def _reconcile_restore_order(
 
 def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
     """Resume a staged group, proving every uncertain move from live state."""
-    from ummanu.tasks import TaskError, _positive_int
+    from ummanu.board.legacy_codec import positive_int as _positive_int
+    from ummanu.kernel.errors import TaskError
 
     payload = event.get("payload")
     if not isinstance(payload, dict):
@@ -882,7 +894,7 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
     ):
         raise TaskError("backend_error", "pending restore order is invalid", 1)
 
-    from ummanu.dispatch.cleanup import bulk_lane
+    from ummanu.dispatch.ownership import bulk_lane
 
     with bulk_lane(writer.data_dir, exclusive=True):
         live, rows = _live_restore_group(writer, column, swimlane)
@@ -940,7 +952,9 @@ def _live_restore_group(
     order, the final authoritative proof and parity gate disagree and fail
     closed instead of publishing this repair.
     """
-    from ummanu.tasks import TaskError, _positive_int, _task_is_active, all_project_cards
+    from ummanu.board.legacy_codec import positive_int as _positive_int
+    from ummanu.board.task_protocol.rows import _task_is_active, all_project_cards
+    from ummanu.kernel.errors import TaskError
 
     board_id, columns, swimlanes = writer.reader._board()
     column_id = next((identifier for identifier, title in columns.items() if title == column), None)
@@ -985,7 +999,7 @@ def _without_retired_launch_mode(metadata: dict[str, str]) -> dict[str, str]:
     would leave a retired value already on the card exactly where it was. Every mode the product
     still has passes through untouched.
     """
-    from ummanu.tasks import _CODEX_LAUNCH_MODES
+    from ummanu.board.task_protocol.rows import _CODEX_LAUNCH_MODES
 
     sanitized = dict(metadata)
     if (
@@ -1000,7 +1014,8 @@ def restore_comment(
     writer: Any, reference: str, body: str, occurrence: int, request_id: str | None
 ) -> dict[str, Any]:
     """Append one comment and retain pending state when its reply is lost."""
-    from ummanu.tasks import TaskError, _CommittedWriteError, _digest, _task_number
+    from ummanu.board.task_protocol.rows import _CommittedWriteError, _digest, _task_number
+    from ummanu.kernel.errors import TaskError
 
     payload: dict[str, Any] = {
         "body_sha256": _digest(body),
@@ -1042,7 +1057,8 @@ def restore_comment(
 
 def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str, Any]) -> None:
     """Finish a restore whose metadata committed before its placement failed."""
-    from ummanu.tasks import _STATE_BY_COLUMN, TaskError
+    from ummanu.board.legacy_codec import TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN
+    from ummanu.kernel.errors import TaskError
 
     target = payload.get("target")
     if target not in _STATE_BY_COLUMN.values():
@@ -1070,7 +1086,9 @@ def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str
 
 def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: dict[str, Any]) -> None:
     """Prove or finish one ambiguous Card/Sprint comment before audit append."""
-    from ummanu.tasks import TaskError, _digest, _positive_int
+    from ummanu.board.legacy_codec import positive_int as _positive_int
+    from ummanu.board.task_protocol.rows import _digest
+    from ummanu.kernel.errors import TaskError
 
     ref = str(event.get("ref") or "")
     body = payload.get("restore_body")
@@ -1128,12 +1146,9 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
 def _restore_placement(
     writer: Any, task: dict[str, Any], target: str, position: int | None, swimlane: str
 ) -> None:
-    from ummanu.tasks import (
-        TaskError,
-        _nonnegative_int,
-        _positive_int,
-        project_card_by_reference,
-    )
+    from ummanu.board.legacy_codec import nonnegative_int as _nonnegative_int, positive_int as _positive_int
+    from ummanu.board.task_protocol.rows import project_card_by_reference
+    from ummanu.kernel.errors import TaskError
 
     board_id, _, swimlanes = writer.reader._board()
     raw = project_card_by_reference(writer.client, board_id, task["ref"])

@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from tests import (
+    source_trees,
     test_sprint_executors,
     test_sprint_listing_budget,
     test_sprint_restore,
@@ -24,7 +25,7 @@ SUITES = (
 EXPECTED_METHODS = {
     "tests.test_sprints": 113,
     "tests.test_sprint_executors": 21,
-    "tests.test_sprint_restore": 25,
+    "tests.test_sprint_restore": 24,
     "tests.test_sprint_listing_budget": 4,
 }
 BEFORE_REACH_INS = {
@@ -60,7 +61,7 @@ EXPECTED_CLASSES = {
     "tests.test_sprint_executors.SprintCardExecutorTests": 4,
     "tests.test_sprint_executors.SprintExecutorRecoveryTests": 4,
     "tests.test_sprint_executors.CardEditExecutorTests": 3,
-    "tests.test_sprint_restore.SprintRestoreTests": 25,
+    "tests.test_sprint_restore.SprintRestoreTests": 24,
     "tests.test_sprint_listing_budget.SprintListingBudgetTests": 4,
 }
 
@@ -113,7 +114,7 @@ FORBIDDEN_RPC = {
 
 def _method_findings(method: object, *, include_rpc: bool = True) -> set[str]:
     body = textwrap.dedent(inspect.getsource(method))
-    tree = ast.parse(body)
+    tree = source_trees.parse(body)
     names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)} & FORBIDDEN_NAMES
     rpc = (
         {node.value for node in ast.walk(tree) if isinstance(node, ast.Constant)} & FORBIDDEN_RPC
@@ -169,7 +170,7 @@ def _reachable_helpers(owner: type, root: object) -> list[tuple[tuple[str, ...],
             continue
         seen.add(method)
         reached.append((path, method))
-        tree = ast.parse(textwrap.dedent(inspect.getsource(method)))
+        tree = source_trees.parse(textwrap.dedent(inspect.getsource(method)))
         helper_names = {
             node.attr
             for node in ast.walk(tree)
@@ -229,7 +230,7 @@ class SprintFixtureGuards(unittest.TestCase):
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 163)
+        self.assertEqual(len(methods), 162)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]

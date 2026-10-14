@@ -8,7 +8,9 @@ says so, its turn processes killed. No PostgreSQL, no Docker, no systemd.
 
 from __future__ import annotations
 
+import argparse
 import ast
+import contextlib
 import getpass
 import inspect
 import json
@@ -31,6 +33,7 @@ from typing import ClassVar
 from unittest import mock
 from urllib.parse import urlencode
 
+from tests import source_trees
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.po_cli_fakes import (
     FAKE_CLAUDE,
@@ -41,6 +44,7 @@ from tests.po_cli_fakes import (
     unscoped_test_launch,
 )
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints, sprint_client
+from tests.support.call_log import CallLog
 from tests.web_fakes import Recording
 from ummanu import upgrade
 from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
@@ -53,6 +57,10 @@ from ummanu.host import (
     render_systemd_unit,
 )
 from ummanu.host_apply import UnitProcessIdentity
+from ummanu.installation.upgrade import (
+    services as upgrade_services,
+    types as upgrade_types,
+)
 from ummanu.po import (
     client as po_client,
     runner as po_runner,
@@ -400,7 +408,7 @@ class CommentDeliveryTests(ServiceFixture):
     def test_refusal_and_rendering_do_not_consume_comments_and_pending_acceptance_does(self) -> None:
         from tests.po_card_fakes import card
         from ummanu.dispatch.po_cards import _po_record, render_po_card_input
-        from ummanu.web import pages
+        from ummanu.web import page_po
 
         self.sprints = FakeSprints({"sprint:50": None})
         service = self.service(run=False, sprints=self.sprints)
@@ -431,7 +439,7 @@ class CommentDeliveryTests(ServiceFixture):
         self.assertEqual(pending[0]["metadata"], first.metadata)
         self.assertIn("comment-049", pending[0]["text"])
         self.assertIn('<details class="po-service-input">',
-                      pages._po_queued_entry(pending[0]))
+                      page_po._po_queued_entry(pending[0]))
         replay = service.submit(session_id=session, text="First", request_id="accepted", source="dispatcher",
                                 card=self.facts(52))
         self.assertTrue(replay["repeated"])
@@ -1481,24 +1489,24 @@ class PoUpgradeFixture(ServiceFixture):
     def bind(self, identity: UnitProcessIdentity) -> str:
         """What the PO service process `identity` writes when it starts on the checkout as it is now."""
         with (
-            mock.patch.object(upgrade.os, "getpid", return_value=identity.pid),
-            mock.patch.object(upgrade, "_process_start_ticks", return_value=identity.start_ticks),
+            mock.patch.object(upgrade_services.os, "getpid", return_value=identity.pid),
+            mock.patch.object(upgrade_services, "_process_start_ticks", return_value=identity.start_ticks),
         ):
-            return upgrade.write_po_process_receipt(
+            return upgrade_services.write_po_process_receipt(
                 self.data, self.product, environ={"INVOCATION_ID": identity.invocation_id}
             )
 
     def receipt(self) -> Path:
         return po_client.process_receipt_path(self.data)
 
-    def context(self, units: FakeUnitInstaller, **flags) -> upgrade.UpgradeContext:
+    def context(self, units: FakeUnitInstaller, **flags) -> upgrade_types.UpgradeContext:
         report = SimpleNamespace(
             host={"unit_prefix": "ummanu-"},
             instance={"host": {"unit_prefix": "ummanu-"}},
             data_dir=self.data,
             bindings=[],
         )
-        return upgrade.UpgradeContext(
+        return upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -1528,8 +1536,8 @@ class UpgradeStepTests(PoUpgradeFixture):
         def systemd_brings_it_back(_seconds: float) -> None:
             units.identities[PO_UNIT] = units._new_identity()
 
-        with listening(service), mock.patch.object(upgrade, "_sleep", side_effect=systemd_brings_it_back):
-            result = upgrade.step_po(self.context(units))
+        with listening(service), mock.patch.object(upgrade_services, "_sleep", side_effect=systemd_brings_it_back):
+            result = upgrade_services.step_po(self.context(units))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn(f"restarted {PO_UNIT} while idle", result.detail)
@@ -1548,8 +1556,8 @@ class UpgradeStepTests(PoUpgradeFixture):
         self.reached_gate(session_id, 1)
         units = self.units()
 
-        with listening(service), mock.patch.object(upgrade, "_sleep") as sleep:
-            result = upgrade.step_po(self.context(units))
+        with listening(service), mock.patch.object(upgrade_services, "_sleep") as sleep:
+            result = upgrade_services.step_po(self.context(units))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertTrue(
@@ -1566,26 +1574,26 @@ class UpgradeStepTests(PoUpgradeFixture):
         self.assertFalse(service.thread.is_alive(), "the deferred restart was not applied at idle")  # type: ignore[attr-defined]
 
     def test_a_service_that_does_not_answer_keeps_the_request_on_disk(self) -> None:
-        result = upgrade.step_po(self.context(self.units()))
+        result = upgrade_services.step_po(self.context(self.units()))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("not acknowledged", result.detail)
         self.assertTrue(po_client.restart_marker_path(self.data).exists())
 
     def test_uninstalled_stopped_unchanged_and_dry_run(self) -> None:
-        missing = upgrade.step_po(self.context(FakeUnitInstaller()))
+        missing = upgrade_services.step_po(self.context(FakeUnitInstaller()))
         self.assertEqual(missing.status, "skipped", missing.detail)
 
         stopped = FakeUnitInstaller(present={PO_UNIT: b"[Service]\n"})
-        started = upgrade.step_po(self.context(stopped))
+        started = upgrade_services.step_po(self.context(stopped))
         self.assertEqual((started.status, stopped.calls), ("changed", [("restart", PO_UNIT)]))
 
         bound = self.units()
         self.bind(bound.identities[PO_UNIT])
-        current = upgrade.step_po(self.context(bound, code_changed=False))
+        current = upgrade_services.step_po(self.context(bound, code_changed=False))
         self.assertEqual(current.status, "unchanged", current.detail)
 
-        dry = upgrade.step_po(self.context(self.units(), dry_run=True, po_unit_changed=True))
+        dry = upgrade_services.step_po(self.context(self.units(), dry_run=True, po_unit_changed=True))
         self.assertEqual(dry.status, "changed")
         self.assertIn("would ask", dry.detail)
         self.assertIn("the PO unit file changed", dry.detail)
@@ -1608,8 +1616,8 @@ class ProcessReceiptTests(PoUpgradeFixture):
         def systemd_brings_it_back(_seconds: float) -> None:
             units.identities[PO_UNIT] = units._new_identity()
 
-        with listening(service), mock.patch.object(upgrade, "_sleep", side_effect=systemd_brings_it_back):
-            result = upgrade.step_po(self.context(units, code_changed=False))
+        with listening(service), mock.patch.object(upgrade_services, "_sleep", side_effect=systemd_brings_it_back):
+            result = upgrade_services.step_po(self.context(units, code_changed=False))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn(f"restarted {PO_UNIT} while idle", result.detail)
@@ -1623,7 +1631,7 @@ class ProcessReceiptTests(PoUpgradeFixture):
         self.assertFalse(service.thread.is_alive(), "the service did not exit for the restart")  # type: ignore[attr-defined]
 
     def test_no_receipt_is_a_restart_reason(self) -> None:
-        result = upgrade.step_po(self.context(self.units(), code_changed=False))
+        result = upgrade_services.step_po(self.context(self.units(), code_changed=False))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("the PO process receipt is missing", result.detail)
@@ -1634,7 +1642,7 @@ class ProcessReceiptTests(PoUpgradeFixture):
         identity = units.identities[PO_UNIT]
         self.bind(identity)
 
-        result = upgrade.step_po(self.context(units, code_changed=False))
+        result = upgrade_services.step_po(self.context(units, code_changed=False))
 
         self.assertEqual(result.status, "unchanged", result.detail)
         revision = self.git("rev-parse", "HEAD")
@@ -1650,7 +1658,7 @@ class ProcessReceiptTests(PoUpgradeFixture):
         units = self.units()
         self.bind(units._new_identity())
 
-        result = upgrade.step_po(self.context(units, code_changed=False))
+        result = upgrade_services.step_po(self.context(units, code_changed=False))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("the PO process receipt belongs to a different process generation", result.detail)
@@ -1665,7 +1673,7 @@ class ProcessReceiptTests(PoUpgradeFixture):
         ):
             with self.subTest(flag):
                 flags = {"code_changed": False, flag: True}
-                result = upgrade.step_po(self.context(units, dry_run=True, **flags))
+                result = upgrade_services.step_po(self.context(units, dry_run=True, **flags))
                 self.assertEqual(result.status, "changed", result.detail)
                 self.assertIn(reason, result.detail)
                 self.assertNotIn("receipt", result.detail)
@@ -1679,8 +1687,8 @@ class ProcessReceiptTests(PoUpgradeFixture):
         self.bind(units.identities[PO_UNIT])
         self.move_checkout()
 
-        with listening(service), mock.patch.object(upgrade, "_sleep") as sleep:
-            result = upgrade.step_po(self.context(units, code_changed=False))
+        with listening(service), mock.patch.object(upgrade_services, "_sleep") as sleep:
+            result = upgrade_services.step_po(self.context(units, code_changed=False))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertTrue(
@@ -1701,7 +1709,7 @@ class ProcessReceiptTests(PoUpgradeFixture):
         before = self.receipt().read_bytes()
         self.move_checkout()
 
-        result = upgrade.step_po(self.context(units, code_changed=False, dry_run=True))
+        result = upgrade_services.step_po(self.context(units, code_changed=False, dry_run=True))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("would ask", result.detail)
@@ -1729,12 +1737,12 @@ class ProcessReceiptTests(PoUpgradeFixture):
         for name, text in cases.items():
             with self.subTest(name):
                 self.receipt().write_text(text, encoding="utf-8")
-                result = upgrade.step_po(self.context(units, code_changed=False, dry_run=True))
+                result = upgrade_services.step_po(self.context(units, code_changed=False, dry_run=True))
                 self.assertEqual(result.status, "changed", result.detail)
                 self.assertIn("the PO process receipt is malformed", result.detail)
         self.receipt().unlink()
         self.receipt().mkdir()
-        result = upgrade.step_po(self.context(units, code_changed=False, dry_run=True))
+        result = upgrade_services.step_po(self.context(units, code_changed=False, dry_run=True))
         self.assertIn("the PO process receipt is malformed", result.detail)
 
     # --- what the service writes ------------------------------------------------------------------
@@ -1765,29 +1773,48 @@ class ProcessReceiptTests(PoUpgradeFixture):
         before = self.receipt().read_bytes()
 
         with (
-            mock.patch.object(upgrade.os, "replace", side_effect=OSError("disk full")),
-            self.assertRaises(upgrade.ReceiptError),
+            mock.patch.object(upgrade_services.process_receipts.os, "replace", side_effect=OSError("disk full")) as replace,
+            self.assertRaises(upgrade_types.ReceiptError),
         ):
             self.bind(FakeUnitInstaller._new_identity())
 
+        replace.assert_called_once()
         self.assertEqual(self.receipt().read_bytes(), before)
         self.assertEqual(list(self.receipt().parent.glob("*.tmp")), [])
 
     def test_a_process_systemd_did_not_start_writes_no_receipt(self) -> None:
-        with self.assertRaisesRegex(upgrade.ReceiptError, "INVOCATION_ID"):
-            upgrade.write_po_process_receipt(self.data, self.product, environ={})
+        with self.assertRaisesRegex(upgrade_types.ReceiptError, "INVOCATION_ID"):
+            upgrade_services.write_po_process_receipt(self.data, self.product, environ={})
         self.assertFalse(self.receipt().exists())
 
         with mock.patch.object(
-            upgrade, "write_po_process_receipt", side_effect=upgrade.ReceiptError("no INVOCATION_ID")
+            upgrade_services, "write_po_process_receipt", side_effect=upgrade_types.ReceiptError("no INVOCATION_ID")
         ):
             line = po_service._write_process_receipt(self.data)
         self.assertIn("no process receipt was written (no INVOCATION_ID)", line)
 
     def test_the_service_writes_its_receipt_before_it_fulfils_a_pending_restart(self) -> None:
-        source = inspect.getsource(po_service.run_po_serve)
-        self.assertLess(source.index("_write_process_receipt(data_dir)"), source.index("service.start()"))
-        with mock.patch.object(upgrade, "write_po_process_receipt", return_value="wrote it") as write:
+        log = CallLog()
+
+        class Service:
+            def __init__(self, *args, data_dir, **kwargs) -> None:
+                self.queue = SimpleNamespace(directory=data_dir / "queue")
+
+            start = log.recorder("start", [])
+            run = log.recorder("run", 0)
+
+        with (
+            mock.patch.object(po_service, "PoService", Service),
+            mock.patch.object(po_service, "PoRunner"),
+            mock.patch.object(po_service, "BoardSprintSessions"),
+            mock.patch.object(po_service, "listening", lambda service: contextlib.nullcontext(self.data / "po.sock")),
+            log.patch(po_service, "_write_process_receipt", "ummanu po: wrote it"),
+            mock.patch.object(po_service, "_say"),
+        ):
+            code = po_service.run_po_serve(argparse.Namespace(data_dir=str(self.data), instance="unused"))
+        self.assertEqual(code, 0)
+        self.assertEqual(log.names, ["_write_process_receipt", "start", "run"])
+        with mock.patch.object(upgrade_services, "write_po_process_receipt", return_value="wrote it") as write:
             self.assertEqual(po_service._write_process_receipt(self.data), "ummanu po: wrote it")
         root = write.call_args.args[1]
         self.assertTrue((root / "src" / "ummanu" / "po" / "service.py").is_file(), root)
@@ -1798,15 +1825,15 @@ class ProcessReceiptTests(PoUpgradeFixture):
 
     # --- verify -----------------------------------------------------------------------------------
 
-    def verify(self, units: FakeUnitInstaller) -> upgrade.StepResult:
+    def verify(self, units: FakeUnitInstaller) -> upgrade_types.StepResult:
         with (
-            mock.patch.object(upgrade, "step_host", return_value=upgrade.StepResult("host", "unchanged")),
-            mock.patch.object(upgrade.role_skills, "audit", return_value={"ok": True}),
-            mock.patch.object(upgrade, "assert_snapshot_current"),
-            mock.patch.object(upgrade, "installed_heads"),
-            mock.patch.object(upgrade.state_repo, "status", return_value=""),
+            mock.patch.object(upgrade_services, "step_host", return_value=upgrade_types.StepResult("host", "unchanged")),
+            mock.patch.object(upgrade_services.role_skills, "audit", return_value={"ok": True}),
+            mock.patch.object(upgrade_services, "assert_snapshot_current"),
+            mock.patch.object(upgrade_services, "installed_heads"),
+            mock.patch("ummanu.state_repo.status", return_value=""),
         ):
-            return upgrade.step_verify(self.context(units, code_changed=False))
+            return upgrade_services.step_verify(self.context(units, code_changed=False))
 
     def test_verify_reports_the_po_receipt(self) -> None:
         units = self.units()
@@ -2011,7 +2038,7 @@ class SprintSessionTests(ServiceFixture):
 
     def test_native_durable_seed_has_decisions_summary_bounded_why_answer_and_notes(self):
         from ummanu.po.context_budget import conversation_bytes
-        from ummanu.web import pages
+        from ummanu.web import page_po
         service, sprints, old = self.budget_resolver(threshold=65536)
         quotation = "No further runs.\nВладелец сказал нет."
         decisions = [{"id": "grant", "scope": "sprint", "kind": "e2e_grant", "value": 3, "quotation": "Three runs."},
@@ -2038,14 +2065,14 @@ class SprintSessionTests(ServiceFixture):
                          "Read the actual NOTES.md", self.DOC, "[Excerpt;", f"/po/sessions/{old}"):
             self.assertIn(expected, seed.text)
         self.assertLess(len(seed.text.encode("utf-8")), 16384)
-        html = pages._po_input_text({"text": seed.text, "metadata": seed.metadata})
+        html = page_po._po_input_text({"text": seed.text, "metadata": seed.metadata})
         self.assertIn(f'href="/po/sessions/{old}"', html)
         self.assertIn(f'href="/po/sessions/{new}"', html)
         self.assertIn("predecessor history", html)
         self.assertIn('<details class="po-service-input">', html)
         self.assertNotIn("<details open", html)
         from datetime import UTC, datetime
-        row = pages._po_session_row({"session_id": new, "title": "sprint:1", "first_message": seed.text,
+        row = page_po._po_session_row({"session_id": new, "title": "sprint:1", "first_message": seed.text,
                                      "first_message_metadata": seed.metadata}, closed=False, now=datetime.now(UTC))
         self.assertIn("Context rollover", row)
         self.assertIn(f'href="/po/sessions/{old}"', row)
@@ -2646,7 +2673,7 @@ class ThinWebTests(unittest.TestCase):
         offenders = []
         for package in ("web", "webproto"):
             for path in sorted((ROOT / "src" / "ummanu" / package).rglob("*.py")):
-                tree = ast.parse(path.read_text(encoding="utf-8"))
+                tree = source_trees.parse(path.read_text(encoding="utf-8"))
                 for node in ast.walk(tree):
                     names = []
                     if isinstance(node, ast.Import):
@@ -2657,9 +2684,6 @@ class ThinWebTests(unittest.TestCase):
                         if name in ("ummanu.po.runner", "ummanu.po.service"):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {name}")
         self.assertEqual(offenders, [])
-
-    def test_the_web_recovery_module_is_gone(self) -> None:
-        self.assertFalse((ROOT / "src" / "ummanu" / "webproto" / "po_recovery.py").exists())
 
 
 class ProviderFallbackTests(ServiceFixture):

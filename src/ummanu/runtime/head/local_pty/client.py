@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
+from ...._fsutil import fsync_directory
 from ..memory import MemoryScopeError
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
@@ -62,6 +63,7 @@ class HeadHandle:
     supervisor_pid: int
     head_pid: int
     scope_generation: str = ""
+    journal_started_seq: int = 0
 
     def connect(self, timeout: float = 5.0) -> SupervisorClient:
         return SupervisorClient.connect(self.socket_path, timeout=timeout)
@@ -129,7 +131,10 @@ def spawn_head(
     for error_path in error_paths:
         error_path.unlink(missing_ok=True)
     journal_path = run_dir / protocol.JOURNAL_NAME
-    already = len(read_events(journal_path).events)
+    prior = read_events(journal_path)
+    if prior.truncated_tail or prior.malformed or not prior.ordered:
+        raise LocalPtySpawnError("journal_unavailable", "the launch journal is damaged")
+    sequence_floor = max((event["seq"] for event in prior.events), default=0)
 
     argv = [
         sys.executable,
@@ -181,11 +186,7 @@ def spawn_head(
                 previous.stop_and_prove_empty()
             lifecycle.persist(run_dir, role=role, task=task, workspace=str(Path(cwd or os.getcwd()).resolve()),
                               replace_existing=not bool(scope_generation))
-            descriptor = os.open(run_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            fsync_directory(run_dir.parent)
         except MemoryScopeError as exc:
             raise LocalPtySpawnError("cleanup_failed", str(exc), cleanup_complete=False,
                                      scope_generation=scope_generation or (previous.generation if previous is not None else lifecycle.generation)) from exc
@@ -214,7 +215,7 @@ def spawn_head(
         status = intermediate.wait()
     except (OSError, subprocess.SubprocessError) as exc:
         error = LocalPtySpawnError("scope_failed", f"head scope launcher failed: {exc}")
-        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already) from exc
+        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, sequence_floor) from exc
     except Exception as exc:  # admission can fail before or after the launch syscall
         if intermediate is not None:
             intermediate.wait()
@@ -224,14 +225,14 @@ def spawn_head(
                                      scope_generation=scope_generation) from exc
         if lifecycle is not None:
             error = _after_failed_launch(LocalPtySpawnError("admission_refused", str(exc)),
-                                        lifecycle, journal_path, socket_path, already)
+                                        lifecycle, journal_path, socket_path, sequence_floor)
             if not error.cleanup_complete:
                 raise error from exc
         raise
     if memory_limit_mib is not None and status != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
         error = LocalPtySpawnError("scope_failed", f"head scope did not start (exit {status}): {tail}")
-        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
+        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, sequence_floor)
 
     deadline = time.monotonic() + timeout
     while True:
@@ -242,11 +243,12 @@ def spawn_head(
                     str(failure.get("reason") or "startup_failed"),
                     str(failure.get("detail") or ""),
                 )
-                raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
+                raise _after_failed_launch(error, lifecycle, journal_path, socket_path, sequence_floor)
         result = read_events(journal_path)
-        observed = lifecycle.started_or_exited(result.events, already) if lifecycle else None
-        started = [event for event in result.events[already:] if event.get("kind") == RUN_STARTED]
-        record = observed[0] if observed else (started[-1] if started else None)
+        usable = not (result.truncated_tail or result.malformed or not result.ordered)
+        observed = lifecycle.started_or_exited(result.events, sequence_floor) if lifecycle and usable else None
+        started = [event for event in result.events if event.get("kind") == RUN_STARTED and event["seq"] > sequence_floor]
+        record = observed[0] if observed else (started[-1] if started and usable else None)
         exited = observed[1] if observed else False
         if (
             record is not None
@@ -264,6 +266,7 @@ def spawn_head(
                 supervisor_pid=int(record.get("supervisor_pid") or 0),
                 head_pid=int(record.get("head_pid") or 0),
                 scope_generation=lifecycle.generation if lifecycle is not None else "",
+                journal_started_seq=record["seq"],
             )
         if time.monotonic() >= deadline:
             tail = ""
@@ -276,7 +279,7 @@ def spawn_head(
                 f"the supervisor for {run_id} did not answer within {timeout:g}s "
                 f"(intermediate exit {status}); log tail: {tail!r}",
             )
-            raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
+            raise _after_failed_launch(error, lifecycle, journal_path, socket_path, sequence_floor)
         time.sleep(_POLL_SECONDS)
 
 
@@ -286,7 +289,9 @@ def _after_failed_launch(
 ) -> LocalPtySpawnError:
     if lifecycle is None:
         return error
-    observed = lifecycle.started_or_exited(read_events(journal_path).events, since)
+    reading = read_events(journal_path)
+    observed = (lifecycle.started_or_exited(reading.events, since)
+                if not (reading.truncated_tail or reading.malformed or not reading.ordered) else None)
     try:
         if observed is not None and not observed[1]:
             lifecycle.cancel_started(
@@ -324,16 +329,8 @@ def _startup_error(path: Path) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _answers(socket_path: Path) -> bool:
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    probe.settimeout(0.5)
-    try:
-        probe.connect(str(socket_path))
-    except OSError:
-        return False
-    finally:
-        probe.close()
-    return True
+# Kept as this module's name: tests patch `client._answers` to stand in for a live supervisor.
+_answers = protocol.socket_answers
 
 
 class SupervisorClient:

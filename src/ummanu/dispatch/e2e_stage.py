@@ -65,8 +65,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ummanu.board import e2e_budget, e2e_record, owner_decisions, po_execution, wait_card
-from ummanu.board import po_origin as origin_field
+from ummanu.board import (
+    e2e_budget,
+    e2e_record,
+    owner_decisions,
+    po_execution,
+    po_origin as origin_field,
+    wait_card,
+)
 from ummanu.board.completion_evidence import has_candidate
 from ummanu.board.e2e_record import FAILURE, REFUSED, SENT, SUCCESS, BudgetWait, E2eRun, E2eState
 from ummanu.dispatch import attempt_accounting
@@ -82,14 +88,13 @@ from ummanu.dispatch.e2e import (
     red_evidence,
     run_head_sha,
 )
-from ummanu.dispatch.gate import GateResult, _name_with_owner
-from ummanu.dispatch.gate import _fingerprint as _gate_fingerprint
 from ummanu.dispatch.gate_receipt import is_exact_sha
+from ummanu.dispatch.gate_types import GateResult, _fingerprint as _gate_fingerprint
+from ummanu.dispatch.github_ci import _name_with_owner
 from ummanu.dispatch.helpers import _legacy_worker_branch, safe_one_line, scrub_host_output
-from ummanu.dispatch.state import DispatcherRecord, request_token
-from ummanu.dispatch.state import attempt_request_id as _attempt_request_id
+from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id, request_token
 from ummanu.dispatch.types import HostError
-from ummanu.tasks import TaskError
+from ummanu.kernel.errors import TaskError
 
 #: The phase a red run's rework is opened under: its request id carries `gate-red`, so the sprint
 #: charges it as the red CI it is.
@@ -159,7 +164,6 @@ def run_stage(
             record,
             records,
             payload,
-            attempt_id,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-declaration-blocked", ref),
             reason=f"The e2e stage cannot read this project's e2e declaration: {scrub_host_output(str(exc))}",
             step=step,
@@ -175,7 +179,7 @@ def run_stage(
     if last is not None:
         if last.closing and runtime.audit.committed_event(last.closing) is None:
             # Its Blocked move did not commit: repeat it, with the same id and words.
-            return _block_run(runtime, task, record, records, payload, attempt_id, last, step=step)
+            return _block_run(runtime, task, record, records, payload, last, step=step)
         if not last.closing and not last.acted:
             settled = _settle_run(
                 runtime, task, record, records, payload, attempt_id, state, last, declaration, step=step
@@ -530,7 +534,7 @@ def _settle_run(
                 }
                 _persist(runtime, ref, state)
     if run.closing:
-        return _block_run(runtime, task, record, records, payload, attempt_id, run, step=step)
+        return _block_run(runtime, task, record, records, payload, run, step=step)
     return _act(runtime, task, record, records, payload, attempt_id, state, run, step=step)
 
 
@@ -570,7 +574,7 @@ def _act(
                 f"rather than released.\nTail:\n```\n{log}\n```",
             )
             _persist(runtime, ref, state)
-            return _block_run(runtime, task, record, records, payload, attempt_id, run, step=step)
+            return _block_run(runtime, task, record, records, payload, run, step=step)
         if not run.acted:
             run.acted = True
             _persist(runtime, ref, state)
@@ -604,7 +608,7 @@ def _act(
         f"charged. Wait card: {run.wait_ref}. Evidence: {result.get('evidence') or run.run_url}.",
     )
     _persist(runtime, ref, state)
-    return _block_run(runtime, task, record, records, payload, attempt_id, run, step=step)
+    return _block_run(runtime, task, record, records, payload, run, step=step)
 
 
 def _red_evidence(runtime: Any, run: E2eRun) -> tuple[str, str, str]:
@@ -674,7 +678,6 @@ def _block_run(
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
-    attempt_id: str,
     run: E2eRun,
     *,
     step: str,
@@ -690,7 +693,6 @@ def _block_run(
         record,
         records,
         payload,
-        attempt_id,
         request_id=run.closing,
         reason=run.closing_reason,
         step=step,
@@ -705,7 +707,6 @@ def _block(
     record: DispatcherRecord,
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
-    attempt_id: str,
     *,
     request_id: str,
     reason: str,
@@ -764,7 +765,7 @@ def _standing_decline(
     state.budget_wait = None
     state.budget_decline = {"decision": decision, "request_id": request_id}
     _persist(runtime, ref, state)
-    return _block(runtime, task, record, records, payload, attempt_id, request_id=request_id,
+    return _block(runtime, task, record, records, payload, request_id=request_id,
                   reason=owner_decisions.refusal_text(sprint, refusal), step=step,
                   outcome="standing owner decision refuses e2e", blocked_reason="other")
 
@@ -884,7 +885,6 @@ def _await_decision(
             record,
             records,
             payload,
-            attempt_id,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "e2e-budget-blocked", ref, sha),
             reason=(
                 f"{spent_line} The PO decision card could not be cut: "
@@ -1138,7 +1138,6 @@ def _budget_recheck(
         record,
         records,
         payload,
-        attempt_id,
         request_id="-".join(
             request_token(part) for part in ("dispatcher", "e2e-budget-declined", ref, waiting.decision)
         ),

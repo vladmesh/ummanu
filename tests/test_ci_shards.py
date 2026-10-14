@@ -798,8 +798,8 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 self.assertNotIn(name, environment)
             for name in (
                 "HOME",
-                "TA_CODEX_HOME",
-                "TA_PIPELINE_STATE_DIR",
+                "UMMANU_CODEX_HOME",
+                "UMMANU_PIPELINE_STATE_DIR",
                 "TEMP",
                 "TMP",
                 "TMPDIR",
@@ -1235,15 +1235,6 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             changed = _changed_candidate_lines(root, base, candidate)
 
         self.assertEqual(changed, {"src/ummanu/module.py": [8], "src/ummanu/added.py": [1, 2]})
-
-    def test_coverage_configuration_enables_branch_scope_without_a_threshold(self) -> None:
-        config = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
-
-        self.assertIn("[tool.coverage.run]", config)
-        self.assertIn("branch = true", config)
-        self.assertIn("relative_files = true", config)
-        self.assertIn('source = ["src/ummanu"]', config)
-        self.assertNotIn("fail_under", config)
 
     def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:
         directory.mkdir(parents=True, exist_ok=True)

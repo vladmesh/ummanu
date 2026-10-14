@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import ast
+import contextlib
 import copy
-import inspect
 import tempfile
 import unittest
 from dataclasses import replace
@@ -13,25 +12,28 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest import mock
 
-from ummanu.board import (
-    Actor,
-    BoardEventPending,
-    Card,
-    CardState,
-    EntityKind,
-    SqlBoardHost,
-    TransitionRequest,
+from tests.fakes.board import MemoryAudit
+from tests.support.call_log import CallLog
+from ummanu.board.events import BoardEventPending
+from ummanu.board.host import TransitionRequest
+from ummanu.board.models import Actor, Card, CardState, EntityKind
+from ummanu.board.sql_host import SqlBoardHost
+from ummanu.dispatch import (
+    attempt_accounting,
+    runtime as dispatch_runtime,
+    worker_continuation as continuation_module,
 )
-from ummanu.board.fake import MemoryAudit
-from ummanu.dispatch import attempt_accounting, worker_continuation as continuation_module
 from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
+    ContinuationLivenessState,
     ContinuationRecoveryRung,
+    WorkerContinuation,
     WorkerContinuationLiveness,
     WorkerContinuationStage,
+    residual_composer_class,
 )
 from ummanu.runtime.head.handoff import PromptHandoff, handoff_budget
 
@@ -167,13 +169,21 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.record.previous_review_id = "prior-green"
         self.record.report_decision_id = "canonical-rework"
         self.record.worker_continuation.begin_red_transition(
-            "review", 0, f"Observer decision: rework. {body}", "red", "rework",
-            reserved_generation=4, decision_body=body,
-            decision_protocol_prerequisites=("repair-contract",))
+            "review",
+            0,
+            f"Observer decision: rework. {body}",
+            "red",
+            "rework",
+            reserved_generation=4,
+            decision_body=body,
+            decision_protocol_prerequisites=("repair-contract",),
+        )
         # A released pending transition may still carry the redundant move body.
         self.record = DispatcherRecord.from_json(self.record.to_json())
         self.records["sample-1"] = self.record
-        with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={"action": "delivered"}):
+        with mock.patch.object(
+            continuation_module, "_deliver_red_continuation", return_value={"action": "delivered"}
+        ):
             self.assertEqual(self.complete()["action"], "delivered")
         move = self.accounting.terminal_effect.call_args.kwargs
         self.assertEqual(move["decision"], "rework")
@@ -200,8 +210,14 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
                     self.assertEqual(result["action"], "gate-red-reused-worker")
                 else:
                     with (
-                        mock.patch.object(continuation_module, "_write_worker_relaunch_intent", return_value=None),
-                        mock.patch.object(continuation_module, "_bring_up_worker_head", return_value=(SimpleNamespace(run={}), None)),
+                        mock.patch.object(
+                            continuation_module, "_write_worker_relaunch_intent", return_value=None
+                        ),
+                        mock.patch.object(
+                            continuation_module,
+                            "_bring_up_worker_head",
+                            return_value=(SimpleNamespace(run={}), None),
+                        ),
                     ):
                         result = self.restart()
                     self.assertEqual(result["action"], "gate-red-rework")
@@ -223,8 +239,15 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.runtime.save_records.side_effect = lambda *_: frozen.append(self.record.to_json())
         with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={}):
             assessment_decision.rework_parked(
-                self.runtime, self.task, self.record, self.records, self.payload, "tick",
-                reason=body, protocol_prerequisites=("repair-contract",))
+                self.runtime,
+                self.task,
+                self.record,
+                self.records,
+                self.payload,
+                "tick",
+                reason=body,
+                protocol_prerequisites=("repair-contract",),
+            )
         reason = frozen[0]["worker_continuation"]["move_reason"]
         self.assertIn("[decision:rework]", reason)
         self.assertNotIn(body, reason)
@@ -242,16 +265,22 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
         self.runtime.audit.events.return_value = []
         self.task["type"] = "research"
         body = "Canonical observer reasoning that remains on the card."
-        with (mock.patch.object(release_lifecycle, "transfer_research_report", return_value=None),
-              mock.patch.object(release_lifecycle, "release_effect", return_value={"action": "released"}) as effect):
-            release_lifecycle.release_parked(self.runtime, self.task, self.record, self.records,
-                                             self.payload, "tick", reason=body)
+        with (
+            mock.patch.object(release_lifecycle, "transfer_research_report", return_value=None),
+            mock.patch.object(
+                release_lifecycle, "release_effect", return_value={"action": "released"}
+            ) as effect,
+        ):
+            release_lifecycle.release_parked(
+                self.runtime, self.task, self.record, self.records, self.payload, "tick"
+            )
         reason = effect.call_args.kwargs["move_reason"]
         self.assertIn("[decision:release]", reason)
         self.assertNotIn(body, reason)
         with mock.patch.object(assessment_decision, "attempt_accounting", self.accounting):
-            assessment_decision.reslice_parked(self.runtime, self.task, self.record, self.records,
-                                               self.payload, "tick", reason=body)
+            assessment_decision.reslice_parked(
+                self.runtime, self.task, self.record, self.records, self.payload, "tick"
+            )
         move = self.accounting.terminal_effect.call_args.kwargs
         self.assertEqual((move["decision"], move["target"]), ("reslice", "blocked"))
         self.assertIn("[decision:reslice]", move["reason"])
@@ -479,7 +508,9 @@ class ProductionContinuationHandoffTests(unittest.TestCase):
         self.runtime.host.worker_handoffs.return_value = True
         self.runtime.host.worker_handoff_floor.return_value = 41
         self.runtime.host.worker_handoff_started.return_value = "none"
-        self.runtime.host.provider_progress.side_effect = lambda *_: self.provider_evidence(cursor=self.cursor)
+        self.runtime.host.provider_progress.side_effect = lambda *_: self.provider_evidence(
+            cursor=self.cursor
+        )
         self.runtime.host.safe_recover_worker_continuation.return_value = {
             "state": "unavailable",
             "reason": "no provider-safe recovery here",
@@ -531,11 +562,17 @@ class ProductionContinuationHandoffTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["handoff_stage"], "typed")
         on_disk = woken_with[0]
-        self.assertEqual(on_disk["worker_continuation"]["handoff"]["floor"], 41,
-                         "the handoff's floor is on disk before anything is woken or typed")
-        self.assertEqual(on_disk["worker_continuation"]["stage"], WorkerContinuationStage.DELIVERY_PENDING.value)
-        self.assertTrue(on_disk["worker_continuation_liveness"]["baseline_established"],
-                        "and so is the provider baseline")
+        self.assertEqual(
+            on_disk["worker_continuation"]["handoff"]["floor"],
+            41,
+            "the handoff's floor is on disk before anything is woken or typed",
+        )
+        self.assertEqual(
+            on_disk["worker_continuation"]["stage"], WorkerContinuationStage.DELIVERY_PENDING.value
+        )
+        self.assertTrue(
+            on_disk["worker_continuation_liveness"]["baseline_established"], "and so is the provider baseline"
+        )
         self.assertEqual(self.runtime.host.resume_worker.call_args.kwargs, {"handoff_started": "none"})
         continuation = self.record.worker_continuation
         self.assertTrue(continuation.delivery_pending)
@@ -624,7 +661,9 @@ class ProductionContinuationHandoffTests(unittest.TestCase):
     def test_a_released_pending_delivery_opens_its_handoff_on_its_next_pass(self) -> None:
         self.retain()
         self.record.worker_continuation.begin_delivery("gate", self.START - 60)
-        self.record.worker_continuation_liveness = WorkerContinuationLiveness.begin(self.record.worker_head_run)
+        self.record.worker_continuation_liveness = WorkerContinuationLiveness.begin(
+            self.record.worker_head_run
+        )
         self.record.worker_continuation_liveness.observe_provider(
             self.provider_evidence(), self.START - 60, head_run=self.record.worker_head_run
         )
@@ -687,7 +726,9 @@ class ProductionContinuationHandoffTests(unittest.TestCase):
         self.assertEqual(attempts[:4], [1, 2, 2, 3])
         self.runtime.host.safe_recover_worker_continuation.assert_called_once()
         self.runtime._stop_worker_confirmed.assert_called_once()
-        self.assertEqual(result["action"], "worker-launch-intent-unwritable", "the replacement path, after the stop")
+        self.assertEqual(
+            result["action"], "worker-launch-intent-unwritable", "the replacement path, after the stop"
+        )
         self.assertEqual(self.record.worker_continuation_liveness.terminal_outcome, "replacement")
 
     def test_provider_progress_resets_the_ladder_and_is_not_a_confirmation(self) -> None:
@@ -700,7 +741,9 @@ class ProductionContinuationHandoffTests(unittest.TestCase):
         self.cursor = "cursor-2"
         self.now += 10
         result = self.production(self.recover)
-        self.assertEqual(result["handoff_stage"], "submitted", "progress is liveness, not the handoff's receipt")
+        self.assertEqual(
+            result["handoff_stage"], "submitted", "progress is liveness, not the handoff's receipt"
+        )
         self.assertEqual(self.record.worker_continuation_liveness.busy_attempts, 0)
         self.assertTrue(self.record.worker_continuation.delivery_pending)
 
@@ -742,7 +785,9 @@ class ProductionContinuationHandoffTests(unittest.TestCase):
         self.now += 10
         self.assertEqual(self.production(self.recover)["action"], "gate-red-worker-busy")
         self.runtime.host.resume_worker.assert_not_called()
-        self.assertEqual(self.record.worker_continuation_liveness.busy_attempts, 0, "20 s stalled is no attempt")
+        self.assertEqual(
+            self.record.worker_continuation_liveness.busy_attempts, 0, "20 s stalled is no attempt"
+        )
 
     def test_a_deferred_read_spends_and_writes_nothing(self) -> None:
         self.opened("typed")
@@ -773,7 +818,13 @@ class TheRecoveryDebtIsReadFromTheSavedRecordTests(ProductionContinuationHandoff
         self.runtime.host.resume_worker.side_effect = self.pending_error("submitted")
         self.production(
             continuation_module._deliver_red_continuation,
-            self.runtime, self.task, self.record, self.records, self.payload, "tick-attempt", phase=phase,
+            self.runtime,
+            self.task,
+            self.record,
+            self.records,
+            self.payload,
+            "tick-attempt",
+            phase=phase,
         )
         self.runtime.host.worker_handoff_started.return_value = "started"
         for elapsed in (60, 120):
@@ -820,7 +871,9 @@ class TheRecoveryDebtIsReadFromTheSavedRecordTests(ProductionContinuationHandoff
             with self.subTest(phase=phase):
                 self.setUp()
                 self.submitted_and_stalled(phase)
-                snapshot = self.die_when(lambda record: record.worker_continuation_liveness.busy_attempts == 3)
+                snapshot = self.die_when(
+                    lambda record: record.worker_continuation_liveness.busy_attempts == 3
+                )
                 self.assertEqual(snapshot["worker_continuation_liveness"]["recovery_rung"], "none")
                 self.reload(snapshot)
                 self.later_passes()
@@ -835,16 +888,22 @@ class TheRecoveryDebtIsReadFromTheSavedRecordTests(ProductionContinuationHandoff
                 self.setUp()
                 self.submitted_and_stalled(phase)
                 snapshot = self.die_when(
-                    lambda record: record.worker_continuation_liveness.recovery_rung
-                    == ContinuationRecoveryRung.SAFE_RECOVERY_PENDING
+                    lambda record: (
+                        record.worker_continuation_liveness.recovery_rung
+                        == ContinuationRecoveryRung.SAFE_RECOVERY_PENDING
+                    )
                 )
-                self.assertEqual(snapshot["worker_continuation_liveness"]["recovery_rung"], "safe_recovery_pending")
+                self.assertEqual(
+                    snapshot["worker_continuation_liveness"]["recovery_rung"], "safe_recovery_pending"
+                )
                 self.reload(snapshot)
                 self.later_passes()
                 self.runtime.host.safe_recover_worker_continuation.assert_not_called()
                 self.assertGreaterEqual(self.runtime._stop_worker_confirmed.call_count, 1)
                 self.runtime.host.resume_worker.assert_not_called()
-                self.assertIn("unconfirmed after dispatcher recovery", self.record.worker_continuation_liveness.reason)
+                self.assertIn(
+                    "unconfirmed after dispatcher recovery", self.record.worker_continuation_liveness.reason
+                )
 
     def test_an_unconfirmed_terminal_stop_is_retried_until_confirmed_then_one_replacement(self) -> None:
         for phase in ("gate", "review"):
@@ -913,7 +972,10 @@ class TheRecoveryStateTableTests(ProductionContinuationHandoffTests):
             liveness.terminalize(outcome, f"recorded {outcome}")
         self.record = DispatcherRecord.from_json(self.record.to_json())
         self.records = {self.task["ref"]: self.record}
-        self.assertEqual(self.record.worker_continuation_liveness.recovery_rung, rung if not outcome else self.Rung.TERMINAL)
+        self.assertEqual(
+            self.record.worker_continuation_liveness.recovery_rung,
+            rung if not outcome else self.Rung.TERMINAL,
+        )
         for counted in (
             self.runtime._stop_worker_confirmed,
             self.runtime.host.safe_recover_worker_continuation,
@@ -935,28 +997,157 @@ class TheRecoveryStateTableTests(ProductionContinuationHandoffTests):
         if kind == "progressed":
             self.cursor = "cursor-moved"
         elif kind in {"unavailable", "identity_mismatch"}:
-            self.runtime.host.provider_progress.side_effect = lambda *_, state=kind: {"state": state, "reason": state}
+            self.runtime.host.provider_progress.side_effect = lambda *_, state=kind: {
+                "state": state,
+                "reason": state,
+            }
 
     ROWS: ClassVar[list[tuple[str, dict[str, Any], str, str, str, tuple[int, int, int]]]] = [
         # name, episode, provider, marker, expected action, (stops, capability calls, deliveries)
-        ("terminal replacement", {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("terminal replacement, cursor moved", {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"}, "progressed", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("identity fenced", {"rung": Rung.NONE, "outcome": "identity_fenced"}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("ambiguous safe recovery", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("ambiguous safe recovery, cursor moved", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "progressed", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("ambiguous safe recovery, source foreign", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "identity_mismatch", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("response window open", {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": 30.0}, "unchanged", "", "gate-red-worker-recovery-window", (0, 0, 0)),
-        ("response window over, no progress", {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": -1.0}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("response window over, progress", {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": -1.0}, "progressed", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
-        ("resume once, not yet used", {"rung": Rung.SAFE_RECOVERY_RESUME_ONCE}, "unchanged", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
-        ("resume once used, exhausted again", {"rung": Rung.SAFE_RECOVERY_RESUME_ONCE, "attempts": 3, "used": True}, "unchanged", "", "worker-launch-intent-unwritable", (1, 0, 0)),
-        ("exhausted, no rung yet", {"rung": Rung.NONE, "attempts": 3}, "unchanged", "", "worker-launch-intent-unwritable", (1, 1, 0)),
-        ("exhausted, no rung yet, progress", {"rung": Rung.NONE, "attempts": 3}, "progressed", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
-        ("exhausted, source unavailable", {"rung": Rung.NONE, "attempts": 3}, "unavailable", "", "gate-red-continuation-liveness-unavailable", (0, 0, 0)),
-        ("exhausted, source foreign", {"rung": Rung.NONE, "attempts": 3}, "identity_mismatch", "", "gate-red-continuation-liveness-unavailable", (0, 0, 0)),
-        ("quiet, nothing owed", {"rung": Rung.NONE}, "unchanged", "", "gate-red-worker-handoff-pending", (0, 0, 1)),
-        ("terminal replacement, report arrived", {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"}, "unchanged", "report:done", "gate-red-reused-worker", (0, 0, 0)),
-        ("ambiguous safe recovery, report arrived", {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3}, "unchanged", "report:done", "gate-red-reused-worker", (0, 0, 0)),
+        (
+            "terminal replacement",
+            {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"},
+            "unchanged",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "terminal replacement, cursor moved",
+            {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"},
+            "progressed",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "identity fenced",
+            {"rung": Rung.NONE, "outcome": "identity_fenced"},
+            "unchanged",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "ambiguous safe recovery",
+            {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3},
+            "unchanged",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "ambiguous safe recovery, cursor moved",
+            {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3},
+            "progressed",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "ambiguous safe recovery, source foreign",
+            {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3},
+            "identity_mismatch",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "response window open",
+            {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": 30.0},
+            "unchanged",
+            "",
+            "gate-red-worker-recovery-window",
+            (0, 0, 0),
+        ),
+        (
+            "response window over, no progress",
+            {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": -1.0},
+            "unchanged",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "response window over, progress",
+            {"rung": Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": -1.0},
+            "progressed",
+            "",
+            "gate-red-worker-handoff-pending",
+            (0, 0, 1),
+        ),
+        (
+            "resume once, not yet used",
+            {"rung": Rung.SAFE_RECOVERY_RESUME_ONCE},
+            "unchanged",
+            "",
+            "gate-red-worker-handoff-pending",
+            (0, 0, 1),
+        ),
+        (
+            "resume once used, exhausted again",
+            {"rung": Rung.SAFE_RECOVERY_RESUME_ONCE, "attempts": 3, "used": True},
+            "unchanged",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 0, 0),
+        ),
+        (
+            "exhausted, no rung yet",
+            {"rung": Rung.NONE, "attempts": 3},
+            "unchanged",
+            "",
+            "worker-launch-intent-unwritable",
+            (1, 1, 0),
+        ),
+        (
+            "exhausted, no rung yet, progress",
+            {"rung": Rung.NONE, "attempts": 3},
+            "progressed",
+            "",
+            "gate-red-worker-handoff-pending",
+            (0, 0, 1),
+        ),
+        (
+            "exhausted, source unavailable",
+            {"rung": Rung.NONE, "attempts": 3},
+            "unavailable",
+            "",
+            "gate-red-continuation-liveness-unavailable",
+            (0, 0, 0),
+        ),
+        (
+            "exhausted, source foreign",
+            {"rung": Rung.NONE, "attempts": 3},
+            "identity_mismatch",
+            "",
+            "gate-red-continuation-liveness-unavailable",
+            (0, 0, 0),
+        ),
+        (
+            "quiet, nothing owed",
+            {"rung": Rung.NONE},
+            "unchanged",
+            "",
+            "gate-red-worker-handoff-pending",
+            (0, 0, 1),
+        ),
+        (
+            "terminal replacement, report arrived",
+            {"rung": Rung.NONE, "attempts": 3, "outcome": "replacement"},
+            "unchanged",
+            "report:done",
+            "gate-red-reused-worker",
+            (0, 0, 0),
+        ),
+        (
+            "ambiguous safe recovery, report arrived",
+            {"rung": Rung.SAFE_RECOVERY_PENDING, "attempts": 3},
+            "unchanged",
+            "report:done",
+            "gate-red-reused-worker",
+            (0, 0, 0),
+        ),
     ]
 
     def test_each_recorded_state_takes_its_one_next_action(self) -> None:
@@ -969,18 +1160,32 @@ class TheRecoveryStateTableTests(ProductionContinuationHandoffTests):
                 result = self.production(self.recover, marker or None)
                 self.assertEqual(result["action"], action)
                 self.assertEqual(self.runtime._stop_worker_confirmed.call_count, stops, "stops")
-                self.assertEqual(self.runtime.host.safe_recover_worker_continuation.call_count, capability, "capability")
+                self.assertEqual(
+                    self.runtime.host.safe_recover_worker_continuation.call_count, capability, "capability"
+                )
                 self.assertEqual(self.runtime.host.resume_worker.call_count, deliveries, "deliveries")
-                if deliveries and episode["rung"] in {self.Rung.SAFE_RECOVERY_RESUME_ONCE, self.Rung.SAFE_RECOVERY_RESPONSE_WINDOW}:
+                if deliveries and episode["rung"] in {
+                    self.Rung.SAFE_RECOVERY_RESUME_ONCE,
+                    self.Rung.SAFE_RECOVERY_RESPONSE_WINDOW,
+                }:
                     on_disk = self.resumed_with[0]["worker_continuation_liveness"]
                     self.assertEqual(on_disk["recovery_rung"], "safe_recovery_resume_once")
-                    self.assertTrue(on_disk["recovery_resume_used"], "the one return was durable before the delivery")
+                    self.assertTrue(
+                        on_disk["recovery_resume_used"], "the one return was durable before the delivery"
+                    )
 
     def test_a_repeated_pass_over_unchanged_debt_or_window_writes_nothing(self) -> None:
         for name, episode, stop in (
-            ("open window", {"rung": self.Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": 600.0}, None),
-            ("unconfirmed terminal stop", {"rung": self.Rung.NONE, "attempts": 3, "outcome": "replacement"},
-             {"status": "degraded", "action": "worker-stop-unconfirmed"}),
+            (
+                "open window",
+                {"rung": self.Rung.SAFE_RECOVERY_RESPONSE_WINDOW, "attempts": 3, "deadline_in": 600.0},
+                None,
+            ),
+            (
+                "unconfirmed terminal stop",
+                {"rung": self.Rung.NONE, "attempts": 3, "outcome": "replacement"},
+                {"status": "degraded", "action": "worker-stop-unconfirmed"},
+            ),
         ):
             with self.subTest(row=name):
                 self.setUp()
@@ -1005,60 +1210,59 @@ class TheRecoveryStateTableTests(ProductionContinuationHandoffTests):
         self.runtime.host.resume_worker.assert_not_called()
 
 
-class ContinuationOwnershipTests(unittest.TestCase):
-    def test_implementation_is_owned_by_the_package_not_runtime_callbacks(self) -> None:
-        root = Path(__file__).resolve().parents[1]
-        runtime_source = (root / "src/ummanu/dispatch/runtime.py").read_text(encoding="utf-8")
-        runtime_tree = ast.parse(runtime_source)
-        runtime = next(
-            n for n in runtime_tree.body if isinstance(n, ast.ClassDef) and n.name == "DispatcherRuntime"
+class AdvanceWorkerContinuationOrderTests(unittest.TestCase):
+    """`_advance_worker` runs the continuation collaborators in order, observed through one call log."""
+
+    ORDER = (
+        "_complete_red_transition",
+        "_worker_report_marker",
+        "_recover_worker_continuation",
+        "_handle_worker_report",
+        "_resolve_headless_worker",
+        "_deliver_worker_comments",
+        "_wait_watchdog",
+    )
+
+    def advance(self, stage: WorkerContinuationStage, *, recovered: dict | None = None) -> list[str]:
+        record = DispatcherRecord(
+            worker="worker-1",
+            workspace="/unused",
+            handle="worker-1",
+            head="codex",
+            review_head="claude",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=1.0,
         )
-        module_tree = ast.parse(inspect.getsource(continuation_module))
-        helpers = {
-            "_begin_red_transition",
-            "_complete_red_transition",
-            "_deliver_red_continuation",
-            "_observe_retained_continuation_progress",
-            "_block_unadmitted_continuation_liveness",
-            "_continuation_recovery_window",
-            "_advance_no_progress_continuation",
-            "_finish_retained_worker_resume",
-            "_restart_red_worker",
-            "_record_worker_continuation",
-        }
-        runtime_names = {n.name for n in runtime.body if isinstance(n, ast.FunctionDef)}
-        self.assertFalse(helpers & runtime_names)
-        callbacks = {
-            n.attr
-            for n in ast.walk(module_tree)
-            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id == "runtime"
-        }
-        self.assertFalse(helpers & callbacks)
-        for helper in (
-            "_retained_worker_busy_deferred",
-            "_retained_worker_recovery_window",
-            "_continuation_no_progress_evidence",
-        ):
-            self.assertNotIn(f"def {helper}(", runtime_source)
-        owned = {n.name for n in module_tree.body if isinstance(n, ast.FunctionDef)}
-        self.assertTrue(
-            {"begin_red_transition", "complete_red_transition", "recover_worker_continuation"} <= owned
+        record.worker_continuation = WorkerContinuation(stage=stage)
+        log = CallLog()
+        with contextlib.ExitStack() as stack:
+            for name in self.ORDER:
+                result = recovered if name == "_recover_worker_continuation" else None
+                stack.enter_context(log.patch(dispatch_runtime, name, result))
+            dispatch_runtime.DispatcherRuntime._advance_worker(
+                SimpleNamespace(), {"ref": "sample-1"}, {"sample-1": record}, {}, "attempt-1"
+            )
+        return log.names
+
+    def test_an_open_red_transition_outranks_the_report_and_the_wait(self) -> None:
+        self.assertEqual(
+            self.advance(WorkerContinuationStage.RED_TRANSITION_PENDING), ["_complete_red_transition"]
         )
-        self.assertNotIn("ummanu.dispatch.runtime", inspect.getsource(continuation_module))
-        advance = next(
-            n for n in runtime.body if isinstance(n, ast.FunctionDef) and n.name == "_advance_worker"
-        )
-        advance_source = ast.get_source_segment(runtime_source, advance)
-        names = [
-            "_complete_red_transition(",
-            "_worker_report_marker(",
-            "_recover_worker_continuation(",
-            "_handle_worker_report(",
-            "_wait_watchdog(self, ",
-        ]
-        positions = [advance_source.index(name) for name in names]
-        self.assertEqual(positions, sorted(positions))
-        self.assertNotIn("if continuation.delivery_pending:", advance_source)
+
+    def test_the_report_marker_is_read_before_the_continuation_is_recovered_and_the_report_handled(
+        self,
+    ) -> None:
+        self.assertEqual(self.advance(WorkerContinuationStage.NONE), list(self.ORDER[1:]))
+
+    def test_a_pending_delivery_goes_through_the_same_recovery_not_a_branch_of_its_own(self) -> None:
+        self.assertEqual(self.advance(WorkerContinuationStage.DELIVERY_PENDING), list(self.ORDER[1:]))
+
+    def test_a_recovered_continuation_ends_the_tick_before_the_report_is_handled(self) -> None:
+        names = self.advance(WorkerContinuationStage.DELIVERY_PENDING, recovered={"action": "recovered"})
+        self.assertEqual(names, list(self.ORDER[1:3]))
 
 
 class DecisionNativeReplayTests(unittest.TestCase):
@@ -1066,7 +1270,9 @@ class DecisionNativeReplayTests(unittest.TestCase):
 
     def setUp(self):
         self.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch.object(attempt_accounting, "_attempt_outcome_obligation", return_value=None))
+        self.enterContext(
+            mock.patch.object(attempt_accounting, "_attempt_outcome_obligation", return_value=None)
+        )
         self.reset_native()
 
     def reset_native(self):
@@ -1076,40 +1282,67 @@ class DecisionNativeReplayTests(unittest.TestCase):
         self.host.read = mock.Mock(side_effect=lambda *_: self.card)
         self.host._move_card = mock.Mock(side_effect=self.move_card)
         self.runtime = SimpleNamespace(
-            owner="dispatcher", writer=SimpleNamespace(board_host=self.host, move=self.move))
+            owner="dispatcher", writer=SimpleNamespace(board_host=self.host, move=self.move)
+        )
         self.record = DispatcherRecord(
-            worker="worker", workspace="/unused", handle="worker", head="codex",
-            review_head="claude", comment_baseline=0, review_baseline=0,
-            state="assessment", claimed_at=1.0, attempt_id="held-attempt")
+            worker="worker",
+            workspace="/unused",
+            handle="worker",
+            head="codex",
+            review_head="claude",
+            comment_baseline=0,
+            review_baseline=0,
+            state="assessment",
+            claimed_at=1.0,
+            attempt_id="held-attempt",
+        )
 
     def move_card(self, _card, target):
         self.card = replace(self.card, state=target)
 
     def move(self, **kwargs):
-        result = self.host.transition(TransitionRequest(
-            EntityKind.CARD, kwargs["reference"], CardState(kwargs["target"]),
-            Actor(kwargs["role"], kwargs["actor"]), kwargs["reason"],
-            request_id=kwargs["request_id"], data={"terminal_taxonomy": kwargs["terminal_taxonomy"]}))
+        result = self.host.transition(
+            TransitionRequest(
+                EntityKind.CARD,
+                kwargs["reference"],
+                CardState(kwargs["target"]),
+                Actor(kwargs["role"], kwargs["actor"]),
+                kwargs["reason"],
+                request_id=kwargs["request_id"],
+                data={"terminal_taxonomy": kwargs["terminal_taxonomy"]},
+            )
+        )
         return {"event_id": result.event.event_id}
 
     def effect(self, decision, reason, request_id="decision-move"):
         target = "done" if decision == "release" else "blocked"
         return attempt_accounting.terminal_effect(
-            self.runtime, {"ref": "sample-1"}, self.record, target=target,
-            reason=reason, request_id=request_id, terminal_state=target,
-            disposition=decision, decision=decision)
+            self.runtime,
+            {"ref": "sample-1"},
+            self.record,
+            target=target,
+            reason=reason,
+            request_id=request_id,
+            terminal_state=target,
+            disposition=decision,
+            decision=decision,
+        )
 
     def test_release_and_reslice_replay_owned_full_reason_and_new_pointer(self):
         for decision in ("release", "reslice"):
-            for original in ("Observer decision: " + decision + ". Full released reason.",
-                             "Observer decision: " + decision + ". See canonical-event."):
+            for original in (
+                "Observer decision: " + decision + ". Full released reason.",
+                "Observer decision: " + decision + ". See canonical-event.",
+            ):
                 for committed in (False, True):
                     with self.subTest(decision=decision, original=original, committed=committed):
                         self.reset_native()
                         # The native host stages its own intent and performs the move; a failed
                         # journal append leaves that exact owned record for recovery.
-                        with mock.patch.object(self.audit, "append", side_effect=OSError("lost commit")), \
-                                self.assertRaises(BoardEventPending):
+                        with (
+                            mock.patch.object(self.audit, "append", side_effect=OSError("lost commit")),
+                            self.assertRaises(BoardEventPending),
+                        ):
                             self.effect(decision, original)
                         owned = self.host.canon.event("decision-move")
                         if committed:
@@ -1123,15 +1356,23 @@ class DecisionNativeReplayTests(unittest.TestCase):
         body = "Repair the canonical defect and preserve its evidence."
         original = f"Observer decision: rework. {body}"
         self.record.worker_continuation.begin_red_transition(
-            "review", 0, original, "red", "rework", reserved_generation=2,
-            decision_body=body, decision_protocol_prerequisites=("repair-contract",))
+            "review",
+            0,
+            original,
+            "red",
+            "rework",
+            reserved_generation=2,
+            decision_body=body,
+            decision_protocol_prerequisites=("repair-contract",),
+        )
         frozen = self.record.to_json()
         self.runtime.reader = SimpleNamespace(show=lambda _: {"ref": "sample-1", "comments": []})
         self.runtime.save_records = mock.Mock(side_effect=OSError("lost state save"))
         records = {"sample-1": self.record}
         with self.assertRaisesRegex(OSError, "lost state save"):
             continuation_module.complete_red_transition(
-                self.runtime, {"ref": "sample-1"}, self.record, records, {}, "tick", ref="sample-1")
+                self.runtime, {"ref": "sample-1"}, self.record, records, {}, "tick", ref="sample-1"
+            )
         events = self.host.canon.events()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].reason, original)
@@ -1140,7 +1381,8 @@ class DecisionNativeReplayTests(unittest.TestCase):
         self.runtime.save_records.side_effect = None
         with mock.patch.object(continuation_module, "_deliver_red_continuation", return_value={}):
             continuation_module.complete_red_transition(
-                self.runtime, {"ref": "sample-1"}, self.record, records, {}, "new-tick", ref="sample-1")
+                self.runtime, {"ref": "sample-1"}, self.record, records, {}, "new-tick", ref="sample-1"
+            )
         self.assertEqual(self.host.canon.events(), events)
         self.assertEqual(self.host._move_card.call_count, 1)
         self.assertEqual(self.record.report_decision, body)
@@ -1150,15 +1392,76 @@ class DecisionNativeReplayTests(unittest.TestCase):
     def test_mismatched_native_identity_and_data_still_refuse(self):
         self.effect("release", "original pointer")
         owned = self.host.canon.committed("decision-move")
-        for field, value in (("ref", "other-1"), ("actor", Actor("dispatcher", "other")),
-                             ("target_state", "blocked"), ("data", {"foreign": True})):
+        for field, value in (
+            ("ref", "other-1"),
+            ("actor", Actor("dispatcher", "other")),
+            ("target_state", "blocked"),
+            ("data", {"foreign": True}),
+        ):
             with self.subTest(field=field):
                 foreign = replace(owned, **{field: value})
-                with mock.patch.object(self.host.canon, "event", return_value=foreign), \
-                        self.assertRaisesRegex(ValueError, "another operation or payload"):
+                with (
+                    mock.patch.object(self.host.canon, "event", return_value=foreign),
+                    self.assertRaisesRegex(ValueError, "another operation or payload"),
+                ):
                     self.effect("release", "new pointer")
                 self.assertEqual(self.host.canon.committed("decision-move"), owned)
                 self.assertEqual(self.host._move_card.call_count, 1)
+
+
+class ResidualComposerClassTests(unittest.TestCase):
+    """The one classification the observer wake and the retained worker continuation share."""
+
+    STALE: ClassVar[dict[str, str]] = {
+        "composer_before": "digest:stale-composer",
+        "composer_after": "digest:stale-composer",
+        "cursor_before": "cursor:report-done",
+        "cursor_after": "cursor:report-done",
+        "reason": "readiness-busy",
+    }
+
+    def test_an_unchanged_known_composer_and_cursor_is_a_completed_turn(self) -> None:
+        self.assertEqual(residual_composer_class(self.STALE), "completed_turn_residual_composer")
+
+    def test_anything_less_than_both_unchanged_stays_active_or_unknown(self) -> None:
+        for name, change in (
+            ("no evidence", None),
+            ("empty composer", {"composer_before": "empty", "composer_after": "empty"}),
+            ("unknown composer", {"composer_before": "unknown", "composer_after": "unknown"}),
+            ("composer moved", {"composer_after": "digest:other"}),
+            ("cursor moved", {"cursor_after": "cursor:later"}),
+            ("no cursor", {"cursor_before": "", "cursor_after": ""}),
+        ):
+            with self.subTest(name):
+                evidence = {} if change is None else {**self.STALE, **change}
+                self.assertEqual(residual_composer_class(evidence), "active_or_unknown_turn")
+
+    def test_both_callers_delegate_to_it(self) -> None:
+        from ummanu.dispatch import observer
+
+        record = SimpleNamespace(worker_delivery_evidence=dict(self.STALE))
+        self.assertEqual(
+            continuation_module._continuation_no_progress_evidence(record, ContinuationLivenessState.STALLED),
+            "completed_turn_residual_composer",
+        )
+        delivery = SimpleNamespace(last_evidence={})
+        self.assertEqual(
+            observer._observer_no_progress_evidence(
+                SimpleNamespace(delivery=delivery), {"delivery_evidence": dict(self.STALE)}
+            ),
+            "completed_turn_residual_composer",
+        )
+        self.assertEqual(
+            observer._observer_no_progress_evidence(
+                SimpleNamespace(delivery=delivery),
+                {"delivery_evidence": {"reason": "payload-left-in-composer"}},
+            ),
+            "completed_turn_residual_composer",
+        )
+        self.assertEqual(
+            observer._observer_no_progress_evidence(SimpleNamespace(delivery=delivery), {}),
+            "active_or_unknown_turn",
+        )
 
 
 if __name__ == "__main__":

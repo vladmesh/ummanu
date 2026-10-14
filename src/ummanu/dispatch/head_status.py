@@ -41,8 +41,8 @@ from ummanu.dispatch.head_vitality import (
     VitalitySnapshot,
     snapshots_from_status,
 )
-from ummanu.dispatch.head_vitality_episode import recovery_outlook
-from ummanu.dispatch.host import _durable_head_run
+from ummanu.dispatch.head_vitality_episode import previous_snapshot_cursors, recovery_outlook
+from ummanu.dispatch.host_runtime.contracts import _durable_head_run
 from ummanu.dispatch.observer import load_observers, observer_head_status
 from ummanu.dispatch.review import command_terminal_status
 from ummanu.dispatch.state import DispatcherRecord
@@ -216,17 +216,7 @@ def _legacy_row(
     snapshots = snapshots_from_status(
         status,
         run_id=run_id,
-        previous_cursor=(
-            (bound_episode.evidence_cursors or {}).get(SnapshotSource.PROVIDER_CURSOR.value, "")
-            if bound_episode is not None
-            else ""
-        ),
-        previous_child_cursor=(
-            (bound_episode.evidence_cursors or {}).get(SnapshotSource.EXECUTION_CHILD.value, "")
-            if bound_episode is not None
-            else ""
-        ),
-        previous_child_key=bound_episode.last_child_key if bound_episode is not None else "",
+        **previous_snapshot_cursors(episode, run_id),
         observed_at=observed_at,
     )
     by_source = {snapshot.source: snapshot for snapshot in snapshots}

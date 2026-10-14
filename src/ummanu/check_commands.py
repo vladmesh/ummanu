@@ -24,6 +24,7 @@ from ummanu.broad_check import (
     summarize,
     usable_receipt,
 )
+from ummanu.cli_output import print_error
 from ummanu.config import ConfigError, _load_bindings, load_config
 from ummanu.projects.contract import (
     ContractUnusable,
@@ -31,6 +32,7 @@ from ummanu.projects.contract import (
     module_contract,
 )
 from ummanu.projects.local_check import LocalProfile, PytestSelection
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.launch_prefix import pythonpath_prefix
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.runtime.role_env import WORKSPACE_ENV_DIR
@@ -135,9 +137,7 @@ class ResolvedCheck:
 
 
 def add_check_subcommands(subparsers) -> None:
-    check = subparsers.add_parser(
-        "check", help="run the declared local profile, a module or a test; show its broad receipt"
-    )
+    check = add_command_parser(subparsers, "check")
     _common(check)
     check.add_argument("check_command", nargs="?", default="", metavar="SELECTOR|broad|show")
     check.add_argument("selectors", nargs="*", metavar="SELECTOR")
@@ -202,7 +202,7 @@ def _common(parser: argparse.ArgumentParser) -> None:
 
 
 def _fail(exc: BroadCheckError) -> int:
-    print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=sys.stderr)
+    print_error({"code": exc.code, "message": exc.message}, stderr=True)
     return 2
 
 

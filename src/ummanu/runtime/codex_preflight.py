@@ -90,7 +90,7 @@ class CodexPreflightError(RuntimeError):
 
 
 class CodexHomeLoginMissing(CodexPreflightError):
-    """No CODEX_HOME a head may run with: no profile `codex_home`, no `TA_CODEX_HOME`, no data-dir login.
+    """No CODEX_HOME a head may run with: no profile `codex_home`, no `UMMANU_CODEX_HOME`, no data-dir login.
 
     `home` is the data-dir home the login belongs in, or None when no data dir is named.
     """
@@ -151,13 +151,14 @@ def resolve_codex_home(
 ) -> CodexHome:
     """Which CODEX_HOME a head with this profile runs with, resolved at call time.
 
-    In order: the profile's `codex_home`, `TA_CODEX_HOME`, then `<data_dir>/codex-home` when it holds
+    In order: the profile's `codex_home`, `UMMANU_CODEX_HOME`, then `<data_dir>/codex-home` when it holds
     a non-empty `auth.json`. Otherwise raises `CodexHomeLoginMissing`; there is no other fallback.
     """
     configured = profile.get("codex_home")
     if configured:
         return CodexHome(str(configured), CODEX_HOME_PROFILE)
-    override = os.environ.get("TA_CODEX_HOME")
+    # Keep the shared preflight's import boundary; same nonempty policy as paths.env_value.
+    override = os.environ.get("UMMANU_CODEX_HOME") or os.environ.get("TA_CODEX_HOME")
     if override:
         return CodexHome(override, CODEX_HOME_ENV)
     data_home = data_dir_codex_home(data_dir)
@@ -174,7 +175,7 @@ def codex_home(profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] |
 def data_dir_codex_home(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
     """`<data_dir>/codex-home` of this installation, or None when no data dir is named.
 
-    A named data dir wins, then `UMMANU_DATA_DIR`. This module imports nothing else of `ummanu`, so
+    A named data dir wins, then `UMMANU_DATA_DIR`. Head launchers bind this setting;
     head launchers bind `UMMANU_DATA_DIR` (`ummanu.runtime.codex_home.bound_data_dir`).
     """
     if data_dir is not None:
@@ -474,7 +475,7 @@ class CodexProviderEventRecorder:
         updated = self.run.with_fanout_policy(policy)
         try:
             self.persist(updated)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - arbitrary persistence callbacks must fail closed
             failed_policy = dict(updated.fanout_policy)
             failed_policy["terminal_state"] = FANOUT_TERMINAL_UNKNOWN
             failed_policy["reason"] = (

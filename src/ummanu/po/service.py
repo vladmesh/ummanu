@@ -90,7 +90,8 @@ from ummanu.po.store import (
     session_fingerprint,
     sprint_session_fingerprint,
 )
-from ummanu.runtime.paths import add_instance_argument
+from ummanu.runtime.cli_composition import add_command_parser
+from ummanu.runtime.paths import add_instance_argument, instance_file
 
 # How often the service looks at its queue, its restart marker and a recovery that did not run yet,
 # besides being woken by a submit or a settled turn.
@@ -784,9 +785,8 @@ class PoService:
             return None
         from ummanu.config import ConfigError, load_config
 
-        path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
         try:
-            return load_config(path)
+            return load_config(instance_file(self.instance))
         except ConfigError as exc:
             raise Refused("unavailable", f"the instance config cannot be read: {exc}") from None
 
@@ -1094,10 +1094,7 @@ def listening(service: PoService) -> Iterator[Path]:
 
 
 def add_po_serve_subcommands(subparsers) -> None:
-    command = subparsers.add_parser(
-        "po-serve",
-        help="run the PO head service: the one owner of PO turns, fed by a durable queue over a local socket",
-    )
+    command = add_command_parser(subparsers, "po-serve")
     add_instance_argument(command, help="path to an instance dir or instance.yaml")
     command.add_argument(
         "--data-dir",
@@ -1136,7 +1133,8 @@ def run_po_serve(args: argparse.Namespace) -> int:
 
 def _write_process_receipt(data_dir: Path) -> str:
     """Bind this process to the checkout its code was imported from; a journal line either way."""
-    from ummanu.upgrade import ReceiptError, write_po_process_receipt
+    from ummanu.infra.process_receipts import ReceiptError
+    from ummanu.installation.upgrade.services import write_po_process_receipt
 
     # src/ummanu/po/service.py: the checkout this process runs, not the one it was pointed at.
     product_root = Path(__file__).resolve().parents[3]

@@ -257,9 +257,9 @@ class GateTests(unittest.TestCase):
             STUB_CODES=str(codes_file),
             STUB_RECORDS=str(records),
             AMBIENT_SENTINEL=str(ambient_sentinel),
-            TA_GATE_BOARD_ATTEMPTS=str(attempts),
-            TA_GATE_BOARD_WAIT="0",
-            TA_RUNTIME_PYTHONPATH=str(self.product),
+            UMMANU_GATE_BOARD_ATTEMPTS=str(attempts),
+            UMMANU_GATE_BOARD_WAIT="0",
+            UMMANU_RUNTIME_PYTHONPATH=str(self.product),
             UMMANU_REPO=str(self.root / "configured-but-not-selected"),
             VIRTUAL_ENV=str(self.root / "activated-candidate-venv"),
         )
@@ -313,7 +313,9 @@ class GateTests(unittest.TestCase):
         self.assert_selected_venv(work, self.product)
         skip = self.run_gate([100])
         self.assertEqual(skip.returncode, 0)
-        self.assertIn("--cleanup-only", skip.stdout)
+        self.assertIn("no change, skill dispatch skipped", skip.stdout)
+        # A quiet tick starts no second process: `--cleanup-only` was a no-op for every agent.
+        self.assertNotIn("ran:", skip.stdout)
         self.assert_selected_venv(skip, self.product)
         broke = self.run_gate([2])
         self.assertEqual(broke.returncode, 2)
@@ -374,11 +376,9 @@ class GateTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.attempts, 1)
-        self.assertIn("--cleanup-only", result.stdout)
+        self.assertNotIn("ran:", result.stdout)
         self.assert_selected_venv(result, self.product)
-        self.assertEqual(
-            [record["kind"] for record in self.records(result)], ["role_env", "role", "role_env", "role"]
-        )
+        self.assertEqual([record["kind"] for record in self.records(result)], ["role_env", "role"])
 
     def test_every_supported_root_precedence_selects_its_own_venv(self):
         runtime = self.make_product(self.root / "runtime-wins")
@@ -389,17 +389,41 @@ class GateTests(unittest.TestCase):
         cases = (
             (
                 "runtime",
-                {"TA_RUNTIME_PYTHONPATH": str(runtime), "UMMANU_REPO": str(configured)},
+                {"UMMANU_RUNTIME_PYTHONPATH": str(runtime), "UMMANU_REPO": str(configured)},
                 runtime,
             ),
-            ("configured", {"TA_RUNTIME_PYTHONPATH": None, "UMMANU_REPO": str(configured)}, configured),
-            ("home", {"TA_RUNTIME_PYTHONPATH": None, "UMMANU_REPO": None}, fallback),
+            ("old-only", {"UMMANU_RUNTIME_PYTHONPATH": None, "TA_RUNTIME_PYTHONPATH": str(runtime)}, runtime),
+            ("both", {"UMMANU_RUNTIME_PYTHONPATH": str(runtime), "TA_RUNTIME_PYTHONPATH": str(configured)}, runtime),
+            ("empty-canonical", {"UMMANU_RUNTIME_PYTHONPATH": "", "TA_RUNTIME_PYTHONPATH": str(runtime)}, runtime),
+            ("empty-legacy", {"UMMANU_RUNTIME_PYTHONPATH": None, "TA_RUNTIME_PYTHONPATH": "", "UMMANU_REPO": str(configured)}, configured),
+            ("configured", {"UMMANU_RUNTIME_PYTHONPATH": None, "UMMANU_REPO": str(configured)}, configured),
+            ("home", {"UMMANU_RUNTIME_PYTHONPATH": None, "UMMANU_REPO": None}, fallback),
         )
         for name, overrides, expected in cases:
             with self.subTest(name):
                 result = self.run_gate([100], agent="curator", env_overrides=overrides, home=home)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assert_selected_venv(result, expected)
+
+    def test_board_retry_alias_precedence_and_malformed_canonical(self):
+        cases = (
+            ({"UMMANU_GATE_BOARD_ATTEMPTS": None, "TA_GATE_BOARD_ATTEMPTS": "2"}, 2),
+            ({"UMMANU_GATE_BOARD_ATTEMPTS": "2", "TA_GATE_BOARD_ATTEMPTS": "3"}, 2),
+            ({"UMMANU_GATE_BOARD_ATTEMPTS": "", "TA_GATE_BOARD_ATTEMPTS": "2"}, 2),
+        )
+        for overrides, attempts in cases:
+            with self.subTest(overrides=overrides):
+                result = self.run_gate([101] * 9, env_overrides={
+                    **overrides, "UMMANU_GATE_BOARD_WAIT": "0", "TA_GATE_BOARD_WAIT": "120"
+                })
+                self.assertEqual(result.attempts, attempts)
+                self.assertEqual(result.returncode, 101, result.stderr)
+        result = self.run_gate([101, 101, 2], env_overrides={
+            "UMMANU_GATE_BOARD_ATTEMPTS": "oops", "TA_GATE_BOARD_ATTEMPTS": "1"
+        })
+        self.assertEqual(result.attempts, 3)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("integer expression expected", result.stderr)
 
     def test_missing_non_executable_and_wrong_venv_interpreters_fail_before_precheck(self):
         missing = self.root / "missing"
@@ -417,7 +441,7 @@ class GateTests(unittest.TestCase):
         for name, root in (("missing", missing), ("non-executable", non_executable), ("wrong", wrong)):
             with self.subTest(name):
                 result = self.run_gate(
-                    [0], agent="curator", env_overrides={"TA_RUNTIME_PYTHONPATH": str(root)}
+                    [0], agent="curator", env_overrides={"UMMANU_RUNTIME_PYTHONPATH": str(root)}
                 )
                 self.assertEqual(result.returncode, 1)
                 self.assertEqual(result.attempts, 0)

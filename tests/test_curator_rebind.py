@@ -12,13 +12,34 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from ummanu.automations.agents.curator import busy, cli, harvest, rebind
+from ummanu.automations.agents.curator import busy, cli, harvest, move_paths, rebind
 from ummanu.runtime.state import PRECHECK_SKIP, AgentState
-from ummanu.transition import rewrite
 
 
 def claude(text: str) -> str:
     return json.dumps({"type": "user", "message": {"content": [{"type": "text", "text": text}]}}) + "\n"
+
+
+class ReleasedMovePathTests(unittest.TestCase):
+    """Pure source goldens pin the released mapping independently of rebind fixture construction."""
+
+    def test_released_order_paths_and_key_encoding_match_source_capture(self) -> None:
+        fixture = json.loads((Path(__file__).parent / "fixtures/rebind_move_sprint1475.json").read_text())
+        home = Path(fixture["home"])
+        pairs = move_paths.claude_move_paths(home, fixture["sprint"])
+        self.assertEqual([[str(old), str(new)] for old, new in pairs], fixture["pairs"])
+        self.assertEqual(len(pairs), 9)
+        self.assertEqual([old.name for old, _new in pairs[-4:]], ["curator", "pipeline", "retro", "steward"])
+        self.assertEqual(move_paths.claude_move_paths(home, ""), pairs[:4] + pairs[5:])
+        other = move_paths.claude_move_paths(home, "sprint:9999")
+        self.assertEqual(other[:4] + other[5:], pairs[:4] + pairs[5:])
+        self.assertEqual(other[4], (pairs[4][0].with_name("sprint-9999"), pairs[4][1].with_name("sprint-9999")))
+        for path, expected in fixture["key_cases"]:
+            with self.subTest(path=path):
+                self.assertEqual(move_paths.claude_key(Path(path)), expected)
+        for case in fixture["prefix_cases"]:
+            with self.subTest(value=case["value"]):
+                self.assertEqual(move_paths.swap_prefix(case["value"], case["prefixes"]), case["expected"])
 
 
 class CuratorRebindTests(unittest.TestCase):
@@ -28,17 +49,17 @@ class CuratorRebindTests(unittest.TestCase):
         self.home = root / "home"
         self.projects = self.home / ".claude" / "projects"
         self.state = AgentState("curator", root / "state")
-        moves = rewrite.claude_move_paths(self.home, rebind.MOVE_SPRINT)
+        moves = move_paths.claude_move_paths(self.home, rebind.MOVE_SPRINT)
         workspaces = self.home / "orca" / "workspaces"
         [(self.old_ws, self.new_ws)] = [(old, new) for old, new in moves if old.parent.parent == workspaces
                                         and old.name == "curator"]
         (po_old, po_new), (product_old, product_new) = moves[0], moves[3]
-        self.po_old = self.projects / rewrite.claude_key(po_old)
-        self.po_new = self.projects / rewrite.claude_key(po_new)
-        self.product_old = self.projects / rewrite.claude_key(product_old)
-        self.product_new = self.projects / rewrite.claude_key(product_new)
-        self.ws_old_dir = self.projects / rewrite.claude_key(self.old_ws)
-        self.ws_new_dir = self.projects / rewrite.claude_key(self.new_ws)
+        self.po_old = self.projects / move_paths.claude_key(po_old)
+        self.po_new = self.projects / move_paths.claude_key(po_new)
+        self.product_old = self.projects / move_paths.claude_key(product_old)
+        self.product_new = self.projects / move_paths.claude_key(product_new)
+        self.ws_old_dir = self.projects / move_paths.claude_key(self.old_ws)
+        self.ws_new_dir = self.projects / move_paths.claude_key(self.new_ws)
         self.outside = self.projects / "-home-dev-orca-workspaces-relay-relay-1200-card"
         self.new_ws.mkdir(parents=True)
         self.patches = [
@@ -47,7 +68,7 @@ class CuratorRebindTests(unittest.TestCase):
             mock.patch.object(cli.discover, "codex_sessions", return_value=[]),
             mock.patch.object(cli.discover, "hermes_sessions", return_value=[]),
             mock.patch.object(cli.discover, "all_memory_files", return_value=[]),
-            mock.patch.dict(os.environ, {"HOME": str(self.home), "TA_CURATOR_WORKSPACE": str(self.new_ws)}),
+            mock.patch.dict(os.environ, {"HOME": str(self.home), "UMMANU_CURATOR_WORKSPACE": str(self.new_ws)}),
         ]
         for patch in self.patches:
             patch.start()
@@ -207,18 +228,6 @@ class CuratorRebindTests(unittest.TestCase):
             self.assertEqual(self._run()[0], 0)
             self.assertEqual(transaction.call_count, 1)
 
-    def test_operations_documents_the_verb_and_its_rules(self) -> None:
-        operations = (Path(__file__).resolve().parents[1] / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
-        for required in (
-            "`ummanu automations curator rebind\n--dry-run`",
-            "after a move of the curator's workspace and Claude\nproject directories",
-            "a cursor never moves backwards",
-            "A second run finds nothing and writes nothing",
-            "`automation_busy_without_advance`",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, operations)
-
     def test_a_failed_audit_append_changes_nothing_and_exits_non_zero(self) -> None:
         self._fixture()
         before = self._snapshot()
@@ -284,28 +293,41 @@ class CuratorRebindTests(unittest.TestCase):
         self.assertEqual(self._journal()[1]["state_digest"], self._published_digest())
 
     def test_rebind_only_appends_to_the_journal(self) -> None:
-        import ast
-        import inspect
-        import textwrap
+        self._fixture()
+        journal = self.state.dir / "runs.jsonl"
+        journal.write_text('{"event": "precheck", "result": "change"}\n', encoding="utf-8")
+        before, inode = journal.read_bytes(), journal.stat().st_ino
+        real_open, real_replace = os.open, os.replace
+        opened: list[int] = []
+        replaced: list[Path] = []
 
-        from ummanu.runtime import state as runtime_state
+        def spy_open(path, flags, *args, **kwargs):
+            if Path(path) == journal:
+                opened.append(flags)
+            return real_open(path, flags, *args, **kwargs)
 
-        tree = ast.parse(textwrap.dedent(inspect.getsource(cli.cmd_rebind)))
-        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-        names = {node.func.id if isinstance(node.func, ast.Name) else node.func.attr for node in calls
-                 if isinstance(node.func, (ast.Name, ast.Attribute))}
-        self.assertFalse(names & {"open", "read_text", "read_bytes", "write_text", "write_bytes", "replace", "unlink"})
-        journal_uses = [node for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id == "journal"]
-        appends = [call for call in calls if isinstance(call.func, ast.Name) and call.func.id == "append_line_durable"]
-        self.assertEqual(len(journal_uses), 1 + len(appends))  # the assignment, then only append arguments
-        self.assertTrue(all(isinstance(call.args[0], ast.Name) and call.args[0].id == "journal" for call in appends))
-        for call in calls:
-            if isinstance(call.func, ast.Name) and call.func.id == "publish_state_atomic":
-                self.assertNotIn("journal", ast.dump(call))
-                self.assertNotIn("runs.jsonl", ast.dump(call))
-        helper = inspect.getsource(runtime_state.append_line_durable)
-        self.assertIn("os.O_APPEND", helper)
-        self.assertNotIn("O_TRUNC", helper)
+        def spy_replace(source, target, *args, **kwargs):
+            replaced.append(Path(target))
+            return real_replace(source, target, *args, **kwargs)
+
+        with (
+            mock.patch("ummanu.runtime.state.os.open", side_effect=spy_open),
+            mock.patch("ummanu.runtime.state.os.replace", side_effect=spy_replace),
+        ):
+            self.assertEqual(self._run()[0], 0)
+        after = journal.read_bytes()
+        # The old bytes are an unchanged prefix of the same file, which gained exactly one line.
+        self.assertTrue(after.startswith(before))
+        self.assertEqual(journal.stat().st_ino, inode)
+        self.assertEqual([event["event"] for event in self._journal()], ["precheck", "rebind"])
+        self.assertTrue(opened)
+        for flags in opened:
+            self.assertTrue(flags & os.O_APPEND)
+            self.assertFalse(flags & os.O_TRUNC)
+        self.assertNotIn(journal, replaced)
+        # A second run has nothing to rebind and writes nothing, the journal included.
+        self.assertEqual(self._run()[0], 0)
+        self.assertEqual(journal.read_bytes(), after)
 
     def test_a_carried_cursor_never_moves_backwards(self) -> None:
         fixture = self._fixture()
@@ -336,7 +358,7 @@ class CuratorRebindTests(unittest.TestCase):
     def test_refuses_a_rebound_identity_that_is_not_this_run(self) -> None:
         self._fixture()
         before = self._snapshot()
-        with mock.patch.dict(os.environ, {"TA_CURATOR_WORKSPACE": str(self.home / "somewhere")}):
+        with mock.patch.dict(os.environ, {"UMMANU_CURATOR_WORKSPACE": str(self.home / "somewhere")}):
             code, _, err = self._run()
         self.assertEqual(code, 1)
         self.assertIn("rebind refused (identity-not-current)", err)

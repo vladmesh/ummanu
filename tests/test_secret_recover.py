@@ -21,8 +21,9 @@ from unittest import mock
 
 from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
 from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
-from ummanu import installation, secret_recover, secret_store
+from ummanu import secret_recover, secret_store
 from ummanu.cli import main
+from ummanu.installation import commands as installation_commands, support as installation_support
 from ummanu.secret_store import (
     RecoveryPhraseError,
     import_env_file,
@@ -126,16 +127,16 @@ class RecoveryCase(unittest.TestCase):
         ]
         output = io.StringIO()
         patches = (
-            mock.patch("ummanu.installation._ensure_installation_user"),
-            mock.patch("ummanu.installation.check_prerequisites"),
-            mock.patch("ummanu.installation.import_normalized_board", return_value=1),
-            mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
+            mock.patch("ummanu.installation.commands._ensure_installation_user"),
+            mock.patch("ummanu.installation.commands.check_prerequisites"),
+            mock.patch("ummanu.installation.commands.import_normalized_board", return_value=1),
+            mock.patch("ummanu.installation.commands.rebuild_memory_index", return_value=1),
             mock.patch(
-                "ummanu.installation.materialize_host",
+                "ummanu.installation.commands.materialize_host",
                 return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
             ),
-            mock.patch("ummanu.installation.materialize_pipeline_state", return_value=0),
-            mock.patch("ummanu.installation.restore_findings", return_value=[]),
+            mock.patch("ummanu.installation.commands.materialize_pipeline_state", return_value=0),
+            mock.patch("ummanu.installation.commands.restore_findings", return_value=[]),
         )
         with contextlib.ExitStack() as stack:
             for patch in patches:
@@ -188,7 +189,7 @@ class LegacyBoardOnlyRecoveryTests(RecoveryCase):
         self.assertEqual(locked.missing, ())
         self.assertTrue(opened.unlocked)
         self.assertEqual([result.path for result in opened.materialized], [runtime_env])
-        self.assertEqual(installation.read_runtime_env(root, None), dict(zip(LEGACY_ENV, LEGACY_VALUES)))
+        self.assertEqual(installation_commands.read_runtime_env(root, None), dict(zip(LEGACY_ENV, LEGACY_VALUES)))
 
 
 class PhraseBranchCase(RecoveryCase):
@@ -220,7 +221,7 @@ class PhraseBranchCase(RecoveryCase):
     def test_the_recovered_file_passes_the_installation_validator_unchanged(self) -> None:
         self.recover("--recovery-phrase-file", str(self.phrase_file))
 
-        values = installation.read_runtime_env(self.target, None)
+        values = installation_commands.read_runtime_env(self.target, None)
         self.assertEqual(values["EXAMPLE_API_TOKEN"], "live-token")
         self.assertEqual(values["EXAMPLE_URL"], "http://127.0.0.1/rpc")
 
@@ -371,7 +372,7 @@ class NoStoreCase(unittest.TestCase):
             _git(source, "commit", "-m", "checkpoint")
 
             output = io.StringIO()
-            real_run = installation._run
+            real_run = installation_support._run
 
             def run_orca_version(
                 argv: list[str],
@@ -386,9 +387,9 @@ class NoStoreCase(unittest.TestCase):
 
             with (
                 mock.patch("sys.stdin", io.StringIO()),
-                mock.patch("ummanu.installation._ensure_installation_user"),
-                mock.patch("ummanu.installation.shutil.which", return_value="/usr/bin/orca"),
-                mock.patch("ummanu.installation._run", side_effect=run_orca_version),
+                mock.patch("ummanu.installation.commands._ensure_installation_user"),
+                mock.patch("ummanu.installation.clone.shutil.which", return_value="/usr/bin/orca"),
+                mock.patch("ummanu.installation.clone._run", side_effect=run_orca_version),
                 contextlib.redirect_stdout(output),
             ):
                 code = main(

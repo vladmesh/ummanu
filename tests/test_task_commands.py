@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+import io
 import json
 import os
 import tempfile
@@ -333,6 +335,88 @@ class CompletionAdmissionTests(unittest.TestCase):
         self.writer._require_committed_workspace.side_effect = AssertionError("replay read checkout")
         self.report()
         self.assertEqual(self.writer._marker_write.call_args.kwargs["data"]["worker_check"], evidence)
+
+
+class HandoffBodyFileTests(unittest.TestCase):
+    """ummanu-241: a report/verdict body is read only from a regular file this user owns.
+
+    The dispatcher names the body in a private directory and the head writes it there; a link, a
+    fifo or another account's file at that name is refused with a typed error before any write.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        from ummanu.cli import build_parser
+
+        cls.parser = build_parser()
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.body = self.root / "ummanu-report-x-1-1.md"
+        self.body.write_text("the body", encoding="utf-8")
+
+    def run_handoff(self, verb: str, path: Path) -> tuple[int, str, mock.MagicMock]:
+        kind = "done" if verb == "report" else "red"
+        args = self.parser.parse_args(
+            ["task", verb, "--ref", "x-1", "--role", "worker" if verb == "report" else "reviewer",
+             "--kind", kind, "--data-dir", str(self.root), "--body-file", str(path)]
+        )
+        writer = mock.MagicMock()
+        getattr(writer.return_value, verb).return_value = {"ok": True}
+        errors = io.StringIO()
+        # No installation is resolved: the board client and writer are stand-ins, and CI has no live root.
+        with (
+            mock.patch("ummanu.task_commands._instance", return_value=str(self.root)),
+            mock.patch("ummanu.task_commands.card_client"),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = args.handler(args)
+        return code, errors.getvalue(), writer
+
+    def assert_refused(self, verb: str, path: Path, reason: str) -> None:
+        code, errors, writer = self.run_handoff(verb, path)
+        self.assertEqual(code, 2)
+        error = json.loads(errors)["error"]
+        self.assertEqual(error["code"], "unsafe_body_file")
+        self.assertIn(reason, error["message"])
+        writer.assert_not_called()
+
+    def test_an_own_regular_body_is_handed_to_the_writer(self) -> None:
+        for verb in ("report", "verdict"):
+            with self.subTest(verb=verb):
+                code, errors, writer = self.run_handoff(verb, self.body)
+                self.assertEqual((code, errors), (0, ""))
+                self.assertEqual(getattr(writer.return_value, verb).call_args.kwargs["body"], "the body")
+
+    def test_a_symlinked_body_is_refused(self) -> None:
+        link = self.root / "ummanu-report-x-1-2.md"
+        link.symlink_to(self.body)
+        for verb in ("report", "verdict"):
+            with self.subTest(verb=verb):
+                self.assert_refused(verb, link, "symbolic link")
+
+    def test_a_body_that_is_not_a_regular_file_is_refused(self) -> None:
+        fifo = self.root / "ummanu-report-x-1-3.md"
+        os.mkfifo(fifo)
+        for verb in ("report", "verdict"):
+            with self.subTest(verb=verb):
+                self.assert_refused(verb, fifo, "not a regular file")
+
+    def test_a_body_another_user_owns_is_refused(self) -> None:
+        real_fstat = os.fstat
+
+        def foreign(fd: int) -> os.stat_result:
+            fields = list(real_fstat(fd))
+            fields[4] = os.geteuid() + 1
+            return os.stat_result(fields)
+
+        for verb in ("report", "verdict"):
+            with self.subTest(verb=verb), mock.patch("ummanu.task_commands.os.fstat", side_effect=foreign):
+                self.assert_refused(verb, self.body, "belongs to another user")
 
 
 if __name__ == "__main__":

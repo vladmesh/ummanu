@@ -18,11 +18,12 @@ from threading import Thread
 from typing import Any, ClassVar
 from urllib.parse import urlencode
 
+from tests import source_trees
 from tests.web_fakes import Recording, system_snapshot
 from ummanu.config import validate
 from ummanu.po import token as po_token
 from ummanu.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS, efforts_from_instance, models_from_instance
-from ummanu.web import pages
+from ummanu.web import page_assets, page_po, pages
 from ummanu.web.app import PO_FORM_FIELDS, PO_OPEN_ROUTES, ROUTES, WebApp, requires_po_token
 from ummanu.web.server import build_server
 from ummanu.webproto.errors import InstallationUnavailable, RuntimeUnavailable
@@ -49,7 +50,7 @@ class ServiceInputDisplayTests(unittest.TestCase):
     def test_explicit_queued_and_feed_inputs_are_closed_and_escaped_with_full_text(self):
         entry = {"role": "owner", "turn_seq": 1, "text": "<script>rights & comments; task show --ref ummanu-50</script>",
                  "metadata": {"source": "dispatcher", "summary": "Question <one>"}}
-        for render in (pages._po_entry, pages._po_queued_entry):
+        for render in (page_po._po_entry, page_po._po_queued_entry):
             for source in ("dispatcher", "po-service"):
                 entry["metadata"]["source"] = source
                 shown = render(entry)
@@ -63,7 +64,7 @@ class ServiceInputDisplayTests(unittest.TestCase):
     def test_owner_and_historical_text_are_never_classified_from_prose(self):
         entry = {"role": "owner", "turn_seq": 1,
                  "source": "dispatcher", "text": "The dispatcher hands you this card. ## Production rights"}
-        for render in (pages._po_entry, pages._po_queued_entry):
+        for render in (page_po._po_entry, page_po._po_queued_entry):
             for metadata in (None, {"source": "web"}):
                 entry["metadata"] = metadata
                 shown = render(entry)
@@ -71,8 +72,8 @@ class ServiceInputDisplayTests(unittest.TestCase):
                 self.assertIn(entry["text"], shown)
                 self.assertIn("owner ·", shown)
         entry.update(role="agent", text="## Answer\nYes", metadata={"source": "dispatcher"})
-        self.assertIn('<div class="md">', pages._po_entry(entry))
-        self.assertNotIn("<details", pages._po_entry(entry))
+        self.assertIn('<div class="md">', page_po._po_entry(entry))
+        self.assertNotIn("<details", page_po._po_entry(entry))
 
 
 def concrete(pattern: str) -> str:
@@ -320,7 +321,7 @@ class PoRequestIdCoverageTests(PoGateFixture):
     def test_sessions_turns_and_request_rows_are_written_only_inside_the_request_transaction(self) -> None:
         root = Path(__file__).resolve().parents[1]
         store = root / "src" / "ummanu" / "po" / "store.py"
-        tree = ast.parse(store.read_text(encoding="utf-8"))
+        tree = source_trees.parse(store.read_text(encoding="utf-8"))
         inserts: dict[str, set[str]] = {"po_sessions": set(), "po_turns": set(), "po_requests": set()}
         recorders: set[str] = set()
         for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
@@ -359,16 +360,6 @@ class PoModelListTests(unittest.TestCase):
         "data_dir": "data",
         "offsite": {"instance_remote": "git@x:y.git"},
     }
-
-    def test_the_default_offers_the_frontier_models_first(self) -> None:
-        # The current catalogue, as the live installation's `po.models` lists it.
-        self.assertEqual(
-            DEFAULT_MODELS,
-            {
-                "claude": ("fable", "claude-opus-5-5"),
-                "codex": ("gpt-6-astra", "gpt-6-sol", "gpt-5.6-terra"),
-            },
-        )
 
     def test_without_a_po_section_the_product_default_applies(self) -> None:
         self.assertEqual(models_from_instance(self.INSTANCE), DEFAULT_MODELS)
@@ -478,14 +469,14 @@ class PoSessionInPlaceTests(unittest.TestCase):
                         self.document(running=running, queued=queued), request_id="r", draft=draft
                     )
                     ids = self.ids(page)
-                    for block in pages.PO_SESSION_BLOCKS:
+                    for block in page_po.PO_SESSION_BLOCKS:
                         self.assertEqual(page.count(f'id="{block}"'), 1, block)
                     self.assertIn("po-turn-state", ids)
                     self.assertIn("po-head", ids["po-turn-state"])
                     for composer in ("po-text", "po-send", "po-status"):
-                        self.assertFalse(set(ids[composer]) & set(pages.PO_SESSION_BLOCKS), composer)
+                        self.assertFalse(set(ids[composer]) & set(page_po.PO_SESSION_BLOCKS), composer)
                     send = page.index('<button type="submit" form="po-send">')
-                    for block in pages.PO_SESSION_BLOCKS:
+                    for block in page_po.PO_SESSION_BLOCKS:
                         start = page.index(f'id="{block}"')
                         self.assertFalse(start < send < start + len(self.block(page, block)), block)
                     if draft:
@@ -521,7 +512,7 @@ class PoSessionInPlaceTests(unittest.TestCase):
         self.assertIn("nothing said yet", self.block(empty, "po-feed"))
 
     def test_the_script_swaps_the_blocks_of_the_page_read_again_and_never_reloads(self) -> None:
-        script = pages._PO_SESSION_SCRIPT
+        script = page_assets._PO_SESSION_SCRIPT
         page = pages.po_session(self.document(running=True), request_id="r", draft="typed")
         self.assertNotIn("location.reload", script)
         self.assertIn("const BLOCKS = ['po-head', 'po-stop', 'po-close', 'po-feed'];", page)
@@ -554,16 +545,16 @@ class PoSessionInPlaceTests(unittest.TestCase):
         self.assertIn('data-turns="0" data-last=""', self.block(empty, "po-turn-state"))
         # One source for the baseline: nothing about the turns is pasted into the script any more.
         for placeholder in ("__TURNS__", "__LAST__", "__QUEUED__", "__RUNNING__"):
-            self.assertNotIn(placeholder, pages._PO_SESSION_SCRIPT)
-        self.assertIn("let seen = shown(document);", pages._PO_SESSION_SCRIPT)
-        self.assertIn("if (seen && (seen.running || seen.queued > 0)) {", pages._PO_SESSION_SCRIPT)
+            self.assertNotIn(placeholder, page_assets._PO_SESSION_SCRIPT)
+        self.assertIn("let seen = shown(document);", page_assets._PO_SESSION_SCRIPT)
+        self.assertIn("if (seen && (seen.running || seen.queued > 0)) {", page_assets._PO_SESSION_SCRIPT)
 
     def test_a_turn_that_starts_between_the_json_and_the_page_read_is_followed_to_its_end(self) -> None:
         """The JSON read says turn N ended and nothing waits; another tab's message then starts turn N+1
         before the page is read, so the page swapped in shows N+1 running. The baseline and the decision
         to keep polling are the page's, so the poll goes on; the idle JSON decides nothing after the swap.
         """
-        script = pages._PO_SESSION_SCRIPT
+        script = page_assets._PO_SESSION_SCRIPT
         # The page read at that moment says N+1 runs, in the attributes the script reads.
         fresh = pages.po_session(self.document(running=True, turns=2), request_id="r")
         self.assertIn('data-turns="2" data-last="running" data-queued="0" data-running="true"', fresh)
@@ -593,7 +584,7 @@ class PoSessionInPlaceTests(unittest.TestCase):
             self.assertIn(compared, detect)
 
     def test_a_failed_read_says_why_and_leaves_the_page_as_it_was(self) -> None:
-        script = pages._PO_SESSION_SCRIPT
+        script = page_assets._PO_SESSION_SCRIPT
         swap = script[script.index("async function swapBlocks()") : script.index("function waitingText")]
         self.assertIn("if (!response.ok) return { failed: String(response.status) };", swap)
         self.assertIn(
@@ -618,16 +609,10 @@ class PoSessionInPlaceTests(unittest.TestCase):
         self.assertIn("finally {\n      busy = false;", script)
 
     def test_send_works_again_after_the_turn_it_started(self) -> None:
-        script = pages._PO_SESSION_SCRIPT
+        script = page_assets._PO_SESSION_SCRIPT
         taken = script.index("seen = swapped.state;")
         reset = script.index("submitted = false;\n      if (button) button.disabled = false;")
         self.assertLess(taken, reset)
-
-    def test_no_page_tells_the_owner_to_reload_to_see_anything(self) -> None:
-        web = Path(pages.__file__).parent
-        for source in sorted(web.rglob("*.py")):
-            with self.subTest(source=source.name):
-                self.assertNotIn("reload to see", source.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

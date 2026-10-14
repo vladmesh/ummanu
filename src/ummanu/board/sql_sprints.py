@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import tempfile
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from ummanu.board import owner_decisions
@@ -22,24 +22,24 @@ from ummanu.board.e2e_budget import (
     SPRINT_E2E_USED,
 )
 from ummanu.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
-def _epoch(value: datetime | None) -> str:
-    return "" if value is None else str(int(value.timestamp()))
+from ummanu.board.sql_rows import (
+    board_row,
+    comment_marker,
+    comment_row,
+    epoch as _epoch,  # noqa: F401 - the independent bulk-read oracle imports this name
+    grouped as _grouped,
+    now as _now,
+    rfc3339,
+)
 
 
 def _rfc3339(value: datetime | None) -> str:
-    return "" if value is None else value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    """A Sprint time to the microsecond, the one board field kept at that precision (CON-08).
 
-
-def _grouped(rows: Any) -> dict[Any, list[Any]]:
-    from ummanu.board.sql_cards import _grouped as card_grouped
-
-    return card_grouped(rows)
+    Sprint e2e charges export and restore through this text and read back ordered by
+    `charged_at`; truncated, two charges in one second would come back in dispatch-id order.
+    """
+    return rfc3339(value, microseconds=True)
 
 
 def sprint_key(reference: str) -> int:
@@ -87,21 +87,34 @@ class SqlSprintRecords:
     @staticmethod
     def _row(values: tuple[Any, ...]) -> dict[str, Any]:
         reference, board_key, goal, created, updated = values
-        return {
-            "id": int(board_key), "reference": str(reference), "title": str(goal),
-            "description": "", "column_id": 1, "position": 0, "swimlane_id": 0,
-            "date_creation": _epoch(created), "date_modification": _epoch(updated), "is_active": 1,
-        }
+        return board_row(
+            id=int(board_key),
+            reference=str(reference),
+            title=str(goal),
+            description="",
+            column_id=1,
+            position=0,
+            swimlane_id=0,
+            created=created,
+            updated=updated,
+            is_active=1,
+        )
 
     @staticmethod
     def _staged_row(key: int, row: dict[str, Any]) -> dict[str, Any]:
         created = row["created_at"]
-        return {
-            "id": key, "reference": row["reference"], "title": row["title"],
-            "description": row.get("description", ""), "column_id": 1, "position": 0,
-            "swimlane_id": 0, "date_creation": _epoch(created),
-            "date_modification": _epoch(created), "is_active": 1,
-        }
+        return board_row(
+            id=key,
+            reference=row["reference"],
+            title=row["title"],
+            description=row.get("description", ""),
+            column_id=1,
+            position=0,
+            swimlane_id=0,
+            created=created,
+            updated=created,
+            is_active=1,
+        )
 
     def row_by_reference(self, reference: str) -> dict[str, Any] | None:
         key = sprint_key(reference)
@@ -358,29 +371,41 @@ class SqlSprintRecords:
         return str(value)
 
     def _replace_relations(self, reference: str, values: dict[str, Any]) -> None:
+        """Each relation list is rewritten in a fixed number of statements, whatever its length:
+        the rows go in as arrays through `unnest ... WITH ORDINALITY`, which keeps their order."""
         if "sprint_repositories" in values:
             self.client._execute("DELETE FROM sprint_repositories WHERE sprint_ref = %s", (reference,))
-            for ordinal, path in enumerate(json.loads(str(values["sprint_repositories"]) or "[]")):
-                rows = self.client._query(
-                    "INSERT INTO repositories (path) VALUES (%s) ON CONFLICT (path) DO UPDATE SET path=EXCLUDED.path RETURNING repository_id",
-                    (str(path),),
-                )
+            paths = [str(path) for path in json.loads(str(values["sprint_repositories"]) or "[]")]
+            if paths:
+                # DISTINCT: one upsert may touch a repository row once; a repeated path still
+                # meets the `sprint_repositories` key below, as it did row by row.
                 self.client._execute(
-                    "INSERT INTO sprint_repositories (sprint_ref, repository_id, ordinal) VALUES (%s,%s,%s)",
-                    (reference, rows[0][0], ordinal),
+                    "WITH listed AS (SELECT path, ordinal FROM unnest(%s::text[]) WITH ORDINALITY AS p(path, ordinal)), "
+                    "known AS (INSERT INTO repositories (path) SELECT DISTINCT path FROM listed "
+                    "ON CONFLICT (path) DO UPDATE SET path=EXCLUDED.path RETURNING repository_id, path) "
+                    "INSERT INTO sprint_repositories (sprint_ref, repository_id, ordinal) "
+                    "SELECT %s, known.repository_id, listed.ordinal - 1 FROM listed JOIN known USING (path) "
+                    "ORDER BY listed.ordinal",
+                    (paths, reference),
                 )
         if "sprint_issues" in values:
             self.client._execute("DELETE FROM sprint_issues WHERE sprint_ref = %s", (reference,))
-            for ordinal, issue in enumerate(json.loads(str(values["sprint_issues"]) or "[]")):
+            issues = [
+                str(issue).removeprefix("issue:")
+                for issue in json.loads(str(values["sprint_issues"]) or "[]")
+            ]
+            if issues:
                 self.client._execute(
-                    "INSERT INTO sprint_issues (sprint_ref, issue_id, ordinal) VALUES (%s,%s,%s)",
-                    (reference, str(issue).removeprefix("issue:"), ordinal),
+                    "INSERT INTO sprint_issues (sprint_ref, issue_id, ordinal) "
+                    "SELECT %s, issue_id, ordinal - 1 FROM unnest(%s::text[]) WITH ORDINALITY AS i(issue_id, ordinal)",
+                    (reference, issues),
                 )
         if "sprint_reservations" in values:
-            projects = [
-                str(project)
-                for project in json.loads(str(values["sprint_reservations"]) or "[]")
-            ]
+            # A project listed twice keeps its last place, as the row-by-row upsert left it.
+            ordinals = {
+                str(project): ordinal
+                for ordinal, project in enumerate(json.loads(str(values["sprint_reservations"]) or "[]"))
+            }
             changed_at = _now()
             self.client._execute(
                 "UPDATE sprint_projects SET reserved=false, released_at=%s "
@@ -391,25 +416,29 @@ class SqlSprintRecords:
                 "SELECT status FROM sprints WHERE ref=%s", (reference,)
             )[0][0]
             reserved = str(status) == "open"
-            from ummanu.board.sql_cards import _ensure_project_row
-
-            for ordinal, project in enumerate(projects):
+            if ordinals:
+                projects = list(ordinals)
                 # §3.1: a fresh store holds no `projects` rows; the reservation names the id.
-                _ensure_project_row(self.client, project)
+                self.client._execute(
+                    "INSERT INTO projects (project_id) SELECT unnest(%s::text[]) "
+                    "ON CONFLICT (project_id) DO NOTHING",
+                    (projects,),
+                )
                 self.client._execute(
                     "INSERT INTO sprint_projects "
                     "(sprint_ref, project_id, reserved, reserved_at, released_at, ordinal) "
-                    "VALUES (%s,%s,%s,%s,%s,%s) "
+                    "SELECT %s, project_id, %s, %s, %s, ordinal "
+                    "FROM unnest(%s::text[], %s::int[]) AS r(project_id, ordinal) "
                     "ON CONFLICT (sprint_ref, project_id) DO UPDATE SET "
                     "reserved=EXCLUDED.reserved, released_at=EXCLUDED.released_at, "
                     "ordinal=EXCLUDED.ordinal",
                     (
                         reference,
-                        project,
                         reserved,
                         changed_at,
                         None if reserved else changed_at,
-                        ordinal,
+                        projects,
+                        [ordinals[project] for project in projects],
                     ),
                 )
 
@@ -547,25 +576,27 @@ class SqlSprintRecords:
                 uncharged_counts = json.loads(
                     str(values.get("sprint_budget_uncharged") or "{}")
                 )
-                for charged, counts in (
-                    (True, charged_counts.get("by_type", {})),
-                    (False, uncharged_counts),
-                ):
-                    for event_type, count in counts.items():
-                        for occurrence in range(int(count)):
-                            self.client._execute(
-                                "INSERT INTO sprint_budget_events "
-                                "(sprint_ref,event_type,charged,reason,request_id,occurred_at) "
-                                "VALUES (%s,%s,%s,%s,%s,%s)",
-                                (
-                                    reference,
-                                    str(event_type),
-                                    charged,
-                                    f"restored occurrence {occurrence + 1}",
-                                    restored[0],
-                                    _now(),
-                                ),
-                            )
+                occurrences = [
+                    (str(event_type), charged, f"restored occurrence {occurrence + 1}")
+                    for charged, counts in (
+                        (True, charged_counts.get("by_type", {})),
+                        (False, uncharged_counts),
+                    )
+                    for event_type, count in counts.items()
+                    for occurrence in range(int(count))
+                ]
+                if occurrences:
+                    # One INSERT for the whole restored history; the identity column keeps the
+                    # order the counts were listed in, and every row shares the restore's moment.
+                    event_types, charged_flags, reasons = (list(column) for column in zip(*occurrences, strict=True))
+                    self.client._execute(
+                        "INSERT INTO sprint_budget_events "
+                        "(sprint_ref,event_type,charged,reason,request_id,occurred_at) "
+                        "SELECT %s, event_type, charged, reason, %s, %s "
+                        "FROM unnest(%s::text[], %s::boolean[], %s::text[]) WITH ORDINALITY "
+                        "AS o(event_type, charged, reason, ordinal) ORDER BY o.ordinal",
+                        (reference, restored[0], _now(), event_types, charged_flags, reasons),
+                    )
 
     def _e2e_charges(self, references: list[str]) -> dict[str, list[dict[str, str]]]:
         """Every sprint's charged e2e runs, oldest first: `{card, dispatch_id, at}`."""
@@ -651,7 +682,7 @@ class SqlSprintRecords:
         ))
         return {
             key: [
-                {"id": identifier, "date_creation": _epoch(created), "comment": body}
+                comment_row(identifier, body, created)
                 for identifier, body, created in comments.get(references[key], [])
             ]
             for key in keys
@@ -659,8 +690,7 @@ class SqlSprintRecords:
 
     def create_comment(self, task_id: int, content: str, *, created_at: Any = None) -> int:
         reference = self._reference(int(task_id))
-        first = content.splitlines()[0] if content else ""
-        marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
+        marker = comment_marker(content)
         claimed = self._request(reference)
         request_id = claimed[0] if claimed else None
         actor = claimed[1].get("actor", {}) if claimed else {}
@@ -723,14 +753,14 @@ class SqlSprintTransaction:
         event = self.audit.committed_event(request_id)
         if event is not None:
             if event.get("kind") != kind or self._intent(event) != intent:
-                from ummanu.tasks import TaskError
+                from ummanu.kernel.errors import TaskError
 
                 raise TaskError("validation", "request id belongs to another operation or payload", 2)
             return None, event
         pending = self.audit.pending_event(request_id)
         if pending is not None:
             if pending.get("kind") != kind or self._intent(pending) != intent:
-                from ummanu.tasks import TaskError
+                from ummanu.kernel.errors import TaskError
 
                 raise TaskError("validation", "request id belongs to another operation or payload", 2)
             return {

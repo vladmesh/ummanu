@@ -7,24 +7,21 @@ import json
 import re
 import uuid
 from collections import defaultdict
-from datetime import UTC, datetime
 from typing import Any
 
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id
-from ummanu.dispatch.cleanup import bulk_lane
-from ummanu.runtime.references import next_reference, reference_allocation_lock
-from ummanu.tasks import (
-    _STATE_BY_COLUMN,
-    ACTIVE_STATES,
-    TaskError,
-    TaskWriter,
-    _positive_int,
-    _task_is_active,
-    _task_metadata,
-    _text,
-    admit_role,
-    all_project_cards,
+from ummanu.board.legacy_codec import (
+    TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
+    positive_int as _positive_int,
+    text as _text,
 )
+from ummanu.board.sql_rows import now, rfc3339
+from ummanu.board.task_protocol.rows import _task_is_active, _task_metadata, admit_role, all_project_cards
+from ummanu.board.task_routing import ACTIVE_STATES
+from ummanu.dispatch.ownership import bulk_lane
+from ummanu.kernel.errors import TaskError
+from ummanu.runtime.references import next_reference, reference_allocation_lock
+from ummanu.tasks import TaskWriter
 
 REPAIR_KIND = "reference_repaired"
 PRODUCER_FIX = "d9e872ba4a3166486b9282611ba54699f9dd7a66"
@@ -273,10 +270,7 @@ def apply_reference_repair(
                 event = by_task_id.get(task_id) or {
                     "event_id": "evt_" + uuid.uuid4().hex,
                     "schema_version": 1,
-                    "occurred_at": datetime.now(UTC)
-                    .replace(microsecond=0)
-                    .isoformat()
-                    .replace("+00:00", "Z"),
+                    "occurred_at": rfc3339(now()),
                     "actor": {"role": role, "id": actor},
                     "kind": REPAIR_KIND,
                     "outcome": "success",

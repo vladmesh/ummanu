@@ -17,6 +17,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import ummanu.board
+from tests import container_cleanup, sql_backend_fixtures
 from ummanu import upgrade
 from ummanu.board import migrate, provision, schema, store
 from ummanu.board.store import (
@@ -34,9 +35,8 @@ from ummanu.board.store import (
 )
 from ummanu.infra import export_allowlist
 from ummanu.infra.export_allowlist import SNAPSHOT_ALLOWLIST, is_exported
+from ummanu.installation.upgrade import host as upgrade_host, types as upgrade_types
 from ummanu.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
-from tests import container_cleanup
-from tests import sql_backend_fixtures
 
 COMPLETE = {
     "UMMANU_DB_HOST": "127.0.0.1",
@@ -331,8 +331,10 @@ class ProvisionDefinitionTests(unittest.TestCase):
                 "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5432"}]}},
             "Mounts": [{"Type": "volume", "Name": "ummanu-board-store_board-db",
                         "Destination": "/var/lib/postgresql/data"}]}
-        with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
-            with self.assertRaisesRegex(BoardStoreError, "production ownership"):
+        with (
+            mock.patch.object(provision, '_run', return_value=json.dumps([payload])),
+            self.assertRaisesRegex(BoardStoreError, 'production ownership'),
+        ):
                 provision._inspect_container("id", volume_name="ummanu-board-store_board-db")
         payload["Config"]["Labels"][PRODUCTION_BOARD_LABEL] = "true"
         with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
@@ -344,8 +346,10 @@ class ProvisionDefinitionTests(unittest.TestCase):
                        "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5432"}]}},
                    "Mounts": [{"Type": "volume", "Name": "ummanu-board-store_board-db",
                                "Destination": "/var/lib/postgresql/data"}]}
-        with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
-            with self.assertRaisesRegex(BoardStoreError, "ownership label"):
+        with (
+            mock.patch.object(provision, '_run', return_value=json.dumps([payload])),
+            self.assertRaisesRegex(BoardStoreError, 'ownership label'),
+        ):
                 provision._inspect_container("id", volume_name="ummanu-board-store_board-db")
 
     def test_reconcile_passes_only_the_private_file_path_not_credentials_on_argv(self) -> None:
@@ -401,11 +405,13 @@ class TestContainerCleanupTests(unittest.TestCase):
                        {TEST_BOARD_LABEL: str(os.getpid()), PRODUCTION_BOARD_LABEL: "true"}):
             with self.subTest(labels=labels):
                 calls = []
-                def docker(*args):
+                def docker(*args, calls=calls, labels=labels):
                     calls.append(args)
                     return json.dumps([{"Id": "exact-id", "Config": {"Labels": labels}}])
-                with mock.patch.object(container_cleanup, "_docker", side_effect=docker):
-                    with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+                with (
+                    mock.patch.object(container_cleanup, '_docker', side_effect=docker),
+                    self.assertRaisesRegex(RuntimeError, 'ownership mismatch'),
+                ):
                         container_cleanup.remove_test_container("exact-id")
                 self.assertEqual(calls, [("container", "inspect", "exact-id")])
 
@@ -432,8 +438,10 @@ class TestContainerCleanupTests(unittest.TestCase):
                 "ps", "--all", "--quiet", "--no-trunc", "--filter", "label=com.docker.compose.project=reused"
             )
 
-        with mock.patch.object(container_cleanup, "_docker", side_effect=RuntimeError("No such container")):
-            with self.assertRaisesRegex(RuntimeError, "No such container"):
+        with (
+            mock.patch.object(container_cleanup, '_docker', side_effect=RuntimeError('No such container')),
+            self.assertRaisesRegex(RuntimeError, 'No such container'),
+        ):
                 container_cleanup.remove_test_container("missing-id")
 
     def test_foreign_compose_container_leaves_resources_alone(self) -> None:
@@ -446,8 +454,10 @@ class TestContainerCleanupTests(unittest.TestCase):
                 TEST_BOARD_LABEL: str(os.getpid() + 1),
                 "com.docker.compose.project": "private",
                 "com.docker.compose.service": "postgres"}}}])
-        with mock.patch.object(container_cleanup, "_docker", side_effect=docker):
-            with self.assertRaisesRegex(RuntimeError, "ownership mismatch"):
+        with (
+            mock.patch.object(container_cleanup, '_docker', side_effect=docker),
+            self.assertRaisesRegex(RuntimeError, 'ownership mismatch'),
+        ):
                 container_cleanup.cleanup_test_project("private")
         self.assertEqual([call[0] for call in calls], ["ps", "container"])
 
@@ -976,7 +986,7 @@ class ExclusionEnforcementTests(LiveRoot):
 
     def test_the_upgrade_step_fails_rather_than_migrating_over_exported_credentials(self) -> None:
         write_store(self.instance)
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=self.instance,
             base_branch="main",
@@ -984,8 +994,8 @@ class ExclusionEnforcementTests(LiveRoot):
             units=None,
         )
 
-        with self.exported(), mock.patch.object(upgrade, "migrate_instance") as migrated:
-            result = upgrade.step_board_store(context)
+        with self.exported(), mock.patch.object(upgrade_host, "migrate_instance") as migrated:
+            result = upgrade_host.step_board_store(context)
 
         migrated.assert_not_called()
         self.assertTrue(result.failed)
@@ -1073,7 +1083,7 @@ class UpgradeStepTests(unittest.TestCase):
         self.instance = Path(self.tmp.name)
 
     def context(self, *, dry_run: bool = False):
-        return upgrade.UpgradeContext(
+        return upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=Path(self.tmp.name),
             base_branch="main",
@@ -1098,8 +1108,8 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_an_installation_with_no_store_is_a_no_op_that_never_connects(self) -> None:
         """Every installation until the store is provisioned, including the live one today."""
-        with mock.patch.object(upgrade, "migrate_instance") as migrate:
-            result = upgrade.step_board_store(self.context())
+        with mock.patch.object(upgrade_host, "migrate_instance") as migrate:
+            result = upgrade_host.step_board_store(self.context())
 
         migrate.assert_not_called()
         self.assertEqual((result.name, result.status), ("board-store", "skipped"))
@@ -1109,8 +1119,8 @@ class UpgradeStepTests(unittest.TestCase):
     def test_a_configured_store_is_migrated_and_the_versions_are_named(self) -> None:
         write_store(self.instance)
 
-        with mock.patch.object(upgrade, "migrate_instance", return_value=("0001_initial",)) as migrate:
-            result = upgrade.step_board_store(self.context())
+        with mock.patch.object(upgrade_host, "migrate_instance", return_value=("0001_initial",)) as migrate:
+            result = upgrade_host.step_board_store(self.context())
 
         migrate.assert_called_once_with(self.instance, dry_run=False)
         self.assertEqual(result.status, "changed")
@@ -1119,16 +1129,16 @@ class UpgradeStepTests(unittest.TestCase):
     def test_a_current_store_reports_unchanged(self) -> None:
         write_store(self.instance)
 
-        with mock.patch.object(upgrade, "migrate_instance", return_value=()):
-            result = upgrade.step_board_store(self.context())
+        with mock.patch.object(upgrade_host, "migrate_instance", return_value=()):
+            result = upgrade_host.step_board_store(self.context())
 
         self.assertEqual(result.status, "unchanged")
 
     def test_a_dry_run_says_what_it_would_apply_and_applies_nothing(self) -> None:
         write_store(self.instance)
 
-        with mock.patch.object(upgrade, "migrate_instance", return_value=("0001_initial",)) as migrate:
-            result = upgrade.step_board_store(self.context(dry_run=True))
+        with mock.patch.object(upgrade_host, "migrate_instance", return_value=("0001_initial",)) as migrate:
+            result = upgrade_host.step_board_store(self.context(dry_run=True))
 
         migrate.assert_called_once_with(self.instance, dry_run=True)
         self.assertEqual(result.status, "would-change")
@@ -1137,10 +1147,10 @@ class UpgradeStepTests(unittest.TestCase):
     def test_a_store_that_is_configured_and_broken_fails_the_step(self) -> None:
         """Never walk past it: the next thing the upgrade would do is restart services."""
         with mock.patch.object(
-            upgrade, "migrate_instance", side_effect=BoardStoreError("connection refused")
+            upgrade_host, "migrate_instance", side_effect=BoardStoreError("connection refused")
         ):
             write_store(self.instance)
-            result = upgrade.step_board_store(self.context())
+            result = upgrade_host.step_board_store(self.context())
 
         self.assertTrue(result.failed)
         self.assertIn("connection refused", result.detail)
@@ -1148,7 +1158,7 @@ class UpgradeStepTests(unittest.TestCase):
     def test_a_partial_configuration_fails_before_any_driver_is_reached(self) -> None:
         write_store(self.instance, {k: v for k, v in COMPLETE.items() if k != "UMMANU_DB_NAME"})
 
-        result = upgrade.step_board_store(self.context())
+        result = upgrade_host.step_board_store(self.context())
 
         self.assertTrue(result.failed)
         self.assertIn("UMMANU_DB_NAME", result.detail)

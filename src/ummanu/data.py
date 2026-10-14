@@ -25,13 +25,13 @@ from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.board.owner_decisions import stored_decisions
 from ummanu.config import validate
+from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot
-from ummanu.tasks import TaskError, TaskReader, task_audit_for
+from ummanu.runtime.paths import PIPELINE_STATE_DIR
+from ummanu.tasks import TaskReader, task_audit_for
 
 LAYOUT_DIRS = ("board", "memory", "runs", "transcripts", "artifacts", "backups")
-PIPELINE_WORKTREE = Path.home() / "orca" / "workspaces" / "ummanu" / "pipeline"
 ORCA_WORKSPACES_ROOT = Path.home() / "orca" / "workspaces"
-PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state" / "pipeline"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
@@ -206,7 +206,7 @@ def _read_board_cut(
     Non-SQL clients are retained for offline test/export compatibility.
     """
     from ummanu.board.sql_cards import SqlCardClient
-    from ummanu.dispatch.cleanup import bulk_lane
+    from ummanu.dispatch.ownership import bulk_lane
 
     owned = reader is None
     client = None
@@ -246,8 +246,8 @@ def _read_board_cut(
 
 def export_sprint_entities(instance_dir: Path, client: Any = None) -> list[dict[str, Any]]:
     """Read the sprint board into deterministic checkpoint records."""
+    from ummanu.kernel.errors import TaskError
     from ummanu.sprints import SprintReader
-    from ummanu.tasks import TaskError
 
     try:
         sprint_board = client if client is not None else board_client(instance_dir, serves=(SPRINT,))

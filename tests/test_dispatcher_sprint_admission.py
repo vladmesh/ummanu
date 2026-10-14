@@ -14,6 +14,7 @@ from unittest import mock
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.board.sql_cards import SPRINT_BOARD_ID
 from ummanu.dispatch.claim import (
     SPRINT_RESERVATION_BLOCKED_ACTION,
@@ -23,7 +24,7 @@ from ummanu.dispatch.claim import (
 from ummanu.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
 from ummanu.dispatch.production import _budget_event_type, _reconcile_sprint_budget
 from ummanu.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
-from ummanu.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintReader
+from ummanu.sprints import SprintReader
 from ummanu.tasks import TaskError, task_audit_for
 
 SPRINT = "sprint:1031"

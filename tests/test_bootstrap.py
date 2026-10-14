@@ -16,7 +16,7 @@ from ummanu.bootstrap import (
     _install_platform,
     bootstrap,
 )
-from ummanu.installation import SnapshotCheckout
+from ummanu.installation.clone import SnapshotCheckout
 
 
 class BootstrapTests(unittest.TestCase):
@@ -250,8 +250,7 @@ class BootstrapTests(unittest.TestCase):
         it runs `_set_installation_owner` for real with root's view of the host and records the
         uid and gid each `chown` receives, and when, relative to the store steps.
         """
-        from ummanu.board import provision as provision_module
-        from ummanu.board import store
+        from ummanu.board import provision as provision_module, store
 
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
@@ -292,9 +291,9 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch("ummanu.bootstrap.migrate_instance", side_effect=step("migrate")),
                 mock.patch("ummanu.bootstrap.verify_board_store_roles", side_effect=step("verify")),
                 # `_set_installation_owner` runs for real, as root would, against a stand-in account.
-                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("ummanu.upgrade.os.chown", side_effect=chown),
+                mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+                mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=account),
+                mock.patch('ummanu.installation.upgrade.workspaces.os.chown', side_effect=chown),
                 mock.patch("builtins.print"),
             ):
                 self.assertEqual(bootstrap(args), 0)

@@ -7,16 +7,22 @@ two statements of one transaction.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
+from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
+from ummanu import sprints
+from ummanu.board import sql_sprints
 from ummanu.board.sql_sprints import sprint_key
 from ummanu.sprint_observer import head_choice
-from ummanu.sprints import SprintWriter
-from ummanu.tasks import TaskError
+from ummanu.sprints import SprintReader, SprintWriter
+from ummanu.tasks import TaskError, TaskWriter
 
 
 class SqlSprintAtomicityTests(SprintFixture):
@@ -51,6 +57,142 @@ class SqlSprintAtomicityTests(SprintFixture):
             self.client._query("SELECT count(*) FROM board_events WHERE request_id=%s", (request_id,)),
             [(0,)],
         )
+
+    def test_staged_persisted_projection_and_comment_marker_actor_stamp(self) -> None:
+        reference = "sprint:1000"
+        written = datetime(2026, 9, 1, 0, 0, 1, 900000, tzinfo=UTC)
+        with self.client.transaction(), mock.patch.object(sql_sprints, "_now", return_value=written):
+            key = self.client.sprints.create(title="projection", description="", reference=reference)
+            staged = self.client.sprints.row_by_reference(reference)
+            self.assertIn(staged, self.client.sprints.rows())
+            self.assertEqual(self.client.sprints.comments_of([key]), {key: []})
+            self.client.sprints.save_metadata(key, {
+                "sprint_goal": "projection", "sprint_definition_of_done": "round trip", "sprint_status": "open",
+            })
+            persisted = self.client.sprints.row_by_reference(reference)
+            self.assertEqual(persisted, staged)
+            self.assertEqual(list(persisted), ["id", "reference", "title", "description", "column_id", "position",
+                                               "swimlane_id", "date_creation", "date_modification", "is_active"])
+            self.assertNotIn(key, self.client.sprints.staged)
+            self.assertEqual(self.client.sprints.metadata_of([key])[key]["sprint_goal"], "projection")
+            identifier = self.client.sprints.create_comment(key, "[]\r\nraw", created_at=written.isoformat())
+        self.assertEqual(self.client._query(
+            "SELECT marker, body, created_at FROM sprint_comments WHERE comment_id=%s", (identifier,)
+        ), [("", "[]\r\nraw", written)])
+        comment = self.client.sprints.comments_of([key])[key][0]
+        self.assertEqual(comment, {"id": identifier, "date_creation": "1788220801", "comment": "[]\r\nraw"})
+        self.writer.comment(role="po", actor="operator", reference=reference, body="stamped", request_id="projection-note")
+        self.writer.comment(role="po", actor="operator", reference=reference, body="stamped", request_id="projection-note")
+        self.assertEqual(self.client._query(
+            "SELECT marker, body, actor_role, actor_id FROM sprint_comments WHERE request_id=%s", ("projection-note",)
+        ), [("po", "[po]\nstamped", "po", "operator")])
+
+    def _read_state(self):
+        """Exact persisted rows and files, after fixture setup and outside the read trap."""
+        tables = ("projects", "sprints", "sprint_repositories", "sprint_issues", "sprint_projects",
+                  "sprint_comments", "sprint_resumes", "sprint_budget_events", "requests", "board_events")
+        rows = {table: self.client._query(f"SELECT to_jsonb(row) FROM {table} AS row ORDER BY to_jsonb(row)::text")
+                for table in tables}
+        guard = Path(self.tmp.name) / "sprints"
+        files = {str(p.relative_to(guard)): p.read_bytes() for p in guard.rglob("*") if p.is_file()}
+        return rows, files
+
+    @contextlib.contextmanager
+    def _read_trap(self):
+        """Instrument actual statements and reject all execute/audit/RPC mutations."""
+        queries, writes = [], []
+        query = self.client._query
+        call = self.client.call
+
+        def read(statement, *args, **kwargs):
+            text = str(statement)
+            queries.append(text)
+            self.assertRegex(text.lstrip().upper(), r"^(SELECT|WITH)\b")
+            self.assertIsNone(re.search(r"\b(INSERT|UPDATE|DELETE|MERGE|ALTER|CREATE|DROP|TRUNCATE|FOR\s+UPDATE)\b", text, re.IGNORECASE))
+            return query(statement, *args, **kwargs)
+
+        def rpc(method, **params):
+            self.assertTrue(method.startswith("get"), f"mutating read RPC: {method}")
+            return call(method, **params)
+
+        def forbid(*args, **kwargs):
+            writes.append((args, kwargs))
+            raise AssertionError("Sprint read attempted a SQL or audit mutation")
+
+        with (mock.patch.object(self.client, "_query", side_effect=read),
+              mock.patch.object(self.client, "_execute", side_effect=forbid),
+              mock.patch.object(self.client, "call", side_effect=rpc),
+              mock.patch.object(self.writer.audit, "stage", side_effect=forbid),
+              mock.patch.object(self.writer.audit, "append", side_effect=forbid)):
+            yield queries, writes
+        self.assertEqual(writes, [])
+
+    def test_fresh_provisioned_reader_construction_list_and_show_write_nothing(self) -> None:
+        # PostgreSQL exposes a virtual board sentinel even with no Sprint rows. This test does
+        # not pretend that its project lookup is the missing-board protocol regression.
+        before = self._read_state()
+        with self._read_trap() as (queries, writes):
+            reader = SprintReader(self.client, data_dir=self.tmp.name)
+            self.assertEqual(queries, [])
+            self.assertEqual(reader.list(), [])
+            self.assertEqual(reader.list(create=False), [])
+            with self.assertRaises(TaskError) as refused:
+                reader.show("sprint:missing")
+            self.assertEqual((refused.exception.code, refused.exception.message, refused.exception.exit_code),
+                             ("not_found", "sprint was not found", 2))
+            self.assertTrue(queries)
+            self.assertEqual(writes, [])
+        self.assertEqual(self._read_state(), before)
+
+    def test_established_default_reads_linked_cards_comments_and_freshness_write_nothing(self) -> None:
+        self._create()
+        # This fixture intentionally has no seeded Cards. Arrange the linked card through
+        # the public writer before starting statement/audit measurement.
+        with as_observer("sprint:atomic"):
+            TaskWriter(self.client, data_dir=self.tmp.name).create(
+                role="observer", actor="observer", project="ummanu", task_type="research", title="read card",
+                reference="ummanu-1", sprint="sprint:atomic", request_id="read-card",
+            )
+        self.writer.comment(role="po", actor="operator", reference="sprint:atomic", body="read comment", request_id="read-comment")
+        self.writer.resume(role="po", actor="operator", reference="sprint:atomic", entry=self._resume_entry(), request_id="read-resume")
+        before = self._read_state()
+        with self._read_trap() as (queries, writes):
+            reader = SprintReader(self.client, data_dir=self.tmp.name)
+            listed = reader.list()
+            self.assertEqual([s["ref"] for s in listed], ["sprint:atomic"])
+            default = reader.show("sprint:atomic")
+            self.assertEqual([card["ref"] for card in default["cards"]], ["ummanu-1"])
+            self.assertEqual([entry["body"] for entry in default["comments"]],
+                             ["[po]\nread comment", "[sprint:resume]\ncontinue"])
+            self.assertIn("resume_freshness", default)
+            explicit = reader.show("sprint:atomic", include_cards=True, include_comments=False, include_resume_freshness=True)
+            self.assertEqual(json.dumps(default), json.dumps(explicit))
+            comments = reader.show("sprint:atomic", include_comments=True)
+            self.assertEqual([entry["body"] for entry in comments["comments"]],
+                             ["[po]\nread comment", "[sprint:resume]\ncontinue"])
+            shallow = reader.show("sprint:atomic", include_cards=False, include_resume_freshness=False)
+            self.assertNotIn("cards", shallow)
+            self.assertNotIn("resume_freshness", shallow)
+            self.assertTrue(queries)
+            self.assertEqual(writes, [])
+        self.assertEqual(self._read_state(), before)
+
+    def test_explicit_writer_create_and_restore_initialize_once_and_replay(self) -> None:
+        with mock.patch.object(sprints, "ensure_sprint_board", wraps=sprints.ensure_sprint_board) as ensure:
+            first = self._create()
+            replay = self._create()
+        self.assertEqual(ensure.call_count, 1)
+        self.assertEqual(json.dumps(first), json.dumps(replay))
+        self.assertEqual(self.client._query("SELECT count(*) FROM sprints"), [(1,)])
+        options = {"reference": "sprint:restored", "goal": "restored", "status": "closed",
+                   "observer": {"kind": "none"}, "request_id": "restore-positive"}
+        with mock.patch.object(sprints, "ensure_sprint_board", wraps=sprints.ensure_sprint_board) as ensure:
+            restored = self.writer.restore_create(**options)
+            replay = self.writer.restore_create(**options)
+        self.assertEqual(ensure.call_count, 1)
+        self.assertEqual(json.dumps(restored), json.dumps(replay))
+        self.assertEqual(self.client._query("SELECT count(*) FROM sprints"), [(2,)])
+        self.assertEqual(self.client._query("SELECT count(*) FROM requests WHERE request_id='restore-positive' AND status='committed'"), [(1,)])
 
     def test_sql_local_run_authority_survives_new_reader_and_rollback(self) -> None:
         from ummanu.sprints import SprintReader

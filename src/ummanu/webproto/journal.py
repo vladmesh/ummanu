@@ -14,6 +14,7 @@ from typing import Any
 
 from ummanu.board.models import Event
 from ummanu.webproto import sources
+from ummanu.webproto._values import _reason, _text
 from ummanu.webproto.cursor import Cursor
 from ummanu.webproto.errors import InvalidCursor
 from ummanu.webproto.sources import Source
@@ -120,7 +121,7 @@ class CommittedAudit:
         return Cursor(ref=ref, offset=ordinal)
 
     def _failures(self) -> tuple[type[BaseException], ...]:
-        from ummanu.tasks import TaskError
+        from ummanu.kernel.errors import TaskError
 
         return (TaskError, *self._FAILURES)
 
@@ -138,10 +139,6 @@ class CommittedAudit:
                 now=now,
             ),
         )
-
-
-def _reason(exc: Exception) -> str:
-    return getattr(exc, "message", None) or str(exc) or type(exc).__name__
 
 
 def _payload(record: dict[str, Any]) -> Any:
@@ -187,7 +184,3 @@ def _item(record: dict[str, Any], cursor: Cursor) -> dict[str, Any]:
         "related_refs": [ref for ref in related if isinstance(ref, str)] if isinstance(related, list) else [],
         "data": payload if isinstance(payload, dict) else {},
     }
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""

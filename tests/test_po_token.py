@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from ummanu import upgrade
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.po import token as po_token
 
 
@@ -22,8 +23,8 @@ class PoTokenStepTests(unittest.TestCase):
         self.data.mkdir()
         self.path = self.data / "po-web-token"
 
-    def run_step(self, *, dry_run: bool = False, runtime_user: str | None = None) -> upgrade.StepResult:
-        context = upgrade.UpgradeContext(
+    def run_step(self, *, dry_run: bool = False, runtime_user: str | None = None) -> upgrade_types.StepResult:
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.root / "product",
             base_branch="main",
@@ -32,7 +33,7 @@ class PoTokenStepTests(unittest.TestCase):
             report=SimpleNamespace(data_dir=self.data),
             runtime_user=runtime_user,
         )
-        return upgrade.step_po_token(context)
+        return upgrade_workspaces.step_po_token(context)
 
     def test_the_step_creates_a_0600_token_and_a_second_run_changes_nothing(self) -> None:
         first = self.run_step()
@@ -88,9 +89,9 @@ class PoTokenStepTests(unittest.TestCase):
     def test_a_root_invoker_hands_the_token_to_the_runtime_user(self) -> None:
         account = SimpleNamespace(pw_uid=4321, pw_gid=4321)
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+            mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=account),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
             result = self.run_step(runtime_user="po-runtime")
 

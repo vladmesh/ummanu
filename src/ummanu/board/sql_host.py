@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import uuid
 from collections.abc import Callable, Sequence
@@ -16,6 +15,7 @@ from ummanu.board.events import (
     BoardEventCanon,
     BoardEventPending,
     MutationEventTransaction,
+    event_id,
     render_marker_comment,
 )
 from ummanu.board.host import (
@@ -28,6 +28,7 @@ from ummanu.board.host import (
     SprintSupplement,
     TransitionRequest,
 )
+from ummanu.board.legacy_codec import positive_int as _positive_int
 from ummanu.board.models import (
     BoardEntity,
     Card,
@@ -43,20 +44,18 @@ from ummanu.board.models import (
     Sprint,
     SprintState,
 )
-from ummanu.board.tick_snapshot import select_cards, select_sprints
-from ummanu.board.transitions import BoardProtocolError, transition, transition_for
-from ummanu.dispatch.cleanup import reference_lock
-from ummanu.product_issues import ProductIssueStore, product_swimlane_id
-from ummanu.sprints import SprintReader
-from ummanu.tasks import (
-    TaskReader,
+from ummanu.board.task_protocol.rows import (
     _digest,
-    _positive_int,
     _target_column_id,
     all_project_cards,
     project_card_by_reference,
-    task_audit_for,
 )
+from ummanu.board.tick_snapshot import select_cards, select_sprints
+from ummanu.board.transitions import BoardProtocolError, transition, transition_for
+from ummanu.dispatch.ownership import reference_lock
+from ummanu.product_issues import ProductIssueStore, product_swimlane_id
+from ummanu.sprints import SprintReader
+from ummanu.tasks import TaskReader, task_audit_for
 
 if TYPE_CHECKING:
     from ummanu.board.sql_cards import SqlCardClient
@@ -493,7 +492,7 @@ class SqlBoardHost:
                     )
                 except Exception as exc:
                     # Only unavailable transport can hide an applied effect.
-                    from ummanu.tasks import TaskError
+                    from ummanu.kernel.errors import TaskError
 
                     if isinstance(exc, TaskError) and exc.code == "backend_unavailable":
                         return
@@ -889,30 +888,26 @@ class SqlBoardHost:
         target: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> Event:
-        payload = json.dumps(
-            {
-                "request_id": request_id,
-                "kind": kind.value,
-                "entity": [
-                    entity.ref,
-                    entity.goal,
-                    entity.state.value,
-                    entity.product_ref,
-                    entity.issue_refs,
-                    entity.card_refs,
-                ],
-                "actor": [actor.role, actor.id, actor.head_run_ref],
-                "reason": reason,
-                "related_refs": list(related.refs),
-                "source": source,
-                "target": target,
-                "data": data or {},
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        identity = {
+            "request_id": request_id,
+            "kind": kind.value,
+            "entity": [
+                entity.ref,
+                entity.goal,
+                entity.state.value,
+                entity.product_ref,
+                entity.issue_refs,
+                entity.card_refs,
+            ],
+            "actor": [actor.role, actor.id, actor.head_run_ref],
+            "reason": reason,
+            "related_refs": list(related.refs),
+            "source": source,
+            "target": target,
+            "data": data or {},
+        }
         return Event(
-            "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32],
+            event_id(identity),
             kind,
             EntityKind.SPRINT,
             entity.ref,
@@ -1024,9 +1019,8 @@ class SqlBoardHost:
             identity["append"] = append.event_data()
         if edit is not None:
             identity["edit"] = edit.event_data()
-        payload = json.dumps(identity, sort_keys=True, separators=(",", ":"))
         return Event(
-            "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32],
+            event_id(identity),
             kind,
             entity.kind,
             entity.ref,
@@ -1155,7 +1149,7 @@ class SqlBoardHost:
     def _create_marker(request_id: str) -> str:
         return (
             "[ummanu-product-issue-transaction:"
-            + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+            + _digest(request_id)
             + "]"
         )
 
@@ -1245,21 +1239,17 @@ class SqlBoardHost:
         data["request_related_refs"] = list(operation.related_refs.refs)
         if marker_occurrence is not None:
             data["marker_occurrence"] = marker_occurrence
-        payload = json.dumps(
-            {
-                "request_id": request_id,
-                "kind": operation.kind.value,
-                "ref": card.ref,
-                "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
-                "reason": operation.reason,
-                "related_refs": list(related.refs),
-                "data": data,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        identity = {
+            "request_id": request_id,
+            "kind": operation.kind.value,
+            "ref": card.ref,
+            "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
+            "reason": operation.reason,
+            "related_refs": list(related.refs),
+            "data": data,
+        }
         event = Event(
-            "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32],
+            event_id(identity),
             operation.kind,
             EntityKind.CARD,
             card.ref,
@@ -1312,23 +1302,19 @@ class SqlBoardHost:
         The id is derived from the request and its exact payload, so a retry of the same request names
         the same occurrence and a different payload can never borrow it.
         """
-        payload = json.dumps(
-            {
-                "request_id": request_id,
-                "kind": kind.value,
-                "ref": card.ref,
-                "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
-                "reason": operation.reason,
-                "related_refs": list(related.refs),
-                "source": card.state.value,
-                "target": operation.target.value,
-                "data": operation.data,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        identity = {
+            "request_id": request_id,
+            "kind": kind.value,
+            "ref": card.ref,
+            "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
+            "reason": operation.reason,
+            "related_refs": list(related.refs),
+            "source": card.state.value,
+            "target": operation.target.value,
+            "data": operation.data,
+        }
         return Event(
-            "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32],
+            event_id(identity),
             kind,
             EntityKind.CARD,
             card.ref,

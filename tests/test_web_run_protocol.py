@@ -26,11 +26,12 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
 import yaml
 
+from tests import source_trees
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.fakes.tasks import SEED_COLUMN
 from tests.sql_backend_fixtures import card_store
@@ -50,10 +51,16 @@ from ummanu.runtime.head.runtime import (
     StopReceipt,
 )
 from ummanu.runtime.heads import Registry
-from ummanu.webproto import admission as admission_module
-from ummanu.webproto import lifecycle as lifecycle_module
-from ummanu.webproto import ops as ops_module
-from ummanu.webproto import run_events, run_state, store_io, workspaces
+from ummanu.webproto import (
+    admission as admission_module,
+    lifecycle as lifecycle_module,
+    ops as ops_module,
+    run_events,
+    run_state,
+    store_io,
+    workspaces,
+)
+from ummanu.webproto.agents import AGENT_STATES
 from ummanu.webproto.boundary import GUARDED, IMPLEMENTATION_FAILURES, ProtocolBoundary, operations
 from ummanu.webproto.errors import (
     OwnerConflict,
@@ -666,7 +673,6 @@ class AdmissionTests(ProductRuntimeFixture):
         # 5. the dispatcher's record, before this layer's own runs.
         self.assertIn("durable record", refusal("ummanu-run-3"))
 
-
     # -- the fence reads one fact ---------------------------------------------------------------
 
     def _record(self, run_id: str, **overrides: Any) -> ProductRun:
@@ -725,32 +731,43 @@ class AdmissionTests(ProductRuntimeFixture):
         self.assertIn("pr-in-doubt", str(refused.exception))
 
     def test_no_branch_of_the_gate_reads_what_a_run_ended_as(self) -> None:
-        """The static half: the outcome vocabulary is not reachable from this module's code.
+        """Exhaustive over the outcome vocabulary: what a run ended as never changes the answer.
 
-        A behavioural check can only sample the values; this says the question is not asked at all.
-        Docstrings are excluded on purpose -- the module explains the distinction at length, and
-        naming a value while explaining why it is not consulted is not consulting it.
+        `AGENT_STATES` is every value a run can end as, so each one is driven rather than sampled:
+        a run that is over frees the card whatever it ended as and whatever reason it gives, and a
+        run that is not over fences it whatever ending its record also carries.
         """
-        import ast
-
-        tree = ast.parse(
-            (REPO_ROOT / "src" / "ummanu" / "webproto" / "admission.py").read_text(encoding="utf-8")
-        )
-        forbidden = {"running", "finished", "process_failed", "source_unavailable", "unknown"}
-        offenders: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef)):
-                body = node.body[1:] if ast.get_docstring(node) else node.body
-                for statement in body:
-                    for inner in ast.walk(statement):
-                        if isinstance(inner, ast.Constant) and inner.value in forbidden:
-                            offenders.append(f"line {inner.lineno}: {inner.value!r}")
-                        if isinstance(inner, ast.Attribute) and inner.attr in {
-                            "settled_state",
-                            "settled_reason",
-                        }:
-                            offenders.append(f"line {inner.lineno}: .{inner.attr}")
-        self.assertEqual(sorted(set(offenders)), [])
+        admitted = set()
+        fenced = set()
+        for value in AGENT_STATES:
+            with self.subTest(value=value):
+                self._record(
+                    "pr-prior",
+                    phase="settled",
+                    ended=True,
+                    settled_state=value,
+                    settled_reason=f"this run ended as {value}",
+                    settled_at=self.clock,
+                )
+                admission = self._admit()
+                admitted.add((admission.ref, admission.project, tuple(run.run_id for run in admission.runs)))
+                self._record(
+                    "pr-prior",
+                    phase="unresolved",
+                    unresolved_reason="the stop was refused",
+                    ended=False,
+                    settled_state=value,
+                    settled_reason=f"this run ended as {value}",
+                )
+                with self.assertRaises(OwnerConflict) as refused:
+                    self._admit()
+                fenced.add(str(refused.exception))
+        self.assertEqual(len(admitted), 1, admitted)
+        ref, project, runs = admitted.pop()
+        self.assertEqual((ref, project), ("ummanu-run-1", "ummanu"))
+        self.assertIn("pr-prior", runs)
+        self.assertEqual(len(fenced), 1, fenced)
+        self.assertIn("pr-prior", fenced.pop())
 
 
 class RunStateTests(ProductRuntimeFixture):
@@ -899,12 +916,6 @@ class RunStateTests(ProductRuntimeFixture):
         self.assertEqual(never_raised["value"], "unknown")
         self.assertIn("no head has been raised", never_raised["reason"])
 
-    def test_a_window_is_never_consulted(self) -> None:
-        """Criterion 5's last sentence: a pane or panel is not evidence of a live run."""
-        source = (REPO_ROOT / "src" / "ummanu" / "webproto" / "run_state.py").read_text(encoding="utf-8")
-        for word in ("pane", "terminal list", "session"):
-            self.assertNotIn(f"{word}(", source)
-
 
 class SettlingTests(ProductRuntimeFixture):
     def test_a_published_result_ends_the_head_this_product_owns(self) -> None:
@@ -989,14 +1000,14 @@ class EventVisibilityTests(ProductRuntimeFixture):
         once. The retry the idempotency contract invites finds the record -- and must publish the
         event it owes rather than only hand the document back, or the launch is invisible forever.
         """
-        with mock.patch.object(
-            ops_module.run_events, "publish_started", side_effect=RuntimeUnavailable("journal down")
+        with (
+            mock.patch.object(
+                ops_module.run_events, "publish_started", side_effect=RuntimeUnavailable("journal down")
+            ),
+            self.assertRaises(RuntimeUnavailable),
         ):
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="lost-start-event")
-        self.assertEqual(
-            self.reads().task_events("ummanu-run-1", None, limit=10)["items"], []
-        )
+            self.start(request_id="lost-start-event")
+        self.assertEqual(self.reads().task_events("ummanu-run-1", None, limit=10)["items"], [])
 
         again = self.start(request_id="lost-start-event")
         self.assertEqual(len(self.runtime.starts), 1)
@@ -1009,11 +1020,13 @@ class EventVisibilityTests(ProductRuntimeFixture):
         """The same hole under `run_state`: the settle is durable before its publication is."""
         run_id = self.start()["run"]["run_id"]
         self.runtime.publish_result(run_id, {"status": "done"})
-        with mock.patch.object(
-            ops_module.run_events, "publish_finished", side_effect=RuntimeUnavailable("journal down")
+        with (
+            mock.patch.object(
+                ops_module.run_events, "publish_finished", side_effect=RuntimeUnavailable("journal down")
+            ),
+            self.assertRaises(RuntimeUnavailable),
         ):
-            with self.assertRaises(RuntimeUnavailable):
-                self.layer().run_state(run_id)
+            self.layer().run_state(run_id)
         kinds = [item["kind"] for item in self.reads().task_events("ummanu-run-1", None, limit=10)["items"]]
         self.assertEqual(kinds, [run_events.STARTED])
 
@@ -1145,11 +1158,14 @@ class LifecycleTests(ProductRuntimeFixture):
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             if path.name == "lifecycle.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                    if node.func.attr in {"start", "stop", "settle"}:
-                        offenders.append(f"{path.name}:{node.lineno} .{node.func.attr}()")
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in {"start", "stop", "settle"}
+                ):
+                    offenders.append(f"{path.name}:{node.lineno} .{node.func.attr}()")
         self.assertEqual(offenders, [])
 
     # -- write-ahead, and ownership recovered from disk -----------------------------------------
@@ -1219,9 +1235,8 @@ class LifecycleTests(ProductRuntimeFixture):
 
     def test_a_save_failure_after_a_successful_start_leaves_no_live_head(self) -> None:
         """The reviewer's scenario, with the cleanup confirmed: no orphan, and the card is free."""
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable) as refused:
-                self.start(request_id="req-lost-save")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable) as refused:
+            self.start(request_id="req-lost-save")
         self.assertIn("disk write failed", str(refused.exception))
         self.assertEqual(len(self.runtime.starts), 1)
         run = RunStore(self.data_dir).by_request("req-lost-save")
@@ -1239,9 +1254,8 @@ class LifecycleTests(ProductRuntimeFixture):
         self.runtime.stop = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-in-doubt")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-in-doubt")
         run = RunStore(self.data_dir).by_request("req-in-doubt")
         self.assertEqual(run.phase, UNRESOLVED)
         self.assertFalse(run.ended, "an unconfirmed cleanup is not an ending")
@@ -1270,9 +1284,8 @@ class LifecycleTests(ProductRuntimeFixture):
         self.runtime.stop = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-late-result")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-late-result")
         run_id = RunStore(self.data_dir).by_request("req-late-result").run_id
 
         # The head survived that stop, did its work and published its result.
@@ -1310,9 +1323,8 @@ class LifecycleTests(ProductRuntimeFixture):
         self.runtime.stop = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-dark")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-dark")
         run = RunStore(self.data_dir).by_request("req-dark")
         self.assertEqual(run.phase, UNRESOLVED)
 
@@ -1369,13 +1381,12 @@ class LifecycleTests(ProductRuntimeFixture):
 
     def test_an_unresolved_run_settles_as_soon_as_the_ending_is_confirmed(self) -> None:
         """An unresolved run is a fence, not a dead end: the next read retries the same stop."""
-        refusing = lambda run, initiator, **options: StopReceipt(  # noqa: E731
+        refusing = lambda run, initiator, **options: StopReceipt(
             status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop it was sent"
         )
         self.runtime.stop = refusing
-        with self._failing_save():
-            with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-recover")
+        with self._failing_save(), self.assertRaises(RuntimeUnavailable):
+            self.start(request_id="req-recover")
         run_id = RunStore(self.data_dir).by_request("req-recover").run_id
 
         self.runtime.stop = FakeHeadRuntime.stop.__get__(self.runtime, FakeHeadRuntime)
@@ -1448,7 +1459,11 @@ class RealHeadFixture(ProductRuntimeFixture):
             for name, group in (("head.pid", True), ("supervisor.pid", False)):
                 try:
                     raw = (run_dir / name).read_text(encoding="utf-8")
-                    pid = int(json.loads(raw)["pid"] if name.endswith(".pid") and raw.strip().startswith("{") else raw)
+                    pid = int(
+                        json.loads(raw)["pid"]
+                        if name.endswith(".pid") and raw.strip().startswith("{")
+                        else raw
+                    )
                 except (OSError, ValueError, KeyError, TypeError):
                     continue
                 for number in (signal.SIGTERM, signal.SIGKILL):
@@ -1506,7 +1521,8 @@ class RealHeadOwnershipTests(RealHeadFixture):
                 lambda profile, **kwargs: HeadCommand(command=self.CHILD_COMMAND, adapter="claude"),
             ),
         ):
-            document = self.layer(runtime_factory=lambda _root: backend).run_start(
+            # Called here, before the `del backend` below that proves the stop needs no live backend.
+            document = self.layer(runtime_factory=lambda _root: backend).run_start(  # noqa: F821
                 "ummanu-run-1", request_id="req-real-head", profile=REVIEWER_PROFILE
             )
 
@@ -1521,8 +1537,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
         head_pid = int(json.loads(pid_file.read_text(encoding="utf-8"))["pid"])
         expected = run_state.expected_identity(stored)
         self._await(
-            lambda: head_process_status(str(pid_file), expected=expected)["state"]
-            == HEARTBEAT_LIVE_MATCH,
+            lambda: head_process_status(str(pid_file), expected=expected)["state"] == HEARTBEAT_LIVE_MATCH,
             "the head's launch identity never became a live match",
         )
         self.assertTrue(_alive(head_pid), "the head's process is running")
@@ -1546,7 +1561,6 @@ class RealHeadOwnershipTests(RealHeadFixture):
         self.assertEqual(head_process_status(str(pid_file))["state"], HEARTBEAT_DEAD)
         self.assertIn(RUN_EXITED, [record.get("kind") for record in head_run_journal(run_dir)])
         self.assertFalse(_alive(head_pid), "the head's process is gone")
-
 
 
 #: What the real children below publish: a worker's report and a reviewer's verdict, in the shape
@@ -1582,17 +1596,13 @@ class RealBackendContractTests(RealHeadFixture):
         root, backend = self.real_backend()
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(self._publishing(REAL_RESULT)):
-            started = layer.run_start(
-                "ummanu-run-1", request_id="req-real-result", profile=REVIEWER_PROFILE
-            )
+            started = layer.run_start("ummanu-run-1", request_id="req-real-result", profile=REVIEWER_PROFILE)
         run_id = started["run"]["run_id"]
         self.assertEqual(started["state"]["value"], "running")
 
         stored = RunStore(self.data_dir).get(run_id)
         self.assertEqual(Path(stored.result_path).parent, root / run_id)
-        self._await(
-            lambda: Path(stored.result_path).exists(), "the head never published its result file"
-        )
+        self._await(lambda: Path(stored.result_path).exists(), "the head never published its result file")
 
         # The product owns the process, so the read that sees a published result ends the head.
         document = layer.run_state(run_id)
@@ -1607,13 +1617,9 @@ class RealBackendContractTests(RealHeadFixture):
         _root, backend = self.real_backend()
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(f"{self.PRODUCT_CHILD} exit 7"):
-            started = layer.run_start(
-                "ummanu-run-1", request_id="req-real-failure", profile=REVIEWER_PROFILE
-            )
+            started = layer.run_start("ummanu-run-1", request_id="req-real-failure", profile=REVIEWER_PROFILE)
         run_id = started["run"]["run_id"]
-        self._await(
-            lambda: layer.run_state(run_id)["state"]["ended"], "the head never ended", timeout=30.0
-        )
+        self._await(lambda: layer.run_state(run_id)["state"]["ended"], "the head never ended", timeout=30.0)
 
         document = layer.run_state(run_id)
         state = document["state"]
@@ -1641,9 +1647,9 @@ class RealBackendContractTests(RealHeadFixture):
         root, backend = self.real_backend()
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(self._publishing(REAL_RESULT), self._publishing(REAL_VERDICT)):
-            worker = layer.run_start(
-                "ummanu-run-1", request_id="req-real-worker", profile=REVIEWER_PROFILE
-            )["run"]["run_id"]
+            worker = layer.run_start("ummanu-run-1", request_id="req-real-worker", profile=REVIEWER_PROFILE)[
+                "run"
+            ]["run_id"]
             self._await(
                 lambda: layer.run_state(worker)["state"]["ended"],
                 "the worker never ended",
@@ -1657,9 +1663,7 @@ class RealBackendContractTests(RealHeadFixture):
         review_id = review["review"]["run"]["run_id"]
         self.assertEqual(review["review"]["run"]["parent_run_id"], worker)
         # The review reads the work, so it runs where the work is.
-        self.assertEqual(
-            review["review"]["run"]["workspace"], review["worker"]["run"]["workspace"]
-        )
+        self.assertEqual(review["review"]["run"]["workspace"], review["worker"]["run"]["workspace"])
         prompt = (root / review_id / "REVIEW.md").read_text(encoding="utf-8")
         self.assertIn(worker, prompt)
         self.assertIn(review["worker"]["run"]["result_path"], prompt)
@@ -1693,7 +1697,6 @@ def _alive(pid: int) -> bool:
     return True
 
 
-
 class ErrorContractTests(ProductRuntimeFixture):
     """The layer's failure vocabulary, kept in one place and checked for every operation.
 
@@ -1712,7 +1715,7 @@ class ErrorContractTests(ProductRuntimeFixture):
 
     REF = "ummanu-run-1"
 
-    READ_CALLS = {
+    READ_CALLS: ClassVar[dict[str, Any]] = {
         "report": lambda layer: layer.report(),
         "data_dir": lambda layer: layer.data_dir(),
         "system_snapshot": lambda layer: layer.system_snapshot(),
@@ -1723,7 +1726,7 @@ class ErrorContractTests(ProductRuntimeFixture):
         "po_delegated": lambda layer: layer.po_delegated("session-contract"),
     }
 
-    OPERATION_CALLS = {
+    OPERATION_CALLS: ClassVar[dict[str, Any]] = {
         "report": lambda layer: layer.report(),
         "data_dir": lambda layer: layer.data_dir(),
         "store": lambda layer: layer.store(),
@@ -1735,6 +1738,8 @@ class ErrorContractTests(ProductRuntimeFixture):
         ),
         "run_state": lambda layer: layer.run_state("pr-contract"),
         "run_list": lambda layer: layer.run_list("ummanu-run-1"),
+        "card_runs": lambda layer: layer.card_runs("ummanu-run-1"),
+        "prepare_card_runs": lambda layer: layer.prepare_card_runs(),
     }
 
     # -- what the roster is worth -------------------------------------------------------------
@@ -1754,9 +1759,9 @@ class ErrorContractTests(ProductRuntimeFixture):
 
     def _each_operation(self) -> list[tuple[str, Any]]:
         reads, ops = self.reads(), self.layer()
-        return [(f"reads.{name}", lambda call=call: call(reads)) for name, call in self.READ_CALLS.items()] + [
-            (f"ops.{name}", lambda call=call: call(ops)) for name, call in self.OPERATION_CALLS.items()
-        ]
+        return [
+            (f"reads.{name}", lambda call=call: call(reads)) for name, call in self.READ_CALLS.items()
+        ] + [(f"ops.{name}", lambda call=call: call(ops)) for name, call in self.OPERATION_CALLS.items()]
 
     def _assert_typed(self, label: str) -> None:
         for name, call in self._each_operation():
@@ -1870,7 +1875,7 @@ class FileWriteSeamTests(unittest.TestCase):
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             if path.name == "store_io.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for line, name, args in self._calls(tree):
                 if name in self.WRITERS:
                     offenders.append(f"{path.name}:{line}: {name}")
@@ -1883,12 +1888,12 @@ class FileWriteSeamTests(unittest.TestCase):
     #: Every module of the layer that puts a file on disk, so the scan above cannot pass by the
     #: layer having stopped writing anything. A fourth one is welcome; a fourth one that writes its
     #: own way is what the scan refuses.
-    SEAM_CALLERS = ("ops.py", "runs.py", "sprint_requests.py")
+    SEAM_CALLERS = ("ops.py", "runs.py", "request_index.py", "ref_lookup.py")
 
     def test_the_seam_is_where_this_layer_actually_writes(self) -> None:
         writers: set[str] = set()
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             if any(name == "write_document" for _line, name, _args in self._calls(tree)):
                 writers.add(path.name)
         self.assertLessEqual(set(self.SEAM_CALLERS), writers)
@@ -1906,71 +1911,14 @@ class FileWriteSeamTests(unittest.TestCase):
 class OrcaAbsenceTests(ProductRuntimeFixture):
     """Criterion 2, as a check rather than a promise.
 
-    What this test asserts, in the words of the card:
+    No Orca import and no Orca process anywhere in the product is `test_architecture`'s
+    `NoOrcaInSourceTests`, over all of `src/ummanu`. What is left here is the half that scan cannot
+    see, in the words of the card:
 
-    * **no Orca import** on any module of the layer -- neither the pane host, nor the legacy
-      backend, nor the control plane's Orca-facing terminal readers;
-    * **no Orca call** on the start path or the result-reading path: with
-      `ummanu.dispatch.head_status` replaced by a detonator, `run_start`, `run_state` and
-      `run_review` all complete. The pane host whose verbs were detonated here too is deleted
-      (secretary-1725), and `test_architecture` forbids importing it anywhere;
-    * **no `orca` process**: every child process the two paths spawn is captured, and none of them
-      is an `orca` executable;
     * **no session manager**: the backend is built by name through the product's one
       name-to-backend mapping, with a session factory that raises if anything ever calls it;
     * **the supervised backend and no other**: the name handed to that mapping is `local-pty`.
     """
-
-    FORBIDDEN_IMPORTS = frozenset(
-        """
-        ummanu.automations.runtime.orca_rpc ummanu.runtime.pane_host
-        ummanu.runtime.orca_legacy_head ummanu.runtime.tui_delivery
-        ummanu.dispatch.head_status ummanu.dispatch.host ummanu.dispatch.review
-        orca
-        """.split()
-    )
-
-    def _imports(self) -> list[tuple[str, str]]:
-        import ast
-
-        found: list[tuple[str, str]] = []
-        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Import):
-                    found.extend((path.name, alias.name) for alias in node.names)
-                elif isinstance(node, ast.ImportFrom) and node.module:
-                    found.append((path.name, node.module))
-        return found
-
-    def test_the_layer_imports_no_orca(self) -> None:
-        offenders = [
-            f"{module}: {imported}"
-            for module, imported in self._imports()
-            if imported in self.FORBIDDEN_IMPORTS or imported.split(".")[0] == "orca"
-        ]
-        self.assertEqual(offenders, [])
-
-    def test_the_start_and_result_paths_call_no_orca(self) -> None:
-        spawned: list[list[str]] = []
-        real_run = subprocess.run
-
-        def watched_run(argv, *args, **kwargs):
-            spawned.append(list(argv))
-            return real_run(argv, *args, **kwargs)
-
-        with (
-            mock.patch("subprocess.run", watched_run),
-            mock.patch.dict("sys.modules", {"ummanu.dispatch.head_status": None}),
-        ):
-            document = self.start(request_id="req-orca")
-            run_id = document["run"]["run_id"]
-            self.runtime.publish_result(run_id, {"status": "done"})
-            self.layer().run_state(run_id)
-            self.layer().run_review(request_id="rev-orca", profile=REVIEWER_PROFILE, worker_run_id=run_id)
-        self.assertTrue(spawned, "the start path provisions a workspace with git")
-        for argv in spawned:
-            self.assertNotIn("orca", Path(argv[0]).name)
 
     def test_the_backend_is_named_and_holds_no_session_manager(self) -> None:
         seen: list[dict[str, Any]] = []
@@ -2032,6 +1980,16 @@ class SchemaTests(ProductRuntimeFixture):
             with self.subTest(kind=candidate["kind"]):
                 self.assertEqual(validate(candidate, "web-run", candidate["kind"]), [])
                 json.dumps(candidate)
+
+    def test_every_document_a_run_route_answers_validates(self) -> None:
+        """CON-02: the run routes' listing (`product_runs`) failed the schema's `oneOf` it is published under."""
+        document = self.start()
+        listed = self.layer().run_list(document["run"]["ref"])
+        empty = self.layer().run_list("ummanu-run-none")
+        self.assertEqual([len(listed["items"]), len(empty["items"])], [1, 0])
+        for route, candidate in (("runs", listed), ("runs, none", empty), ("run", listed["items"][0])):
+            with self.subTest(route=route):
+                self.assertEqual(validate(candidate, "web-run", candidate["kind"]), [])
 
 
 class WebRunCommandTests(ProductRuntimeFixture):

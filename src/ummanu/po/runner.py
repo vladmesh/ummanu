@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ummanu._fsutil import fsync_directory
 from ummanu.head_health import HeadHealth, failure_status, failure_until, until_text
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
@@ -44,11 +45,12 @@ from ummanu.po.store import (
 from ummanu.po.workspace import workspace_dir
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import HeadHandle, spawn_head
-from ummanu.runtime.head.local_pty.journal import RUN_EXITED, read_events
+from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, read_events
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.head.memory import MemoryScopeError
 from ummanu.runtime.head.spec import HeadSpec, load_head_specs
 from ummanu.runtime.heads import HeadRegistryError, Registry, load_registry
+from ummanu.runtime.procfs import STARTTIME, proc_stat_fields
 from ummanu.runtime.provider_errors import (
     CODEX_QUOTA_ERROR_INFOS,
     KIND_QUOTA,
@@ -99,10 +101,10 @@ def process_identity(pid: int) -> str | None:
     except OSError:
         return None
     # Field 2 (comm) may contain spaces and parentheses; the rest starts after the last ')'.
-    fields = stat[stat.rindex(")") + 2 :].split()
-    if len(fields) < 20:
+    fields = proc_stat_fields(stat)
+    if len(fields) <= STARTTIME:
         return None
-    return f"{boot_id}:{fields[19]}"
+    return f"{boot_id}:{fields[STARTTIME]}"
 
 
 def still_running(pid: int | None, identity: str | None) -> bool:
@@ -116,7 +118,7 @@ def still_running(pid: int | None, identity: str | None) -> bool:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return stat[stat.rindex(")") + 2 :].split()[:1] not in (["Z"], ["X"])
+    return proc_stat_fields(stat)[:1] not in (["Z"], ["X"])
 
 
 def turn_environment(
@@ -263,17 +265,33 @@ class ScopedPoProcess:
     def wait(self, timeout: float | None = None) -> int:
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            for event in reversed(read_events(self.handle.journal_path).events):
-                if event.get("kind") == RUN_EXITED and event.get("run_id") == self.handle.run_id:
-                    self.head_loss_reason = event.get("head_loss_reason")
-                    code = event.get("exit_code")
-                    number = event.get("signal")
-                    return int(code) if code is not None else -int(number or 0)
+            reading = read_events(self.handle.journal_path)
+            if reading.malformed or not reading.ordered:
+                raise RunnerError("PO head journal is damaged; exit outcome is unavailable")
+            if not reading.truncated_tail:
+                starts = reading.of_kind(RUN_STARTED)
+                if self.handle.journal_started_seq and (
+                    not starts or starts[-1]["seq"] != self.handle.journal_started_seq
+                ):
+                    raise RunnerError("PO head journal incarnation changed; exit outcome is unavailable")
+                for event in reversed(reading.events):
+                    if event.get("kind") == RUN_STARTED:
+                        break  # No exit from a previous incarnation answers for this handle.
+                    if event.get("kind") == RUN_EXITED and event.get("run_id") == self.handle.run_id:
+                        if event.get("head_pid") != self.handle.head_pid:
+                            break
+                        self.head_loss_reason = event.get("head_loss_reason")
+                        code = event.get("exit_code")
+                        number = event.get("signal")
+                        return int(code) if code is not None else -int(number or 0)
+            # An in-progress append is pending while the exact supervisor still runs. Even an
+            # older complete exit cannot answer through that torn current record.
             if not still_running(self.handle.supervisor_pid, self._supervisor_identity):
                 raise RunnerError(f"PO head supervisor {self.handle.supervisor_pid} exited without a run.exited record")
-            if deadline is not None and time.monotonic() >= deadline:
+            left = None if deadline is None else deadline - time.monotonic()
+            if left is not None and left <= 0:
                 raise subprocess.TimeoutExpired("PO head", timeout)
-            time.sleep(0.05)
+            time.sleep(0.05 if left is None else min(0.05, left))
 
 
 class PoRunner:
@@ -368,11 +386,7 @@ class PoRunner:
             if scope_dir.is_symlink():
                 scope_dir.unlink()
             scope_dir.symlink_to(run_dir, target_is_directory=True)
-            descriptor = os.open(scope_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            fsync_directory(scope_dir.parent)
             handle = spawn_head(
                 root=self.data_dir / "po-heads", run_id=lifecycle.run_id, role="po",
                 task=f"po:{spec.profile_id}:{session.session_id}:{seq}", command=command, cwd=session.cwd,

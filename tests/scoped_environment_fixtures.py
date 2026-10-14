@@ -8,6 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests import source_trees
 from ummanu.dispatch.runtime_preflight import PACKAGE
 from ummanu.runtime.head.memory import scope_unit
 
@@ -32,7 +33,7 @@ def deployed_scope_argv():
         ["git", "show", f"{DEPLOYED_PO_SHA}:{path}"],
         cwd=root, check=True, capture_output=True, text=True,
     ).stdout.replace(f'"{released}.runtime.', f'"{PACKAGE}.runtime.')
-    function = next(node for node in ast.parse(source).body
+    function = next(node for node in source_trees.parse(source).body
                     if isinstance(node, ast.FunctionDef) and node.name == "scope_argv")
     namespace = {"os": os, "sys": sys, "scope_unit": scope_unit}
     exec(compile(ast.Module(body=[function], type_ignores=[]), "deployed-scope-argv", "exec"), namespace)

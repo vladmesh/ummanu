@@ -44,6 +44,15 @@ from typing import Any
 
 from ummanu.board.backend import record_key, record_key_kind
 from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.sql_rows import (
+    board_row,
+    comment_marker,
+    comment_row,
+    epoch as _epoch,  # noqa: F401 - the shared-clock ownership guard imports this name
+    grouped as _grouped,
+    json_document,
+    now as _now,
+)
 
 #: §8.1's Product keys, and the column or table each one is.
 PRODUCT_KEYS = ("record_type", "product_id", "product_projects")
@@ -128,18 +137,18 @@ class ProductIssueRecords:
 
     def _staged_row(self, task_id: int) -> dict[str, Any]:
         staged = self.staged[int(task_id)]
-        return {
-            "id": int(task_id),
-            "reference": staged["reference"],
-            "title": staged["title"],
-            "description": staged["description"],
-            "column_id": self._issues_column_id(),
-            "position": 0,
-            "swimlane_id": self.client._lane_id(staged["lane"]),
-            "date_creation": _epoch(staged["created_at"]),
-            "date_modification": _epoch(staged["created_at"]),
-            "is_active": 1,
-        }
+        return board_row(
+            id=int(task_id),
+            reference=staged["reference"],
+            title=staged["title"],
+            description=staged["description"],
+            column_id=self._issues_column_id(),
+            position=0,
+            swimlane_id=self.client._lane_id(staged["lane"]),
+            created=staged["created_at"],
+            updated=staged["created_at"],
+            is_active=1,
+        )
 
     def rows(self) -> list[dict[str, Any]]:
         """Every Product and Issue row the store holds, plus the staged creates of this
@@ -157,33 +166,33 @@ class ProductIssueRecords:
 
     def _product_row(self, values: tuple[Any, ...]) -> dict[str, Any]:
         product_id, board_key_value, title, description, state, created, updated = values
-        return {
-            "id": int(board_key_value),
-            "reference": f"product:{product_id}",
-            "title": _text(title),
-            "description": _text(description),
-            "column_id": self._issues_column_id(),
-            "position": 0,
-            "swimlane_id": self.client._lane_id(product_id),
-            "date_creation": _epoch(created),
-            "date_modification": _epoch(updated),
-            "is_active": 0 if state == "archived" else 1,
-        }
+        return board_row(
+            id=int(board_key_value),
+            reference=f"product:{product_id}",
+            title=_text(title),
+            description=_text(description),
+            column_id=self._issues_column_id(),
+            position=0,
+            swimlane_id=self.client._lane_id(product_id),
+            created=created,
+            updated=updated,
+            is_active=0 if state == "archived" else 1,
+        )
 
     def _issue_row(self, values: tuple[Any, ...]) -> dict[str, Any]:
         issue_id, board_key_value, product_id, title, description, state, created, updated = values
-        return {
-            "id": int(board_key_value),
-            "reference": f"issue:{issue_id}",
-            "title": _text(title),
-            "description": _text(description),
-            "column_id": self._issues_column_id(),
-            "position": 0,
-            "swimlane_id": self.client._lane_id(product_id),
-            "date_creation": _epoch(created),
-            "date_modification": _epoch(updated),
-            "is_active": 0 if state == "closed" else 1,
-        }
+        return board_row(
+            id=int(board_key_value),
+            reference=f"issue:{issue_id}",
+            title=_text(title),
+            description=_text(description),
+            column_id=self._issues_column_id(),
+            position=0,
+            swimlane_id=self.client._lane_id(product_id),
+            created=created,
+            updated=updated,
+            is_active=0 if state == "closed" else 1,
+        )
 
     def row_by_reference(self, reference: str) -> dict[str, Any] | None:
         kind = self.kind_of_reference(reference)
@@ -367,7 +376,7 @@ class ProductIssueRecords:
                         projects.get(identifier, []), separators=(",", ":")
                     ),
                 }
-                bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
+                bag = json_document(extensions)
                 for name, value in (bag.get(EXTENSION_BAG) or {}).items():
                     if name not in PRODUCT_KEYS:
                         meta[name] = _text(value)
@@ -386,7 +395,7 @@ class ProductIssueRecords:
                 }
                 if close_reason:
                     meta["issue_closed_reason"] = _text(close_reason)
-                bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
+                bag = json_document(extensions)
                 for name, value in (bag.get(EXTENSION_BAG) or {}).items():
                     if name not in ISSUE_KEYS:
                         meta[name] = _text(value)
@@ -468,18 +477,21 @@ class ProductIssueRecords:
         if not isinstance(projects, list) or any(not isinstance(item, str) for item in projects):
             raise self._error("a Product's project set must be a JSON array of ids")
         self.client._execute("DELETE FROM product_projects WHERE product_id = %s", (product_id,))
-        for project in sorted(set(projects)):
-            # §3.1: `projects` is derived from the file registry, which stays canonical.  The
-            # mutation that references an id inserts a missing row inside its own transaction,
-            # with the id only: everything else in the row is the registry's.
-            self.client._execute(
-                "INSERT INTO projects (project_id) VALUES (%s) ON CONFLICT (project_id) DO NOTHING",
-                (project,),
-            )
-            self.client._execute(
-                "INSERT INTO product_projects (product_id, project_id) VALUES (%s, %s)",
-                (product_id, project),
-            )
+        listed = sorted(set(projects))
+        if not listed:
+            return
+        # §3.1: `projects` is derived from the file registry, which stays canonical.  The
+        # mutation that references an id inserts a missing row inside its own transaction,
+        # with the id only: everything else in the row is the registry's.  Two statements for
+        # the whole set, in sorted order, as the row-by-row writes went.
+        self.client._execute(
+            "INSERT INTO projects (project_id) SELECT unnest(%s::text[]) ON CONFLICT (project_id) DO NOTHING",
+            (listed,),
+        )
+        self.client._execute(
+            "INSERT INTO product_projects (product_id, project_id) SELECT %s, unnest(%s::text[])",
+            (product_id, listed),
+        )
 
     def _update_product(self, product_id: str, values: dict[str, Any]) -> bool:
         if _text(values.get("record_type")) not in {"", "product"}:
@@ -587,7 +599,7 @@ class ProductIssueRecords:
             ))
             for key in keys:
                 result[key] = [
-                    {"id": identifier_value, "date_creation": _epoch(created), "comment": body}
+                    comment_row(identifier_value, body, created)
                     for identifier_value, body, created in comments.get(identifiers[key], [])
                 ]
         return result
@@ -599,8 +611,7 @@ class ProductIssueRecords:
         kind = record_key_kind(key)
         identifier = self.identifier_for(kind, key)
         table, column = self._comment_table(kind)
-        first = content.splitlines()[0] if content else ""
-        marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
+        marker = comment_marker(content)
         request_id = self._comment_request_id(content)
         if request_id is not None:
             existing = self.client._query(
@@ -622,24 +633,6 @@ class ProductIssueRecords:
 
 def _text(value: Any) -> str:
     return "" if value is None else str(value)
-
-
-def _epoch(value: Any) -> str:
-    from ummanu.board.sql_cards import _epoch as card_epoch
-
-    return card_epoch(value)
-
-
-def _grouped(rows: Any) -> dict[Any, list[Any]]:
-    from ummanu.board.sql_cards import _grouped as card_grouped
-
-    return card_grouped(rows)
-
-
-def _now() -> Any:
-    from ummanu.board.sql_cards import _now as card_now
-
-    return card_now()
 
 
 __all__ = ["ISSUE_KEYS", "PRODUCT_KEYS", "ProductIssueRecords"]

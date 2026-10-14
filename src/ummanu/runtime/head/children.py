@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ummanu.runtime.procfs import CSTIME, CUTIME, PPID, STARTTIME, STATE, STIME, UTIME, proc_stat_fields
 from ummanu.runtime.redact import scrub_secrets
 
 #: How many descendants one reading describes; totals still cover the whole tree. Half the slots
@@ -42,11 +43,11 @@ def _stat_fields(pid: int, proc: Path) -> list[str] | None:
         stat = (proc / str(pid) / "stat").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    close = stat.rfind(")")
-    if close < 0:
+    try:
+        fields = proc_stat_fields(stat)
+    except ValueError:
         return None
-    fields = stat[close + 2 :].split()
-    return fields if len(fields) > 19 else None
+    return fields if len(fields) > STARTTIME else None
 
 
 def _io_bytes(pid: int, proc: Path) -> int:
@@ -137,7 +138,7 @@ def read_head_children(head_pid: Any, *, proc_root: str = "/proc") -> dict[str, 
         if fields is None:
             continue
         try:
-            parents[child] = int(fields[1])
+            parents[child] = int(fields[PPID])
         except ValueError:
             continue
         stats[child] = fields
@@ -160,17 +161,17 @@ def read_head_children(head_pid: Any, *, proc_root: str = "/proc") -> dict[str, 
     head_fields = stats.get(pid)
     if head_fields is not None:
         try:
-            total_ticks += int(head_fields[13]) + int(head_fields[14])
+            total_ticks += int(head_fields[CUTIME]) + int(head_fields[CSTIME])
         except ValueError:
             pass
     total_io = 0
     for child in descendants:
         fields = stats[child]
-        if fields[0] in ("Z", "X", "x"):
+        if fields[STATE] in ("Z", "X", "x"):
             continue
         try:
-            cpu_ticks = sum(int(fields[index]) for index in (11, 12, 13, 14))
-            start = int(fields[19])
+            cpu_ticks = sum(int(fields[index]) for index in (UTIME, STIME, CUTIME, CSTIME))
+            start = int(fields[STARTTIME])
         except ValueError:
             continue
         io = _io_bytes(child, proc)

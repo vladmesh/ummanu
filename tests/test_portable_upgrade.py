@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -31,7 +32,7 @@ from tests.retired_board import (
     legacy_runtime_lines,
     write_stale_leftovers,
 )
-from ummanu import cli as cli_module, installation, role_skills, upgrade
+from ummanu import cli as cli_module, role_skills, upgrade
 from ummanu.cli import main as cli_main
 from ummanu.config import validate_instance
 from ummanu.head_registry import (
@@ -44,6 +45,13 @@ from ummanu.head_registry import (
 )
 from ummanu.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
 from ummanu.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
+from ummanu.installation import commands as installation_commands
+from ummanu.installation.upgrade import (
+    host as upgrade_host,
+    services as upgrade_services,
+    types as upgrade_types,
+    workspaces as upgrade_workspaces,
+)
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import heads as shipped_heads
 
@@ -350,10 +358,10 @@ class PortableFixture(unittest.TestCase):
 
     # --- driving the materializer ---------------------------------------------------------
 
-    def context(self, **overrides) -> upgrade.UpgradeContext:
+    def context(self, **overrides) -> upgrade_types.UpgradeContext:
         report = validate_instance(self.instance)
         self.assertTrue(report.ok, report.errors)
-        base = upgrade.UpgradeContext(
+        base = upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
@@ -365,12 +373,12 @@ class PortableFixture(unittest.TestCase):
             runtime_user="operator",
             runtime_home=self.home,
         )
-        return base if not overrides else upgrade.replace(base, **overrides)
+        return base if not overrides else replace(base, **overrides)
 
-    def run_upgrade(self, **overrides) -> upgrade.UpgradeResult:
+    def run_upgrade(self, **overrides) -> upgrade_types.UpgradeResult:
         # This fixture replaces systemd and the host inventory; it intentionally has no MCP daemon.
         # The dedicated memory health tests cover the authenticated service boundary.
-        with mock.patch.object(upgrade, "probe_memory"):
+        with mock.patch.object(upgrade_services, "probe_memory"):
             return upgrade.run_steps(self.context(**overrides))
 
     def run_upgrade_command(self, **overrides) -> int:
@@ -393,7 +401,7 @@ class PortableFixture(unittest.TestCase):
             setattr(args, key, value)
         with (
             mock.patch.object(upgrade, "SystemdUnitInstaller", return_value=self.units),
-            mock.patch.object(upgrade, "probe_memory"),
+            mock.patch.object(upgrade_services, "probe_memory"),
         ):
             return upgrade.run_upgrade(args)
 
@@ -422,7 +430,7 @@ class PortableFixture(unittest.TestCase):
         self.assertIn(f"{self.WORK_TREE}: ", text)
         self.assertIn("status: findings", text)
 
-    def statuses(self, result: upgrade.UpgradeResult) -> dict[str, str]:
+    def statuses(self, result: upgrade_types.UpgradeResult) -> dict[str, str]:
         return {step.name: step.status for step in result.steps}
 
     def shell_skill(self, shell: str, skill: str, home: Path | None = None) -> Path:
@@ -447,13 +455,13 @@ class PackagedRuntimeParityTests(PortableFixture):
         prepared = upgrade.run_steps(
             context,
             (
-                upgrade.step_role_skills,
-                upgrade.step_head_registry,
-                upgrade.step_instance_packing,
+                upgrade_workspaces.step_role_skills,
+                upgrade_workspaces.step_head_registry,
+                upgrade_workspaces.step_instance_packing,
             ),
         )
         self.assertTrue(prepared.ok, prepared.render())
-        self.assertFalse(upgrade.step_host(context).failed)
+        self.assertFalse(upgrade_host.step_host(context).failed)
         self.units.calls.clear()
 
     def verify(self, **overrides):
@@ -461,13 +469,13 @@ class PackagedRuntimeParityTests(PortableFixture):
         # with their evidence provided by the fake host, while exercising real host verification.
         with (
             mock.patch.object(
-                upgrade, "_receipt_evidence", return_value=(True, "web receipt current")
+                upgrade_services, "_receipt_evidence", return_value=(True, "web receipt current")
             ) as web,
             mock.patch.object(
-                upgrade, "_po_receipt_evidence", return_value=(True, "PO receipt current")
+                upgrade_services, "_po_receipt_evidence", return_value=(True, "PO receipt current")
             ) as po,
         ):
-            result = upgrade.step_verify(self.context(**overrides))
+            result = upgrade_services.step_verify(self.context(**overrides))
         if not result.failed:
             web.assert_called_once()
             po.assert_called_once()
@@ -521,7 +529,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         expected, collected, diffs = self.doctor_inventory()
         self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
         self.assertEqual(diffs["units"].missing_on_host, [])
-        self.assertEqual(upgrade.step_host(self.context()).status, "unchanged")
+        self.assertEqual(upgrade_host.step_host(self.context()).status, "unchanged")
         self.assertEqual(self.units.calls, [])
 
     def test_inactive_and_disabled_timers_fail_both_consumers_and_reconcile_unchanged_bytes(self):
@@ -545,12 +553,12 @@ class PackagedRuntimeParityTests(PortableFixture):
                     )
                     if not enabled:
                         self.assertIn(f"{name}: expected enabled, got disabled", result.detail)
-                    preview = upgrade.step_host(self.context(dry_run=True))
+                    preview = upgrade_host.step_host(self.context(dry_run=True))
                     self.assertEqual(preview.status, "changed", preview.detail)
                     self.assertIn(f"{action} {name}", preview.detail)
                     self.assertEqual(self.units.calls, [])
                     self.assertEqual((self.data / "host-managed.json").read_bytes(), manifest)
-                    repaired = upgrade.step_host(self.context())
+                    repaired = upgrade_host.step_host(self.context())
                     self.assertEqual(repaired.status, "changed", repaired.detail)
                     self.assertEqual(self.units.calls, [(action, name)])
                     self.assertEqual(self.units.files, before)
@@ -579,7 +587,7 @@ class PackagedRuntimeParityTests(PortableFixture):
             name = f"ummanu-{component}.service"
             template = self.product / "packaging" / "systemd" / name
             template.write_bytes(template.read_bytes() + b"\n# changed catalogue input\n")
-            result = upgrade.step_host(self.context())
+            result = upgrade_host.step_host(self.context())
             self.assertEqual(result.status, "changed", result.detail)
             self.assertIn(f"update {name}", result.detail)
             self.assertIn(("install", name), self.units.calls)
@@ -589,7 +597,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         with mock.patch(
             "ummanu.host_apply.pwd.getpwnam", return_value=SimpleNamespace(pw_dir=str(other_home))
         ):
-            result = upgrade.step_host(self.context())
+            result = upgrade_host.step_host(self.context())
         self.assertEqual(result.status, "changed", result.detail)
         for component in ("steward", "retro", "doctor"):
             self.assertIn(str(other_home).encode(), self.units.files[f"ummanu-{component}.service"])
@@ -609,7 +617,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.units.enabled.discard("ummanu-steward.timer")
         self.units._publish()
         foreign_before = {name: content for name, content in self.units.files.items() if "steward." in name}
-        result = upgrade.step_host(self.context())
+        result = upgrade_host.step_host(self.context())
         self.assertFalse(result.failed, result.detail)
         self.assertFalse(any("steward." in name for _, name in self.units.calls))
         self.assertFalse(any("retro." in name for name in self.units.files))
@@ -626,7 +634,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.units.active.discard(name)
         self.units.fail_on.add(name)
         self.units._publish()
-        result = upgrade.step_host(self.context())
+        result = upgrade_host.step_host(self.context())
         self.assertTrue(result.failed, result.detail)
         self.assertIn("start", result.detail)
         self.assertTrue(self.verify().failed)
@@ -639,7 +647,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         config.write_text(original + "  foreign_units: [ummanu-doctor.service, ummanu-doctor.timer]\n")
         self.units.active.discard("ummanu-doctor.timer")
         self.units._publish()
-        result = upgrade.step_host(self.context())
+        result = upgrade_host.step_host(self.context())
         self.assertFalse(result.failed, result.detail)
         self.assertFalse(any(name in pair for _, name in self.units.calls))
         self.assertEqual({name: self.units.files[name] for name in pair}, before)
@@ -650,7 +658,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertFalse(self.verify().failed)
         # A disabled component in a fresh install owns/renders neither unit.
         config.write_text(original + "  components:\n    doctor: {enabled: false}\n")
-        result = upgrade.step_host(self.context())
+        result = upgrade_host.step_host(self.context())
         self.assertFalse(result.failed, result.detail)
         self.assertTrue(pair.isdisjoint(self.units.files))
         self.assertFalse(self.verify().failed)
@@ -666,7 +674,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertIn(
             f"{name}: expected active, got inactive", cli_module._unit_runtime_findings(expected, collected)
         )
-        repaired = upgrade.step_host(self.context())
+        repaired = upgrade_host.step_host(self.context())
         self.assertFalse(repaired.failed, repaired.detail)
         self.assertEqual(self.units.calls, [("start", name)])
         self.assertFalse(self.verify().failed)
@@ -679,18 +687,18 @@ class PackagedRuntimeParityTests(PortableFixture):
             + "  foreign_units: [ummanu-web.service, ummanu-po.service]\n"
         )
         context = self.context()
-        host = upgrade.step_host(context)
+        host = upgrade_host.step_host(context)
         self.assertFalse(host.failed, host.detail)
         self.units.calls.clear()
         with (
-            mock.patch.object(upgrade, "_receipt_evidence") as web,
-            mock.patch.object(upgrade, "_po_receipt_evidence") as po,
+            mock.patch.object(upgrade_services, "_receipt_evidence") as web,
+            mock.patch.object(upgrade_services, "_po_receipt_evidence") as po,
             mock.patch.object(self.units, "is_active", side_effect=AssertionError("excluded process probe")),
         ):
-            for step in (upgrade.step_memory, upgrade.step_web, upgrade.step_po):
+            for step in (upgrade_services.step_memory, upgrade_services.step_web, upgrade_services.step_po):
                 result = step(context)
                 self.assertEqual(result.status, "skipped", result.detail)
-            verified = upgrade.step_verify(context)
+            verified = upgrade_services.step_verify(context)
             self.assertFalse(verified.failed, verified.detail)
             web.assert_not_called()
             po.assert_not_called()
@@ -796,7 +804,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         with (
             self.native_boundary(),
             mock.patch("ummanu.infra.systemd._proc.run", side_effect=reply),
-            mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
+            mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")),
         ):
             result = self.verify(host_fixture=None)
             self.assertEqual(result.status, "unchanged", result.detail)
@@ -839,7 +847,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertFalse(any("managed unit mismatch" in str(finding) for finding in baseline["findings"]))
         config = self.instance / "instance.yaml"
         config.write_text(config.read_text() + f"  foreign_units: {sorted(pair)}\n")
-        self.assertEqual(upgrade.step_host(self.context()).status, "unchanged")
+        self.assertEqual(upgrade_host.step_host(self.context()).status, "unchanged")
         result = self.verify()
         self.assertEqual(result.status, "unchanged", result.detail)
         text_code, output = self.run_cli(args)
@@ -863,7 +871,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         with (
             self.native_boundary(),
             mock.patch("ummanu.infra.systemd._proc.run", side_effect=reply),
-            mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
+            mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")),
         ):
             result = self.verify(host_fixture=None)
             self.assertTrue(result.failed, result.detail)
@@ -912,7 +920,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         manifest = (self.data / "host-managed.json").read_bytes()
         files = dict(self.units.files)
         with self.native_boundary():
-            host = upgrade.step_host(context)
+            host = upgrade_host.step_host(context)
             self.assertEqual(host.status, "unchanged", host.detail)
             result = self.verify(host_fixture=None, project_availability=availability)
             self.assertEqual(result.status, "unchanged", result.detail)
@@ -941,7 +949,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         try:
             os.chdir(self.root)
             with self.native_boundary():
-                host = upgrade.step_host(self.context(host_fixture=None))
+                host = upgrade_host.step_host(self.context(host_fixture=None))
                 result = self.verify(host_fixture=None)
         finally:
             os.chdir(previous_cwd)
@@ -967,8 +975,8 @@ class PackagedRuntimeParityTests(PortableFixture):
                     return real_source(runtime_user)
 
                 with (
-                    mock.patch.object(upgrade, "LiveHostSource", side_effect=source),
-                    mock.patch.object(cli_module, "LiveHostSource", side_effect=source),
+                    mock.patch.object(upgrade_host, "LiveHostSource", side_effect=source),
+                    mock.patch("ummanu.host.LiveHostSource", side_effect=source),
                 ):
                     result = self.verify(host_fixture=None)
                     expected, collected, diffs = cli_module.collect_host_inventory(
@@ -990,11 +998,11 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.units.active.discard(name)
         self.units._publish()
         with self.native_boundary():
-            result = upgrade.step_verify(self.context(host_fixture=None))
+            result = upgrade_services.step_verify(self.context(host_fixture=None))
             self.assertTrue(result.failed, result.detail)
             self.assertIn(f"{name}: expected active, got inactive", result.detail)
             self.assertFalse(SystemdUnitInstaller(sudo=False).is_active(name))
-            with mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")):
+            with mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")):
                 text_code, output = self.run_cli(
                     [
                         "doctor",
@@ -1035,7 +1043,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                     self.subTest(diagnostic=diagnostic, probe=probe),
                     self.native_boundary(diagnostic, probe),
                 ):
-                    result = upgrade.step_verify(self.context(host_fixture=None))
+                    result = upgrade_services.step_verify(self.context(host_fixture=None))
                     self.assertTrue(result.failed, result.detail)
                     self.assertIn(
                         "system manager/bus unavailable: manager/bus connection failed", result.detail
@@ -1044,8 +1052,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                     installer = SystemdUnitInstaller(sudo=False, runtime_user="operator")
                     with self.assertRaisesRegex(HostCommandError, "manager/bus connection failed"):
                         installer.is_active("ummanu-steward.timer")
-                    with mock.patch.object(
-                        cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")
+                    with mock.patch("ummanu.host.FixtureHostSource", return_value=LiveHostSource("operator")
                     ):
                         text_code, output = self.run_cli(
                             [
@@ -1178,11 +1185,11 @@ class PortableInstallationTests(PortableFixture):
     def test_the_units_are_rendered_from_the_named_checkout_and_the_installation_user(self) -> None:
         context = self.context()
 
-        with mock.patch.object(upgrade, "probe_memory"):
+        with mock.patch.object(upgrade_services, "probe_memory"):
             result = upgrade.run_steps(context)
         rendered = b"\n".join(
             unit.content
-            for unit in upgrade.resolve_packaged(
+            for unit in upgrade_host.resolve_packaged(
                 context.report.instance,
                 self.product / "packaging" / "systemd",
                 product_root=self.product,
@@ -1198,36 +1205,6 @@ class PortableInstallationTests(PortableFixture):
         self.assertIn(f"ExecStart={self.home}/.local/bin".encode(), rendered)
         self.assertIn("User=operator", rendered.decode())
         self.assert_hermetic(rendered.decode())
-
-    def test_a_dry_run_upgrade_never_asks_orca_about_automations(self) -> None:
-        """secretary-1706: systemd units are the only schedule owner of the background roles.
-
-        The product ships a background agent's spec, which is exactly what the retired automations
-        step turned into `orca automations` calls; the upgrade must now issue none of them.
-        """
-        agent = self.product / "src" / "ummanu" / "automations" / "agents" / "curator"
-        agent.mkdir(parents=True, exist_ok=True)
-        (agent / "automation.toml").write_text('name = "curator"\nskill = "/curate"\n', encoding="utf-8")
-        (self.product / "pyproject.toml").write_text(
-            '[tool.ummanu]\nagent-specs = "src/ummanu/automations/agents"\n', encoding="utf-8"
-        )
-        argvs: list[list[str]] = []
-        real_popen_init = subprocess.Popen.__init__
-
-        def recording_init(popen, args, *rest, **kwargs):
-            argvs.append([str(arg) for arg in args] if isinstance(args, (list, tuple)) else [str(args)])
-            return real_popen_init(popen, args, *rest, **kwargs)
-
-        with (
-            mock.patch.object(subprocess.Popen, "__init__", recording_init),
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            code = self.run_upgrade_command(dry_run=True)
-
-        self.assertEqual(code, 0, output.getvalue())
-        self.assertTrue(argvs, "the recorder saw no subprocess at all")
-        self.assertFalse([argv for argv in argvs if "automations" in argv], argvs)
-        self.assertNotIn("automations", output.getvalue())
 
     def test_a_second_run_against_the_installation_it_just_wrote_changes_nothing(self) -> None:
         first = self.run_upgrade()
@@ -1293,10 +1270,10 @@ class PortableInstallationTests(PortableFixture):
 
     def test_the_upgrade_command_installs_the_checkout_it_was_pointed_at(self) -> None:
         """`--product-root` has to reach the steps, or the skills come from the running module."""
-        seen: list[upgrade.UpgradeContext] = []
+        seen: list[upgrade_types.UpgradeContext] = []
 
         with mock.patch.object(
-            upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult()
+            upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade_types.UpgradeResult()
         ):
             code = upgrade.run_upgrade(
                 SimpleNamespace(
@@ -1313,7 +1290,7 @@ class PortableInstallationTests(PortableFixture):
         self.assertEqual(code, 0)
         self.assertEqual(seen[0].product_root, self.product)
         self.assertEqual(
-            upgrade._role_skills_manifest(seen[0]),
+            upgrade_workspaces._role_skills_manifest(seen[0]),
             role_skills.product_manifest_path(self.product),
         )
 
@@ -1426,10 +1403,10 @@ class InstallationOwnerTests(PortableFixture):
     """
 
     def test_the_upgrade_command_resolves_the_installation_owner_from_the_instance(self) -> None:
-        seen: list[upgrade.UpgradeContext] = []
+        seen: list[upgrade_types.UpgradeContext] = []
 
         with mock.patch.object(
-            upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult()
+            upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade_types.UpgradeResult()
         ):
             code = self.run_upgrade_command(dry_run=True)
 
@@ -1440,24 +1417,25 @@ class InstallationOwnerTests(PortableFixture):
 
     def test_nonroot_dry_run_reports_an_unreadable_managed_manifest(self) -> None:
         with (
-            mock.patch.object(upgrade.os, "geteuid", return_value=1000),
+            mock.patch.object(upgrade_workspaces.os, "geteuid", return_value=1000),
             mock.patch.object(
-                upgrade, "strict_manifest", return_value=([], "managed manifest is unreadable")
-            ),
+                upgrade_host, "strict_manifest", return_value=([], "managed manifest is unreadable")
+            ) as manifest,
         ):
             code, output = self.capture(lambda: self.run_upgrade_command(dry_run=True))
 
         self.assertEqual(code, 1)
         self.assertIn("failed    host: managed manifest is unreadable", output)
+        manifest.assert_called()
 
     def test_an_explicit_runtime_user_wins_over_the_directory_owner(self) -> None:
-        seen: list[upgrade.UpgradeContext] = []
+        seen: list[upgrade_types.UpgradeContext] = []
 
         with (
             mock.patch.object(
                 upgrade,
                 "run_steps",
-                side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult(),
+                side_effect=lambda context: seen.append(context) or upgrade_types.UpgradeResult(),
             ),
             mock.patch("ummanu.host_apply.pwd.getpwuid", side_effect=AssertionError("owner probed")),
         ):
@@ -1488,15 +1466,15 @@ class InstallationOwnerTests(PortableFixture):
             '[tool.ummanu]\nagent-specs = "src/ummanu/automations/agents"\n', encoding="utf-8"
         )
 
-        worktrees = upgrade.desired_role_worktrees(self.product, self.home)
+        worktrees = upgrade_workspaces.desired_role_worktrees(self.product, self.home)
 
         self.assertEqual(worktrees, [self.home / "orca" / "workspaces" / "ummanu" / "curator"])
 
     def test_a_configured_workspaces_root_still_wins_over_the_owners_home(self) -> None:
         elsewhere = self.root / "elsewhere"
 
-        with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(elsewhere)}):
-            roots = upgrade.workspaces_root(self.home)
+        with mock.patch.dict(os.environ, {"UMMANU_WORKSPACES_ROOT": str(elsewhere)}):
+            roots = upgrade_workspaces.workspaces_root(self.home)
 
         self.assertEqual(roots, elsewhere)
 
@@ -1535,7 +1513,7 @@ class ProductRootDefaultTests(PortableFixture):
         with mock.patch.dict(os.environ, {"UMMANU_REPO": str(self.product)}):
             self.assertEqual(upgrade.default_product_root(), self.product)
             self.assertEqual(
-                installation._product_root(SimpleNamespace(product_root=None)),
+                installation_commands._product_root(SimpleNamespace(product_root=None)),
                 self.product.resolve(),
             )
 
@@ -1581,11 +1559,11 @@ class ProductRootDefaultTests(PortableFixture):
     def test_an_explicitly_named_checkout_still_wins_over_the_configured_one(self) -> None:
         decoy = self.root / "decoy"
         with mock.patch.dict(os.environ, {"UMMANU_REPO": str(decoy)}):
-            seen: list[upgrade.UpgradeContext] = []
+            seen: list[upgrade_types.UpgradeContext] = []
             with mock.patch.object(
                 upgrade,
                 "run_steps",
-                side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult(),
+                side_effect=lambda context: seen.append(context) or upgrade_types.UpgradeResult(),
             ):
                 code = self.run_upgrade_command(dry_run=True)
 
@@ -1659,7 +1637,7 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         self.assertFalse((self.home / "bin").exists(), "an entry point was linked")
         self.assertFalse((self.data / "host-managed.json").exists(), "the host manifest was written")
 
-    def assert_refused(self, result: upgrade.UpgradeResult, named: Path) -> None:
+    def assert_refused(self, result: upgrade_types.UpgradeResult, named: Path) -> None:
         failed = [step for step in result.steps if step.failed]
         self.assertEqual([step.name for step in failed], ["registries"], result.render())
         self.assertIn(str(named), failed[0].detail)

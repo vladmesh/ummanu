@@ -16,10 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sys
 from typing import Any
 
-from ummanu.runtime.paths import add_instance_argument
+from ummanu.cli_output import print_error, usage_handler
+from ummanu.runtime.cli_composition import add_command_parser
+from ummanu.runtime.paths import add_instance_argument, env_value
 from ummanu.webproto.command_reads import CommandReadLayer
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.journal import DEFAULT_LIMIT
@@ -35,10 +36,7 @@ _EXIT_BY_CODE = {"not_found": 2, "validation": 2, "backend_unavailable": 1}
 
 def add_web_read_subcommands(subparsers) -> None:
     """Register the group. Read-only: none of these three takes an actor or writes anything."""
-    group = subparsers.add_parser(
-        "web-read",
-        help="read the transport-independent system, task and event snapshots",
-    )
+    group = add_command_parser(subparsers, "web-read")
     commands = group.add_subparsers(dest="web_read_command")
 
     system = commands.add_parser(
@@ -87,7 +85,7 @@ def add_web_read_subcommands(subparsers) -> None:
     request.add_argument("--request-id", required=True, help="the id the operation was sent with")
     request.set_defaults(handler=run_web_read_request)
 
-    group.set_defaults(handler=_usage)
+    group.set_defaults(handler=usage_handler("web-read subcommand required"))
 
 
 def _common(parser: argparse.ArgumentParser) -> None:
@@ -112,11 +110,6 @@ def _installation(parser: argparse.ArgumentParser) -> None:
         help="override the instance's configured data directory",
     )
     parser.add_argument("--json", action="store_true", help="print the snapshot as JSON")
-
-
-def _usage(_args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "web-read subcommand required"}}))
-    return EXIT_VALIDATION
 
 
 def _layer(args: argparse.Namespace) -> ReadLayer:
@@ -164,7 +157,7 @@ def _emit(args: argparse.Namespace, operation, render) -> int:
     try:
         snapshot = operation()
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return _EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
     if args.json:
         print(json.dumps(snapshot, sort_keys=True))
@@ -256,10 +249,7 @@ _RUN_EXIT_BY_CODE = {
 
 def add_web_run_subcommands(subparsers) -> None:
     """Register the group beside `web-read`."""
-    group = subparsers.add_parser(
-        "web-run",
-        help="start, review and read a product run without a web transport",
-    )
+    group = add_command_parser(subparsers, "web-run")
     commands = group.add_subparsers(dest="web_run_command")
 
     start = commands.add_parser("start", help="raise a worker head for one card")
@@ -292,7 +282,12 @@ def add_web_run_subcommands(subparsers) -> None:
     listing.add_argument("--ref", required=True, help="the card whose runs to list")
     listing.set_defaults(handler=run_web_run_list)
 
-    group.set_defaults(handler=_run_usage)
+    group.set_defaults(handler=usage_handler("web-run subcommand required"))
+
+
+def heads_registry_default() -> str | None:
+    """Registry override for web parsers, read by the protocol layer at construction time."""
+    return env_value("UMMANU_HEADS_REGISTRY")
 
 
 def _run_common(parser: argparse.ArgumentParser) -> None:
@@ -304,7 +299,7 @@ def _run_common(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--heads-registry",
-        default=os.environ.get("TA_HEADS_REGISTRY"),
+        default=heads_registry_default(),
         help="read head profiles from this registry instead of the installation's own",
     )
     parser.add_argument(
@@ -314,11 +309,6 @@ def _run_common(parser: argparse.ArgumentParser) -> None:
         help="how long a run may take before the product ends the head holding it",
     )
     parser.add_argument("--json", action="store_true", help="print the document as JSON")
-
-
-def _run_usage(_args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "web-run subcommand required"}}))
-    return EXIT_VALIDATION
 
 
 def _ops_layer(args: argparse.Namespace) -> OperationLayer:
@@ -369,7 +359,7 @@ def _emit_run(args: argparse.Namespace, operation, render) -> int:
     try:
         document = operation()
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return _RUN_EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
     if args.json:
         print(json.dumps(document, sort_keys=True))

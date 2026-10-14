@@ -23,7 +23,7 @@ from tests.po_fake_store import FakePoStore
 from tests.web_fakes import Recording
 from ummanu.board.e2e_record import e2e_view
 from ummanu.po import token as po_token
-from ummanu.web import pages
+from ummanu.web import page_assets, page_po, pages
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import RuntimeUnavailable
 from ummanu.webproto.po_auth import PoTokenLayer
@@ -154,7 +154,7 @@ class PageFixture(unittest.TestCase):
     def app(self, reads: Recording, *, sprint_reads: Recording | None = None, po: Any = "default") -> WebApp:
         layers = [
             reads,
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             sprint_reads or Recording(),
             Recording(),
             Recording(),
@@ -446,7 +446,7 @@ class PoSessionPageTests(PageFixture):
         polled = json.loads(self.po_get(f"/po/api/sessions/{SESSION}", reads, query="cards=0").body)
         self.assertIsNone(polled["delegated"])
         self.assertEqual(len(reads.calls), 1, "the poll reads no board")
-        self.assertIn("?cards=0", pages._PO_SESSION_SCRIPT)
+        self.assertIn("?cards=0", page_assets._PO_SESSION_SCRIPT)
 
     def test_a_session_that_delegated_nothing_says_so(self) -> None:
         reads = Recording(po_delegated={**self.DELEGATED, "items": []})
@@ -493,12 +493,12 @@ class PoSessionPageTests(PageFixture):
         html = self.po_get(f"/po/sessions/{SESSION}", reads).body.decode()
         start = html.index('<details class="panel po-delegated"')
         end = html.index("</details>", start)
-        self.assertNotIn("po-delegated", pages.PO_SESSION_BLOCKS)
+        self.assertNotIn("po-delegated", page_po.PO_SESSION_BLOCKS)
         # #po-head is the one swapped block above the panel, and it closes before the rename form;
         # every other swapped block opens after the panel has closed, so none of them contains it.
         self.assertLess(html.index('id="po-head"'), html.index('id="po-title"'))
         self.assertLess(html.index('id="po-title"'), start)
-        for block in pages.PO_SESSION_BLOCKS:
+        for block in page_po.PO_SESSION_BLOCKS:
             if block != "po-head":
                 self.assertLess(end, html.index(f'id="{block}"'), f"#{block} opens after the panel")
 
@@ -554,27 +554,46 @@ class CardWaitsTests(unittest.TestCase):
 
     def test_neutral_hotfix_receipt_keeps_the_generic_blocked_observer_wait(self) -> None:
         receipt = {
-            "operation": "ummanu-599", "status": "neutral", "action": "",
-            "holder": "", "reason": "Operation completed without a structured E2E disposition",
+            "operation": "ummanu-599",
+            "status": "neutral",
+            "action": "",
+            "holder": "",
+            "reason": "Operation completed without a structured E2E disposition",
         }
         card = {
-            "ref": "ummanu-590", "type": "code", "state": "blocked", "blocked_by": None,
-            "extensions": {"extra": {"e2e": json.dumps({
-                "hotfix_route": {"carrier": "ummanu-561", "run": "run-1", "result": receipt},
-            })}},
+            "ref": "ummanu-590",
+            "type": "code",
+            "state": "blocked",
+            "blocked_by": None,
+            "extensions": {
+                "extra": {
+                    "e2e": json.dumps(
+                        {
+                            "hotfix_route": {"carrier": "ummanu-561", "run": "run-1", "result": receipt},
+                        }
+                    )
+                }
+            },
         }
         card["e2e"] = e2e_view(card)
         self.assertEqual(card["e2e"]["hotfix_route"]["result"], receipt)
-        self.assertEqual(card_waits(card), [{
-            "kind": "observer", "card": "ummanu-590",
-            "detail": "Blocked work returns to the sprint observer",
-        }])
+        self.assertEqual(
+            card_waits(card),
+            [
+                {
+                    "kind": "observer",
+                    "card": "ummanu-590",
+                    "detail": "Blocked work returns to the sprint observer",
+                }
+            ],
+        )
         self.assertIsNone(card["blocked_by"])
         self.assertEqual(card["e2e"]["hotfix_route"]["result"], receipt)
 
     def test_each_kind(self) -> None:
-        schema = json.loads((Path(__file__).resolve().parents[1] /
-                             "src/ummanu/schemas/web-sprint.schema.json").read_text())
+        schema = json.loads(
+            (Path(__file__).resolve().parents[1] / "src/ummanu/schemas/web-sprint.schema.json").read_text()
+        )
         entry_schema = schema["$defs"]["work"]["properties"]["waiting_on"]["items"]
         validator = Draft202012Validator(entry_schema)
         handed = {
@@ -744,9 +763,7 @@ class AfterMergeWaitsTests(unittest.TestCase):
     def test_green_red_and_declined_wait_for_nothing(self) -> None:
         for state in ("green", "red", "declined"):
             with self.subTest(state=state):
-                self.assertEqual(
-                    card_waits(merged("ummanu-560", am_mark(state, hotfix="ummanu-590"))), []
-                )
+                self.assertEqual(card_waits(merged("ummanu-560", am_mark(state, hotfix="ummanu-590"))), [])
 
     def test_a_carrier_whose_run_answered_does_not_wait_on_it_while_its_mark_still_says_covered(self) -> None:
         carrier = merged("ummanu-561", am_mark("covered", "b" * 40), carried=[am_run("success")])

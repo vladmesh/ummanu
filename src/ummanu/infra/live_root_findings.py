@@ -2,7 +2,7 @@
 
 The live root is a plain directory (`runtime.paths.default_instance_path`), not a Git work tree,
 and nothing that starts the installation names the path it had before: the instance repository's
-checkout in the runtime home (`transition.names.INSTANCE_PROJECT`, the one spelling of that name).
+checkout in the runtime home (`old_name_guard.INSTANCE_PROJECT`, the one spelling of that name).
 
 - ``live_root.git_work_tree``: the configured live root holds ``.git``.
 - ``live_root.old_path``: an installed ``ummanu-*`` unit file, the installation's runtime env file,
@@ -19,8 +19,11 @@ import re
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
+from ummanu.infra.old_name_guard import INSTANCE_PROJECT
 from ummanu.runtime.paths import INSTANCE_ENV
-from ummanu.transition.names import INSTANCE_PROJECT, NEW
+
+#: Current product units inspected by this policy; foreign unit prefixes are outside its scope.
+UNIT_PREFIX = "ummanu-"
 
 GIT_WORK_TREE = "live_root.git_work_tree"
 OLD_PATH = "live_root.old_path"
@@ -74,7 +77,7 @@ def _old_path_finding(
 def unit_file_findings(unit_dir: Path, pattern: re.Pattern[str]) -> list[dict[str, object]]:
     """One finding per installed ``ummanu-*`` unit file that names the old path."""
     try:
-        entries = sorted(entry for entry in unit_dir.iterdir() if entry.name.startswith(NEW.unit_prefix))
+        entries = sorted(entry for entry in unit_dir.iterdir() if entry.name.startswith(UNIT_PREFIX))
     except OSError:
         return []
     findings: list[dict[str, object]] = []

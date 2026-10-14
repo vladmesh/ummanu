@@ -17,8 +17,6 @@ See docs/PROTOCOLS.md, "Running the pipeline".
 from __future__ import annotations
 
 import contextlib
-import json
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -28,11 +26,11 @@ from ummanu.board.backend import CARD, board_client
 from ummanu.config import InstanceReport, validate_instance
 from ummanu.runtime.head.command import HeadCommandError
 from ummanu.runtime.head.spec import HeadSpec, HeadSpecError
+from ummanu.runtime.head_runtime_backends import build_head_runtime
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.heads import HeadRegistryError, load_registry
 from ummanu.tasks import task_audit_for
-from ummanu.webproto import run_events, sources
-from ummanu.webproto import run_state as run_state_reads
+from ummanu.webproto import run_events, run_state as run_state_reads, sources
 from ummanu.webproto.admission import Admission, admit
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import (
@@ -42,6 +40,7 @@ from ummanu.webproto.errors import (
     RunNotFound,
     RuntimeUnavailable,
     ValidationRefused,
+    installation_refusal,
 )
 from ummanu.webproto.lifecycle import (
     CLAUDE_JSON,
@@ -75,18 +74,17 @@ from ummanu.webproto.runs import (
 )
 from ummanu.webproto.store_io import write_document
 from ummanu.webproto.workspaces import provision, workspace_path
-from ummanu.runtime.head_runtime_backends import build_head_runtime
 
 #: Re-exported names; the transitions using them live in :mod:`ummanu.webproto.lifecycle`.
 __all__ = [
     "CLAUDE_JSON",
     "INITIATOR",
-    "OperationLayer",
     "STOP_BRING_UP_FAILED",
     "STOP_DEADLINE",
     "STOP_ENDED",
     "STOP_RESULT_IN",
     "SUBMIT_KEY",
+    "OperationLayer",
 ]
 
 SCHEMA_VERSION = 1
@@ -139,10 +137,7 @@ class OperationLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report = validate_instance(self.instance)
         if not report.ok or report.data_dir is None:
-            raise InstallationUnavailable(
-                "this instance config does not validate: "
-                + "; ".join(str(error) for error in report.errors[:5])
-            )
+            raise InstallationUnavailable(installation_refusal(report))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
@@ -227,9 +222,7 @@ class OperationLayer(ProtocolBoundary):
         fingerprint = request_fingerprint(
             START_OPERATION, {"ref": ref, "profile": profile, "instruction": instruction}
         )
-        existing = self._existing(
-            store, request_id, operation=START_OPERATION, fingerprint=fingerprint
-        )
+        existing = self._existing(store, request_id, operation=START_OPERATION, fingerprint=fingerprint)
         if existing is not None:
             return self._document(existing, now=now, state=self._republish(data_dir, existing, now=now))
 
@@ -261,9 +254,7 @@ class OperationLayer(ProtocolBoundary):
             workspace = provision(admission.repo, Path(run.workspace), base=admission.default_branch)
             document = self._worker_document(run, admission, instruction=instruction, base=workspace)
             run = prepared(
-                lifecycle.advance(
-                    run, RAISING, now=now, spec=spec, profile=profile_table, document=document
-                )
+                lifecycle.advance(run, RAISING, now=now, spec=spec, profile=profile_table, document=document)
             )
         run = lifecycle.advance(
             run,
@@ -299,9 +290,7 @@ class OperationLayer(ProtocolBoundary):
         fingerprint = request_fingerprint(
             REVIEW_OPERATION, {"ref": ref, "worker_run_id": worker_run_id, "profile": profile}
         )
-        existing = self._existing(
-            store, request_id, operation=REVIEW_OPERATION, fingerprint=fingerprint
-        )
+        existing = self._existing(store, request_id, operation=REVIEW_OPERATION, fingerprint=fingerprint)
         if existing is not None:
             self._republish(data_dir, existing, now=now)
             return self._review_document(existing, store, now=now)
@@ -347,9 +336,7 @@ class OperationLayer(ProtocolBoundary):
         with self._closing_before_any_spawn(lifecycle, run, now=now) as prepared:
             document = self._review_prompt(run, worker, worker_state)
             run = prepared(
-                lifecycle.advance(
-                    run, RAISING, now=now, spec=spec, profile=profile_table, document=document
-                )
+                lifecycle.advance(run, RAISING, now=now, spec=spec, profile=profile_table, document=document)
             )
         run = lifecycle.advance(
             run,
@@ -403,6 +390,25 @@ class OperationLayer(ProtocolBoundary):
             "ref": ref,
             "items": [self.run_state(run.run_id) for run in store.for_ref(ref)],
         }
+
+    def card_runs(self, ref: str) -> dict[str, Any]:
+        """Read-only product-run documents for HTML, using the existing evidence and framing.
+
+        This observes even deadline/result/terminal evidence without advancing the lifecycle or
+        looking up audit events. The supported run_state and run_list contracts remain separate.
+        """
+        now = self._clock()
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "product_runs",
+            "observed_at": sources.isoformat(now),
+            "ref": ref,
+            "items": [self._document(run, now=now) for run in self.store().read_for_ref(ref)],
+        }
+
+    def prepare_card_runs(self) -> None:
+        """Prepare/recover derived membership before serving HTML; never an implicit read step."""
+        self.store().prepare_ref_lookup()
 
     # -- the pieces the operations are made of ----------------------------------------------
 

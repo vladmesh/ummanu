@@ -13,7 +13,11 @@ from unittest import mock
 import yaml
 
 from tests.fakes.upgrade import FakeUnitInstaller
-from ummanu import upgrade
+from ummanu.installation.upgrade import (
+    services as upgrade_services,
+    types as upgrade_types,
+    workspaces as upgrade_workspaces,
+)
 from ummanu.memory import pack as memory_pack
 from ummanu.memory.pack import (
     MemoryPackDegradedError,
@@ -155,18 +159,17 @@ class ProductMemoryPackTests(unittest.TestCase):
             "symlinked": self._symlink_pack_fact,
         }
         for name, corrupt in cases.items():
-            with self.subTest(name=name):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    root = Path(tmpdir)
-                    product = write_pack(root / "product", {"one": "one"})
-                    instance = instance_repo(root / "instance")
-                    self.product = product
-                    self.instance = instance
-                    pack = product / "packaging/memory/product-ummanu"
-                    corrupt()
-                    with self.assertRaises(MemoryPackError):
-                        load_product_pack(product)
-                    self.assertFalse((instance / "state").exists())
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                product = write_pack(root / "product", {"one": "one"})
+                instance = instance_repo(root / "instance")
+                self.product = product
+                self.instance = instance
+                pack = product / "packaging/memory/product-ummanu"
+                corrupt()
+                with self.assertRaises(MemoryPackError):
+                    load_product_pack(product)
+                self.assertFalse((instance / "state").exists())
         self.product = write_pack(self.root / "product", {"one": "one", "two": "two"})
         self.instance = instance_repo(self.root / "instance-replacement")
 
@@ -174,9 +177,8 @@ class ProductMemoryPackTests(unittest.TestCase):
         with mock.patch(
             "ummanu.memory.pack.canon_revision",
             side_effect=RuntimeError("canon disk unavailable"),
-        ):
-            with self.assertRaisesRegex(MemoryPackError, "canon disk unavailable"):
-                self.materialize()
+        ), self.assertRaisesRegex(MemoryPackError, "canon disk unavailable"):
+            self.materialize()
         self.assertFalse(git(self.instance, "status", "--porcelain", "--", "state/memory"))
         self.assertEqual([path for path in (self.instance / "state/memory").rglob("*") if path.is_file()], [])
         self.assertFalse((self.data / "memory" / ".undo").exists())
@@ -184,9 +186,8 @@ class ProductMemoryPackTests(unittest.TestCase):
     def test_failed_export_leaves_pending_ledger_and_no_pull_retry_converges(self):
         with mock.patch(
             "ummanu.memory.pack._publish_memory_export", side_effect=RuntimeError("data directory read-only")
-        ):
-            with self.assertRaisesRegex(MemoryPackDegradedError, "data directory read-only"):
-                self.materialize()
+        ), self.assertRaisesRegex(MemoryPackDegradedError, "data directory read-only"):
+            self.materialize()
 
         ledger_path = self.instance / "state/memory/packs/product-ummanu.json"
         self.assertEqual(json.loads(ledger_path.read_text(encoding="utf-8"))["state"], "pending")
@@ -197,7 +198,7 @@ class ProductMemoryPackTests(unittest.TestCase):
 
     def test_root_handoff_precedes_export_and_makes_export_runtime_owned(self):
         report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "ummanu-"})
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
@@ -220,12 +221,12 @@ class ProductMemoryPackTests(unittest.TestCase):
             return actual_publish(*args, **kwargs)
 
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
-            mock.patch("ummanu.upgrade.os.chown", side_effect=chown),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+            mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=account),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown', side_effect=chown),
             mock.patch("ummanu.memory.pack._publish_memory_export", side_effect=publish),
         ):
-            result = upgrade.step_memory_pack(context)
+            result = upgrade_workspaces.step_memory_pack(context)
 
         self.assertEqual(result.status, "changed")
         self.assertTrue(
@@ -253,7 +254,7 @@ class ProductMemoryPackTests(unittest.TestCase):
         git(self.product, "add", "-A")
         git(self.product, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "p")
         report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "ummanu-"})
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
@@ -262,11 +263,11 @@ class ProductMemoryPackTests(unittest.TestCase):
             pull=False,
             report=report,
         )
-        with mock.patch("ummanu.upgrade.probe_memory") as probe:
-            first = upgrade.step_memory_pack(context)
-            restarted = upgrade.step_memory(context)
-            second = upgrade.step_memory_pack(context)
-            no_op = upgrade.step_memory(context)
+        with mock.patch('ummanu.installation.upgrade.services.probe_memory') as probe:
+            first = upgrade_workspaces.step_memory_pack(context)
+            restarted = upgrade_services.step_memory(context)
+            second = upgrade_workspaces.step_memory_pack(context)
+            no_op = upgrade_services.step_memory(context)
 
         self.assertEqual(first.status, "changed")
         self.assertEqual(restarted.status, "changed")

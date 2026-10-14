@@ -14,6 +14,7 @@ import unittest
 from typing import Any
 
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.config import validate
 from ummanu.status import collect_status
 from ummanu.tasks import TaskWriter
 from ummanu.web.app import ROUTES, WebApp
@@ -167,7 +168,7 @@ class FakeAppFixture(unittest.TestCase):
                 "agents": {"source": available(), "items": []},
             }
         )
-        self.ops = Recording(run_list={"items": []})
+        self.ops = Recording(card_runs={"items": []})
         self.sprint_reads = Recording(sprint_list=sprint_listing([sprint_item()]))
         self.sprint_ops = Recording(
             sprint_comment={"kind": "sprint_comment", "comment_id": "evt-c", "saved": True},
@@ -176,9 +177,7 @@ class FakeAppFixture(unittest.TestCase):
         self.pause_reads = Recording(pause_state=pause_document())
         self.pause_ops = Recording(pause_drain={"kind": "pause_drain"}, pause_resume={"kind": "pause_resume"})
         self.command_reads = Recording(
-            command_history=history(
-                [command("card.assessed", "ummanu-9", outcome="", reason="review:red")]
-            )
+            command_history=history([command("card.assessed", "ummanu-9", outcome="", reason="review:red")])
         )
         self.card_ops = Recording(task_comment={"kind": "card_commented"}, task_move={"kind": "card_moved"})
 
@@ -452,9 +451,7 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn("the pipeline is paused (freeze)", page)
 
     def test_the_history_page_links_to_the_older_page_by_cursor(self) -> None:
-        self.command_reads = Recording(
-            command_history=history([command("routing", "ummanu-9")], more=True)
-        )
+        self.command_reads = Recording(command_history=history([command("routing", "ummanu-9")], more=True))
         page = self.text(self.get("/history"))
         self.assertIn("routing", page)
         self.assertIn('href="/history?cursor=c-2&amp;limit=25"', page)
@@ -826,6 +823,7 @@ class CardOperationTests(SprintProtocolFixture):
         answer = self.layer().task_comment(request_id="r-1", actor="web", reference=ref, body="hold on")
         self.assertEqual(answer["kind"], "card_commented")
         self.assertEqual(answer["ref"], ref)
+        self.assertEqual(validate(answer, "web-card", answer["kind"]), [])
         comments = [str(comment.get("comment")) for comment in self.board.comments(self.board.key_of(ref))]
         self.assertTrue(any("hold on" in comment for comment in comments), comments)
 
@@ -870,6 +868,7 @@ class CardOperationTests(SprintProtocolFixture):
         )
         self.assertEqual(answer["kind"], "card_moved")
         self.assertEqual(self.state_of(ref), "blocked")
+        self.assertEqual(validate(answer, "web-card", answer["kind"]), [])
 
     def test_a_move_the_writer_forbids_is_an_owner_conflict(self) -> None:
         """A PO may move a card between any two states; to the state it is in is not a move."""

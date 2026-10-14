@@ -16,7 +16,8 @@ from typing import Any
 from ummanu.board.backend import card_client
 from ummanu.board.owner_handover import OWNER_ROLE, waiting_owner
 from ummanu.config import InstanceReport, validate_instance
-from ummanu.tasks import TaskError, TaskWriter
+from ummanu.kernel.errors import TaskError
+from ummanu.tasks import TaskWriter
 from ummanu.webproto import sources
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import (
@@ -25,6 +26,7 @@ from ummanu.webproto.errors import (
     RuntimeUnavailable,
     TaskNotFound,
     ValidationRefused,
+    installation_refusal,
 )
 
 SCHEMA_VERSION = 1
@@ -70,10 +72,7 @@ class CardOperationLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report = validate_instance(self.instance)
         if not report.ok or report.data_dir is None:
-            raise InstallationUnavailable(
-                "this instance config does not validate: "
-                + "; ".join(str(error) for error in report.errors[:5])
-            )
+            raise InstallationUnavailable(installation_refusal(report))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:

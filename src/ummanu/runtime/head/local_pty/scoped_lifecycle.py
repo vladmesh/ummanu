@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...._fsutil import fsync_directory
+from ...procfs import PGRP, STARTTIME, STATE, proc_stat_fields
 from ..memory import (
     CGROUP_ROOT,
     MEMORY_LIMIT_REASON,
@@ -30,8 +32,7 @@ from ..memory import (
 )
 
 LAUNCH_BINDING_ENV = "UMMANU_SCOPE_LAUNCH_BINDING"
-LAUNCH_FIELDS = ("run_id", "unit", "generation", "role", "task", "workspace",
-                 "launch_pid", "launch_identity")
+LAUNCH_FIELDS = ("run_id", "unit", "generation", "role", "task", "workspace", "launch_pid", "launch_identity")
 
 
 def binding_description(binding: dict[str, Any]) -> str:
@@ -43,16 +44,33 @@ def launch_binding(record: dict[str, Any], directory: Path) -> dict[str, Any]:
     directory = directory.absolute()
     # The caller selected this actual launch root. The reader anchors it under
     # its selected data root; no installation root is guessed from basename.
-    return {"version": 1, "directory": str(directory), "root": str(directory.parent),
-            **{key: record[key] for key in LAUNCH_FIELDS}}
+    return {
+        "version": 1,
+        "directory": str(directory),
+        "root": str(directory.parent),
+        **{key: record[key] for key in LAUNCH_FIELDS},
+    }
 
 
 def native_scope_state(unit: str, *, timeout: float = 10.0) -> dict[str, str]:
-    properties = ("Id", "LoadState", "ActiveState", "SubState", "ControlGroup",
-                  "InvocationID", "ActiveEnterTimestampMonotonic", "Transient", "BindsTo", "Description")
+    properties = (
+        "Id",
+        "LoadState",
+        "ActiveState",
+        "SubState",
+        "ControlGroup",
+        "InvocationID",
+        "ActiveEnterTimestampMonotonic",
+        "Transient",
+        "BindsTo",
+        "Description",
+    )
     result = subprocess.run(
         ["systemctl", "--system", "show", unit, "--property=" + ",".join(properties)],
-        capture_output=True, text=True, timeout=timeout, check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
     )
     if result.returncode or result.stderr.strip():
         raise MemoryScopeError("native runtime scope observation failed; retry systemctl show")
@@ -72,15 +90,26 @@ def _unit_not_loaded(returncode: int, detail: str) -> bool:
     return returncode == SYSTEMCTL_UNIT_NOT_LOADED and "not loaded" in detail
 
 
+def _launch_stat_fields(text: str) -> list[str]:
+    try:
+        return proc_stat_fields(text, skip_separator=False)
+    except ValueError:
+        raise IndexError("list index out of range") from None
+
+
 def launch_identity(pid: int) -> str | None:
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        try:
+            fields = _launch_stat_fields(Path(f"/proc/{pid}/stat").read_text())
+        except (FileNotFoundError, ProcessLookupError):
+            # ENOENT and ESRCH both mean this process disappeared, not a boot-id failure.
+            return None
         boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     except FileNotFoundError:
         return None
     except (OSError, IndexError) as exc:
         raise MemoryScopeError(f"could not inspect scope launcher {pid}: {exc}") from exc
-    return None if fields[0] in ("Z", "X") else f"{boot}:{fields[19]}"
+    return None if fields[STATE] in ("Z", "X") else f"{boot}:{fields[STARTTIME]}"
 
 
 def launch_group_present(pid: int, identity: str) -> bool:
@@ -94,19 +123,19 @@ def launch_group_present(pid: int, identity: str) -> bool:
     if not identity.startswith(boot + ":"):
         return False
     try:
-        leader = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
-    except FileNotFoundError:
+        leader = _launch_stat_fields(Path(f"/proc/{pid}/stat").read_text())
+    except (FileNotFoundError, ProcessLookupError):
         leader = None
-    if leader is not None and identity != f"{boot}:{leader[19]}":
+    if leader is not None and identity != f"{boot}:{leader[STARTTIME]}":
         return False
     for entry in Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
         try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-        except FileNotFoundError:
+            fields = _launch_stat_fields((entry / "stat").read_text())
+        except (FileNotFoundError, ProcessLookupError):
             continue
-        if fields[2] == str(pid) and fields[0] not in ("Z", "X"):
+        if fields[PGRP] == str(pid) and fields[STATE] not in ("Z", "X"):
             return True
     return False
 
@@ -121,7 +150,15 @@ class ScopedHeadLifecycle:
     directory: Path | None = None
     generation: str = field(default_factory=lambda: uuid.uuid4().hex)
 
-    def persist(self, run_dir: Path, *, role: str = "", task: str = "", workspace: str = "", replace_existing: bool = True) -> None:
+    def persist(
+        self,
+        run_dir: Path,
+        *,
+        role: str = "",
+        task: str = "",
+        workspace: str = "",
+        replace_existing: bool = True,
+    ) -> None:
         """Leave the scope name on disk before any process can create the unit."""
         with self.owner_lock(run_dir):
             path = run_dir / "scope-owner.json"
@@ -130,11 +167,19 @@ class ScopedHeadLifecycle:
                     raise MemoryScopeError("a write-ahead scope generation cannot replace an existing owner")
                 if not self.read_owner(run_dir)["cleanup_complete"]:
                     raise MemoryScopeError("an unsettled scope owner cannot be replaced")
-            self.update_owner(run_dir, {
-                "run_id": self.run_id, "unit": scope_unit(self.run_id),
-                "generation": self.generation, "launch_allowed": True, "cleanup_complete": False,
-                "role": role, "task": task, "workspace": workspace,
-            })
+            self.update_owner(
+                run_dir,
+                {
+                    "run_id": self.run_id,
+                    "unit": scope_unit(self.run_id),
+                    "generation": self.generation,
+                    "launch_allowed": True,
+                    "cleanup_complete": False,
+                    "role": role,
+                    "task": task,
+                    "workspace": workspace,
+                },
+            )
         self.directory = run_dir
 
     @staticmethod
@@ -174,9 +219,12 @@ class ScopedHeadLifecycle:
         if "launch_pid" in record or "launch_identity" in record:
             identity = record.get("launch_identity")
             if (
-                type(record.get("launch_pid")) is not int or record["launch_pid"] <= 0
-                or not isinstance(identity, str) or ":" not in identity
-                or not identity.rsplit(":", 1)[0] or not identity.rsplit(":", 1)[1].isdecimal()
+                type(record.get("launch_pid")) is not int
+                or record["launch_pid"] <= 0
+                or not isinstance(identity, str)
+                or ":" not in identity
+                or not identity.rsplit(":", 1)[0]
+                or not identity.rsplit(":", 1)[1].isdecimal()
             ):
                 raise MemoryScopeError("scope owner has invalid launcher identity")
         return record
@@ -219,23 +267,31 @@ class ScopedHeadLifecycle:
             stream.flush()
             os.fsync(stream.fileno())
         temporary.replace(path)
-        fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        fsync_directory(run_dir)
 
     def launcher_argv(
-        self, supervisor: list[str], *, run_dir: Path, log_path: Path, timeout: float,
+        self,
+        supervisor: list[str],
+        *,
+        run_dir: Path,
+        log_path: Path,
+        timeout: float,
         pythonpath: str,
     ) -> list[str]:
         if "--daemonize" in supervisor:
             raise ValueError("a scoped supervisor must remain attached until its head exits")
         return [
-            sys.executable, "-P", "-m", "ummanu.runtime.head.local_pty.scope_launcher",
-            str(run_dir), str(log_path), str(timeout), self.generation,
-            *scope_argv(self.run_id, self.limit_mib, supervisor,
-                        pythonpath=pythonpath, owner_unit=self.owner_unit),
+            sys.executable,
+            "-P",
+            "-m",
+            "ummanu.runtime.head.local_pty.scope_launcher",
+            str(run_dir),
+            str(log_path),
+            str(timeout),
+            self.generation,
+            *scope_argv(
+                self.run_id, self.limit_mib, supervisor, pythonpath=pythonpath, owner_unit=self.owner_unit
+            ),
         ]
 
     @staticmethod
@@ -245,7 +301,10 @@ class ScopedHeadLifecycle:
         from .journal import RUN_STARTED, read_events
 
         run_dir, log_path, timeout = Path(arguments[0]), Path(arguments[1]), float(arguments[2])
-        since = len(read_events(run_dir / protocol.JOURNAL_NAME).events)
+        prior = read_events(run_dir / protocol.JOURNAL_NAME)
+        if prior.truncated_tail or prior.malformed or not prior.ordered:
+            raise MemoryScopeError("the launch journal is damaged")
+        sequence_floor = max((event["seq"] for event in prior.events), default=0)
         # The child cannot invoke systemd until its launch identity is durable. EOF on
         # the barrier (launcher death before release) makes it exit without creating work.
         with ScopedHeadLifecycle.owner_lock(run_dir):
@@ -256,16 +315,30 @@ class ScopedHeadLifecycle:
                 raise MemoryScopeError("scope admission directory is not canonical")
             # The admitted snapshot crosses the gate, rather than being assembled
             # later from a mutable owner. The released caller already supplies [3].
-            admitted = {key: record[key] for key in ("run_id", "unit", "generation", "role", "task", "workspace")}
+            admitted = {
+                key: record[key] for key in ("run_id", "unit", "generation", "role", "task", "workspace")
+            }
             admitted["directory"] = str(run_dir.absolute())
             read_fd, write_fd = os.pipe()
             try:
                 with log_path.open("ab", buffering=0) as log:
                     scope = subprocess.Popen(
-                        [sys.executable, "-P", "-m", "ummanu.runtime.head.local_pty.scope_launcher",
-                         "--exec-gated", str(read_fd), json.dumps(admitted), *arguments[4:]],
-                        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                        start_new_session=True, close_fds=True, pass_fds=(read_fd,),
+                        [
+                            sys.executable,
+                            "-P",
+                            "-m",
+                            "ummanu.runtime.head.local_pty.scope_launcher",
+                            "--exec-gated",
+                            str(read_fd),
+                            json.dumps(admitted),
+                            *arguments[4:],
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=log,
+                        start_new_session=True,
+                        close_fds=True,
+                        pass_fds=(read_fd,),
                     )
                 record["launch_pid"] = scope.pid
                 record["launch_identity"] = launch_identity(scope.pid)
@@ -278,7 +351,10 @@ class ScopedHeadLifecycle:
                 os.close(write_fd)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if any(event.get("kind") == RUN_STARTED for event in read_events(run_dir / protocol.JOURNAL_NAME).events[since:]):
+            reading = read_events(run_dir / protocol.JOURNAL_NAME)
+            if (not (reading.truncated_tail or reading.malformed or not reading.ordered)
+                    and any(event.get("kind") == RUN_STARTED and event["seq"] > sequence_floor
+                            for event in reading.events)):
                 return 0
             if (run_dir / protocol.STARTUP_ERROR_NAME).exists():
                 try:
@@ -304,7 +380,9 @@ class ScopedHeadLifecycle:
         return 1
 
     @contextmanager
-    def attest_launch(self, *, directory: Path, role: str, task: str, workspace: str) -> Iterator[dict[str, Any]]:
+    def attest_launch(
+        self, *, directory: Path, role: str, task: str, workspace: str
+    ) -> Iterator[dict[str, Any]]:
         """Bind the sealed admission to this native incarnation before head work."""
         raw = os.environ.pop(LAUNCH_BINDING_ENV, "")
         try:
@@ -313,27 +391,42 @@ class ScopedHeadLifecycle:
                 raise MemoryScopeError("sealed launch belongs to a different run directory")
             with self.owner_lock(directory):
                 record = self.read_owner(directory)
-                if (not record["launch_allowed"] or record["cleanup_complete"]
-                        or binding != launch_binding(record, directory)
-                        or binding["run_id"] != self.run_id or binding["role"] != role
-                        or binding["task"] != task or binding["workspace"] != workspace):
+                if (
+                    not record["launch_allowed"]
+                    or record["cleanup_complete"]
+                    or binding != launch_binding(record, directory)
+                    or binding["run_id"] != self.run_id
+                    or binding["role"] != role
+                    or binding["task"] != task
+                    or binding["workspace"] != workspace
+                ):
                     raise MemoryScopeError("sealed launch admission does not match the actual supervisor")
                 group = own_cgroup()
                 state = native_scope_state(record["unit"])
-                if (group is None or group != CGROUP_ROOT / "system.slice" / record["unit"]
-                        or state["Id"] != record["unit"] or state["LoadState"] != "loaded"
-                        or state["Transient"] != "yes" or not state["InvocationID"]
-                        or state["ControlGroup"] != f"/system.slice/{record['unit']}"
-                        or state["Description"] != binding_description(binding)
-                        or launch_identity(record["launch_pid"]) != record["launch_identity"]):
+                if (
+                    group is None
+                    or group != CGROUP_ROOT / "system.slice" / record["unit"]
+                    or state["Id"] != record["unit"]
+                    or state["LoadState"] != "loaded"
+                    or state["Transient"] != "yes"
+                    or not state["InvocationID"]
+                    or state["ControlGroup"] != f"/system.slice/{record['unit']}"
+                    or state["Description"] != binding_description(binding)
+                    or launch_identity(record["launch_pid"]) != record["launch_identity"]
+                ):
                     raise MemoryScopeError("native scope does not match sealed launch admission")
                 ticks = int(record["launch_identity"].rsplit(":", 1)[1])
-                if int(state["ActiveEnterTimestampMonotonic"]) < ticks * 1_000_000 // os.sysconf("SC_CLK_TCK"):
+                if int(state["ActiveEnterTimestampMonotonic"]) < ticks * 1_000_000 // os.sysconf(
+                    "SC_CLK_TCK"
+                ):
                     raise MemoryScopeError("native scope predates the admitted launcher")
                 info = group.stat()
-                yield {"admitted": binding, "invocation_id": state["InvocationID"],
-                       "activation": state["ActiveEnterTimestampMonotonic"],
-                       "cgroup": [info.st_dev, info.st_ino]}
+                yield {
+                    "admitted": binding,
+                    "invocation_id": state["InvocationID"],
+                    "activation": state["ActiveEnterTimestampMonotonic"],
+                    "cgroup": [info.st_dev, info.st_ino],
+                }
         except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
             raise MemoryScopeError("scope launch attestation is unavailable") from exc
 
@@ -342,7 +435,7 @@ class ScopedHeadLifecycle:
         """A completed short head is still a successful launch with a durable exit to read."""
         from .journal import RUN_EXITED, RUN_STARTED
 
-        fresh = events[since:]
+        fresh = [event for event in events if int(event.get("seq") or 0) > since]
         started = [event for event in fresh if event.get("kind") == RUN_STARTED]
         if not started:
             return None
@@ -395,6 +488,7 @@ class ScopedHeadLifecycle:
         A caller's `remaining` cuts each of its waits (launch group, `systemctl stop`, membership)
         to what is left; one it outlives is the same retryable refusal as its own bound.
         """
+
         def bound(seconds: float, what: str) -> float:
             if remaining is None:
                 return seconds
@@ -419,7 +513,9 @@ class ScopedHeadLifecycle:
                 except PermissionError:
                     result = subprocess.run(
                         ["sudo", "-n", "kill", "-KILL", "--", f"-{pid}"],
-                        capture_output=True, timeout=bound(5, "the launch group kill"), check=False,
+                        capture_output=True,
+                        timeout=bound(5, "the launch group kill"),
+                        check=False,
                     )
                     if result.returncode:
                         raise MemoryScopeError("could not terminate the scope launch group")
@@ -439,8 +535,11 @@ class ScopedHeadLifecycle:
         try:
             stopped = subprocess.run(
                 ["sudo", "-n", "systemctl", "stop", scope_unit(self.run_id)],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                check=False, timeout=bound(15.0, "the scope stop"),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=bound(15.0, "the scope stop"),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {exc}") from exc
@@ -465,7 +564,9 @@ class ScopedHeadLifecycle:
                     return  # systemd removed the cgroup after its final member left.
                 raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} has no membership evidence")
             except OSError as exc:
-                raise MemoryScopeError(f"could not verify empty head scope {scope_unit(self.run_id)}: {exc}") from exc
+                raise MemoryScopeError(
+                    f"could not verify empty head scope {scope_unit(self.run_id)}: {exc}"
+                ) from exc
             if "populated 0" in fields:
                 self._record_empty(record)
                 return  # cgroup.events counts descendants, including separate process groups.
@@ -493,8 +594,12 @@ class ScopedHeadLifecycle:
             oom_group = ""
         before = memory_events(cgroup)
         if (
-            cgroup is None or cgroup.name != scope_unit(self.run_id)
-            or actual != expected or swap_max != "0" or oom_group != "1" or before is None
+            cgroup is None
+            or cgroup.name != scope_unit(self.run_id)
+            or actual != expected
+            or swap_max != "0"
+            or oom_group != "1"
+            or before is None
             or not supervisor_oom_protected()
         ):
             raise MemoryScopeError(
@@ -505,7 +610,10 @@ class ScopedHeadLifecycle:
 
     @staticmethod
     def exit_fields(
-        status: int, evidence: ScopeEvidence, *, stopping: bool = False,
+        status: int,
+        evidence: ScopeEvidence,
+        *,
+        stopping: bool = False,
         oom_victim: dict[str, int] | None = None,
     ) -> dict[str, Any]:
         """Only a kernel kill record for the reserved head PID establishes an OOM."""

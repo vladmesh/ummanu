@@ -25,7 +25,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from ummanu._fsutil import file_lock
+from ummanu._fsutil import file_lock, fsync_directory
+from ummanu.webproto._values import _float, _text
+from ummanu.webproto.ref_lookup import RefLookup
+from ummanu.webproto.request_index import RequestIndex, RequestMismatch as RequestMismatch
 from ummanu.webproto.store_io import RunStoreError, write_document
 
 #: Which side of the demonstration scenario a run is; there is no third.
@@ -72,12 +75,7 @@ REVIEW_OPERATION = "run_review"
 # (`IMPLEMENTATION_FAILURES` and others import it from this module).
 
 
-class RequestMismatch(RunStoreError):
-    """This request id already owns a different operation, or the same one with different inputs.
-
-    Idempotency covers a retry of the same request only; another command reusing the id is refused
-    rather than aliased to the first run.
-    """
+# RequestMismatch stays importable here for ops.py and sprint_ops.py.
 
 
 def request_fingerprint(operation: str, request: dict[str, Any]) -> str:
@@ -158,7 +156,6 @@ class ProductRun:
     def at_phase(self, phase: str, **changes: Any) -> ProductRun:
         """The same run in another phase. The only way `phase` is ever written."""
         return replace(self, phase=phase, **changes)
-
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -290,6 +287,8 @@ class RunStore:
         self.root = Path(os.fspath(data_dir)) / RUNS_RELATIVE
         self.requests = self.root / "requests"
         self.lock_path = self.root / ".runs.lock"
+        self.index = RequestIndex(self.requests)
+        self.refs = RefLookup(self.root)
 
     # -- paths -----------------------------------------------------------------------------
 
@@ -298,13 +297,11 @@ class RunStore:
             raise RunStoreError(f"a product run is named by a run id, not by {run_id!r}")
         return self.root / f"{run_id}.json"
 
-    def _request_path(self, request_id: str) -> Path:
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
-        return self.requests / f"{digest}.json"
-
     def _prepare(self) -> None:
         try:
             self.requests.mkdir(parents=True, exist_ok=True)
+            for directory in (self.root, self.root.parent, self.root.parent.parent):
+                fsync_directory(directory)
         except OSError as exc:
             raise RunStoreError(f"the product run store at {self.root} could not be opened: {exc}") from None
 
@@ -321,40 +318,31 @@ class RunStore:
             raise RunStoreError(f"the product run record at {path} could not be read: {exc}") from None
         return ProductRun.from_json(payload)
 
-    def by_request(
-        self, request_id: str, *, operation: str = "", fingerprint: str = ""
-    ) -> ProductRun | None:
+    def by_request(self, request_id: str, *, operation: str = "", fingerprint: str = "") -> ProductRun | None:
         """The run a request id owns, if it owns one and this is the same request.
 
         With `operation`/`fingerprint`, a disagreeing record raises :class:`RequestMismatch`. With
         neither, the record is read as it stands (for listings and repairs).
         """
-        path = self._request_path(request_id)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        document = self.index.read(request_id, label="product run request index")
+        if document is None:
             return None
-        except (OSError, ValueError) as exc:
-            raise RunStoreError(f"the product run request index at {path} could not be read: {exc}") from None
+        path, payload = document
         if not isinstance(payload, dict):
             raise RunStoreError(f"the product run request index at {path} is not an object")
-        owned_operation = _text(payload.get("operation"))
-        owned_fingerprint = _text(payload.get("fingerprint"))
-        if operation and owned_operation and owned_operation != operation:
-            raise RequestMismatch(
-                f"request id {request_id!r} already owns a {owned_operation} run; a request id is "
-                f"the idempotency key of one operation and cannot be reused for {operation}"
-            )
-        if fingerprint and owned_fingerprint and owned_fingerprint != fingerprint:
-            raise RequestMismatch(
-                f"request id {request_id!r} already owns a {owned_operation or operation} run made "
-                "with different inputs; a repeat is a retry of the same request, not a new one"
-            )
+        self.index.match(
+            request_id,
+            _text(payload.get("operation")),
+            _text(payload.get("fingerprint")),
+            operation=operation,
+            fingerprint=fingerprint,
+            noun="run",
+        )
         run_id = _text(payload.get("run_id"))
         return self.get(run_id) if run_id else None
 
     def for_ref(self, ref: str) -> list[ProductRun]:
-        """Every run of one card, oldest first. What a card page shows, and what admission reads."""
+        """Canonical scan for admission and the mutating API/CLI listing, oldest first."""
         runs: list[ProductRun] = []
         try:
             names = sorted(path for path in self.root.glob("*.json"))
@@ -371,6 +359,48 @@ class RunStore:
             if run.ref == ref:
                 runs.append(run)
         return sorted(runs, key=lambda run: (run.started_at, run.run_id))
+
+    def read_for_ref(self, ref: str) -> list[ProductRun]:
+        """A prepared card lookup, with no recovery, lock creation or writes on a read.
+
+        Two identical complete tokens fence the whole canonical read. A concurrent writer or
+        interrupted write refuses the listing rather than passing a partial list to the page.
+        """
+        if not self.root.exists():
+            return []
+        token = self.refs.token()
+        runs = []
+        for run_id in self.refs.ids(ref):
+            run = self.get(run_id)
+            if run is None or run.run_id != run_id or run.ref != ref:
+                raise RunStoreError("the product run ref lookup disagrees with its canonical record")
+            runs.append(run)
+        if self.refs.token() != token:
+            raise RunStoreError("the product run ref lookup changed during this read; retry the read")
+        return sorted(runs, key=lambda run: (run.started_at, run.run_id))
+
+    def prepare_ref_lookup(self) -> None:
+        """Explicit startup/recovery scan of released records, never called from a constructor/GET.
+
+        Rebuild even a complete lookup: old writers did not participate in this protocol. Normal
+        restart/upgrade stops those writers before preparation and serves only new writers after it.
+        A never-created store needs neither preparation nor a filesystem write.
+        """
+        if not self.root.exists():
+            return
+        self._prepare()
+        with file_lock(self.lock_path):
+            self.refs.mark(complete=False)
+            groups: dict[str, list[str]] = {}
+            for path in sorted(self.root.iterdir()):
+                if path.suffix != ".json":
+                    continue
+                run = self.get(path.stem)
+                if run is None or run.run_id != path.stem or not run.ref:
+                    raise RunStoreError(f"the canonical product run at {path} has invalid identity")
+                groups.setdefault(run.ref, []).append(run.run_id)
+            self.refs.rebuild(groups)
+            self.refs.mark(complete=True)
 
     # -- writes ----------------------------------------------------------------------------
 
@@ -397,17 +427,14 @@ class RunStore:
             if not isinstance(run, ProductRun):
                 raise RunStoreError("a product run record is built as a ProductRun")
             self._write(run)
-            write_document(
-                self._request_path(request_id),
-                json.dumps(
-                    {
-                        "request_id": request_id,
-                        "run_id": run.run_id,
-                        "operation": operation,
-                        "fingerprint": fingerprint,
-                    },
-                    sort_keys=True,
-                ),
+            self.index.write(
+                request_id,
+                {
+                    "request_id": request_id,
+                    "run_id": run.run_id,
+                    "operation": operation,
+                    "fingerprint": fingerprint,
+                },
             )
             return run, True
 
@@ -436,14 +463,42 @@ class RunStore:
                 raise RunStoreError(f"there is no product run {run_id!r} to settle")
             if current.ended:
                 return current, False
-            settled = current.settled_as(
-                state, reason, now=now, exit_status=exit_status, result=result
-            )
+            settled = current.settled_as(state, reason, now=now, exit_status=exit_status, result=result)
             self._write(settled)
             return settled, True
 
     def _write(self, run: ProductRun) -> None:
-        write_document(self._run_path(run.run_id), json.dumps(run.to_json(), sort_keys=True, indent=2))
+        # claim, save and settle all reach this method under .runs.lock. An unprepared store
+        # continues canonical lifecycle writes, but cannot claim a complete derived listing.
+        path = self._run_path(run.run_id)
+        previous = self.get(run.run_id)
+        if not self.refs.marker.exists() and not any(self.root.glob("*.json")):
+            # A first writer may initialize an empty store without a legacy JSON scan. Startup
+            # deliberately leaves a never-created store absent; the first claim makes it real.
+            self.refs.mark(complete=False)
+            self.refs.rebuild({})
+            self.refs.mark(complete=True)
+        try:
+            self.refs.token()
+        except RunStoreError:
+            prepared = False
+        else:
+            prepared = True
+        memberships = {}
+        if prepared:
+            memberships[run.ref] = self.refs.ids(run.ref)
+            if previous is not None and previous.ref != run.ref:
+                memberships[previous.ref] = self.refs.ids(previous.ref)
+                if run.run_id not in memberships[previous.ref]:
+                    raise RunStoreError("the product run ref lookup lost an existing run")
+                memberships[previous.ref].remove(run.run_id)
+            memberships[run.ref] = sorted(set(memberships[run.ref]) | {run.run_id})
+        self.refs.mark(complete=False)
+        write_document(path, json.dumps(run.to_json(), sort_keys=True, indent=2), durable=True)
+        if prepared:
+            for ref, ids in memberships.items():
+                self.refs.put(ref, ids)
+            self.refs.mark(complete=True)
 
 
 def new_run_id() -> str:
@@ -453,10 +508,6 @@ def new_run_id() -> str:
 
 def now() -> float:
     return time.time()
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
 
 
 def _int(value: Any) -> int:
@@ -479,7 +530,3 @@ def _flag(value: Any, fallback: bool) -> bool:
 
 def _mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _float(value: Any) -> float:
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0.0

@@ -15,6 +15,12 @@ from unittest import mock
 from tests.fakes.upgrade import FakeUnitInstaller
 from ummanu import upgrade
 from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
+from ummanu.installation.upgrade import (
+    checkout as upgrade_checkout,
+    dependencies as upgrade_dependencies,
+    services as upgrade_services,
+    types as upgrade_types,
+)
 from ummanu.memory import DEFAULT_MODEL
 
 MEMORY_UNIT = "ummanu-memory.service"
@@ -57,7 +63,7 @@ class StateReceiptFixture(unittest.TestCase):
             bindings=[],
         )
         self.installs: list[list[str]] = []
-        real_run = upgrade._proc.run
+        real_run = upgrade_checkout._proc.run
 
         def run(argv, *args, **kwargs):
             if list(argv[1:4]) == ["-m", "pip", "install"]:
@@ -65,8 +71,8 @@ class StateReceiptFixture(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return real_run(argv, *args, **kwargs)
 
-        self.enterContext(mock.patch.object(upgrade._proc, "run", side_effect=run))
-        self.probe = self.enterContext(mock.patch.object(upgrade, "probe_memory"))
+        self.enterContext(mock.patch.object(upgrade_checkout._proc, "run", side_effect=run))
+        self.probe = self.enterContext(mock.patch.object(upgrade_services, "probe_memory"))
 
     def _write_product(self) -> None:
         files = {
@@ -113,8 +119,8 @@ class StateReceiptFixture(unittest.TestCase):
         (self.product / relative).write_text(text, encoding="utf-8")
         self.commit(f"move {relative}")
 
-    def context(self, **overrides) -> upgrade.UpgradeContext:
-        base = upgrade.UpgradeContext(
+    def context(self, **overrides) -> upgrade_types.UpgradeContext:
+        base = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -127,10 +133,10 @@ class StateReceiptFixture(unittest.TestCase):
         return replace(base, **overrides)
 
     def dependency_receipt(self) -> Path:
-        return self.data / upgrade.DEPENDENCY_RECEIPT_RELATIVE
+        return self.data / upgrade_dependencies.DEPENDENCY_RECEIPT_RELATIVE
 
     def memory_receipt(self) -> Path:
-        return self.data / upgrade.MEMORY_PROCESS_RECEIPT_RELATIVE
+        return self.data / upgrade_services.MEMORY_PROCESS_RECEIPT_RELATIVE
 
     def extras_installed(self) -> str:
         """The extras list of the last `pip install -e <root>[...]`."""
@@ -141,8 +147,8 @@ class StateReceiptFixture(unittest.TestCase):
 
 class DependencyReceiptTests(StateReceiptFixture):
     def test_first_run_installs_once_writes_the_receipt_and_the_repeat_is_unchanged(self) -> None:
-        first = upgrade.step_dependencies(self.context())
-        second = upgrade.step_dependencies(self.context())
+        first = upgrade_dependencies.step_dependencies(self.context())
+        second = upgrade_dependencies.step_dependencies(self.context())
 
         self.assertEqual(first.status, "changed", first.detail)
         self.assertIn("the dependency receipt is missing", first.detail)
@@ -156,13 +162,13 @@ class DependencyReceiptTests(StateReceiptFixture):
         self.assertNotIn("no dependency manifest moved", first.detail + second.detail)
 
     def test_a_memory_pin_bump_outside_upgrade_reinstalls_with_an_empty_pull_delta(self) -> None:
-        upgrade.step_dependencies(self.context())
+        upgrade_dependencies.step_dependencies(self.context())
         self.move_checkout("pyproject.toml", PYPROJECT.replace("NUMPY", "2.4.7"))
         context = self.context()
 
-        pulled = upgrade.step_pull(context)
-        result = upgrade.step_dependencies(context)
-        again = upgrade.step_dependencies(self.context())
+        pulled = upgrade_checkout.step_pull(context)
+        result = upgrade_dependencies.step_dependencies(context)
+        again = upgrade_dependencies.step_dependencies(self.context())
 
         self.assertEqual((pulled.status, context.changed_paths), ("skipped", ()))
         self.assertEqual(result.status, "changed", result.detail)
@@ -173,10 +179,10 @@ class DependencyReceiptTests(StateReceiptFixture):
         self.assertEqual(again.status, "unchanged", again.detail)
 
     def test_a_source_only_move_leaves_the_venv_alone(self) -> None:
-        upgrade.step_dependencies(self.context())
+        upgrade_dependencies.step_dependencies(self.context())
         self.move_checkout("src/ummanu/app.py", "VERSION = 'B'\n")
 
-        result = upgrade.step_dependencies(self.context())
+        result = upgrade_dependencies.step_dependencies(self.context())
 
         self.assertEqual(result.status, "unchanged", result.detail)
         self.assertEqual(len(self.installs), 1)
@@ -199,15 +205,15 @@ class DependencyReceiptTests(StateReceiptFixture):
                     )
                 units = FakeUnitInstaller(present=present, active=active)
 
-                self.assertEqual(upgrade.required_extras(self.context(units=units), venv), expected)
+                self.assertEqual(upgrade_dependencies.required_extras(self.context(units=units), venv), expected)
 
     def test_an_extra_the_installation_started_using_reinstalls(self) -> None:
         self.units = FakeUnitInstaller()
-        first = upgrade.step_dependencies(self.context())
+        first = upgrade_dependencies.step_dependencies(self.context())
         self.assertEqual(self.extras_installed(), "dev")
         self.units = FakeUnitInstaller(present={MEMORY_UNIT: memory_unit()})
 
-        result = upgrade.step_dependencies(self.context())
+        result = upgrade_dependencies.step_dependencies(self.context())
 
         self.assertEqual(first.status, "changed")
         self.assertEqual(result.status, "changed", result.detail)
@@ -215,7 +221,7 @@ class DependencyReceiptTests(StateReceiptFixture):
         self.assertEqual(self.extras_installed(), "dev,memory")
 
     def test_dry_run_names_the_reason_and_installs_nothing(self) -> None:
-        result = upgrade.step_dependencies(self.context(dry_run=True))
+        result = upgrade_dependencies.step_dependencies(self.context(dry_run=True))
 
         self.assertEqual(result.status, "changed")
         self.assertIn("would reinstall", result.detail)
@@ -223,22 +229,22 @@ class DependencyReceiptTests(StateReceiptFixture):
         self.assertFalse(self.dependency_receipt().exists())
 
     def test_a_failed_install_writes_no_receipt(self) -> None:
-        real_run = upgrade._proc.run.side_effect
+        real_run = upgrade_checkout._proc.run.side_effect
 
         def run(argv, *args, **kwargs):
             if list(argv[1:4]) == ["-m", "pip", "install"]:
                 raise subprocess.CalledProcessError(1, argv)
             return real_run(argv, *args, **kwargs)
 
-        with mock.patch.object(upgrade._proc, "run", side_effect=run):
-            result = upgrade.step_dependencies(self.context())
+        with mock.patch.object(upgrade_checkout._proc, "run", side_effect=run):
+            result = upgrade_dependencies.step_dependencies(self.context())
 
         self.assertEqual(result.status, "failed")
         self.assertFalse(self.dependency_receipt().exists())
 
     def test_hostile_receipts_mean_install_never_an_exception(self) -> None:
         venv = str((self.product / ".venv").resolve())
-        digest = upgrade._git_tracked_digest(self.product, upgrade.DEPENDENCY_PATHS)
+        digest = upgrade_checkout._git_tracked_digest(self.product, upgrade_types.DEPENDENCY_PATHS)
 
         def body(**fields: object) -> str:
             payload = {"version": 1, "venv": venv, "dependency_sha256": digest, "extras": ["dev", "memory"]}
@@ -250,19 +256,19 @@ class DependencyReceiptTests(StateReceiptFixture):
                 self.installs.clear()
                 self._plant(self.dependency_receipt(), text)
 
-                result = upgrade.step_dependencies(self.context())
+                result = upgrade_dependencies.step_dependencies(self.context())
 
                 self.assertEqual(result.status, _EXPECTED.get(name, "changed"), result.detail)
                 self.assertEqual(len(self.installs), 1)
         with self.subTest("another venv path"):
             self.installs.clear()
             self._plant(self.dependency_receipt(), body(venv="/elsewhere/.venv"))
-            result = upgrade.step_dependencies(self.context())
+            result = upgrade_dependencies.step_dependencies(self.context())
             self.assertIn("names another venv", result.detail)
             self.assertEqual(len(self.installs), 1)
         with self.subTest("the valid control is unchanged"):
             self._plant(self.dependency_receipt(), body())
-            self.assertEqual(upgrade.step_dependencies(self.context()).status, "unchanged")
+            self.assertEqual(upgrade_dependencies.step_dependencies(self.context()).status, "unchanged")
 
     def _plant(self, path: Path, text: str | None) -> None:
         _plant(path, text)
@@ -270,8 +276,8 @@ class DependencyReceiptTests(StateReceiptFixture):
 
 class MemoryReceiptTests(StateReceiptFixture):
     def test_first_run_restarts_once_writes_the_receipt_and_the_repeat_is_unchanged(self) -> None:
-        first = upgrade.step_memory(self.context())
-        second = upgrade.step_memory(self.context())
+        first = upgrade_services.step_memory(self.context())
+        second = upgrade_services.step_memory(self.context())
 
         self.assertEqual(first.status, "changed", first.detail)
         self.assertIn("the memory process receipt is missing", first.detail)
@@ -284,14 +290,14 @@ class MemoryReceiptTests(StateReceiptFixture):
         self.assertNotIn("serving the current code", second.detail)
 
     def test_a_source_commit_outside_upgrade_restarts_the_service_on_no_pull(self) -> None:
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
         self.move_checkout("src/ummanu/app.py", "VERSION = 'B'\n")
         context = self.context()
 
         steps = upgrade.run_steps(
-            context, steps=(upgrade.step_pull, upgrade.step_dependencies, upgrade.step_memory)
+            context, steps=(upgrade_checkout.step_pull, upgrade_dependencies.step_dependencies, upgrade_services.step_memory)
         )
-        again = upgrade.run_steps(self.context(), steps=(upgrade.step_dependencies, upgrade.step_memory))
+        again = upgrade.run_steps(self.context(), steps=(upgrade_dependencies.step_dependencies, upgrade_services.step_memory))
 
         pulled, dependencies, memory = steps.steps
         self.assertEqual(pulled.status, "skipped")
@@ -305,64 +311,64 @@ class MemoryReceiptTests(StateReceiptFixture):
         self.assertIn("memory process receipt verified", again.steps[1].detail)
 
     def test_a_restart_outside_upgrade_is_a_different_process_generation(self) -> None:
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
         self.units.restart(MEMORY_UNIT)
         self.units.calls.clear()
 
-        result = upgrade.step_memory(self.context())
+        result = upgrade_services.step_memory(self.context())
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("different process generation", result.detail)
         self.assertEqual(self.units.calls, [("restart", MEMORY_UNIT)])
 
     def test_a_changed_memory_model_restarts_the_service(self) -> None:
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
         self.units.files[MEMORY_UNIT] = memory_unit("model-b")
         self.units.calls.clear()
 
-        result = upgrade.step_memory(self.context())
+        result = upgrade_services.step_memory(self.context())
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn("memory model model-a -> model-b", result.detail)
         self.assertEqual(self.units.calls, [("restart", MEMORY_UNIT)])
-        self.assertEqual(upgrade.step_memory(self.context()).status, "unchanged")
+        self.assertEqual(upgrade_services.step_memory(self.context()).status, "unchanged")
 
     def test_a_unit_without_a_model_binds_the_service_default(self) -> None:
         self.units.files[MEMORY_UNIT] = memory_unit(None)
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
         self.units.files[MEMORY_UNIT] = memory_unit(DEFAULT_MODEL)
 
-        result = upgrade.step_memory(self.context())
+        result = upgrade_services.step_memory(self.context())
 
         self.assertEqual(result.status, "unchanged", result.detail)
         self.assertIn(f"model {DEFAULT_MODEL}", result.detail)
 
     def test_a_changed_memory_pack_digest_restarts_the_service(self) -> None:
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
 
-        result = upgrade.step_memory(self.context(memory_pack_digest="b" * 64))
+        result = upgrade_services.step_memory(self.context(memory_pack_digest="b" * 64))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertIn(f"memory pack sha256 {'a' * 12} -> {'b' * 12}", result.detail)
 
     def test_the_existing_change_flags_are_still_reasons(self) -> None:
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
         for flag, reason in (
             ("unit_changed", "unit file changed"),
             ("code_changed", "product code or dependencies changed"),
             ("memory_pack_changed", "memory pack export changed"),
         ):
             with self.subTest(flag):
-                result = upgrade.step_memory(self.context(**{flag: True}))
+                result = upgrade_services.step_memory(self.context(**{flag: True}))
                 self.assertEqual(result.status, "changed")
                 self.assertIn(reason, result.detail)
 
     def test_dry_run_names_the_moved_checkout_and_restarts_nothing(self) -> None:
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
         self.move_checkout("src/ummanu/app.py", "VERSION = 'B'\n")
         self.units.calls.clear()
 
-        result = upgrade.step_memory(self.context(dry_run=True))
+        result = upgrade_services.step_memory(self.context(dry_run=True))
 
         self.assertEqual(result.status, "changed")
         self.assertIn(f"would restart {MEMORY_UNIT}", result.detail)
@@ -370,15 +376,15 @@ class MemoryReceiptTests(StateReceiptFixture):
         self.assertEqual(self.units.calls, [])
 
     def test_a_failed_probe_writes_no_receipt(self) -> None:
-        self.probe.side_effect = upgrade.MemoryProbeError("no allowed read")
+        self.probe.side_effect = upgrade_services.MemoryProbeError("no allowed read")
 
-        result = upgrade.step_memory(self.context())
+        result = upgrade_services.step_memory(self.context())
 
         self.assertEqual(result.status, "failed")
         self.assertFalse(self.memory_receipt().exists())
 
     def test_hostile_receipts_mean_restart_never_an_exception(self) -> None:
-        upgrade.step_memory(self.context())
+        upgrade_services.step_memory(self.context())
         valid = json.loads(self.memory_receipt().read_text(encoding="utf-8"))
 
         def body(**fields: object) -> str:
@@ -399,12 +405,12 @@ class MemoryReceiptTests(StateReceiptFixture):
                 self.units.calls.clear()
                 self._plant(text)
 
-                result = upgrade.step_memory(self.context())
+                result = upgrade_services.step_memory(self.context())
 
                 self.assertEqual(result.status, _EXPECTED.get(name, "changed"), result.detail)
                 self.assertEqual(self.units.calls, [("restart", MEMORY_UNIT)])
         with self.subTest("the valid control is unchanged"):
-            self.assertEqual(upgrade.step_memory(self.context()).status, "unchanged")
+            self.assertEqual(upgrade_services.step_memory(self.context()).status, "unchanged")
 
     def _plant(self, text: str | None) -> None:
         _plant(self.memory_receipt(), text)
@@ -412,7 +418,7 @@ class MemoryReceiptTests(StateReceiptFixture):
 
 class ReceiptBackupTests(unittest.TestCase):
     def test_both_receipts_are_excluded_from_backup(self) -> None:
-        for relative in (upgrade.DEPENDENCY_RECEIPT_RELATIVE, upgrade.MEMORY_PROCESS_RECEIPT_RELATIVE):
+        for relative in (upgrade_dependencies.DEPENDENCY_RECEIPT_RELATIVE, upgrade_services.MEMORY_PROCESS_RECEIPT_RELATIVE):
             with self.subTest(str(relative)):
                 self.assertTrue(should_skip_data_entry(relative, policy=FULL_POLICY))
 
@@ -439,7 +445,7 @@ def _hostile(body, *, extras_key: str) -> dict[str, str | None]:
         "extra key": body(unexpected=1),
         "wrong type": body(**{extras_key: "dev"}),
         "null field": body(**{extras_key: None}),
-        "oversized": body(padding="x" * (upgrade.RECEIPT_MAX_BYTES + 1)),
+        "oversized": body(padding="x" * (upgrade_services.process_receipts.RECEIPT_MAX_BYTES + 1)),
         "directory": "<directory>",
         "symlink": "<symlink>",
     }

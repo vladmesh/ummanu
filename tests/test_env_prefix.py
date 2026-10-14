@@ -1,7 +1,7 @@
-"""Only the `UMMANU_*` environment configures the product, and the old package is gone (docs/RENAME.md §T5).
+"""Only the `UMMANU_*` environment configures the product, and the old package is gone (docs/RENAME.md, "Guard").
 
-There is no alias: the old prefix is ignored, never read as a fallback, and the old package does not
-import. The old names come from the transition's name table, the one place that spells them.
+The retired package prefix is ignored, never read as a fallback, and the old package does not
+import. The old spellings below are negative fixtures, never runtime aliases.
 """
 
 from __future__ import annotations
@@ -18,16 +18,15 @@ from unittest import mock
 from ummanu import session
 from ummanu.automations.runtime import production_telemetry
 from ummanu.runtime import paths, role_env
-from ummanu.transition.names import NEW, OLD
 
 ROOT = Path(__file__).resolve().parent.parent
 
 #: The keys under test, by role: (old spelling, new spelling).
 KEYS = {
-    "data_dir": (f"{OLD.env_prefix}DATA_DIR", f"{NEW.env_prefix}DATA_DIR"),
-    "instance": (f"{OLD.env_prefix}INSTANCE", f"{NEW.env_prefix}INSTANCE"),
-    "repo": (f"TA_{OLD.env_prefix}REPO", f"{NEW.env_prefix}REPO"),
-    "runtime_env_file": (f"{OLD.env_prefix}RUNTIME_ENV_FILE", f"{NEW.env_prefix}RUNTIME_ENV_FILE"),
+    "data_dir": ("SECRETARY_DATA_DIR", "UMMANU_DATA_DIR"),
+    "instance": ("SECRETARY_INSTANCE", paths.INSTANCE_ENV),
+    "repo": ("TA_SECRETARY_REPO", paths.PRODUCT_ENV),
+    "runtime_env_file": ("SECRETARY_RUNTIME_ENV_FILE", "UMMANU_RUNTIME_ENV_FILE"),
 }
 
 
@@ -36,8 +35,8 @@ def _clean_environ() -> dict[str, str]:
     return {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith((OLD.env_prefix, NEW.env_prefix, f"TA_{OLD.env_prefix}"))
-        and key != role_env.RUNTIME_ENV_FILE_ENV
+        if not key.startswith(("SECRETARY_", "UMMANU_", "TA_SECRETARY_"))
+        and key not in role_env.RUNTIME_ENV_FILE_ENVS
     }
 
 
@@ -69,9 +68,9 @@ class EnvPrefixTests(unittest.TestCase):
                 self.assertFalse(
                     str(value).startswith(str(bogus)), f"{role} followed the old prefix: {value}"
                 )
-        self.assertEqual(resolved["data_dir"], self.home / NEW.data_dir)
+        self.assertEqual(resolved["data_dir"], self.home / "ummanu-data")
         self.assertEqual(resolved["instance"], self.default_instance)
-        self.assertEqual(resolved["repo"], self.home / NEW.product_dir)
+        self.assertEqual(resolved["repo"], self.home / "ummanu")
         self.assertEqual(resolved["runtime_env_file"], Path(role_env.RUNTIME_ENV_DEFAULT))
         self.assertIsNone(resolved["memory_data_dir"])
 
@@ -97,7 +96,7 @@ class EnvPrefixTests(unittest.TestCase):
     def test_the_old_package_does_not_import_in_a_clean_interpreter(self) -> None:
         environ = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
         old = subprocess.run(
-            [sys.executable, "-P", "-c", f"import {OLD.package}"],
+            [sys.executable, "-P", "-c", "import secretary"],
             cwd=self.home,
             env=environ,
             capture_output=True,
@@ -105,11 +104,11 @@ class EnvPrefixTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(old.returncode, 0, old.stdout)
-        self.assertIn(f"ModuleNotFoundError: No module named '{OLD.package}'", old.stderr)
+        self.assertIn("ModuleNotFoundError: No module named 'secretary'", old.stderr)
         # The same interpreter does import the product from this tree, so the refusal above is the
         # missing package and not a broken interpreter.
         new = subprocess.run(
-            [sys.executable, "-P", "-c", f"import {NEW.package}; print({NEW.package}.__file__)"],
+            [sys.executable, "-P", "-c", "import ummanu; print(ummanu.__file__)"],
             cwd=self.home,
             env={**environ, "PYTHONPATH": str(ROOT / "src")},
             capture_output=True,
@@ -117,12 +116,7 @@ class EnvPrefixTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(new.returncode, 0, new.stderr)
-        self.assertEqual(Path(new.stdout.strip()), ROOT / "src" / NEW.package / "__init__.py")
-
-    def test_the_old_source_tree_is_gone(self) -> None:
-        self.assertFalse((ROOT / "src" / OLD.package).exists())
-        self.assertTrue((ROOT / "src" / NEW.package / "dispatch" / "runtime_preflight.py").is_file())
-
+        self.assertEqual(Path(new.stdout.strip()), ROOT / "src" / "ummanu" / "__init__.py")
 
 if __name__ == "__main__":
     unittest.main()

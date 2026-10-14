@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 
 from ummanu.board.backend import PRODUCT_ISSUE, board_client
+from ummanu.cli_output import usage_handler
+from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import ISSUE_WRITE_ROLES, ProductIssueStore
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.task_commands import _read_body, resolve_data_dir, run_task_command
-from ummanu.tasks import TaskError
 
 
 def _common(
@@ -27,7 +28,7 @@ def _common(
 
 
 def add_product_issue_subcommands(subparsers) -> None:
-    product = subparsers.add_parser("product", help="manage durable Product records")
+    product = add_command_parser(subparsers, "product")
     product_sub = product.add_subparsers(dest="product_command")
     create = product_sub.add_parser("create")
     _common(create, write=True, roles=("po",))
@@ -73,10 +74,10 @@ def add_product_issue_subcommands(subparsers) -> None:
     _common(transaction_adopt)
     transaction_adopt.add_argument("--path", required=True)
     transaction_adopt.set_defaults(handler=run_transaction_adopt)
-    transaction.set_defaults(handler=_missing("product transaction subcommand required"))
-    product.set_defaults(handler=_missing("product subcommand required"))
+    transaction.set_defaults(handler=usage_handler("product transaction subcommand required"))
+    product.set_defaults(handler=usage_handler("product subcommand required"))
 
-    issue = subparsers.add_parser("issue", help="manage durable Product issues")
+    issue = add_command_parser(subparsers, "issue")
     issue_sub = issue.add_subparsers(dest="issue_command")
     create = issue_sub.add_parser("create")
     _common(create, write=True)
@@ -124,15 +125,7 @@ def add_product_issue_subcommands(subparsers) -> None:
     close.add_argument("--ref", required=True)
     close.add_argument("--reason", required=True, choices=("resolved", "invalid", "duplicate", "wont_do"))
     close.set_defaults(handler=run_issue_close)
-    issue.set_defaults(handler=_missing("issue subcommand required"))
-
-
-def _missing(message: str):
-    def handler(_args: argparse.Namespace) -> int:
-        print(json.dumps({"error": {"code": "usage", "message": message}}))
-        return 2
-
-    return handler
+    issue.set_defaults(handler=usage_handler("issue subcommand required"))
 
 
 def _store(args: argparse.Namespace) -> ProductIssueStore:

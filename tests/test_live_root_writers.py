@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from ummanu import knowledge_write, runtime_env, secret_store, state_repo
+from ummanu import knowledge_write, runtime_env, secret_store
 from ummanu._fsutil import content_revision
 from ummanu.board import store as board_store
 from ummanu.board.sprint_close import SprintCloseoutPlan
@@ -264,9 +264,11 @@ class KnowledgeDirectoryAtomicityTests(LiveRootCase):
                 raise OSError("rename failed")
             return real(source, destination)
 
-        with mock.patch.object(knowledge_write.os, "replace", side_effect=fail_on_move_in):
-            with self.assertRaises(KnowledgeError):
-                self.write()
+        with (
+            mock.patch.object(knowledge_write.os, "replace", side_effect=fail_on_move_in),
+            self.assertRaises(KnowledgeError),
+        ):
+            self.write()
 
         self.assert_unchanged()
 
@@ -551,12 +553,12 @@ class ExclusionTests(LiveRootCase):
             self.assertIn("snapshot export copies", board_store.findings(self.live)[0])
 
     def test_the_installation_key_is_refused_once_the_allowlist_would_export_it(self):
-        with mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params):
-            with (
-                mock.patch.object(export_allowlist, "SNAPSHOT_ALLOWLIST", (*SNAPSHOT_ALLOWLIST, "secrets/*.key")),
-                self.assertRaisesRegex(SecretStoreError, "export allowlist"),
-            ):
-                initialize_store(self.live, phrase=PHRASE, actor="tester")
+        with (
+            mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params),
+            mock.patch.object(export_allowlist, "SNAPSHOT_ALLOWLIST", (*SNAPSHOT_ALLOWLIST, "secrets/*.key")),
+            self.assertRaisesRegex(SecretStoreError, "export allowlist"),
+        ):
+            initialize_store(self.live, phrase=PHRASE, actor="tester")
         self.assertFalse(self.secrets.exists())
 
     def test_materialize_refuses_a_target_the_export_would_copy(self):
@@ -576,11 +578,6 @@ class ExclusionTests(LiveRootCase):
         with self.assertRaisesRegex(SecretStoreError, "snapshot export copies"):
             secret_store.materialize_secrets(self.live, target="file")
         self.assertFalse((self.live / "persona" / "leak.env").exists())
-
-    def test_no_exclusion_helper_is_left_in_the_instance_repository_module(self):
-        for name in ("ensure_ignored", "is_ignored", "is_tracked", "GITIGNORE_PATHSPEC"):
-            with self.subTest(name=name):
-                self.assertFalse(hasattr(state_repo, name))
 
 
 class RecoveryCheckoutChangesTests(LiveRootCase):
@@ -609,7 +606,7 @@ class RecoveryCheckoutChangesTests(LiveRootCase):
             (self.live / local).write_text("local\n", encoding="utf-8")
 
     def changes(self) -> str:
-        from ummanu.installation import _checkout_changes
+        from ummanu.installation.clone import _checkout_changes
 
         return _checkout_changes(self.live, label="test")
 

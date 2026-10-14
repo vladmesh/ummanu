@@ -8,10 +8,11 @@
 # `python3 -P -m ummanu automations`, whose composition root injects the board ports; see
 # each agent's cli.py under src/ummanu/automations and ummanu/runtime/state.py PRECHECK_SKIP):
 #   0              -> there is work: exec the dispatch, the head wakes up.
-#   100            -> deliberate skip (nothing changed / paused): no new skill dispatch. The gate
-#                     still runs `dispatch --cleanup-only`, which is a no-op exit 0 for every agent
-#                     since the pane lifecycle it tore down was deleted (secretary-1720); the call
-#                     stays so the installed units and this gate need no change.
+#   100            -> deliberate skip (nothing changed / paused): exit successfully, no dispatch.
+#                     The gate used to follow with `dispatch --cleanup-only`, a no-op exit 0 for
+#                     every agent since the pane lifecycle it tore down was deleted
+#                     (secretary-1720), at the cost of one more interpreter per quiet tick
+#                     (ummanu-239). The flag is still accepted for manual callers.
 #   101            -> the board refused the connection for the client's whole retry window: nothing
 #                     was evaluated, so the tick is deferred rather than answered. This gate waits
 #                     and re-runs the precheck a bounded number of times before giving up with 101.
@@ -42,12 +43,12 @@
 set -u
 
 export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
-# Which checkout the role runs out of: the launcher's explicit TA_RUNTIME_PYTHONPATH, else the
+# Which checkout the role runs out of: the launcher's explicit UMMANU_RUNTIME_PYTHONPATH, else the
 # product checkout this installation is configured with, else the home default. An installation
 # materialized from an alternate checkout sets UMMANU_REPO in the unit it renders, and
 # skipping that name here would start the role out of ~/ummanu — a checkout the operator may
 # never have upgraded, or may not have at all.
-product_root="${TA_RUNTIME_PYTHONPATH:-${UMMANU_REPO:-$HOME/ummanu}}"
+product_root="${UMMANU_RUNTIME_PYTHONPATH:-${TA_RUNTIME_PYTHONPATH:-${UMMANU_REPO:-$HOME/ummanu}}}"
 selected_product_root="$product_root"
 
 # Resolve the root once, before starting a Python process, so the source tree, managed interpreter
@@ -106,11 +107,11 @@ if [ -n "$variant" ]; then
 fi
 
 # How long the gate keeps re-attempting a precheck that could not reach the board: attempts spaced
-# by TA_GATE_BOARD_WAIT seconds, on top of the retry window the client itself already spends inside
+# by UMMANU_GATE_BOARD_WAIT seconds, on top of the retry window the client itself already spends inside
 # each attempt. The total has to comfortably cover a board coming up a minute or two after a reboot,
 # and has to stay bounded so a board that is really gone still ends the unit `failed` and visible.
-board_attempts="${TA_GATE_BOARD_ATTEMPTS:-5}"
-board_wait="${TA_GATE_BOARD_WAIT:-120}"
+board_attempts="${UMMANU_GATE_BOARD_ATTEMPTS:-${TA_GATE_BOARD_ATTEMPTS:-5}}"
+board_wait="${UMMANU_GATE_BOARD_WAIT:-${TA_GATE_BOARD_WAIT:-120}}"
 
 attempt=1
 while : ; do
@@ -128,7 +129,7 @@ if [ "$rc" -eq 0 ]; then
     exec_role_env "$managed_python" -P "${role_command[@]}" "$agent" dispatch
 elif [ "$rc" -eq 100 ]; then
     echo "[ta-$agent] precheck: no change, skill dispatch skipped"
-    exec_role_env "$managed_python" -P "${role_command[@]}" "$agent" dispatch --cleanup-only
+    exit 0
 elif [ "$rc" -eq 101 ]; then
     # No dispatch and no cleanup: both talk to the same board none of the attempts could reach.
     echo "[ta-$agent] precheck: board unreachable after $board_attempts attempts; run not taken" >&2

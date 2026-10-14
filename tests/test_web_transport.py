@@ -34,8 +34,10 @@ from urllib.parse import urlencode
 import yaml
 from jsonschema import Draft202012Validator
 
+from tests import source_trees
 from tests.fakes.tasks import SEED_COLUMN, empty_seed
 from tests.sql_backend_fixtures import card_store
+from tests.support.card_run_fixtures import record
 from ummanu.config import ConfigError, load_schema
 from ummanu.runtime.head.identity import publish_heartbeat
 from ummanu.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
@@ -49,7 +51,7 @@ from ummanu.runtime.head.runtime import (
 )
 from ummanu.runtime.heads import Registry
 from ummanu.tasks import task_audit_for
-from ummanu.web import pages
+from ummanu.web import page_shell, pages
 from ummanu.web.app import ROUTES, WebApp
 from ummanu.web.server import (
     DEFAULT_HOST,
@@ -555,7 +557,7 @@ class RouteTableTests(TransportFixture):
         forbidden = {"subprocess", "os.system", "shutil", "pty"}
         offenders: list[str] = []
         for path in sorted(source):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 names = (
                     [alias.name for alias in node.names]
@@ -733,10 +735,13 @@ class PageTests(TransportFixture):
 
     def test_the_card_page_shows_state_events_output_and_result(self) -> None:
         task_id = self._card()
-        self.board.replace_comments(task_id, [
-            {"date_creation": 1, "comment": "[report:done]\nthe worker's own words"},
-            {"date_creation": 2, "comment": "[review:green]\nthe reviewer's own words"},
-        ])
+        self.board.replace_comments(
+            task_id,
+            [
+                {"date_creation": 1, "comment": "[report:done]\nthe worker's own words"},
+                {"date_creation": 2, "comment": "[review:green]\nthe reviewer's own words"},
+            ],
+        )
         self._journal([self._event("ummanu-run-1", 0)])
         markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("the worker&#x27;s own words", markup)
@@ -899,18 +904,24 @@ class PageTests(TransportFixture):
     def test_an_unreadable_run_record_marks_one_section_and_leaves_the_page_standing(self) -> None:
         """Criteria 3 and 7: a dead source is shown on the page, it does not take the page down.
 
-        The run store is one source among several. An unreadable record under
-        `<data>/webproto/runs/` says nothing about the card, its history, its output or its result,
+        The run store is one source among several. An unreadable target record in the explicitly
+        prepared store says nothing about the card, its history, its output or its result,
         so those are still rendered and only the product-runs section is marked unavailable, with
         the reason the layer gave.
         """
         task_id = self._card()
-        self.board.replace_comments(task_id, [
-            {"date_creation": 1, "comment": "[report:done]\nwhat the worker said"}
-        ])
+        self.board.replace_comments(
+            task_id, [{"date_creation": 1, "comment": "[report:done]\nwhat the worker said"}]
+        )
         self._journal([self._event("ummanu-run-1", 0)])
         runs = self.data_dir / "webproto" / "runs"
         runs.mkdir(parents=True, exist_ok=True)
+        # HTML requires explicitly prepared membership. Corrupt a known target record after
+        # preparation so this exercises the canonical source failure, not a missing lookup.
+        (runs / "pr-broken.json").write_text(
+            json.dumps(record("pr-broken", "ummanu-run-1").to_json()), encoding="utf-8"
+        )
+        self.ops().prepare_card_runs()
         (runs / "pr-broken.json").write_text("{not json", encoding="utf-8")
 
         response = self.get("/tasks/ummanu-run-1")
@@ -949,7 +960,7 @@ class PageTests(TransportFixture):
         for path in ("/", "/tasks/ummanu-run-1"):
             with self.subTest(path=path):
                 self.assertIn("local only", self.text_of(self.get(path)))
-        self.assertIn("no password", pages.LOOPBACK_NOTICE)
+        self.assertIn("no password", page_shell.LOOPBACK_NOTICE)
 
 
 # -- criterion 4: a repeated POST is one run ------------------------------------------------------
@@ -1505,7 +1516,7 @@ class ThinnessTests(unittest.TestCase):
     def test_the_transport_reaches_the_installation_only_through_the_layer(self) -> None:
         offenders: list[str] = []
         for path in sorted((REPO_ROOT / "src" / "ummanu" / "web").rglob("*.py")):
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 modules = (
                     [alias.name for alias in node.names]

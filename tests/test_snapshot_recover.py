@@ -35,7 +35,7 @@ from tests.fakes.snapshot_remote import (
     recover_snapshot,
     recovery_args as _args,
 )
-from ummanu import bootstrap as bootstrap_module, installation, restore, secret_store
+from ummanu import bootstrap as bootstrap_module, restore, secret_store
 from ummanu.board import provision as provision_module, store
 from ummanu.board.migrate import head_revision
 from ummanu.checkpoint import (
@@ -50,7 +50,9 @@ from ummanu.checkpoint import (
 from ummanu.config import validate_instance
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.infra.export_allowlist import is_exported
-from ummanu.installation import InstallError, _recovery_identity
+from ummanu.installation import clone as installation_clone, commands as installation_commands
+from ummanu.installation.materialize import _recovery_identity
+from ummanu.installation.models import InstallError
 from ummanu.memory.canon import fact_content_hash, fact_files, parse_fact_text
 from ummanu.memory_journal import verify_memory_journal
 from ummanu.secret_words import RECOVERY_WORDS
@@ -528,7 +530,7 @@ class SnapshotRefusalTests(SnapshotRecoverCase):
         planted = {"persona/rules.md": b"mine\n", "notes.txt": b"keep\n"}
 
         # Without an `instance.yaml` it is no live root of any snapshot: today's refusal, unread remote.
-        with mock.patch.object(installation, "_snapshot_checkout") as probe:
+        with mock.patch.object(installation_commands, "_snapshot_checkout") as probe:
             result = self.recover()
         probe.assert_not_called()
         self.assertEqual(result.status, "failed")
@@ -865,27 +867,27 @@ class LegacyShapeTests(unittest.TestCase):
                     subprocess.run(
                         ["git", "clone", "--quiet", "--bare", str(source), str(remote)], check=True
                     )
-                legacy_clone = mock.Mock(wraps=installation._clone_or_reuse)
+                legacy_clone = mock.Mock(wraps=installation_clone._clone_or_reuse)
 
                 with (
-                    mock.patch.object(installation, "_clone_or_reuse", legacy_clone),
-                    mock.patch.object(installation, "check_prerequisites"),
-                    mock.patch.object(installation, "import_normalized_board", return_value=1),
-                    mock.patch.object(installation, "rebuild_memory_index", return_value=1),
+                    mock.patch.object(installation_commands, "_clone_or_reuse", legacy_clone),
+                    mock.patch.object(installation_commands, "check_prerequisites"),
+                    mock.patch.object(installation_commands, "import_normalized_board", return_value=1),
+                    mock.patch.object(installation_commands, "rebuild_memory_index", return_value=1),
                     mock.patch.object(
-                        installation, "materialize_host", return_value=SimpleNamespace(steps=[])
+                        installation_commands, "materialize_host", return_value=SimpleNamespace(steps=[])
                     ),
                     mock.patch.object(
-                        installation,
+                        installation_commands,
                         "materialize_pipeline_state",
                         return_value=SimpleNamespace(records=0, changed=False),
                     ),
-                    mock.patch.object(installation, "provision_project_checkouts", return_value=[]),
-                    mock.patch.object(installation, "provision_codex_home", return_value=0),
-                    mock.patch.object(installation, "mark_reconcile_applied"),
-                    mock.patch.object(installation, "restore_findings", return_value=[]),
+                    mock.patch.object(installation_commands, "provision_project_checkouts", return_value=[]),
+                    mock.patch.object(installation_commands, "provision_codex_home", return_value=0),
+                    mock.patch.object(installation_commands, "mark_reconcile_applied"),
+                    mock.patch.object(installation_commands, "restore_findings", return_value=[]),
                 ):
-                    result = installation.install(_args(SimpleNamespace(target=target, remote=remote)))
+                    result = installation_commands.install(_args(SimpleNamespace(target=target, remote=remote)))
 
                 self.assertEqual(result.status, "ok", result.render())
                 legacy_clone.assert_called_once()
@@ -916,7 +918,7 @@ class LegacyShapeTests(unittest.TestCase):
                 installation_user=getpass.getuser(),
                 dry_run=False,
             )
-            probe = mock.Mock(wraps=installation._snapshot_checkout)
+            probe = mock.Mock(wraps=installation_clone._snapshot_checkout)
             chowned: list[tuple[Path, int, int]] = []
 
             for _run in range(2):
@@ -940,10 +942,10 @@ class LegacyShapeTests(unittest.TestCase):
             target = Path(temporary) / "instance"
             (target / ".git").mkdir(parents=True)
             with (
-                mock.patch.object(installation, "_snapshot_checkout") as probe,
-                mock.patch.object(installation, "_clone_or_reuse", side_effect=InstallError("legacy step")),
+                mock.patch.object(installation_commands, "_snapshot_checkout") as probe,
+                mock.patch.object(installation_commands, "_clone_or_reuse", side_effect=InstallError("legacy step")),
             ):
-                result = installation.install(_args(SimpleNamespace(target=target, remote="remote")))
+                result = installation_commands.install(_args(SimpleNamespace(target=target, remote="remote")))
 
             probe.assert_not_called()
             self.assertIn("legacy step", {step.name: step.detail for step in result.steps}["install"])
@@ -954,13 +956,13 @@ class LegacyShapeTests(unittest.TestCase):
             for overrides in ({"recover": False}, {"dry_run": True}):
                 with (
                     self.subTest(**overrides),
-                    mock.patch.object(installation, "_snapshot_checkout") as probe,
-                    mock.patch.object(installation, "_ensure_installation_user"),
+                    mock.patch.object(installation_commands, "_snapshot_checkout") as probe,
+                    mock.patch.object(installation_commands, "_ensure_installation_user"),
                     mock.patch.object(
-                        installation, "_clone_or_reuse", side_effect=InstallError("legacy step")
+                        installation_commands, "_clone_or_reuse", side_effect=InstallError("legacy step")
                     ),
                 ):
-                    installation.install(_args(SimpleNamespace(target=target, remote="remote"), **overrides))
+                    installation_commands.install(_args(SimpleNamespace(target=target, remote="remote"), **overrides))
                 probe.assert_not_called()
 
 
@@ -1023,7 +1025,7 @@ class CleanHostRecoverTests(unittest.TestCase):
         """The control: with recover's head-registry step taken out, the drill's failure comes back."""
         fixture = exporter_remote(self.root, sprints=[OPEN_SPRINT])
 
-        with mock.patch.object(installation, "materialize_head_registry", return_value=("unchanged", "-")):
+        with mock.patch.object(installation_commands, "materialize_head_registry", return_value=("unchanged", "-")):
             result = recover_snapshot(fixture, board=self.board)
 
         self.assertEqual(result.status, "failed", result.render())
@@ -1067,21 +1069,21 @@ class CleanHostRecoverTests(unittest.TestCase):
 
     def recover_legacy(self, source: Path, target: Path, phrase: Path):
         with (
-            mock.patch.object(installation, "check_prerequisites"),
-            mock.patch.object(installation, "import_normalized_board", self.board),
-            mock.patch.object(installation, "rebuild_memory_index", return_value=1),
-            mock.patch.object(installation, "materialize_host", return_value=SimpleNamespace(steps=[])),
+            mock.patch.object(installation_commands, "check_prerequisites"),
+            mock.patch.object(installation_commands, "import_normalized_board", self.board),
+            mock.patch.object(installation_commands, "rebuild_memory_index", return_value=1),
+            mock.patch.object(installation_commands, "materialize_host", return_value=SimpleNamespace(steps=[])),
             mock.patch.object(
-                installation,
+                installation_commands,
                 "materialize_pipeline_state",
                 return_value=SimpleNamespace(records=0, changed=False),
             ),
-            mock.patch.object(installation, "provision_project_checkouts", return_value=[]),
-            mock.patch.object(installation, "provision_codex_home", return_value=0),
-            mock.patch.object(installation, "mark_reconcile_applied"),
-            mock.patch.object(installation, "restore_findings", return_value=[]),
+            mock.patch.object(installation_commands, "provision_project_checkouts", return_value=[]),
+            mock.patch.object(installation_commands, "provision_codex_home", return_value=0),
+            mock.patch.object(installation_commands, "mark_reconcile_applied"),
+            mock.patch.object(installation_commands, "restore_findings", return_value=[]),
         ):
-            return installation.install(
+            return installation_commands.install(
                 _args(SimpleNamespace(target=target, remote=source), recovery_phrase_file=str(phrase))
             )
 

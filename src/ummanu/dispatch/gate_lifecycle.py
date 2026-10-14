@@ -18,11 +18,12 @@ from ummanu.dispatch.gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
-    _fingerprint as _gate_fingerprint,
     reset_infrastructure_reruns as _reset_infrastructure_reruns,
     validation_ci as _validation_ci,
 )
 from ummanu.dispatch.gate_receipt import AcceptedGreenGate
+from ummanu.dispatch.gate_types import _fingerprint as _gate_fingerprint
+from ummanu.dispatch.head_vitality import status_has_vitality_observation
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.helpers import _gate_red_repeat_count, scrub_host_output
 from ummanu.dispatch.state import (
@@ -42,7 +43,7 @@ from ummanu.dispatch.wait_vitality import (
     reduce_and_store_vitality_episode as _reduce_and_store_vitality_episode,
 )
 from ummanu.dispatch.worker_continuation import begin_red_transition as _begin_red_transition
-from ummanu.tasks import TaskError
+from ummanu.kernel.errors import TaskError
 
 
 def run_gate(
@@ -143,7 +144,7 @@ def accept_green_gate(
         gate_mode=_validation_ci(runtime.host, task),
         noop=getattr(runtime.host, "mode", "real") == "noop",
     )
-    if not accepted.valid:
+    if not accepted.policy_valid:
         if stage == "initial":
             return _block_missing_gate_receipt(runtime, task, record, records, payload, attempt_id)
         step = "assessment" if stage == "release" else "review"
@@ -153,6 +154,7 @@ def accept_green_gate(
             records,
             payload,
             attempt_id,
+            blocked_reason="gate",
             action=f"{stage}-gate-receipt-blocked",
             reason=f"{stage} gate reported green without a valid exact-SHA receipt",
             step=step,
@@ -295,6 +297,7 @@ def gate_red_to_worker(
             records,
             payload,
             attempt_id,
+            blocked_reason="gate",
             action=f"{phase}-gate-topology-blocked",
             reason=(
                 "the mechanical validation gate cannot produce this project's required CI for "
@@ -715,6 +718,7 @@ def block_gate_transport(
         records,
         payload,
         attempt_id,
+        blocked_reason="gate",
         action=action,
         reason=f"{prefix}{reason}" if prefix else reason,
         step=step,
@@ -860,11 +864,7 @@ def _worker_vitality_for_gate(
         status = runtime.host.worker_status(task, record)
     except Exception:  # noqa: BLE001 - a blind probe must never break the gate tick
         return None
-    if not isinstance(status, dict) or (
-        not isinstance(status.get("pid_status"), dict)
-        and not isinstance(status.get("provider_progress"), dict)
-        and "idle" not in status
-    ):
+    if not status_has_vitality_observation(status):
         # Nothing was observed this tick. Do not feed a previous episode back
         # into recovery policy as fresh evidence (it may describe an old run).
         # The persisted episode remains available to identity/destructive guards.

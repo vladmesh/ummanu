@@ -148,7 +148,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """
         with mock.patch.dict(
             os.environ,
-            {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)},
+            {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)},
         ):
             return production_telemetry.read()
 
@@ -292,7 +292,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.unhealthy_total, 1)
         self.assertEqual(telemetry.last_healthy_at, healthy_at)
 
-        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
+        with mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
         self.assertTrue(any("launch-intent-stop-unconfirmed" in problem for problem in problems))
@@ -308,7 +308,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         state = AgentState("steward", state_dir=self.data_dir / "steward")
         with contextlib.ExitStack() as stack:
             stack.enter_context(
-                mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)})
+                mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)})
             )
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
@@ -321,7 +321,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.dict(
                     os.environ,
-                    {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")},
+                    {"UMMANU_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")},
                 )
             )
             stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
@@ -395,7 +395,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         )
         self.assertIn("generation 1", degradation["reason"])
 
-        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
+        with mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("worker-respawned" in problem for problem in problems))
 
@@ -466,7 +466,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.incident["opened"]["errors"][0]["code"], "backend_unavailable")
         self.assertEqual(telemetry.recovery, {})
 
-        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
+        with mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
         self.assertTrue(any("backend_unavailable" in problem for problem in problems))
@@ -485,7 +485,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         )
         with contextlib.ExitStack() as stack:
             stack.enter_context(
-                mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)})
+                mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)})
             )
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
@@ -498,7 +498,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             stack.enter_context(
                 mock.patch.dict(
                     os.environ,
-                    {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")},
+                    {"UMMANU_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")},
                 )
             )
             stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
@@ -574,12 +574,12 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(self.read_through_the_agent_reader().last["status"], "failed")
 
     def test_telemetry_is_found_through_the_instance_the_unit_passes(self) -> None:
-        """No TA_PRODUCTION_STATE, no UMMANU_DATA_DIR: only `--instance`, as the unit runs it."""
+        """No UMMANU_PRODUCTION_STATE, no UMMANU_DATA_DIR: only `--instance`, as the unit runs it."""
         instance = _instance(self.data_dir / "instance", self.data_dir)
         self.runtime.production_tick()
 
         with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(instance)}, clear=False):
-            os.environ.pop("TA_PRODUCTION_STATE", None)
+            os.environ.pop("UMMANU_PRODUCTION_STATE", None)
             os.environ.pop("UMMANU_DATA_DIR", None)
             telemetry = production_telemetry.read()
 
@@ -649,7 +649,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.unhealthy_total, 1)
         self.assertFalse(telemetry.last_healthy_at)
 
-        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
+        with mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
         self.assertTrue(any("observer-stop-failed" in problem for problem in problems))
@@ -666,7 +666,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         )
         with contextlib.ExitStack() as stack:
             stack.enter_context(
-                mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)})
+                mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.runtime.production_state.path)})
             )
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             hits, _ = steward_signals._pipeline_tick_signals(state.load_watermark())
@@ -771,10 +771,10 @@ class ProductionStatePathTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for name in (
-            "TA_PRODUCTION_STATE",
+            "UMMANU_PRODUCTION_STATE",
             "UMMANU_DATA_DIR",
             "UMMANU_INSTANCE",
-            "TA_RUNTIME_ENV_FILE",
+            "UMMANU_RUNTIME_ENV_FILE",
         ):
             os.environ.pop(name, None)
 
@@ -804,7 +804,7 @@ class ProductionStatePathTests(unittest.TestCase):
         os.environ["UMMANU_DATA_DIR"] = str(self.root / "elsewhere")
         self.assertEqual(production_telemetry.data_dir(), self.root / "elsewhere")
 
-        os.environ["TA_PRODUCTION_STATE"] = str(self.root / "state.json")
+        os.environ["UMMANU_PRODUCTION_STATE"] = str(self.root / "state.json")
         self.assertEqual(production_telemetry.state_path(), self.root / "state.json")
 
     def test_an_unusable_instance_falls_back_to_the_home_default(self) -> None:
@@ -825,8 +825,8 @@ class ProductionStatePathTests(unittest.TestCase):
         self.assertEqual(telemetry.path, self.data_dir / "dispatcher" / "production-state.json")
 
     def test_the_role_units_env_file_path_carries_the_instance(self) -> None:
-        """A role process handed only TA_RUNTIME_ENV_FILE still lands on the dispatcher's file."""
-        os.environ["TA_RUNTIME_ENV_FILE"] = str(self.instance / "runtime.env")
+        """A role process handed only UMMANU_RUNTIME_ENV_FILE still lands on the dispatcher's file."""
+        os.environ["UMMANU_RUNTIME_ENV_FILE"] = str(self.instance / "runtime.env")
 
         self.assertEqual(production_telemetry.data_dir(), self.data_dir)
 
@@ -862,7 +862,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
         )
         env.start()
         self.addCleanup(env.stop)
-        for name in ("TA_PRODUCTION_STATE", "TA_RUNTIME_ENV_FILE"):
+        for name in ("UMMANU_PRODUCTION_STATE", "UMMANU_RUNTIME_ENV_FILE"):
             os.environ.pop(name, None)
         self.state = AgentState("steward", state_dir=self.root / "steward")
         state = mock.patch.object(steward_signals, "STATE", self.state)
@@ -1045,10 +1045,10 @@ class StewardResourceSignalTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for name in (
-            "TA_PRODUCTION_RESOURCE_HEALTH",
+            "UMMANU_PRODUCTION_RESOURCE_HEALTH",
             "UMMANU_DATA_DIR",
-            "TA_RUNTIME_ENV_FILE",
-            "TA_PIPELINE_STATE_DIR",
+            "UMMANU_RUNTIME_ENV_FILE",
+            "UMMANU_PIPELINE_STATE_DIR",
         ):
             os.environ.pop(name, None)
         workspaces = mock.patch.object(steward_signals, "_workspaces_root", return_value=self.root / "workspaces")
@@ -1135,7 +1135,7 @@ class StewardResourceSignalTests(unittest.TestCase):
 
     def test_an_explicit_override_wins_like_the_tick_record(self) -> None:
         elsewhere = self.root / "elsewhere.json"
-        with mock.patch.dict(os.environ, {"TA_PRODUCTION_RESOURCE_HEALTH": str(elsewhere)}):
+        with mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_RESOURCE_HEALTH": str(elsewhere)}):
             self.assertEqual(production_telemetry.resource_health_path(), elsewhere)
 
 
@@ -1169,7 +1169,7 @@ class HealthAgentStateTests(unittest.TestCase):
         self.assertIn("last tick", detail)
 
     def test_state_root_override_is_honored(self) -> None:
-        # TA_STATE is the same knob the units would use if they set one; health must follow it
+        # UMMANU_STATE is the same knob the units would use if they set one; health must follow it
         # rather than resolving a path of its own.
         elsewhere = Path(self.tmpdir.name) / "elsewhere"
         with mock.patch("ummanu.runtime.state.STATE_ROOT", elsewhere):
@@ -1343,7 +1343,7 @@ class HealthPipelineLineTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.path = Path(self.tmpdir.name) / "dispatcher" / "production-state.json"
-        env = mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.path)})
+        env = mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.path)})
         env.start()
         self.addCleanup(env.stop)
 
@@ -1468,7 +1468,7 @@ class StewardPipelineSignalTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.path = Path(self.tmpdir.name) / "dispatcher" / "production-state.json"
-        env = mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.path)})
+        env = mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(self.path)})
         env.start()
         self.addCleanup(env.stop)
         self.state = AgentState("steward", state_dir=Path(self.tmpdir.name) / "steward")
@@ -1534,7 +1534,7 @@ class StewardPipelineSignalTests(unittest.TestCase):
                 mock.patch.dict(
                     os.environ,
                     {
-                        "TA_PRODUCTION_RESOURCE_HEALTH": str(
+                        "UMMANU_PRODUCTION_RESOURCE_HEALTH": str(
                             Path(self.tmpdir.name) / "no-resource-health.json"
                         )
                     },

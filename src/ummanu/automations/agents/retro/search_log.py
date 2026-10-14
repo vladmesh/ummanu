@@ -4,7 +4,7 @@ The audit stream contains several memory actions. This reader accepts only recor
 `action` is `memory_search`, and pairs them with the transcript batch so the judge can tell whether a
 search actually fired near an answer (the "answered from memory without memory_search" failure).
 
-Path is overridable via TA_SEARCH_LOG (default ~/ummanu-data/memory/search-log.jsonl). The file
+Path is overridable via UMMANU_SEARCH_LOG (default ~/ummanu-data/memory/search-log.jsonl). The file
 may not exist yet — that is not an error, it just means an empty tail.
 
 Timestamps: Claude transcript ts are UTC (trailing Z); the search log writes naive UTC
@@ -15,19 +15,20 @@ the window slack absorbs minor skew.
 from __future__ import annotations
 
 import json
-import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from ummanu.runtime.paths import env_value
+
 DEFAULT_SEARCH_LOG = Path.home() / "ummanu-data" / "memory" / "search-log.jsonl"
-SEARCH_LOG = Path(os.environ.get("TA_SEARCH_LOG", str(DEFAULT_SEARCH_LOG)))
+SEARCH_LOG = Path(env_value("UMMANU_SEARCH_LOG", str(DEFAULT_SEARCH_LOG)))
 
 
 def _parse(ts):
     if not ts:
         return None
     try:
-        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(str(ts))
     except ValueError:
         return None
     if dt.tzinfo is not None:

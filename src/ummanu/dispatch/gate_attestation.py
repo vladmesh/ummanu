@@ -15,7 +15,7 @@ from typing import Any
 
 from ummanu.dispatch.gate_receipt import GateReceipt, is_exact_sha
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
-from ummanu.tasks import TaskError
+from ummanu.kernel.errors import TaskError
 
 ATTESTATION_FAILURE_LIMIT = 3
 
@@ -102,7 +102,7 @@ class AttestationRefusal(Exception):
 def read_committed(runtime: Any, request_id: str) -> dict[str, Any] | None:
     try:
         return runtime.audit.committed_event(request_id)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any unreadable audit refuses before an effect
         raise AttestationRefusal(request_id, "restore authoritative audit readability and retry") from None
 
 
@@ -188,7 +188,7 @@ def recover_legacy(
         # Pending old-format effects have no authoritative immutable completion to adopt.
         try:
             pending = runtime.audit.pending_event(request_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - any unreadable pending audit refuses adoption
             raise AttestationRefusal(request_id, "restore authoritative pending audit readability and retry") from None
         if pending is not None:
             raise AttestationRefusal(request_id, "settle the staged legacy request through supported audit recovery", pending)
@@ -200,11 +200,10 @@ def recover_legacy(
         for index, comment in enumerate(card["comments"]):
             body = comment["body"]
             # TaskReader preserves the board role prefix; sanitized readers may strip it.
-            if body.startswith("[dispatcher]\n"):
-                body = body[len("[dispatcher]\n"):]
+            body = body.removeprefix("[dispatcher]\n")
             if comment.get("marker") == "dispatcher" and digest(body) == expected_digest:
                 bodies.append((index, body))
-    except Exception:
+    except Exception:  # noqa: BLE001 - any unreadable board evidence refuses adoption
         raise AttestationRefusal(request_id, "restore authoritative board comment readability and retry", event) from None
     if len(bodies) != 1:
         raise AttestationRefusal(request_id, "recover one unambiguous original board comment matching the immutable audit digest", event)

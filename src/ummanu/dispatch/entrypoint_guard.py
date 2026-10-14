@@ -4,8 +4,8 @@ The installed units start ``src/<PACKAGE>/dispatch/runtime_preflight.py`` by pat
 ``<PACKAGE>`` console script of the editable install, both out of the production checkout. A commit
 without either cannot be activated by moving that checkout under the running code: the next tick,
 web or PO restart would find nothing to execute. Such a commit may land on the remote, but the
-production checkout and its role worktrees stay where they are until the transition runbook
-(`docs/RENAME.md` §T3) moves the installation as a whole.
+production checkout and its role worktrees stay where they are until a deliberate installation operation
+(`docs/OPERATIONS.md` §Entrypoint activation) activates the replacement entrypoints.
 
 `PACKAGE` is the running code's own package (`runtime_preflight.PACKAGE`), never a literal, so after
 a rename the same check guards the new name and ordinary releases advance again. The target is read
@@ -23,7 +23,7 @@ from collections.abc import Callable
 from ummanu.dispatch.runtime_preflight import PACKAGE
 
 ENTRYPOINT_MOVED = "entrypoint_moved"
-RUNBOOK = "docs/RENAME.md §T3"
+RUNBOOK = "docs/OPERATIONS.md §Entrypoint activation"
 
 #: Runs ``git <args>`` in the checkout being advanced; stdout, or None when git failed.
 GitProbe = Callable[[list[str]], "str | None"]
@@ -41,7 +41,7 @@ class EntrypointMoved(Exception):
         self.missing = missing
         super().__init__(
             f"{target[:12]} does not keep the running entrypoint of package {package!r}: {missing}; "
-            f"activate it only through the transition runbook in {RUNBOOK}"
+            f"activate it only through the installation operation guidance in {RUNBOOK}"
         )
 
     def facts(self) -> dict[str, object]:

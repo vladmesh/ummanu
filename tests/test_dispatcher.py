@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -22,6 +23,7 @@ from unittest import mock
 from tests.fakes.review_packet import marker_event
 from ummanu._fsutil import file_lock, try_file_lock, write_json
 from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
+from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.checkpoint import CheckpointResult
 from ummanu.cli import main as task_main
 from ummanu.dispatch import (
@@ -39,11 +41,10 @@ from ummanu.dispatch.bootstrap import default_data_dir
 from ummanu.dispatch.gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
-    PR_BODY_SECTION_CHARS,
     GateResult,
-    _backend_call,
-    _pr_digest,
 )
+from ummanu.dispatch.gate_pr import PR_BODY_SECTION_CHARS, _pr_digest
+from ummanu.dispatch.github_ci import _backend_call
 from ummanu.dispatch.head_vitality import HeadVitalityError
 from ummanu.dispatch.head_vitality_episode import (
     VitalityEpisode,
@@ -68,6 +69,7 @@ from ummanu.dispatch.host import (
     _gate_attestation_for_prompt,
     _report_nudge_prompt,
 )
+from ummanu.dispatch.host_runtime import lifecycle as host_lifecycle
 from ummanu.dispatch.launch import (
     BRING_UP_CAUSE_CLASSES,
     CAUSE_HOST_UNAVAILABLE,
@@ -190,7 +192,7 @@ from ummanu.runtime.prompt_document import (
     PromptDocumentError,
 )
 from ummanu.runtime.tui_delivery import DeliveryEvidence
-from ummanu.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, instance_open_sprint_limit
+from ummanu.sprints import instance_open_sprint_limit
 from ummanu.task_commands import _read_body
 from ummanu.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 
@@ -5691,6 +5693,47 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green",
         )
 
+    def _assert_failed_merge_gate_taxonomy(self, *, release: bool) -> None:
+        self.start_dispatcher()
+        self._drive_to_green_verdict()
+        if release:
+            self.assertEqual(self.tick()["to"], "assessment")
+            self._decide("release")
+        self.host.gate_results = [HostError("gate backend failed")]
+        action = "release-failed-blocked" if release else "merge-gate-blocked"
+        attempt = self._pilot_record()["attempt_id"]
+
+        result = self.tick()
+
+        self.assertEqual(result, {
+            "status": "blocked", "step": "assessment" if release else "review",
+            "pilot_ref": CARD_REF, "reason": "release failed" if release else "merge gate failed",
+        })
+        request_id = f"dispatcher-{attempt}-{action}-{CARD_REF}"
+        terminal = next(event for event in self.audit_events() if event["request_id"] == request_id)
+        taxonomy = terminal["data"]["terminal_taxonomy"]
+        self.assertEqual(taxonomy["blocked_reason"], "gate")
+        self.assertEqual(taxonomy["budget_class"], "blocked")
+        self.assertEqual(_budget_event_type(terminal), "blocked")
+        canon = self.writer.board_host.canon
+        outcomes = canon.attempt_outcome_occurrences(ref=CARD_REF)
+        self.assertEqual(len(outcomes), 1)
+        self.assertFalse(outcomes[0].pending)
+        outcome = outcomes[0].event
+        self.assertEqual(outcome.data["blocked_reason"], "gate")
+        self.assertEqual(outcome.data["terminal_state"], "blocked")
+        effect = canon.event(request_id)
+        self.assertEqual(outcome.data["source_event_ids"]["effect"], effect.event_id)
+        self.assertEqual(effect.data["terminal_taxonomy"], taxonomy)
+        self.assertEqual(self.host.completed, [])
+        self.assertEqual(self.host.torn_down, [])
+
+    def test_review_failed_merge_gate_persists_gate_taxonomy_and_attempt_outcome(self) -> None:
+        self._assert_failed_merge_gate_taxonomy(release=False)
+
+    def test_release_failed_merge_gate_persists_gate_taxonomy_and_attempt_outcome(self) -> None:
+        self._assert_failed_merge_gate_taxonomy(release=True)
+
     def test_rejected_merge_blocks_the_card_instead_of_escaping_the_tick(self) -> None:
         """The merge push is rejected when the branch is not a fast-forward of main.
 
@@ -8059,6 +8102,70 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn(body, document)
         self.assertEqual(self.card_comments().count(f"[dispatcher]\n{original}"), 1)
 
+    def _run_handed_command(self, line: str) -> tuple[list[str], int, str]:
+        """Run one head-visible report/verdict line through the CLI, as the head would.
+
+        Only the writer's workspace is pinned (the done gate would otherwise read this repo's own
+        checkout); the argument vector, the body-file read and the protocol write are the real ones.
+        """
+        tokens = shlex.split(line)
+        argv = tokens[tokens.index("ummanu") + 1:]
+        errors = io.StringIO()
+        with (
+            mock.patch("ummanu.task_commands.card_client", return_value=self.board),
+            mock.patch(
+                "ummanu.tasks.TaskWriter",
+                lambda client, data_dir: TaskWriter(client, data_dir=data_dir, workspace=self.data_dir),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = task_main([*argv, "--instance", str(self.data_dir), "--data-dir", str(self.data_dir)])
+        return argv, code, errors.getvalue()
+
+    def test_report_and_verdict_handoffs_read_their_body_from_the_private_data_dir(self) -> None:
+        """ummanu-241: with no override the worker's report and the reviewer's verdict are handed a
+        body path under `<data_dir>/artifacts/bodies` (0700), and the commands they hold read it
+        from there and move the card: report to validate, red verdict to assessment."""
+        # The host's own data dir: the fixture roots the fake host at `<data_dir>/workspaces`.
+        bodies = Path(self.host.data_dir) / "artifacts" / "bodies"
+        with mock.patch.dict(os.environ):
+            os.environ.pop("UMMANU_DISPATCHER_BODY_DIR", None)
+            self.start_dispatcher()
+            self.tick()
+            record = self._pilot_record()
+            workspace = record.get("workspace") or (self.data_dir / "workspaces" / "ummanu-510-pilot")
+            document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+            report_line = next(line for line in document.splitlines() if "--kind done" in line)
+            report_body = bodies / f"ummanu-report-ummanu-510-{record['report_generation']}.md"
+            self.assertIn(f"--body-file {report_body}", report_line)
+            self.assertEqual(stat.S_IMODE(bodies.stat().st_mode), 0o700)
+            report_body.write_text("worker report from the private body file", encoding="utf-8")
+
+            argv, code, errors = self._run_handed_command(report_line)
+
+            self.assertEqual((argv[:2], code, errors), (["task", "report"], 0, ""))
+            self.assertEqual(self.tick()["to"], "validate")
+            self.tick()
+            self.assertEqual(self.host.reviews, ["ummanu-510"])
+            record = self._pilot_record()
+            review = CommandHostRuntime(FakeCatalog(), self.host.data_dir, mode="noop")._review_prompt(  # type: ignore[arg-type]
+                self.reader.show("ummanu-510"), str(record["attempt_id"]), int(record["review_baseline"])
+            )
+            verdict_line = next(line for line in review.splitlines() if "--kind red" in line)
+            verdict_body = bodies / f"ummanu-verdict-ummanu-510-{record['review_baseline']}.md"
+            self.assertIn(f"--body-file {verdict_body}", verdict_line)
+            self.assertIn(f"--request-id {self._review_verdict_request_id('red')}", verdict_line)
+            verdict_body.write_text("reviewer verdict from the private body file", encoding="utf-8")
+
+            argv, code, errors = self._run_handed_command(verdict_line)
+
+            self.assertEqual((argv[:2], code, errors), (["task", "verdict"], 0, ""))
+            self.assertEqual(self.tick()["to"], "assessment")
+        bodies_on_card = [comment["body"] for comment in self.reader.show("ummanu-510")["comments"]]
+        for body in ("worker report from the private body file", "reviewer verdict from the private body file"):
+            self.assertTrue(any(body in text for text in bodies_on_card), body)
+
     def test_a_new_round_removes_the_previous_rounds_report_body(self) -> None:
         """The last thing that could make a command from a round that is over report this one.
 
@@ -8072,7 +8179,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self.tick()
         stale_id = self._worker_report_request_id()
-        stale_body = Path(_body_file_path("report", "ummanu-510", 1))
+        stale_body = Path(_body_file_path(self.data_dir, "report", "ummanu-510", 1))
         stale_body.parent.mkdir(parents=True, exist_ok=True)
         stale_body.write_text("same body", encoding="utf-8")
         self._report_done("same body")
@@ -8116,7 +8223,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self.tick()
         stale_id = self._worker_report_request_id()
-        stale_body = Path(_body_file_path("report", "ummanu-510", 1))
+        stale_body = Path(_body_file_path(self.data_dir, "report", "ummanu-510", 1))
         stale_body.parent.mkdir(parents=True, exist_ok=True)
         stale_body.write_text("same body", encoding="utf-8")
         self._report_done("same body")
@@ -9514,7 +9621,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         return self._pilot_record().get("worker_report_nudge") or {}
 
     def _round_body_file(self, generation: int) -> Path:
-        return Path(_body_file_path("report", CARD_REF, generation))
+        return Path(_body_file_path(self.data_dir, "report", CARD_REF, generation))
 
     def test_an_idle_worker_is_asked_for_the_report_before_anything_is_stopped(self) -> None:
         """The card this exists for: the work is finished, the head went back to its prompt without
@@ -9783,9 +9890,11 @@ class HeadPromptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
-        # The assertions below name /tmp, and docs/OPERATIONS.md documents this override on the
-        # unit, so a host that exports it would fail the suite for no reason.
+        # The assertions below name the default private directory under the data dir, and
+        # docs/OPERATIONS.md documents this override on the unit, so a host that exports it would
+        # fail the suite for no reason.
         _clear_env(self, "UMMANU_DISPATCHER_BODY_DIR")
+        self.bodies = Path(self.tmpdir.name) / "artifacts" / "bodies"
         # The TASK.md feedback selector reads the card audit, so this host is handed a store's.
         self.board = card_store(self, dispatcher_seed(), instance_dir=self.tmpdir.name)
         self.host = CommandHostRuntime(
@@ -9869,7 +9978,7 @@ class HeadPromptTests(unittest.TestCase):
 
         self.assertEqual(len(commands), 2, "one green and one red command")
         for command in commands:
-            self.assertIn("--body-file /tmp/ummanu-verdict-ummanu-510-3.md", command)
+            self.assertIn(f"--body-file {self.bodies}/ummanu-verdict-ummanu-510-3.md", command)
             self.assertNotIn("<file>", command)
 
     def test_review_prompt_names_a_worker_head_chosen_by_failover(self) -> None:
@@ -9899,40 +10008,90 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("`codex`", substituted)
         self.assertNotIn("Head failover", plain)
 
-    def test_every_worker_packet_forbids_ai_co_authorship_whatever_the_head(self) -> None:
-        """secretary-1401: the instruction used to live in one model family's home file, so a head
-        of another family never saw it. It is in the packet now, and the packet is the same
-        document for every runtime."""
+    def _head_record(self, head: str) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="ummanu-510-pilot",
+            workspace="",
+            handle="",
+            head=head,
+            review_head=f"{head}-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="review_starting",
+            claimed_at=1.0,
+        )
+
+    @staticmethod
+    def _sections(doc: str) -> dict[str, str]:
+        """The packet's `## ` sections in order, each heading to the text up to the next one."""
+        sections: dict[str, str] = {}
+        heading = ""
+        for line in doc.splitlines():
+            if line.startswith("## "):
+                heading = line
+                sections[heading] = ""
+            elif heading:
+                sections[heading] += line + "\n"
+        return sections
+
+    def test_every_worker_packet_carries_the_policy_sections_whatever_the_head(self) -> None:
+        """secretary-1401: a policy that lived in one model family's home file never reached a head
+        of another family. The policy sections are in the packet, the same for every runtime; each
+        policy is anchored by the one fact it hands the worker, not by its wording."""
+        policies = {
+            "## No subagents": ("subagents",),
+            "## Check-cost contract": ("none/noop", "dispatcher-owned exact-SHA gate receipt"),
+            "## Scope of a rework": (
+                "`report:blocked`",  # an obvious wrong cut only
+                "`--product-root .`",  # checks never write to the live installation
+                "existing test",  # a changed test is named in the report
+                "foreground",  # no backgrounded check
+                "`Co-Authored-By:`",  # the trailer the gate refuses
+            ),
+        }
+        scopes = set()
         for head in ("claude-opus", "codex", "gemini"):
-            record = DispatcherRecord(
-                worker="ummanu-510-pilot",
-                workspace="",
-                handle="",
-                head=head,
-                review_head=f"{head}-reviewer",
-                attempt_id="attempt-1",
-                comment_baseline=0,
-                review_baseline=0,
-                state="review_starting",
-                claimed_at=1.0,
-            )
-            doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-            review = self.host._review_prompt(self.task, "attempt-1", 1, record=record)
-
-            self.assertIn("Do not add AI co-authorship to your commits", doc)
-            self.assertIn("`Co-Authored-By:` trailer", doc)
-            self.assertIn("Human", doc)
-            self.assertIn("Read the commit messages on this branch", review)
-            self.assertIn("RED blocker", review)
-
-    def test_worker_and_reviewer_prompt_sources_forbid_subagents(self) -> None:
-        worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
-        reviewer = self.host._review_prompt(self.task, "attempt-1", 1)
+            with self.subTest(head=head):
+                doc = self.host._worker_task_doc(self.task, "main", "attempt-1", record=self._head_record(head))
+                sections = self._sections(doc)
+                self.assertEqual([heading for heading in sections if heading in policies], list(policies))
+                for heading, anchors in policies.items():
+                    for anchor in anchors:
+                        self.assertIn(anchor, sections[heading], heading)
+                # Each blocked command's classification is the one the section tells the worker to pick.
+                classifications = {
+                    line.split("--classification ", 1)[1].split()[0]
+                    for line in self._command_lines(doc)
+                    if "--kind blocked" in line
+                }
+                self.assertEqual(classifications, {"external_fact", "wrong_task_definition"})
+                for classification in classifications:
+                    self.assertIn(f"`--classification {classification}`", sections["## Scope of a rework"])
+                scopes.add(sections["## Scope of a rework"])
+        self.assertEqual(len(scopes), 1, "the policy is the same document for every head")
+        # The launch pointer, which has no sections, repeats the subagent rule before TASK.md is read.
         launch = self.host._worker_launch_prompt()
+        self.assertIn("TASK.md", launch)
+        self.assertIn("subagents", launch)
 
-        for prompt in (worker, reviewer, launch):
-            self.assertIn("Do not spawn", prompt)
-            self.assertIn("subagents", prompt)
+    def test_every_review_packet_carries_the_policy_sections_whatever_the_head(self) -> None:
+        """The reviewer's policies after its `## No subagents` section, each anchored by its fact."""
+        anchors = (
+            "subagents",
+            "`BLOCKER-<short-slug>`",  # every blocker of the round, with a stable id
+            "RED blocker",  # each with its scenario, criterion and origin
+            "`Co-Authored-By:`",  # commit messages are read, not only the diff
+            "fixture",  # a passing fixture is no backend evidence
+        )
+        for head in ("claude-opus", "codex", "gemini"):
+            with self.subTest(head=head):
+                doc = self.host._review_prompt(self.task, "attempt-1", 3, record=self._head_record(head))
+                policy = doc.partition("\n## No subagents\n")[2]
+                self.assertTrue(policy, "the review packet has a `## No subagents` section")
+                for anchor in anchors:
+                    self.assertIn(anchor, policy)
+                self.assertEqual(len(self._command_lines(policy)), 2, "the verdict commands follow the policy")
 
     def test_worker_packet_points_at_the_receipt_and_forbids_a_scrolled_pane_rerun(self) -> None:
         """secretary-1406: the packet used to leave the evidence in the terminal, so the only way
@@ -10082,7 +10241,7 @@ class HeadPromptTests(unittest.TestCase):
         # classification, and the worker copies the line rather than editing a placeholder.
         self.assertEqual(len(commands), 3, "one done and one blocked command per classification")
         for command in commands:
-            self.assertIn("--body-file /tmp/ummanu-report-ummanu-510-0.md", command)
+            self.assertIn(f"--body-file {self.bodies}/ummanu-report-ummanu-510-0.md", command)
             self.assertNotIn("<file>", command)
         blocked = [command for command in commands if "--kind blocked" in command]
         self.assertEqual(
@@ -10091,16 +10250,30 @@ class HeadPromptTests(unittest.TestCase):
         )
         self.assertNotIn("--classification", commands[0])
 
+    def test_body_files_live_in_a_private_directory_not_the_shared_tmp(self) -> None:
+        """ummanu-241: `/tmp/ummanu-<kind>-<ref>-<round>.md` was a name any account on the host could
+        create or link first. Both prompts now name a file in a 0700 directory under the data dir."""
+        for doc in (
+            self.host._worker_task_doc(self.task, "main", "attempt-1"),
+            self.host._review_prompt(self.task, "attempt-1", 3),
+        ):
+            for command in self._command_lines(doc):
+                # The old shared name, not any path under /tmp: the suite's own temp root is /tmp/ummanu-*.
+                self.assertNotRegex(command, r"--body-file /tmp/ummanu-(report|verdict)-")
+                self.assertIn(f"--body-file {self.bodies}/ummanu-", command)
+        self.assertEqual(stat.S_IMODE(self.bodies.stat().st_mode), 0o700)
+        self.assertEqual(list(self.bodies.iterdir()), [], "the head writes the body, not the dispatcher")
+
     def test_clearing_report_bodies_takes_every_round_of_one_card_only(self) -> None:
         """Every round of this card goes, including the one about to start. Another card's bodies
-        and anything that is not a numbered report body stay: the sweep runs in a shared directory
-        (`/tmp` by default), where deleting by prefix alone would reach other cards' rounds."""
+        and anything that is not a numbered report body stay: the sweep runs in a directory every
+        card shares, where deleting by prefix alone would reach other cards' rounds."""
         root = Path(self.tmpdir.name)
         with mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": str(root)}):
-            mine = [Path(_body_file_path("report", "ummanu-510", n)) for n in (0, 1, 12)]
+            mine = [Path(_body_file_path(root, "report", "ummanu-510", n)) for n in (0, 1, 12)]
             others = [
-                Path(_body_file_path("report", "ummanu-511", 1)),
-                Path(_body_file_path("verdict", "ummanu-510", 1)),
+                Path(_body_file_path(root, "report", "ummanu-511", 1)),
+                Path(_body_file_path(root, "verdict", "ummanu-510", 1)),
                 root / "ummanu-report-ummanu-510-notes.md",
             ]
             for path in mine + others:
@@ -10312,70 +10485,6 @@ class HeadPromptTests(unittest.TestCase):
         self.assertEqual(self._read_back(adjudicated, "adjudicated"), decision)
         self.assertEqual(self._read_back(unadjudicated, "unadjudicated"), "")
 
-    def test_worker_prompt_says_which_blocked_classification_to_use(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("`--classification external_fact` when the blocker is a fact outside this", doc)
-        self.assertIn("`--classification wrong_task_definition` when the card itself is", doc)
-        self.assertIn("a blocked report without one is", doc)
-
-    def test_worker_prompt_limits_blocked_reports_to_an_obvious_wrong_cut(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("only for an obvious wrong cut", doc)
-        self.assertIn("requires a new durable protocol, product contract, or trust", doc)
-        self.assertIn("Difficulty or size alone is not a reason to stop", doc)
-        self.assertIn("conflict and the observer decision needed", doc)
-
-    def test_worker_prompt_forbids_writing_to_the_live_installation(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("read the live installation; they never write to it", doc)
-        self.assertIn("deploys, syncs, provisions or reconciles live state", doc)
-        self.assertIn("--product-root .", doc)
-        self.assertIn("what you could not verify", doc)
-
-    def test_worker_prompt_makes_an_existing_test_change_reportable(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("Do not change or weaken an existing test", doc)
-        self.assertIn("name the test, what it", doc)
-        self.assertIn("silently rewritten assertion", doc)
-
-    def test_worker_prompt_keeps_checks_in_the_foreground(self) -> None:
-        """A head has no way to wait: a background job answers at the start of its next turn, and
-        any tool call keeps the current one open. Backgrounding a check is therefore a stall."""
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("Run every check in the foreground", doc)
-        self.assertIn("do not write a loop that waits for it", doc)
-        self.assertIn("keeps the turn open", doc)
-
-    def test_worker_prompt_does_not_call_none_or_noop_validation_authoritative(self) -> None:
-        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
-
-        self.assertIn("only if it produces a valid dispatcher-owned exact-SHA gate receipt", doc)
-        self.assertIn("none/noop gate", doc)
-        self.assertIn("attests no broad suite", doc)
-        self.assertNotIn("authoritative broad suite belongs", doc)
-
-    def test_review_prompt_refuses_a_fixture_as_backend_evidence(self) -> None:
-        doc = self.host._review_prompt(self.task, "attempt-1", 3)
-
-        self.assertIn("a passing fixture is not", doc)
-        self.assertIn("same wrong assumption as the code", doc)
-        self.assertIn("no end-to-end check against the real backend", doc)
-        self.assertIn("which assumption stays unverified", doc)
-
-    def test_review_prompt_requires_evidence_for_every_red_blocker(self) -> None:
-        doc = self.host._review_prompt(self.task, "attempt-1", 3)
-
-        self.assertIn("concrete reachable scenario", doc)
-        self.assertIn("violated acceptance", doc)
-        self.assertIn("whether this branch introduced", doc)
-        self.assertIn("compatibility promise", doc)
-        self.assertIn("do not silently widen the supported boundary or decide sprint scope", doc)
-
     def test_review_prompt_uses_an_exact_sha_receipt_and_delta_packet(self) -> None:
         record = DispatcherRecord(
             worker="worker",
@@ -10559,7 +10668,7 @@ class HeadPromptTests(unittest.TestCase):
                 arguments = command.split("python3 -P -m ummanu task", 1)[1]
                 for banned in ("`", "$", "'", '"', "|", ";", "&", ">", "<", "(", ")"):
                     self.assertNotIn(banned, arguments, command)
-                self.assertIn("--body-file /tmp/ummanu-", command)
+                self.assertIn(f"--body-file {self.bodies}/ummanu-", command)
             self.assertIn("(no heredoc, no mktemp, no echo pipeline)", doc)
 
     def test_report_and_verdict_commands_use_the_live_control_plane_not_the_workspace(self) -> None:
@@ -10942,7 +11051,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         """Waking one is a lifecycle transition with its own durable boundary, and this is not it."""
         with (
             mock.patch.object(
-                dispatcher_host_module,
+                host_lifecycle,
                 "_head_run_process_status",
                 lambda path, **kwargs: {"known": True, "alive": True, "stopped": True, "state": "live-match"},
             ),
@@ -10954,7 +11063,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.pid_file.write_text("1", encoding="utf-8")
         with (
             mock.patch.object(
-                dispatcher_host_module,
+                host_lifecycle,
                 "_head_process_status",
                 lambda path, **kwargs: {"known": True, "alive": False},
             ),
@@ -11458,7 +11567,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             catalog._heads = {  # type: ignore[attr-defined]
                 "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
             }
-            with mock.patch.dict(os.environ, {"TA_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}):
                 launch = catalog.head_launch(  # type: ignore[attr-defined]
                     "claude-opus",
                     "TASK.md",
@@ -11538,7 +11647,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             catalog._heads = {  # type: ignore[attr-defined]
                 "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
             }
-            with mock.patch.dict(os.environ, {"TA_CLAUDE_JSON": str(config)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_JSON": str(config)}):
                 command = catalog.head_launch(
                     "claude-opus",
                     "TASK.md",
@@ -12812,7 +12921,7 @@ class ReviewBaseReconciliationTests(unittest.TestCase):
                 mock.patch.object(writer.audit, "pending_event", wraps=writer.audit.pending_event) as pending,
             ):
                 outcome = release_lifecycle.release_parked(
-                    runtime, task, record, {task["ref"]: record}, {}, "attempt-1", reason="approved"
+                    runtime, task, record, {task["ref"]: record}, {}, "attempt-1",
                 )
 
             head = git(workspace, "rev-parse", "HEAD")
@@ -13559,7 +13668,7 @@ class DispatcherGateTests(unittest.TestCase):
         """`_backend_answered` has to keep these apart with the lease in play: the refusal below is
         git 2.43.0's own text for a push whose lease was stale, and the remote produced it. A
         transport failure on the same command is still no answer at all."""
-        from ummanu.dispatch.gate import _backend_answered
+        from ummanu.dispatch.github_ci import _backend_answered
 
         push = ["git", "-C", "/ws", "push", "--force-with-lease=refs/heads/x:" + "a" * 40, "origin", "x:x"]
         refused = (
@@ -14166,7 +14275,7 @@ class DispatcherGateTests(unittest.TestCase):
 
     def _spy_backend_calls(self):
         """Record the label of every question that goes through the single backend call point."""
-        from ummanu.dispatch import gate as gate_module
+        from ummanu.dispatch import github_ci as gate_module
 
         seen: list[str] = []
         real = gate_module._backend_call
@@ -14932,7 +15041,7 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertIn("optional-suite", result.summary)
 
     def test_github_rollup_honours_the_required_set(self) -> None:
-        from ummanu.dispatch.gate import _rollup
+        from ummanu.dispatch.github_ci import _rollup
 
         items = [
             {"status": "COMPLETED", "conclusion": "SUCCESS", "name": "test"},
@@ -14949,7 +15058,7 @@ class DispatcherGateTests(unittest.TestCase):
         )
 
     def test_github_rollup_classification(self) -> None:
-        from ummanu.dispatch.gate import _rollup
+        from ummanu.dispatch.github_ci import _rollup
 
         self.assertEqual(_rollup([])[0], "NONE")
         self.assertEqual(_rollup([{"status": "COMPLETED", "conclusion": "SUCCESS"}])[0], "SUCCESS")

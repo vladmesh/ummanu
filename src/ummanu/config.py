@@ -7,7 +7,6 @@ to the offending field, so ``doctor`` never shows a traceback for bad input.
 from __future__ import annotations
 
 import json
-import tomllib
 from dataclasses import dataclass
 from functools import cache
 from importlib import resources
@@ -26,8 +25,8 @@ from referencing.jsonschema import DRAFT202012
 #: paid four times per dashboard.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
-from ummanu.sprints import budget_thresholds, open_sprint_limit_invalid
-from ummanu.tasks import TaskError
+from ummanu.kernel.sprint_policy import budget_thresholds, open_sprint_limit_invalid
+from ummanu.runtime.paths import instance_file as config_file
 
 # schema name -> file in ummanu/schemas/
 SCHEMAS = {
@@ -46,6 +45,8 @@ SCHEMAS = {
     "web-sprint": "web-sprint.schema.json",
     "web-pause": "web-pause.schema.json",
     "web-command": "web-command.schema.json",
+    "web-card": "web-card.schema.json",
+    "web-provider": "web-provider.schema.json",
 }
 
 
@@ -229,9 +230,19 @@ class InstanceReport:
 
 def _resolve_instance(path: Path) -> Path:
     """Accept either an instance dir or a direct path to instance.yaml."""
-    expanded = path.expanduser()
-    instance_file = expanded / "instance.yaml" if expanded.is_dir() else expanded
-    return instance_file.resolve(strict=False)
+    return config_file(path.expanduser()).resolve(strict=False)
+
+
+def _instance_config(instance_file: Path) -> Any:
+    """``instance.yaml``'s content; a failure to read or parse it is a data-dir refusal."""
+    try:
+        return load_config(instance_file)
+    except ConfigError as exc:
+        raise DataDirError(str(exc)) from None
+
+
+def _invalid_instance(instance_file: Path, detail: str) -> DataDirError:
+    return DataDirError(f"invalid instance {instance_file}: {detail}")
 
 
 def _configured_data_dir(instance_file: Path, instance: dict[str, Any]) -> Path:
@@ -253,15 +264,7 @@ def instance_data_dir(path: Path) -> Path:
     command-line and environment overrides remain caller-owned paths.
     """
     instance_file = _resolve_instance(path)
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
-    errors = validate(instance, "instance", instance_file.name)
-    if errors:
-        raise DataDirError(f"invalid instance {instance_file}: " + "; ".join(map(str, errors)))
-    assert isinstance(instance, dict)
-    return _configured_data_dir(instance_file, instance)
+    return _configured_data_dir(instance_file, _validated_instance_config(instance_file))
 
 
 def generated_state_dir(path: Path) -> Path:
@@ -273,13 +276,10 @@ def generated_state_dir(path: Path) -> Path:
     state unreachable. ``data_dir`` itself is held to its schema: a non-empty string.
     """
     instance_file = _resolve_instance(path)
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
+    instance = _instance_config(instance_file)
     configured = instance.get("data_dir") if isinstance(instance, dict) else None
     if not isinstance(configured, str) or not configured:
-        raise DataDirError(f"invalid instance {instance_file}: data_dir must be a non-empty string")
+        raise _invalid_instance(instance_file, "data_dir must be a non-empty string")
     return _configured_data_dir(instance_file, instance)
 
 
@@ -311,13 +311,10 @@ def recovered_instance_locations(instance_file: Path, live_root: Path) -> tuple[
 
 
 def _validated_instance_config(instance_file: Path) -> dict[str, Any]:
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
+    instance = _instance_config(instance_file)
     errors = validate(instance, "instance", instance_file.name)
     if errors:
-        raise DataDirError(f"invalid instance {instance_file}: " + "; ".join(map(str, errors)))
+        raise _invalid_instance(instance_file, "; ".join(map(str, errors)))
     assert isinstance(instance, dict)
     return instance
 
@@ -337,11 +334,7 @@ def instance_offsite_remote(path: Path) -> str:
     the snapshot pusher reports an absent remote as a skipped push, as the legacy pusher does a
     repository with no remote.
     """
-    instance_file = _resolve_instance(path)
-    try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
-        raise DataDirError(str(exc)) from None
+    instance = _instance_config(_resolve_instance(path))
     offsite = instance.get("offsite") if isinstance(instance, dict) else None
     remote = offsite.get("instance_remote") if isinstance(offsite, dict) else None
     return remote.strip() if isinstance(remote, str) else ""
@@ -385,7 +378,7 @@ def validate_instance(path: Path) -> InstanceReport:
         # so a partial setting cannot pass validation then stop every dispatcher tick.
         try:
             budget_thresholds(instance)
-        except TaskError:
+        except ValueError:
             errors.append(
                 SchemaError(
                     instance_file.name, "sprint_budget", "hard threshold must not be below signal threshold"
@@ -413,7 +406,7 @@ def validate_instance(path: Path) -> InstanceReport:
     # usable one already carries that error above.
     adapter_drafts = 0
     if data_dir is not None:
-        from ummanu.onboarding import OnboardingStorage
+        from ummanu.runtime.onboarding_storage import OnboardingStorage
 
         adapter_drafts = _validate_dir(OnboardingStorage(data_dir).drafts, "onboarding-contract", errors)
     bindings = _load_bindings(instance_dir / "projects")
@@ -452,54 +445,6 @@ def validate_instance(path: Path) -> InstanceReport:
         instance=instance if isinstance(instance, dict) else {},
         data_dir=data_dir,
     )
-
-
-def fallback_errors(instance_dir: Path, instance: Any) -> list[SchemaError]:
-    """Every head and PO session must be able to fall over to the other subscription family.
-
-    Read by `ummanu config check` and `ummanu doctor`, which fail on it naming the profile; not by
-    `validate_instance`, so an installation with a gap still upgrades and runs (and is told).
-
-    ummanu-108: a role's default profile is only the first one to try. The installation's own head
-    registry (`heads/heads.toml`, when it has one; the product default otherwise, which passes) has
-    to give every `claude`/`codex` profile a cross-family fallback at the same effort, and
-    `po.models` has to offer a model on both CLIs, or on neither, so a PO session opened on one can
-    continue on the other. A registry that cannot be parsed is reported by the reader that loads it.
-    """
-    from ummanu.head_registry import INSTANCE_HEADS_RELATIVE
-    from ummanu.po.models import models_from_instance
-    from ummanu.runtime.heads import HeadRegistryError, cross_family_gaps, validate_registry
-
-    errors: list[SchemaError] = []
-    path = instance_dir / INSTANCE_HEADS_RELATIVE
-    if path.is_file():
-        try:
-            data = tomllib.loads(path.read_text(encoding="utf-8"))
-            profiles = data.get("profiles") or {}
-            validate_registry(data.get("resources") or {}, profiles)
-        except (OSError, UnicodeError, ValueError, HeadRegistryError, AttributeError) as exc:
-            errors.append(SchemaError(str(INSTANCE_HEADS_RELATIVE), "<file>", f"head registry is invalid: {exc}"))
-        else:
-            for gap in cross_family_gaps(profiles):
-                errors.append(SchemaError(str(INSTANCE_HEADS_RELATIVE), "profiles.fallback", gap))
-    if not isinstance(instance, dict):
-        return errors
-    try:
-        models = models_from_instance(instance)
-    except (AttributeError, TypeError):
-        return errors
-    offered = {cli: bool(values) for cli, values in models.items()}
-    if any(offered.values()) and not all(offered.values()):
-        lone = next(cli for cli, has in offered.items() if has)
-        missing = ", ".join(cli for cli, has in offered.items() if not has)
-        errors.append(
-            SchemaError(
-                "instance.yaml",
-                "po.models",
-                f"a {lone} PO session has no model on {missing} to fall over to when its subscription is down",
-            )
-        )
-    return errors
 
 
 def _find_manifest(instance_dir: Path, data_dir: Path | None) -> Path | None:

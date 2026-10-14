@@ -16,6 +16,7 @@ from typing import Any
 
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
 from ummanu.po.client import OutcomeUnknown, PoServiceClient, ServiceRefused, ServiceUnavailable
+from ummanu.po.context_budget import CONTEXT_METRIC, context_budget_bytes, conversation_bytes
 from ummanu.po.models import (
     DEFAULT_EFFORTS,
     EffortRefused,
@@ -24,7 +25,6 @@ from ummanu.po.models import (
     require_explicit_effort,
 )
 from ummanu.po.queue import PoQueue, QueueError
-from ummanu.po.context_budget import CONTEXT_METRIC, context_budget_bytes, conversation_bytes
 from ummanu.po.store import (
     OWNER,
     RUNNING,
@@ -40,6 +40,7 @@ from ummanu.po.store import (
     Turn,
     TurnInProgress,
 )
+from ummanu.runtime.paths import instance_file
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.errors import (
     NOTHING_WRITTEN,
@@ -333,9 +334,8 @@ class PoLayer(ProtocolBoundary):
         return efforts_from_instance(self._instance_config())
 
     def _instance_config(self) -> Any:
-        path = self.instance / "instance.yaml" if self.instance.is_dir() else self.instance
         try:
-            return load_config(path)
+            return load_config(instance_file(self.instance))
         except ConfigError as exc:
             raise InstallationUnavailable(str(exc)) from None
 

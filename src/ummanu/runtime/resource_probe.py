@@ -9,7 +9,7 @@ local login is valid) and `status=exhausted` (the subscription's usage limit is 
 then carries `provider_error=` with the provider's own words and reset time) by name.
 
 Timeouts are per resource: 75 s for `openai-sub` (Codex refuses slowly), 20 s otherwise;
-`TA_PROBE_TIMEOUT_S` moves the default, `TA_PROBE_TIMEOUT_S_<RESOURCE>` sets one resource.
+`UMMANU_PROBE_TIMEOUT_S` moves the default, `UMMANU_PROBE_TIMEOUT_S_<RESOURCE>` sets one resource.
 `head_health` derives its outer timeout from the same number so this classifier answers first.
 See docs/PROTOCOLS.md "Resource probe statuses".
 """
@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ummanu.runtime.codex_home import installation_codex_home
 from ummanu.runtime.codex_preflight import CodexHomeLoginMissing
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.provider_errors import (
     KIND_AUTH,
     KIND_QUOTA,
@@ -40,8 +41,8 @@ from ummanu.runtime.provider_errors import (
 from ummanu.runtime.redact import redact
 
 # Kills a slow or broken probe instead of hanging the dispatcher tick; env-overridable.
-PROBE_TIMEOUT_S = int(os.environ.get("TA_PROBE_TIMEOUT_S", "20"))
-PROBE_REASON_TEXT_LIMIT = int(os.environ.get("TA_PROBE_REASON_TEXT_LIMIT", "400"))
+PROBE_TIMEOUT_S = int(env_value("UMMANU_PROBE_TIMEOUT_S", "20"))
+PROBE_REASON_TEXT_LIMIT = int(env_value("UMMANU_PROBE_REASON_TEXT_LIMIT", "400"))
 #: The default inner timeout of a resource with no entry below.
 DEFAULT_PROBE_TIMEOUT_S = 20
 #: Resources whose provider answers more slowly than the default, and how long they get.
@@ -54,7 +55,7 @@ STATUS_EXHAUSTED = "exhausted"
 
 
 def _env_seconds(name: str) -> int | None:
-    raw = os.environ.get(name, "").strip()
+    raw = env_value(name, "").strip()
     if not raw:
         return None
     try:
@@ -66,13 +67,13 @@ def _env_seconds(name: str) -> int | None:
 
 def probe_timeout_env_name(resource_id: str) -> str:
     """The environment variable that sets one resource's probe timeout."""
-    return "TA_PROBE_TIMEOUT_S_" + "".join(c if c.isalnum() else "_" for c in resource_id.upper())
+    return "UMMANU_PROBE_TIMEOUT_S_" + "".join(c if c.isalnum() else "_" for c in resource_id.upper())
 
 
 def probe_timeout_s(resource_id: str) -> int:
     """This resource's probe timeout, read from the environment per call.
 
-    Per-resource variable, then the resource's default, then `TA_PROBE_TIMEOUT_S`, then 20 s. Read
+    Per-resource variable, then the resource's default, then `UMMANU_PROBE_TIMEOUT_S`, then 20 s. Read
     per call so the dispatcher and the probe it spawns cannot disagree.
     """
     specific = _env_seconds(probe_timeout_env_name(resource_id))
@@ -80,7 +81,7 @@ def probe_timeout_s(resource_id: str) -> int:
         return specific
     if resource_id in RESOURCE_PROBE_TIMEOUTS_S:
         return RESOURCE_PROBE_TIMEOUTS_S[resource_id]
-    return _env_seconds("TA_PROBE_TIMEOUT_S") or DEFAULT_PROBE_TIMEOUT_S
+    return _env_seconds("UMMANU_PROBE_TIMEOUT_S") or DEFAULT_PROBE_TIMEOUT_S
 
 
 @dataclass(frozen=True)
@@ -198,18 +199,18 @@ def format_probe_failure(resource_id: str, result: ProbeResult) -> str:
     return "; ".join(parts)
 
 
-_OPENROUTER_ENV_FILE = Path(os.environ.get("TA_OPENROUTER_ENV_FILE", str(Path.home() / ".hermes" / ".env")))
+_OPENROUTER_ENV_FILE = Path(env_value("UMMANU_OPENROUTER_ENV_FILE", str(Path.home() / ".hermes" / ".env")))
 # Key names accepted in _OPENROUTER_ENV_FILE (hermes `OPENROUTER_API_KEY`, legacy `open_router_key`);
-# TA_OPENROUTER_ENV_KEY pins a single name.
+# UMMANU_OPENROUTER_ENV_KEY pins a single name.
 _OPENROUTER_ENV_KEYS: tuple[str, ...] = (
-    (os.environ["TA_OPENROUTER_ENV_KEY"],)
-    if os.environ.get("TA_OPENROUTER_ENV_KEY")
+    (env_value("UMMANU_OPENROUTER_ENV_KEY", "", nonempty=True),)
+    if env_value("UMMANU_OPENROUTER_ENV_KEY", nonempty=True)
     else ("OPENROUTER_API_KEY", "open_router_key")
 )
 
 
 def _read_openrouter_key() -> str | None:
-    override = os.environ.get("TA_OPENROUTER_KEY")
+    override = env_value("UMMANU_OPENROUTER_KEY", nonempty=True)
     if override:
         return override
     try:

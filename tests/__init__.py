@@ -28,7 +28,7 @@ secretary-1723) -- installation state shared by every Codex head on the
 host -- so any test that reaches a
 worker/reviewer/service bring-up without saying otherwise would record a
 permanent ``trusted`` grant for its own throwaway workspace there, and
-nothing prunes it. ``TA_CODEX_HOME`` is the single seam every one of those
+nothing prunes it. ``UMMANU_CODEX_HOME`` is the single seam every one of those
 paths reads (``codex_preflight.codex_home``, resolved per launch, and every
 sessions reader built on it), so the suite claims one throwaway home of
 its own for the whole run, before any test module is imported.
@@ -44,7 +44,7 @@ suite runs makes ``runtime/dispatch._pipeline_paused()`` true, and every
 triggered-dispatch test silently takes the "pipeline paused -- no dispatch"
 branch instead of the lifecycle branch it was written for. The same binding
 also had the suite appending its own ``runs.jsonl`` records to that live
-directory. ``TA_PIPELINE_STATE_DIR`` is the single seam both readers go
+directory. ``UMMANU_PIPELINE_STATE_DIR`` is the single seam both readers go
 through (``shared_state.resolve_pipeline_state_dir``, and
 ``dispatch.pause.legacy_mirror_path`` for the mirror), so the suite claims
 one throwaway state dir of its own for the whole run, before any test module
@@ -126,22 +126,22 @@ atexit.register(_guard_suite_tmp)
 # that a bring-up reached from anywhere in the suite -- including one whose
 # fixture registry names no `codex_home` and which never thought about trust at
 # all -- writes into a directory this run owns and removes. Set unconditionally:
-# an ambient TA_CODEX_HOME inherited from a worker/reviewer/operator shell names that
+# an ambient UMMANU_CODEX_HOME inherited from a worker/reviewer/operator shell names that
 # installation's real home, which is exactly what must not be written.
 _SUITE_CODEX_HOME = Path(tempfile.mkdtemp(prefix="ummanu-tests-codex-home."))
-os.environ["TA_CODEX_HOME"] = str(_SUITE_CODEX_HOME)
+os.environ["UMMANU_CODEX_HOME"] = str(_SUITE_CODEX_HOME)
 atexit.register(shutil.rmtree, _SUITE_CODEX_HOME, ignore_errors=True)
 
 # The throwaway pipeline state dir described above, claimed before any test module
 # -- and therefore before `ummanu.automations.agents.pipeline.state` -- is imported,
 # because that module binds `STATE` (and through it `pause.PAUSE_FILE`) to whatever
 # `resolve_pipeline_state_dir()` answers at import time. Set unconditionally, for
-# the same reason as TA_CODEX_HOME above: an ambient TA_PIPELINE_STATE_DIR
+# the same reason as UMMANU_CODEX_HOME above: an ambient UMMANU_PIPELINE_STATE_DIR
 # inherited from a worker/reviewer/operator shell names the live installation's
 # state dir, which is exactly what the suite must neither read nor write.
 # `tests/test_hermetic_pipeline_state.py` proves both halves.
 _SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="ummanu-tests-pipeline-state."))
-os.environ["TA_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
+os.environ["UMMANU_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
 atexit.register(shutil.rmtree, _SUITE_PIPELINE_STATE_DIR, ignore_errors=True)
 
 # `git fetch` ends with `git maintenance run --auto`, and gc detaches by default,

@@ -66,7 +66,6 @@ class ProgressState(StrEnum):
 
     ADVANCING = "advancing"
     QUIET = "quiet"
-    STAGNANT = "stagnant"
     UNKNOWN = "unknown"
 
 
@@ -93,13 +92,17 @@ class SnapshotSource(StrEnum):
     PID_HEARTBEAT = "pid_heartbeat"
     PROVIDER_CURSOR = "provider_cursor"
     PANE_ADVISORY = "pane_advisory"
-    EXECUTION_RECEIPT = "execution_receipt"
     # The head's own child processes, read from /proc (secretary-1692): a head blocked on a long
     # foreground command is silent everywhere else while its child works.
     EXECUTION_CHILD = "execution_child"
     # The head's own local-pty supervisor journal (secretary-1739): the Turn axis, and Progress
     # from `provider.progressed`, which since secretary-1738 is written only for new screen content.
     SUPERVISOR_JOURNAL = "supervisor_journal"
+
+
+# Reducer/guard safety vocabulary, deliberately provider-only. Child and journal
+# advancement have separate clocks and must not bypass dark-source or outer ceilings.
+PROGRESS_SOURCES = frozenset({SnapshotSource.PROVIDER_CURSOR.value})
 
 
 @dataclass(frozen=True)
@@ -648,6 +651,17 @@ def _parse_child_cursor(
     except ValueError:
         return None
     return uptime, total_cpu, total_io, counters
+
+
+def status_has_vitality_observation(status: Any) -> bool:
+    """Whether any supported channel was observed, including unavailable journal answers."""
+    return isinstance(status, dict) and (
+        isinstance(status.get("pid_status"), dict)
+        or isinstance(status.get("provider_progress"), dict)
+        or "idle" in status
+        or isinstance(status.get("child_activity"), dict)
+        or "supervisor_journal" in status
+    )
 
 
 def snapshots_from_status(

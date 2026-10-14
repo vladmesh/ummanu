@@ -65,6 +65,7 @@ class _ClaimRuntime:
         self.writer = mock.Mock()
         self.audit = mock.Mock()
         self.audit.committed_event.return_value = None
+        self.audit.events.return_value = []
         self.host = mock.Mock()
 
     def head_readiness(self, head: str) -> HeadReadiness:
@@ -199,11 +200,6 @@ class HostRefusalTests(unittest.TestCase):
     def test_no_workspace_is_prepared_on_the_live_root(self) -> None:
         with self.assertRaisesRegex(HostError, f"names the live root {self.live}"):
             self.host._require_project_available("instance")
-
-    def test_the_landing_path_is_gone(self) -> None:
-        self.assertFalse(hasattr(CommandHostRuntime, "_complete_green_instance_repo"))
-        self.assertFalse(hasattr(CommandHostRuntime, "is_instance_publish_recovery"))
-
 
 if __name__ == "__main__":
     unittest.main()

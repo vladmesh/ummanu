@@ -11,7 +11,45 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
+
+
+def legacy_name(name: str) -> str:
+    """The released TA spelling of a canonical UMMANU setting."""
+    return "TA_" + name.removeprefix("UMMANU_")
+
+
+@overload
+def env_value(
+    name: str, default: str, *, nonempty: bool = False, environ: Mapping[str, str] | None = None
+) -> str: ...
+
+
+@overload
+def env_value(
+    name: str, default: None = None, *, nonempty: bool = False, environ: Mapping[str, str] | None = None
+) -> str | None: ...
+
+
+def env_value(
+    name: str,
+    default: str | None = None,
+    *,
+    nonempty: bool = False,
+    environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Canonical, then legacy, then default; only nonempty lookups skip empty strings.
+
+    Parsing belongs to the consumer. A malformed canonical value never borrows legacy data.
+    This lookup neither mutates the environment nor grants authority to either spelling.
+    """
+    env = os.environ if environ is None else environ
+    for key in (name, legacy_name(name)):
+        value = env.get(key)
+        if value is not None and (value or not nonempty):
+            return value
+    return default
+
 
 PRODUCT_ENV = "UMMANU_REPO"
 INSTANCE_ENV = "UMMANU_INSTANCE"
@@ -19,6 +57,10 @@ DATA_DIRNAME = "ummanu-data"
 INSTANCE_DIRNAME = "instance"
 PRODUCT_DIRNAME = "ummanu"
 INSTANCE_CONFIG_NAME = "instance.yaml"
+
+# The legacy pipeline export source, shared by the data exporter and its CLI default.
+PIPELINE_WORKTREE = Path.home() / "orca" / "workspaces" / "ummanu" / "pipeline"
+PIPELINE_STATE_DIR = PIPELINE_WORKTREE / "state" / "pipeline"
 
 
 class MissingDefaultInstance(RuntimeError):
@@ -96,6 +138,16 @@ def configured_product_root(environ: Mapping[str, str] | None = None) -> Path:
     env = os.environ if environ is None else environ
     configured = env.get(PRODUCT_ENV)
     return Path(configured).expanduser() if configured else default_product_root()
+
+
+def instance_file(path: Path) -> Path:
+    """The config file for a path naming either an existing instance directory or the file itself.
+
+    Decided by the filesystem, unlike :func:`instance_dir`: an existing directory yields its
+    ``instance.yaml``, anything else (a file, a missing path) is returned unchanged. ``~`` is not
+    expanded here; a caller that accepts it expands first.
+    """
+    return path / INSTANCE_CONFIG_NAME if path.is_dir() else path
 
 
 def instance_dir(path: Path | str) -> Path:

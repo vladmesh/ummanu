@@ -17,6 +17,108 @@ determines which owners and modules apply to a PR. Pushes and manual dispatches 
 | integration-heads | test / integration-heads | Head launch, vitality, observer, review lifecycle and attempt accounting. |
 | packaging | test / packaging | Bootstrap, installation, provisioning and upgrade flows. |
 
+`tests.test_installation_boundary` (unit) guards the thin installation namespace, directed owner
+imports, shared type identity, bounded file sizes, baseline definition ASTs, representative result
+bytes and CLI defaults. Its goldens are baseline source captures, not independent baseline runs.
+`tests.test_kernel_source_graph` (integration-recovery) guards all four ARCH-04 facts, including
+SCC <=60 on the uncut static source graph with nested/lazy/alias/string/package edges. It reuses
+the source dependency capability with coupling.py's tier_none semantics; selector opacity and
+runtime import tables are not SCC evidence. Planted barrel/cycle/package/persisted-string cases
+stay in the small unit profile. The existing twelve kernel and fifteen cleanup foundation tests
+remain in their original local shards. Install/recovery, snapshot/PostgreSQL and packaging
+fixtures retain their CI owners.
+
+`tests.test_upgrade_owners` (unit) covers the upgrade/install owner seams, shared type identity,
+import-bound default steps, file bounds and selected CLI/materializer observations. The public
+composition remains `upgrade.py`; checkout fingerprints, dependencies, workspaces, host
+materialization and service evidence live in `installation/upgrade/`. The package root contains
+only its description. `docs/upgrade-owner-inventory.json` records the extraction's definitions,
+global reads, import/attribute consumers and patch moves; it is a capture, not a frozen API.
+The source graph scanner and its SCC/config closure budgets are unchanged.
+
+For the extraction comparison, `UMMANU_UPGRADE_BASE_SOURCE` may name an external copy of
+`src/ummanu/upgrade.py` from `aa816323315719f5b59a2d8c972b11204afc396b`. The fixture checks
+its SHA256 before loading it and compares actual base/candidate packets. Supporting helpers and
+installation composition are the candidate's; this is not a pristine historical suite run.
+`UMMANU_UPGRADE_PACKET_OUT` selects an optional packet artifact. Routine CI asserts the supported
+candidate contracts without any historical source. The packet covers selected CLI JSON/text and
+error exits, step order/stop/context/result, mock exec argv/inherited environment, handoff refusal
+and no-second-pull, dependency and workspace traces, service evidence and all four receipt bytes.
+Install/recover observations use the actual composition with a small substituted step sequence.
+These file-only fixtures prove no installed process, backend, network, systemd or packaging
+behavior. Original upgrade, portable, recovery, dependency, web and PO fixtures retain their
+native CI owners; package inclusion is validated by the existing packaging shard.
+
+`tests.test_upgrade_source_cut` and `tests.test_upgrade_source_cut_faults` (unit) exercise the actual
+install/recover materializer and memory/web/PO/verify steps on temporary files. Host planning,
+Git selection, process identities and probes are explicit doubles. At N/2N tracked files they
+count actual payload streams/bytes and digest feeds per file, separately from metadata, Git
+enumeration, manifests and shipped units. They cover dirty schemas, untracked/bytecode exclusion,
+scope cleanup, repeated contexts/roots, standalone PO acquisition, file/stat/descriptor/HEAD/path
+faults, runtime inputs, generations, current/publication decisions and pending/idle/busy PO restarts.
+No fixture claims real systemd, kernel, backend, socket or packaging evidence. Original guard
+tests keep their native owners and failure precedence.
+
+An opt-in `UMMANU_SOURCE_CUT_BASE` directory may supply external `upgrade.py` and `services.py`
+from exact base `360509c3898e51bf71089bd2d6373506ab2aab0c`; their SHA256s are checked before
+loading. The same fixture executes actual base/candidate producers and compares process receipt
+bytes and service results. Supporting checkout/receipt helpers and installation composition are
+the candidate's. This is a file-only historical comparison, not a pristine historical suite or
+permanent old-implementation CI oracle. `UMMANU_SOURCE_CUT_PACKET_OUT` writes both packets,
+including N/2N reads/bytes/hash evidence. Routine CI needs neither environment variable.
+
+The related DUP-I1 cleanup uses the shared reader's decoded web `ProcessReceipt`, preserving
+identity-before-input diagnostics without decoding identity twice or relying on an assertion.
+The existing receipt fixture owns the shared producer/golden assertion used by both receipt test
+classes. Upgrade source acquisition now shares one invocation cut with conservative metadata
+invalidation ([Protocols](PROTOCOLS.md#upgrade-source-coherence)); archive/restore INEF-09 remains
+open. Neither change closes all of slot15 or ARCH-01.
+
+`tests.test_request_index` (unit) guards DUP-W4's shared digest/read/match/write delegation and
+exception identity, including planted duplicate implementations. Its file-only fixture captures
+both real stores' paths and bytes, result types/values, claim flags, exception messages/causes and
+read/build/lock/write order. Routine CI runs the candidate-only supported-contract assertions and
+does not supply a historical baseline. For this extraction, a developer may explicitly set
+`UMMANU_INDEX_BASE_SOURCE` to external store files from
+`2347277b18f281505dfb82d39b6134035cdd003a` to verify their SHA256s and compare base/candidate
+packets. `UMMANU_INDEX_PACKET_OUT` selects an optional artifact path. This opt-in capture executes
+the new fixture on base store bytes with unchanged supporting helpers, not a pristine historical
+whole-suite run. Historical whole-store equivalence is extraction evidence; future changes to
+supported store, record and diagnostic contracts are governed by their current contract tests.
+The original web run/sprint protocol, transport and staged-reference recovery cases remain in
+integration-board; the original uncut coupling scanner remains in CI. Historical whole-store
+packet equality does not describe the added INEF-04 derived files; canonical/request-index bytes
+and replay remain the supported contract. The write-fault fixture still targets canonical/request
+writes, and counts its canonical orphan independently of the derived lookup.
+
+`tests.test_run_ref_lookup` and `tests.test_web_card_runs` (unit) cover INEF-04 with temporary files.
+The real `WebApp.handle` card rendering path separately counts bootstrap reads, canonical opens
+and decoding, lookup opens and mutations at N/2N foreign history. First and repeated GETs use
+three target records plus four lookup reads, or zero canonical records plus two lookup reads for
+an absent card, with no mutations or lifecycle/audit calls. Claimed, unknown/unresolved, running,
+deadline, result, unavailable and stored terminal evidence use the existing observer. Process
+identity is injected; these fixtures prove no kernel liveness or installed service behavior.
+File-only cases cover released-history bootstrap, repeat preparation, subsequent claims,
+missing/dirty/corrupt lookup, interrupted canonical/membership/presence/complete phases, ordered
+reader/writer overlap, recovery, request replay/settlement and canonical admission refusal.
+The command startup fixture corrupts a canonical record before preparation, verifies a typed
+diagnostic and continued serving, and counts repeated HTML reads of the unavailable runs section
+with no repair/writes and preserved canonical/history/request-index bytes. Target corruption after
+successful preparation remains separately covered with its precise filename/error envelope.
+The startup fixtures replace serving and unrelated read sources and touch no socket. Original real
+runtime/backend, API/CLI lifecycle, transport and recovery checks remain in their native CI shards.
+
+`tests.test_task_protocol_owners` (unit) checks DEC-01's six task files, unique owning
+definitions and exact baseline ASTs (including decorators/defaults/annotations), operative
+instance and owner-global patches, shared error identities and recovery refusal distinctions.
+`docs/task-protocol-inventory.json` is a capture of dc84b45e source, not an independently
+executed baseline. Existing task/board, dispatcher and recovery fault suites keep their
+CI manifest owners. The `task-protocol-graph` workflow runs on task-owner pull requests or manual
+dispatches, using the frozen, byte-identical
+ummanu-220 research scanner against its exact dispatched SHA in CI and uploads the uncut
+tier_none graph and full SCC membership. Its `.txt` fixture is research source, never imported
+by the product or local tests; this avoids a second implementation of the coupling model.
+
 ## Suite manifest
 
 `tests/ci-shards.txt` owns the taxonomy: every top-level `tests/test_*.py` occurs exactly once, under
@@ -278,6 +380,26 @@ The module set is exactly `unit` + `component` from `scripts/ci_test_shards.py::
 The existing validator checks all CI ownership for duplicate, stale, missing or unclaimed modules and
 empty shards. This validation is not a discovery fallback. The other seven shards run only in exact-SHA
 CI. `tests/__init__.py` supplies the hermetic defaults before any selected test module imports.
+
+The config boundary adds `tests.test_config_boundary` to `unit`; the manifest now owns 313
+modules. Its shared policy and storage fixtures check effective limits, draft validation and the
+released storage alias. `tests.test_kernel_import_boundary` follows config's actual reachable
+nested/relative imports, aliases, string targets and package ancestors and caps that closure at ten
+modules, alongside the TaskError leaf and board package guards. It parses only reachable files
+through `tests.source_trees`. The component `tests.test_config_check` exercises cross-family
+diagnostics through native `config check` and offline `doctor`; the policy owner is
+`ummanu.kernel.sprint_policy`, storage is `ummanu.runtime.onboarding_storage`, and fallback
+diagnostics belong to `ummanu.infra.fallback`. Sprint admission and onboarding/upgrade packaging
+remain in their existing CI shards.
+
+`tests.test_cleanup_foundation` belongs to `unit`: it guards the ownership/journal imports and
+cold imports, checks shared identities and mocked lock acquisition/order, and uses a fake clock
+for replay waits, nested deadlines, before-effect reservation and publication after work exhaustion.
+Small released-source journal goldens compare persisted byte hashes for state, retained head evidence,
+v1 migration and copy/publication/archive crash recovery. Actual concurrent locks and runtime effects
+remain in integration-dispatcher (`bounded_cleanup_replay`, `owned_cleanup`, `narrow_cleanup_lock`,
+`cleanup_journal_layout`), integration-recovery (`cleanup_journal_migration`, `bulk_ownership_lane`)
+and integration-board (`cleanup_lock_sql`). These suites run in CI only.
 
 The historical ummanu-202 routing baseline, measured on the control host on 2026-10-10, contained
 141 modules and 2,644 tests:
@@ -674,6 +796,11 @@ Timing rollout exposed four modules containing real integration work. Their asse
 fixtures are retained in CI: `test_docker_guard` executes installed role wrappers and native
 tool subprocesses in runtime-component; `test_owned_cleanup` and `test_bounded_cleanup_replay`
 exercise real Git, process termination, journals and runtime cleanup in integration-dispatcher;
-`test_measurement_script` runs loopback HTTP and real cadence waits in integration-board.
+`test_measurement_script` runs loopback HTTP in integration-board.
 The original component CI report observed a 94.627437s cleanup replay module, a 10.425188s
 guard test and an 18.513881s measurement test. The journal-layout component tests remain local.
+Since ummanu-240 the measurement module keeps the poll's three-second cadence and 100 ms
+tolerance on a virtual clock injected through the script's `CLOCK` seam: a case chooses whether a
+poll starts late, and the stub orders answers by events rather than sleeps. A virtual poll is
+released only after every earlier poll has read its start. One smoke case runs the real clock and
+asserts only scheduler-independent facts: program-order launch and no poll before its schedule.

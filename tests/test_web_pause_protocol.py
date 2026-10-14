@@ -13,21 +13,25 @@ fixture's own data plane and its `FakeHost`.
 from __future__ import annotations
 
 import ast
+import inspect
 import json
-import re
 import unittest
 from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
+from tests import source_trees
 from tests.webproto_pause_fixtures import EXISTING_CARD, PauseProtocolFixture
 from ummanu.board.sql_cards import BOARD_ID
 from ummanu.config import validate
 from ummanu.dispatch import pause_ops as dispatcher_pause_ops
-from ummanu.dispatch.pause_ops import PauseCommandCompleted
-from ummanu.dispatch.pause_ops import pause as dispatcher_pause
-from ummanu.dispatch.pause_ops import resume as dispatcher_resume
+from ummanu.dispatch.pause_ops import (
+    PauseCommandCompleted,
+    pause as dispatcher_pause,
+    resume as dispatcher_resume,
+)
 from ummanu.dispatch.types import DispatcherError
+from ummanu.webproto.boundary import operations
 from ummanu.webproto.errors import OwnerConflict, ReadError, ValidationRefused
 from ummanu.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
 from ummanu.webproto.pause_reads import DRAIN, PIPELINE_WIDE, PauseReadLayer
@@ -469,41 +473,23 @@ class DrainOperationTests(PauseProtocolFixture):
         self.assertEqual(self.pause_payload(), frozen)
 
     def test_a_drain_names_no_mode_and_no_freeze_is_reachable_from_this_layer(self) -> None:
-        """Criterion 5 as structure: there is no argument, default or path that produces a freeze.
+        """Criterion 5 on the public surface: there is no argument, default or operation that freezes.
 
-        Checked on the source rather than by calling it, because what has to hold is that no
-        spelling exists: an operation that took a mode would pass this suite by never being handed
-        `freeze` in a test, and fail an operator the first time something else passed one down.
+        An operation that took a mode would pass every other test here by never being handed
+        `freeze`, so the surface itself is pinned: two operations, a drain without a mode, and a
+        mode handed to it anyway refused before anything is written.
         """
-        source = (
-            Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto" / "pause_ops.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        layer = next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ClassDef) and node.name == "PauseOperationLayer"
-        )
-        methods = {node.name: node for node in layer.body if isinstance(node, ast.FunctionDef)}
-        # The public surface: two operations, and neither of them is a freeze.
-        self.assertEqual(
-            sorted(name for name in methods if not name.startswith("_")),
-            ["pause_drain", "pause_resume"],
-        )
-        drain = methods["pause_drain"]
-        arguments = [argument.arg for argument in (*drain.args.args, *drain.args.kwonlyargs)]
-        self.assertEqual(arguments, ["self", "actor", "reason"])
-        self.assertEqual(drain.args.defaults, [])
-        self.assertEqual([default for default in drain.args.kw_defaults if default], [])
-        # And the mode it hands down is the drain constant, not a value that reached it.
-        modes = [
-            keyword.value
-            for node in ast.walk(drain)
-            if isinstance(node, ast.Call)
-            for keyword in node.keywords
-            if keyword.arg == "mode"
-        ]
-        self.assertEqual([getattr(mode, "id", None) for mode in modes], ["DRAIN"])
+        layer = self.pause_ops()
+        self.assertEqual(operations(PauseOperationLayer), ("pause_drain", "pause_resume"))
+        parameters = inspect.signature(layer.pause_drain).parameters
+        self.assertEqual(list(parameters), ["actor", "reason"])
+        self.assertEqual([name for name, parameter in parameters.items() if parameter.default is not parameter.empty], [])
+        with self.assertRaises(TypeError):
+            layer.pause_drain(actor="operator", reason="host maintenance", mode="freeze")  # type: ignore[call-arg]
+        self.assertFalse(self.pause_file().exists())
+        # And the mode a drain writes is the drain, whoever asked.
+        layer.pause_drain(actor="operator", reason="host maintenance")
+        self.assertEqual(self.pause_payload()["mode"], DRAIN)
 
     def test_a_missing_actor_or_reason_is_a_validation_refusal(self) -> None:
         for actor, reason in (("", "a reason"), ("operator", "")):
@@ -643,11 +629,8 @@ class ErrorContractTests(PauseProtocolFixture):
         raised: dict[str, set[str]] = {name: set() for name in PAUSE_ERRORS}
         broken = str(self._broken_instance())
 
-        # validation, on all four: an installation whose config does not validate, and for the
-        # drain also the operation's own missing input.
-        raised["pause_drain"].add(
-            self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason=""))
-        )
+        # backend_unavailable, on all four: an installation whose config does not validate, the code
+        # every layer gives it (CON-07).
         raised["pause_drain"].add(
             self._code(lambda: PauseOperationLayer(broken).pause_drain(actor="operator", reason="why"))
         )
@@ -656,6 +639,20 @@ class ErrorContractTests(PauseProtocolFixture):
         )
         raised["pause_state"].add(self._code(PauseReadLayer(broken).pause_state))
         raised["pause_scope"].add(self._code(PauseReadLayer(broken).pause_scope))
+
+        # validation: the drain's own missing input, and for both writes a head registry that does
+        # not validate.
+        raised["pause_drain"].add(
+            self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason=""))
+        )
+        heads = DispatcherError("invalid_heads", "the head registry does not validate")
+        with mock.patch("ummanu.webproto.pause_ops.runtime_from_args", side_effect=heads):
+            raised["pause_drain"].add(
+                self._code(lambda: PauseOperationLayer(self.instance).pause_drain(actor="operator", reason="why"))
+            )
+            raised["pause_resume"].add(
+                self._code(lambda: PauseOperationLayer(self.instance).pause_resume(actor="operator"))
+            )
 
         # owner_conflict: a well-formed drain refused on the state of the world.
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
@@ -674,22 +671,6 @@ class ErrorContractTests(PauseProtocolFixture):
         for operation, documented in PAUSE_ERRORS.items():
             with self.subTest(operation=operation):
                 self.assertEqual(raised[operation], set(documented))
-
-    def test_the_published_table_records_exactly_those_codes(self) -> None:
-        """`docs/PROTOCOLS.md` is held to the contract, not trusted to have kept up with it."""
-        protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
-            encoding="utf-8"
-        )
-        documented: dict[str, tuple[str, ...]] = {}
-        for line in protocols.splitlines():
-            cells = [cell.strip() for cell in line.split("|")]
-            if len(cells) != 6:
-                continue
-            operation = re.fullmatch(r"`(pause_[a-z]+)`", cells[1])
-            if operation is None or operation.group(1) not in PAUSE_ERRORS:
-                continue
-            documented[operation.group(1)] = tuple(re.findall(r"`([a-z_]+)`", cells[4]))
-        self.assertEqual(documented, PAUSE_ERRORS)
 
 
 class CommandClientTests(PauseProtocolFixture):
@@ -772,14 +753,14 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(status, 2)
         self.assertEqual(document["error"]["code"], "usage")
 
-    def test_an_invalid_instance_keeps_the_exit_status_it_always_had(self) -> None:
-        """Criterion 8 on the configuration refusal, which used to be the dispatcher's own exit 2.
+    def test_an_invalid_instance_answers_every_pause_command_with_one_status(self) -> None:
+        """The configuration refusal is `backend_unavailable` (exit 1) on all four commands (CON-07).
 
-        Before these commands were clients, every one of them reached the dispatcher through
-        `runtime_from_args`, whose `invalid_instance` is a `DispatcherError` with exit status 2. A
-        script reading that status must keep reading it, so the layer's typed code for a config that
-        does not validate is `validation` and not `backend_unavailable`. No layer is substituted
-        here: these run the real handlers over a real broken installation.
+        It used to be `validation` (exit 2, the dispatcher's own `invalid_instance`) here and in the
+        command-history reads, while every other reader answered `backend_unavailable` for the same
+        config, so HTTP gave it 400 on some routes and 503 on the rest. One cause now has one code
+        and so one status. No layer is substituted here: these run the real handlers over a real
+        broken installation.
         """
         from ummanu.dispatch import commands as dispatcher_commands
 
@@ -796,7 +777,7 @@ class CommandClientTests(PauseProtocolFixture):
             with self.subTest(command=name):
                 with mock.patch("sys.stdout"), mock.patch("sys.stderr"):
                     status = handler(self._args(instance=str(broken), data_dir=None, **extra))
-                self.assertEqual(status, 2)
+                self.assertEqual(status, 1)
 
     def test_pause_freeze_does_not_go_through_the_soft_path(self) -> None:
         """Criterion 5 at the command: the two spellings reach two implementations."""
@@ -1060,7 +1041,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         A test that only calls the operations passes for as long as nobody moves the decision back
         out; this fails the moment the assignment leaves the locked span.
         """
-        tree = ast.parse(
+        tree = source_trees.parse(
             (Path(__file__).resolve().parents[1] / "src" / "ummanu" / "dispatch" / "pause_ops.py").read_text(
                 encoding="utf-8"
             )
@@ -1095,29 +1076,47 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         self.assertNotIn("_with_status", called)
 
     def test_no_operation_of_the_layer_reads_the_flag_to_decide_what_it_did(self) -> None:
-        """Criterion 1 at the layer: there is no flag read here to infer an action from."""
-        source = (
-            Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto" / "pause_ops.py"
-        ).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        layer = next(
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ClassDef) and node.name == "PauseOperationLayer"
+        """Criterion 1 at the layer: the action is the dispatcher's answer, whatever the flag says.
+
+        Each operation runs over a flag that contradicts the dispatcher's answer, both when the
+        answer is returned and when it arrives on `PauseCommandCompleted`. A layer that inferred
+        the action from the flag would report what the flag suggests instead. The runtime is a bare
+        object, so a layer that asked it anything would fail on the attribute.
+        """
+        refused = DispatcherError("unsupported_legacy_record", "the records do not convert", 1)
+        cases = (
+            # (operation, whether a drain is held before it, what the dispatcher decided)
+            ("pause_drain", True, {"step": "pause", "action": "paused"}),
+            ("pause_drain", False, {"step": "pause", "action": "noop"}),
+            ("pause_resume", False, {"step": "resume", "action": "resumed", "resumed_mode": DRAIN}),
+            ("pause_resume", True, {"step": "resume", "action": "noop"}),
         )
-        # The runtime is handed to the dispatcher and never asked anything by this layer.
-        self.assertEqual(
-            sorted(
-                {
-                    node.attr
-                    for node in ast.walk(layer)
-                    if isinstance(node, ast.Attribute) and getattr(node.value, "id", "") == "runtime"
-                }
-            ),
-            [],
-        )
-        for spelling in ("pause.load", "normalize_pause_mode", "UNREADABLE_FLAG"):
-            self.assertNotIn(spelling, source)
+        for operation, held, decision in cases:
+            for completed in (False, True):
+                with self.subTest(operation=operation, held=held, action=decision["action"], completed=completed):
+                    if held:
+                        dispatcher_pause(self.runtime, mode=DRAIN, actor="steward", reason="a window")
+                    else:
+                        self.pause_file().unlink(missing_ok=True)
+                    calls: list[str] = []
+
+                    def answer(*_args, decision=decision, completed=completed, calls=calls, **_kwargs):
+                        calls.append("dispatcher")
+                        if completed:
+                            raise PauseCommandCompleted(decision, refused, warnings=[])
+                        return dict(decision)
+
+                    target = "_pause" if operation == "pause_drain" else "_resume"
+                    with mock.patch(f"ummanu.webproto.pause_ops.{target}", answer):
+                        layer = self.pause_ops(runtime=object())
+                        if operation == "pause_drain":
+                            document = layer.pause_drain(actor="operator", reason="host maintenance")
+                        else:
+                            document = layer.pause_resume(actor="operator")
+                    self.assertEqual(calls, ["dispatcher"])
+                    self.assertEqual(document["action"], decision["action"])
+                    self.assertEqual(document["changed"], decision["action"] != "noop")
+                    self.assertEqual(self.pause_file().exists(), held)
 
     def test_a_caller_that_does_not_know_the_decision_answers_exactly_as_before(self) -> None:
         """`ummanu pause freeze` and the tick's auto-resume are not clients of this, and stay put.
@@ -1172,18 +1171,6 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
                 # The resume itself happened; only its render refused, which is what makes the
                 # error field the one thing this caller reports about it.
                 self.assertFalse(self.pause_file().exists())
-
-    def test_the_published_prose_says_where_the_action_is_decided(self) -> None:
-        """Criterion 6: the sentence that keeps the next reader from reintroducing the inference."""
-        protocols = (Path(__file__).resolve().parents[1] / "docs" / "PROTOCOLS.md").read_text(
-            encoding="utf-8"
-        )
-        for promise in (
-            "decided inside the production tick lock",
-            "is not evidence of which command set it",
-            "PauseCommandCompleted",
-        ):
-            self.assertIn(promise, protocols)
 
 
 def _takes_the_tick_lock(node: ast.With) -> bool:

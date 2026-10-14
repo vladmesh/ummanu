@@ -18,27 +18,22 @@ from pathlib import Path
 
 from ummanu.board.local_run import parse_local_run_policy
 from ummanu.runtime import docker_guard, test_guard
-from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path
+from ummanu.runtime.paths import PRODUCT_ENV, default_instance_path, env_value, legacy_name
 from ummanu.runtime_env import RuntimeEnvError, parse_runtime_env
 
 # The one module every launcher runs as `python3 -P -m <this> exec --role ...`.
 ENTRY_POINT = "ummanu.runtime.role_env"
 
-RUNTIME_ENV_FILE_ENV = "TA_RUNTIME_ENV_FILE"
-UMMANU_RUNTIME_ENV_FILE_ENV = "UMMANU_RUNTIME_ENV_FILE"
-# Packaged automation units use the TA_ spelling, dispatcher-launched heads the UMMANU_ one. The
-# UMMANU_ pin wins, so recovery cannot materialize secrets into an ambient unit's runtime.env.
-RUNTIME_ENV_FILE_ENVS = (UMMANU_RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_FILE_ENV)
+RUNTIME_ENV_FILE_ENV = "UMMANU_RUNTIME_ENV_FILE"
+UMMANU_RUNTIME_ENV_FILE_ENV = RUNTIME_ENV_FILE_ENV
+# Released units used TA_; a canonical launcher pin wins over their ambient setting.
+RUNTIME_ENV_FILE_ENVS = (RUNTIME_ENV_FILE_ENV, legacy_name(RUNTIME_ENV_FILE_ENV))
 RUNTIME_ENV_DEFAULT = str(default_instance_path() / "runtime.env")
 
 
 def runtime_env_path() -> Path:
     """The runtime env file, resolved per call so a process moved onto another installation follows."""
-    return Path(
-        next(
-            (os.environ[name] for name in RUNTIME_ENV_FILE_ENVS if os.environ.get(name)), RUNTIME_ENV_DEFAULT
-        )
-    )
+    return Path(env_value(RUNTIME_ENV_FILE_ENV, RUNTIME_ENV_DEFAULT, nonempty=True))
 
 
 # For ummanu.session's launch error: the file selected at import.
@@ -46,17 +41,18 @@ RUNTIME_ENV = runtime_env_path()
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-RUNTIME_PYTHONPATH_ENV = "TA_RUNTIME_PYTHONPATH"
+RUNTIME_PYTHONPATH_ENV = "UMMANU_RUNTIME_PYTHONPATH"
+RUNTIME_PYTHONPATH_ENVS = (RUNTIME_PYTHONPATH_ENV, legacy_name(RUNTIME_PYTHONPATH_ENV))
 
 
 def runtime_product_root() -> Path:
     """The checkout a launched role imports the product from, resolved per call.
 
-    ``TA_RUNTIME_PYTHONPATH``, then the configured ``UMMANU_REPO`` (an alternate checkout binds it in
+    ``UMMANU_RUNTIME_PYTHONPATH`` (legacy ``TA_RUNTIME_PYTHONPATH``), then ``UMMANU_REPO`` (bound in
     the units and launch command it renders), else this module's own checkout, which is importable.
     Never the dispatcher's running checkout by default, nor an assumed ``~/ummanu``.
     """
-    configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
+    configured = env_value(RUNTIME_PYTHONPATH_ENV, nonempty=True) or os.environ.get(PRODUCT_ENV)
     return Path(configured).expanduser() if configured else REPO_ROOT
 
 
@@ -112,6 +108,8 @@ MEMORY_ACCESS_TOKEN_ENV = "UMMANU_MEMORY_ACCESS_TOKEN"
 # The `--actor` board commands default to: a worker/reviewer head's profile, else the role name.
 BOARD_ACTOR_ENV = "BOARD_ACTOR"
 UNIT_BOUND_ENV = (
+    *RUNTIME_ENV_FILE_ENVS,
+    *RUNTIME_PYTHONPATH_ENVS,
     "UMMANU_INSTANCE",
     "UMMANU_REPO",
     OBSERVER_SPRINT_ENV,
@@ -122,7 +120,7 @@ UNIT_BOUND_ENV = (
 # Launcher-supplied identity only: runtime.env must never let a head claim another sprint or name.
 LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV)
 # What a launched process has to be told about the installation it belongs to.
-LAUNCH_BOUND_ENV = (*RUNTIME_ENV_FILE_ENVS, "UMMANU_INSTANCE", "UMMANU_REPO")
+LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV, "UMMANU_INSTANCE", "UMMANU_REPO")
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": NONSECRET_ENV,
@@ -288,11 +286,23 @@ def runtime_env(
 
     env: dict[str, str] = {}
     for key, value in base.items():
-        if key in source and key not in allowed:
+        if (
+            key in source
+            and key not in allowed
+            and key not in RUNTIME_ENV_FILE_ENVS
+            and key not in RUNTIME_PYTHONPATH_ENVS
+        ):
             continue
         if _is_sensitive_name(key) and key not in allowed:
             continue
         env[key] = value
+
+    # Only trusted ambient bindings cross this seam; runtime.env grants neither spelling.
+    for name in (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV):
+        binding_value = env_value(name, nonempty=True, environ=base)
+        env.pop(legacy_name(name), None)
+        if binding_value is not None:
+            env[name] = binding_value
 
     for key in allowed:
         if key in base and key in UNIT_BOUND_ENV:
@@ -419,7 +429,16 @@ def launch_binding() -> list[str]:
     the command; otherwise a non-default installation's role reads ``paths.default_instance_path``.
     Only names the launcher was given are rendered.
     """
-    return [f"{name}={shlex.quote(value)}" for name in LAUNCH_BOUND_ENV if (value := os.environ.get(name))]
+    bindings = []
+    for name in LAUNCH_BOUND_ENV:
+        value = (
+            env_value(name, nonempty=True)
+            if name in (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV)
+            else os.environ.get(name)
+        )
+        if value:
+            bindings.append(f"{name}={shlex.quote(value)}")
+    return bindings
 
 
 def wrap_shell_command(

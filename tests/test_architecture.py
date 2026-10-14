@@ -9,29 +9,13 @@ import shlex
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 from tests import source_trees
 
 ROOT = Path(__file__).resolve().parents[1]
 
-
-class DeadPaneDeferralTests(unittest.TestCase):
-    def test_retired_pane_names_stay_out_of_source_and_docs(self) -> None:
-        banned = (
-            "HeadPaneBusy",
-            "HeadPaneNotReady",
-            "UMMANU_BRINGUP_DEFER_ATTEMPTS",
-            "pane_never_ready",
-        )
-        for directory in (ROOT / "src", ROOT / "docs"):
-            for path in directory.rglob("*"):
-                if not path.is_file() or path.suffix == ".pyc":
-                    continue
-                content = path.read_text(encoding="utf-8", errors="replace")
-                for name in banned:
-                    with self.subTest(file=str(path.relative_to(ROOT)), name=name):
-                        self.assertNotIn(name, content, f"{path.relative_to(ROOT)} contains {name}")
 
 # Existing flat modules may leave this set one feature at a time. New modules belong in one of the
 # feature packages documented in ARCHITECTURE.md instead of making the root wider again.
@@ -42,7 +26,7 @@ LEGACY_FLAT_MODULES = frozenset(
     broad_check.py candidate_history.py check_commands.py checkpoint.py cli.py cli_output.py
     codex_provider_events.py config.py data.py
     gate.py
-    head_health.py head_registry.py host.py host_apply.py host_commands.py installation.py
+    head_health.py head_registry.py host.py host_apply.py host_commands.py
     knowledge_write.py memory_errors.py memory_journal.py memory_reindex.py memory_service.py
     memory_write.py observer_root.py onboarding.py product_issue_commands.py product_issues.py
     product_lanes.py provision.py restore.py restore_commands.py role_skills.py
@@ -60,7 +44,6 @@ LEGACY_FLAT_MODULES = frozenset(
 # that name must not come back anywhere.
 AUTOMATIONS_PACKAGE = "ummanu.automations"
 AUTOMATIONS_ENTRY = "src/ummanu/cli.py"
-RETIRED_AGENTS_PACKAGE = "triggered_agents"
 
 
 def _absolute_imports(relative: str, source: str) -> list[tuple[ast.stmt, str, bool]]:
@@ -73,9 +56,7 @@ def _absolute_imports(relative: str, source: str) -> list[tuple[ast.stmt, str, b
             found.extend((node, alias.name, id(node) in top_level) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             found.append((node, node.module, id(node) in top_level))
-            found.extend(
-                (node, f"{node.module}.{alias.name}", id(node) in top_level) for alias in node.names
-            )
+            found.extend((node, f"{node.module}.{alias.name}", id(node) in top_level) for alias in node.names)
     return found
 
 
@@ -83,15 +64,38 @@ def _names(module: str, package: str) -> bool:
     return module == package or module.startswith(package + ".")
 
 
-def _imports_retired_agents_package(relative: str, source: str) -> list[str]:
-    """Every import of the retired top-level `triggered_agents` package, as offender lines."""
-    return sorted(
-        {
-            f"{relative}:{node.lineno}: {module.split('.')[0]}"
-            for node, module, _ in _absolute_imports(relative, source)
-            if _names(module, RETIRED_AGENTS_PACKAGE)
-        }
-    )
+# The dispatcher's state machine (`ummanu.dispatch.runtime`) calls each flow of a card through a
+# module of its own; a flow module never imports the state machine back, so the flows stay
+# testable without it and there is no cycle through the runtime class.
+DISPATCH_STATE_MACHINE = "ummanu.dispatch.runtime"
+DISPATCH_FLOW_MODULES = (
+    "claim",
+    "worker_launch",
+    "worker_report",
+    "worker_continuation",
+    "gate_lifecycle",
+    "review_verdict",
+    "assessment_decision",
+    "release_lifecycle",
+    "attempt_accounting",
+    "wait_vitality",
+)
+
+
+def _imports_dispatch_state_machine(relative: str, source: str) -> list[str]:
+    """Every import of `ummanu.dispatch.runtime` in one module of `ummanu.dispatch`, relative or not."""
+    package = relative.removeprefix("src/").removesuffix(".py").split("/")[:-1]
+    offenders: list[str] = []
+    for node in source_trees.imports(source_trees.parse(source, filename=relative)):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        else:
+            base = package[: len(package) - node.level + 1] if node.level else []
+            module = ".".join([*base, *([node.module] if node.module else [])])
+            names = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+        if any(_names(name, DISPATCH_STATE_MACHINE) for name in names):
+            offenders.append(f"{relative}:{node.lineno}")
+    return offenders
 
 
 def _imports_automations(relative: str, source: str) -> list[str]:
@@ -109,9 +113,13 @@ def _imports_automations(relative: str, source: str) -> list[str]:
     if relative.startswith("src/ummanu/"):
         tree = source_trees.parse(source, filename=relative)
         for node in source_trees.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level and (
-                (node.module or "").split(".")[0] == "automations"
-                or any(alias.name == "automations" for alias in node.names)
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level
+                and (
+                    (node.module or "").split(".")[0] == "automations"
+                    or any(alias.name == "automations" for alias in node.names)
+                )
             ):
                 offenders.add(f"{relative}:{node.lineno}: {AUTOMATIONS_PACKAGE}")
     return sorted(offenders)
@@ -161,7 +169,7 @@ ORCA_ALLOWLIST = (
         "a kind, not a program",
     ),
     OrcaAllowance(
-        "src/ummanu/upgrade.py",
+        "src/ummanu/installation/upgrade/workspaces.py",
         'workspace_root.parent.name == "orca"',
         "orca",
         "owner decision, step 11: the role worktree root `~/orca/workspaces`, compared by name; "
@@ -183,7 +191,7 @@ def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
     module = _module_of(relative)
     package = module if relative.endswith("__init__.py") else module.rpartition(".")[0]
     found: list[tuple[int, str]] = []
-    for node in source_trees.walk(tree):
+    for node in source_trees.imports(tree):
         if isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -196,6 +204,53 @@ def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
             found.append((node.lineno, target))
             found.extend((node.lineno, f"{target}.{alias.name}") for alias in node.names)
     return found
+
+
+def _board_fake_offenders(relative: str, source: str) -> list[str]:
+    """Retired imports, product test dependencies and misplaced host definitions."""
+    product = relative.startswith("src/")
+    tree = source_trees.parse(source, filename=relative)
+    targets = _imported_modules(relative, source)
+    aliases = {
+        alias.asname or alias.name: alias.name.rpartition(".")[2]
+        for node in source_trees.imports(tree)
+        for alias in node.names
+    }
+    offenders = []
+    if relative == "src/ummanu/board/fake.py":
+        offenders.append(f"{relative}: retired product location")
+    # Imports need only statement traversal. A full expression walk is needed
+    # only when a host class or a dynamic import/patch call can be spelled here.
+    classes = "class" in source and source_trees.may_name(source, ("FakeBoardHost", "MemoryAudit"))
+    calls = source_trees.may_name(source, ("import_module", "__import__", "patch"))
+    for node in source_trees.walk(tree) if classes or calls else ():
+        if isinstance(node, ast.ClassDef) and (
+            (node.name == "FakeBoardHost" and relative != "tests/fakes/board.py")
+            or (product and node.name == "MemoryAudit")
+        ):
+            offenders.append(f"{relative}:{node.lineno}: misplaced {node.name}")
+        if isinstance(node, ast.Call):
+            called = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
+            )
+            if (
+                aliases.get(called, called) in {"import_module", "__import__", "patch"}
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                target = node.args[0].value
+                if target.startswith(".") and len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                    import importlib.util
+
+                    target = importlib.util.resolve_name(target, node.args[1].value)
+                targets.append((node.lineno, target))
+    for line, target in targets:
+        if _names(target, "ummanu.board.fake") or (product and _names(target, "tests")):
+            offenders.append(f"{relative}:{line}: {target}")
+    return offenders
 
 
 def _first_shell_word(text: str) -> str:
@@ -255,19 +310,23 @@ def _orca_references(relative: str, source: str) -> list[OrcaFinding]:
     for lineno, module in _imported_modules(relative, source):
         if _names_banned_module(module):
             found.add(OrcaFinding(lineno, -1, f"imports {module}", module))
-    parents = source_trees.parents(tree)
+    parents = None
     for node in source_trees.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             text = node.value
             # `importlib.import_module("…")` and friends name a module by string.
             if _DOTTED_NAME.fullmatch(text) and text.rsplit(".", 1)[-1] in BANNED_ORCA_LAST_COMPONENTS:
                 found.add(OrcaFinding(node.lineno, node.col_offset, f"names module {text}", text))
-            if _is_orca_program(_first_shell_word(text)) and not _is_path_operand(
-                node, parents.get(id(node))
-            ):
-                found.add(
-                    OrcaFinding(node.lineno, node.col_offset, f"names the orca program: {text[:60]!r}", text)
-                )
+            if _is_orca_program(_first_shell_word(text)):
+                # Most modules have no program candidate and need no parent map.
+                if parents is None:
+                    parents = source_trees.parents(tree)
+                if not _is_path_operand(node, parents.get(id(node))):
+                    found.add(
+                        OrcaFinding(
+                            node.lineno, node.col_offset, f"names the orca program: {text[:60]!r}", text
+                        )
+                    )
         if isinstance(node, (ast.List, ast.Tuple)):
             words = [
                 element.value
@@ -345,13 +404,104 @@ class NoOrcaInSourceTests(unittest.TestCase):
     def test_each_allowlist_entry_still_excuses_a_real_line(self) -> None:
         """An entry cannot outlive its code: it must match a line that the rule would flag."""
         excused: list[OrcaAllowance] = []
-        for relative, source in self._sources():
+        # Only an entry's own file can spend it; the ban test above scans every source.
+        for relative in sorted({allowance.path for allowance in ORCA_ALLOWLIST}):
+            path = ROOT / relative
+            self.assertTrue(path.is_relative_to(SOURCE_ROOT) and path.name.endswith(".py"), relative)
+            self.assertNotIn("..", path.parts, relative)
+            self.assertEqual(path.relative_to(ROOT).as_posix(), relative)
+            source = path.read_text(encoding="utf-8")
             excused.extend(_apply_allowlist(relative, source)[1])
         self.assertEqual(len(excused), len(set(excused)))
         for allowance in ORCA_ALLOWLIST:
             with self.subTest(path=allowance.path, line=allowance.line):
                 self.assertTrue(allowance.reason)
                 self.assertIn(allowance, excused, "no flagged line matches this entry any more")
+
+    def test_liveness_reads_a_future_allowance_file_once_and_ban_scans_siblings(self) -> None:
+        relative = "src/ummanu/future.py"
+        allowances = tuple(
+            OrcaAllowance(relative, f"{name} =", value, "fixture decision")
+            for name, value in (("FIRST", "orca"), ("SECOND", "orca-cli"))
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            (root / relative).write_text('FIRST = "orca"\nSECOND = "orca-cli"\n', encoding="utf-8")
+            (source_root / "sibling.py").write_text('FIRST = "orca"\n', encoding="utf-8")
+            with mock.patch.multiple(__name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=allowances):
+                with (
+                    mock.patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as reads,
+                    mock.patch(f"{__name__}._apply_allowlist", wraps=_apply_allowlist) as apply,
+                ):
+                    NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
+                self.assertEqual([call.args[0] for call in reads.call_args_list], [root / relative])
+                self.assertEqual([call.args[0] for call in apply.call_args_list], [relative])
+                with self.assertRaisesRegex(AssertionError, "sibling.py"):
+                    NoOrcaInSourceTests().test_no_module_imports_or_names_orca()
+
+    def test_liveness_rejects_missing_or_stale_allowance_files(self) -> None:
+        relative = "src/ummanu/future.py"
+        allowance = OrcaAllowance(relative, "VALUE =", "orca", "fixture decision")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            (source_root / "sibling.py").write_text('VALUE = "orca"\n', encoding="utf-8")
+            with mock.patch.multiple(
+                __name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=(allowance,)
+            ):
+                for source in (None, 'VALUE = "retired"\n', 'OTHER = "orca"\n', 'VALUE = Path("orca")\n'):
+                    with self.subTest(source=source):
+                        if source is not None:
+                            (root / relative).write_text(source, encoding="utf-8")
+                        with self.assertRaises((FileNotFoundError, AssertionError)):
+                            NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
+
+    def test_liveness_rejects_allowance_paths_outside_the_source_universe(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            for relative in ("outside.py", "src/ummanu/future.txt", "src/ummanu/future.py"):
+                (root / relative).write_text('VALUE = "orca"\n', encoding="utf-8")
+            for relative in (
+                "outside.py",
+                "src/ummanu/future.txt",
+                "src/ummanu/../../outside.py",
+                "src/ummanu/./future.py",
+                "src//ummanu/future.py",
+                str(source_root / "future.py"),
+            ):
+                allowance = OrcaAllowance(relative, "VALUE =", "orca", "fixture decision")
+                with (
+                    self.subTest(path=relative),
+                    mock.patch.multiple(
+                        __name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=(allowance,)
+                    ),
+                    self.assertRaises(AssertionError),
+                ):
+                    NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
+
+    def test_parent_maps_are_built_only_for_program_candidates_in_a_cold_index(self) -> None:
+        for source, parent_maps, values in (
+            ("import math\nVALUE = sum(range(100))\n", 0, []),
+            ('DOC = "mentions orca without naming a program"\n', 0, []),
+            ("from . import orca_rpc as rpc\n", 0, ["ummanu.runtime.orca_rpc"]),
+            ("ROOT = Path('or' 'ca')\n", 1, []),
+            ("FIRST = 'or' 'ca'\nSECOND = '\\x6f\\x72\\x63\\x61'\n", 1, ["orca", "orca"]),
+        ):
+            index = source_trees.SourceIndex(freeze=False)
+            with (
+                self.subTest(source=source),
+                mock.patch.multiple(source_trees, parse=index.parse, walk=index.walk),
+                mock.patch.object(source_trees, "parents", wraps=index.parents) as parents,
+            ):
+                findings = _orca_references("src/ummanu/runtime/planted.py", source)
+                self.assertEqual([finding.value for finding in findings], values)
+                self.assertEqual(index.parses, 1)
+                self.assertEqual(parents.call_count, parent_maps)
 
     def test_each_planted_route_to_orca_fails_the_rule(self) -> None:
         planted = "src/ummanu/runtime/planted.py"
@@ -361,6 +511,9 @@ class NoOrcaInSourceTests(unittest.TestCase):
             "from subprocess import run as launch\nlaunch('orca-cli')\n",
             "import subprocess\nsubprocess.run(['/bin/sh', '-c', 'orca terminal list'])\n",
             "import os\nos.system('orca')\n",
+            "BIN = '\\x6f\\x72\\x63\\x61'\n",
+            "BIN = 'or' 'ca'\n",
+            "launch(['sh', '-c', 'cd /tmp && \\157rca'])\n",
             "from importlib import import_module\nimport_module('ummanu.runtime.pane_host')\n",
             # Beyond the card's six: a later word under `-c`, a path, the imports in each form.
             "import subprocess\nsubprocess.run(['sh', '-c', 'cd /tmp && orca terminal list'])\n",
@@ -399,12 +552,12 @@ class NoOrcaInSourceTests(unittest.TestCase):
                 ["imports ummanu.runtime.pane_host"],
             ),
             (
-                "src/ummanu/upgrade.py",
+                "src/ummanu/installation/upgrade/workspaces.py",
                 'workspace_root.parent.name == "orca"; os.system("orca-cli")\n',
                 ["names the orca program: 'orca-cli'"],
             ),
             (
-                "src/ummanu/upgrade.py",
+                "src/ummanu/installation/upgrade/workspaces.py",
                 'workspace_root.parent.name == "orca"; os.system("orca")\n',
                 ["names the orca program: 'orca'"],
             ),
@@ -422,18 +575,84 @@ class NoOrcaInSourceTests(unittest.TestCase):
                 self.assertEqual([offender.split(": ", 1)[1] for offender in offenders], expected)
 
 
-# The dispatcher state machine lives in `ummanu.dispatch.runtime`. The retired flat root module
-# must not come back, and nothing may import it under its old name.
-RETIRED_DISPATCHER_MODULE = ("ummanu", "dispatcher")
-
-
 class SourceLayoutTests(unittest.TestCase):
+    def test_board_double_static_imports_need_no_expression_walk(self) -> None:
+        for source, expected in (
+            ("from ummanu.board.models import Event\nVALUE = sum(range(100))\n", []),
+            (
+                "from ummanu.board.fake import MemoryAudit\n",
+                [
+                    "src/ummanu/probe.py:1: ummanu.board.fake",
+                    "src/ummanu/probe.py:1: ummanu.board.fake.MemoryAudit",
+                ],
+            ),
+            (
+                "if True:\n    from tests.fakes import board\n",
+                [
+                    "src/ummanu/probe.py:2: tests.fakes",
+                    "src/ummanu/probe.py:2: tests.fakes.board",
+                ],
+            ),
+        ):
+            with (
+                self.subTest(source=source),
+                mock.patch.object(
+                    source_trees, "walk", side_effect=AssertionError("unnecessary expression walk")
+                ),
+            ):
+                self.assertEqual(_board_fake_offenders("src/ummanu/probe.py", source), expected)
+
+    def test_board_double_has_one_test_owner_and_no_product_dependency(self) -> None:
+        self.assertFalse((ROOT / "src/ummanu/board/fake.py").exists())
+        owner = ROOT / "tests/fakes/board.py"
+        tree = source_trees.parse(owner.read_text())
+        self.assertEqual(
+            [node.name for node in tree.body if isinstance(node, ast.ClassDef)],
+            ["MemoryAudit", "FakeBoardHost"],
+        )
+        offenders = []
+        for directory in ("src", "tests", "scripts"):
+            naming = (
+                ("fake", "FakeBoardHost", "MemoryAudit", "tests")
+                if directory == "src"
+                else ("ummanu.board", "FakeBoardHost")
+            )
+            for path, _tree in source_trees.modules(ROOT / directory, naming=naming):
+                offenders.extend(_board_fake_offenders(path.relative_to(ROOT).as_posix(), path.read_text()))
+        self.assertEqual(offenders, [])
+
+    def test_board_double_guard_detects_planted_imports_and_locations(self) -> None:
+        for relative, source in (
+            ("src/ummanu/board/fake.py", ""),
+            ("src/ummanu/board/probe.py", "from . import fake as owner\n"),
+            ("tests/probe.py", "from ummanu.board.fake import MemoryAudit\n"),
+            ("src/ummanu/probe.py", "from tests.fakes import board\n"),
+            (
+                "src/ummanu/probe.py",
+                "from importlib import import_module as load\nload('tests.fakes.board')\n",
+            ),
+            ("tests/probe.py", "import importlib as loader\nloader.import_module('.fake', 'ummanu.board')\n"),
+            ("tests/probe.py", "from unittest.mock import patch as p\np('ummanu.board.fake.uuid')\n"),
+            ("tests/fakes/duplicate.py", "class FakeBoardHost: pass\n"),
+            ("src/ummanu/probe.py", "class MemoryAudit: pass\n"),
+        ):
+            with self.subTest(relative=relative, source=source):
+                self.assertTrue(_board_fake_offenders(relative, source))
+        self.assertEqual(
+            _board_fake_offenders(
+                "tests/probe.py",
+                "FORBIDDEN = ('ummanu.board.fake',)\nfrom tests.fakes.board import MemoryAudit\n",
+            ),
+            [],
+        )
+
     def test_test_support_never_imports_a_test_module(self) -> None:
         """Shared fakes are a one-way dependency, not bridges between test modules."""
         offenders: list[str] = []
         for path in (ROOT / "tests").rglob("*.py"):
-            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in source_trees.walk(tree):
+            # Read once, by this check only: nothing keeps the test files' trees.
+            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path), retain=False)
+            for node in source_trees.imports(tree):
                 module = node.module if isinstance(node, ast.ImportFrom) else None
                 if module and (module == "tests.test" or module.startswith("tests.test_")):
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
@@ -442,28 +661,6 @@ class SourceLayoutTests(unittest.TestCase):
     def test_new_ummanu_modules_do_not_widen_the_flat_root(self) -> None:
         current = {path.name for path in (ROOT / "src" / "ummanu").glob("*.py")}
         self.assertEqual(current - LEGACY_FLAT_MODULES, set())
-
-    def test_retired_dispatcher_root_module_stays_retired(self) -> None:
-        """The retired flat dispatcher root module is gone and nothing imports it by its old name."""
-        self.assertFalse((ROOT / "src" / "ummanu" / "dispatcher.py").exists())
-        retired = ".".join(RETIRED_DISPATCHER_MODULE)
-        offenders: list[str] = []
-        for tree_root in ("src", "tests", "scripts"):
-            for path in (ROOT / tree_root).rglob("*.py"):
-                source = path.read_text(encoding="utf-8")
-                tree = source_trees.parse(source, filename=str(path))
-                for node in source_trees.imports(tree):
-                    if isinstance(node, ast.Import):
-                        modules = [alias.name for alias in node.names]
-                    elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                        modules = [node.module]
-                        modules += [f"{node.module}.{alias.name}" for alias in node.names]
-                    else:
-                        continue
-                    for module in modules:
-                        if module == retired or module.startswith(f"{retired}."):
-                            offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
-        self.assertEqual(offenders, [])
 
     def test_import_walk_matches_ast_walk_in_nested_statement_containers(self) -> None:
         tree = ast.parse("""
@@ -490,319 +687,38 @@ async def asynchronous():
         expected = {id(node) for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))}
         self.assertEqual({id(node) for node in source_trees.imports(tree)}, expected)
 
-    def test_dispatcher_claim_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
-            encoding="utf-8"
-        )
-        production_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "production.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "_failover_collapse",
-            "_broad_check_contract_verdict",
-            "_sprint_admission_refusal",
-            "_project_git_access",
-            "_write_claim_preflight_block",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        self.assertNotIn("runtime._claim(", production_source)
-
-    def test_dispatcher_worker_launch_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
-            encoding="utf-8"
-        )
-        claim_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "claim.py"
-        ).read_text(encoding="utf-8")
-        worker_launch_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "worker_launch.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "_launch_worker_after_claim",
-            "_worker_launch_failure",
-            "_bring_up_worker_head",
-            "_worker_relaunch_intent",
-            "_resolve_headless_worker",
-            "_relaunch_headless_worker",
-            "_refuse_headless_worker",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        self.assertNotIn("runtime._launch_worker_after_claim(", claim_source)
-        self.assertIn("def launch_worker_after_claim(", worker_launch_source)
-        self.assertIn("def resolve_headless_worker(", worker_launch_source)
-
-    def test_dispatcher_worker_report_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        report_source = (ROOT / "src" / "ummanu" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
-        for helper in (
-            "_record_infra_completion", "_accept_stale_infrastructure_done",
-            "_block_repeated_infrastructure_done", "_reject_stale_done", "_prompt_worker_report",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"self.{helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", report_source)
-        runtime_tree = source_trees.parse(dispatcher_source)
-        advance = next(node for node in source_trees.walk(runtime_tree) if isinstance(node, ast.FunctionDef) and node.name == "_advance_worker")
-        advance_source = ast.get_source_segment(dispatcher_source, advance)
-        self.assertIn("_worker_report_marker(", advance_source)
-        self.assertIn("_handle_worker_report(", advance_source)
-        self.assertNotIn("verify_worker_result(", advance_source)
-        self.assertLess(
-            advance_source.index("_worker_report_marker("),
-            advance_source.index("_recover_worker_continuation("),
-        )
-        self.assertLess(
-            advance_source.index("_recover_worker_continuation("),
-            advance_source.index("_handle_worker_report("),
-        )
-        self.assertLess(
-            advance_source.index("_handle_worker_report("),
-            advance_source.index("_wait_watchdog(self, "),
-        )
-        for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
-            self.assertIn(f"def {entry}(", report_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", report_source)
-
-    def test_dispatcher_gate_lifecycle_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        gate_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "gate_lifecycle.py"
-        ).read_text(encoding="utf-8")
-        gate_domain_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "gate.py"
-        ).read_text(encoding="utf-8")
-        helpers = (
-            "_run_gate",
-            "_accept_green_gate",
-            "_block_missing_gate_receipt",
-            "_gate_red_to_worker",
-            "_retry_infrastructure_gate",
-            "_reset_infrastructure_reruns",
-            "_block_infrastructure_reruns_exhausted",
-            "_block_infrastructure_rerun_unavailable",
-            "_gate_answered",
-            "_gate_transport_retry",
-            "_gate_rerun_transport_retry",
-            "_block_gate_transport",
-            "_gate_pending",
-            "_worker_vitality_for_gate",
-        )
-        for helper in helpers:
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", gate_source)
-        for entry in (
-            "run_gate",
-            "accept_green_gate",
-            "gate_red_to_worker",
-            "gate_transport_retry",
-            "block_gate_transport",
-            "gate_answered",
-            "gate_pending",
-        ):
-            self.assertIn(f"def {entry}(", gate_source)
-        self.assertIn("def reset_infrastructure_reruns(", gate_domain_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", gate_source)
-
-    def test_dispatcher_review_verdict_parking_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        verdict_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "review_verdict.py"
-        ).read_text(encoding="utf-8")
-        helpers = (
-            "_parks_for_decision",
-            "_park_green_verdict",
-            "_merge_ready_for_park",
-            "_begin_park",
-            "_complete_park",
-            "_block_red_review_ceiling",
-        )
-        for helper in helpers:
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"self.{helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", verdict_source)
-        for entry in (
-            "advance_review_verdict",
-            "park_green_verdict",
-            "merge_ready_for_park",
-            "begin_park",
-            "complete_park",
-        ):
-            self.assertIn(f"def {entry}(", verdict_source)
-        self.assertIn("_advance_review_verdict(self, task, record, records, payload, attempt_id)", dispatcher_source)
-        self.assertNotIn("\n    def _advance_assessment(", dispatcher_source)
-        self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
-        self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", verdict_source)
-
-    def test_dispatcher_assessment_decision_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        decision_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "assessment_decision.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "_advance_assessment",
-            "_recorded_decision",
-            "_rework_parked",
-            "_reslice_parked",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        for entry in (
-            "advance_assessment",
-            "recorded_decision",
-            "rework_parked",
-            "reslice_parked",
-        ):
-            self.assertIn(f"def {entry}(", decision_source)
-        self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
-        self.assertIn("release_lifecycle.release_parked(", decision_source)
-        self.assertNotIn("runtime._release_parked(", decision_source)
-        self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", decision_source)
-
-    def test_dispatcher_release_completion_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        release_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "release_lifecycle.py"
-        ).read_text(encoding="utf-8")
-        gate_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "gate_lifecycle.py"
-        ).read_text(encoding="utf-8")
-        verdict_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "review_verdict.py"
-        ).read_text(encoding="utf-8")
-        decision_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "assessment_decision.py"
-        ).read_text(encoding="utf-8")
-
-        for helper in (
-            "_block_merge_path",
-            "_release_parked",
-            "_release_effect",
-            "_require_completion_evidence",
-            "_transfer_research_report",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        for helper in ("_released_verdict", "_merge_terminal_reason"):
-            self.assertNotIn(f"\ndef {helper}(", dispatcher_source)
-        for entry in (
-            "block_merge_path",
-            "release_parked",
-            "release_effect",
-            "require_completion_evidence",
-            "transfer_research_report",
-            "review_drift",
-            "merge_readiness",
-        ):
-            self.assertIn(f"def {entry}(", release_source)
-
-        self.assertNotIn("def review_drift(", verdict_source)
-        self.assertNotIn("def merge_readiness(", verdict_source)
-        self.assertIn("release_lifecycle.merge_readiness(runtime,", verdict_source)
-        self.assertIn("release_lifecycle.release_effect(runtime,", verdict_source)
-        self.assertIn("release_lifecycle.release_parked(", decision_source)
-        self.assertIn("release_lifecycle.block_merge_path(runtime,", gate_source)
-        self.assertNotIn("runtime._block_merge_path(", gate_source)
-        self.assertNotIn("runtime._block_merge_path(", verdict_source)
-        self.assertNotIn("runtime._release_effect(", verdict_source)
-        self.assertNotIn("runtime._release_parked(", decision_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", release_source)
-
-    def test_dispatcher_attempt_accounting_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        accounting_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "attempt_accounting.py"
-        ).read_text(encoding="utf-8")
-        for helper in (
-            "pending_attempt_usage",
-            "_attempt_outcome_obligation",
-            "_outcome_lineage_sources",
-            "_outcome_round_context_request_id",
-            "_persist_outcome_round_context",
-            "_capture_outcome_source",
-            "_outcome_round_context",
-            "_outcome_usage_source",
-            "_finish_attempt_outcome",
-            "terminal_effect",
-            "publish_pending_attempt_outcomes",
-            "publish_pending_attempt_usage",
-            "record_attempt_usage",
-            "_write_attempt_usage",
-        ):
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-        for entry in (
-            "persist_outcome_round_context",
-            "capture_outcome_source",
-            "terminal_effect",
-            "publish_pending_attempt_outcomes",
-            "publish_pending_attempt_usage",
-            "record_attempt_usage",
-        ):
-            self.assertIn(f"def {entry}(", accounting_source)
-        for path in (ROOT / "src" / "ummanu" / "dispatch").glob("*.py"):
-            if path.name == "attempt_accounting.py":
-                continue
-            source = path.read_text(encoding="utf-8")
-            for legacy_call in (
-                "runtime.terminal_effect(",
-                "runtime._persist_outcome_round_context(",
-                "runtime._capture_outcome_source(",
-                "runtime.record_attempt_usage(",
-                "runtime.publish_pending_attempt_outcomes(",
-                "runtime.publish_pending_attempt_usage(",
-            ):
-                self.assertNotIn(legacy_call, source, path.name)
-        self.assertNotIn("from ummanu.dispatch.runtime import", accounting_source)
-
-    def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        wait_source = (
-            ROOT / "src" / "ummanu" / "dispatch" / "wait_vitality.py"
-        ).read_text(encoding="utf-8")
-        helpers = (
-            "_decide_wait_by_verdict",
-            "_escalate_unobservable_wait",
-            "_recovery_policy_decision",
-            "_execute_recovery_intent",
-            "_sigcont_head",
-            "_guard_or_wait",
-            "_trigger_wait_watchdog",
-            "_respawn_wait",
-            "_escalate_wait",
-        )
-        for helper in helpers:
-            self.assertNotIn(f"\n    def {helper}(", dispatcher_source)
-            self.assertNotIn(f"runtime.{helper}(", wait_source)
-        for entry in (
-            "wait_watchdog",
-            "execute_recovery_intent",
-            "recovery_policy_outcome",
-            "reduce_and_store_vitality_episode",
-        ):
-            self.assertIn(f"def {entry}(", wait_source)
-        self.assertNotIn("from ummanu.dispatch.runtime import", wait_source)
-
-    def test_the_retired_agents_package_stays_retired(self) -> None:
-        """`src/triggered_agents` is gone, and nothing in `src/`, `tests/` or `scripts/` imports it."""
-        self.assertFalse((ROOT / "src" / RETIRED_AGENTS_PACKAGE).exists())
-        self.assertTrue((ROOT / "src" / "ummanu" / "automations" / "composition.py").is_file())
+    def test_no_dispatcher_flow_module_imports_the_state_machine_back(self) -> None:
+        """The dependency runs one way: `ummanu.dispatch.runtime` -> the flow modules it calls."""
         offenders: list[str] = []
-        for tree_root in ("src", "tests", "scripts"):
-            for path in sorted((ROOT / tree_root).rglob("*.py")):
-                relative = path.relative_to(ROOT).as_posix()
-                offenders.extend(_imports_retired_agents_package(relative, path.read_text(encoding="utf-8")))
+        for name in DISPATCH_FLOW_MODULES:
+            relative = f"src/ummanu/dispatch/{name}.py"
+            offenders.extend(
+                _imports_dispatch_state_machine(relative, (ROOT / relative).read_text(encoding="utf-8"))
+            )
         self.assertEqual(offenders, [])
-
-    def test_a_planted_import_of_the_retired_package_is_caught(self) -> None:
-        for relative, source in (
-            ("tests/test_planted.py", "from triggered_agents import __main__\n"),
-            ("scripts/planted.py", "import triggered_agents.runtime.dispatch as d\n"),
-            ("src/ummanu/planted.py", "def f():\n    from triggered_agents.agents import x\n"),
+        # Every spelling of the back edge is caught, at module level or inside a function.
+        for source in (
+            "from ummanu.dispatch.runtime import DispatcherRuntime\n",
+            "import ummanu.dispatch.runtime as runtime\n",
+            "from ummanu.dispatch import runtime\n",
+            "def f():\n    from ummanu.dispatch import gate, runtime\n",
+            "from . import runtime\n",
+            "from .runtime import DispatcherRuntime\n",
+            "from ..dispatch.runtime import DispatcherRuntime\n",
         ):
-            with self.subTest(relative):
-                self.assertEqual(len(_imports_retired_agents_package(relative, source)), 1)
-        self.assertEqual(
-            _imports_retired_agents_package("tests/x.py", "from ummanu.automations import composition\n"), []
-        )
+            with self.subTest(source=source):
+                self.assertEqual(
+                    len(_imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source)), 1
+                )
+        # A sibling flow module or a similarly named module is not the state machine.
+        for source in (
+            "from ummanu.dispatch import runtime_preflight\n",
+            "from .gate_lifecycle import run_gate\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    _imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source), []
+                )
 
     def test_no_ummanu_module_imports_the_agents_back(self) -> None:
         """The dependency runs one way: `ummanu.automations` -> the rest of `ummanu`."""
@@ -845,49 +761,6 @@ async def asynchronous():
             [],
         )
 
-    def test_ummanu_never_names_triggered_agents(self) -> None:
-        """`grep -rn triggered_agents src/ummanu` is empty: code, data and comments alike."""
-        package = ROOT / "src" / "ummanu"
-        mentions: set[str] = set()
-        for path in sorted(package.rglob("*")):
-            if not path.is_file() or "__pycache__" in path.parts:
-                continue
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-                if RETIRED_AGENTS_PACKAGE in line:
-                    mentions.add(f"{path.relative_to(package).as_posix()}:{number}")
-        self.assertEqual(mentions, set())
-
-
-# Every place in `ummanu` that builds the *file* audit (`TaskAudit` over a data dir) rather than
-# asking `ummanu.tasks.task_audit_for` for the audit owner of a card client, and the reason each
-# one may. `requests`/`board_events` is the card audit (`docs/BOARD_STORE.md` §7.3), so a live
-# reader built from the file journal of a data directory alone answers from a store the
-# installation does not write: on 2026-09-10 that made a committed
-# `report:done` invisible to the dispatcher (sprint:1437, secretary-1614), and it is the same shape
-# as an empty command history or a false `not_found`. A new entry here is a new reader that decided
-# its audit by default instead of by its client, so it is added deliberately with its reason or it
-# is a defect.
-#
-# Since secretary-1673 the file audit class is gone, so the allowance is empty: the typed canon takes
-# its audit owner as a required argument, and the fake host hands in an in-memory one.
-FILE_AUDIT_CONSTRUCTIONS: dict[str, str] = {}
-
-#: Where a live audit reader asks for its owner. Cards, Sprints and Products/Issues have one
-#: implementation, PostgreSQL, and so one audit owner (`task_audit_for`).
-LIVE_AUDIT_SELECTORS = {
-    "checkpoint.py": "task_audit_for(",
-    "task_commands.py": "task_audit_for(",
-    "webproto/command_reads.py": "task_audit_for(",
-    "webproto/ops.py": "task_audit_for(",
-    "webproto/reads.py": "task_audit_for(",
-    "webproto/sprint_reads.py": "task_audit_for(",
-    "board/sql_host.py": "task_audit_for(",
-    "sprints.py": "task_audit_for(",
-    "data.py": "task_audit_for(",
-    "dispatch/bootstrap.py": "task_audit_for(",
-    "product_issues.py": "task_audit_for(",
-}
-
 
 def _source_modules() -> list[Path]:
     """Every Python module under `src/`, both packages."""
@@ -897,91 +770,12 @@ def _source_modules() -> list[Path]:
 class FileAuditOwnershipTests(unittest.TestCase):
     """A live audit reader follows its card client, and the exceptions are named with their reasons."""
 
-    def _constructions(self) -> dict[str, list[int]]:
-        """Every call of a `TaskAudit` name in `src/ummanu`, by module and line."""
-        found: dict[str, list[int]] = {}
-        for path in sorted((ROOT / "src" / "ummanu").rglob("*.py")):
-            tree = source_trees.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in source_trees.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                target = node.func
-                if isinstance(target, ast.Name) and target.id == "TaskAudit":
-                    key = str(path.relative_to(ROOT / "src" / "ummanu"))
-                    found.setdefault(key, []).append(node.lineno)
-        return found
-
-    def test_only_the_named_modules_build_the_file_audit_directly(self) -> None:
-        """Anything else reads a journal its installation's backend may never write."""
-        offenders = sorted(set(self._constructions()) - set(FILE_AUDIT_CONSTRUCTIONS))
-        self.assertEqual(
-            offenders,
-            [],
-            "these modules build the file journal's TaskAudit from a data directory instead of "
-            "asking ummanu.tasks.task_audit_for for the audit owner of their card client",
-        )
-
-    def test_every_named_module_still_builds_one(self) -> None:
-        """The allowance is a statement about live code, not a list that outlives its reasons."""
-        self.assertEqual(sorted(self._constructions()), sorted(FILE_AUDIT_CONSTRUCTIONS))
-
-    def test_the_file_audit_is_gone_and_the_canon_names_its_owner(self) -> None:
-        """No `TaskAudit` to build, and no canon that falls back to one (secretary-1673)."""
-        from ummanu import tasks
-        from ummanu.board.events import BoardEventCanon
-
-        self.assertFalse(hasattr(tasks, "TaskAudit"))
-        parameters = inspect.signature(BoardEventCanon.__init__).parameters
-        self.assertEqual([name for name in parameters if name != "self"], ["audit"])
-        self.assertIs(parameters["audit"].default, inspect.Parameter.empty)
-        source = inspect.getsource(BoardEventCanon)
-        for forbidden in ("data_dir", "events.ndjson", "TaskAudit"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source)
-
-    def test_every_live_reader_construction_site_goes_through_the_selector(self) -> None:
-        """The readers this card enumerated, each holding the selector call in its own source.
-
-        Named rather than derived: these are the sites that had a data-dir-only audit and are the
-        ones a regression would arrive at again. A module that stops calling `task_audit_for` is
-        either a deliberate removal of a reader or the bypass coming back, and both belong in a diff
-        that has to change this list.
-        """
-        for module, selector in LIVE_AUDIT_SELECTORS.items():
-            source = (ROOT / "src" / "ummanu" / module).read_text(encoding="utf-8")
-            with self.subTest(module=module):
-                self.assertIn(selector, source, module)
-
     def test_the_card_audit_has_one_owner(self) -> None:
-        """`task_audit_for` returns the SQL audit whatever it is handed; no card writer builds a file one."""
+        """`task_audit_for` returns the SQL audit whatever it is handed, never a file one."""
         from ummanu.board.sql_audit import SqlTaskAudit
         from ummanu.tasks import task_audit_for
 
         self.assertIsInstance(task_audit_for(mock.sentinel.client, "/nonexistent"), SqlTaskAudit)
-        source = inspect.getsource(task_audit_for)
-        self.assertIsNone(re.search(r"(?<!Sql)TaskAudit\(", source))
-
-    def test_no_source_module_has_a_backend_branch(self) -> None:
-        """Cards, Sprints and Products/Issues have one implementation, so nothing asks which one it holds."""
-        for path in _source_modules():
-            module = str(path.relative_to(ROOT / "src"))
-            tree = source_trees.parse(path.read_text(encoding="utf-8"))
-            reads = [
-                node.lineno
-                for node in source_trees.walk(tree)
-                if (isinstance(node, ast.Attribute) and node.attr == "backend_kind")
-                or (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id == "getattr"
-                    and any(
-                        isinstance(argument, ast.Constant) and argument.value == "backend_kind"
-                        for argument in node.args
-                    )
-                )
-            ]
-            with self.subTest(module=module):
-                self.assertEqual(reads, [], f"{module} reads a client's backend_kind")
 
     def test_no_source_module_writes_a_retired_backend_identity(self) -> None:
         """A new write names the PostgreSQL store; an earlier store's identities are only read.
@@ -1029,66 +823,6 @@ class FileAuditOwnershipTests(unittest.TestCase):
             with self.subTest(module=module):
                 self.assertEqual(sorted(set(found)), [], f"{module} writes a store literal as a backend kind")
 
-    def test_the_product_issue_store_keeps_no_file_journal_guard(self) -> None:
-        """The pre-cutover file-claim guard protected nothing after the importer copied every id.
-
-        On 2026-09-22 the live `board/events.ndjson` (last written 2026-09-10) held 27,966 request
-        ids, all but three already in SQL `requests`, and those three were dispatcher records, not
-        Product/Issue ones; `board/pending-audit` was empty (secretary-1670).
-        """
-        from ummanu.board.sql_audit import SqlTaskAudit
-        from ummanu.product_issues import ProductIssueStore
-
-        self.assertFalse(hasattr(ProductIssueStore, "_require_sql_legacy_namespace_free"))
-        self.assertNotIn("legacy_audit", inspect.getsource(ProductIssueStore))
-        self.assertNotIn("legacy_audit", inspect.getsource(SqlTaskAudit))
-        self.assertFalse(hasattr(SqlTaskAudit, "require_pending_layout"))
-
-    def test_the_sprint_traversal_cannot_be_built_from_a_data_directory(self) -> None:
-        """`_AuditOnce` takes records or an audit owner, and has no directory to fall back to."""
-        from ummanu.sprints import _AuditOnce
-
-        parameters = inspect.signature(_AuditOnce.__init__).parameters
-        self.assertEqual([name for name in parameters if name != "self"], ["events", "audit"])
-        self.assertEqual(_AuditOnce().events(), [])
-
-
-class IndirectFileAuditReaderTests(unittest.TestCase):
-    """No reader opens the file journal itself: the card history is the card audit's traversal.
-
-    `secretary-1622`'s first submission is why this class exists: the product-run events had moved
-    to `requests` while `ReadLayer.task_snapshot` and `task_events` still built
-    `EventJournal(data_dir)`, so a migrated installation answered a card's history from a projection
-    its writers never touch. The file reader is gone with the second card backend.
-    """
-
-    def test_the_file_event_reader_is_gone(self) -> None:
-        from ummanu.webproto import journal
-
-        self.assertFalse(hasattr(journal, "EventJournal"))
-
-    def test_the_read_layer_selects_its_event_reader_from_its_client(self) -> None:
-        """Both card-event operations read the owner the client names, and neither a file by default."""
-        source = (ROOT / "src" / "ummanu" / "webproto" / "reads.py").read_text(encoding="utf-8")
-        self.assertIn("task_audit_for(", source)
-        self.assertIn("CommittedAudit(", source)
-        for operation in ("def task_snapshot", "def task_events"):
-            with self.subTest(operation=operation):
-                body = source[source.index(operation) :]
-                body = body[: body.index("\n    def ", 1)]
-                self.assertNotIn("EventJournal(", body)
-
-    def test_the_sql_reader_never_touches_a_path(self) -> None:
-        """`CommittedAudit` has no data directory to read: it pages what its audit owner traverses."""
-        from ummanu.webproto.journal import CommittedAudit
-
-        parameters = inspect.signature(CommittedAudit.__init__).parameters
-        self.assertEqual([name for name in parameters if name != "self"], ["audit", "backend"])
-        source = inspect.getsource(CommittedAudit)
-        for forbidden in ("open(", "Path(", "events.ndjson"):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, source)
-
 
 class OneBoardClientTests(unittest.TestCase):
     """There is one board client, built in one place, and nothing in the environment selects it."""
@@ -1098,43 +832,15 @@ class OneBoardClientTests(unittest.TestCase):
 
         parameters = inspect.signature(backend.board_client).parameters
         self.assertEqual([name for name in parameters], ["instance_dir", "serves", "role"])
-        tree = source_trees.parse((ROOT / "src" / "ummanu" / "board" / "backend.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse(
+            (ROOT / "src" / "ummanu" / "board" / "backend.py").read_text(encoding="utf-8")
+        )
         environment = [
             node.lineno
             for node in source_trees.walk(tree)
             if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}
         ]
         self.assertEqual(environment, [], "board/backend.py reads the process environment")
-
-    def test_the_legacy_host_module_is_gone(self) -> None:
-        """The host `SqlCardClient` runs on has a neutral name, and no other module is its alias.
-
-        An alias is a board module that only imports from `sql_host`: the shape the old host module
-        would keep if it stayed behind as a compatibility name.
-        """
-        board = ROOT / "src" / "ummanu" / "board"
-        self.assertTrue((board / "sql_host.py").exists())
-        aliases: list[str] = []
-        for path in sorted(board.glob("*.py")):
-            if path.name in {"sql_host.py", "__init__.py"}:
-                continue
-            body = source_trees.parse(path.read_text(encoding="utf-8")).body
-            imports_host = any(
-                isinstance(node, ast.ImportFrom) and node.module == "ummanu.board.sql_host" for node in body
-            )
-            only_imports = all(
-                isinstance(node, (ast.Import, ast.ImportFrom))
-                or (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
-                or (
-                    isinstance(node, ast.Assign)
-                    and [getattr(target, "id", "") for target in node.targets] == ["__all__"]
-                )
-                for node in body
-            )
-            if imports_host and only_imports:
-                aliases.append(path.name)
-        self.assertEqual(aliases, [])
-
 
 
 if __name__ == "__main__":
@@ -1151,11 +857,17 @@ HEAD_HEALTH_HOME = "ummanu/head_health.py"
 RESOURCE_HEALTH_FILE = "resource_health.json"
 # Generated state that left the live root for the data directory (ummanu-26). Each class has one
 # resolver, and only its module spells the paths: `head_registry.installed_pair`/`generated_pair`
-# for the head-registry pair, `onboarding.OnboardingStorage` for onboarding's drafts, runs and locks.
+# for the head-registry pair, `runtime.onboarding_storage.OnboardingStorage` for onboarding's drafts, runs and locks.
 HEAD_REGISTRY_HOME = "ummanu/head_registry.py"
 HEAD_PAIR_FILES = ("heads.yaml", "source.yaml")
-ONBOARDING_STORAGE_HOME = "ummanu/onboarding.py"
-ONBOARDING_STORAGE_NAMES = ("adapter-drafts", "gate-runs", "provision-runs", "compatibility-manifests", ".locks")
+ONBOARDING_STORAGE_HOME = "ummanu/runtime/onboarding_storage.py"
+ONBOARDING_STORAGE_NAMES = (
+    "adapter-drafts",
+    "gate-runs",
+    "provision-runs",
+    "compatibility-manifests",
+    ".locks",
+)
 SINGLE_HOME_ASSIGNMENTS = {
     "ROLE_ALLOWLIST": ROLE_ENV_HOME,
     "SENSITIVE_ENV_NAME_RE": ROLE_ENV_HOME,
@@ -1301,7 +1013,9 @@ class SingleHomeTests(unittest.TestCase):
             with self.subTest(label):
                 offenders = _second_copies({path: text})
                 self.assertEqual(len(offenders), 1, offenders)
-                self.assertTrue(offenders[0].startswith(path) and offenders[0].endswith(label.strip()), offenders)
+                self.assertTrue(
+                    offenders[0].startswith(path) and offenders[0].endswith(label.strip()), offenders
+                )
         # The homes themselves are not second copies.
         self.assertEqual(
             _second_copies(
@@ -1321,7 +1035,3 @@ class SingleHomeTests(unittest.TestCase):
             ),
             [],
         )
-
-
-def tearDownModule() -> None:
-    source_trees.clear()

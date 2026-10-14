@@ -21,8 +21,8 @@ from unittest import mock
 
 from ummanu import cli
 from ummanu.infra import live_root_findings as lrf
+from ummanu.infra.old_name_guard import INSTANCE_PROJECT
 from ummanu.runtime import paths
-from ummanu.transition.names import INSTANCE_PROJECT
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
@@ -246,7 +246,7 @@ class LiveRootFindingTests(unittest.TestCase):
 
     def test_the_runtime_env_and_the_bound_role_env_are_read(self):
         (self.live_root / "runtime.env").write_text(
-            f"TA_RUNTIME_ENV_FILE={self.old}/runtime.env\n", encoding="utf-8"
+            f"UMMANU_RUNTIME_ENV_FILE={self.old}/runtime.env\n", encoding="utf-8"
         )
         bound = {
             "UMMANU_INSTANCE": str(self.live_root),

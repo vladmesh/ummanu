@@ -13,6 +13,7 @@ from ummanu.board.completion_evidence import (
     research_report_path,
     research_report_refusal,
 )
+from ummanu.board.terminal_taxonomy import BlockedReason
 from ummanu.dispatch import attempt_accounting, e2e_stage, post_merge, release_activation
 from ummanu.dispatch.decision_pointer import decision_pointer
 from ummanu.dispatch.gate import GateResult
@@ -32,20 +33,6 @@ from ummanu.state_repo import StateRepoError
 def released_verdict(record: DispatcherRecord) -> str:
     """The verdict a decided release carries: the parked one, or `missing` when no reviewer ran."""
     return "missing" if record.worker_continuation.verdict_outcome == "missing" else "green"
-
-
-def merge_terminal_reason(action: str) -> str:
-    """Classify the terminal cause a merge path actually reached.
-
-    A failed release/merge and a gate that cannot supply a usable result still
-    charge as their own terminal work.  Only a classified head bring-up is the
-    distinct uncharged infrastructure family.
-    """
-    if action == "red-review-ceiling":
-        return "review"
-    if "gate" in action:
-        return "gate"
-    return "implementation"
 
 
 def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -> str:
@@ -112,6 +99,7 @@ def block_merge_path(
     attempt_id: str,
     *,
     action: str,
+    blocked_reason: BlockedReason,
     reason: str,
     step: str,
     outcome: str,
@@ -135,7 +123,7 @@ def block_merge_path(
             verdict=record.worker_continuation.verdict_outcome
             if record.worker_continuation.verdict_outcome in {"green", "red", "blocked"}
             else "missing",
-            blocked_reason=merge_terminal_reason(action),
+            blocked_reason=blocked_reason,
         )
         records.pop(ref, None)
         runtime.save_records(payload, records)
@@ -203,6 +191,7 @@ def _transfer_research_report(
             records,
             payload,
             attempt_id,
+            blocked_reason="implementation",
             action="research-report-transfer-refused",
             reason=(
                 f"research report transfer refused ({refusal}): {scrub_host_output(message)}. "
@@ -234,8 +223,6 @@ def release_parked(
     records: dict[str, DispatcherRecord],
     payload: dict[str, Any],
     attempt_id: str,
-    *,
-    reason: str,
 ) -> dict[str, Any]:
     """Perform a release decision: re-check the mechanical state, then merge."""
     from ummanu.dispatch import gate_lifecycle
@@ -358,6 +345,7 @@ def read_release_gate(
                 records,
                 payload,
                 attempt_id,
+                blocked_reason="gate",
                 action="release-gate-result-blocked",
                 reason="merge gate returned pending without a result payload",
                 step="assessment",
@@ -384,6 +372,7 @@ def read_release_gate(
             records,
             payload,
             attempt_id,
+            blocked_reason="implementation" if kind == "drift" else "gate",
             action=f"release-{kind}-blocked",
             reason=f"Observer decision: release. {summary}",
             step="assessment",
@@ -396,6 +385,7 @@ def read_release_gate(
             records,
             payload,
             attempt_id,
+            blocked_reason="gate",
             action="release-gate-result-blocked",
             reason="merge gate returned green without a result payload",
             step="assessment",
@@ -453,6 +443,7 @@ def release_effect(
                 records,
                 payload,
                 attempt_id,
+                blocked_reason="implementation",
                 action="merge-blocked",
                 reason=f"merge failed: {scrub_host_output(str(exc))}",
                 step=step,
@@ -460,7 +451,7 @@ def release_effect(
             )
         if isinstance(landing, MergeLanding):
             with tick_stage("release_landed"):
-                watch = post_merge.open_watch(runtime, task, payload, landing, workspace=record.workspace)
+                watch = post_merge.open_watch(task, payload, landing, workspace=record.workspace)
                 runtime.save_records(payload, records)
                 release_merge = post_merge.release_merge_marker(watch)
     blocked = require_completion_evidence(runtime, task, record, records, payload, attempt_id, step=step)
@@ -480,6 +471,7 @@ def release_effect(
             records,
             payload,
             attempt_id,
+            blocked_reason="implementation",
             action="cleanup-provenance-blocked",
             reason=f"release cleanup refused: {scrub_host_output(str(exc))}",
             step=step,
@@ -545,6 +537,7 @@ def _require_completion_evidence(
         records,
         payload,
         attempt_id,
+        blocked_reason="implementation",
         action="completion-evidence-missing",
         reason=(
             f"completion evidence missing: this {task.get('type')} card has no `[{missing}]` "

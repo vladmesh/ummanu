@@ -12,14 +12,16 @@ import sys
 from pathlib import Path
 
 from ummanu.board.owner_events import OwnerEventError, OwnerEventStore
-from ummanu.runtime.paths import add_instance_argument
-from ummanu.runtime.paths import instance_dir as normalize_instance_dir
+from ummanu.board.sql_rows import rfc3339
+from ummanu.cli_output import print_error
+from ummanu.runtime.cli_composition import add_command_parser
+from ummanu.runtime.paths import add_instance_argument, instance_dir as normalize_instance_dir
 
 EXIT_UNAVAILABLE = 1
 
 
 def add_owner_event_subcommands(subparsers) -> None:
-    command = subparsers.add_parser("owner-events", help="read the owner events behind the web's bell")
+    command = add_command_parser(subparsers, "owner-events")
     verbs = command.add_subparsers(dest="owner_events_command", required=True)
     listing = verbs.add_parser("list", help="list owner events: what needs the owner first, then newest first")
     add_instance_argument(listing, help="path to an instance dir or instance.yaml")
@@ -36,7 +38,7 @@ def run_owner_events_list(args: argparse.Namespace) -> int:
         unread = store.unread_count()
     except (OwnerEventError, RuntimeError) as exc:
         if args.json:
-            print(json.dumps({"error": {"code": "backend_unavailable", "message": str(exc)}}, sort_keys=True))
+            print_error({"code": "backend_unavailable", "message": str(exc)}, sort_keys=True)
         else:
             print(f"ummanu owner-events: {exc}", file=sys.stderr)
         return EXIT_UNAVAILABLE
@@ -48,7 +50,7 @@ def run_owner_events_list(args: argparse.Namespace) -> int:
         mark = "*" if event.unread else " "
         subject = event.subject_ref or "-"
         print(
-            f"{mark} #{event.id} {event.created_at.isoformat()} {event.event_class} {event.kind} {subject}"
+            f"{mark} #{event.id} {rfc3339(event.created_at)} {event.event_class} {event.kind} {subject}"
         )
         for line in event.text.splitlines() or [""]:
             print(f"    {line}")

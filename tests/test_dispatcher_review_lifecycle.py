@@ -12,9 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu.checkpoint import CheckpointResult
-from ummanu.dispatch import host as dispatcher_host_module
 from ummanu.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.host_runtime import packets as host_packets
 from ummanu.dispatch.review import (
     recover_review_launch,
 )
@@ -499,7 +499,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         host.audit = self.card_audit
         with (
             mock.patch.object(
-                dispatcher_host_module,
+                host_packets,
                 "_write_prompt_document",
                 side_effect=PromptDocumentError("read-only artifacts directory"),
             ),
@@ -1699,7 +1699,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.runtime.pause_pipeline(mode="freeze", actor="ummanu-backup", reason="backup")
         self.age_the_pause(3600)
 
-        with mock.patch.dict(os.environ, {"TA_HARD_PAUSE_AUTO_RESUME_TTL_S": "0"}):
+        with mock.patch.dict(os.environ, {"UMMANU_HARD_PAUSE_AUTO_RESUME_TTL_S": "0"}):
             self.assertEqual(self.runtime.production_tick()["status"], "skipped")
 
         self.assertEqual(self.runtime.production_tick()["auto_resume"]["resumed"], True)
@@ -1759,7 +1759,7 @@ class ProductionPauseTests(unittest.TestCase):
     def test_the_mirror_lands_where_the_background_roles_look(self) -> None:
         """resolve_pipeline_state_dir's own order: a mirror written elsewhere sheds nothing."""
         state_dir = self.data_dir / "ta-state"
-        with mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(state_dir)}):
+        with mock.patch.dict(os.environ, {"UMMANU_PIPELINE_STATE_DIR": str(state_dir)}):
             os.environ.pop("UMMANU_LEGACY_PAUSE_FILE", None)
             self.pause("drain")
 

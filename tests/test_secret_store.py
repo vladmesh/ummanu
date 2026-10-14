@@ -14,11 +14,12 @@ from unittest import mock
 import yaml
 
 from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
-from ummanu import _fsutil, installation, runtime_env, secret_commands, secret_store, state_repo
+from ummanu import _fsutil, runtime_env, secret_commands, secret_store, state_repo
 from ummanu.cli import main
 from ummanu.config import validate
 from ummanu.infra import export_allowlist
 from ummanu.infra.export_allowlist import is_exported
+from ummanu.installation import commands as installation_commands, credentials as installation_credentials
 from ummanu.memory.canon import CanonTransaction
 from ummanu.runtime import role_env
 from ummanu.secret_store import (
@@ -1125,8 +1126,8 @@ class MaterializeCase(EnvStoreCase):
         ambient = Path(self.tmpdir.name) / "live" / "runtime.env"
         entry = {"materialize": {"target": "runtime-env"}}
         with (
-            mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": str(ambient)}, clear=True),
-            installation._runtime_environment({"UMMANU_RUNTIME_ENV_FILE": str(pinned)}),
+            mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(ambient)}, clear=True),
+            installation_credentials._runtime_environment({"UMMANU_RUNTIME_ENV_FILE": str(pinned)}),
         ):
             self.assertEqual(secret_store.materialize_path(self.instance_dir, entry), pinned)
 
@@ -1170,7 +1171,7 @@ class MaterializeCase(EnvStoreCase):
 
     def test_the_generated_file_passes_the_installation_validator(self) -> None:
         materialize_secrets(self.instance_dir)
-        values = installation.read_runtime_env(self.instance_dir, str(self.target))
+        values = installation_commands.read_runtime_env(self.instance_dir, str(self.target))
         self.assertEqual(
             values,
             {

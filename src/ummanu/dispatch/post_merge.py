@@ -42,7 +42,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ummanu.dispatch.gate import (
+from ummanu.dispatch.gate_workflows import push_trigger_absent_reason
+from ummanu.dispatch.github_ci import (
     _actions_run_id,
     _backend_call,
     _check_name,
@@ -52,12 +53,12 @@ from ummanu.dispatch.gate import (
     _required_checks,
     _rollup,
     _selected_checks,
-    push_trigger_absent_reason,
 )
 from ummanu.dispatch.helpers import safe_one_line
 from ummanu.dispatch.types import HostError, MergeLanding
 from ummanu.infra.env import positive_int
-from ummanu.tasks import POST_MERGE_CI_KEY, TaskError, post_merge_ci_fact
+from ummanu.kernel.errors import TaskError
+from ummanu.tasks import POST_MERGE_CI_KEY, post_merge_ci_fact
 
 WATCHES_KEY = "post_merge_watches"
 CEILING_ENV = "UMMANU_POST_MERGE_CI_CEILING_SECONDS"
@@ -100,7 +101,6 @@ def pr_merge_commit(run: Callable[..., Any], branch: str, cwd: Path) -> str:
 
 
 def open_watch(
-    runtime: Any,
     task: dict[str, Any],
     payload: dict[str, Any],
     landing: MergeLanding,

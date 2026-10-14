@@ -364,8 +364,7 @@ By default an operation touches no production; a sprint allows its operations th
 at create ([`allowed_productions`](#the-sprints-po-session-and-productions)), and the ones its PO allows
 later with `sprint allow-production` (below). The rule is evaluated in one place: the PO service's
 handling of a dispatcher submit (`PoService.submit`), after the request id is reserved and the session
-found open. Neither the dispatcher nor the web evaluates it. It refuses nothing and hands nothing over
-(secretary-1769): every operation card becomes a normal PO turn, and the rule only decides what that
+found open. Neither the dispatcher nor the web evaluates it. It refuses nothing and hands nothing over: every operation card becomes a normal PO turn, and the rule only decides what that
 turn's input says. On a submit whose facts say `kind: operation`, `input: card`, the service queues the
 input with a **rights section** (`## Production rights (the PO service)`) that the turn's prompt, and
 the session's feed, carry after the dispatcher's text:
@@ -500,7 +499,7 @@ Every card of the sprint that waits on the PO, the owner or a run, current or no
 
 ### Wait cards
 
-A `wait` card (secretary-1790) waits for one external or board fact with no head and delivers its
+A `wait` card waits for one external or board fact with no head and delivers its
 outcome to the return addresses its creator named, exactly once. The dispatcher advances it once per
 tick; there is no watcher process, background job or queue, and everything the wait knows is on the
 card, so a restarted dispatcher (or PO service) continues where the last one stopped. It is a
@@ -660,7 +659,7 @@ records, and ends the same way at once: a wait is not restarted; cut a new one.
 A PO turn is a conversation with the owner. Work that would take longer than about a minute, or read
 more than about ten files, becomes a card the PO cuts (the rule its instructions state,
 `packaging/po-workspace/AGENTS.md`), and the card's result comes back to the session that cut it as a
-new input (secretary-1792). Nothing waits in the turn, and a background job is not a way to wait: a
+new input. Nothing waits in the turn, and a background job is not a way to wait: a
 long wait is a [wait card](#wait-cards).
 
 **Origin.** `task create --role po` inside a PO turn records the card's origin: the turn's session
@@ -1128,10 +1127,10 @@ boundary once; `unavailable`, malformed and stale-handle evidence keep their own
 
 ### Provider failure of a head's turn
 
-Every role keeps working when one subscription is down (ummanu-108): a role's default profile is
+Every role keeps working when one subscription is down: a role's default profile is
 only the first one to try. A worker, reviewer, observer, standing automation or PO turn that ends on a
 provider error has failed on its provider. That is a provider verdict, not a stall
-(`src/ummanu/dispatch/provider_failure.py`, first written for secretary-1799). The provider errors in
+(`src/ummanu/dispatch/provider_failure.py`). The provider errors in
 scope are a spent subscription (Codex `codex_error_info: usage_limit_exceeded`, "You've hit your usage
 limit ... try again at Oct 9th, 2026 9:11 PM"; Claude "You've hit your weekly limit · resets 1am
 (UTC)", "5-hour limit reached"), an HTTP 401/403, a 429, any 5xx (529 included), and a connection the
@@ -1501,7 +1500,7 @@ are the dialogue of an attempt; the spec lives only in the description.
 ## The e2e stage
 
 A project may declare one end-to-end check: a GitHub Actions workflow the dispatcher dispatches on a
-`code` card's candidate and waits for through a [wait card](#wait-cards) (secretary-1795). The stage
+`code` card's candidate and waits for through a [wait card](#wait-cards). The stage
 is `dispatch/e2e_stage.py`; the declaration and the GitHub calls are `dispatch/e2e.py`.
 
 **Declaration.** In the adapter, beside the gate:
@@ -1558,7 +1557,7 @@ The stage proceeds only on a SHA with a green run of its own, or one reconciled 
 
 A base-only move does not invalidate an e2e result for the card's own change, as it does not invalidate
 a review; CI still gates the new SHA. This avoids re-paying a long run for every base move on an active
-main (the observer's decision, secretary-1795).
+main.
 
 **Dispatch identity.** The card's `e2e` field (`extensions.extra.e2e`, JSON, written only by the
 dispatcher through `TaskWriter.record_e2e_state`; no column, no migration) is the stage's record: one
@@ -1636,7 +1635,7 @@ A declaration the stage cannot read Blocks the card as `gate`.
 ### The e2e run budget
 
 Every e2e run pays for stands (BitLaunch machines), `mega-noop` included, so runs are budgeted
-(secretary-1796; `board/e2e_budget.py`). The budget replaces the interim per-card cap of 3 for every
+(`board/e2e_budget.py`). The budget replaces the interim per-card cap of 3 for every
 card of a sprint.
 
 **The budget.** A sprint carries `e2e_budget`, the runs it may dispatch (`sprint create --e2e-budget N`,
@@ -1748,7 +1747,7 @@ run `sha`, `dispatch_id`, `workflow`, `state` (`dispatching`, `identifying`, `wa
 Some e2e workflows can only run on a commit whose releases the post-merge CI of `main` published: the
 Codegen mega's `stand-e2e.yml` waits for the worker and service releases of its exact SHA, and codegen
 publishes them only on a push to `main`. Its candidate branch never has them. A project declares that with
-`placement: after_merge` (secretary-1807, the PO's decision secretary-1805; `dispatch/e2e_after_merge.py`).
+`placement: after_merge` (`dispatch/e2e_after_merge.py`).
 
 **No stage before the merge.** A card of such a project never runs the stage above: it goes through
 review, Assessment and release as a card of a project with no e2e.
@@ -2183,10 +2182,10 @@ issues:
     actual: duplicate
     reason: another PO closed it as a duplicate while this sprint ran
 cards:
-  - ref: secretary-1400
+  - ref: project-1
     verdict: drop              # done | drop
     reason: superseded by the next sprint's cut
-  - ref: secretary-1401
+  - ref: project-2
     verdict: already_moved     # somebody else took it there; name the state it is in
     actual: ready
     reason: its own head put it back in Ready before the close got to it
@@ -2751,7 +2750,9 @@ the card in either.
 
 The audit trail is always written to the installation data directory: `--data-dir`, else
 `UMMANU_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
-instance file. An unresolvable data directory is a usage error.
+instance file. An unresolvable data directory is a usage error. The `data`, `backup` and `memory`
+commands skip `UMMANU_DATA_DIR` on purpose: they write the data plane of the installation `--instance`
+names, and every role head inherits the variable pointing at the live one.
 
 ### The no-observer ceiling
 
@@ -2836,6 +2837,20 @@ carries the head that earned it.
 
 Reader: `ummanu.routing_journal.attempts(events, ref)` returns a finished card's attempts with heads
 and outcome. These events travel in the recovery checkpoint with the rest of the event log.
+
+### Outcome lineage
+
+Worker and reviewer launches create a durable round handoff. The dispatcher adds the exact report,
+verdict and decision event identities as it consumes each source. The terminal transition reads
+that handoff to freeze the specification revision, sources, taxonomy and usage identities into
+its durable `attempt_outcome_owed` record. Recovery publishes only that record; it never reopens
+a card or infers a link from a request id, comment, timestamp or journal order.
+
+When a worker report is accepted, the dispatcher persists the typed terminal path
+(`outcome_terminal_path`) before looking up that report's event. Validate, gate, reviewer launch,
+reviewer wait and post-gate terminal all read that path. A missing report handoff stays a named
+incomplete lineage obligation; it cannot become a path claiming no report was consumed.
+The resulting record follows [Attempt outcome ledger v1](#attempt-outcome-ledger-v1).
 
 ### Attempt outcome ledger v1
 
@@ -3413,10 +3428,10 @@ The same pause through the transport-independent layer (`ummanu.webproto.pause_o
 
 | operation | inputs | answers with | errors |
 | --- | --- | --- | --- |
-| `pause_drain` | `actor`, `reason` | a `pause_command` document | `validation` (empty actor or reason, or an installation whose config does not validate), `owner_conflict` (already paused in the other mode), `backend_unavailable` (a durable source or the host refused) |
-| `pause_resume` | `actor` | a `pause_command` document, with `restored` | `validation` (an installation whose config does not validate), `backend_unavailable` (a durable source or the host refused) |
-| `pause_state` | — | a `pause_state` document | `validation` (an installation whose config does not validate, with no data directory to fall back on) |
-| `pause_scope` | — | a `pause_scope` document | `validation` (the same) |
+| `pause_drain` | `actor`, `reason` | a `pause_command` document | `validation` (empty actor or reason, or a head registry that does not validate), `owner_conflict` (already paused in the other mode), `backend_unavailable` (an installation whose config does not validate, or a durable source or the host refused) |
+| `pause_resume` | `actor` | a `pause_command` document, with `restored` | `validation` (a head registry that does not validate), `backend_unavailable` (an installation whose config does not validate, or a durable source or the host refused) |
+| `pause_state` | — | a `pause_state` document | `backend_unavailable` (an installation whose config does not validate, with no data directory to fall back on) |
+| `pause_scope` | — | a `pause_scope` document | `backend_unavailable` (the same) |
 
 The table is checked against `ummanu.webproto.pause_ops.PAUSE_ERRORS`. Every operation of the
 package can also answer `backend_unavailable` for an implementation failure caught by
@@ -3509,7 +3524,8 @@ unreadable-flag sentence.
 **The commands are clients.** `ummanu pause drain`, `ummanu resume`, `ummanu pause-status` and
 `ummanu pause-scope` call these operations, print the document, and map codes to exit status as
 `ummanu web-run` does: `validation`/`not_found` → 2, `owner_conflict` → 3 (a `pause_conflict`),
-`backend_unavailable` → 1. An installation whose config does not validate is `validation` (exit 2).
+`backend_unavailable` → 1. An installation whose config does not validate is `backend_unavailable`
+(exit 1), the code every layer gives it.
 With an explicit `--data-dir` and an invalid config, the two reads answer from the flag and dispatcher
 state and report `installation` unavailable. `ummanu pause freeze` does not go through the layer and
 keeps its own path.
@@ -3707,6 +3723,40 @@ service, stale or denied identity, malformed MCP reply or missing expected row f
 upgrade step visibly; a denial is final, not retried into a timeout. The list tool may return one JSON
 text block per row or structured content; the probe normalizes every supported form to rows.
 
+### Upgrade source coherence
+
+`upgrade.run_steps` owns a lazy `installation.upgrade.fingerprints.SourceCut`. The first
+memory/web/PO input consumer, after pull or pulled-code handoff, selects the resolved product root,
+exact HEAD and ordered Git tracked path sets for `src/` and its bundled-schema subset. It observes
+all regular files before acquisition, opens each source payload once through a no-follow,
+nonblocking descriptor, compares descriptor metadata before/after the read with the path metadata,
+and checks the whole selection again. The same bytes feed the released product and schema digest
+domains, in their original path order. Dirty tracked bytes count; untracked files and bytecode do
+not. Dependency manifests retain their separate acquisition and wire contract.
+
+Every reuse checks root resolution, directory identity, HEAD, tracked membership and each file's
+device, inode, mode, link count, uid/gid, size and nanosecond mtime/ctime. Step boundaries, current
+decisions and memory/web publication check the cut again. Verify's `dataclasses.replace` shares the
+active owner; exiting `run_steps`, including exceptions, closes it and clears the context binding.
+A copied context holding the closed owner cannot reacquire through it. A new invocation receives
+a new lazy owner. Standalone helpers and PO startup have no shared owner and read fresh inputs;
+PO self-publication remains bound to its own pid, start ticks and invocation ID. Runtime model/pack,
+web units and registry, process identities, probes and pending PO restart checks remain fresh.
+
+`SourceCutInvalidated`, a common `ReceiptError` and `WebProcessReceiptError` subtype, produces the
+existing failed-step/CLI exit envelope with `source cut acquisition failed:` or
+`source cut invalidated:` detail. Changed or unavailable evidence forbids publication/current;
+the invocation never retries with another cut, and existing receipt bytes remain intact. Even a
+harmless touch is conservatively invalidated. Incomplete stat evidence is refused. Unrelated
+directory timestamp changes from creating bytecode do not invalidate regular tracked payloads.
+
+This proof assumes a local filesystem whose identity and nanosecond mtime/ctime expose normal
+writes, replacement and permission changes. Metadata observations are bounded fresh fences, not
+a filesystem transaction or cryptographic attestation against metadata forgery, coarse/unreliable
+timestamps, hostile mount changes or writers acting after the last observation. The owner provides
+no process-global/persisted cache and no proof of what another process imported. Archive/restore's
+INEF-09 half and the remaining DUP-I1 restart framework are separate work.
+
 ## Reading the pipeline
 
 `ummanu.webproto` is one read layer for "what is running", "what is this card doing" and "what
@@ -3857,7 +3907,8 @@ python3 -P -m ummanu web-run list   --instance I --ref REF
 ```
 
 Every document validates against the packaged `web-run` schema and carries `schema_version`, a `kind`
-of `product_run` or `product_review`, and `observed_at`. A run id is `pr-` prefixed.
+of `product_run`, `product_review` or `product_runs` (the listing), and `observed_at`. A run id is
+`pr-` prefixed.
 
 `--profile` is required, with no default. The profile comes from the head registry and must declare the
 `local-pty` runtime; a profile naming any other runtime is refused. `--heads-registry` (or
@@ -3900,6 +3951,12 @@ in `<data>/webproto/workspaces/<run-id>`; it has no branch, and nothing here com
 PR. The head's process is held by the product's supervisor under `<data>/webproto/heads/<run-id>`, with
 `head.pid`, `journal.jsonl`, `supervisor.log`, the task document and `result.json`. The run record is
 `<data>/webproto/runs/<run-id>.json`. All paths are on the run document.
+
+`RunStore` and `SprintRequestStore` share `webproto.request_index.RequestIndex` for request-id
+digest paths, index document I/O and operation/fingerprint matching. Each store keeps its own
+lock and record conversion. Run claims write the run before its compact request index; sprint
+claims write the full indented request record before the board operation. A recorded sprint
+reference is final, and an empty reference leaves the outcome unknown. Reads prepare no directory.
 
 A head receives `UMMANU_RUN_RESULT` (the only place a result may appear), `UMMANU_RUN_ID`,
 `UMMANU_RUN_ROLE`, `UMMANU_RUN_REF` and `UMMANU_RUN_WORKSPACE`. A `run_state` that finds the
@@ -4273,7 +4330,7 @@ observer claim.
 **`waiting_on`** is what the sprint waits for, beside `waiting` (which is about the current card only): a
 list of `{kind, card, detail}`, one entry per waiting live card of the sprint, derived at read time from
 the sprint's cards in the Pipeline listing and nothing else -- no dispatcher record, no journal, nothing
-stored (secretary-1811). It is a list rather than a section; the document's `cards` mark is its source.
+stored. It is a list rather than a section; the document's `cards` mark is its source.
 `kind` is exactly one of:
 
 | kind | a card of the sprint that is | `detail` |
@@ -4476,8 +4533,10 @@ Neither read has a code of its own; any other durable-source failure is `backend
 
 | read | code | when |
 | --- | --- | --- |
-| `command_history` | `validation` | the instance config does not validate, or the cursor is one this reader did not issue, belongs to a card, or is past the end of a journal that only grows |
-| `command_request` | `validation` | the instance config does not validate, or no request id was given |
+| `command_history` | `validation` | the cursor is one this reader did not issue, belongs to a card, or is past the end of a journal that only grows |
+| `command_history` | `backend_unavailable` | the instance config does not validate and no data directory was given |
+| `command_request` | `validation` | no request id was given |
+| `command_request` | `backend_unavailable` | the instance config does not validate and no data directory was given |
 
 ## Serving the pipeline locally
 
@@ -4554,6 +4613,12 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/owner-events` | `owner_events.owner_event_list` | the owner's bell: the unread owner events by default, `?all=1` every event (unread highlighted); open `needs_owner` events first, then newest first, with its class badge and subject link; `?unread=1` or any other value is the unread default; the board without `owner_events` reads as no events with the source `unavailable` ([Owner events](#owner-events-and-the-bell)) |
 | POST | `/owner-events/read-all` | `owner_events.mark_all_read` | mark every unread notice read; a `needs_owner` event is never touched; form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
 | POST | `/owner-events/{event_id}/read` | `owner_events.mark_read` | mark one event read; a `needs_owner` event whose card carries `waiting_owner` is refused (409 `owner_conflict`); form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
+
+A JSON answer validates against the packaged schema of its layer: `web-read` (system, task, events),
+`web-run` (a run, its start or review, a card's runs), `web-sprint`, `web-pause`, `web-command`,
+`web-card` (`card_commented`, `card_moved`) and `web-provider` (`codex_reset_limit`). The head view
+and the `/po` session document have none yet: both still change with the head and PO surfaces they
+show.
 
 The dashboard (`GET /`) reads four documents — system snapshot, pause state, open sprints, last commands
 — and a refusing one marks only its own section; only the snapshot's refusal fails the page. Card and
@@ -4660,7 +4725,7 @@ One table, in `ummanu.web.statuses`; no status number elsewhere in the transport
 | `owner_conflict` | 409 | the request is well formed and refused on the state of the world |
 | `request_conflict` | 409 | a `/po` request id reused for another operation or other inputs |
 | `session_closed` | 409 | a message into a PO session the owner closed; no turn, feed entry, request row or process. It never clears by waiting |
-| `backend_unavailable` | 503 | a source this request needs could not be reached at all |
+| `backend_unavailable` | 503 | a source this request needs could not be reached at all, the installation's own config among them: an instance config that does not validate is 503 on every route |
 | anything else | 500 | a code this transport has never heard of — a defect of the transport, not of the client |
 
 The transport's own refusals are 404 (unrouted path) and 405 (unrouted method). A refusal on a page
@@ -4678,6 +4743,46 @@ answer a repeat with the existing run, so a repeated POST raises no second head.
 
 ### What a card page says about a product run
 
+HTML `/tasks/{ref}` uses `ops.card_runs`: `RunStore.read_for_ref` reads only this card's canonical
+records, and `_document` uses the existing `run_state.observe` evidence and framing. Deadline,
+result and terminal evidence do not settle/save, start/stop a head, or look up/publish audit events
+while rendering. A settled run retains its recorded ending and result. The API run/list routes and
+`web-run state/list` retain their lifecycle and publication/republication behavior.
+
+Before serving, `web-serve` calls `ops.prepare_card_runs` / `RunStore.prepare_ref_lookup` under
+`.runs.lock`. This explicit, repeatable preparation scans released root run JSON, validates each
+path/id/ref and rebuilds derived membership without rewriting canonical bytes or the request-id
+index. A typed preparation failure is logged and serving continues with product runs unavailable,
+preserving the other pages and canonical/history/request-index bytes. The lookup stays incomplete;
+GET performs no repair. Dirty lookup after an interrupted write is recovered by explicit
+preparation at restart; unrepaired canonical corruption keeps runs unavailable on that restart.
+A never-created store stays absent, without writes;
+its first writer initializes empty membership under the lock before claiming a canonical run.
+
+The derived `runs/refs/complete.json` is a small versioned completeness token. For a card, SHA-256
+of its ref names `refs/cards/<digest>.json` (ref and run IDs) and `refs/present/<digest>.json` (ref
+and membership checksum). Both absent under a complete token mean no history for that ref; one
+missing, a checksum/ref/id/path mismatch, an unavailable lookup directory, or a missing/dirty/corrupt
+token is `backend_unavailable`. All canonical writers (`claim`, `save`, `settle`) enter
+`RunStore._write` under the same lock: synced incomplete token, canonical record, affected card
+membership/presence, synced complete token with a fresh identity. Ref reassignment updates both
+memberships. Unprepared/dirty legacy stores can continue canonical lifecycle writes, leaving the
+lookup incomplete until explicit recovery. Preparation discards stale derived membership only.
+
+The HTML reader creates no lock or directories and never repairs. It checks the same complete
+token before and after reading membership and canonical records; an overlapping writer refuses the
+listing, including an absence proof, rather than returning a partial result. Each populated-card
+read opens four lookup documents (two token reads and that card's pair) plus its canonical runs;
+an absent-card read opens two tokens. Foreign history does not change those counts. Admission and
+worker selection retain their canonical scan, so lookup incompleteness cannot admit a second head.
+
+The supported restart/upgrade boundary stops released writers before preparation and serves only
+writers participating in this protocol afterward. An old writer running concurrently does not
+invalidate the token and is unsupported. Recovery is explicit preparation from canonical records,
+never a GET. Filesystem edits outside RunStore, including deleting both halves of a card's
+membership while retaining a complete token, do not participate in the completeness protocol.
+Production activation is a separate operator action.
+
 One row per run:
 
 | column | what it is |
@@ -4685,7 +4790,7 @@ One row per run:
 | `state` | what the run's *process* did: one of `running`, `finished`, `process_failed`, `source_unavailable`, `unknown`, with the reason the evidence gave and `(open)` or `(over)` beside it |
 | `outcome` | what the run *produced*: the verdict when the result carries one (`state.result.verdict`), the head's own result summary, and the exit status or signal the supervisor recorded |
 
-Both come straight from the `product_run` document (as `/api/runs/{run_id}` returns). A finished run
+Both come straight from the read-only `product_run` document, with the same framing as the run API. A finished run
 shows its result (a review its `green` or `red` verdict); a failed run shows `process_failed`, its exit
 status and that no result was published; an open run says it has produced nothing yet.
 
@@ -4749,7 +4854,7 @@ moves a research report into `state/knowledge/reports/<card ref>/`.
 
 ```bash
 python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
-  --path reports/secretary-1640 --dir REPORT_DIR
+  --path reports/project-1 --dir REPORT_DIR
 ```
 
 Refused with code 2 before anything is written: a missing source or one with no files; a symlink,

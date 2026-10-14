@@ -10,7 +10,7 @@ WorkingDirectory={{UMMANU_PRODUCT_ROOT}}
 EnvironmentFile=-{{UMMANU_INSTANCE_PATH}}/runtime.env
 Environment=UMMANU_INSTANCE={{UMMANU_INSTANCE_PATH}}
 Environment=UMMANU_REPO={{UMMANU_PRODUCT_ROOT}}
-Environment=TA_RUNTIME_ENV_FILE={{UMMANU_INSTANCE_PATH}}/runtime.env
+Environment=UMMANU_RUNTIME_ENV_FILE={{UMMANU_INSTANCE_PATH}}/runtime.env
 Environment=UMMANU_DATA_DIR={{UMMANU_DATA_DIR}}
 Environment=PATH={{UMMANU_RUNTIME_HOME}}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # 127.0.0.1 is not a default this unit may relax: the transport has no password of its own and its

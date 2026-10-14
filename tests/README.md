@@ -15,9 +15,9 @@ production call path:
 - `TMPDIR` (and `tempfile.tempdir`) point at one throwaway root the run owns and removes at exit; an
   `ummanu-*` or `orca-*` entry still in it then fails the run, naming the leak
   (`tests/test_suite_tmp_guard.py`);
-- `TA_CODEX_HOME` is a throwaway Codex home, so a Codex bring-up never writes a directory-trust grant
+- `UMMANU_CODEX_HOME` is a throwaway Codex home, so a Codex bring-up never writes a directory-trust grant
   into the installation's home (`tests/test_hermetic_codex.py`);
-- `TA_PIPELINE_STATE_DIR` is a throwaway pipeline state dir (below);
+- `UMMANU_PIPELINE_STATE_DIR` is a throwaway pipeline state dir (below);
 - `GIT_CONFIG_*` turns off `gc.auto` and `maintenance.auto` for every git the suite starts, so no
   detached gc writes into a temporary repository after its test returns.
 
@@ -33,9 +33,9 @@ while the suite runs makes `runtime/dispatch._pipeline_paused()` true, and every
 test takes the "pipeline paused — no dispatch" branch instead of the lifecycle branch it
 asserts about, and the suite appends its own `runs.jsonl` records into that live directory.
 
-`tests/__init__.py` therefore claims one throwaway `TA_PIPELINE_STATE_DIR` for the whole
+`tests/__init__.py` therefore claims one throwaway `UMMANU_PIPELINE_STATE_DIR` for the whole
 run and removes it at exit, set before any `test_*` module is imported and set
-unconditionally — an ambient `TA_PIPELINE_STATE_DIR` inherited from a worker, reviewer or
+unconditionally — an ambient `UMMANU_PIPELINE_STATE_DIR` inherited from a worker, reviewer or
 operator shell names exactly the live directory that must not be touched.
 `tests/test_hermetic_pipeline_state.py` is the proof, in both directions: a hard freeze in
 a production-like `<workspaces>/ummanu/pipeline/state/pipeline` (built under a
@@ -44,7 +44,7 @@ skipping, while a freeze written into the suite's *own* state dir still pauses �
 "not paused" half cannot pass by the reader having gone dead.
 
 A focused test that needs a different value overrides the variable locally, the usual way
-(`mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(tmp)})`), or pops it to
+(`mock.patch.dict(os.environ, {"UMMANU_PIPELINE_STATE_DIR": str(tmp)})`), or pops it to
 exercise the default-path computation; both still work, since the suite default is just an
 ordinary process environment value the `with` block shadows. Note that a test which pops
 it and then *reads* a pause flag is back to reading the host — pop it only to assert about

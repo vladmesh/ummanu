@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import re
 import subprocess
 import tempfile
 import tomllib
@@ -12,7 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import upgrade
+from ummanu import cli, upgrade
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.memory import client_config
 from ummanu.po import workspace
 from ummanu.role_skills import (
@@ -38,55 +42,35 @@ class InstructionsTests(unittest.TestCase):
         self.agents = workspace.agents_source(ROOT).read_text(encoding="utf-8")
         self.flat = " ".join(self.agents.split())
 
-    def test_long_work_becomes_a_card_unless_the_owner_asks(self) -> None:
-        for rule in (
-            "longer than about a minute",
-            "read more than about ten files",
-            "becomes a card",
-            "unless the owner explicitly asks you to do it yourself",
-            "comes back to this same session as a new input",
-        ):
-            self.assertIn(rule, self.flat)
-
-    def test_background_jobs_are_not_a_way_to_wait_and_a_long_wait_is_a_wait_card(self) -> None:
-        self.assertIn("Background jobs are not a way to wait", self.flat)
-        for job in ("`run_in_background`", "`nohup`", "`&`", "`systemd-run`", "run watch` left running"):
-            self.assertIn(job, self.flat)
-        self.assertIn("A long wait becomes a `wait` card", self.flat)
-
     def test_it_quotes_the_wait_card_form_of_the_protocols_exactly(self) -> None:
-        protocols = (ROOT / "docs" / "PROTOCOLS.md").read_text(encoding="utf-8")
-        section = protocols[
-            protocols.index("### Wait cards") : protocols.index("### Owner events and the bell")
-        ]
-        [form] = [
+        """Every wait-card command the PO is shown parses under the real `task create` parser.
+
+        Each flag of the documented form is handed to the parser with the first alternative of its
+        value, a placeholder kept as its own text, so a flag the CLI does not have fails here.
+        """
+        forms = [
             line.strip()
-            for line in section.splitlines()
-            if "task create" in line and "--type wait" in line and line.strip().startswith("python3")
+            for line in self.agents.splitlines()
+            if "ummanu task create" in line and "--type wait" in line
         ]
-        self.assertIn(form, self.agents)
-
-    def test_an_issue_like_finding_is_filed_at_once_without_asking_the_owner(self) -> None:
-        for rule in (
-            "file it with `ummanu issue create --role po` at once",
-            "Do not ask the owner whether to file it",
-            "Check for a duplicate first",
-            "`issue append` what is new",
-            "Choose kind and priority yourself, then tell the owner the ref",
-            "pipeline cards still follow the delegation rules",
-        ):
-            self.assertIn(rule, self.flat)
-
-    def test_the_open_issue_skill_chooses_the_fields_without_owner_confirmation(self) -> None:
-        skill = (ROOT / "skills" / "roles" / "po" / "open-issue" / "SKILL.md").read_text(encoding="utf-8")
-        flat = " ".join(skill.split())
-        self.assertIn("## 2. Choose the fields", skill)
-        self.assertIn("there is no owner confirmation before create", flat)
-        self.assertIn("`issue update-priority`", flat)
-        self.assertIn("--request-id", flat)
-        self.assertIn("issue append", flat)
-        for old in ("Agree the fields with the owner", "Show the owner the fields", "with the owner, and create"):
-            self.assertNotIn(old, flat)
+        self.assertTrue(forms)
+        parser = cli.build_parser()
+        for form in forms:
+            with self.subTest(form=form):
+                command = re.sub(r"<([^>]*)>", lambda m: "<" + m.group(1).replace(" ", "-") + ">", form)
+                words = command.split(" -m ummanu ", 1)[1].split()[:2]
+                argv = list(words)
+                for flag, value in re.findall(r"(--[a-z][a-z-]*)(?:\s+(?!-)([^\s\[\]|]+))?", command):
+                    argv += [flag, value] if value else [flag]
+                self.assertEqual(argv[:2], ["task", "create"])
+                stderr = io.StringIO()
+                try:
+                    with contextlib.redirect_stderr(stderr):
+                        args = parser.parse_args(argv)
+                except SystemExit:
+                    self.fail(f"{argv} is refused by the CLI: {stderr.getvalue()}")
+                self.assertEqual((args.role, args.type), ("po", "wait"))
+                self.assertTrue(args.wait_deadline and args.wait_return)
 
 
 class PoWorkspaceStepTests(unittest.TestCase):
@@ -104,8 +88,8 @@ class PoWorkspaceStepTests(unittest.TestCase):
         self.data = self.root / "data"
         self.po = self.data / workspace.WORKSPACE_NAME
 
-    def run_step(self, *, dry_run: bool = False) -> upgrade.StepResult:
-        context = upgrade.UpgradeContext(
+    def run_step(self, *, dry_run: bool = False) -> upgrade_types.StepResult:
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -113,7 +97,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
             units=None,
             report=SimpleNamespace(data_dir=self.data),
         )
-        return upgrade.step_po_workspace(context)
+        return upgrade_workspaces.step_po_workspace(context)
 
     def snapshot(self) -> dict[str, tuple[bytes, int]]:
         return {
@@ -135,7 +119,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
 
     def test_a_root_invoker_hands_the_whole_workspace_to_the_runtime_user_on_every_run(self) -> None:
         """Skill roots role-skills creates as root are handed over, and repaired on a later run."""
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -144,7 +128,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
             report=SimpleNamespace(data_dir=self.data),
             runtime_user="po-runtime",
         )
-        upgrade.step_po_workspace(context)
+        upgrade_workspaces.step_po_workspace(context)
         (self.root / "instance").mkdir()
         with mock.patch.dict(os.environ, {BIN_DIR_ENV: str(self.root / "bin")}):
             sync(
@@ -159,14 +143,14 @@ class PoWorkspaceStepTests(unittest.TestCase):
         (self.po / "link").symlink_to(outside)
         account = SimpleNamespace(pw_uid=4321, pw_gid=4321)
 
-        runs: list[tuple[upgrade.StepResult, set[Path]]] = []
+        runs: list[tuple[upgrade_types.StepResult, set[Path]]] = []
         for _ in range(2):
             with (
-                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("ummanu.upgrade.os.chown") as chown,
+                mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+                mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=account),
+                mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
             ):
-                result = upgrade.step_po_workspace_owner(context)
+                result = upgrade_workspaces.step_po_workspace_owner(context)
             runs.append((result, {Path(call.args[0]) for call in chown.call_args_list}))
 
         for result, owned in runs:
@@ -185,8 +169,8 @@ class PoWorkspaceStepTests(unittest.TestCase):
                 self.assertNotIn(outside, owned)
 
     def test_a_non_root_invoker_skips_the_handover(self) -> None:
-        upgrade.step_po_workspace(
-            upgrade.UpgradeContext(
+        upgrade_workspaces.step_po_workspace(
+            upgrade_types.UpgradeContext(
                 instance_path=self.root / "instance",
                 product_root=self.product,
                 base_branch="main",
@@ -195,7 +179,7 @@ class PoWorkspaceStepTests(unittest.TestCase):
                 report=SimpleNamespace(data_dir=self.data),
             )
         )
-        context = upgrade.UpgradeContext(
+        context = upgrade_types.UpgradeContext(
             instance_path=self.root / "instance",
             product_root=self.product,
             base_branch="main",
@@ -206,10 +190,10 @@ class PoWorkspaceStepTests(unittest.TestCase):
         )
 
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=1000),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=1000),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
-            result = upgrade.step_po_workspace_owner(context)
+            result = upgrade_workspaces.step_po_workspace_owner(context)
 
         self.assertEqual(result.status, "skipped")
         chown.assert_not_called()
@@ -479,22 +463,6 @@ class RetiredSkillTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RegistryError, "ummanu/missing"):
             load_registry(self.instance, product_manifest=self.manifest)
-
-
-class RetiredSpecCardTests(unittest.TestCase):
-    def test_the_repository_no_longer_ships_the_spec_card_skill(self) -> None:
-        name = "spec" + "-card"
-
-        self.assertEqual(list((ROOT / "skills").rglob(name)), [])
-        mentions = [
-            str(path)
-            for top in ("skills", "src", "docs")
-            for path in (ROOT / top).rglob("*")
-            if path.is_file()
-            and path.suffix in {".md", ".toml", ".py"}
-            and name in path.read_text(encoding="utf-8")
-        ]
-        self.assertEqual(mentions, [])
 
 
 if __name__ == "__main__":

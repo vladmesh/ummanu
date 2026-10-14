@@ -18,10 +18,16 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, write_memory_metadata
-from ummanu import installation, upgrade
+from ummanu import upgrade
 from ummanu.board.migrate import head_revision
 from ummanu.checkpoint import SNAPSHOT_REF, CheckpointWriter, SnapshotExporter
 from ummanu.data import DataExport
+from ummanu.installation import (
+    clone as installation_clone,
+    commands as installation_commands,
+    materialize as installation_materialize,
+)
+from ummanu.installation.upgrade import workspaces as upgrade_workspaces
 
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 ROLES = ("new_card", "reviewer", "observer", "curator", "retro", "steward")
@@ -219,10 +225,10 @@ def recovery_args(fixture, **overrides) -> SimpleNamespace:
     return SimpleNamespace(**values)
 
 
-def _head_registry_only(context, steps=installation.STEPS):
+def _head_registry_only(context, steps=installation_materialize.STEPS):
     """The recover materializer with only its head-registry step running (the host is not this test's)."""
     return upgrade.run_steps(
-        context, steps=tuple(step for step in steps if step is upgrade.step_head_registry)
+        context, steps=tuple(step for step in steps if step is upgrade_workspaces.step_head_registry)
     )
 
 
@@ -258,7 +264,25 @@ def recover_snapshot(
     }
     for name, failure in (failures or {}).items():
         patches[name] = mock.Mock(side_effect=failure)
+    # Patch the binding read by the real caller, including the host materializer's
+    # own preflight and step runner. No mock is copied to unrelated owners.
+    owners = {
+        "_materialize_live_root": installation_clone,
+        "check_prerequisites": installation_commands,
+        "check_product_runtime": installation_materialize,
+        "import_normalized_board": installation_commands,
+        "rebuild_memory_index": installation_commands,
+        "provision_project_checkouts": installation_commands,
+        "provision_codex_home": installation_commands,
+        "run_steps": installation_materialize,
+        "mark_reconcile_applied": installation_commands,
+        "restore_findings": installation_commands,
+        "materialize_checkpoint": installation_commands,
+        "materialize_head_registry": installation_commands,
+        "materialize_pipeline_state": installation_commands,
+        "materialize_host": installation_commands,
+    }
     with ExitStack() as stack:
         for name, replacement in patches.items():
-            stack.enter_context(mock.patch.object(installation, name, replacement))
-        return installation.install(recovery_args(fixture, **overrides))
+            stack.enter_context(mock.patch.object(owners[name], name, replacement))
+        return installation_commands.install(recovery_args(fixture, **overrides))

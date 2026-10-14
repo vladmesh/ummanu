@@ -47,6 +47,7 @@ from ummanu.dispatch.pause_ops import auto_resume_expired_freeze
 from ummanu.dispatch.po_cards import completion_state
 from ummanu.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
 from ummanu.dispatch.provider_failure import is_provider_unavailable_return
+from ummanu.dispatch.runtime_preflight import record_incident
 from ummanu.dispatch.state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
@@ -72,6 +73,7 @@ from ummanu.dispatch.tick_telemetry import (
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.infra.checkpoint_run import load_checkpoint_state
+from ummanu.kernel.errors import TaskError
 from ummanu.runtime.head.handoff import (
     active_budget,
     handoff_budget,
@@ -80,7 +82,7 @@ from ummanu.runtime.head.handoff import (
     handoff_stages_since,
 )
 from ummanu.sprints import SprintWriter, budget_thresholds
-from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY, TaskError
+from ummanu.tasks import ACTIVE_STATES, WAIT_OUTCOME_KEY
 
 # Tick telemetry records terminal health for pipeline and steward readers.
 TICK_TELEMETRY_UNHEALTHY_KEPT = 50
@@ -335,54 +337,9 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
         telemetry["unhealthy_total"] = _counter(telemetry.get("unhealthy_total")) + 1
     telemetry["unhealthy"] = unhealthy[-TICK_TELEMETRY_UNHEALTHY_KEPT:]
     telemetry.setdefault("unhealthy_total", _counter(telemetry.get("unhealthy_total")))
-    _record_incident(telemetry, entry)
+    record_incident(telemetry, entry)
     payload["tick_telemetry"] = telemetry
     return telemetry
-
-
-def _record_incident(telemetry: dict[str, Any], entry: dict[str, Any]) -> None:
-    """Fold one tick into the open incident, closing it when the tick is healthy again.
-
-    An incident is one continuous run of unhealthy ticks: the tick that finds none open opens one and
-    bumps `incident_total`, every unhealthy tick after it extends that record, and the first healthy
-    tick closes it into `recovery` and bumps `recovery_total`. Both counters are monotonic within a
-    generation, because a reader dedupes on them and a counter that can go down would let a later
-    event consume an earlier one the reader has not seen.
-
-    The tick that opened the incident is kept whole under `opened`, so its cause survives into the
-    recovery record.
-    """
-    incident = telemetry.get("incident")
-    incident = dict(incident) if isinstance(incident, dict) else None
-    if entry["healthy"]:
-        if incident:
-            telemetry["recovery"] = {
-                **incident,
-                "recovered_seq": entry["seq"],
-                "recovered_at": entry["at"],
-                "recovered_status": entry["status"],
-            }
-            telemetry["recovery_total"] = _counter(telemetry.get("recovery_total")) + 1
-            incident = None
-    elif incident:
-        incident["unhealthy_ticks"] = _counter(incident.get("unhealthy_ticks")) + 1
-        incident["last_seq"] = entry["seq"]
-        incident["last_at"] = entry["at"]
-    else:
-        incident = {
-            "id": uuid.uuid4().hex,
-            "opened_seq": entry["seq"],
-            "opened_at": entry["at"],
-            "last_seq": entry["seq"],
-            "last_at": entry["at"],
-            "unhealthy_ticks": 1,
-            "opened": entry,
-        }
-        telemetry["incident_total"] = _counter(telemetry.get("incident_total")) + 1
-    telemetry["incident"] = incident
-    telemetry.setdefault("recovery", None)
-    telemetry.setdefault("incident_total", _counter(telemetry.get("incident_total")))
-    telemetry.setdefault("recovery_total", _counter(telemetry.get("recovery_total")))
 
 
 def _record_failed_tick(runtime: Any, exc: BaseException) -> None:
@@ -1112,12 +1069,9 @@ def _advance_active(
         except Exception as exc:  # noqa: BLE001 - one step's failure is recorded, never ends the tick
             errors.append(_unexpected_error(str(task.get("ref") or ""), exc))
             continue
-        # Legacy terminal paths report a committed board transition as
-        # {"status": "ok", "to": "blocked"}.  That is still a Blocked card:
-        # suppress claims in its sprint and project during this same tick.
-        if outcome.get("status") == "blocked" or (
-            outcome.get("status") == "ok" and outcome.get("to") == "blocked"
-        ):
+        # The terminal destination closes scopes regardless of the action's health status.
+        # Recovery paths also report Blocked directly in status, without a destination.
+        if outcome.get("to") == "blocked" or outcome.get("status") == "blocked":
             sprint_ref = str(task.get("sprint") or "")
             project = str(task.get("project") or "")
             if sprint_ref:
@@ -1601,6 +1555,7 @@ def _production_claim_ready(
                 payload,
                 attempt_id,
                 resume_workspace=resume_workspace,
+                fresh_attempt=True,
             )
         except TaskError as exc:
             if exc.code in {"capacity_reached", "claim_conflict", "predecessor_open"}:

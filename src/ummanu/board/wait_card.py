@@ -34,8 +34,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.extension_bag import bag_json
 from ummanu.board.models import CardState
+from ummanu.board.sql_rows import parse_rfc3339, rfc3339
 
 #: The three bag fields (see the module docstring).
 WAIT_SPEC = "wait"
@@ -91,16 +92,15 @@ class WaitSpecError(ValueError):
 
 def utc_text(moment: datetime) -> str:
     """RFC 3339 UTC with a `Z`, to the second."""
-    return moment.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return rfc3339(moment)
 
 
 def parse_utc(value: str, what: str) -> datetime:
     """An ISO-8601 time that names its zone, as UTC. A time without a zone is refused, not guessed."""
     text = str(value or "").strip()
-    try:
-        moment = datetime.fromisoformat(text.replace("Z", "+00:00").replace("z", "+00:00"))
-    except ValueError:
-        raise WaitSpecError(f"{what} {text!r} is not an ISO-8601 time") from None
+    moment = parse_rfc3339(text)
+    if moment is None:
+        raise WaitSpecError(f"{what} {text!r} is not an ISO-8601 time")
     if moment.tzinfo is None:
         raise WaitSpecError(f"{what} {text!r} names no zone; give UTC, e.g. 2026-09-28T12:00:00Z")
     return moment.astimezone(UTC)
@@ -352,30 +352,14 @@ def build_wait_spec(
     return WaitSpec(target, utc_text(moment), addresses, utc_text(now), window)
 
 
-def _bag(task: Mapping[str, Any]) -> Mapping[str, Any]:
-    extensions = task.get("extensions")
-    bag = extensions.get(EXTENSION_BAG) if isinstance(extensions, Mapping) else None
-    return bag if isinstance(bag, Mapping) else {}
-
-
-def _json_field(task: Mapping[str, Any], key: str) -> Any:
-    raw = _bag(task).get(key)
-    if isinstance(raw, Mapping):
-        return raw
-    try:
-        return json.loads(str(raw or ""))
-    except ValueError:
-        return None
-
-
 def wait_spec(task: Mapping[str, Any]) -> WaitSpec | None:
     """The card's wait spec, or None when it carries no well-formed one."""
-    return WaitSpec.from_json(_json_field(task, WAIT_SPEC))
+    return WaitSpec.from_json(bag_json(task, WAIT_SPEC))
 
 
 def wait_cancel(task: Mapping[str, Any]) -> dict[str, str] | None:
     """The card's cancel as `{at, by, role, reason}`, or None."""
-    payload = _json_field(task, WAIT_CANCEL)
+    payload = bag_json(task, WAIT_CANCEL)
     if not isinstance(payload, Mapping):
         return None
     record = {key: str(payload.get(key) or "").strip() for key in ("at", "by", "role", "reason")}
@@ -454,7 +438,7 @@ class WaitState:
 
 
 def wait_state(task: Mapping[str, Any]) -> WaitState:
-    return WaitState.from_json(_json_field(task, WAIT_STATE))
+    return WaitState.from_json(bag_json(task, WAIT_STATE))
 
 
 def pending_addresses(spec: WaitSpec, state: WaitState) -> list[str]:

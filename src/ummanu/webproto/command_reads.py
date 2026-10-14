@@ -24,15 +24,24 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.board.models import Event
-from ummanu.config import InstanceReport, validate_instance
+from ummanu.config import InstanceReport
 from ummanu.tasks import _event_action, task_audit_for
 from ummanu.webproto import sources
+from ummanu.webproto._values import _text, _typed_reason
 from ummanu.webproto.boundary import ProtocolBoundary
 from ummanu.webproto.cursor import Cursor, decode
-from ummanu.webproto.errors import InvalidCursor, ValidationRefused
+from ummanu.webproto.errors import InstallationUnavailable, InvalidCursor, ValidationRefused
 from ummanu.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
-from ummanu.webproto.section import Reading, Section, SectionSet, SourceSet, render, rule
-from ummanu.webproto.section import read_source as _source
+from ummanu.webproto.section import (
+    Reading,
+    Section,
+    SectionSet,
+    SourceSet,
+    read_installation,
+    read_source as _source,
+    render,
+    rule,
+)
 
 SCHEMA_VERSION = 1
 
@@ -163,16 +172,13 @@ OPERATION_IDENTITY: dict[str, Any] = {
     },
 }
 
-#: The codes each read can refuse with, checked against `docs/PROTOCOLS.md` by a test. The layer-wide
-#: `backend_unavailable` from :mod:`ummanu.webproto.boundary` is not listed per read.
+#: The codes each read can refuse with, checked against `docs/PROTOCOLS.md` by a test. Its
+#: `backend_unavailable` is the unusable instance config (`InstallationUnavailable`, every layer's
+#: code for it); any other source failure is the layer-wide one from :mod:`ummanu.webproto.boundary`.
 COMMAND_ERRORS: dict[str, tuple[str, ...]] = {
-    "command_history": ("validation",),
-    "command_request": ("validation",),
+    "command_history": ("validation", "backend_unavailable"),
+    "command_request": ("validation", "backend_unavailable"),
 }
-
-
-class _Unreadable(Exception):
-    """Inside one source read: the durable document could not be read at all."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,10 +260,6 @@ def _entity(record: dict[str, Any], typed: bool) -> dict[str, Any]:
         kind = _text(subject.get("kind")) or None
         reference = _text(subject.get("ref")) or reference
     return {"ref": reference, "kind": kind}
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""
 
 
 class CommandSections(SectionSet):
@@ -454,7 +456,7 @@ class CommandReadLayer(ProtocolBoundary):
     def report(self) -> InstanceReport:
         report, refused = self._installation(now=self._clock())
         if report is None:
-            raise ValidationRefused(str(refused.source.reason))
+            raise InstallationUnavailable(str(refused.source.reason))
         return report
 
     def data_dir(self, report: InstanceReport | None = None) -> Path:
@@ -465,39 +467,11 @@ class CommandReadLayer(ProtocolBoundary):
         return report.data_dir
 
     def _installation(self, *, now: float) -> tuple[InstanceReport | None, Reading]:
-        """The installation config as a source, and the refusal only it can force.
-
-        With an explicit data directory, an invalid config removes only what it owns. Without one,
-        the read is refused as `validation`.
-        """
-
-        def produce() -> InstanceReport:
-            report = validate_instance(self.instance)
-            if not report.ok or report.data_dir is None:
-                raise _Unreadable(
-                    "this instance config does not validate: "
-                    + "; ".join(str(error) for error in report.errors[:5])
-                    if report.errors
-                    else "this instance config names no data directory"
-                )
-            return report
-
-        reading = _source(
-            SOURCE_INSTALLATION,
-            produce,
-            refusal=lambda exc: (
-                str(exc)
-                if isinstance(exc, _Unreadable)
-                else f"this instance config could not be read: {_reason(exc)}"
-            ),
-            now=now,
-            evidence=self._instance_file(),
+        """The installation config as a source (:func:`read_installation`); the reading carries no value."""
+        report, reading = read_installation(
+            self.instance, key=SOURCE_INSTALLATION, now=now, located=self._data_dir is not None
         )
-        if reading.answered:
-            return reading.value, Reading(SOURCE_INSTALLATION, reading.source, None)
-        if self._data_dir is None:
-            raise ValidationRefused(str(reading.source.reason))
-        return None, reading
+        return report, Reading(SOURCE_INSTALLATION, reading.source, None)
 
     # -- the source ---------------------------------------------------------------------------
 
@@ -540,7 +514,7 @@ class CommandReadLayer(ProtocolBoundary):
         return _source(
             SOURCE_AUDIT,
             read,
-            refusal=lambda exc: f"the committed board audit could not be read: {_reason(exc)}",
+            refusal=lambda exc: f"the committed board audit could not be read: {_typed_reason(exc)}",
             now=now,
             evidence=None,
         )
@@ -558,9 +532,6 @@ class CommandReadLayer(ProtocolBoundary):
         """The availability of every source, stated once for the document."""
         return {key: read.mark(key) for key in (SOURCE_AUDIT, SOURCE_INSTALLATION)}
 
-    def _instance_file(self) -> Path:
-        """The config file itself, so a refusal can be dated by it even when reading it failed."""
-        return self.instance if self.instance.is_file() else self.instance / "instance.yaml"
 
 
 def _identity() -> dict[str, Any]:
@@ -574,10 +545,6 @@ def _identity() -> dict[str, Any]:
         },
         "errors": {name: dict(entry) for name, entry in OPERATION_IDENTITY["errors"].items()},
     }
-
-
-def _reason(exc: Exception) -> str:
-    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
 
 
 __all__ = [

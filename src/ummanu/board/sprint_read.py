@@ -10,12 +10,17 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
-from ummanu.board.legacy_codec import positive_int, text
+from ummanu.board.legacy_codec import text
 from ummanu.board.models import SprintState
 from ummanu.board.po_channel import PoRequest
+from ummanu.board.sql_rows import now, rfc3339
+from ummanu.kernel.sprint_policy import (
+    DEFAULT_BUDGET_HARD as DEFAULT_BUDGET_HARD,
+    DEFAULT_BUDGET_SIGNAL as DEFAULT_BUDGET_SIGNAL,
+    budget_thresholds as budget_thresholds,
+)
 
 SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
 
@@ -33,8 +38,6 @@ BUDGET_UNCHARGED_INFRASTRUCTURE = "infrastructure_blocked"
 BUDGET_UNCHARGED_EVENT_TYPES = (BUDGET_UNCHARGED_INFRASTRUCTURE,)
 BUDGET_RECORDED_EVENT_TYPES = BUDGET_EVENT_TYPES + BUDGET_UNCHARGED_EVENT_TYPES
 BUDGET_UNCHARGED_FIELD = "sprint_budget_uncharged"
-DEFAULT_BUDGET_SIGNAL = 3
-DEFAULT_BUDGET_HARD = 6
 
 RESUME_FIELDS = (
     "selected_step",
@@ -46,18 +49,7 @@ RESUME_FIELDS = (
 )
 
 def _default_now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
-
-
-def budget_thresholds(config: Mapping[str, Any] | None = None) -> dict[str, int]:
-    """Resolve effective Sprint budget thresholds without depending on the legacy façade."""
-    raw = config.get("sprint_budget") if isinstance(config, Mapping) else {}
-    raw = raw if isinstance(raw, Mapping) else {}
-    signal = positive_int(raw.get("signal")) or DEFAULT_BUDGET_SIGNAL
-    hard = positive_int(raw.get("hard")) or DEFAULT_BUDGET_HARD
-    if hard < signal:
-        raise ValueError("sprint budget hard threshold must not be below signal threshold")
-    return {"signal": signal, "hard": hard}
+    return rfc3339(now())
 
 
 def _unique_strings(values: list[Any]) -> tuple[str, ...]:

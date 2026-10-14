@@ -22,7 +22,7 @@ facts:
     sha256: ff30c0433c12e7b7b655739f8e354b265c7059b0f64b81a705ab8ddb33acde5d
   - id: sprints-and-reservations
     path: sprints-and-reservations.md
-    sha256: 78e0f15a6a06b18814d35537ae1e85f7ca7a3d61bb6a733c0907bf69c3c0a0b7
+    sha256: 952652a723aa0a21ca449a075d389bb7c73d73c19d3c45d73ad0614b141dd67d
   - id: worker-reporting
     path: worker-reporting.md
     sha256: 17ccda217965f48e25291ab40e2b7977ce910a34f9ac37fcd9fd793418fea1a4

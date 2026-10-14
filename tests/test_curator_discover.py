@@ -24,7 +24,7 @@ class CuratorIdentityDiscoveryTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.curator = "/home/dev/orca/workspaces/ummanu/curator"
         self.env = mock.patch.dict(
-            "os.environ", {"TA_CURATOR_WORKSPACE": self.curator, "TA_CURATOR_SESSION_ID": "self"}
+            "os.environ", {"UMMANU_CURATOR_WORKSPACE": self.curator, "UMMANU_CURATOR_SESSION_ID": "self"}
         )
         self.env.start()
 
@@ -84,7 +84,7 @@ class CuratorIdentityDiscoveryTests(unittest.TestCase):
             )
         with (
             mock.patch.object(discover, "CLAUDE_PROJECTS", projects),
-            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.root / "workspaces")}),
+            mock.patch.dict("os.environ", {"UMMANU_WORKSPACES_ROOT": str(self.root / "workspaces")}),
             mock.patch.object(discover, "project_bindings", return_value=[]) as bindings,
             mock.patch.object(discover, "_observer_route", return_value="alpha") as observer_route,
         ):
@@ -132,7 +132,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         (self.workspaces / "a" / "worker").mkdir(parents=True)
         self._binding("a", repo_a)
         self._binding("ab", repo_ab)
-        with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}):
+        with mock.patch.dict("os.environ", {"UMMANU_WORKSPACES_ROOT": str(self.workspaces)}):
             self.assertEqual(discover.resolve_route(str(repo_a / "child"), instance=self.instance), "a")
             self.assertEqual(discover.resolve_route(str(alias / "child"), instance=self.instance), "a")
             self.assertEqual(
@@ -149,7 +149,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         self._binding("alpha", repo, "alpha-binding")
         removed = self.workspaces / "alpha-binding" / "finished-card"
         self.assertFalse(removed.exists())
-        with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}):
+        with mock.patch.dict("os.environ", {"UMMANU_WORKSPACES_ROOT": str(self.workspaces)}):
             self.assertEqual(discover.resolve_route(str(removed), instance=self.instance), "alpha")
             self.assertEqual(
                 discover.resolve_route(
@@ -195,7 +195,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         repo.mkdir()
         self._binding("ready-for-traffic", repo, include_binding=False)
         (self.workspaces / "ready-for-traffic" / "worker").mkdir(parents=True)
-        with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}):
+        with mock.patch.dict("os.environ", {"UMMANU_WORKSPACES_ROOT": str(self.workspaces)}):
             self.assertEqual(discover.registered_project_ids(self.instance), {"ready-for-traffic"})
             self.assertEqual(discover.resolve_route(str(repo), instance=self.instance), "ready-for-traffic")
             self.assertEqual(
@@ -215,7 +215,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         observer = self.workspaces / "observers" / token / "head"
         observer.mkdir(parents=True)
         with (
-            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
+            mock.patch.dict("os.environ", {"UMMANU_WORKSPACES_ROOT": str(self.workspaces)}),
             mock.patch.object(discover, "SprintReader") as reader,
             mock.patch.object(discover, "sprint_client"),
         ):
@@ -238,7 +238,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         observer = self.workspaces / "observers" / request_token("sprint:1412") / "head"
         observer.mkdir(parents=True)
         with (
-            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
+            mock.patch.dict("os.environ", {"UMMANU_WORKSPACES_ROOT": str(self.workspaces)}),
             mock.patch.object(discover, "SprintReader") as reader,
             mock.patch.object(discover, "sprint_client"),
         ):
@@ -257,7 +257,7 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         observer = self.workspaces / "observers" / request_token("sprint:1412") / "removed-head"
         self.assertFalse(observer.exists())
         with (
-            mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}),
+            mock.patch.dict("os.environ", {"UMMANU_WORKSPACES_ROOT": str(self.workspaces)}),
             mock.patch.object(discover, "SprintReader") as reader,
             mock.patch.object(discover, "sprint_client"),
         ):

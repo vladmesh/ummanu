@@ -34,6 +34,7 @@ from ummanu.runtime.local_pty_head import (
     head_run_supervisor_lease,
 )
 from ummanu.runtime.redact import scrub_secrets
+from ummanu.webproto._values import _text
 
 #: What a row of a card's heads, or a head view, says about a head on the legacy runtime.
 LEGACY_NOTICE = "no local-pty journal (legacy runtime)"
@@ -395,7 +396,3 @@ def _time(value: Any) -> float | None:
     except (OverflowError, ValueError):
         return None
     return seconds if math.isfinite(seconds) and 0 < seconds < _LAST_TIME else None
-
-
-def _text(value: Any) -> str:
-    return value if isinstance(value, str) else ""

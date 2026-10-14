@@ -16,6 +16,7 @@ import copy
 import io
 import json
 import tempfile
+import threading
 import unittest
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -57,7 +58,7 @@ from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
 from ummanu.po import store as po_store
 from ummanu.po.client import OutcomeUnknown
-from ummanu.po.service import listening
+from ummanu.po.service import PoService, listening
 from ummanu.po.sprints import SprintRecord
 from ummanu.tasks import TaskError, TaskWriter, is_significant_card_event, is_significant_observer_event
 
@@ -282,7 +283,20 @@ class RepeatTests(DispatcherFixture):
         self.assertEqual(len(self.po_sprints.comments), 1)
 
     def test_an_unanswered_submit_is_repeated_with_the_same_id_and_makes_one_input(self) -> None:
-        self.start()
+        advance = threading.Lock()
+        attempted = threading.Event()
+        owner = threading.current_thread()
+        pump = PoService.pump
+
+        def controlled_pump(service: PoService) -> None:
+            if not advance.acquire(blocking=False):
+                if threading.current_thread() is not owner:
+                    attempted.set()
+                return
+            try:
+                pump(service)
+            finally:
+                advance.release()
 
         class LosesTheFirstAnswer:
             def __init__(self, inner: Any) -> None:
@@ -302,15 +316,30 @@ class RepeatTests(DispatcherFixture):
         runtime = self.runtime(card())
         runtime.po = channel = LosesTheFirstAnswer(runtime.po)
 
-        first = self.claim(runtime)
-        second = self.tick(runtime)
+        # Install before start so no pump can already be advancing. Contenders return rather
+        # than blocking the socket or cleanup; both contexts unwind even on assertion failure.
+        with mock.patch.object(PoService, "pump", controlled_pump), advance:
+            service = self.start()
+            eventually(attempted.is_set, "the background service never attempted to pump")
+            first = self.claim(runtime)
+            submission = self.record().po_submission
+            accepted = service.queue.find(submission.submit_request_id)
+            self.assertIsNotNone(accepted)
+            self.assertEqual((accepted.session_id, accepted.text), (submission.session_id, submission.text))
+            service.pump()  # Force another advance attempt with the accepted input still queued.
+            second = self.tick(runtime)
 
-        self.assertEqual((first["action"], second["action"]), ("po-service-unanswered", "po-card-queued"))
-        self.assertEqual(len(set(channel.ids)), 1)
-        self.assertEqual(len(channel.ids), 1, "durable queue evidence recovers the accepted submit without replay")
+            self.assertEqual((first["action"], second["action"]), ("po-service-unanswered", "po-card-queued"))
+            self.assertEqual(len(set(channel.ids)), 1)
+            self.assertEqual(len(channel.ids), 1, "durable queue evidence recovers the accepted submit without replay")
+            self.assertEqual(service.queue.find(submission.submit_request_id), accepted)
+            self.assertIsNone(service.store.request(submission.submit_request_id))
         [session] = self.session_ids()
         self.settled(session, 2)
         self.assertEqual(len(FakePoStore(self.board).turns(session)), 2)
+        request = service.store.request(submission.submit_request_id)
+        self.assertEqual((request.session_id, request.seq), (accepted.session_id, 2))
+        self.assertIsNone(service.queue.find(submission.submit_request_id))
 
     def test_a_service_that_is_down_leaves_the_card_in_progress_and_the_next_tick_submits(self) -> None:
         service = self.start(listen=False)
@@ -535,7 +564,7 @@ class CreateValidationTests(unittest.TestCase):
             writer.return_value.create.return_value = {"action": "created"}
             with (
                 tempfile.TemporaryDirectory() as tmp,
-                mock.patch("ummanu.task_commands.TaskWriter", writer),
+                mock.patch("ummanu.tasks.TaskWriter", writer),
                 mock.patch("ummanu.task_commands.card_client"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -551,7 +580,7 @@ class CreateValidationTests(unittest.TestCase):
         writer.return_value.complete.return_value = {"action": "completed"}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
             mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):

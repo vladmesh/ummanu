@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from ummanu._fsutil import write_text_atomic
+from ummanu._fsutil import fsync_directory, write_text_atomic
 
 
 class RunStoreError(RuntimeError):
@@ -21,7 +21,7 @@ class RunStoreError(RuntimeError):
     """
 
 
-def write_document(path: Path | str, payload: str) -> None:
+def write_document(path: Path | str, payload: str, *, durable: bool = False) -> None:
     """Write one of this layer's durable documents atomically, or raise `RunStoreError`.
 
     Any `RuntimeError` or `OSError` from `write_text_atomic` becomes `RunStoreError`, which the
@@ -30,6 +30,10 @@ def write_document(path: Path | str, payload: str) -> None:
     target = Path(os.fspath(path))
     try:
         write_text_atomic(target, payload)
+        if durable:
+            with target.open("rb") as handle:
+                os.fsync(handle.fileno())
+            fsync_directory(target.parent)
     except RunStoreError:
         raise
     except (RuntimeError, OSError) as exc:

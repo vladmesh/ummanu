@@ -106,6 +106,12 @@ files = [
     "src/ummanu/runtime/tui_delivery.py",
     "src/ummanu/runtime/head_runtimes.py",
     "src/ummanu/runtime/local_pty_head.py",
+    "src/ummanu/runtime/local_pty_values.py",
+    "src/ummanu/runtime/local_pty_delivery.py",
+    "src/ummanu/runtime/local_pty_handoff.py",
+    "src/ummanu/runtime/local_pty_durable.py",
+    "src/ummanu/runtime/local_pty_journal.py",
+    "src/ummanu/runtime/local_pty_inspection.py",
     "src/ummanu/runtime/head_runtime_backends.py",
     "src/ummanu/runtime/codex_preflight.py",
     "src/ummanu/runtime/state.py",
@@ -214,6 +220,7 @@ where = ["src"]
 include = ["ummanu*"]
 
 [tool.setuptools.package-data]
+"ummanu.web" = ["static/*.css", "static/*.js"]
 "ummanu.schemas" = ["*.json"]
 # Alembic reads its environment, template and revisions from the installed tree by path, so
 # they ship with the package rather than only existing in the checkout.

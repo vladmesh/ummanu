@@ -72,13 +72,14 @@ from ummanu.infra.github_credential import (
     CredentialError,
     RemoteExecution,
 )
+from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import (
     ProductIssueValidationError,
     registered_projects,
 )
 from ummanu.runtime.redact import redact
 from ummanu.state_repo import BOARD_RUNS_PATHSPEC
-from ummanu.tasks import TaskError, task_audit_for
+from ummanu.tasks import task_audit_for
 
 # Canonical checkpoint entries per component. `events.ndjson` is stored history: the
 # pre-2026-09-10 file journal, which nothing writes any more. It is copied while the data dir
@@ -818,14 +819,7 @@ class CheckpointWriter:
     def _git(self, args: list[str], label: str) -> subprocess.CompletedProcess[str]:
         # The instance repository owns command shape, owner crossing and the Git
         # environment; this writer owns only the semantic failure it reports.
-        try:
-            result = state_repo.run_git(self.instance_dir, args, label=label)
-        except state_repo.StateRepoError as exc:
-            raise CheckpointBlocked(str(exc)) from None
-        if result.returncode != 0:
-            detail = (result.stderr or result.stdout or "").strip().splitlines()
-            raise CheckpointBlocked(f"{label} failed: {detail[-1] if detail else 'git error'}")
-        return result
+        return state_repo.run_git_checked(self.instance_dir, args, label=label, error=CheckpointBlocked)
 
 
 # The snapshot exporter (docs/RECOVERY.md, "Layout" and "Writers"). Its identity and subject prefix
@@ -983,7 +977,7 @@ class SnapshotExporter(CheckpointWriter):
             repo, ["init", "--quiet", "--bare", "--initial-branch", SNAPSHOT_BRANCH], label="snapshot init"
         )
         if result.returncode != 0:
-            raise CheckpointBlocked(f"snapshot init failed: {_last_line(result)}")
+            raise CheckpointBlocked(f"snapshot init failed: {state_repo.git_failure_detail(result)}")
 
     def _tip(self, repo: Path) -> str:
         result = self._repo_run(
@@ -992,7 +986,7 @@ class SnapshotExporter(CheckpointWriter):
         if result.returncode == 1 and not result.stdout.strip():
             return ""
         if result.returncode != 0:
-            raise CheckpointBlocked(f"snapshot tip failed: {_last_line(result)}")
+            raise CheckpointBlocked(f"snapshot tip failed: {state_repo.git_failure_detail(result)}")
         return result.stdout.strip()
 
     def _published_runs(self, repo: Path, tip: str, work: Path) -> Path | None:
@@ -1035,8 +1029,9 @@ class SnapshotExporter(CheckpointWriter):
             repo, ["update-ref", "-m", message, "--stdin"], "snapshot ref", input="".join(updates)
         )
         if moved.returncode != 0:
+            detail = state_repo.git_failure_detail(moved)
             raise CheckpointBlocked(
-                f"snapshot branch moved during the window (expected {expected[:12]}): {_last_line(moved)}"
+                f"snapshot branch moved during the window (expected {expected[:12]}): {detail}"
             )
         return commit
 
@@ -1118,14 +1113,14 @@ class SnapshotExporter(CheckpointWriter):
             "snapshot seed fetch",
         )
         if fetched.returncode != 0:
-            raise CheckpointBlocked(f"snapshot seed fetch failed: {_last_line(fetched)}")
+            raise CheckpointBlocked(f"snapshot seed fetch failed: {state_repo.git_failure_detail(fetched)}")
         moved = self._repo_run(
             repo,
             ["update-ref", "-m", f"seed from {legacy}", SNAPSHOT_REF, legacy_tip, "0" * len(legacy_tip)],
             "snapshot seed ref",
         )
         if moved.returncode != 0:
-            raise CheckpointBlocked(f"snapshot seed ref failed: {_last_line(moved)}")
+            raise CheckpointBlocked(f"snapshot seed ref failed: {state_repo.git_failure_detail(moved)}")
         return {"status": "seeded", "commit": legacy_tip, "legacy_branch": branch}
 
     def _build_tree(self, repo: Path, cut: Path, modes: dict[str, str], index: Path) -> str:
@@ -1171,10 +1166,10 @@ class SnapshotExporter(CheckpointWriter):
         input: str | None = None,
         extra_env: dict[str, str] | None = None,
     ) -> str:
-        result = self._repo_run(repo, args, label, input=input, extra_env=extra_env)
-        if result.returncode != 0:
-            raise CheckpointBlocked(f"{label} failed: {_last_line(result)}")
-        return result.stdout
+        return state_repo.run_git_checked(
+            repo, ["--git-dir", str(repo), *args], label=label, error=CheckpointBlocked, input=input,
+            extra_env=extra_env,
+        ).stdout
 
     def _hand_to_git_child(self, path: Path, owner_of: Path) -> None:
         """A root run hands what it created to the identity its Git children run as."""
@@ -1508,11 +1503,6 @@ def _ignore_text(ignore: tuple[str, ...]) -> str:
     return "".join(f"{line}\n" for line in ignore)
 
 
-def _last_line(result: subprocess.CompletedProcess[str]) -> str:
-    detail = (result.stderr or result.stdout or "").strip().splitlines()
-    return detail[-1] if detail else "git error"
-
-
 class _GitFailure(Exception):
     """A git command the pusher needs did not run or did not succeed."""
 
@@ -1830,9 +1820,9 @@ class CheckpointPusher:
 
     @staticmethod
     def _raise_git_failure(result: subprocess.CompletedProcess[str], label: str) -> None:
-        output = CheckpointPusher._git_output(result)
-        detail = output.splitlines()
-        raise _GitFailure(f"{label} failed: {detail[-1] if detail else 'git error'}", output)
+        raise _GitFailure(
+            f"{label} failed: {state_repo.git_failure_detail(result)}", CheckpointPusher._git_output(result)
+        )
 
     @staticmethod
     def _git_output(result: subprocess.CompletedProcess[str]) -> str:
@@ -2312,34 +2302,15 @@ class _SnapshotAudit:
         return found
 
     def _blobs(self, oids: list[str]) -> dict[str, bytes]:
-        """The bytes of each blob, read in one `cat-file --batch` (the text runner would alter them)."""
-        result = state_repo.run_git_bytes(
-            self.published.path,
-            self.published.args(["cat-file", "--batch"]),
-            label="snapshot blobs",
-            input="".join(f"{oid}\n" for oid in oids).encode(),
-        )
-        if result.returncode != 0:
-            detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
-            raise state_repo.StateRepoError(f"snapshot blobs failed: {detail[-1] if detail else 'git error'}")
-        payload, offset = result.stdout, 0
-        blobs: dict[str, bytes] = {}
-        for oid in oids:
-            end = payload.index(b"\n", offset)
-            header = payload[offset:end].decode("ascii", "replace").split()
-            if len(header) != 3 or header[1] != "blob" or not header[2].isdigit():
-                raise state_repo.StateRepoError(f"snapshot blobs failed: {oid} is not a blob")
-            size = int(header[2])
-            blobs[oid] = payload[end + 1 : end + 1 + size]
-            offset = end + 1 + size + 1
-        return blobs
+        return state_repo.read_blobs(self.published.path, oids, git_args=self.published.args([]))
 
     def _resolve(self, name: str) -> str:
         result = self._run(["rev-parse", "--verify", "--quiet", name])
         if result.returncode == 1 and not result.stdout.strip():
             return ""
         if result.returncode != 0:
-            raise state_repo.StateRepoError(f"could not resolve {name}: {_last_line(result)}")
+            detail = state_repo.git_failure_detail(result)
+            raise state_repo.StateRepoError(f"could not resolve {name}: {detail}")
         return result.stdout.strip()
 
     def _run(self, args: list[str], *, input: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -2350,7 +2321,7 @@ class _SnapshotAudit:
     def _git(self, args: list[str], label: str, *, input: str | None = None) -> str:
         result = self._run(args, input=input)
         if result.returncode != 0:
-            raise state_repo.StateRepoError(f"{label} failed: {_last_line(result)}")
+            raise state_repo.StateRepoError(f"{label} failed: {state_repo.git_failure_detail(result)}")
         return result.stdout
 
 

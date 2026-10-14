@@ -8,7 +8,6 @@ a run or a sprint is decided here.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -20,7 +19,13 @@ from ummanu.web.provider_usage import ProviderUsageLayer
 from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from ummanu.webproto.card_ops import CardOperationLayer
 from ummanu.webproto.command_reads import CommandReadLayer
-from ummanu.webproto.commands import add_instance_argument
+from ummanu.webproto.commands import (
+    add_command_parser,
+    add_instance_argument,
+    heads_registry_default,
+    print_error,
+)
+from ummanu.webproto.errors import ReadError
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -39,10 +44,7 @@ EXIT_VALIDATION = 2
 
 def add_web_serve_subcommands(subparsers) -> None:
     """Register the group beside `web-read` and `web-run`."""
-    group = subparsers.add_parser(
-        "web-serve",
-        help="serve the local dashboard and card pages over the web-read and web-run operations",
-    )
+    group = add_command_parser(subparsers, "web-serve")
     add_instance_argument(group, help="path to an instance dir or instance.yaml")
     group.add_argument(
         "--data-dir",
@@ -57,7 +59,7 @@ def add_web_serve_subcommands(subparsers) -> None:
     group.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port to bind")
     group.add_argument(
         "--heads-registry",
-        default=os.environ.get("TA_HEADS_REGISTRY"),
+        default=heads_registry_default(),
         help="read head profiles from this registry instead of the installation's own",
     )
     group.add_argument(
@@ -107,11 +109,18 @@ def run_web_serve(args: argparse.Namespace) -> int:
     # The bar reads the Codex account the heads run on: `<data_dir>/codex-home`, not `~/.codex`.
     usage = ProviderUsageLayer(codex_home=codex_usage_home(args.data_dir))
     owner_events = OwnerEventLayer(args.instance)
+    ops = OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry)
+    try:
+        ops.prepare_card_runs()
+    except ReadError as refused:
+        # A refused runs source leaves that section unavailable; it must not stop the other pages.
+        # RunStore keeps its incomplete lookup until a later explicit preparation succeeds.
+        print_error(refused.to_json(), stderr=True)
     app = WebApp(
         reads,
-        OperationLayer(args.instance, data_dir=args.data_dir, registry_path=args.heads_registry),
+        ops,
         SprintReadLayer(args.instance, data_dir=args.data_dir, owner_events=owner_events),
-        SprintOperationLayer(args.instance, data_dir=args.data_dir),
+        SprintOperationLayer(args.instance, data_dir=args.data_dir, owner_events=owner_events),
         PauseReadLayer(args.instance, data_dir=args.data_dir),
         # The same construction `ummanu pause`/`resume` make for the production dispatcher: a
         # drain or a resume issued from the browser is the operator's own command, not a rehearsal.
@@ -128,5 +137,5 @@ def run_web_serve(args: argparse.Namespace) -> int:
     try:
         return serve(app, host=args.host, port=args.port)
     except LoopbackOnly as refused:
-        print(json.dumps({"error": {"code": "validation", "message": str(refused)}}), file=sys.stderr)
+        print_error({"code": "validation", "message": str(refused)}, stderr=True)
         return EXIT_VALIDATION

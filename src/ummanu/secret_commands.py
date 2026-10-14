@@ -25,7 +25,8 @@ from ummanu.infra.github_credential import (
     CredentialError,
     validate_checkpoint_credential,
 )
-from ummanu.runtime.paths import add_instance_argument
+from ummanu.runtime.cli_composition import add_command_parser
+from ummanu.runtime.paths import add_instance_argument, instance_dir as _instance_dir
 from ummanu.secret_store import (
     CONFIRM_WORDS,
     MATERIALIZE_FILE,
@@ -53,7 +54,7 @@ DEFAULT_ACTOR = "operator"
 
 
 def add_secret_subcommands(subparsers) -> None:
-    secret = subparsers.add_parser("secret", help="manage the encrypted secret store in the instance repo")
+    secret = add_command_parser(subparsers, "secret")
     secret_subcommands = secret.add_subparsers(dest="secret_command")
 
     init = secret_subcommands.add_parser(
@@ -491,11 +492,6 @@ def _confirmation_positions(count: int) -> set[int]:
     while len(positions) < min(CONFIRM_WORDS, count):
         positions.add(pysecrets.randbelow(count))
     return positions
-
-
-def _instance_dir(value: str) -> Path:
-    path = Path(value).expanduser()
-    return path.parent if path.name == "instance.yaml" else path
 
 
 def _fail(operation: str, error: str, message: str) -> int:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import json
+import errno
 import os
 from collections.abc import Callable
 from pathlib import Path
+from stat import S_ISREG
+from typing import TYPE_CHECKING
 
 from ummanu.board.backend import card_client
 from ummanu.board.models import CardState
@@ -21,19 +23,16 @@ from ummanu.board.task_routing import (
     TaskReview,
     TaskType,
 )
-from ummanu.cli_output import print_json
+from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missing_snapshot
+from ummanu.kernel.errors import TaskError
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
-from ummanu.runtime.head import CODEX_LAUNCH_MODES
-from ummanu.runtime.paths import add_instance_argument, resolve_instance_path
-from ummanu.tasks import (
-    BOARD_STORE_KIND,
-    TaskError,
-    TaskReader,
-    TaskWriter,
-    task_audit_for,
-)
+from ummanu.runtime.cli_composition import add_command_parser
+from ummanu.runtime.paths import add_instance_argument, instance_file, resolve_instance_path
+
+if TYPE_CHECKING:
+    from ummanu.tasks import TaskReader, TaskWriter
 
 
 def _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:
@@ -72,9 +71,8 @@ def resolve_data_dir(args: argparse.Namespace) -> str:
     try:
         return str(instance_data_dir(instance))
     except DataDirError as exc:
-        instance_file = instance / "instance.yaml" if instance.is_dir() else instance
         raise TaskError(
-            "usage", f"cannot resolve data dir from {instance_file}: {exc}; pass --data-dir", 2
+            "usage", f"cannot resolve data dir from {instance_file(instance)}: {exc}; pass --data-dir", 2
         ) from None
 
 
@@ -84,7 +82,7 @@ def _instance(args: argparse.Namespace) -> str:
 
 
 def add_task_subcommands(subparsers) -> None:
-    task = subparsers.add_parser("task", help="read normalized cards from the Pipeline board")
+    task = add_command_parser(subparsers, "task")
     task_subcommands = task.add_subparsers(dest="task_command")
     task_list = task_subcommands.add_parser("list")
     task_list.add_argument(
@@ -355,7 +353,7 @@ def add_task_subcommands(subparsers) -> None:
     verify_audit = task_subcommands.add_parser("verify-audit")
     _add_data_dir_args(verify_audit)
     verify_audit.set_defaults(handler=run_task_verify_audit)
-    task.set_defaults(handler=not_implemented_task)
+    task.set_defaults(handler=usage_handler("task subcommand required"))
 
 
 def _add_wait_create_args(parser) -> None:
@@ -416,11 +414,6 @@ def _add_sprint_override_args(parser) -> None:
     parser.add_argument("--sprint-override-reason-file", help="required PO override reason file")
 
 
-def not_implemented_task(args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "task subcommand required"}}))
-    return 2
-
-
 def run_task_list(args: argparse.Namespace) -> int:
     return _run_task_read(
         args,
@@ -439,6 +432,7 @@ def run_task_show(args: argparse.Namespace) -> int:
 
 def run_task_repair_references_preview(args: argparse.Namespace) -> int:
     from ummanu.board.reference_repair import preview_reference_repair
+    from ummanu.tasks import TaskWriter
 
     return run_task_command(
         lambda: preview_reference_repair(
@@ -449,6 +443,7 @@ def run_task_repair_references_preview(args: argparse.Namespace) -> int:
 
 def run_task_repair_references_apply(args: argparse.Namespace) -> int:
     from ummanu.board.reference_repair import apply_reference_repair
+    from ummanu.tasks import TaskWriter
 
     return run_task_command(
         lambda: apply_reference_repair(
@@ -464,6 +459,8 @@ def run_task_repair_references_apply(args: argparse.Namespace) -> int:
 
 
 def _run_task_read(args: argparse.Namespace, operation: Callable[[TaskReader], object]) -> int:
+    from ummanu.tasks import TaskReader
+
     return run_task_command(lambda: operation(TaskReader(card_client(_instance(args)))))
 
 
@@ -473,10 +470,15 @@ def run_task_command(
     try:
         result = operation()
     except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        print_task_error(exc)
         return exc.exit_code
     print_json(result, compact=True)
     return exit_code(result) if exit_code is not None else 0
+
+
+def print_task_error(exc: TaskError) -> None:
+    """A task-protocol refusal, on stderr as every task and sprint command prints one."""
+    print_error({"code": exc.code, "message": exc.message}, stderr=True)
 
 
 def _read_body(path: str | None) -> str:
@@ -488,17 +490,51 @@ def _read_body(path: str | None) -> str:
         raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
 
 
-def _reason_body(args: argparse.Namespace) -> str:
+def _read_handoff_body(path: str) -> str:
+    """A head's report/verdict body: a regular file this user owns, opened without following a link.
+
+    The dispatcher names the file in a directory private to this user, and the head writes it
+    there itself; a link, a fifo or another account's file at that name is not the head's body.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise TaskError("unsafe_body_file", f"body file {path} is a symbolic link", 2) from None
+        raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
+    with os.fdopen(fd, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not S_ISREG(info.st_mode):
+            raise TaskError("unsafe_body_file", f"body file {path} is not a regular file", 2)
+        if info.st_uid != os.geteuid():
+            raise TaskError("unsafe_body_file", f"body file {path} belongs to another user (uid {info.st_uid})", 2)
+        try:
+            return handle.read().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise TaskError("usage", f"cannot read body file: {exc}", 2) from None
+
+
+def _reason_body(args: argparse.Namespace, *, handoff: bool = False) -> str:
     literal = getattr(args, "reason", None)
     paths = [getattr(args, name, None) for name in ("body_file", "reason_file")]
     if sum(value is not None for value in [literal, *paths]) > 1:
         raise TaskError("usage", "choose one body/reason source", 2)
-    return literal if literal is not None else _read_body(next((path for path in paths if path is not None), None))
+    if literal is not None:
+        return literal
+    path = next((path for path in paths if path is not None), None)
+    return _read_handoff_body(path) if handoff and path is not None else _read_body(path)
 
 
-def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
+def _run_task_write(
+    args: argparse.Namespace,
+    operation: Callable[[TaskWriter, str, str], object],
+    *,
+    handoff: bool = False,
+) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
-        body = _reason_body(args)
+        body = _reason_body(args, handoff=handoff)
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return operation(writer, body, args.actor or args.role)
 
@@ -515,6 +551,8 @@ def run_task_comment(args: argparse.Namespace) -> int:
 
 
 def run_task_create(args: argparse.Namespace) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
         _validate_codex_mode_for_create(args)
         description = _read_body(args.body_file) if args.body_file else args.description
@@ -578,6 +616,8 @@ def _po_turn_origin(role: str) -> dict[str, str] | None:
 
 
 def run_task_edit(args: argparse.Namespace) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
         description = _read_body(args.body_file) if args.body_file else args.description
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
@@ -609,6 +649,7 @@ def run_task_report(args: argparse.Namespace) -> int:
             classification=args.classification,
             request_id=args.request_id,
         ),
+        handoff=True,
     )
 
 
@@ -686,6 +727,7 @@ def run_task_verdict(args: argparse.Namespace) -> int:
             body=body,
             request_id=args.request_id,
         ),
+        handoff=True,
     )
 
 
@@ -749,6 +791,8 @@ def run_task_claim(args: argparse.Namespace) -> int:
 
 
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
+    from ummanu.tasks import TaskWriter
+
     def command() -> object:
         repaired, unresolved = TaskWriter(
             card_client(_instance(args)),
@@ -768,6 +812,7 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
     secretary-1614 was declared stalled by. The exit contract is unchanged: 0 when nothing is staged, 1 when something is, and
     the named `TaskError` status of any command that cannot reach its backend.
     """
+    from ummanu.tasks import BOARD_STORE_KIND, task_audit_for
 
     def command() -> object:
         client = card_client(_instance(args))
@@ -779,6 +824,8 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
 
 
 def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:
+    from ummanu.runtime.head import CODEX_LAUNCH_MODES
+
     if not args.codex_mode:
         return
     mode = str(args.codex_mode).strip()

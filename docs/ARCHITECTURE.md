@@ -16,7 +16,19 @@ an uninstalled checkout by accident. Packaging, scripts, docs, examples and test
 - `src/ummanu` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
   packages: `automations`, `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`,
-  `schemas`, `transition`, `web`, `webfront`, `webproto`.
+  `schemas`, `web`, `webfront`, `webproto`.
+- `ummanu.tasks` owns the public `TaskReader` and `TaskWriter`, card creation, comments,
+  reports and transitions. `board/task_protocol/rows.py` owns shared task rows, event predicates,
+  request keys and admission error identities; `dispatcher.py` owns control writes for wait,
+  PO, e2e, routing and attempt accounting; `sprint_guard.py` owns reservations, executor pins
+  and observer identity; `recovery.py` owns archive/retire/restore, audit staging and pending
+  completion. The writer inherits these three capabilities and dispatches through the same
+  `self`. Lower owners do not import the public facade. Released helper aliases remain direct
+  bindings; a module-global patch must target the module executing the call.
+  [The source inventory](task-protocol-inventory.json) records baseline AST hashes, signatures,
+  decorators, global bindings and actual consumers. `tests/test_task_protocol_owners.py` checks
+  unique implementations and the 3000-line limit for this subsystem. Other giant files remain
+  outside this DEC-01 task cut.
 - `src/ummanu/automations` is the three background agents (curator, steward, retro), built on top
   of the rest of `ummanu`. `python3 -P -m ummanu automations <agent> <cmd>` is their one entry:
   `ummanu.cli` hands the argv untouched to the composition root
@@ -88,6 +100,22 @@ Done. `dispatch.attempt_accounting` owns the shared attempt-usage/outcome bounda
 round/source handoff, phase usage accounting and publication, terminal outcome obligations, and the
 generic terminal board effect. Reviewer launch/wait, confirmed-stop/adoption, routing bookkeeping and
 provider ingress remain separate runtime boundaries.
+
+`dispatch.gate` owns mechanical mode selection, candidate attribution preflight,
+base recovery, local validation and GitHub verdict/receipt orchestration. Shared
+GitHub transport, checks/status rollup, Actions logs and failed-job reruns belong
+to `dispatch.github_ci`; e2e, post-merge and wait consumers import that owner.
+`dispatch.gate_pr` owns publication leases and PR authorship/readback; it records
+successful publication before another tick can reuse a lease and preserves human
+PR text. `dispatch.gate_workflows` owns PR/push trigger analysis: only readable
+workflows unanimously refusing the base prove impossibility. None/noop and empty
+rollups do not attest an executed green suite. `dispatch.gate_types` defines the
+shared result, import-time limits and failure fingerprint; `gate.GateResult` is a direct alias.
+Lower owners never import the gate facade. Core and publication resolve backend
+calls through `github_ci`, so patches at that owner observe every remote question.
+Bounded ownership guards live in `tests/test_gate_owners.py`; the Git/backend
+scenario corpus stays in its declared CI shards. The original coupling scanner
+and `task-protocol-graph` workflow measure the candidate's uncut graph.
 
 Dependency rules:
 
@@ -235,8 +263,9 @@ loads and is shown as a legacy record, but no backend is built for it, so it is 
 delivered to. A dispatcher record from that time, one whose workspace is an Orca worktree or whose
 head run is a legacy record, is refused by every host verb (launch, delivery, stop, teardown) with
 one typed error, `LegacyDispatcherRecord`, before anything runs; the card goes Blocked with a reason
-naming the record. What an absent key means, the `local-pty` parity criteria and the A20 exit
-checklist are in [Head runtime](HEAD_RUNTIME.md).
+naming the record. Absent-key meanings are in
+[The runtime default](HEAD_RUNTIME.md#the-runtime-default); completed migration evidence is in
+[Orca migration history](HEAD_RUNTIME.md#orca-migration-history).
 
 - `LocalPtyHeadRuntime` runs a per-run supervisor that owns the process group, PTY, Unix socket and
   a versioned append-only journal. Delivery, drain and stop share one lock. The supervisor's status
@@ -537,6 +566,15 @@ the boundary.
 
 ## Ownership and security
 
+Install/recover capabilities live in `ummanu.installation`: `commands` owns CLI orchestration,
+`clone` owns legacy and snapshot checkouts, `credentials` owns bootstrap input, secret unlock and
+scoped environment, `materialize` owns checkpoint/run-state/host/registry/memory recovery and
+progress, and `provision` owns projects and CODEX_HOME. `support` owns subprocess, ownership and
+target confinement boundaries; `models` owns their shared error and results. The package root is
+only a namespace. Bootstrap, restore commands and upgrade import these owners directly. The
+[moved-definition inventory](installation-boundary-inventory.json) records the baseline AST and
+all source/patch seams; [testing](TESTING.md) records the graph guard's CI ownership.
+
 - The security profile assumes one trusted host owner. Agents are not isolated as untrusted tenants.
 - `doctor` reads config, data and host inventory and never changes the host. `status` and `doctor`
   share one recovery projection; it does not decrypt values, update the probe cache or launch heads.
@@ -544,7 +582,7 @@ the boundary.
   managed manifest or a product-written marker. Its kinds are project checkouts and systemd units.
   An `orca` record an older reconcile left in the managed manifest is kept, untouched (A20 step 8).
   A binding's `orca_binding` is optional legacy, read only by curator routing
-  ([Head runtime](HEAD_RUNTIME.md#a20-exit-checklist)); new projects have none. Card placement
+  ([Head runtime](HEAD_RUNTIME.md#orca-migration-history)); new projects have none. Card placement
   never reads it.
 - Store-registered secrets reach the snapshot and the instance remote only as encrypted envelopes.
   The raw installation key, the recovery phrase and `runtime.env` are never exported. Facts, exports and diagnostics carry no

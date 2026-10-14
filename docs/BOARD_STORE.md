@@ -312,10 +312,11 @@ CREATE TABLE sprint_e2e_charges (
 CREATE INDEX sprint_e2e_charges_by_sprint ON sprint_e2e_charges (sprint_ref);
 ```
 
-A charge is `UPDATE sprints SET e2e_used = e2e_used + 1 WHERE ref = ... AND e2e_used < e2e_budget AND
-NOT EXISTS (a charge of that dispatch id) RETURNING ...` and, when it returns a row, the insert, in the
-transaction that writes the run's intent on the card. A raise adds to `e2e_budget` in place under one
-`e2e_budget_raised` sprint audit record.
+A charge conditionally increments `e2e_used` where the reference matches, `e2e_used < e2e_budget`,
+the latest `e2e_grant`/`e2e_refusal` entry of `owner_decisions` is not `e2e_refusal`, and no charge
+of that dispatch id exists (`sql_sprints.py:charge_e2e`). When the UPDATE returns a row, the charge
+is inserted in the transaction that writes the run's intent on the card. A raise adds to
+`e2e_budget` in place under one `e2e_budget_raised` sprint audit record.
 
 ### 3.5 Cards (tasks)
 
@@ -614,6 +615,10 @@ ALTER TABLE sprint_decisions
 
 The `UNIQUE (request_id)` on comment tables means at most one comment per claimed request.
 
+`board_events.committed` and `committed_at` are mirror fields populated by
+`SqlTaskAudit._write_board_event`. Audit reads and replay use `requests.status` and
+`requests.intent`; the mirror fields do not decide whether an operation committed.
+
 **Request lifecycle in `SqlTaskAudit`.**
 
 - The whole record is frozen in `requests.intent`; `operation` is its `kind`. Only records whose
@@ -647,6 +652,59 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
   export gate (§6.3) and `ummanu task verify-audit`'s answer.
 - One advisory lock (`ummanu.board.requests`) serializes separate claims outside a transaction;
   the per-card marker lock is also an advisory lock.
+
+#### PO sessions, turns and delivery tables
+
+These tables share the board store. The migration links below give their DDL; the column lists
+include later revisions. Current types, nullability, keys and constraints are in
+[`board/schema.py`](../src/ummanu/board/schema.py).
+
+- `po_sessions`: `session_id` (text primary key), `cli`, `model`, `cwd`, `created_at`, `state`,
+  `cli_session_id`, `closed_at`, `closed_by`, `effort`, `title`.
+  [`0008`](../src/ummanu/board/migrations/versions/0008_po_sessions.py) creates the table;
+  [`0010`](../src/ummanu/board/migrations/versions/0010_po_session_close.py) adds the close audit,
+  [`0015`](../src/ummanu/board/migrations/versions/0015_po_effort_resolved_model.py) the effort,
+  and [`0019`](../src/ummanu/board/migrations/versions/0019_po_session_title.py) the title.
+  `cli` is `claude|codex`, `state` is `open|closed`; both close fields are set exactly when closed.
+- `po_turns`: `session_id`, `seq` (composite primary key), `started_at`, `finished_at`, `state`,
+  `stdout_path`, `pid`, `process_identity`, `reason`, `resolved_model`.
+  [`0008`](../src/ummanu/board/migrations/versions/0008_po_sessions.py) creates it;
+  [`0015`](../src/ummanu/board/migrations/versions/0015_po_effort_resolved_model.py) adds the model.
+  The session foreign key cascades deletes. `seq > 0`, state is
+  `running|completed|failed|interrupted`, and `finished_at` is NULL exactly while running.
+  `po_turns_one_running_per_session` is a unique partial index on running sessions.
+- `po_feed`: `entry_id` (bigint identity primary key), `session_id`, `turn_seq`, `role`, `text`,
+  `created_at`, `metadata` (nullable JSONB object, J11).
+  [`0008`](../src/ummanu/board/migrations/versions/0008_po_sessions.py) creates it;
+  [`0030`](../src/ummanu/board/migrations/versions/0030_po_input_context.py) adds metadata.
+  The composite turn foreign key cascades deletes; `role` is `owner|agent` and
+  `po_feed_by_session` indexes `(session_id, entry_id)`.
+- `po_requests`: `request_id` (text primary key), `operation`, `fingerprint`, `session_id`, `seq`,
+  `created_at`. [`0009`](../src/ummanu/board/migrations/versions/0009_po_requests.py) creates it;
+  [`0016`](../src/ummanu/board/migrations/versions/0016_sprint_po_session.py) extends operations to
+  `po_session_create|po_send|po_sprint_session`. `seq` is set exactly for `po_send`; session and
+  composite turn foreign keys cascade deletes. This PO request namespace is separate from `requests`.
+- `owner_events`: `id` (bigint identity primary key), `kind`, `class`, `subject_ref`, `text`,
+  `created_at`, `read_at`, `dedup_key` (unique).
+  [`0018`](../src/ummanu/board/migrations/versions/0018_owner_events.py) creates it;
+  revisions `0021`, `0023`, `0024`, `0025` and
+  [`0028`](../src/ummanu/board/migrations/versions/0028_owner_turns.py) extend or reclassify kinds
+  (§3.12, §3.13). `owner_events_by_subject` indexes `subject_ref`. Only
+  `card_handed_to_owner`, `steward_needs_human` and `po_card_escalated` have class `needs_owner`;
+  all other kinds are `notice`.
+- `origin_returns`: `id` (bigint identity primary key), `task_ref`, `event_id` (unique), `request_id`,
+  `target_state`, `created_at`, `delivered_at`, `status`, `notice`, `session`, `po_request_id`.
+  [`0022`](../src/ummanu/board/migrations/versions/0022_origin_returns.py) creates it.
+  `target_state` is `done|blocked`; `status` is NULL exactly while `delivered_at` is NULL, then
+  `delivered|skipped`. `origin_returns_undelivered` indexes `id` where `delivered_at IS NULL`, and
+  `origin_returns_by_card` indexes `task_ref`. Its text identities have no foreign keys.
+
+Migration `0028` also installs the PL/pgSQL function and row trigger
+`owner_event_routine_notice`, before INSERT or UPDATE OF `kind, class` on `owner_events`.
+For `card_waits_for_person`, `e2e_budget_spent` and `e2e_after_merge`, it changes an incoming
+`needs_owner` class to `notice` before the current class constraint is checked. Released producers
+can therefore write during activation without restoring obsolete owner authority. The migration
+also reclassifies existing rows, preserving their IDs, text, dedup keys and read history.
 
 ### 3.10 The eleven `jsonb` columns
 
@@ -692,7 +750,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `tasks.review` | `required`, `skipped`, or NULL (legacy, read as `required`) | `board.task_routing.TaskReview` |
 | `tasks.complexity` | `cheap`, `standard`, `hard`, `frontier` | `board.task_routing.TaskComplexity` |
 | `tasks.family_preference` | `auto`, `claude`, `codex` | `board.task_routing.FamilyPreference` |
-| `tasks.codex_launch_mode` | `tui` | `tasks._CODEX_LAUNCH_MODES` ← `head/command.py:CODEX_LAUNCH_MODES` |
+| `tasks.codex_launch_mode` | `tui` | `board.task_protocol.rows._CODEX_LAUNCH_MODES` ← `runtime.head.CODEX_LAUNCH_MODES` |
 | `sprint_budget_events.event_type` | six charged types + `infrastructure_blocked` | `sprints.BUDGET_RECORDED_EVENT_TYPES` |
 | `sprint_decisions.verdict` | per subject kind | `sprint_close.ISSUE_VERDICTS`, `CARD_DISPOSITIONS` |
 | `requests.status` | `staged`, `committed`, `discarded` | this schema |
@@ -702,7 +760,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `owner_events.kind` | the 14 owner event kinds | `board.owner_events.KINDS` |
 | `owner_events.class` | `needs_owner`, `notice`, derived from the kind (`owner_event_class_follows_kind`) | `board.owner_events.KIND_CLASS` |
 
-A retired `codex_launch_mode` reads as NULL (`tasks.py`); an audit record whose kind is not an
+A retired `codex_launch_mode` reads as NULL (`board/task_protocol/rows.py`); an audit record whose kind is not an
 `EventKind` stays a generic `requests` row (§3.9).
 
 Open vocabularies (`claim_worker`, `slug`, `base_branch`, pins, comment markers, head/profile
@@ -735,7 +793,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0009_po_requests` | `po_requests`: each /po form request id, its operation and input fingerprint, and the session or turn it made |
 | `0010_po_session_close` | `po_sessions.closed_at`, `closed_by`, set exactly when `state = 'closed'` (`po_session_closed_iff_audited`) |
 | `0011_card_kinds` | `infra` in `task_type_is_a_known_type_or_nothing`; nullable `tasks.review` (`task_review_is_a_known_choice_or_nothing`); `tasks.live_impact` defaulting to false, research only (`task_live_impact_is_research_only`) |
-| `0012_request_read_indexes` | indexes on `requests` only: committed by `ref` and in claim order, staged in claim order, by `intent->>'kind'`, by `intent->>'event_id'`, and the records owing an attempt outcome; the audit's narrowed reads (`docs/REQUESTS_GROWTH.md`) |
+| `0012_request_read_indexes` | indexes on `requests` only: committed by `ref` and in claim order, staged in claim order, by `intent->>'kind'`, by `intent->>'event_id'`, and the records owing an attempt outcome; the audit's narrowed reads ([Requests growth policy](#requests-growth-policy)) |
 | `0013_budget_candidates` | one partial index on `requests` only, `requests_budget_candidates`: committed rows meeting the budget pass's candidate predicate (`board/budget_candidates.py`), in claim order |
 | `0014_neutral_extension_bag` | data only: the extension bag of current `tasks`, `products` and `issues` rows moves onto the key `extra` (§8.2); refuses a store whose premise does not hold or that holds a non-committed `done-retention-` request; history is not rewritten; no downgrade |
 | `0015_po_effort_resolved_model` | `po_sessions.effort` (text, not null, default `'default'`: every existing session ran at the CLI's own effort) and `po_turns.resolved_model` (nullable text: the model the CLI reported for that turn); no downgrade |
@@ -1057,7 +1115,7 @@ per-card lock for marker comments.
 | Concern | Mechanism |
 |---|---|
 | request-id namespace | `requests.request_id` primary key; comments and budget charges claim it too |
-| staged and committed records | `requests.status` and `board_events.committed`, under advisory locks |
+| staged and committed records | `requests.status`, under advisory locks; `board_events` mirrors typed occurrences |
 | stage / commit / `committed(request_id)` | insert/upsert on `requests`, then compare the stored `intent` |
 | generic-stage replacement | allowed only over staged rows with `NOT protocol` |
 | `event_id` owner | lookup by `intent->>'event_id'` in `requests`, served by `requests_by_event_id` |
@@ -1089,7 +1147,8 @@ conditions (`board/budget_candidates.py`, over both the `kind`/`payload` and the
 in claim order and probes each charge id through the primary key. There is no cursor: a record that commits late, or whose card lookup fails for
 any number of ticks, stays in the set until it is charged. Every candidate leaves it exactly once, by
 a charge, a `budget_unlinked` marker (card has no sprint) or a `budget_unclassified` marker (the
-classifier types it nothing, or its terminal taxonomy is invalid), each under the charge id. The growth policy that rests on this is `docs/REQUESTS_GROWTH.md`.
+classifier types it nothing, or its terminal taxonomy is invalid), each under the charge id.
+The growth policy that rests on this is [below](#requests-growth-policy).
 
 **Card edges.** `TaskWriter._transition_card` and `TaskWriter.retire_done` run inside
 `TaskWriter._mutation()`. The claim, the state/archive change, the caller's finishing writes (claim
@@ -1117,6 +1176,25 @@ empty.
 **Card event readers.** `ReadLayer._events` returns `webproto.journal.CommittedAudit` (ordinal
 pages over committed audit, no file). The cursor names its kind, `ordinal`; a cursor of another
 kind is refused.
+
+#### Requests growth policy
+
+Keep every `requests` row. The product does not rotate, archive or delete settled audit history;
+discarding a staged generic claim remains part of its lifecycle (§3.9). Indexed, filtered reads
+cost the requested slice rather than unrelated history. The budget pass uses its partial candidate
+index and primary-key charge probes, so deleting history would buy little on those paths.
+
+`requests` is also the recovery canon: checkpoints export the whole audit as `audit.json` or
+`audit.ndjson`, restore reads it back, and request-id replay, budget and usage accounting and
+observer cursors resolve against it. Rotation would require a separate design for the history
+recovery replays, rather than piecemeal deletion.
+
+`tests/test_sql_audit_reads.py` verifies equal rows touched over N and 10×N unrelated records,
+index availability and equivalent narrowed answers. `tests/test_budget_candidates.py` verifies
+the candidate read cost and equivalent charges. Revisit retention only if a tick or web reader
+cannot be narrowed, or disk footprint, backup time or restore replay becomes an operational
+problem (for example, several GB or a backup exceeding its window). Whole-history checkpoint
+and restore reads stay outside latency-sensitive paths.
 
 ### 7.4 Schema versioning and migrations
 
@@ -1171,8 +1249,8 @@ kind is refused.
   *previous* build at release, so it imports from the product only what that build already ships.
 - **Schema gate (`board/schema_gate.py`):** every operational connection reads `alembic_version`
   once when it opens, before any schema-dependent statement: each new connection of
-  `SqlCardClient`'s pool (cards, sprints, products/issues, SQL audit, `SqlBoardHost`), each
-  `PoStore` operation and each `OwnerEventStore` connection of its own (one joined to a client
+  `SqlCardClient`'s pool (cards, sprints, products/issues, SQL audit, `SqlBoardHost`), each new
+  connection a `PoStore` keeps between its operations, and each `OwnerEventStore` connection of its own (one joined to a client
   transaction was admitted with that client's connection). Exactly
   `EXPECTED_SCHEMA_REVISION` is current: one read, no Alembic import. A revision of this build's
   lineage short of it, or no version table at all, is refused with code `schema_owed` naming the

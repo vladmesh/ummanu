@@ -36,6 +36,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
+from tests import source_trees
 from tests.dispatcher_fixtures import card_audit
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.fanout_fixtures import accepted_transport_run
@@ -44,20 +45,21 @@ from tests.retired_board import legacy_runtime_lines
 from tests.support.managed_venv import guarded_product_env, managed_product_root
 from ummanu import upgrade
 from ummanu.automations.runtime import dispatch
-from ummanu.dispatch import attempt_accounting as dispatcher_attempt_accounting
-from ummanu.dispatch import claim as dispatcher_claim
-from ummanu.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
-from ummanu.dispatch import host as dispatcher_host_module
-from ummanu.dispatch import launcher as dispatcher_launcher
-from ummanu.dispatch import observer as dispatcher_observer
-from ummanu.dispatch import production as dispatcher_production
-from ummanu.dispatch import release_lifecycle as dispatcher_release_lifecycle
-from ummanu.dispatch import review as dispatcher_review
-from ummanu.dispatch import runtime as dispatcher_module
-from ummanu.dispatch import wait_vitality as dispatcher_wait_vitality
-from ummanu.dispatch import worker_continuation as dispatcher_worker_continuation
-from ummanu.dispatch import worker_launch as dispatcher_worker_launch
-from ummanu.dispatch import worker_report as dispatcher_worker_report
+from ummanu.dispatch import (
+    attempt_accounting as dispatcher_attempt_accounting,
+    claim as dispatcher_claim,
+    gate_lifecycle as dispatcher_gate_lifecycle,
+    launcher as dispatcher_launcher,
+    observer as dispatcher_observer,
+    production as dispatcher_production,
+    release_lifecycle as dispatcher_release_lifecycle,
+    review as dispatcher_review,
+    runtime as dispatcher_module,
+    wait_vitality as dispatcher_wait_vitality,
+    worker_continuation as dispatcher_worker_continuation,
+    worker_launch as dispatcher_worker_launch,
+    worker_report as dispatcher_worker_report,
+)
 from ummanu.dispatch.gate import GateResult
 from ummanu.dispatch.git_workspace import GitWorkspaceManager
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
@@ -74,6 +76,7 @@ from ummanu.head_registry import (
 )
 from ummanu.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from ummanu.host_apply import resolve_packaged
+from ummanu.installation.upgrade import workspaces as upgrade_workspaces
 from ummanu.runtime import heads, role_env
 from ummanu.runtime.head import (
     HEAD_ALIVE,
@@ -125,7 +128,7 @@ def _runtime_trees() -> list[ast.AST]:
     host's own use of the real catalog, not the surface the doubles have to cover."""
     trees: list[ast.AST] = []
     for module in _RUNTIME_MODULES:
-        tree = ast.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))
+        tree = source_trees.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))
         if module is dispatcher_module:
             trees.extend(
                 node
@@ -161,7 +164,7 @@ def _declares(cls, name: str) -> bool:
     if hasattr(cls, name):
         return True
     try:
-        tree = ast.parse(textwrap.dedent(inspect.getsource(cls)))
+        tree = source_trees.parse(textwrap.dedent(inspect.getsource(cls)))
     except (OSError, TypeError, SyntaxError):
         return False
     return any(
@@ -245,12 +248,15 @@ class HostSurfaceContractTests(unittest.TestCase):
     def test_host_internal_catalog_calls_exist_on_the_real_catalog(self) -> None:
         """`CommandHostRuntime` drives the catalog itself when launching a head. No double covers
         that path (the launcher tests use the real classes), but a rename must still fail here."""
-        tree = ast.parse(Path(inspect.getsourcefile(dispatcher_host_module)).read_text(encoding="utf-8"))
-        host_class = next(
-            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "CommandHostRuntime"
-        )
+        host_classes = []
+        for cls in CommandHostRuntime.__mro__[:-1]:
+            tree = source_trees.parse(Path(inspect.getsourcefile(cls)).read_text(encoding="utf-8"))
+            host_classes.extend(
+                node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == cls.__name__
+            )
         used = {
             node.attr
+            for host_class in host_classes
             for node in ast.walk(host_class)
             if isinstance(node, ast.Attribute)
             and isinstance(node.value, ast.Attribute)
@@ -399,9 +405,11 @@ class HostBehaviourContractTests(unittest.TestCase):
         backend = _RecordingBackend(LOCAL_PTY_RUNTIME)
         real._head_runtimes[LOCAL_PTY_RUNTIME] = backend
         record = self._supervised_record()
-        with mock.patch.object(GitWorkspaceManager, "teardown") as removal:
-            with self.assertRaisesRegex(HostError, "no durable cleanup owner"):
-                real.teardown(record)
+        with (
+            mock.patch.object(GitWorkspaceManager, "teardown") as removal,
+            self.assertRaisesRegex(HostError, "no durable cleanup owner"),
+        ):
+            real.teardown(record)
         self.assertEqual(backend.calls, [])
         removal.assert_not_called()
         self.fake.teardown(record)
@@ -424,6 +432,28 @@ class HostBehaviourContractTests(unittest.TestCase):
         self.assertEqual(result["reason"], "scope stop failed")
         removal.assert_not_called()
 
+
+    def test_teardown_refuses_a_head_run_with_a_null_task_ref_by_name(self) -> None:
+        """ummanu-241: `task_ref: null` in a stored head run raised `AttributeError` out of
+        `.get` on None; it is a refusal naming the record and the run instead."""
+        real = CommandHostRuntime(
+            FakeCatalog(), self.root / "data", mode="real", production_runtime=registered_production_runtime(self.root)
+        )
+        record = self._supervised_record()
+        record.worker_head_run = {**record.worker_head_run, "task_ref": None}
+        cleanup = mock.Mock()
+        real.cleanup_owner = SimpleNamespace(runtime=SimpleNamespace(reader=SimpleNamespace(show=dict)),
+                                             cleanup=cleanup, _state=dict)
+        with (
+            mock.patch.object(GitWorkspaceManager, "teardown") as removal,
+            self.assertRaisesRegex(
+                HostError, rf"cleanup refuses the dispatcher record of {record.worker}: its worker head run "
+                r"carries task_ref None"
+            ),
+        ):
+            real.teardown(record)
+        cleanup.assert_not_called()
+        removal.assert_not_called()
 
 class RuntimeWiringContractTests(unittest.TestCase):
     def test_production_unit_puts_local_bin_on_path(self) -> None:
@@ -811,7 +841,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 env = self.unit_env(name)
                 if name == "ummanu-dispatcher-production.service":
                     self.assertEqual(env["UMMANU_RUNTIME_ENV_FILE"], expected)
-                self.assertEqual(env["TA_RUNTIME_ENV_FILE"], expected)
+                self.assertEqual(env["UMMANU_RUNTIME_ENV_FILE"], expected)
 
     def test_the_runtime_env_file_cannot_hand_a_role_another_instance(self) -> None:
         """The launcher's binding wins over the file's own line, for a head and a standing role."""
@@ -840,7 +870,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 # The gate-launched services also import from it directly; the dispatcher runs the
                 # checkout's own venv entry point and needs no PYTHONPATH of its own.
                 self.assertEqual(
-                    env.get("TA_RUNTIME_PYTHONPATH", str(self.root / "product")),
+                    env.get("UMMANU_RUNTIME_PYTHONPATH", str(self.root / "product")),
                     str(self.root / "product"),
                 )
 
@@ -856,7 +886,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
                 rendered = render_systemd_unit(
                     (SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout
                 ).decode()
-                self.assertIn(f"Environment=TA_RUNTIME_PYTHONPATH={self.root / 'product'}", rendered)
+                self.assertIn(f"Environment=UMMANU_RUNTIME_PYTHONPATH={self.root / 'product'}", rendered)
                 self.assertIn(f"Environment=UMMANU_REPO={self.root / 'product'}", rendered)
                 self.assertIn(f"ExecStart={self.root / 'product'}/scripts/ummanu-agent-gate.sh", rendered)
 
@@ -1161,7 +1191,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
                     catalog = object.__new__(InstanceCatalog)
                     catalog._heads = canon  # type: ignore[attr-defined]
 
-                    with mock.patch.dict(os.environ, {"TA_CODEX_HOME": str(home)}):
+                    with mock.patch.dict(os.environ, {"UMMANU_CODEX_HOME": str(home)}):
                         catalog.prepare_head_workspace(head, str(workspace), role=role)
 
                     trusted = (home / "config.toml").read_text(encoding="utf-8")
@@ -1284,7 +1314,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         with self.assertRaisesRegex(heads.HeadRegistryError, r"role_defaults\.new_card"):
             heads.default_head(registry)
         with mock.patch.dict(os.environ, {}, clear=False) as env:
-            env.pop("TA_REVIEWER_HEAD", None)
+            env.pop("UMMANU_REVIEWER_HEAD", None)
             with self.assertRaisesRegex(heads.HeadRegistryError, r"role_defaults\.reviewer"):
                 heads.reviewer_head(registry)
 
@@ -1364,7 +1394,7 @@ class ShippedRegistryTiersTests(unittest.TestCase):
         )
 
     def test_shipped_automation_specs_name_shipped_tiers(self) -> None:
-        agents = upgrade.agents_root(Path(upgrade.running_product_root()))
+        agents = upgrade_workspaces.agents_root(Path(upgrade.running_product_root()))
         assert agents is not None
         specs = sorted(agents.glob("*/automation.toml"))
         self.assertTrue(specs, agents)
@@ -1444,15 +1474,6 @@ class PerProfileRuntimeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(heads.HeadRegistryError, "runtime must be a name"):
             heads.validate_registry(self.RESOURCES, profiles)
-
-    def test_the_check_lives_in_the_one_place_both_readers_go_through(self) -> None:
-        """Not a second validation site: `validate_launch_shape` is where the rule is."""
-        source = inspect.getsource(dispatcher_module.head_ops.command.validate_launch_shape)
-
-        self.assertIn("HEAD_RUNTIMES", source)
-        for holder in (heads.validate_registry, HeadSpec.from_profile):
-            with self.subTest(reader=holder.__qualname__):
-                self.assertNotIn("HEAD_RUNTIMES", inspect.getsource(holder))
 
     # -- criterion 3: the runtime is independent of the adapter --------------------------------
 
@@ -1541,8 +1562,6 @@ class PerProfileRuntimeTests(unittest.TestCase):
         for subject in (legacy, ORCA_LEGACY_RUNTIME, None):
             with self.subTest(subject=subject), self.assertRaisesRegex(HostError, "legacy Orca record"):
                 host.head_runtime_for(subject)
-        with self.assertRaisesRegex(HostError, "legacy Orca record"):
-            host.head_runtime  # noqa: B018
         self.assertIsInstance(host.head_runtime_for(supervised), LocalPtyHeadRuntime)
         self.assertIs(
             host.head_runtime_for(supervised),

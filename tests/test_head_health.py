@@ -430,7 +430,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         for name in list(os.environ):
-            if name.startswith("TA_PROBE_TIMEOUT_S"):
+            if name.startswith("UMMANU_PROBE_TIMEOUT_S"):
                 del os.environ[name]
 
     def _login(self, mode: str) -> None:
@@ -476,8 +476,8 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
             self.assertEqual(probe_timeout_s(resource), 20)
         for overrides in (
             {},
-            {"TA_PROBE_TIMEOUT_S": "40"},
-            {"TA_PROBE_TIMEOUT_S_OPENAI_SUB": "120", "TA_PROBE_TIMEOUT_S_CLAUDE_SUB": "5"},
+            {"UMMANU_PROBE_TIMEOUT_S": "40"},
+            {"UMMANU_PROBE_TIMEOUT_S_OPENAI_SUB": "120", "UMMANU_PROBE_TIMEOUT_S_CLAUDE_SUB": "5"},
         ):
             with mock.patch.dict(os.environ, overrides):
                 for resource in ("openai-sub", "claude-sub", "openrouter", "another"):
@@ -485,7 +485,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
                         self.assertGreater(
                             head_health.probe_timeout_seconds(resource), probe_timeout_s(resource)
                         )
-        with mock.patch.dict(os.environ, {"TA_PROBE_TIMEOUT_S_OPENAI_SUB": "120"}):
+        with mock.patch.dict(os.environ, {"UMMANU_PROBE_TIMEOUT_S_OPENAI_SUB": "120"}):
             self.assertEqual(probe_timeout_s("openai-sub"), 120)
 
     def test_the_probe_command_is_run_under_its_resource_outer_timeout(self) -> None:
@@ -521,7 +521,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
 
     def test_the_same_slow_401_under_the_old_20s_limit_is_a_timeout_not_a_launch(self) -> None:
         self._login("chatgpt")
-        with mock.patch.dict(os.environ, {"TA_PROBE_TIMEOUT_S_OPENAI_SUB": "20"}):
+        with mock.patch.dict(os.environ, {"UMMANU_PROBE_TIMEOUT_S_OPENAI_SUB": "20"}):
             code, err = self._inner(45, "unexpected status 401 Unauthorized: Incorrect API key provided")
         self.assertIn("status=timeout", err)
 
@@ -605,7 +605,8 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
         run.assert_called_once()
 
     def test_doctor_shows_timed_out_like_the_other_non_ready_statuses(self) -> None:
-        from ummanu.cli import PROVIDER_RED_STATES, _recovery_findings
+        from ummanu.cli import _recovery_findings
+        from ummanu.infra.doctor_provider import PROVIDER_RED_STATES
 
         self.assertIn(head_health.PROBE_TIMED_OUT, PROVIDER_RED_STATES)
         findings = _recovery_findings(

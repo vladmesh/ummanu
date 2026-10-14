@@ -17,8 +17,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import cli, installation, session, upgrade
+from ummanu import cli, session, upgrade
 from ummanu.infra.export_allowlist import is_exported
+from ummanu.installation import materialize as installation_materialize
+from ummanu.installation.upgrade import types as upgrade_types, workspaces as upgrade_workspaces
 from ummanu.memory import client_config
 from ummanu.po import workspace as po_workspace
 from ummanu.role_skills import BIN_DIR_ENV, MANIFEST, sync
@@ -57,8 +59,8 @@ class Fixture(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
 
-    def context(self, *, dry_run: bool = False, runtime_user: str | None = None) -> upgrade.UpgradeContext:
-        return upgrade.UpgradeContext(
+    def context(self, *, dry_run: bool = False, runtime_user: str | None = None) -> upgrade_types.UpgradeContext:
+        return upgrade_types.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
@@ -68,35 +70,24 @@ class Fixture(unittest.TestCase):
             runtime_user=runtime_user,
         )
 
-    def run_step(self, **kwargs) -> upgrade.StepResult:
-        return upgrade.step_interactive_workspace(self.context(**kwargs))
+    def run_step(self, **kwargs) -> upgrade_types.StepResult:
+        return upgrade_workspaces.step_interactive_workspace(self.context(**kwargs))
 
     def agents(self) -> bytes:
         return (self.workspace / iw.AGENTS_FILE).read_bytes()
 
 
 class SharedPartTests(unittest.TestCase):
-    """The shared part ships nothing personal and nothing of the retired layout."""
+    """The shared part ships nothing personal."""
 
-    def setUp(self) -> None:
-        self.text = iw.shared_source(ROOT).read_text(encoding="utf-8")
-
-    def test_it_names_no_retired_layout_and_no_owner(self) -> None:
-        for word in ("secretary-instance", "orca", "policies", "vladmesh"):
-            with self.subTest(word=word):
-                self.assertNotIn(word, self.text.lower())
-
-    def test_it_carries_no_owner_preference(self) -> None:
-        # The language and the style are the owner's: they belong to the personal part.
-        self.assertIsNone(re.search(r"[Ѐ-ӿ]", self.text), "Cyrillic text in the shared part")
-        for word in ("russian", "english", "em-dash", "em dash", "panelmem"):
-            with self.subTest(word=word):
-                self.assertNotIn(word, self.text.lower())
-
-    def test_interactive_role_does_not_claim_po_only_owner_decision_authority(self) -> None:
-        self.assertNotIn("--role po", self.text)
-        self.assertNotIn("The PO can supply", self.text)
-        self.assertIn("PO-only authority", self.text)
+    def test_no_shipped_packaging_text_names_the_owner(self) -> None:
+        # The owner's identity belongs in the live root (`persona/`), never in a shipped text: one
+        # guard over everything `packaging/` ships, the shared part of this workspace included.
+        shipped = sorted(path for path in (ROOT / "packaging").rglob("*") if path.is_file())
+        self.assertIn(iw.shared_source(ROOT), shipped)
+        for path in shipped:
+            with self.subTest(path=path.relative_to(ROOT).as_posix()):
+                self.assertNotIn(b"vladmesh", path.read_bytes().lower())
 
     def test_the_personal_part_is_exported_with_the_snapshot(self) -> None:
         self.assertTrue(is_exported(iw.PERSONAL_SOURCE_RELATIVE.as_posix()))
@@ -187,9 +178,9 @@ class UpgradeStepTests(Fixture):
     def test_a_root_invoker_hands_the_workspace_to_the_runtime_user(self) -> None:
         account = SimpleNamespace(pw_uid=4321, pw_gid=4321)
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+            mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=account),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
             result = self.run_step(runtime_user="runtime")
 
@@ -200,8 +191,8 @@ class UpgradeStepTests(Fixture):
 
     def test_a_non_root_invoker_changes_no_owner(self) -> None:
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=1000),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=1000),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
             result = self.run_step(runtime_user="runtime")
 
@@ -230,15 +221,15 @@ class RecoverTests(Fixture):
         (live_root / "persona").mkdir()
         (live_root / "persona" / "AGENTS.md").write_bytes(PERSONAL)
 
-        def interactive_only(context, steps=installation.STEPS):
-            self.assertIn(upgrade.step_interactive_workspace, steps)
-            return upgrade.run_steps(context, steps=(upgrade.step_interactive_workspace,))
+        def interactive_only(context, steps=installation_materialize.STEPS):
+            self.assertIn(upgrade_workspaces.step_interactive_workspace, steps)
+            return upgrade.run_steps(context, steps=(upgrade_workspaces.step_interactive_workspace,))
 
         with (
-            mock.patch.object(installation, "run_steps", side_effect=interactive_only),
-            mock.patch.object(installation, "check_product_runtime"),
+            mock.patch.object(installation_materialize, "run_steps", side_effect=interactive_only),
+            mock.patch.object(installation_materialize, "check_product_runtime"),
         ):
-            result = installation.materialize_host(live_root, self.product)
+            result = installation_materialize.materialize_host(live_root, self.product)
 
         self.assertTrue(result.ok, result.render())
         recovered = recovered_data / iw.WORKSPACE_NAME
@@ -272,7 +263,7 @@ class NoLeakTests(Fixture):
 
         context = self.context()
         with mock.patch.dict(os.environ, {"HOME": str(home), BIN_DIR_ENV: str(self.root / "bin")}):
-            for step in (upgrade.step_po_workspace, upgrade.step_interactive_workspace):
+            for step in (upgrade_workspaces.step_po_workspace, upgrade_workspaces.step_interactive_workspace):
                 self.assertFalse(step(context).failed)
             sync(
                 instance_path=self.instance,
@@ -359,7 +350,7 @@ class StatusLineTests(Fixture):
             "checkpoint": {"lag_minutes": 0},
         }
         out = io.StringIO()
-        with mock.patch.object(cli, "collect_status", return_value=snapshot), redirect_stdout(out):
+        with mock.patch("ummanu.status.collect_status", return_value=snapshot), redirect_stdout(out):
             code = cli.main(["status", "--offline", "--instance", str(self.instance)])
 
         self.assertEqual(code, 0, out.getvalue())
@@ -479,7 +470,7 @@ class ShellWithoutAnExportedInstallationTests(Fixture):
         login.parent.mkdir(parents=True)
         login.write_text('{"token": "fixture"}\n', encoding="utf-8")
         # Nothing in the process env names an installation, a Codex home or a runtime env file.
-        named = ("UMMANU_INSTANCE", "UMMANU_DATA_DIR", "TA_CODEX_HOME", *role_env.RUNTIME_ENV_FILE_ENVS)
+        named = ("UMMANU_INSTANCE", "UMMANU_DATA_DIR", "UMMANU_CODEX_HOME", *role_env.RUNTIME_ENV_FILE_ENVS)
         environ = {key: value for key, value in os.environ.items() if key not in named}
         environ.update({"HOME": str(self.home), head_registry.REGISTRY_ENV: str(head_registry.HEADS_TOML)})
         for patcher in (

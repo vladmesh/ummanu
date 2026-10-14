@@ -42,7 +42,7 @@ from ummanu.board.owner_events import (
 from ummanu.board.owner_handover import mark_values, waiting_owner
 from ummanu.sprints import BUDGET_EVENT_TYPES
 from ummanu.tasks import TaskWriter
-from ummanu.web import pages
+from ummanu.web import page_assets, pages
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import OwnerConflict, OwnerEventMissing, RuntimeUnavailable
 from ummanu.webproto.owner_events import OwnerEventLayer
@@ -280,6 +280,7 @@ class StayUnreadThroughTheCardTests(unittest.TestCase):
         self.writer.audit = MemoryAudit()
         self.writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(self.card))
         self.enterContext(mock.patch("ummanu.tasks._task_number", return_value=1900))
+        self.enterContext(mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=1900))
         typed: dict[str, Any] = {}
         self.writer._typed_event = lambda request_id: typed.get(request_id)  # type: ignore[method-assign]
 
@@ -370,6 +371,7 @@ class StewardProducerTests(unittest.TestCase):
         self.writer.audit = MemoryAudit()
         self.writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(self.card))
         self.enterContext(mock.patch("ummanu.tasks._task_number", return_value=77))
+        self.enterContext(mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=77))
         self.writer._typed_event = lambda request_id: None  # type: ignore[method-assign]
         self.writer._guard_sprint_write = lambda **_: {}  # type: ignore[method-assign]
 
@@ -565,8 +567,7 @@ class DispatcherProducerTests(unittest.TestCase):
             cli, "checkpoint_findings", return_value=[]
         ), mock.patch.object(cli, "secret_store_findings", return_value=[]), mock.patch.object(
             cli, "_load_dispatcher_state", return_value={}
-        ), mock.patch.object(cli, "checkpoint_snapshot", return_value={}), mock.patch.object(
-            cli, "collect_recovery_inventory", return_value={"resources": []}
+        ), mock.patch("ummanu.checkpoint.checkpoint_snapshot", return_value={}), mock.patch("ummanu.infra.recovery_inventory.collect_recovery_inventory", return_value={"resources": []}
         ), mock.patch.object(cli, "_restore_findings", return_value=[]), mock.patch.object(
             cli, "_codex_home_status", return_value={"login_missing": "", "codex_required": False}
         ), mock.patch.object(cli, "_recovery_findings", return_value=[]):
@@ -589,6 +590,8 @@ class PoTurnFailedTests(HandedOverFixture):
 
         self.assertEqual(self.tick(runtime)["action"], "po-owner-answer-submitted")
         self.assertEqual(self.settled(session, 3).state, "failed")
+        # The durable row precedes on_failed; join the existing waiter before reading its notice.
+        self.services[-1].runner.wait(session, 3, timeout=2)
 
         outcome = self.tick(runtime)
         self.assertEqual(outcome["action"], "po-card-owner-answer-turn-ended")
@@ -609,6 +612,7 @@ class PoTurnFailedTests(HandedOverFixture):
         session = created["session_id"]
         service.submit(session_id=session, text="FAIL at once", request_id="s-1")
         self.assertEqual(self.settled(session, 1).state, "failed")
+        service.runner.wait(session, 1, timeout=2)
         service.submit(session_id=session, text="GATE hold", request_id="s-2")
         self.reached_gate(session, 2)
         service.stop_turn(session_id=session, seq=2)
@@ -813,8 +817,8 @@ class WebTests(unittest.TestCase):
         self.assertIn('<span class="bell-count">5</span>', self.get("/doctor"))
 
     def test_the_list_page_works_at_phone_width(self) -> None:
-        self.assertIn("ol.owner-events li { display: flex; flex-wrap: wrap;", pages.STYLE)
-        self.assertIn("overflow-wrap: anywhere", pages.STYLE)
+        self.assertIn("ol.owner-events li { display: flex; flex-wrap: wrap;", page_assets.STYLE)
+        self.assertIn("overflow-wrap: anywhere", page_assets.STYLE)
 
 
 # --- the carried fixes ------------------------------------------------------------------------
@@ -855,6 +859,7 @@ class CardCommentRoleTests(unittest.TestCase):
                 mock.patch.object(CardOperationLayer, "report", return_value=SimpleNamespace(data_dir=Path(tmp))),
                 mock.patch("ummanu.webproto.card_ops.TaskWriter", return_value=writer),
                 mock.patch("ummanu.tasks._task_number", return_value=1900),
+                mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=1900),
             ):
                 writer.handover(role="po", actor="po", reference=REF, to="owner", reason=REASON, request_id="real-handover")
                 layer.task_comment(request_id="r-1", actor="web", reference=REF, body="Yes, pay it.")

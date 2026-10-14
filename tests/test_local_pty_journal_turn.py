@@ -27,8 +27,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from ummanu.dispatch import review as dispatcher_review
-from ummanu.dispatch import wait_vitality
+from ummanu.dispatch import review as dispatcher_review, wait_vitality
 from ummanu.dispatch.head_vitality import (
     ProgressState,
     SnapshotSource,
@@ -804,8 +803,21 @@ class Ummanu1727ReplayTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.records = _fixture_records()
+        # The historical gzip deliberately omits progress records. Retention now makes those
+        # original sequence gaps incomplete evidence. This reducer replay needs the known turn
+        # timeline, so use an explicit consecutive-sequence projection of its retained records;
+        # times, kinds and all verdict assertions stay unchanged. The gzip remains original
+        # historical bytes; this projection is not a pristine/full production journal.
+        self.records = [dict(record, seq=index) for index, record in enumerate(_fixture_records(), 1)]
         self.record = _worker_record(RUN_1727)
+
+    def test_original_trimmed_fixture_exposes_interior_gaps(self) -> None:
+        journal = _JournalDir(self, RUN_1727)
+        journal.write(_fixture_records())
+        from ummanu.runtime.head.local_pty.journal import read_events
+
+        self.assertTrue(read_events(journal.path).partial_head)
+        self.assertEqual([record["seq"] for record in self.records], list(range(1, len(self.records) + 1)))
 
     def replay(self, *, with_journal: bool, until: float) -> list[tuple[float, VitalityEpisode]]:
         journal = _JournalDir(self, RUN_1727)

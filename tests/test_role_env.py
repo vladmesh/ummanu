@@ -274,7 +274,7 @@ class ManagedInterpreterTests(unittest.TestCase):
     def test_the_helper_resolves_the_venv_of_the_checkout_the_role_imports(self) -> None:
         cases = (
             ({"UMMANU_REPO": "/srv/repo"}, "/srv/repo"),
-            ({"TA_RUNTIME_PYTHONPATH": "/srv/runtime", "UMMANU_REPO": "/srv/repo"}, "/srv/runtime"),
+            ({"UMMANU_RUNTIME_PYTHONPATH": "/srv/runtime", "UMMANU_REPO": "/srv/repo"}, "/srv/runtime"),
             ({}, str(role_env.REPO_ROOT)),
         )
         for environ, root in cases:

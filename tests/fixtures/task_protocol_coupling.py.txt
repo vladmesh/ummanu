@@ -1,0 +1,1027 @@
+"""Static coupling model for ummanu (research card ummanu-220).
+
+Read-only. Reads Git objects of --repo, parses Python with ast; never imports or
+executes analyzed code. Helpers (snapshot, changed_paths, module_name, documentation,
+select) come from that repository's scripts/ci_selection.py, loaded by path.
+
+The model scans every file at *symbol* level (top-level def/class/assignment/import
+binding) and then collapses symbols back to module nodes for every module that is not
+in the scenario's "split" set. With split=empty and opacity="selector" it reproduces
+ci_selection.select (checked: PR717 -> identical 291 module set). Splitting a module
+models a refactor where each top-level symbol lives in its own module (upper bound of
+what a split of that module can achieve). Splitting a package __init__ models removing
+its re-export barrel. Opacity tiers model selector-only fixes.
+
+Usage (parse cache defaults to $TMPDIR/ummanu-220-scan-cache.pickle; cold parse ~10 s/tree):
+  python3 -I coupling.py --repo REPO pr717                  -> pr717.json   (decomposition of 291/294)
+  python3 -I coupling.py --repo REPO graph --sha b612ad3a   -> graph.json   (hubs, SCCs, sizes, layers)
+  python3 -I coupling.py --repo REPO history -n 20          -> history.json (scenarios x last 20 code PRs)
+  python3 -I coupling.py --repo REPO reach --sha b612ad3a   -> reach.json   (churn-weighted change reach)
+Needs durations.json (python3 -I durations.py) for job-second figures.
+"""
+from __future__ import annotations
+
+import argparse
+import ast
+import collections
+import hashlib
+import importlib.util
+import json
+import pickle
+import re
+import sys
+from pathlib import Path
+
+OPAQUE_CALLS = {"exec", "eval", "spec_from_file_location", "run_module", "run_path",
+                "read_text", "read_bytes", "open", "getsource", "source_trees",
+                "Popen", "run", "call", "check_output", "check_call", "system", "entry_points"}
+LOADERS = {"exec", "eval", "spec_from_file_location", "run_module", "run_path", "getsource",
+           "source_trees", "entry_points"}
+PROCESS = {"run", "Popen", "call", "check_output", "check_call", "system"}
+TARGET = re.compile(r"(?:ummanu|tests)(?:\.[A-Za-z0-9_]+)+")
+TOP = "__top__"
+SCAN_VERSION = 2
+try:
+    DURATIONS = json.loads((Path(__file__).resolve().parent / "durations.json").read_text())["modules"]
+except OSError:
+    DURATIONS = {}
+
+
+def load_selector(repo: Path):
+    spec = importlib.util.spec_from_file_location("_ci_selection", repo / "scripts/ci_selection.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def manifest(sel, repo: Path, sha: str) -> dict[str, list[str]]:
+    text = sel.git_bytes(repo, "show", f"{sha}:tests/ci-shards.txt").decode()
+    grouped = collections.defaultdict(list)
+    for line in text.splitlines():
+        if line.strip() and not line.startswith("#"):
+            suite, path = line.split()
+            grouped[suite].append(path)
+    return dict(grouped)
+
+
+# ---------------------------------------------------------------- file scan
+def _bindings(stmt):
+    """Names a top-level statement binds (descending into if/try/with blocks)."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [stmt.name]
+    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+        return [(a.asname or a.name.split(".")[0]) for a in stmt.names if a.name != "*"]
+    if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        return [n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)]
+    return []
+
+
+def scan(name: str, path: str, text: str):
+    """Return per-symbol facts for one file. Symbol TOP holds non-binding top-level code."""
+    tree = ast.parse(text, filename=path)
+    package = name if path.endswith("/__init__.py") else name.rpartition(".")[0]
+    all_nodes = tuple(ast.walk(tree))
+    docstrings = {id(i.body[0].value) for i in all_nodes
+                  if isinstance(i, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                  and i.body and isinstance(i.body[0], ast.Expr)
+                  and isinstance(i.body[0].value, ast.Constant) and isinstance(i.body[0].value.value, str)}
+    aliases_last = {a.asname or a.name: a.name.rpartition(".")[2]
+                    for i in all_nodes if isinstance(i, (ast.Import, ast.ImportFrom)) for a in i.names}
+
+    def resolve(node):
+        prefix = node.module or ""
+        if node.level:
+            comps = package.split(".")
+            prefix = ".".join(comps[:len(comps) - node.level + 1] + ([prefix] if prefix else []))
+        return prefix
+
+    # flatten top-level statements (if/try blocks are transparent)
+    flat = []
+
+    def flatten(body):
+        for s in body:
+            if isinstance(s, (ast.If, ast.Try)) and not _bindings(s):
+                inner = s.body + s.orelse + (s.finalbody if isinstance(s, ast.Try) else []) + \
+                    [x for h in getattr(s, "handlers", []) for x in h.body]
+                if any(_bindings(x) or isinstance(x, (ast.If, ast.Try)) for x in inner):
+                    flatten(inner)
+                    test = getattr(s, "test", None)
+                    if test is not None:
+                        flat.append((TOP, test))
+                    continue
+            flat.append((None, s))
+    flatten(tree.body)
+
+    symbols = {}          # sym -> dict(refs=set(names), attrs=set((alias, attr)), targets=[(module, kind)], opaque=set, dump=str)
+    imports = {}          # binding name -> (module, attr|None)   (top-level only)
+    order = []
+
+    def sym(key):
+        if key not in symbols:
+            symbols[key] = {"refs": set(), "bare": set(), "attrs": set(), "targets": [], "opaque": set(),
+                            "dump": [], "kind": None}
+            order.append(key)
+        return symbols[key]
+
+    for forced, stmt in flat:
+        names = [] if forced else _bindings(stmt)
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            for a in stmt.names:
+                if isinstance(stmt, ast.Import):
+                    bound = a.asname or a.name.split(".")[0]
+                    imports[bound] = (a.name if a.asname else a.name.split(".")[0], None)
+                    s = sym(bound)
+                    s["targets"].append((a.name, "import"))
+                    s["dump"].append(ast.dump(stmt))
+                else:
+                    prefix = resolve(stmt)
+                    if a.name == "*":
+                        s = sym(TOP)
+                        s["opaque"].add("star-import")
+                        s["targets"].append((prefix, "import"))
+                        continue
+                    bound = a.asname or a.name
+                    imports[bound] = (prefix, a.name)
+                    s = sym(bound)
+                    s["targets"].append((f"{prefix}.{a.name}", "import"))
+                    s["dump"].append(ast.dump(stmt))
+            continue
+        keys = names or [TOP]
+        for key in keys:
+            s = sym(key)
+            s["kind"] = s["kind"] or (
+                "class" if isinstance(stmt, ast.ClassDef) else
+                "def" if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) else
+                "top" if key == TOP else "assign")
+            if isinstance(stmt, ast.ClassDef) and any(
+                    (b.id if isinstance(b, ast.Name) else getattr(b, "attr", "")).endswith(("Error", "Exception"))
+                    for b in stmt.bases):
+                s["kind"] = "exception"
+            s["dump"].append(ast.dump(stmt))
+            walked = tuple(ast.walk(stmt))
+            attr_values = {id(n.value) for n in walked if isinstance(n, ast.Attribute)}
+            for node in walked:
+                _scan_node(node, s, docstrings, aliases_last, resolve, attr_values)
+    for key, s in symbols.items():
+        s["dump"] = hashlib.sha1("\n".join(s["dump"]).encode()).hexdigest()
+    return {"package": package, "symbols": symbols, "imports": imports}
+
+
+def _scan_node(node, s, docstrings, aliases_last, resolve, attr_values):
+    if isinstance(node, ast.Name):
+        s["refs"].add(node.id)
+        if id(node) not in attr_values:
+            s["bare"].add(node.id)
+    elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        s["attrs"].add((node.value.id, node.attr))
+    elif isinstance(node, ast.Import):
+        for a in node.names:
+            s["targets"].append((a.name, "lazy"))
+    elif isinstance(node, ast.ImportFrom):
+        prefix = resolve(node)
+        for a in node.names:
+            if a.name == "*":
+                s["opaque"].add("star-import")
+                s["targets"].append((prefix, "lazy"))
+            else:
+                s["targets"].append((f"{prefix}.{a.name}", "lazy"))
+    elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+        for t in TARGET.findall(node.value):
+            s["targets"].append((t, "string"))
+    elif isinstance(node, ast.Call):
+        f = node.func
+        raw = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else "")
+        called = aliases_last.get(raw, raw)
+        if called in {"import_module", "__import__"}:
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                s["targets"].append((node.args[0].value, "dynamic"))
+            else:
+                s["opaque"].add("dynamic-import")
+        if called in OPAQUE_CALLS:
+            recv = ""
+            if isinstance(f, ast.Attribute):
+                v = f.value
+                recv = v.id if isinstance(v, ast.Name) else (v.attr if isinstance(v, ast.Attribute)
+                                                             else type(v).__name__)
+            s["opaque"].add(f"{recv}.{raw}" if recv else raw)
+        # python-subprocess marker for the heuristic tier
+        for arg in ast.walk(node):
+            if isinstance(arg, ast.Attribute) and arg.attr == "executable" and \
+                    isinstance(arg.value, ast.Name) and arg.value.id == "sys":
+                s["opaque"].add("~sys.executable")
+
+
+class Snapshot:
+    def __init__(self, sel, sources: dict[str, str], cache: dict):
+        self.sel = sel
+        self.files = {}
+        self.lines = {}
+        for path, text in sources.items():
+            name = sel.module_name(path)
+            key = (SCAN_VERSION, name, path, hashlib.sha1(text.encode()).hexdigest())
+            if key not in cache:
+                cache[key] = scan(name, path, text)
+            self.files[name] = cache[key]
+            self.lines[name] = text.count("\n") + 1
+        self.modules = set(self.files)
+        self.nodes_mod = set(self.modules)
+        for n in self.modules:
+            parts = n.split(".")
+            for i in range(1, len(parts)):
+                self.nodes_mod.add(".".join(parts[:i]))
+
+    def opaque_modules(self):
+        return {m: set().union(*(s["opaque"] for s in f["symbols"].values()))
+                for m, f in self.files.items()
+                if any(s["opaque"] for s in f["symbols"].values())}
+
+
+# ------------------------------------------------------------ opacity tiers
+def tier_selector(m, triggers):
+    return bool(triggers - {"~sys.executable"})
+
+
+def tier_qualified(m, triggers):
+    """Only qualified loader/source/process APIs (subprocess.*, os.system, exec/eval,
+    loaders, getsource, entry_points, star/dynamic imports). Drops name-only matches:
+    mock call, asyncio.run, self.run, path.read_text/open of data files."""
+    for t in triggers:
+        recv, _, fn = t.rpartition(".")
+        if fn in LOADERS or t in {"star-import", "dynamic-import"}:
+            return True
+        if recv in {"subprocess", "os"} and fn in PROCESS:
+            return True
+    return False
+
+
+def tier_python_process(m, triggers):
+    """Heuristic (not a proof): a subprocess is treated as possibly running repository
+    Python only when the same unit mentions sys.executable. git/docker/tmux calls drop."""
+    for t in triggers:
+        recv, _, fn = t.rpartition(".")
+        if fn in LOADERS or t in {"star-import", "dynamic-import"}:
+            return True
+    return "~sys.executable" in triggers and tier_qualified(m, triggers)
+
+
+def tier_none(m, triggers):
+    return False
+
+
+TIERS = {"selector": tier_selector, "qualified": tier_qualified,
+         "python-process": tier_python_process, "none": tier_none}
+
+
+# ------------------------------------------------------------------ graph
+# Minimal layering slice M: move TaskError/cleanup locks/watchdog status out of the god
+# modules into kernel modules, config stops importing domain validators, barrels stop
+# re-exporting. Modeled as dropping these consumer-prefix -> dependency-prefix edges.
+LAYER_CUTS = [("ummanu.board", "ummanu.tasks"), ("ummanu.config", "ummanu.tasks"),
+              ("ummanu.config", "ummanu.sprints"), ("ummanu.config", "ummanu.runtime.heads"),
+              ("ummanu.config", "ummanu.po"), ("ummanu.config", "ummanu.onboarding"),
+              ("ummanu.config", "ummanu.head_registry"), ("ummanu.tasks", "ummanu.dispatch.cleanup"),
+              ("ummanu.sprints", "ummanu.dispatch.cleanup"), ("ummanu.board", "ummanu.dispatch.cleanup"),
+              ("ummanu.webproto", "ummanu.dispatch.watchdog"), ("ummanu.tasks", "ummanu.secret_store"),
+              ("ummanu.tasks", "ummanu.dispatch.types")]
+
+
+def apply_cuts(graph, cuts, barrels=()):
+    def mod(n):
+        return n.split("::")[0]
+    out = {}
+    for c, ds in graph.items():
+        if mod(c) in barrels and "::" not in c:
+            out[c] = {d for d in ds if not d.startswith(c + ".")}
+            continue
+        out[c] = {d for d in ds if not any((mod(c) == a or mod(c).startswith(a + ".")) and
+                                           (mod(d) == b or mod(d).startswith(b + ".")) for a, b in cuts)}
+    return out
+
+
+def build_graph(snap: Snapshot, split: set[str], tier, edge_kinds=None, carve=None, cuts=None):
+    """Consumer -> dependencies over nodes. Node = module, or 'module::symbol' for split
+    modules; a split module's bare node 'module' depends on all its symbols."""
+    files = snap.files
+
+    carve = carve or {}
+
+    def node(mod, symbol=None):
+        if symbol is not None and (mod in split or symbol in carve.get(mod, ())):
+            return f"{mod}::{symbol}"
+        return mod
+
+    def target_nodes(target):
+        """Nodes reached by importing/naming the dotted target (with ancestor packages)."""
+        parts = target.split(".")
+        out = set()
+        for n in range(1, len(parts) + 1):
+            anc = ".".join(parts[:n])
+            if anc not in snap.nodes_mod:
+                continue
+            last = n == len(parts)
+            if anc in split:
+                if last:
+                    out.add(anc)          # whole module (bare reference)
+                else:
+                    # attribute of the module (next part) or package execution
+                    nxt = parts[n]
+                    sub = f"{anc}.{nxt}"
+                    if sub in snap.nodes_mod:
+                        out.add(node(anc, TOP))   # executing package __init__ top only
+                    elif anc in files and nxt in files[anc]["symbols"]:
+                        out.add(node(anc, nxt))
+                    else:
+                        out.add(node(anc, TOP))
+            elif not last and parts[n] in carve.get(anc, ()):
+                out.add(node(anc, parts[n]))   # moved to a leaf module: owner not executed
+                break
+            else:
+                out.add(anc)
+        return out
+
+    def package_nodes(pkg):
+        parts = pkg.split(".")
+        out = set()
+        for n in range(1, len(parts) + 1):
+            anc = ".".join(parts[:n])
+            if anc in snap.nodes_mod:
+                out.add(node(anc, TOP) if anc in split else anc)
+        return out
+
+    graph = collections.defaultdict(set)
+    opaque_nodes = {}
+    for mod, f in files.items():
+        syms = f["symbols"]
+        imports = f["imports"]
+        for key, s in syms.items():
+            me = node(mod, key)
+            deps = graph[me]
+            for t, kind in s["targets"]:
+                if edge_kinds is not None and kind not in edge_kinds:
+                    continue
+                if kind == "import" and t in split and key in imports and imports[key][1] is None \
+                        or kind == "import" and t in split and key in imports and f"{imports[key][0]}.{imports[key][1]}" == t:
+                    # module alias of a split module: precise use comes from attrs/bare refs
+                    deps |= package_nodes(t)
+                    continue
+                deps |= target_nodes(t)
+            for ref in s["refs"]:
+                if ref in syms and ref != key:
+                    deps.add(node(mod, ref))
+            for ref in s["bare"]:
+                if ref in imports:
+                    tmod, tattr = imports[ref]
+                    full = f"{tmod}.{tattr}" if tattr else tmod
+                    if full in split:
+                        deps.add(full)
+            for alias, attr in s["attrs"]:
+                if alias in imports:
+                    tmod, tattr = imports[alias]
+                    full = f"{tmod}.{tattr}" if tattr else tmod
+                    deps |= target_nodes(f"{full}.{attr}")
+            if mod in split:
+                deps.add(node(mod, TOP))
+                if key != TOP:
+                    graph[mod].add(me)
+            if s["opaque"]:
+                opaque_nodes.setdefault(me, set()).update(s["opaque"])
+            # every module executes its package __init__ chain
+            pkg = mod.rpartition(".")[0] if f["package"] == mod else f["package"]
+            if pkg:
+                deps |= package_nodes(pkg)
+        if mod in split:
+            graph[mod].add(node(mod, TOP))
+    # bare split-module node depends on all of its symbols already; ensure presence
+    for n in snap.nodes_mod:
+        graph.setdefault(n, set())
+    # opacity: universal dependencies
+    everything = set(graph)
+    product = {n for n in everything if n == "ummanu" or n.startswith("ummanu.")}
+    opaque = {n for n, t in opaque_nodes.items() if tier(n, t)}
+    # a split opaque symbol only taints itself; a module-level opaque node taints the module
+    for n in opaque:
+        graph[n] |= (everything if n.startswith("tests.") else product) - {n}
+    for n in graph:
+        graph[n].discard(n)
+    if cuts:
+        graph = apply_cuts(graph, cuts, BARRELS)
+    return graph, opaque
+
+
+def closure(graph, changed):
+    rev = collections.defaultdict(set)
+    for c, deps in graph.items():
+        for d in deps:
+            rev[d].add(c)
+    seen, stack = set(changed), list(changed)
+    while stack:
+        for c in rev.get(stack.pop(), ()):
+            if c not in seen:
+                seen.add(c)
+                stack.append(c)
+    return seen
+
+
+def changed_nodes(old: Snapshot | None, new: Snapshot, paths, split, sel, carve=None):
+    """Changed modules, refined to changed symbols for split modules."""
+    out = set()
+    carve = carve or {}
+    for p in paths:
+        m = sel.module_name(p)
+        if m is None:
+            continue
+        if m in carve and m not in split and old and m in old.files and m in new.files:
+            sa, sb = old.files[m]["symbols"], new.files[m]["symbols"]
+            for k in sa.keys() | sb.keys():
+                if k not in sa or k not in sb or sa[k]["dump"] != sb[k]["dump"]:
+                    out.add(f"{m}::{k}" if k in carve[m] else m)
+            continue
+        if m not in split:
+            out.add(m)
+            continue
+        a = old.files.get(m) if old else None
+        b = new.files.get(m)
+        if a is None or b is None:
+            out.add(m)
+            continue
+        sa, sb = a["symbols"], b["symbols"]
+        for k in sa.keys() | sb.keys():
+            if k not in sa or k not in sb or sa[k]["dump"] != sb[k]["dump"]:
+                out.add(f"{m}::{k}")
+    return out
+
+
+def union(g1, g2):
+    return {n: g1.get(n, set()) | g2.get(n, set()) for n in g1.keys() | g2.keys()}
+
+
+def selected_tests(grouped, sel, affected):
+    owners = {p: s for s, ps in grouped.items() for p in ps}
+    hit = sorted(p for p in owners if sel.module_name(p) in affected)
+    return hit, sorted({owners[p] for p in hit})
+
+
+# ---------------------------------------------------------------- scenarios
+BARRELS = {"ummanu.board", "ummanu.runtime.head", "ummanu.webproto", "ummanu.web",
+           "ummanu.webfront", "ummanu.runtime.head.local_pty"}
+
+
+def god_modules(snap, k=12):
+    prod = [m for m in snap.modules if m.startswith("ummanu.")]
+    return set(sorted(prod, key=lambda m: -snap.lines[m])[:k])
+
+
+def test_support(snap):
+    return {m for m in snap.modules if m.startswith("tests.") and not m.split(".")[-1].startswith("test_")}
+
+
+def compute_carve(snap, min_owner_closure=20, small_closure=5):
+    """Seam K: leaf symbols (errors, constants, pure helpers) that other modules import
+    from a heavy module. A symbol is carvable when its symbol-level dependencies reach no
+    other product module except tiny leaf modules. Moving it to a leaf module unhooks its
+    importers from the owner. Returns {owner: {symbol}} for externally used symbols."""
+    prod = {m for m in snap.modules if m.startswith("ummanu")}
+    mod_graph, _ = build_graph(snap, set(), tier_none)
+    closure_size = {m: len({n for n in closure_forward(mod_graph, m) if n in prod}) for m in prod}
+    small = {m for m in prod if closure_size[m] <= small_closure}
+    g, _ = build_graph(snap, prod, tier_none)
+    rev = collections.defaultdict(set)
+    for c, ds in g.items():
+        for d in ds:
+            rev[d].add(c)
+    carve = {}
+    for m in prod:
+        if closure_size[m] < min_owner_closure:
+            continue
+        for k, info in snap.files[m]["symbols"].items():
+            if k == TOP or info["kind"] is None:
+                continue
+            me = f"{m}::{k}"
+            if not any(c.split("::")[0] != m for c in rev.get(me, ())):
+                continue
+            reach = {n.split("::")[0] for n in closure_forward(g, me)}
+            other = {r for r in reach if r in prod and r != m and r not in small
+                     and not (r in snap.modules and snap.files[r]["package"] == r)}
+            if not other:
+                carve.setdefault(m, set()).add(k)
+    return carve
+
+
+def scenarios(snap):
+    """(name, split set, opacity tier, policy, carve). Policy 'selector' = today's fallbacks;
+    'manifest' = a tests/ci-shards.txt diff selects only the modules whose entry changed,
+    and a changed opaque *test* module no longer forces the full run (its consumers are
+    still found by the closure)."""
+    gods = god_modules(snap)
+    support = test_support(snap)
+    allprod = {m for m in snap.modules if m.startswith("ummanu")}
+    carve = compute_carve(snap)
+    return [
+        ("S0 selector today", set(), "selector", "selector", None, None),
+        ("M@S0 layering slice, selector unchanged", set(), "selector", "selector", None, LAYER_CUTS),
+        ("R2@S0 refactor K+R1+R2, selector unchanged", BARRELS | gods, "selector", "selector", carve, None),
+        ("P1 manifest-aware policy", set(), "selector", "manifest", None, None),
+        ("P2 P1 + qualified opacity", set(), "qualified", "manifest", None, None),
+        ("M P2 + layering slice", set(), "qualified", "manifest", None, LAYER_CUTS),
+        ("K P2 + leaf errors/helpers carved", set(), "qualified", "manifest", carve, None),
+        ("R1 K + de-barrel packages", BARRELS, "qualified", "manifest", carve, None),
+        ("R2 R1 + split 12 god modules", BARRELS | gods, "qualified", "manifest", carve, None),
+        ("R3 R2 + split test support", BARRELS | gods | support, "qualified", "manifest", carve, None),
+        ("R4 R3 + subprocess tests declared", BARRELS | gods | support, "python-process", "manifest", carve, None),
+        ("C0 code only: P1, no opacity, no split", set(), "none", "manifest", None, None),
+        ("U1 floor: P1, every module split, no opacity", allprod | support, "none", "manifest", None, None),
+    ]
+
+
+def evaluate(sel, grouped, old, new, changes, split, tier_name, policy="selector", old_grouped=None, carve=None, cuts=None):
+    """Mirror select(): fallbacks first, then closure over base|candidate graphs."""
+    paths = {p for _, items in changes for p in items}
+    code = {p for p in paths if not sel.documentation(p)}
+    total = sum(len(v) for v in grouped.values())
+    full = lambda reason, **kw: {"mode": "full", "reason": reason, "modules": total,
+                                 "owners": len(grouped), **kw}
+    extra = set()
+    if policy == "manifest" and "tests/ci-shards.txt" in code:
+        code.discard("tests/ci-shards.txt")
+        before = {(s, p) for s, ps in (old_grouped or {}).items() for p in ps}
+        after = {(s, p) for s, ps in grouped.items() for p in ps}
+        extra = {sel.module_name(p) for _, p in before ^ after}
+    if not code and not extra:
+        return {"mode": "docs-only", "modules": 0, "owners": 0}
+    if any(sel.module_name(p) is None for p in code):
+        return full("non-Python/shared path", paths=sorted(p for p in code if sel.module_name(p) is None)[:6])
+    if any(st[0] in "DRT" for st, items in changes if any(p in code for p in items)):
+        return full("delete/rename")
+    tier = TIERS[tier_name]
+    g_old, op_old = build_graph(old, split, tier, carve=carve, cuts=cuts)
+    g_new, op_new = build_graph(new, split, tier, carve=carve, cuts=cuts)
+    changed = changed_nodes(old, new, code, split, sel, carve) | extra
+    blocking = changed & (op_old | op_new)
+    if policy == "manifest":
+        blocking = {n for n in blocking if not n.startswith("tests.")}
+    if blocking:
+        return full("changed opaque code", nodes=sorted(blocking)[:6])
+    affected = closure(union(g_old, g_new), changed)
+    hit, owners = selected_tests(grouped, sel, affected)
+    if not hit:
+        return full("no consumer")
+    return {"mode": "affected", "modules": len(hit), "owners": len(owners), "selected": hit}
+
+
+# ------------------------------------------------------------------ commands
+def load_cache(path):
+    try:
+        return pickle.loads(path.read_bytes())
+    except (OSError, pickle.UnpicklingError, EOFError):
+        return {}
+
+
+def code_prs(sel, repo, n):
+    out = sel.git_bytes(repo, "log", "--merges", "--first-parent", "main", "--format=%H %s",
+                        f"-{4 * n}").decode()
+    prs = []
+    for line in out.splitlines():
+        sha, subj = line.split(" ", 1)
+        m = re.search(r"#(\d+)", subj)
+        p1, p2 = sel.git_bytes(repo, "rev-parse", f"{sha}^1", f"{sha}^2").decode().split()
+        mb = sel.git_bytes(repo, "merge-base", p1, p2).decode().strip()
+        changes = sel.changed_paths(sel.git_bytes(repo, "diff", "--name-status", "-z", "--find-renames",
+                                                  mb, p2, "--"))
+        paths = {p for _, ps in changes for p in ps}
+        if all(sel.documentation(p) for p in paths):
+            continue
+        numstat = sel.git_bytes(repo, "diff", "--shortstat", mb, p2).decode().strip()
+        prs.append({"pr": int(m.group(1)) if m else None, "branch": subj.rpartition(" ")[2],
+                    "merge": sha, "base": mb, "head": p2, "changes": changes,
+                    "paths": sorted(paths), "shortstat": numstat})
+        if len(prs) == n:
+            break
+    return prs
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--repo", type=Path, required=True)
+    ap.add_argument("--out", type=Path, default=Path(__file__).resolve().parent)
+    ap.add_argument("--cache", type=Path, default=None)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("pr717")
+    g = sub.add_parser("graph")
+    g.add_argument("--sha", default="HEAD")
+    rc = sub.add_parser("reach")
+    rc.add_argument("--sha", default="HEAD")
+    rc.add_argument("--since", default="2026-07-11")
+    h = sub.add_parser("history")
+    h.add_argument("-n", type=int, default=20)
+    args = ap.parse_args()
+    sel = load_selector(args.repo)
+    import tempfile
+    cache_path = args.cache or Path(tempfile.gettempdir()) / "ummanu-220-scan-cache.pickle"
+    cache = load_cache(cache_path)
+    try:
+        if args.cmd == "pr717":
+            cmd_pr717(sel, args, cache)
+        elif args.cmd == "graph":
+            cmd_graph(sel, args, cache)
+        elif args.cmd == "reach":
+            cmd_reach(sel, args, cache)
+        else:
+            cmd_history(sel, args, cache)
+    finally:
+        cache_path.write_bytes(pickle.dumps(cache))
+
+
+def cmd_pr717(sel, args, cache):
+    repo = args.repo
+    base, head = "8d722448497dcbd4ab32ee6e347fb1bc53024d9d", "ac037ac7927cc2937f098431fee145ba7cad99be"
+    grouped = manifest(sel, repo, head)
+    old_src, new_src = sel.snapshot(repo, base), sel.snapshot(repo, head)
+    changes = sel.changed_paths(sel.git_bytes(repo, "diff", "--name-status", "-z", base, head, "--"))
+    _, _, selected, explanations = sel.select(grouped, changes, old_src, new_src)
+    real = sorted(p for ps in selected.values() for p in ps)
+    old, new = Snapshot(sel, old_src, cache), Snapshot(sel, new_src, cache)
+    result = {"base": base, "head": head, "selector_plan_modules": len(real),
+              "selector_reasons": dict(collections.Counter(
+                  "changed test" if v == ["changed test"] else
+                  "conservative opaque consumer" if v == ["conservative opaque consumer"] else
+                  "import consumer" for v in explanations.values())),
+              "scenarios": {}}
+    code = [p for _, ps in changes for p in ps]
+    for name, split, tier, policy, carve, cuts in scenarios(new):
+        r = evaluate(sel, grouped, old, new, changes, split, tier, policy, grouped, carve, cuts)
+        chosen = r.pop("selected", None) or [p for ps in grouped.values() for p in ps]
+        r["job_seconds"] = round(sum(DURATIONS.get(p, 0.0) for p in chosen))
+        result["scenarios"][name] = r
+    # reproduction check
+    g, _ = build_graph(new, set(), tier_selector)
+    g = union(build_graph(old, set(), tier_selector)[0], g)
+    hit, _ = selected_tests(grouped, sel, closure(g, {sel.module_name(p) for p in code}))
+    result["model_reproduces_selector_exactly"] = hit == real
+    # decomposition of the 291: opaque tests vs reached through import chain
+    tier = tier_selector
+    g_none = union(build_graph(old, set(), tier_none)[0], build_graph(new, set(), tier_none)[0])
+    via_imports = set(selected_tests(grouped, sel, closure(g_none, {sel.module_name(p) for p in code}))[0])
+    op_tests = {p for p in real if sel.module_name(p) in new.opaque_modules() and tier(None, new.opaque_modules()[sel.module_name(p)])}
+    result["decomposition"] = {
+        "selected": len(real),
+        "reached_by_pure_imports": len(via_imports),
+        "opaque_tests_selected": len(op_tests),
+        "opaque_and_import_reached": len(op_tests & via_imports),
+        "only_because_test_is_opaque": len(op_tests - via_imports),
+        "only_via_opaque_product_module": len(set(real) - via_imports - op_tests),
+        "not_selected": sorted(set(p for ps in grouped.values() for p in ps) - set(real)),
+    }
+    # first hops of the pure-import chains
+    rev = collections.defaultdict(set)
+    for c, ds in g_none.items():
+        for d in ds:
+            rev[d].add(c)
+    start = {sel.module_name(p) for p in code}
+    parent = {n: None for n in start}
+    queue = collections.deque(start)
+    while queue:
+        x = queue.popleft()
+        for c in sorted(rev[x]):
+            if c not in parent:
+                parent[c] = x
+                queue.append(c)
+    chains = collections.Counter()
+    for p in via_imports:
+        n, chain = sel.module_name(p), []
+        while n:
+            chain.append(n)
+            n = parent[n]
+        chain = chain[::-1][1:-1]
+        chains[" > ".join(chain[:3]) or "(direct)"] += 1
+    result["shortest_import_chains_top"] = chains.most_common(20)
+    # what one cut would do (pure imports)
+    cuts = []
+    affected = closure(g_none, start)
+    for h in sorted(n for n in affected if n.startswith("ummanu") and n not in start):
+        g2 = {c: ds - {h} for c, ds in g_none.items() if c != h}
+        cuts.append((len(selected_tests(grouped, sel, closure(g2, start))[0]), h))
+    result["best_single_node_cuts_pure_imports"] = sorted(cuts)[:10]
+    (args.out / "pr717.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
+    print(json.dumps({k: v for k, v in result.items() if k != "shortest_import_chains_top"}, indent=1)[:4000])
+
+
+def tarjan(graph):
+    sys.setrecursionlimit(100000)
+    index, low, stack, on, out, i = {}, {}, [], set(), [], [0]
+
+    def visit(v):
+        index[v] = low[v] = i[0]
+        i[0] += 1
+        stack.append(v)
+        on.add(v)
+        for w in graph.get(v, ()):
+            if w not in index:
+                visit(w)
+                low[v] = min(low[v], low[w])
+            elif w in on:
+                low[v] = min(low[v], index[w])
+        if low[v] == index[v]:
+            comp = []
+            while True:
+                w = stack.pop()
+                on.discard(w)
+                comp.append(w)
+                if w == v:
+                    break
+            out.append(comp)
+    for v in list(graph):
+        if v not in index:
+            visit(v)
+    return out
+
+
+def structure_scenarios(snap, prod):
+    """SCC sizes and import closures (top-level + lazy + strings/attrs, module level)."""
+    out = {}
+    prod = set(prod)
+    tests = [m for m in snap.modules if m.startswith("tests.test_")]
+    for name, cuts, split in [("current", None, set()), ("layering slice M", LAYER_CUTS, set()),
+                              ("every module split (floor)", None, prod)]:
+        g, _ = build_graph(snap, split, tier_none, cuts=cuts)
+        mods = lambda nodes: {n.split("::")[0] for n in nodes} & prod
+        g_mod = collections.defaultdict(set)
+        for c, ds in g.items():
+            g_mod[c.split("::")[0]] |= {d.split("::")[0] for d in ds}
+        sccs = sorted((len(c) for c in tarjan({k: {d for d in v if d in prod and d != k}
+                                                for k, v in g_mod.items() if k in prod})), reverse=True)
+        sizes = sorted(len(mods(closure_forward(g, t))) for t in tests)
+        out[name] = {
+            "largest_sccs": sccs[:3],
+            "closure_board.models": len(mods(closure_forward(g, "ummanu.board.models"))),
+            "closure_config": len(mods(closure_forward(g, "ummanu.config"))),
+            "closure_tasks": len(mods(closure_forward(g, "ummanu.tasks"))),
+            "test_closure_median": sizes[len(sizes) // 2],
+            "tests_over_200": sum(s > 200 for s in sizes),
+        }
+    return out
+
+
+def cmd_graph(sel, args, cache):
+    repo = args.repo
+    sha = sel.git_bytes(repo, "rev-parse", args.sha).decode().strip()
+    snap = Snapshot(sel, sel.snapshot(repo, sha), cache)
+    grouped = manifest(sel, repo, sha)
+    prod = sorted(m for m in snap.modules if m.startswith("ummanu"))
+
+    def module_graph(kinds):
+        g, _ = build_graph(snap, set(), tier_none, kinds)
+        return {c: {d for d in ds if d.startswith("ummanu")} for c, ds in g.items() if c.startswith("ummanu")}
+    top = module_graph({"import"})
+    full = module_graph(None)
+    # direct (non-ancestor) top-level import edges for fan-in/out
+    direct = collections.defaultdict(set)
+    for m in prod:
+        for key, s in snap.files[m]["symbols"].items():
+            for t, kind in s["targets"]:
+                if kind in {"import", "lazy"}:
+                    parts = t.split(".")
+                    for n in range(len(parts), 0, -1):
+                        cand = ".".join(parts[:n])
+                        if cand in snap.modules and cand != m:
+                            direct[m].add(cand)
+                            break
+    fan_in = collections.Counter(d for m in prod for d in direct[m])
+    tests_in = collections.Counter()
+    test_closure = {}
+    g_none, _ = build_graph(snap, set(), tier_none)
+    for suite, paths in grouped.items():
+        for p in paths:
+            test_closure[p] = {n for n in closure_forward(g_none, sel.module_name(p)) if n.startswith("ummanu.")}
+            for n in test_closure[p]:
+                tests_in[n] += 1
+    # reverse reach of each product module (how many tests a change would select, pure imports)
+    reach = {}
+    for m in prod:
+        affected = closure(g_none, {m})
+        reach[m] = len(selected_tests(grouped, sel, affected)[0])
+    sccs_top = sorted((sorted(c) for c in tarjan(top) if len(c) > 1), key=len, reverse=True)
+    sccs_full = sorted((sorted(c) for c in tarjan(module_graph({"import", "lazy"})) if len(c) > 1),
+                       key=len, reverse=True)
+    sccs_all = sorted((sorted(c) for c in tarjan(full) if len(c) > 1), key=len, reverse=True)
+    layer = lambda m: m.split(".")[1] if m.count(".") >= 1 else m
+    layer_edges = collections.Counter()
+    for m in prod:
+        for d in direct[m]:
+            a, b = layer(m), layer(d)
+            if a != b and m.count(".") >= 2 and d.count(".") >= 2:
+                layer_edges[(a, b)] += 1
+    bidirectional = sorted({tuple(sorted((a, b))) for (a, b) in layer_edges if (b, a) in layer_edges})
+    opaque = snap.opaque_modules()
+    reach_values = sorted(reach.values())
+    result = {
+        "sha": sha,
+        "product_modules": len(prod), "product_lines": sum(snap.lines[m] for m in prod),
+        "test_modules_in_manifest": sum(len(v) for v in grouped.values()),
+        "largest_modules": sorted(((snap.lines[m], m) for m in prod), reverse=True)[:15],
+        "fan_in_top": fan_in.most_common(20),
+        "fan_out_top": sorted(((len(direct[m]), m) for m in prod), reverse=True)[:20],
+        "product_modules_in_test_import_closures_top": tests_in.most_common(20),
+        "test_import_closure_size": {
+            "median_product_modules": sorted(len(v) for v in test_closure.values())[len(test_closure) // 2],
+            "over_200_product_modules": sum(1 for v in test_closure.values() if len(v) > 200),
+        },
+        "change_reach_pure_imports": {
+            "median_tests": reach_values[len(reach_values) // 2],
+            "modules_reaching_over_250_tests": sum(1 for v in reach_values if v > 250),
+            "modules_reaching_under_50_tests": sum(1 for v in reach_values if v < 50),
+            "histogram_by_50": dict(collections.Counter(min(v // 50 * 50, 250) for v in reach_values)),
+        },
+        "scc_top_level_imports": [len(c) for c in sccs_top],
+        "scc_with_lazy_imports": [len(c) for c in sccs_full],
+        "scc_selector_edges(lazy+strings+package)": [len(c) for c in sccs_all][:5],
+        "largest_scc_with_lazy": sccs_full[0] if sccs_full else [],
+        "layer_edges_bidirectional": [(a, b, layer_edges[(a, b)], layer_edges[(b, a)]) for a, b in bidirectional],
+        "opaque": {
+            "selector": {"tests": sum(1 for m, t in opaque.items() if m.startswith("tests.test_") and tier_selector(m, t)),
+                         "product": sum(1 for m, t in opaque.items() if m.startswith("ummanu") and tier_selector(m, t))},
+            "qualified": {"tests": sum(1 for m, t in opaque.items() if m.startswith("tests.test_") and tier_qualified(m, t)),
+                          "product": sum(1 for m, t in opaque.items() if m.startswith("ummanu") and tier_qualified(m, t))},
+            "python-process": {"tests": sum(1 for m, t in opaque.items() if m.startswith("tests.test_") and tier_python_process(m, t)),
+                               "product": sum(1 for m, t in opaque.items() if m.startswith("ummanu") and tier_python_process(m, t))},
+            "trigger_counts_selector": collections.Counter(t for ts in opaque.values() for t in ts
+                                                           if not t.startswith("~")).most_common(25),
+        },
+        "structure_scenarios": structure_scenarios(snap, prod),
+        "edges": {m: sorted(direct[m]) for m in prod},
+    }
+    (args.out / "graph.json").write_text(json.dumps(result, indent=1, ensure_ascii=False))
+    print(json.dumps({k: v for k, v in result.items() if k not in {"edges", "largest_scc_with_lazy"}}, indent=1))
+
+
+def test_bits(graph, tests):
+    """node -> bitmask of tests whose dependency closure contains the node."""
+    index = {t: i for i, t in enumerate(tests)}
+    rev = collections.defaultdict(set)
+    for c, ds in graph.items():
+        for d in ds:
+            rev[d].add(c)
+    nodes = set(graph) | set(rev)
+    bits = {}
+    for comp in tarjan({n: rev.get(n, ()) for n in nodes}):   # consumers-first order
+        mask = 0
+        members = set(comp)
+        for n in comp:
+            if n in index:
+                mask |= 1 << index[n]
+            for c in rev.get(n, ()):
+                if c not in members:
+                    mask |= bits[c]
+        for n in comp:
+            bits[n] = mask
+    return bits
+
+
+def cmd_reach(sel, args, cache):
+    """Churn-weighted 'what would a change select': every product/test-support file
+    weighted by the number of main commits that touched it since --since."""
+    repo = args.repo
+    sha = sel.git_bytes(repo, "rev-parse", args.sha).decode().strip()
+    snap = Snapshot(sel, sel.snapshot(repo, sha), cache)
+    grouped = manifest(sel, repo, sha)
+    tests = [p for ps in grouped.values() for p in ps]
+    names = [sel.module_name(p) for p in tests]
+    secs = [DURATIONS.get(p, 0.0) for p in tests]
+    total_secs = sum(secs)
+    churn = collections.Counter(
+        sel.module_name(p) for p in sel.git_bytes(repo, "log", f"--since={args.since}", "--format=",
+                                                   "--name-only", sha, "--", "src/ummanu", "tests").decode().split()
+        if p.endswith(".py") and sel.module_name(p) in snap.modules)
+    weights = {m: w for m, w in churn.items() if not m.split(".")[-1].startswith("test_")}
+    out = {"sha": sha, "since": args.since, "weighted_files": len(weights),
+           "weighted_changes": sum(weights.values()), "scenarios": {}}
+    for name, split, tier_name, policy, carve, cuts in scenarios(snap):
+        graph, opaque = build_graph(snap, split, TIERS[tier_name], carve=carve, cuts=cuts)
+        bits = test_bits(graph, names)
+        full_mask = (1 << len(names)) - 1
+        samples = []
+        for m, w in weights.items():
+            if m in split:
+                keys = [f"{m}::{k}" for k in snap.files[m]["symbols"]]
+            elif carve and m in carve:
+                keys = [f"{m}::{k}" if k in carve[m] else m for k in snap.files[m]["symbols"]]
+            else:
+                keys = [m]
+            keys = keys or [m]
+            per = []
+            for key in keys:
+                blocked = key in opaque and (policy == "selector" or not key.startswith("tests."))
+                mask = full_mask if blocked else bits.get(key, 0) | (bits.get(m, 0) if key == m else 0)
+                per.append((bin(mask).count("1"),
+                            sum(s for i, s in enumerate(secs) if mask >> i & 1)))
+            samples.append((w, sum(a for a, _ in per) / len(per), sum(b for _, b in per) / len(per)))
+        tot_w = sum(w for w, *_ in samples)
+
+        def wmedian(idx):
+            acc = 0
+            for row in sorted(samples, key=lambda r: r[idx]):
+                acc += row[0]
+                if acc >= tot_w / 2:
+                    return round(row[idx])
+        out["scenarios"][name] = {
+            "weighted_median_modules": wmedian(1),
+            "weighted_mean_modules": round(sum(w * a for w, a, _ in samples) / tot_w),
+            "weighted_mean_job_seconds": round(sum(w * b for w, _, b in samples) / tot_w),
+            "share_of_changes_under_half_modules": round(sum(w for w, a, _ in samples if a < len(names) / 2) / tot_w, 2),
+            "share_of_changes_under_half_seconds": round(sum(w for w, _, b in samples if b < total_secs / 2) / tot_w, 2),
+        }
+        print(name, out["scenarios"][name], flush=True)
+    (args.out / "reach.json").write_text(json.dumps(out, indent=1))
+
+
+def closure_forward(graph, start):
+    seen, stack = {start}, [start]
+    while stack:
+        for d in graph.get(stack.pop(), ()):
+            if d not in seen:
+                seen.add(d)
+                stack.append(d)
+    return seen
+
+
+def cmd_history(sel, args, cache):
+    repo = args.repo
+    prs = code_prs(sel, repo, args.n)
+    rows = []
+    for pr in prs:
+        grouped = manifest(sel, repo, pr["head"])
+        old = Snapshot(sel, sel.snapshot(repo, pr["base"]), cache)
+        new = Snapshot(sel, sel.snapshot(repo, pr["head"]), cache)
+        row = {k: pr[k] for k in ("pr", "branch", "head", "base", "shortstat")}
+        row["files"] = len(pr["paths"])
+        row["total_modules"] = sum(len(v) for v in grouped.values())
+        old_grouped = manifest(sel, repo, pr["base"])
+        row["scenarios"] = {name: evaluate(sel, grouped, old, new, pr["changes"], split, tier, policy, old_grouped, carve, cuts)
+                            for name, split, tier, policy, carve, cuts in scenarios(new)}
+        row["path_map"] = path_map(pr["paths"], grouped)
+        c0 = row["scenarios"]["C0 code only: P1, no opacity, no split"]
+        c0_hit = set(c0.get("selected") or [p for ps in grouped.values() for p in ps])
+        pm_hit = set(p for s in (row["path_map"].get("suites") or grouped) for p in grouped.get(s, []))
+        row["path_map"]["misses_import_consumers"] = len(c0_hit - pm_hit)
+        for r in list(row["scenarios"].values()) + [row["path_map"]]:
+            chosen = r.pop("selected", None)
+            if r.get("mode") == "docs-only":
+                chosen = []
+            elif chosen is None:
+                chosen = [p for s in (r.get("suites") or grouped) for p in grouped.get(s, [])]
+            r.pop("suites", None)
+            per_owner = collections.Counter()
+            owner_of = {p: s for s, ps in grouped.items() for p in ps}
+            for p in chosen:
+                per_owner[owner_of[p]] += DURATIONS.get(p, 0.0)
+            r["job_seconds"] = round(sum(per_owner.values()))
+            r["critical_owner_seconds"] = round(max(per_owner.values(), default=0))
+        rows.append(row)
+        print(pr["pr"], row["files"], " ".join(f'{k.split()[0]}={v["modules"]}{v["mode"][0]}/{v["job_seconds"]}' for k, v in row["scenarios"].items()),
+              "path", row["path_map"]["modules"], row["path_map"]["job_seconds"], "miss", row["path_map"]["misses_import_consumers"],
+              "crit", {k.split()[0]: v["critical_owner_seconds"] for k, v in row["scenarios"].items() if k[:2] in ("S0", "R4", "U1")}, flush=True)
+    (args.out / "history.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False))
+
+
+# Coarse alternative (issue:7ba9a9f3): choose CI owners by a hand-written path map, no
+# import analysis. A plausible map from the suite names; unknown paths -> all owners.
+PATH_MAP = [
+    (r"^src/ummanu/board/|^src/ummanu/(sprints|product_issues|tasks|task_commands|sprint_.*)\.py$",
+     {"unit", "integration-board"}),
+    (r"^src/ummanu/(restore|checkpoint|task_restore|backup_.*)\.py$|^src/ummanu/board/(postgres_recovery|normalized_checkpoint)",
+     {"unit", "integration-recovery"}),
+    (r"^src/ummanu/dispatch/", {"unit", "component", "integration-dispatcher"}),
+    (r"^src/ummanu/runtime/|^src/ummanu/(head_.*|heads?)\.py$", {"unit", "runtime-component", "integration-heads"}),
+    (r"^src/ummanu/memory|^src/ummanu/memory_", {"unit", "integration-memory"}),
+    (r"^src/ummanu/(installation|upgrade|onboarding|cli)\.py$|^pyproject.toml$|^scripts/", None),
+    (r"^src/ummanu/(web|webproto|webfront)/", {"unit", "component"}),
+]
+
+
+def path_map(paths, grouped):
+    owners = set()
+    for p in paths:
+        if p.startswith("tests/") and p.endswith(".py"):
+            for s, ps in grouped.items():
+                if p in ps:
+                    owners.add(s)
+                    break
+            else:
+                return {"owners": len(grouped), "modules": sum(len(v) for v in grouped.values()), "reason": f"test support {p}"}
+            continue
+        if p.endswith(".md"):
+            continue
+        for rx, suites in PATH_MAP:
+            if re.search(rx, p):
+                if suites is None:
+                    return {"owners": len(grouped), "modules": sum(len(v) for v in grouped.values()), "reason": p}
+                owners |= suites
+                break
+        else:
+            return {"owners": len(grouped), "modules": sum(len(v) for v in grouped.values()), "reason": f"unmapped {p}"}
+    return {"owners": len(owners), "modules": sum(len(grouped.get(s, [])) for s in owners),
+            "suites": sorted(owners)}
+
+
+if __name__ == "__main__":
+    main()

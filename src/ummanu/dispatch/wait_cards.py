@@ -68,7 +68,7 @@ from ummanu.board.wait_card import (
     parse_utc,
     utc_text,
 )
-from ummanu.dispatch.gate import _HTTP_STATUS_RE, GateTransportError, _gh_api
+from ummanu.dispatch.github_ci import _HTTP_STATUS_RE, _gh_api
 from ummanu.dispatch.helpers import _worker_id
 from ummanu.dispatch.po_delivery import deliver, open_successor
 from ummanu.dispatch.state import (
@@ -78,8 +78,9 @@ from ummanu.dispatch.state import (
     record_attempt as _record_attempt,
     request_token,
 )
-from ummanu.dispatch.types import HostError
-from ummanu.tasks import TaskError, recorded_card_transition
+from ummanu.dispatch.types import GateTransportError, HostError
+from ummanu.kernel.errors import TaskError
+from ummanu.tasks import recorded_card_transition
 
 WAIT_STEP = "wait-card"
 #: Request-id actions of a delivery, each under `delivery_request_id(<card>, <action>, <address>, <key>)`.

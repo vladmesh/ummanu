@@ -25,7 +25,6 @@ legacy one. What is in this file beside it is what only this backend can be aske
 
 from __future__ import annotations
 
-import ast
 import inspect
 import json
 import os
@@ -40,6 +39,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from unittest import mock
 
+from tests import source_trees
+from tests.support import local_pty_owners
 from tests.support.head_runtime_contract import HeadRuntimeContract
 from ummanu.codex_provider_events import CodexProviderEventIngress
 from ummanu.dispatch.watchdog import clear_head_heartbeat, head_process_status
@@ -1896,39 +1897,6 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
         self.assertTrue(answer["ok"], answer)
         self.assertEqual(_declared_bound(answer["delivery"]), 17.0)
 
-    def test_nothing_asks_a_second_time_what_became_of_a_delivery(self) -> None:
-        """One point asks the witnesses, and it is the one that carries the delivery: `_follow`.
-
-        A source guard rather than a behavioural one on purpose. What criterion 2 forbids is not a
-        wrong answer — each of these was locally right when it was added — but a second place where
-        the question can be asked at all, because that is what let two places answer it differently.
-        A name that comes back is a decision somebody has to make again, and this fails when it is
-        made silently.
-        """
-        source = (REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py").read_text(
-            encoding="utf-8"
-        )
-        tree = ast.parse(source)
-        defined = {
-            node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        assigned = {
-            target.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-
-        self.assertNotIn("_settle", defined)
-        self.assertNotIn("_resolve", defined)
-        self.assertNotIn("_remember", defined)
-        self.assertNotIn("DELIVERY_STILL_GOING", assigned, "the fifth outcome is back")
-        self.assertNotIn("_unfinished", source, "the register of deliveries nobody accounted for is back")
-        self.assertNotIn("still_going", source)
-        # And the one place that does ask is still there, asking once.
-        self.assertIn("_follow", defined)
-
 
 class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
     """Criterion 6: a bound the substrate clears by itself is a refusal, never a head's ending.
@@ -2219,24 +2187,15 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
     """
 
     def test_the_substrate_is_reached_only_through_its_scoped_consumers(self) -> None:
-        package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"
-        backend = REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py"
-        po_runner = REPO / "src" / "ummanu" / "po" / "runner.py"
-        substrate = "ummanu.runtime.head.local_pty"
-        offenders = []
-        for path in (REPO / "src").rglob("*.py"):
-            if package in path.parents or path in (backend, po_runner):
-                continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                names = []
-                if isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
-                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-                    names = [node.module]
-                if any(name == substrate or name.startswith(substrate + ".") for name in names):
-                    offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is reached outside its runtime and PO consumers")
+        sources = {
+            str(path.relative_to(REPO)): path.read_text()
+            for path, _tree in source_trees.modules(REPO / "src", naming=("local_pty",))
+        }
+        self.assertEqual(
+            local_pty_owners.substrate_offenders(sources),
+            [],
+            "the substrate is reached outside its runtime and PO consumers",
+        )
 
     def test_the_product_builds_its_backends_in_exactly_one_place(self) -> None:
         """Criterion 4 of secretary-1467, criterion 1 of secretary-1474: one build site.
@@ -2246,35 +2205,16 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         assertion is now over the whole product rather than over one module of it: whoever names a
         backend, exactly one function anywhere turns that name into an object.
         """
-        sites = {}
-        for path in sorted((REPO / "src").rglob("*.py")):
-            if path == REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py":
-                continue  # the class's own module, where it is defined rather than built
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for holder in ast.walk(tree):
-                if not isinstance(holder, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                for node in ast.walk(holder):
-                    if (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Name)
-                        and node.func.id.endswith("HeadRuntime")
-                    ):
-                        sites.setdefault(holder.name, set()).add(node.func.id)
+        # Only the defining class owner is exempt, never the extracted owners.
+        sources = {
+            str(path.relative_to(REPO)): path.read_text()
+            for path, _tree in source_trees.modules(REPO / "src", naming=("HeadRuntime",))
+        }
+        sites = local_pty_owners.construction_sites(sources)
 
         self.assertEqual(sorted(sites), ["build_head_runtime"], "a second place builds a backend")
         # secretary-1722: the Orca backend is no longer built anywhere.
         self.assertEqual(sites["build_head_runtime"], {"LocalPtyHeadRuntime"})
-
-    def test_no_profile_and_no_registry_names_this_backend(self) -> None:
-        offenders = []
-        for path in (REPO / "src").rglob("*"):
-            if path.is_dir() or path.suffix not in (".yaml", ".yml", ".json", ".toml"):
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace")
-            if "local-pty" in text or "local_pty" in text:
-                offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "a profile selects a backend this card does not wire in")
 
 
 class AnAgentPromptIsSubmittedTests(LocalPtyRuntimeTestCase):

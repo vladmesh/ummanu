@@ -19,13 +19,15 @@ import json
 import os
 from pathlib import Path
 
+from ummanu.cli_output import print_error, usage_handler
 from ummanu.dispatch.bootstrap import runtime_from_args
 from ummanu.dispatch.head_status import head_status
 from ummanu.dispatch.pause import PAUSE_MODES, normalize_pause_mode
 from ummanu.dispatch.types import DispatcherError, HostError
+from ummanu.kernel.errors import TaskError
+from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.codex_home import bound_data_dir
 from ummanu.runtime.paths import add_instance_argument
-from ummanu.tasks import TaskError
 from ummanu.webproto.commands import _RUN_EXIT_BY_CODE, EXIT_BACKEND
 from ummanu.webproto.errors import ReadError
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -33,7 +35,7 @@ from ummanu.webproto.pause_reads import DRAIN, PauseReadLayer
 
 
 def add_dispatcher_subcommands(subparsers) -> None:
-    dispatcher = subparsers.add_parser("dispatcher", help="run the task and sprint dispatcher")
+    dispatcher = add_command_parser(subparsers, "dispatcher")
     commands = dispatcher.add_subparsers(dest="dispatcher_command")
 
     for name, handler in (
@@ -56,7 +58,7 @@ def add_dispatcher_subcommands(subparsers) -> None:
             command.add_argument("--max-interval-seconds", type=float, default=300.0)
             command.add_argument("--max-ticks", type=int)
 
-    dispatcher.set_defaults(handler=not_implemented_dispatcher)
+    dispatcher.set_defaults(handler=usage_handler("dispatcher subcommand required"))
 
 
 def add_pause_commands(subparsers) -> None:
@@ -66,10 +68,7 @@ def add_pause_commands(subparsers) -> None:
     and not one of the dispatcher's own steps. The legacy `pipeline pause` entry refuses and points
     here, so the two implementations cannot drift apart in silence.
     """
-    pause = subparsers.add_parser(
-        "pause",
-        help="stop the pipeline: drain (no new claims) or freeze (heads stopped too)",
-    )
+    pause = add_command_parser(subparsers, "pause")
     add_common(pause)
     pause.add_argument("mode", choices=(*PAUSE_MODES, "soft", "hard"))
     reason = pause.add_mutually_exclusive_group()
@@ -83,19 +82,15 @@ def add_pause_commands(subparsers) -> None:
     )
     pause.set_defaults(handler=run_pause)
 
-    resume = subparsers.add_parser("resume", help="clear the pause and put back what a freeze stopped")
+    resume = add_command_parser(subparsers, "resume")
     add_common(resume)
     resume.set_defaults(handler=run_resume)
 
-    status = subparsers.add_parser("pause-status", help="read the production dispatcher's pause state")
+    status = add_command_parser(subparsers, "pause-status")
     add_common(status)
     status.set_defaults(handler=run_pause_status)
 
-    scope = subparsers.add_parser(
-        "pause-scope",
-        help="read what a pause would reach before issuing one: the flag, the open sprints and "
-        "cards inside the pipeline-wide scope, and the heads a drain would leave running",
-    )
+    scope = add_command_parser(subparsers, "pause-scope")
     add_common(scope)
     scope.set_defaults(handler=run_pause_scope)
 
@@ -110,10 +105,7 @@ def add_head_status_command(subparsers) -> None:
     dispatcher state -- the records naming which head serves which card in which workspace -- while
     `host_commands` is about host resources the dispatcher does not own.
     """
-    command = subparsers.add_parser(
-        "head-status",
-        help="read whether the dispatcher's heads in a workspace are alive, and what proved it",
-    )
+    command = add_command_parser(subparsers, "head-status")
     add_common(command)
     command.add_argument(
         "--workspace",
@@ -140,11 +132,6 @@ def add_common(parser: argparse.ArgumentParser) -> None:
         choices=("real", "noop"),
         default=os.environ.get("UMMANU_DISPATCHER_HOST_MODE", "real"),
     )
-
-
-def not_implemented_dispatcher(args: argparse.Namespace) -> int:
-    print(json.dumps({"error": {"code": "usage", "message": "dispatcher subcommand required"}}))
-    return 2
 
 
 def run_dispatcher_production_tick(args: argparse.Namespace) -> int:
@@ -187,9 +174,13 @@ def run_pause(args: argparse.Namespace) -> int:
     freeze: the two spellings reach two different implementations, and the freeze one is the
     deliberate `pause freeze` an operator types.
     """
-    reason = (args.reason or "").strip() or _read_optional(args.reason_file).strip()
+    try:
+        reason = (args.reason or "").strip() or _read_reason_file(args.reason_file).strip()
+    except DispatcherError as exc:
+        print_error({"code": exc.code, "message": exc.message})
+        return exc.exit_code
     if not reason:
-        print(json.dumps({"error": {"code": "usage", "message": "pause requires --reason or --reason-file"}}))
+        print_error({"code": "usage", "message": "pause requires --reason or --reason-file"})
         return 2
     if normalize_pause_mode(args.mode) == DRAIN:
         return _answer(lambda: _pause_operations(args).pause_drain(actor=args.actor, reason=reason))
@@ -239,7 +230,7 @@ def _answer(call) -> int:
     try:
         document = call()
     except ReadError as exc:
-        print(json.dumps({"error": exc.to_json()}), file=os.sys.stderr)
+        print_error(exc.to_json(), stderr=True)
         return _RUN_EXIT_BY_CODE.get(exc.code, EXIT_BACKEND)
     print(json.dumps(document, sort_keys=True, separators=(",", ":")))
     return 0
@@ -256,27 +247,19 @@ def _run_production(args: argparse.Namespace, operation) -> int:
         with bound_data_dir(runtime.data_dir):
             result = operation(runtime)
     except (DispatcherError, TaskError) as exc:
-        print(
-            json.dumps(
-                {"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")
-            )
-        )
+        print_error({"code": exc.code, "message": exc.message}, compact=True, sort_keys=True)
         return exc.exit_code
     except HostError as exc:
-        print(
-            json.dumps(
-                {"error": {"code": "host_error", "message": str(exc)}}, sort_keys=True, separators=(",", ":")
-            )
-        )
+        print_error({"code": "host_error", "message": str(exc)}, compact=True, sort_keys=True)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result.get("status") in {"ok", "skipped"} else 3
 
 
-def _read_optional(path: str | None) -> str:
+def _read_reason_file(path: str | None) -> str:
     if path is None:
         return ""
     try:
         return Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise DispatcherError("usage", f"cannot read file: {exc}", 2) from None
+        raise DispatcherError("usage", f"cannot read --reason-file: {exc}", 2) from None

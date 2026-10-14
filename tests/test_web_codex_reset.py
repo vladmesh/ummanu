@@ -19,8 +19,9 @@ from unittest import mock
 from urllib.error import HTTPError, URLError
 
 from tests.web_fakes import Recording
+from ummanu.config import validate
 from ummanu.tasks import TaskError
-from ummanu.web import pages
+from ummanu.web import page_assets, page_shell, pages
 from ummanu.web.app import WebApp
 from ummanu.web.provider_usage import (
     CLAUDE_USAGE_URL,
@@ -331,6 +332,18 @@ class ResetOperationTests(ResetFixture):
                     self.assertTrue(record["reason"])
                 self.assertNoToken(document, record)
 
+    def test_every_answer_validates_against_the_published_schema(self) -> None:
+        """A sent press, its replay, a refusal and a provider error: each is a `web-provider` document."""
+        answers = [self.press("rid-sent"), self.press("rid-sent")]
+        self.provider.answer = {"code": "mystery"}
+        answers.append(self.press("rid-error"))
+        self.provider.credits = {"available_count": 0, "applicable_available_count": 0}
+        answers.append(self.press("rid-refused"))
+        self.assertEqual([a["outcome"] for a in answers], ["reset", "reset", "error", "refused"])
+        for answer in answers:
+            with self.subTest(outcome=answer["outcome"], replayed=answer["replayed"]):
+                self.assertEqual(validate(answer, "web-provider", answer["kind"]), [])
+
     def test_the_record_names_the_actor_the_action_the_id_and_the_outcome(self) -> None:
         self.press("rid-7")
         record = self.audit.committed["rid-7"]
@@ -451,7 +464,7 @@ def codex_place(credits: Any, *, carry: bool = True, age: float = 0.0) -> str:
     if carry:
         codex["reset_credits"] = credits
     section = {"available": True, "reason": None, "document": {"providers": [codex]}}
-    return pages._limits_bar_of(section)
+    return page_shell._limits_bar_of(section)
 
 
 class ButtonTests(unittest.TestCase):
@@ -471,11 +484,11 @@ class ButtonTests(unittest.TestCase):
         bar = codex_place({"available": 1, "applicable": 0, "next_expires_at": None})
         details = bar[bar.index('<details class="credits">') : bar.index("</details>")]
         self.assertIn('class="bar-reset"', details)
-        self.assertIn(pages.RESET_NOT_APPLICABLE, details)
+        self.assertIn(page_shell.RESET_NOT_APPLICABLE, details)
         self.assertLess(details.index("pop-line warn"), details.index('class="bar-reset"'))
         bar = codex_place({"available": 1, "applicable": 1, "next_expires_at": None})
-        self.assertIn(pages.RESET_APPLICABLE, bar)
-        self.assertNotIn(pages.RESET_NOT_APPLICABLE, bar)
+        self.assertIn(page_shell.RESET_APPLICABLE, bar)
+        self.assertNotIn(page_shell.RESET_NOT_APPLICABLE, bar)
 
     def test_absent_with_no_available_credit_or_on_a_fallback_reading(self) -> None:
         for credits, carry, age in (
@@ -491,17 +504,17 @@ class ButtonTests(unittest.TestCase):
         bar = codex_place({"available": 1, "applicable": 1, "next_expires_at": None})
         self.assertEqual(bar.count('<div class="row">'), 1)
         self.assertNotIn("<br", bar)
-        self.assertIn("white-space: nowrap", pages.STYLE)
+        self.assertIn("white-space: nowrap", page_assets.STYLE)
 
     def test_every_page_carries_the_click_script_and_it_confirms_before_it_posts(self) -> None:
-        script = pages._RESET_SCRIPT
-        self.assertIn(script, pages._page("t", "<p>x</p>"))
+        script = page_assets._RESET_SCRIPT
+        self.assertIn(script, page_shell._page("t", "<p>x</p>"))
         with pages.from_post(True):
-            self.assertIn(script, pages._page("t", "<p>x</p>"))
+            self.assertIn(script, page_shell._page("t", "<p>x</p>"))
         self.assertLess(script.index("window.confirm(button.dataset.confirm)"), script.index("fetch("))
         self.assertIn("/api/providers/codex/reset-limit", script)
         self.assertIn("ummanuReloadWhenIdle", script)
-        self.assertIn("window.ummanuReloadWhenIdle", pages._REFRESH_SCRIPT)
+        self.assertIn("window.ummanuReloadWhenIdle", page_assets._REFRESH_SCRIPT)
         self.assertNotIn("location.reload", script, "the reset reloads only through the page's rule")
 
 

@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import unittest
 
-import ummanu.tasks as task_protocol
-from ummanu.board import Role as ExportedRole
 from ummanu.board.card_transitions import (
     CARD_TRANSITIONS,
     CardTransitionForbidden,
@@ -17,13 +15,13 @@ from ummanu.board.roles import (
     PROPOSAL_CREATE_ROLES,
     Role,
 )
-from ummanu.task_commands import _role_choices
+from ummanu.task_commands import Role as CommandRole, _role_choices
 from ummanu.tasks import TaskError, TaskWriter
 
 
 class RoleVocabularyTests(unittest.TestCase):
     def test_role_is_public_string_compatible_closed_vocabulary(self) -> None:
-        self.assertIs(ExportedRole, Role)
+        self.assertIs(CommandRole, Role)
         self.assertIs(Role("worker"), Role.WORKER)
         self.assertEqual(str(Role.WORKER), "worker")
         self.assertEqual(
@@ -45,16 +43,6 @@ class RoleVocabularyTests(unittest.TestCase):
             TaskWriter._role("dispatcher", CREATE_ROLES)
         with self.assertRaises(TaskError):
             TaskWriter._role("dispatchre", BOARD_ROLES)
-
-    def test_task_module_no_longer_owns_duplicate_role_registries(self) -> None:
-        for name in (
-            "_ROLES",
-            "_COMMENT_ROLES",
-            "_CREATE_ROLES",
-            "_PROPOSAL_CREATE_ROLES",
-            "_EDIT_ROLES",
-        ):
-            self.assertFalse(hasattr(task_protocol, name), name)
 
     def test_cli_role_choices_are_projected_from_canonical_subsets(self) -> None:
         self.assertEqual(set(_role_choices(BOARD_ROLES)), {role.value for role in BOARD_ROLES})

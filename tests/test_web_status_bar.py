@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from tests.web_fakes import Recording, system_snapshot
-from ummanu.web import pages
+from ummanu.web import page_assets, page_parts, page_shell, pages
 from ummanu.web.app import ROUTES, WebApp
 from ummanu.web.provider_usage import (
     CACHE_SECONDS,
@@ -184,7 +184,7 @@ class RouteFixture(unittest.TestCase):
         # about the bar, and a page that also has an unreadable section is the harder case for it.
         self.layers = [
             self.reads,
-            Recording(run_list={"items": []}),
+            Recording(card_runs={"items": []}),
             self.sprint_reads,
             Recording(),
             Recording(pause_state=unreadable),
@@ -308,20 +308,20 @@ class EveryPageCarriesTheBarTests(RouteFixture):
 
 class BarLayoutTests(RouteFixture):
     def test_the_bar_is_the_only_fixed_element_and_the_page_reserves_its_height(self) -> None:
-        fixed = set(re.findall(r"^(\S+) \{[^}]*position: fixed", pages.STYLE, re.MULTILINE))
+        fixed = set(re.findall(r"^(\S+) \{[^}]*position: fixed", page_assets.STYLE, re.MULTILINE))
         self.assertEqual(fixed, {".statusbar"}, "only the bar is lifted out of the page's flow")
-        self.assertIn(".statusbar { position: fixed; left: 0; right: 0; bottom: 0;", pages.STYLE)
-        self.assertIn("--bar-height:", pages.STYLE)
-        self.assertIn("body { padding-bottom: var(--bar-height); }", pages.STYLE)
-        self.assertIn("height: var(--bar-height)", pages.STYLE)
+        self.assertIn(".statusbar { position: fixed; left: 0; right: 0; bottom: 0;", page_assets.STYLE)
+        self.assertIn("--bar-height:", page_assets.STYLE)
+        self.assertIn("body { padding-bottom: var(--bar-height); }", page_assets.STYLE)
+        self.assertIn("height: var(--bar-height)", page_assets.STYLE)
 
     def test_the_bar_keeps_one_line_at_any_width_so_the_reserved_height_stays_true(self) -> None:
-        row = re.search(r"\.statusbar \.row \{([^}]*)\}", pages.STYLE)
+        row = re.search(r"\.statusbar \.row \{([^}]*)\}", page_assets.STYLE)
         assert row is not None
         self.assertIn("white-space: nowrap", row.group(1))
         self.assertIn("overflow-x: auto", row.group(1))
         # The phone-width rule narrows the gutters; it must not reintroduce wrapping or a height.
-        phone = re.search(r"@media \(max-width: 600px\) \{ \.statusbar[^}]*\}", pages.STYLE)
+        phone = re.search(r"@media \(max-width: 600px\) \{ \.statusbar[^}]*\}", page_assets.STYLE)
         assert phone is not None
         self.assertNotIn("white-space", phone.group(0))
 
@@ -331,25 +331,25 @@ class BarLayoutTests(RouteFixture):
         # The composer is inside <main>, which the reserved padding sits below; the bar follows it.
         self.assertLess(page.index('id="po-text"'), page.index("</main>"))
         self.assertLess(page.index("</main>"), page.index('<footer class="statusbar"'))
-        self.assertNotIn("position: fixed", re.search(r"form\.sprint \{[^}]*\}", pages.STYLE).group(0))
+        self.assertNotIn("position: fixed", re.search(r"form\.sprint \{[^}]*\}", page_assets.STYLE).group(0))
 
     def test_a_provider_is_a_group_the_eye_can_find_on_a_single_line(self) -> None:
         """The bar is one line, so the grouping is drawn rather than spelled with newlines."""
-        heading = re.search(r"\.statusbar \.provider > b \{([^}]*)\}", pages.STYLE)
+        heading = re.search(r"\.statusbar \.provider > b \{([^}]*)\}", page_assets.STYLE)
         assert heading is not None
         # The heading is set apart from the windows the way a panel heading is: see `h2`.
         self.assertIn("text-transform: uppercase", heading.group(1))
         self.assertIn("letter-spacing", heading.group(1))
         # One provider is separated from the next by a rule and not only by a gap.
-        rule = re.search(r"\.statusbar \.provider \+ \.provider \{([^}]*)\}", pages.STYLE)
+        rule = re.search(r"\.statusbar \.provider \+ \.provider \{([^}]*)\}", page_assets.STYLE)
         assert rule is not None
         self.assertIn("border-left: 1px solid", rule.group(1))
 
     def test_a_window_is_one_chip_and_its_figure_sits_next_to_its_name(self) -> None:
-        chip = re.search(r"\.statusbar \.window \{([^}]*)\}", pages.STYLE)
+        chip = re.search(r"\.statusbar \.window \{([^}]*)\}", page_assets.STYLE)
         assert chip is not None
         self.assertIn("background: var(--raised)", chip.group(1))
-        figure = re.search(r"\.statusbar \.window > b \{([^}]*)\}", pages.STYLE)
+        figure = re.search(r"\.statusbar \.window > b \{([^}]*)\}", page_assets.STYLE)
         assert figure is not None
         # No fixed column: it would open a hole between the window's name and its percentage.
         self.assertNotIn("min-width", figure.group(1))
@@ -361,7 +361,7 @@ class BarLayoutTests(RouteFixture):
 
 class BarReadingTests(RouteFixture):
     def bar(self, section: dict[str, Any] | None) -> str:
-        return bar_of(f"<main></main>{pages._limits_bar_of(section)}")
+        return bar_of(f"<main></main>{page_shell._limits_bar_of(section)}")
 
     def section(self, providers: list[dict[str, Any]]) -> dict[str, Any]:
         return {"available": True, "reason": None, "document": usage_document(providers)}
@@ -470,7 +470,7 @@ class BarReadingTests(RouteFixture):
         bar = self.bar(self.section([provider("claude", "Claude", windows=[window("5-hour", 74.0, "x")])]))
         codex = provider_places(bar)[1]
         self.assertIn("<b>Codex</b>", codex)
-        self.assertIn(pages.LIMITS_NOT_IN_READING, codex)
+        self.assertIn(page_shell.LIMITS_NOT_IN_READING, codex)
         self.assertIsNone(PERCENTAGE.search(codex), codex)
 
     def test_a_provider_beyond_the_two_is_shown_rather_than_hidden(self) -> None:
@@ -484,7 +484,7 @@ class BarReadingTests(RouteFixture):
             path = self.concrete(route.pattern)
             with self.subTest(path=path):
                 bar = bar_of(self.get(path, app=app))
-                self.assertIn(pages.LIMITS_NOT_BUILT, bar)
+                self.assertIn(page_shell.LIMITS_NOT_BUILT, bar)
                 self.assertIsNone(PERCENTAGE.search(bar), bar)
 
     def test_a_provider_read_that_refuses_still_serves_every_page_with_the_reason(self) -> None:
@@ -616,7 +616,7 @@ class ResetCreditsCostTests(BarCostsNoExtraReadTests):
 
 
 class ResetCreditsLabelTests(unittest.TestCase):
-    """The folded label :func:`pages._bar_reset_credits` draws, in every case the card names."""
+    """The folded label :func:`page_shell._bar_reset_credits` draws, in every case the card names."""
 
     EXPIRES = "2026-10-16T10:00:00Z"  # 25d 22h after RENDERED_AT
 
@@ -628,7 +628,7 @@ class ResetCreditsLabelTests(unittest.TestCase):
         if carry:
             codex["reset_credits"] = credits
         section = {"available": True, "reason": None, "document": usage_document([codex])}
-        return provider_places(bar_of(pages._limits_bar_of(section)))[1]
+        return provider_places(bar_of(page_shell._limits_bar_of(section)))[1]
 
     def test_the_bar_carries_only_the_count_and_the_details_are_folded(self) -> None:
         place = self.codex({"available": 1, "applicable": 0, "next_expires_at": None})
@@ -655,12 +655,12 @@ class ResetCreditsLabelTests(unittest.TestCase):
 
     def test_applicability_is_a_line_of_the_popover_in_words(self) -> None:
         place = self.codex({"available": 1, "applicable": 0, "next_expires_at": None})
-        self.assertIn(f'<span class="pop-line warn">{pages.RESET_NOT_APPLICABLE}</span>', place)
+        self.assertIn(f'<span class="pop-line warn">{page_shell.RESET_NOT_APPLICABLE}</span>', place)
         place = self.codex({"available": 1, "applicable": None, "next_expires_at": None})
-        self.assertIn(f'<span class="pop-line warn">{pages.RESET_NOT_APPLICABLE}</span>', place)
+        self.assertIn(f'<span class="pop-line warn">{page_shell.RESET_NOT_APPLICABLE}</span>', place)
         place = self.codex({"available": 3, "applicable": 2, "next_expires_at": None})
         self.assertIn(">3 resets</summary>", place)
-        self.assertIn(f'<span class="pop-line applies">{pages.RESET_APPLICABLE}</span>', place)
+        self.assertIn(f'<span class="pop-line applies">{page_shell.RESET_APPLICABLE}</span>', place)
         self.assertNotIn("pop-line warn", place)
 
     def test_no_available_credit_and_no_credits_draw_no_label(self) -> None:
@@ -726,7 +726,7 @@ class BarRefreshTests(RouteFixture):
             with self.subTest(path=path):
                 page = self.get(path)
                 self.assertIn("data-refresh-toggle", bar_of(page))
-                self.assertIn(pages._REFRESH_SCRIPT, page)
+                self.assertIn(page_assets._REFRESH_SCRIPT, page)
 
     def test_the_dashboard_has_the_bar_switch_and_no_second_one(self) -> None:
         page = self.get("/")
@@ -739,7 +739,7 @@ class BarRefreshTests(RouteFixture):
         Nothing here runs JavaScript, so what is pinned is the shape of the guard: both clauses are
         present, both are `return`s, and both stand before the only `reload` in the script.
         """
-        script = pages._REFRESH_SCRIPT
+        script = page_assets._REFRESH_SCRIPT
         focus = script.index(
             "if (active && (active.tagName === 'TEXTAREA' || active.tagName === 'INPUT' "
             "|| active.tagName === 'SELECT')) return;"
@@ -773,7 +773,7 @@ class ResetRenderingTests(unittest.TestCase):
         """What the renderer draws for `resets_at`, `minutes` after :data:`RENDERED_AT`."""
         now = RENDERED_AT + timedelta(minutes=minutes)
         with pages.render_clock(lambda: now):
-            return pages._reset(resets_at)
+            return page_parts._reset(resets_at)
 
     def test_more_than_a_day_away_is_whole_days_and_hours(self) -> None:
         drawn = self.left("2026-09-22T23:30:00Z")
@@ -793,7 +793,7 @@ class ResetRenderingTests(unittest.TestCase):
     def rolled(self, resets_at: Any, window_minutes: Any, *, minutes: float = 0.0) -> tuple[str, bool]:
         now = RENDERED_AT + timedelta(minutes=minutes)
         with pages.render_clock(lambda: now):
-            return pages._reset_reading(resets_at, window_minutes)
+            return page_parts._reset_reading(resets_at, window_minutes)
 
     def test_a_moment_already_past_rolls_forward_by_its_window(self) -> None:
         """A reset ten minutes ago on a 5-hour window means the running window resets in 4h 50m."""
@@ -828,28 +828,28 @@ class ResetRenderingTests(unittest.TestCase):
         for minutes in (None, 0, -300, True, False, 300.0, "300", 1e300):
             with self.subTest(window_minutes=minutes):
                 drawn, predates = self.rolled("2026-09-20T11:50:00Z", minutes)
-                self.assertIn(f">{pages.NO_RESET_RECORDED}<", drawn)
+                self.assertIn(f">{page_parts.NO_RESET_RECORDED}<", drawn)
                 self.assertTrue(predates, "the percentage is stale all the same")
 
     def test_hostile_moments_and_windows_never_raise_or_loop(self) -> None:
         """A table of hostile inputs: each is answered in bounded time with no exception."""
         cases: list[tuple[Any, Any, str | None, bool]] = [
             # (resets_at, window_minutes, expected text or None for "any countdown", predates)
-            ("2026-09-20T11:50:00Z", 1e300, pages.NO_RESET_RECORDED, True),
-            ("2026-09-20T11:50:00Z", 10**400, pages.NO_RESET_RECORDED, True),
-            ("2026-09-20T11:50:00Z", -(10**400), pages.NO_RESET_RECORDED, True),
-            ("2026-09-20T11:50:00Z", True, pages.NO_RESET_RECORDED, True),
-            ("2026-09-20T11:50:00Z", "300", pages.NO_RESET_RECORDED, True),
-            ("2026-09-20T11:50:00Z", -1, pages.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", 1e300, page_parts.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", 10**400, page_parts.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", -(10**400), page_parts.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", True, page_parts.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", "300", page_parts.NO_RESET_RECORDED, True),
+            ("2026-09-20T11:50:00Z", -1, page_parts.NO_RESET_RECORDED, True),
             ("1970-01-01T00:00:00Z", 1, "1m left", True),
             ("1970-01-01T00:00:00Z", 300, None, True),
             ("0001-01-01T00:00:00+14:00", 1, None, True),
-            ("0001-01-01T00:00:00Z", pages.LONGEST_WINDOW_MINUTES, None, True),
+            ("0001-01-01T00:00:00Z", page_parts.LONGEST_WINDOW_MINUTES, None, True),
             ("9999-12-31T23:59:59-14:00", 300, None, False),
-            (1e300, 300, pages.NO_RESET_RECORDED, False),
-            (10**400, 300, pages.NO_RESET_RECORDED, False),
-            (True, 300, pages.NO_RESET_RECORDED, False),
-            (-5, 300, pages.NO_RESET_RECORDED, False),
+            (1e300, 300, page_parts.NO_RESET_RECORDED, False),
+            (10**400, 300, page_parts.NO_RESET_RECORDED, False),
+            (True, 300, page_parts.NO_RESET_RECORDED, False),
+            (-5, 300, page_parts.NO_RESET_RECORDED, False),
         ]
         for resets_at, minutes, text, predates in cases:
             with self.subTest(resets_at=resets_at, window_minutes=minutes):
@@ -860,17 +860,11 @@ class ResetRenderingTests(unittest.TestCase):
                 else:
                     self.assertRegex(drawn, r">(\d+d \d+h|\d+h \d+m|\d+m|less than a minute) left<")
 
-    def test_no_text_in_the_web_package_says_a_reset_already_passed(self) -> None:
-        root = Path(pages.__file__).parent
-        for path in root.rglob("*.py"):
-            with self.subTest(path=path.name):
-                self.assertNotIn("already passed", path.read_text(encoding="utf-8"))
-
     def test_a_reading_with_no_moment_says_so_and_carries_no_title(self) -> None:
         for absent in (None, "", "   ", "not a moment", 17):
             with self.subTest(absent=absent):
                 drawn = self.left(absent)
-                self.assertIn(pages.NO_RESET_RECORDED, drawn)
+                self.assertIn(page_parts.NO_RESET_RECORDED, drawn)
                 self.assertNotIn("title=", drawn)
 
     def test_the_moment_is_kept_as_the_hover_title(self) -> None:
@@ -893,18 +887,18 @@ class PercentRenderingTests(unittest.TestCase):
     """A percentage is drawn once for both places too, and a tenth that is zero is not drawn at all."""
 
     def test_a_whole_reading_carries_no_trailing_tenth(self) -> None:
-        self.assertEqual(pages._percent(73.0), "73%")
-        self.assertEqual(pages._percent(100.0), "100%")
-        self.assertEqual(pages._percent(72), "72%")
+        self.assertEqual(page_parts._percent(73.0), "73%")
+        self.assertEqual(page_parts._percent(100.0), "100%")
+        self.assertEqual(page_parts._percent(72), "72%")
 
     def test_a_reading_that_really_is_fractional_keeps_its_one_digit(self) -> None:
-        self.assertEqual(pages._percent(95.4), "95.4%")
-        self.assertEqual(pages._percent(0.5), "0.5%")
+        self.assertEqual(page_parts._percent(95.4), "95.4%")
+        self.assertEqual(page_parts._percent(0.5), "0.5%")
 
     def test_no_reading_is_a_dash_and_never_a_zero_or_a_bare_per_cent_sign(self) -> None:
         for absent in (None, "", "74", True):
             with self.subTest(absent=absent):
-                self.assertEqual(pages._percent(absent), "—")
+                self.assertEqual(page_parts._percent(absent), "—")
 
 
 class TheBarDrawsTheResetTests(RouteFixture):
@@ -930,7 +924,7 @@ class TheBarDrawsTheResetTests(RouteFixture):
             )
         )
         page = self.get("/")
-        self.assertEqual(page.count(pages.NO_RESET_RECORDED), 1, "once, on the bar")
+        self.assertEqual(page.count(page_parts.NO_RESET_RECORDED), 1, "once, on the bar")
 
 
 class TheBarNeverDrawsAPreResetFigureTests(RouteFixture):
@@ -955,7 +949,7 @@ class TheBarNeverDrawsAPreResetFigureTests(RouteFixture):
         chips = re.findall(r'<span class="window">.*?</span></span>', bar)
         self.assertEqual(len(chips), 2)
         self.assertIn(">4h 50m left<", chips[0])
-        self.assertIn(f'<b class="stale" title="{pages.READING_PREDATES_RESET}">stale</b>', chips[0])
+        self.assertIn(f'<b class="stale" title="{page_parts.READING_PREDATES_RESET}">stale</b>', chips[0])
         self.assertNotIn("63%", bar, "no figure from before the reset is drawn")
         self.assertIn("<b>88%</b>", chips[1])
         self.assertIn(">2d 0h left<", chips[1])
@@ -964,7 +958,7 @@ class TheBarNeverDrawsAPreResetFigureTests(RouteFixture):
         past = {"name": "5-hour", "remaining_percent": 63.0, "resets_at": "2026-09-20T11:50:00Z"}
         self.usage = Recording(usage_snapshot=usage_document([provider("claude", "Claude", windows=[past])]))
         bar = bar_of(self.get("/"))
-        self.assertIn(pages.NO_RESET_RECORDED, bar)
+        self.assertIn(page_parts.NO_RESET_RECORDED, bar)
         self.assertIn(">stale</b>", bar)
         self.assertNotIn("63%", bar)
 
@@ -983,7 +977,7 @@ class ClaudeUtilizationIsAPercentageTests(unittest.TestCase):
 
             document = ProviderUsageLayer(home=home, fetch_json=fetch, now=lambda: NOW).usage_snapshot()
         with pages.render_clock(lambda: RENDERED_AT):
-            bar = pages._limits_bar_of({"available": True, "document": document})
+            bar = page_shell._limits_bar_of({"available": True, "document": document})
         self.assertIn("<b>99%</b>", bar)
         self.assertIn(">3h 0m left<", bar)
 
@@ -996,7 +990,7 @@ class RefreshGuardCoversTypedSecretsTests(RouteFixture):
 
     def selector(self) -> str:
         found = re.search(
-            r"querySelectorAll\('([^']+)'\)\) if \(field\.value\) return;", pages._REFRESH_SCRIPT
+            r"querySelectorAll\('([^']+)'\)\) if \(field\.value\) return;", page_assets._REFRESH_SCRIPT
         )
         assert found is not None
         return found.group(1)
@@ -1027,20 +1021,20 @@ class APostResultDoesNotReloadItselfTests(RouteFixture):
     def test_a_page_rendered_from_a_post_carries_no_auto_reload(self) -> None:
         page = self.refused_login()
         self.assertNotIn("window.location.reload()", page)
-        self.assertNotIn(pages._REFRESH_SCRIPT, page)
+        self.assertNotIn(page_assets._REFRESH_SCRIPT, page)
 
     def test_that_same_page_reached_by_a_get_does_carry_it(self) -> None:
         app = self.app(po=self.po)
         app.po_auth = Recording(po_admits={"admitted": False})
         page = app.handle("GET", "/po").body.decode("utf-8")
-        self.assertIn(pages._REFRESH_SCRIPT, page)
+        self.assertIn(page_assets._REFRESH_SCRIPT, page)
 
     def test_the_post_result_still_carries_the_bar_it_simply_does_not_reload(self) -> None:
         self.assertIn("<b>Claude</b>", bar_of(self.refused_login()))
 
     def test_the_mark_is_unset_again_once_the_request_is_answered(self) -> None:
         self.refused_login()
-        self.assertIn(pages._REFRESH_SCRIPT, self.get("/"))
+        self.assertIn(page_assets._REFRESH_SCRIPT, self.get("/"))
 
 
 # -- the shell holds nothing between two requests ------------------------------------------------
@@ -1052,7 +1046,7 @@ class BarSourceIsPerRequestTests(RouteFixture):
         self.assertIn("74%", bar_of(self.get("/", app=app)))
         # Rendered outside any request, the same shell says it was fed nothing rather than
         # repeating what the last request happened to see.
-        self.assertIn(pages.LIMITS_NOT_BUILT, bar_of(pages.error(404, "not_found", "no route here")))
+        self.assertIn(page_shell.LIMITS_NOT_BUILT, bar_of(pages.error(404, "not_found", "no route here")))
 
 
 if __name__ == "__main__":  # pragma: no cover

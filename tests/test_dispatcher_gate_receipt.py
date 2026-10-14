@@ -8,10 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from ummanu.board.audit_contract import require_claim
 from ummanu.dispatch import gate_attestation, gate_lifecycle
 from ummanu.dispatch.gate import GateResult
-
 from ummanu.dispatch.gate_receipt import (
     AcceptedGreenGate,
     GateReceipt,
@@ -19,7 +19,6 @@ from ummanu.dispatch.gate_receipt import (
 )
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.tasks import TaskError
-from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 
 
 class AttestationEffectTests(unittest.TestCase):
@@ -514,7 +513,7 @@ class GateReceiptPolicyTests(unittest.TestCase):
             self.receipt(), current_sha="a" * 40, gate_mode="local", noop=False
         )
 
-        self.assertTrue(accepted.valid)
+        self.assertTrue(accepted.policy_valid)
         self.assertIsInstance(accepted.receipt, GateReceipt)
         assert accepted.receipt is not None
         self.assertIn("unit: SUCCESS", accepted.receipt.render())
@@ -532,7 +531,7 @@ class GateReceiptPolicyTests(unittest.TestCase):
                 accepted = AcceptedGreenGate.accept(
                     payload, current_sha=current_sha, gate_mode=gate_mode, noop=False
                 )
-                self.assertFalse(accepted.valid)
+                self.assertFalse(accepted.policy_valid)
                 self.assertIsNone(accepted.receipt)
 
     def test_none_and_noop_accept_only_receiptless_results(self) -> None:
@@ -546,14 +545,14 @@ class GateReceiptPolicyTests(unittest.TestCase):
                 forged = AcceptedGreenGate.accept(
                     candidate, current_sha="a" * 40, gate_mode=gate_mode, noop=noop
                 )
-                self.assertTrue(receiptless.valid)
-                self.assertEqual(receiptless.persisted_payload(), {})
-                self.assertFalse(forged.valid)
+                self.assertTrue(receiptless.policy_valid)
+                self.assertIsNone(receiptless.receipt)
+                self.assertFalse(forged.policy_valid)
 
     def test_unknown_mode_is_invalid_even_when_receiptless_or_noop(self) -> None:
         for noop in (False, True):
             accepted = AcceptedGreenGate.accept(None, current_sha="a" * 40, gate_mode="alternate", noop=noop)
-            self.assertFalse(accepted.valid)
+            self.assertFalse(accepted.policy_valid)
 
     def test_only_full_sha1_or_sha256_object_ids_are_receipts(self) -> None:
         for length in (7, 12, 39, 41, 63, 65):

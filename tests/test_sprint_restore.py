@@ -104,9 +104,6 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self.ref = self._seed_closed_sprint()
         self._export()
 
-    def test_sprint_comments_have_only_the_shared_restore_representation(self) -> None:
-        self.assertFalse(hasattr(SprintWriter, "restore_comment"))
-
     def test_quoted_owner_decisions_and_paid_budget_roundtrip_without_reapplying_grants(self) -> None:
         from ummanu.board.owner_decisions import attributed
 

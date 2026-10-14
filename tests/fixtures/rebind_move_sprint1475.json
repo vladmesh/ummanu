@@ -1,0 +1,115 @@
+{
+  "provenance": {
+    "base": "920feeed99c82d0169a04ba9c70e6eaa8504690f",
+    "released_producer": "sprint:1475",
+    "consumer": "curator rebind persisted watermark/pending identities/Claude transcript keys",
+    "capture": "Expected outputs transcribed from baseline source; no independent baseline execution",
+    "rewrite_source_sha256": "35bf1cf97c5db6c61abb5409565a4e8cf0b7cefc3c2efd1e4bdf9772a34736ea"
+  },
+  "home": "/home/a user/é.dev",
+  "sprint": "sprint:1475",
+  "pairs": [
+    [
+      "/home/a user/é.dev/secretary-data/po",
+      "/home/a user/é.dev/ummanu-data/po"
+    ],
+    [
+      "/home/a user/é.dev/secretary-data/po/handoffs",
+      "/home/a user/é.dev/ummanu-data/po/handoffs"
+    ],
+    [
+      "/home/a user/é.dev/secretary-data/dispatcher/observer-root/observers",
+      "/home/a user/é.dev/ummanu-data/dispatcher/observer-root/observers"
+    ],
+    [
+      "/home/a user/é.dev/secretary",
+      "/home/a user/é.dev/ummanu"
+    ],
+    [
+      "/home/a user/é.dev/secretary-data/workspaces/observers/sprint-1475",
+      "/home/a user/é.dev/ummanu-data/workspaces/observers/sprint-1475"
+    ],
+    [
+      "/home/a user/é.dev/orca/workspaces/secretary/curator",
+      "/home/a user/é.dev/orca/workspaces/ummanu/curator"
+    ],
+    [
+      "/home/a user/é.dev/orca/workspaces/secretary/pipeline",
+      "/home/a user/é.dev/orca/workspaces/ummanu/pipeline"
+    ],
+    [
+      "/home/a user/é.dev/orca/workspaces/secretary/retro",
+      "/home/a user/é.dev/orca/workspaces/ummanu/retro"
+    ],
+    [
+      "/home/a user/é.dev/orca/workspaces/secretary/steward",
+      "/home/a user/é.dev/orca/workspaces/ummanu/steward"
+    ]
+  ],
+  "key_cases": [
+    [
+      "/home/a user/é.dev",
+      "-home-a-user---dev"
+    ],
+    [
+      "/a/A_z.9:+",
+      "-a-A-z-9--"
+    ]
+  ],
+  "prefix_cases": [
+    {
+      "value": "/old/po/handoffs/session",
+      "prefixes": [
+        [
+          "/old/po",
+          "/new/po"
+        ],
+        [
+          "/old/po/handoffs",
+          "/different"
+        ]
+      ],
+      "expected": "/new/po/handoffs/session"
+    },
+    {
+      "value": "/old/po",
+      "prefixes": [
+        [
+          "/old/po",
+          "/new/po"
+        ]
+      ],
+      "expected": "/new/po"
+    },
+    {
+      "value": "/old/po-other/file",
+      "prefixes": [
+        [
+          "/old/po",
+          "/new/po"
+        ]
+      ],
+      "expected": "/old/po-other/file"
+    },
+    {
+      "value": "/home/a user/é.dev/secretary-instance/card",
+      "prefixes": [
+        [
+          "/home/a user/é.dev/secretary",
+          "/home/a user/é.dev/ummanu"
+        ]
+      ],
+      "expected": "/home/a user/é.dev/secretary-instance/card"
+    },
+    {
+      "value": "/home/a user/é.dev/secretary/file with spaces",
+      "prefixes": [
+        [
+          "/home/a user/é.dev/secretary",
+          "/home/a user/é.dev/ummanu"
+        ]
+      ],
+      "expected": "/home/a user/é.dev/ummanu/file with spaces"
+    }
+  ]
+}

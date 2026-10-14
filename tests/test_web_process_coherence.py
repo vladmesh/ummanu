@@ -26,11 +26,13 @@ run before the restart rather than after it.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from dataclasses import replace
@@ -38,13 +40,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest import mock
+from zipfile import ZipFile
 
 from jsonschema import Draft202012Validator
 
 from tests.fakes.upgrade import FakeUnitInstaller
+from tests.support.web_render_packets import ASSETS, NOW, packets
 from ummanu import upgrade
 from ummanu.config import load_schema, validate
 from ummanu.host_apply import HostCommandError
+from ummanu.installation.upgrade import (
+    checkout as upgrade_checkout,
+    dependencies as upgrade_dependencies,
+    host as upgrade_host,
+    services as upgrade_services,
+    types as upgrade_types,
+    workspaces as upgrade_workspaces,
+)
+from ummanu.web import page_assets, pages
 from ummanu.web.health import (
     WebProbeError,
     WebTarget,
@@ -55,6 +68,108 @@ from ummanu.web.server import LoopbackOnly
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "onboarding" / "happy-path.json"
+
+
+class InstalledPresentationTests(unittest.TestCase):
+    """Build the sdist, build its wheel and render from an installation outside either tree."""
+
+    def test_sdist_wheel_and_installed_pages_carry_the_canonical_resources(self):
+        with tempfile.TemporaryDirectory(prefix="ummanu-installed-presentation-") as temporary:
+            scratch = Path(temporary)
+            distributions = scratch / "distributions"
+            distributions.mkdir()
+            built = subprocess.run(
+                [sys.executable, "-c", ("from setuptools.build_meta import build_sdist; "
+                 "import sys; build_sdist(sys.argv[1])"), str(distributions)],
+                cwd=REPO_ROOT, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            expected = {str(path.relative_to(REPO_ROOT / "src")) for path in
+                        [*(REPO_ROOT / "src/ummanu/web").glob("page*.py"),
+                         *(REPO_ROOT / "src/ummanu/web/static").iterdir()]}
+            unpacked = scratch / "sdist"
+            with tarfile.open(next(distributions.glob("*.tar.gz"))) as archive:
+                members = archive.getnames()
+                for name in expected:
+                    self.assertTrue(any(member.endswith("/src/" + name) for member in members), name)
+                archive.extractall(unpacked, filter="data")
+            sdist_root = next(unpacked.iterdir())
+            built = subprocess.run(
+                [sys.executable, "-c", ("from setuptools.build_meta import build_wheel; "
+                 "import sys; build_wheel(sys.argv[1])"), str(distributions)],
+                cwd=sdist_root, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            wheel = next(distributions.glob("*.whl"))
+            with ZipFile(wheel) as archive:
+                self.assertTrue(expected <= set(archive.namelist()), expected - set(archive.namelist()))
+            installed = scratch / "installed"
+            installation = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--no-deps", "--no-index", "--target", str(installed), str(wheel)],
+                cwd=scratch, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(installation.returncode, 0, installation.stdout + installation.stderr)
+            cases = list(packets())
+            expected_packets = {}
+            with pages.render_clock(lambda: NOW):
+                for label, name, args, kwargs in cases:
+                    try:
+                        expected_packets[label] = {"value": getattr(pages, name)(*args, **kwargs)}
+                    except Exception as exc:  # noqa: BLE001 - compare malformed-input behavior too
+                        expected_packets[label] = {"exception": type(exc).__name__, "message": str(exc)}
+            payload = {"cases": cases, "assets": ASSETS, "now": NOW.isoformat()}
+            child = subprocess.run(
+                [sys.executable, "-I", "-c", _INSTALLED_PRESENTATION, str(installed)],
+                input=json.dumps(payload, default=lambda value: value.isoformat()),
+                cwd=scratch, capture_output=True, text=True, timeout=60, check=False,
+            )
+            self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+            actual = json.loads(child.stdout)
+            self.assertEqual(actual["packets"], expected_packets)
+            self.assertEqual(actual["assets"], {name: hashlib.sha256(getattr(page_assets, name).encode()).hexdigest()
+                                               for name in ASSETS})
+            self.assertEqual(actual["max_tabs"], page_assets.MAX_TABS)
+
+
+_INSTALLED_PRESENTATION = '''
+import ast, hashlib, json, sys
+from datetime import datetime
+from pathlib import Path
+from importlib.resources import files
+target = Path(sys.argv[1])
+sys.path.insert(0, str(target))
+from ummanu.web import pages, page_assets
+assert Path(pages.__file__).is_relative_to(target), pages.__file__
+assert Path(page_assets.__file__).is_relative_to(target), page_assets.__file__
+payload = json.load(sys.stdin)
+now = datetime.fromisoformat(payload['now'])
+packets = {}
+with pages.render_clock(lambda: now):
+    for label, name, args, kwargs in payload['cases']:
+        if name == 'po_page':
+            kwargs['now'] = now
+        try:
+            packets[label] = {'value': getattr(pages, name)(*args, **kwargs)}
+        except Exception as exc:
+            packets[label] = {'exception': type(exc).__name__, 'message': str(exc)}
+web = target / 'ummanu/web'
+for path in web.rglob('*.py'):
+    tree = ast.parse(path.read_text(encoding='utf-8'))
+    for node in ast.walk(tree):
+        names = [a.name for a in node.names] if isinstance(node, ast.Import) else \
+                [node.module or ''] if isinstance(node, ast.ImportFrom) else []
+        assert not any(n.split('.')[0] in {'subprocess', 'os.system', 'shutil', 'pty'} for n in names), path
+static = files('ummanu.web').joinpath('static')
+for resource in static.iterdir():
+    text = resource.read_text(encoding='utf-8')
+    assert '</script' not in text.lower() and '</style' not in text.lower() and '@import' not in text
+assert 'TAB_RULES' in static.joinpath('style.css').read_text(encoding='utf-8')
+assert 'TAB_RULES' not in page_assets.STYLE
+for n in range(1, page_assets.MAX_TABS + 1):
+    assert f'.tab-panel:nth-of-type({n}) {{ display: block; }}' in page_assets.STYLE
+print(json.dumps({'packets': packets, 'max_tabs': page_assets.MAX_TABS,
+    'assets': {name: hashlib.sha256(getattr(page_assets, name).encode()).hexdigest() for name in payload['assets']}}))
+'''
 
 UNIT_PREFIX = "ummanu-"
 WEB_UNIT = f"{UNIT_PREFIX}web.service"
@@ -95,7 +210,7 @@ class _Report:
     bindings: ClassVar[list] = []
 
 
-def _context(units: Any, **overrides) -> upgrade.UpgradeContext:
+def _context(units: Any, **overrides) -> upgrade_types.UpgradeContext:
     report = overrides.pop("report", None)
     instance_path = overrides.pop("instance_path", None)
     if report is None or instance_path is None:
@@ -113,7 +228,7 @@ def _context(units: Any, **overrides) -> upgrade.UpgradeContext:
                 data_dir=root / "data",
                 bindings=[],
             )
-    base = upgrade.UpgradeContext(
+    base = upgrade_types.UpgradeContext(
         instance_path=instance_path,
         product_root=upgrade.running_product_root(),
         base_branch="main",
@@ -384,7 +499,7 @@ class LongLivedProcessDriftTests(unittest.TestCase):
         self.assertEqual(self.units.generations, first_generation, "nothing has restarted it yet")
 
         # The supported repair: the upgrade step, not a bare systemctl call.
-        result = upgrade.step_web(_context(self.units, code_changed=True, schemas_changed=True))
+        result = upgrade_services.step_web(_context(self.units, code_changed=True, schemas_changed=True))
 
         self.assertEqual(result.status, "changed")
         self.assertIn(f"restarted {WEB_UNIT}", result.detail)
@@ -401,8 +516,8 @@ class LongLivedProcessDriftTests(unittest.TestCase):
         self.assertEqual(self._read()[0], 200)
         generation = self.units.generations
 
-        first = upgrade.step_web(_context(self.units))
-        result = upgrade.step_web(_context(self.units))
+        first = upgrade_services.step_web(_context(self.units))
+        result = upgrade_services.step_web(_context(self.units))
 
         self.assertEqual(first.status, "changed")
         self.assertEqual(result.status, "unchanged")
@@ -425,13 +540,13 @@ class LongLivedProcessDriftTests(unittest.TestCase):
         context = _context(self.units, pull=False)
 
         with (
-            mock.patch.object(upgrade, "canonical_path", return_value=(self.tmp / "heads.toml", "instance")),
-            mock.patch.object(upgrade, "materialize_snapshot", return_value=True),
-            mock.patch.object(upgrade, "record_source", return_value=False),
-            mock.patch.object(upgrade, "_set_runtime_owner"),
+            mock.patch.object(upgrade_workspaces, "canonical_path", return_value=(self.tmp / "heads.toml", "instance")),
+            mock.patch.object(upgrade_workspaces, "materialize_snapshot", return_value=True),
+            mock.patch.object(upgrade_workspaces, "record_source", return_value=False),
+            mock.patch.object(upgrade_workspaces, "_set_runtime_owner"),
         ):
-            registry = upgrade.step_head_registry(context)
-        web = upgrade.step_web(context)
+            registry = upgrade_workspaces.step_head_registry(context)
+        web = upgrade_services.step_web(context)
 
         self.assertEqual(registry.status, "changed")
         self.assertTrue(context.head_registry_changed)
@@ -450,17 +565,17 @@ class LongLivedProcessDriftTests(unittest.TestCase):
         context = _context(self.units, pull=False)
 
         with (
-            mock.patch.object(upgrade, "canonical_path", return_value=(self.tmp / "heads.toml", "instance")),
-            mock.patch.object(upgrade, "materialize_snapshot", return_value=False),
-            mock.patch.object(upgrade, "record_source", return_value=False),
-            mock.patch.object(upgrade, "_set_runtime_owner"),
+            mock.patch.object(upgrade_workspaces, "canonical_path", return_value=(self.tmp / "heads.toml", "instance")),
+            mock.patch.object(upgrade_workspaces, "materialize_snapshot", return_value=False),
+            mock.patch.object(upgrade_workspaces, "record_source", return_value=False),
+            mock.patch.object(upgrade_workspaces, "_set_runtime_owner"),
         ):
-            registry = upgrade.step_head_registry(context)
+            registry = upgrade_workspaces.step_head_registry(context)
 
         self.assertEqual(registry.status, "unchanged")
         self.assertFalse(context.head_registry_changed)
-        self.assertEqual(upgrade.step_web(context).status, "changed")
-        self.assertEqual(upgrade.step_web(context).status, "unchanged")
+        self.assertEqual(upgrade_services.step_web(context).status, "changed")
+        self.assertEqual(upgrade_services.step_web(context).status, "unchanged")
         self.assertEqual(self.units.generations, generation + 1)
 
     def test_a_restart_whose_process_cannot_answer_fails_the_step(self) -> None:
@@ -471,8 +586,8 @@ class LongLivedProcessDriftTests(unittest.TestCase):
         # stale one: the contract still references the adapter schema and the file is gone.
         (self.schemas / "adapter.schema.json").unlink()
 
-        with mock.patch.object(upgrade, "WEB_PROBE_TIMEOUT_SECONDS", 1.0):
-            result = upgrade.step_web(_context(self.units, schemas_changed=True))
+        with mock.patch.object(upgrade_services, "WEB_PROBE_TIMEOUT_SECONDS", 1.0):
+            result = upgrade_services.step_web(_context(self.units, schemas_changed=True))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("loopback probe failed", result.detail)
@@ -486,7 +601,7 @@ class LongLivedProcessDriftTests(unittest.TestCase):
 
 class WebStepTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.probe = self.enterContext(mock.patch.object(upgrade, "probe_web", return_value=200))
+        self.probe = self.enterContext(mock.patch.object(upgrade_services, "probe_web", return_value=200))
 
     def units(self, *, installed: bool = True, active: bool = True, port: int = 8787) -> FakeUnitInstaller:
         return FakeUnitInstaller(
@@ -497,7 +612,7 @@ class WebStepTests(unittest.TestCase):
     def test_an_uninstalled_web_unit_is_reported_and_never_started(self) -> None:
         units = self.units(installed=False, active=False)
 
-        result = upgrade.step_web(_context(units, code_changed=True))
+        result = upgrade_services.step_web(_context(units, code_changed=True))
 
         self.assertEqual(result.status, "skipped")
         self.assertIn("not installed", result.detail)
@@ -507,7 +622,7 @@ class WebStepTests(unittest.TestCase):
     def test_an_inactive_web_unit_is_reported_and_never_started(self) -> None:
         units = self.units(active=False)
 
-        result = upgrade.step_web(_context(units, code_changed=True))
+        result = upgrade_services.step_web(_context(units, code_changed=True))
 
         self.assertEqual(result.status, "skipped")
         self.assertIn("not active", result.detail)
@@ -525,7 +640,7 @@ class WebStepTests(unittest.TestCase):
             with self.subTest(reason=field):
                 units = self.units()
 
-                result = upgrade.step_web(_context(units, **{field: True}))
+                result = upgrade_services.step_web(_context(units, **{field: True}))
 
                 self.assertEqual(result.status, "changed")
                 self.assertIn(reason, result.detail)
@@ -534,11 +649,11 @@ class WebStepTests(unittest.TestCase):
     def test_a_receipt_bound_current_process_is_left_alone_and_not_probed(self) -> None:
         units = self.units()
 
-        first = upgrade.step_web(_context(units))
+        first = upgrade_services.step_web(_context(units))
         self.assertEqual(first.status, "changed")
         units.calls.clear()
         self.probe.reset_mock()
-        result = upgrade.step_web(_context(units))
+        result = upgrade_services.step_web(_context(units))
 
         self.assertEqual(result.status, "unchanged")
         self.assertEqual(units.calls, [])
@@ -547,7 +662,7 @@ class WebStepTests(unittest.TestCase):
     def test_dry_run_names_the_pending_restart_and_the_probe_and_touches_nothing(self) -> None:
         units = self.units(port=8899)
 
-        result = upgrade.step_web(_context(units, code_changed=True, dry_run=True))
+        result = upgrade_services.step_web(_context(units, code_changed=True, dry_run=True))
 
         self.assertEqual(result.status, "changed")
         self.assertIn(f"would restart {WEB_UNIT}", result.detail)
@@ -558,7 +673,7 @@ class WebStepTests(unittest.TestCase):
     def test_a_successful_reconciliation_names_the_unit_and_the_path_it_read(self) -> None:
         units = self.units(port=8901)
 
-        result = upgrade.step_web(_context(units, code_changed=True))
+        result = upgrade_services.step_web(_context(units, code_changed=True))
 
         self.assertEqual(result.status, "changed")
         self.assertIn(WEB_UNIT, result.detail)
@@ -569,7 +684,7 @@ class WebStepTests(unittest.TestCase):
         units = self.units()
         units.restart = lambda name: (_ for _ in ()).throw(HostCommandError(f"restart {name}: exited 1"))
 
-        result = upgrade.step_web(_context(units, code_changed=True))
+        result = upgrade_services.step_web(_context(units, code_changed=True))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("restarting", result.detail)
@@ -578,7 +693,7 @@ class WebStepTests(unittest.TestCase):
     def test_a_failed_probe_fails_the_step(self) -> None:
         self.probe.side_effect = WebProbeError("http://127.0.0.1:8787/api/system did not answer 200")
 
-        result = upgrade.step_web(_context(self.units(), code_changed=True))
+        result = upgrade_services.step_web(_context(self.units(), code_changed=True))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("loopback probe failed", result.detail)
@@ -586,7 +701,7 @@ class WebStepTests(unittest.TestCase):
     def test_a_unit_edited_to_serve_off_loopback_refuses_the_probe_rather_than_reaching_out(self) -> None:
         units = FakeUnitInstaller(present={WEB_UNIT: _unit_text(8787, host="192.168.7.7")}, active={WEB_UNIT})
 
-        result = upgrade.step_web(_context(units, code_changed=True))
+        result = upgrade_services.step_web(_context(units, code_changed=True))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("loopback", result.detail)
@@ -597,7 +712,7 @@ class WebStepTests(unittest.TestCase):
         """Criterion 2: a failure here cannot be reported as an upgrade that served current code."""
         self.probe.side_effect = WebProbeError("no answer")
 
-        result = upgrade.run_steps(_context(self.units(), code_changed=True), steps=(upgrade.step_web,))
+        result = upgrade.run_steps(_context(self.units(), code_changed=True), steps=(upgrade_services.step_web,))
 
         self.assertFalse(result.ok)
         self.assertIn("failed", result.render())
@@ -610,22 +725,22 @@ class WebStepOrderingTests(unittest.TestCase):
         return upgrade.STEPS.index(step)
 
     def test_the_restart_follows_the_checkout_the_dependencies_the_schemas_and_the_unit(self) -> None:
-        web = self.index(upgrade.step_web)
-        for earlier in (upgrade.step_pull, upgrade.step_dependencies, upgrade.step_host):
+        web = self.index(upgrade_services.step_web)
+        for earlier in (upgrade_checkout.step_pull, upgrade_dependencies.step_dependencies, upgrade_host.step_host):
             with self.subTest(step=earlier.__name__):
                 self.assertLess(self.index(earlier), web)
 
     def test_verification_runs_after_the_restart_so_it_cannot_call_an_old_process_current(self) -> None:
-        self.assertLess(self.index(upgrade.step_web), self.index(upgrade.step_verify))
-        self.assertIs(upgrade.STEPS[-1], upgrade.step_verify)
+        self.assertLess(self.index(upgrade_services.step_web), self.index(upgrade_services.step_verify))
+        self.assertIs(upgrade.STEPS[-1], upgrade_services.step_verify)
 
     def test_a_failed_prerequisite_stops_the_run_before_the_restart(self) -> None:
         units = FakeUnitInstaller(present={WEB_UNIT: _unit_text(8787)}, active={WEB_UNIT})
 
         def failing(context):
-            return upgrade.StepResult("dependencies", "failed", "pip install exited 1")
+            return upgrade_types.StepResult("dependencies", "failed", "pip install exited 1")
 
-        result = upgrade.run_steps(_context(units, code_changed=True), steps=(failing, upgrade.step_web))
+        result = upgrade.run_steps(_context(units, code_changed=True), steps=(failing, upgrade_services.step_web))
 
         self.assertFalse(result.ok)
         self.assertEqual([step.name for step in result.steps], ["dependencies"])
@@ -674,22 +789,22 @@ class ChangePathTests(unittest.TestCase):
     """
 
     def test_every_declared_prefix_names_something_this_repository_has(self) -> None:
-        for prefix in (*upgrade.PRODUCT_SOURCE_PATHS, *upgrade.SCHEMA_PATHS, upgrade.PACKAGED_UNIT_ROOT):
+        for prefix in (*upgrade_types.PRODUCT_SOURCE_PATHS, *upgrade_types.SCHEMA_PATHS, upgrade_types.PACKAGED_UNIT_ROOT):
             with self.subTest(prefix=prefix):
                 self.assertTrue((REPO_ROOT / prefix).is_dir(), f"{prefix} names no directory")
-        for path in upgrade.DEPENDENCY_PATHS:
+        for path in upgrade_types.DEPENDENCY_PATHS:
             with self.subTest(path=path):
                 # A manifest may legitimately be absent; a prefix that is a directory is the bug.
                 self.assertFalse((REPO_ROOT / path).is_dir())
 
     def test_the_revision_that_took_the_transport_down_moves_both_flags(self) -> None:
-        upgrade.record_change_plan(context := _context(FakeUnitInstaller()), OUTAGE_REVISION_PATHS)
+        upgrade_checkout.record_change_plan(context := _context(FakeUnitInstaller()), OUTAGE_REVISION_PATHS)
 
         self.assertTrue(context.code_changed)
         self.assertTrue(context.schemas_changed)
 
     def test_a_documentation_only_revision_moves_neither(self) -> None:
-        upgrade.record_change_plan(context := _context(FakeUnitInstaller()), ("docs/OPERATIONS.md",))
+        upgrade_checkout.record_change_plan(context := _context(FakeUnitInstaller()), ("docs/OPERATIONS.md",))
 
         self.assertFalse(context.code_changed)
         self.assertFalse(context.schemas_changed)
@@ -702,8 +817,8 @@ class ChangePathTests(unittest.TestCase):
             "src/ummanu/web/server.py",
         )
 
-        self.assertEqual(upgrade.planned_unit_names(changed, "ummanu-web"), ("ummanu-web.service",))
-        self.assertEqual(upgrade.planned_unit_names(changed, "ummanu-nothing"), ())
+        self.assertEqual(upgrade_checkout.planned_unit_names(changed, "ummanu-web"), ("ummanu-web.service",))
+        self.assertEqual(upgrade_checkout.planned_unit_names(changed, "ummanu-nothing"), ())
 
 
 class PulledRevisionTests(unittest.TestCase):
@@ -732,7 +847,7 @@ class PulledRevisionTests(unittest.TestCase):
         self._git(self.tmp, "clone", "--quiet", str(self.upstream), str(self.product))
         self.baseline = self._head(self.product)
         self.units = FakeUnitInstaller(present={WEB_UNIT: _unit_text(8787)}, active={WEB_UNIT})
-        self.probe = self.enterContext(mock.patch.object(upgrade, "probe_web", return_value=200))
+        self.probe = self.enterContext(mock.patch.object(upgrade_services, "probe_web", return_value=200))
 
     # -- the two repositories ------------------------------------------------------------------
 
@@ -764,7 +879,7 @@ class PulledRevisionTests(unittest.TestCase):
         self._git(self.upstream, "commit", "--quiet", "-m", "next")
         return self._head(self.upstream)
 
-    def context(self, **overrides) -> upgrade.UpgradeContext:
+    def context(self, **overrides) -> upgrade_types.UpgradeContext:
         return _context(self.units, product_root=self.product, **overrides)
 
     def venv(self) -> None:
@@ -780,8 +895,8 @@ class PulledRevisionTests(unittest.TestCase):
         self.publish({"src/ummanu/config.py": "SCHEMAS = {'adapter': 1}\n"})
         context = self.context()
 
-        pulled = upgrade.step_pull(context)
-        result = upgrade.step_web(context)
+        pulled = upgrade_checkout.step_pull(context)
+        result = upgrade_services.step_web(context)
 
         self.assertEqual(pulled.status, "changed")
         self.assertEqual(context.changed_paths, ("src/ummanu/config.py",))
@@ -797,8 +912,8 @@ class PulledRevisionTests(unittest.TestCase):
         )
         context = self.context()
 
-        upgrade.step_pull(context)
-        result = upgrade.step_web(context)
+        upgrade_checkout.step_pull(context)
+        result = upgrade_services.step_web(context)
 
         self.assertTrue(context.schemas_changed)
         self.assertEqual(result.status, "changed")
@@ -810,18 +925,18 @@ class PulledRevisionTests(unittest.TestCase):
         self.publish({"src/ummanu/automations/__main__.py": "ROOT = '/x'\n"})
         context = self.context()
 
-        upgrade.step_pull(context)
+        upgrade_checkout.step_pull(context)
 
         self.assertTrue(context.code_changed)
-        self.assertEqual(upgrade.step_web(context).status, "changed")
+        self.assertEqual(upgrade_services.step_web(context).status, "changed")
 
     def test_a_documentation_only_checkout_advance_establishes_a_new_process_receipt(self) -> None:
         """The receipt binds the exact checkout revision, not only files selected by change flags."""
         self.publish({"docs/OPERATIONS.md": "how to run it, revised\n"})
         context = self.context()
 
-        pulled = upgrade.step_pull(context)
-        result = upgrade.step_web(context)
+        pulled = upgrade_checkout.step_pull(context)
+        result = upgrade_services.step_web(context)
 
         self.assertEqual(pulled.status, "changed")
         self.assertEqual(result.status, "changed")
@@ -831,12 +946,12 @@ class PulledRevisionTests(unittest.TestCase):
     def test_an_upstream_that_moved_nothing_establishes_then_reuses_the_receipt(self) -> None:
         context = self.context()
 
-        pulled = upgrade.step_pull(context)
+        pulled = upgrade_checkout.step_pull(context)
 
         self.assertEqual(pulled.status, "unchanged")
         self.assertEqual(context.changed_paths, ())
-        self.assertEqual(upgrade.step_web(context).status, "changed")
-        self.assertEqual(upgrade.step_web(context).status, "unchanged")
+        self.assertEqual(upgrade_services.step_web(context).status, "changed")
+        self.assertEqual(upgrade_services.step_web(context).status, "unchanged")
         self.assertEqual(self.units.calls, [("restart", WEB_UNIT)])
 
     def test_the_handoff_marker_derives_the_same_facts_as_the_pull_that_wrote_it(self) -> None:
@@ -850,14 +965,14 @@ class PulledRevisionTests(unittest.TestCase):
             {"src/ummanu/schemas/onboarding-contract.schema.json": '{"$ref": "adapter.schema.json"}\n'}
         )
         pulling = self.context()
-        upgrade.step_pull(pulling)
+        upgrade_checkout.step_pull(pulling)
 
         handed_off = self.context(pull=False, handoff_before=self.baseline, handoff_after="f" * 40)
-        upgrade.record_change_plan(handed_off, pulling.changed_paths)
+        upgrade_checkout.record_change_plan(handed_off, pulling.changed_paths)
 
         self.assertEqual(handed_off.schemas_changed, pulling.schemas_changed)
         self.assertEqual(handed_off.code_changed, pulling.code_changed)
-        self.assertIn("bundled schemas changed", upgrade.step_web(handed_off).detail)
+        self.assertIn("bundled schemas changed", upgrade_services.step_web(handed_off).detail)
 
     # -- the planned path ----------------------------------------------------------------------
 
@@ -875,9 +990,9 @@ class PulledRevisionTests(unittest.TestCase):
         self.venv()
         context = self.context(dry_run=True)
 
-        pulled = upgrade.step_pull(context)
-        dependencies = upgrade.step_dependencies(context)
-        web = upgrade.step_web(context)
+        pulled = upgrade_checkout.step_pull(context)
+        dependencies = upgrade_dependencies.step_dependencies(context)
+        web = upgrade_services.step_web(context)
 
         self.assertEqual(pulled.status, "changed")
         self.assertIn("not applied", pulled.detail)
@@ -906,8 +1021,8 @@ class PulledRevisionTests(unittest.TestCase):
         self.publish({"packaging/systemd/ummanu-web.service": "[Service]\nExecStart=/z --port 8787\n"})
         context = self.context(dry_run=True)
 
-        upgrade.step_pull(context)
-        result = upgrade.step_web(context)
+        upgrade_checkout.step_pull(context)
+        result = upgrade_services.step_web(context)
 
         self.assertFalse(context.web_unit_changed, "step_host never ran, so reconcile said nothing")
         self.assertEqual(result.status, "changed")
@@ -917,10 +1032,10 @@ class PulledRevisionTests(unittest.TestCase):
     def test_dry_run_over_a_current_upstream_plans_the_missing_receipt_restart(self) -> None:
         context = self.context(dry_run=True)
 
-        pulled = upgrade.step_pull(context)
+        pulled = upgrade_checkout.step_pull(context)
 
         self.assertEqual(pulled.status, "unchanged")
-        web = upgrade.step_web(context)
+        web = upgrade_services.step_web(context)
         self.assertEqual(web.status, "changed")
         self.assertIn("web process receipt is missing", web.detail)
         self.assertEqual(self.units.calls, [])

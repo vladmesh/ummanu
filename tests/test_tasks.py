@@ -519,7 +519,7 @@ class TaskCliTests(CardStoreCase):
             writer.return_value.create.return_value = {"action": "created"}
             with (
                 tempfile.TemporaryDirectory() as tmp,
-                mock.patch("ummanu.task_commands.TaskWriter", writer),
+                mock.patch("ummanu.tasks.TaskWriter", writer),
                 mock.patch("ummanu.task_commands.card_client"),
                 mock.patch.dict("os.environ", {}, clear=True),
                 contextlib.redirect_stdout(io.StringIO()),
@@ -5155,7 +5155,7 @@ class BlockedContractTests(CardStoreCase):
         )
 
 
-class RequestIdOwnershipTests(CardStoreCase):
+class RequestIdOwnershipFixture(CardStoreCase):
     """A request id owns the operation it committed (secretary-1060).
 
     A retained worker reused the previous round's report id while submitting the next
@@ -5198,6 +5198,8 @@ class RequestIdOwnershipTests(CardStoreCase):
         call.update(overrides)
         return self.writer.report(**call)  # type: ignore[arg-type]
 
+
+class RequestIdOwnershipTests(RequestIdOwnershipFixture):
     def test_a_reused_report_id_with_another_body_is_refused(self) -> None:
         """The live shape of issue:df7d0778b26357e60046."""
         first = self._report()
@@ -5373,7 +5375,7 @@ class RequestIdOwnershipTests(CardStoreCase):
         self.assertEqual(len(self._comments()), 1)
 
 
-class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
+class TypedMarkerRecoveryTests(RequestIdOwnershipFixture):
     """The three migrated marker families share one staged typed transaction."""
 
     def setUp(self) -> None:
@@ -5733,26 +5735,6 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
 
 class LegacyTaskCodecTests(unittest.TestCase):
-    def test_reader_and_restore_share_legacy_task_codec(self) -> None:
-        import importlib
-
-        from ummanu.board import legacy_codec
-
-        restore = importlib.import_module("ummanu.restore")
-
-        self.assertIs(tasks._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
-        self.assertIs(tasks._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
-        self.assertIs(tasks._text, legacy_codec.text)
-        self.assertIs(tasks._positive_int, legacy_codec.positive_int)
-        self.assertIs(tasks._nonnegative_int, legacy_codec.nonnegative_int)
-        self.assertIs(tasks._null_if_empty, legacy_codec.null_if_empty)
-        self.assertIs(tasks._split_heads, legacy_codec.split_heads)
-        self.assertIs(tasks._enum_or_default, legacy_codec.enum_or_default)
-        self.assertIs(tasks._enum_or_none, legacy_codec.enum_or_none)
-        self.assertIs(restore._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
-        self.assertIs(restore._positive_int, legacy_codec.positive_int)
-        self.assertIs(restore._enum_or_default, legacy_codec.enum_or_default)
-
     def test_legacy_task_codec_preserves_released_normalization(self) -> None:
         from ummanu.board import legacy_codec
 

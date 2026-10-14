@@ -30,13 +30,25 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from ummanu import bootstrap, installation, restore, upgrade
+from tests import source_trees
+from ummanu import bootstrap, restore, upgrade
 from ummanu.config import validate_instance
 from ummanu.dispatch import commands, production
 from ummanu.dispatch.observer import DRAIN_DEFERRED_REASON, ObserverRecord, put_observers
 from ummanu.dispatch.observer_fence import REASON_DEFERRED, REASON_NO_RECORD, observer_fence
 from ummanu.host import HostInventory, build_doctor_expectations, build_expectations, inventory
-from ummanu.installation import InstallError, ProjectProvisionResult
+from ummanu.installation import (
+    materialize as installation_materialize,
+    models as installation_models,
+    provision as installation_provision,
+)
+from ummanu.installation.models import InstallError, ProjectProvisionResult
+from ummanu.installation.upgrade import (
+    checkout as upgrade_checkout,
+    host as upgrade_host,
+    types as upgrade_types,
+    workspaces as upgrade_workspaces,
+)
 from ummanu.secret_store import generate_recovery_phrase, initialize_store, set_secret
 from ummanu.sprint_observer import head_choice
 from ummanu.web.app import ROUTES
@@ -72,7 +84,7 @@ def _product_with_a_role_worktree(root: Path) -> Path:
     return product
 
 
-def _context(product: Path, **overrides) -> upgrade.UpgradeContext:
+def _context(product: Path, **overrides) -> upgrade_types.UpgradeContext:
     values = {
         "instance_path": product.parent / "instance",
         "product_root": product,
@@ -81,7 +93,7 @@ def _context(product: Path, **overrides) -> upgrade.UpgradeContext:
         "units": mock.Mock(),
     }
     values.update(overrides)
-    return upgrade.UpgradeContext(**values)
+    return upgrade_types.UpgradeContext(**values)
 
 
 class RoleWorktreeRegistrationTests(unittest.TestCase):
@@ -93,15 +105,15 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.product = _product_with_a_role_worktree(self.root)
         self.worktree = self.root / "workspaces" / "ummanu" / "curator"
-        patcher = mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(self.root / "workspaces")})
+        patcher = mock.patch.dict(os.environ, {"UMMANU_WORKSPACES_ROOT": str(self.root / "workspaces")})
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def test_a_registered_worktree_whose_directory_was_lost_is_added_again(self) -> None:
-        self.assertEqual(upgrade.step_worktrees(_context(self.product)).status, "changed")
+        self.assertEqual(upgrade_workspaces.step_worktrees(_context(self.product)).status, "changed")
         shutil.rmtree(self.worktree)
 
-        result = upgrade.step_worktrees(_context(self.product))
+        result = upgrade_workspaces.step_worktrees(_context(self.product))
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertEqual(result.detail, "created curator")
@@ -110,15 +122,15 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
             _git("-C", str(self.worktree), "rev-parse", "HEAD"),
             _git("-C", str(self.product), "rev-parse", "HEAD"),
         )
-        self.assertEqual(upgrade.step_worktrees(_context(self.product)).status, "unchanged")
+        self.assertEqual(upgrade_workspaces.step_worktrees(_context(self.product)).status, "unchanged")
 
     def test_a_genuine_refusal_reports_gits_fatal_line_not_its_progress_line(self) -> None:
-        upgrade.step_worktrees(_context(self.product))
+        upgrade_workspaces.step_worktrees(_context(self.product))
         # A lock is the operator's word that the registration stays: one `--force` does not override it.
         _git("-C", str(self.product), "worktree", "lock", str(self.worktree))
         shutil.rmtree(self.worktree)
 
-        result = upgrade.step_worktrees(_context(self.product))
+        result = upgrade_workspaces.step_worktrees(_context(self.product))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("curator: git worktree: fatal:", result.detail)
@@ -127,12 +139,12 @@ class RoleWorktreeRegistrationTests(unittest.TestCase):
 
     def test_a_failure_without_a_fatal_line_reports_the_last_line(self) -> None:
         self.assertEqual(
-            upgrade._git_failure_reason("Preparing worktree\nerror: one\nlast words\n"), "last words"
+            upgrade_checkout._git_failure_reason("Preparing worktree\nerror: one\nlast words\n"), "last words"
         )
         self.assertEqual(
-            upgrade._git_failure_reason("hint: try\nfatal: the cause\nhint: more\n"), "fatal: the cause"
+            upgrade_checkout._git_failure_reason("hint: try\nfatal: the cause\nhint: more\n"), "fatal: the cause"
         )
-        self.assertEqual(upgrade._git_failure_reason(""), "failed")
+        self.assertEqual(upgrade_checkout._git_failure_reason(""), "failed")
 
 
 class EmbedderEnvironmentTests(unittest.TestCase):
@@ -142,7 +154,7 @@ class EmbedderEnvironmentTests(unittest.TestCase):
     HUB_MODULES = ("fastembed", "huggingface_hub")
 
     def test_memory_service_sets_the_variable_before_its_first_third_party_import(self) -> None:
-        tree = ast.parse((SOURCE / "memory_service.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse((SOURCE / "memory_service.py").read_text(encoding="utf-8"))
         setting = next(
             index
             for index, node in enumerate(tree.body)
@@ -173,8 +185,9 @@ class EmbedderEnvironmentTests(unittest.TestCase):
     def test_no_other_module_imports_the_embedding_stack(self) -> None:
         """One place sets it: every embedder (service, reindex, recover) is built through `memory_service`."""
         importers = set()
-        for path in SOURCE.rglob("*.py"):
-            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        # An import of the stack spells its top-level name, so no other file can import it.
+        for path, tree in source_trees.modules(SOURCE, naming=self.HUB_MODULES):
+            for node in source_trees.imports(tree):
                 names = (
                     [alias.name for alias in node.names]
                     if isinstance(node, ast.Import)
@@ -185,7 +198,7 @@ class EmbedderEnvironmentTests(unittest.TestCase):
                 if any(name.split(".")[0] in self.HUB_MODULES for name in names):
                     importers.add(path.relative_to(SOURCE).as_posix())
         self.assertEqual(importers, {"memory_service.py"})
-        reindex = ast.parse((SOURCE / "memory_reindex.py").read_text(encoding="utf-8"))
+        reindex = source_trees.parse((SOURCE / "memory_reindex.py").read_text(encoding="utf-8"))
         self.assertIn(
             "memory_service",
             [alias.name for node in reindex.body if isinstance(node, ast.ImportFrom) for alias in node.names],
@@ -265,19 +278,19 @@ class WebFrontCaddyTests(unittest.TestCase):
 
     def test_the_web_front_is_wanted_exactly_when_the_host_plan_would_install_its_unit(self) -> None:
         prefixed = "host:\n  unit_prefix: ummanu-\n"
-        self.assertTrue(installation.web_front_wanted(self.instance(prefixed)))
-        self.assertFalse(installation.web_front_wanted(self.instance("host:\n  memory_threads: 1\n")))
+        self.assertTrue(installation_materialize.web_front_wanted(self.instance(prefixed)))
+        self.assertFalse(installation_materialize.web_front_wanted(self.instance("host:\n  memory_threads: 1\n")))
         self.assertFalse(
-            installation.web_front_wanted(
+            installation_materialize.web_front_wanted(
                 self.instance(prefixed + "  components:\n    web-front:\n      enabled: false\n")
             )
         )
         self.assertFalse(
-            installation.web_front_wanted(
+            installation_materialize.web_front_wanted(
                 self.instance(prefixed + "  foreign_units: [ummanu-web-front.service]\n")
             )
         )
-        self.assertFalse(installation.web_front_wanted(self.root / "absent"))
+        self.assertFalse(installation_materialize.web_front_wanted(self.root / "absent"))
 
     def test_bootstrap_masks_the_distribution_unit_and_installs_caddy_for_the_web_front(self) -> None:
         with (
@@ -344,12 +357,12 @@ class WebFrontCaddyTests(unittest.TestCase):
     def test_prerequisites_refuse_up_front_and_name_caddy(self) -> None:
         instance = self.instance("host:\n  unit_prefix: ummanu-\n")
         with (
-            mock.patch("ummanu.installation.caddy_installed", return_value=False),
-            mock.patch("ummanu.installation.board_client"),
-            mock.patch("ummanu.installation.TaskReader"),
+            mock.patch("ummanu.installation.materialize.caddy_installed", return_value=False),
+            mock.patch("ummanu.installation.materialize.board_client"),
+            mock.patch("ummanu.installation.materialize.TaskReader"),
             self.assertRaisesRegex(InstallError, r"caddy prerequisite failed: .*web-front.*/usr/bin/caddy"),
         ):
-            installation.check_prerequisites(instance)
+            installation_materialize.check_prerequisites(instance)
 
     def test_prerequisites_pass_caddy_when_it_is_installed_or_not_wanted(self) -> None:
         cases = (
@@ -364,11 +377,11 @@ class WebFrontCaddyTests(unittest.TestCase):
         )
         for instance, present in cases:
             with (
-                mock.patch("ummanu.installation.caddy_installed", return_value=present),
-                mock.patch("ummanu.installation.board_client"),
-                mock.patch("ummanu.installation.TaskReader") as reader,
+                mock.patch("ummanu.installation.materialize.caddy_installed", return_value=present),
+                mock.patch("ummanu.installation.materialize.board_client"),
+                mock.patch("ummanu.installation.materialize.TaskReader") as reader,
             ):
-                installation.check_prerequisites(instance)
+                installation_materialize.check_prerequisites(instance)
             reader.return_value.list.assert_called_once_with()
 
 
@@ -511,8 +524,8 @@ class DisabledBindingTests(unittest.TestCase):
                 "enabled": False,
                 "adapter": "retired",
             }
-            with mock.patch("ummanu.installation.RemoteExecution") as remote:
-                [result] = installation.provision_project_checkouts([binding], None, instance_dir=root)
+            with mock.patch("ummanu.installation.provision.RemoteExecution") as remote:
+                [result] = installation_provision.provision_project_checkouts([binding], None, instance_dir=root)
 
             remote.assert_not_called()
             self.assertEqual(
@@ -528,7 +541,7 @@ class DisabledBindingTests(unittest.TestCase):
                 ),
             )
             self.assertFalse((root / "retired-instance").exists())
-            recovered = installation.InstallResult(projects=[result])
+            recovered = installation_models.InstallResult(projects=[result])
             self.assertEqual(recovered.status, "ok")
 
 
@@ -544,9 +557,9 @@ class RuntimeOwnershipTests(unittest.TestCase):
     @contextlib.contextmanager
     def as_root(self):
         with (
-            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
-            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=self.account),
-            mock.patch("ummanu.upgrade.os.chown") as chown,
+            mock.patch('ummanu.installation.upgrade.workspaces.os.geteuid', return_value=0),
+            mock.patch('ummanu.installation.upgrade.workspaces.pwd.getpwnam', return_value=self.account),
+            mock.patch('ummanu.installation.upgrade.workspaces.os.chown') as chown,
         ):
             yield chown
 
@@ -565,8 +578,8 @@ class RuntimeOwnershipTests(unittest.TestCase):
         (self.root / "instance").mkdir()
 
         with self.as_root() as chown:
-            result = upgrade.step_role_skills(context)
-            unchanged = upgrade.step_role_skills(context)
+            result = upgrade_workspaces.step_role_skills(context)
+            unchanged = upgrade_workspaces.step_role_skills(context)
 
         self.assertEqual(result.status, "changed", result.detail)
         self.assertEqual(unchanged.status, "unchanged", unchanged.detail)
@@ -607,10 +620,10 @@ class RuntimeOwnershipTests(unittest.TestCase):
         remote = mock.Mock(transport="https")
         remote.run_clone.side_effect = clone
         with (
-            mock.patch("ummanu.installation.RemoteExecution", return_value=remote),
-            mock.patch("ummanu.installation._set_installation_owner") as owner,
+            mock.patch("ummanu.installation.provision.RemoteExecution", return_value=remote),
+            mock.patch("ummanu.installation.provision._set_installation_owner") as owner,
         ):
-            [result] = installation.provision_project_checkouts([binding], "dev", instance_dir=self.root)
+            [result] = installation_provision.provision_project_checkouts([binding], "dev", instance_dir=self.root)
 
         self.assertEqual(result.outcome, "cloned", result)
         self.assertEqual(owner.call_args_list[0], mock.call(home / "projects", "dev"))
@@ -651,10 +664,10 @@ class WebFrontSitesTests(unittest.TestCase):
             )
         return instance
 
-    def context(self, instance: Path) -> upgrade.UpgradeContext:
+    def context(self, instance: Path) -> upgrade_types.UpgradeContext:
         report = validate_instance(instance)
         self.assertTrue(report.ok, report.errors)
-        return upgrade.UpgradeContext(
+        return upgrade_types.UpgradeContext(
             instance_path=instance,
             product_root=self.root / "product",
             base_branch="main",
@@ -674,7 +687,7 @@ class WebFrontSitesTests(unittest.TestCase):
 
     def test_the_render_runs_before_the_host_step(self) -> None:
         self.assertLess(
-            upgrade.STEPS.index(upgrade.step_web_front_config), upgrade.STEPS.index(upgrade.step_host)
+            upgrade.STEPS.index(upgrade_host.step_web_front_config), upgrade.STEPS.index(upgrade_host.step_host)
         )
 
     def test_install_and_recover_render_a_guarded_front_before_their_host_step(self) -> None:
@@ -682,16 +695,16 @@ class WebFrontSitesTests(unittest.TestCase):
         instance = self.instance()
         seen = []
 
-        def host(context: upgrade.UpgradeContext) -> upgrade.StepResult:
+        def host(context: upgrade_types.UpgradeContext) -> upgrade_types.StepResult:
             seen.append(self.caddyfile.read_text(encoding="utf-8"))
-            return upgrade.StepResult("host", "unchanged", "")
+            return upgrade_types.StepResult("host", "unchanged", "")
 
         with (
-            mock.patch.object(installation, "STEPS", (upgrade.step_web_front_config, host)),
-            mock.patch.object(installation, "step_host", host),
-            mock.patch.object(installation, "check_product_runtime"),
+            mock.patch.object(installation_materialize, "STEPS", (upgrade_host.step_web_front_config, host)),
+            mock.patch.object(installation_materialize, "step_host", host),
+            mock.patch.object(installation_materialize, "check_product_runtime"),
         ):
-            result = installation.materialize_host(
+            result = installation_materialize.materialize_host(
                 instance,
                 self.root / "product",
                 installation_user=getpass.getuser(),
@@ -708,12 +721,12 @@ class WebFrontSitesTests(unittest.TestCase):
 
     def test_a_current_front_is_not_rewritten(self) -> None:
         context = self.context(self.instance())
-        self.assertEqual(upgrade.step_web_front_config(context).status, "changed")
+        self.assertEqual(upgrade_host.step_web_front_config(context).status, "changed")
         self.assertTrue(context.web_front_config_changed)
         before = (self.caddyfile.read_bytes(), self.caddyfile.stat().st_mtime_ns)
 
         again = self.context(context.instance_path)
-        result = upgrade.step_web_front_config(again)
+        result = upgrade_host.step_web_front_config(again)
 
         self.assertEqual(result.status, "unchanged", result.detail)
         self.assertFalse(again.web_front_config_changed)
@@ -727,8 +740,8 @@ class WebFrontSitesTests(unittest.TestCase):
         self.caddyfile.chmod(0o600)
         before = self.file_state()
 
-        with mock.patch("ummanu.upgrade.state_repo.run_as_git_child") as render:
-            result = upgrade.step_web_front_config(context)
+        with mock.patch('ummanu.installation.upgrade.host.state_repo.run_as_git_child') as render:
+            result = upgrade_host.step_web_front_config(context)
 
         render.assert_not_called()
         self.assertEqual(result.status, "unchanged", result.detail)
@@ -737,14 +750,14 @@ class WebFrontSitesTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in self.caddyfile.parent.iterdir()), ["Caddyfile"])
 
     def test_an_upgrade_with_neither_sites_nor_a_file_names_the_setting_and_writes_nothing(self) -> None:
-        result = upgrade.step_web_front_config(self.context(self.instance(sites=False)))
+        result = upgrade_host.step_web_front_config(self.context(self.instance(sites=False)))
 
         self.assertEqual(result.status, "skipped")
         self.assertIn("host.web_front.sites", result.detail)
         self.assertFalse(self.caddyfile.parent.exists())
 
     def test_a_front_without_a_password_fails_and_names_set_password(self) -> None:
-        result = upgrade.step_web_front_config(self.context(self.instance(password=False)))
+        result = upgrade_host.step_web_front_config(self.context(self.instance(password=False)))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("ummanu web-front set-password", result.detail)
@@ -757,7 +770,7 @@ class WebFrontSitesTests(unittest.TestCase):
             config.read_text(encoding="utf-8") + "  components:\n    web-front:\n      enabled: false\n",
             encoding="utf-8",
         )
-        result = upgrade.step_web_front_config(self.context(instance))
+        result = upgrade_host.step_web_front_config(self.context(instance))
 
         self.assertEqual(result.status, "skipped")
         self.assertFalse(self.caddyfile.exists())
@@ -765,15 +778,15 @@ class WebFrontSitesTests(unittest.TestCase):
     def test_prerequisites_refuse_an_enabled_front_without_sites_and_name_the_setting(self) -> None:
         instance = _write_instance(self.root / "bare", "host:\n  unit_prefix: ummanu-\n")
         with (
-            mock.patch("ummanu.installation.caddy_installed", return_value=True),
-            mock.patch("ummanu.installation.board_client"),
-            mock.patch("ummanu.installation.TaskReader"),
+            mock.patch("ummanu.installation.materialize.caddy_installed", return_value=True),
+            mock.patch("ummanu.installation.materialize.board_client"),
+            mock.patch("ummanu.installation.materialize.TaskReader"),
             self.assertRaisesRegex(
                 InstallError,
                 r"web-front prerequisite failed: .*host\.web_front\.sites.*`ummanu web-front render",
             ),
         ):
-            installation.check_prerequisites(instance)
+            installation_materialize.check_prerequisites(instance)
 
     def test_the_schema_takes_https_site_addresses_only(self) -> None:
         cases = (("[https://front.example]", True), ("[http://front.example]", False), ("[]", False))
@@ -889,7 +902,7 @@ class EmbedderReleaseTests(unittest.TestCase):
         self.assertNotEqual(restore.restore_state(self.data).get("memory_index"), "complete")
 
     def test_recover_asks_for_the_isolated_rebuild_at_every_call(self) -> None:
-        tree = ast.parse((SOURCE / "installation.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse((SOURCE / "installation" / "commands.py").read_text(encoding="utf-8"))
         calls = [
             node
             for node in ast.walk(tree)

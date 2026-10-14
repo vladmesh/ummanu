@@ -8,7 +8,6 @@ existed beside the spec block.
 
 from __future__ import annotations
 
-import ast
 import copy
 import json
 import tempfile
@@ -17,7 +16,6 @@ from pathlib import Path
 from unittest import mock
 
 from ummanu.memory import access as memory_access
-from ummanu.runtime import head_runtime_backends
 from ummanu.runtime.head import HeadRun, HeadSpec, HeadSpecError, TaskRef
 from ummanu.runtime.head.command import HeadCommandError, validate_launch_shape
 from ummanu.runtime.head_runtime_backends import (
@@ -34,8 +32,6 @@ from ummanu.runtime.head_runtimes import (
     RECORD_RUNTIME_WHEN_ABSENT,
 )
 from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
-
-REPO = Path(__file__).resolve().parents[1]
 
 GRANT = {
     "expires_at": 1790296027,
@@ -54,8 +50,10 @@ GRANT = {
             "provider_schema_verdict": "",
             "provider_source": {
                 "baseline": [
-                    "/home/dev/ummanu-data/codex-home/sessions/2026/09/24/"
-                    "rollout-2026-09-24T08-40-14-01a0d292-8b60-78e0-bdc1-9dbe28652227.jsonl"
+                    (
+                        "/home/dev/ummanu-data/codex-home/sessions/2026/09/24/"
+                        "rollout-2026-09-24T08-40-14-01a0d292-8b60-78e0-bdc1-9dbe28652227.jsonl"
+                    )
                 ],
                 "head_run_fingerprint": "172529ff471f9a656fb02b0cc6df1c07",
                 "kind": "codex_session_event_jsonl",
@@ -150,22 +148,15 @@ class BackendTests(unittest.TestCase):
 
     def test_a_legacy_record_is_refused_by_a_typed_error_and_never_falls_back(self) -> None:
         for name in (ORCA_LEGACY_RUNTIME, ""):
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(LegacyHeadRecordError, "legacy Orca record.*never launched"):
-                    self.build(name)
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(LegacyHeadRecordError, "legacy Orca record.*never launched"),
+            ):
+                self.build(name)
         self.assertTrue(issubclass(LegacyHeadRecordError, UnknownHeadRuntimeError))
         with self.assertRaises(UnknownHeadRuntimeError) as caught:
             self.build("podman")
         self.assertNotIsInstance(caught.exception, LegacyHeadRecordError)
-
-    def test_the_backend_module_no_longer_imports_the_orca_backend(self) -> None:
-        tree = ast.parse(Path(head_runtime_backends.__file__).read_text(encoding="utf-8"))
-        imported = {
-            node.module or ""
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-        } | {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-        self.assertFalse([name for name in imported if "orca_legacy_head" in name], imported)
 
 
 class RecordTests(unittest.TestCase):
@@ -204,11 +195,22 @@ class RecordTests(unittest.TestCase):
         self.assertFalse(is_legacy_record(HeadRun.from_json(payload)))
 
     def test_the_hand_built_bridge_and_probe_specs_name_local_pty(self) -> None:
-        """They were live producers of `orca-legacy` grants only because a hand-built spec defaults to it."""
-        for module in ("memory/po_bridge.py", "memory/health.py"):
-            with self.subTest(module=module):
-                source = (REPO / "src" / "ummanu" / module).read_text(encoding="utf-8")
-                self.assertIn("runtime=LOCAL_PTY_RUNTIME", source)
+        """They were live producers of `orca-legacy` grants only because a hand-built spec defaults to it.
+
+        The probe's run is read where it is handed to the read; the bridge's, which needs the
+        `memory` extra, in `test_memory_po_bridge`.
+        """
+        from ummanu.memory import health
+
+        probed: list[HeadRun] = []
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            mock.patch.object(health, "_probe_read", side_effect=lambda run, *args, **kwargs: probed.append(run)),
+        ):
+            health.probe_memory(Path(data_dir))
+        [run] = probed
+        self.assertEqual(run.spec.runtime, LOCAL_PTY_RUNTIME)
+        self.assertFalse(is_legacy_record(run))
 
 
 class AccessGrantTests(unittest.TestCase):

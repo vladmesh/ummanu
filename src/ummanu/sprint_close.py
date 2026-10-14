@@ -8,8 +8,8 @@ from typing import Any
 import yaml
 
 from ummanu.board.sprint_close import SprintCloseDecision, SprintCloseDecisions
+from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import ISSUE_CLOSE_REASONS
-from ummanu.tasks import TaskError
 
 KEEP_OPEN = "open"
 ALREADY_CLOSED = "already_closed"

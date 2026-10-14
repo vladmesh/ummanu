@@ -39,7 +39,7 @@ from tests import test_owned_cleanup as owned_fixtures, test_sql_card_pool as po
 from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu import _proc
 from ummanu.board.sql_cards import SqlCardClient
-from ummanu.dispatch import attempt_accounting, cleanup as cleanup_module, production
+from ummanu.dispatch import attempt_accounting, cleanup as cleanup_module, cleanup_journal, production
 from ummanu.dispatch.cleanup import (
     ATTEMPT_FLOOR,
     PUBLICATION_RESERVE,
@@ -741,13 +741,13 @@ class BoundedCleanupReplayTests(unittest.TestCase):
 
     def publications(self):
         """Every completed journal publication, at the one file replacement every write goes through."""
-        native = cleanup_module._replace_file
+        native = cleanup_journal._replace_file
         published: list[str] = []
 
         def replace(path, body):
             native(path, body)
             published.append(str(Path(path).relative_to(self.owner.journal.path)))
-        return mock.patch.object(cleanup_module, "_replace_file", side_effect=replace), published
+        return mock.patch.object(cleanup_journal, "_replace_file", side_effect=replace), published
 
     def test_a_no_effect_preserved_retry_publishes_its_reservation_outcome_and_cursor_only(self):
         fixture = self.fixture

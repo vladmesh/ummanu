@@ -57,6 +57,7 @@ from ummanu.host import (
 )
 from ummanu.infra.systemd import ACTIVE_STATES, SystemdObservation, observation_error
 from ummanu.memory.config import memory_config
+from ummanu.runtime.procfs import STARTTIME, proc_stat_fields
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -282,13 +283,14 @@ def _process_start_ticks(pid: int) -> int | None:
         text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return None
-    closing = text.rfind(")")
-    fields = text[closing + 1 :].split() if closing >= 0 else []
-    # Field 3 is the first item after ``)``; starttime is field 22.
-    if len(fields) <= 19:
+    try:
+        fields = proc_stat_fields(text, skip_separator=False)
+    except ValueError:
+        return None
+    if len(fields) <= STARTTIME:
         return None
     try:
-        start_ticks = int(fields[19])
+        start_ticks = int(fields[STARTTIME])
     except ValueError:
         return None
     return start_ticks if start_ticks > 0 else None

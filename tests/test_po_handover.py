@@ -58,7 +58,7 @@ from ummanu.po import store as po_store
 from ummanu.po.queue import PoQueue
 from ummanu.po.sprints import SprintRecord
 from ummanu.tasks import TaskError, TaskReader, TaskWriter
-from ummanu.web import pages
+from ummanu.web import page_parts, pages
 from ummanu.webproto import sources
 from ummanu.webproto.reads import _card_value
 from ummanu.webproto.section import Reading, SourceSet, render
@@ -143,6 +143,7 @@ class WriterFixture(unittest.TestCase):
         patcher = mock.patch("ummanu.tasks._task_number", return_value=1900)
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.enterContext(mock.patch("ummanu.board.task_protocol.recovery._task_number", return_value=1900))
 
     def hand_over(self, **fields: Any) -> dict[str, Any]:
         call = {"role": "po", "actor": "po", "reference": REF, "to": "owner", "reason": REASON,
@@ -283,8 +284,8 @@ class OwnerCommentTests(WriterFixture):
         self.writer.comment(role="owner", actor="owner", reference=REF, body="Earlier approval.", request_id="old-comment")
         first = self.hand_over()
         self.assertIsNotNone(waiting_owner(self.card))
-        fields = dict(role="po", actor="po", reference=REF, handover_event=first["event_id"],
-                      quotation="Approved.", request_id="answer-1")
+        fields = {"role": "po", "actor": "po", "reference": REF, "handover_event": first["event_id"],
+                  "quotation": "Approved.", "request_id": "answer-1"}
         result = self.writer.record_owner_answer(**fields)
         self.assertTrue(self.writer.record_owner_answer(**fields)["replayed"])
         self.assertEqual(attention_record(self.card, OWNER_ANSWER)["event_id"], result["event_id"])
@@ -365,7 +366,7 @@ class OwnerCommentTests(WriterFixture):
         writer.return_value.handover.return_value = {"action": HANDED_TO_OWNER}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.tasks.TaskWriter", writer),
             mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
@@ -396,7 +397,7 @@ class OwnerCommentTests(WriterFixture):
         writer = mock.Mock()
         writer.return_value.record_owner_answer.return_value = {"action": "owner_answer_recorded"}
         with (tempfile.TemporaryDirectory() as tmp,
-              mock.patch("ummanu.task_commands.TaskWriter", writer),
+              mock.patch("ummanu.tasks.TaskWriter", writer),
               mock.patch("ummanu.task_commands.card_client"),
               contextlib.redirect_stdout(io.StringIO())):
             body = Path(tmp) / "answer.md"
@@ -425,12 +426,12 @@ class EscalationTests(WriterFixture):
     def advance(self, runtime: Any, seconds: int) -> None:
         from ummanu.dispatch.po_cards import _episode_outcome
         start = datetime.fromisoformat(SINCE).timestamp()
-        with mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds):
-            # These tests isolate the escalation writer; settled-turn transitions are exercised
-            # through the full dispatcher and real SQL writer below and in test_sprint_attention.
-            with mock.patch("ummanu.dispatch.po_cards._block", return_value={}):
-                _episode_outcome(runtime, self.card, SimpleNamespace(attempt_id="attempt",
-                    po_submission=SimpleNamespace(submit_request_id="submit-episode")), {}, {})
+        # These tests isolate the escalation writer; settled-turn transitions are exercised
+        # through the full dispatcher and real SQL writer below and in test_sprint_attention.
+        with (mock.patch("ummanu.dispatch.po_cards.time.time", return_value=start + seconds),
+              mock.patch("ummanu.dispatch.po_cards._block", return_value={})):
+            _episode_outcome(runtime, self.card, SimpleNamespace(attempt_id="attempt",
+                po_submission=SimpleNamespace(submit_request_id="submit-episode")), {}, {})
 
     def test_queued_deadline_is_2959_then_3000_and_restart_replay_deduplicates(self) -> None:
         runtime = self.runtime()
@@ -989,7 +990,7 @@ class SprintWaitingTests(unittest.TestCase):
             "goal": "g",
             "waiting": {"state": "waiting", "reason": f"{REF} (decision) is handed to the owner: {REASON}", "card": REF},
         }
-        html = pages._compact_sprint_card(item)
+        html = page_parts._compact_sprint_card(item)
         self.assertIn("is handed to the owner: Pay the relay provider", html)
         self.assertIn(f'href="/tasks/{REF}"', html)
 

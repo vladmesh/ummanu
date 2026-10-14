@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import IO, Any, BinaryIO
 
 from ummanu import _proc
 
@@ -40,6 +40,15 @@ def ndjson_lines(text: str) -> list[str]:
 def write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
     body = "".join(ndjson_line(row) for row in rows)
     write_text_atomic(path, body)
+
+
+def fsync_directory(directory: Path | str) -> None:
+    """Flush a directory's entries, so a rename or a new name in it survives a host crash."""
+    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def write_text_atomic(path: Path, payload: str) -> None:
@@ -202,12 +211,18 @@ def _restore_file(path: Path, before: bytes | None) -> None:
 @contextlib.contextmanager
 def file_lock(path: Path) -> Iterator[None]:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with path.open("a+", encoding="utf-8") as handle, held_lock(handle):
+        yield
+
+
+@contextlib.contextmanager
+def held_lock(handle: IO[str]) -> Iterator[None]:
+    """Hold an exclusive `flock` on an already open lock file for the block."""
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        yield
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 @contextlib.contextmanager

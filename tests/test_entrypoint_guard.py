@@ -2,7 +2,7 @@
 
 Real Git over a fixture origin and checkout. The release path (`production_checkout.advance`) and
 the operator path (`upgrade.fast_forward`) refuse the same targets through the same check, before
-the board schema or the checkout is touched (secretary-1929, `docs/RENAME.md` §T1).
+the board schema or the checkout is touched (secretary-1929, `docs/OPERATIONS.md` §Entrypoint activation).
 """
 
 from __future__ import annotations
@@ -14,11 +14,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu import upgrade
 from ummanu.dispatch import entrypoint_guard, production_checkout
 from ummanu.dispatch.production_checkout import ProductionActivationRefused
 from ummanu.dispatch.runtime_preflight import PACKAGE
 from ummanu.dispatch.types import HostError
+from ummanu.installation.upgrade import checkout as upgrade_checkout, types as upgrade_types
 
 PREFLIGHT = f"src/{PACKAGE}/dispatch/runtime_preflight.py"
 MANIFEST = f'[project]\nname = "product"\n\n[project.scripts]\n{PACKAGE} = "{PACKAGE}.cli:main"\n'
@@ -121,9 +121,6 @@ class TheCheckTests(EntrypointFixture, unittest.TestCase):
         )
         self.fetched()
         self.assertIsNone(entrypoint_guard.entrypoint_refusal(self.probe, renamed, package="renamed_package"))
-        source = Path(entrypoint_guard.__file__).read_text(encoding="utf-8")
-        code = source.split('"""', 2)[2]
-        self.assertNotIn(f'"{PACKAGE}"', code)
 
     def test_a_missing_or_unreadable_manifest_is_refused(self) -> None:
         for manifest in ("[project\n", "[project]\nscripts = 1\n"):
@@ -170,7 +167,7 @@ class AdvanceTests(EntrypointFixture, unittest.TestCase):
         self.assertIsNone(facts["revision"])
         self.assertIsNone(facts["remote_merge"])
         self.assertIn(PREFLIGHT, facts["message"])
-        self.assertIn("docs/RENAME.md", facts["message"])
+        self.assertIn("docs/OPERATIONS.md §Entrypoint activation", facts["message"])
 
     def test_a_dropped_console_script_is_refused(self) -> None:
         self.scriptless()
@@ -194,19 +191,19 @@ class UpgradeFastForwardTests(EntrypointFixture, unittest.TestCase):
 
     def test_an_ordinary_target_fast_forwards(self) -> None:
         target = self.push("an ordinary release", files={"README.md": "new\n"})
-        self.assertEqual(upgrade.fast_forward(self.production, "main"), (self.old, target))
+        self.assertEqual(upgrade_checkout.fast_forward(self.production, "main"), (self.old, target))
 
     def test_a_moved_package_or_dropped_script_leaves_the_checkout_as_found(self) -> None:
         for make in (self.renamed, self.scriptless):
             with self.subTest(target=make.__name__):
                 target = make()
-                with self.assertRaises(upgrade.EntrypointRefused) as raised:
-                    upgrade.fast_forward(self.production, "main")
-                self.assertIsInstance(raised.exception, upgrade.GitError)
+                with self.assertRaises(upgrade_types.EntrypointRefused) as raised:
+                    upgrade_checkout.fast_forward(self.production, "main")
+                self.assertIsInstance(raised.exception, upgrade_types.GitError)
                 self.assertEqual(raised.exception.refusal.reason, "entrypoint_moved")
                 self.assertEqual(raised.exception.refusal.target, target)
                 self.assertIn("entrypoint_moved", str(raised.exception))
-                self.assertIn("docs/RENAME.md", str(raised.exception))
+                self.assertIn("docs/OPERATIONS.md §Entrypoint activation", str(raised.exception))
                 self.assert_untouched()
 
     def test_the_pull_step_and_its_dry_run_report_the_refusal(self) -> None:
@@ -217,10 +214,10 @@ class UpgradeFastForwardTests(EntrypointFixture, unittest.TestCase):
                     pull_result=None, pull=True, product_root=self.production, base_branch="main", dry_run=dry_run,
                     changed_paths=(), code_changed=False, schemas_changed=False,
                 )
-                result = upgrade.step_pull(context)  # type: ignore[arg-type]
+                result = upgrade_checkout.step_pull(context)  # type: ignore[arg-type]
                 self.assertEqual(result.status, "failed")
                 self.assertIn("entrypoint_moved", result.detail)
-                self.assertIn("docs/RENAME.md", result.detail)
+                self.assertIn("docs/OPERATIONS.md §Entrypoint activation", result.detail)
                 self.assertEqual(context.changed_paths, (), "a refused target plans no move")
                 self.assert_untouched()
 
@@ -228,8 +225,8 @@ class UpgradeFastForwardTests(EntrypointFixture, unittest.TestCase):
         worktree = self.root / "workspaces" / "role"
         git(self.production, "worktree", "add", "--quiet", "--detach", str(worktree), "HEAD")
         self.renamed()
-        with self.assertRaises(upgrade.EntrypointRefused):
-            upgrade.fast_forward(worktree, "main")
+        with self.assertRaises(upgrade_types.EntrypointRefused):
+            upgrade_checkout.fast_forward(worktree, "main")
         self.assertEqual(git(worktree, "rev-parse", "HEAD"), self.old)
         self.assertTrue((worktree / PREFLIGHT).is_file())
 

@@ -13,13 +13,10 @@ from typing import Any
 
 from ummanu.runtime.codex_preflight import (
     CodexPreflightError,
-)
-from ummanu.runtime.codex_preflight import (
     ensure_codex_workspace_trusted as _preflight_codex_workspace,
-)
-from ummanu.runtime.codex_preflight import (
     reject_symlinked_config as _reject_symlinked_config,
 )
+from ummanu.runtime.paths import env_value
 from ummanu.runtime.role_env import (
     RoleEnvError,
     runtime_env,
@@ -45,7 +42,7 @@ def ensure_claude_workspace_ready(
     default_theme: str = CLAUDE_THEME_DEFAULT,
 ) -> None:
     """Pre-answer Claude Code first-run prompts for one headless workspace."""
-    config_path = config or Path(os.environ.get("TA_CLAUDE_JSON", CLAUDE_JSON_DEFAULT))
+    config_path = config or Path(env_value("UMMANU_CLAUDE_JSON", CLAUDE_JSON_DEFAULT))
     data = _load_claude_config(config_path)
     changed = _mark_claude_workspace_trusted(data, str(workspace), config_path)
     changed = _ensure_claude_theme(data, default_theme) or changed

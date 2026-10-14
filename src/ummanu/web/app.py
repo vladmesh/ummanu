@@ -24,8 +24,7 @@ from ummanu.web.statuses import status_for
 from ummanu.webproto.errors import OperationPending, ReadError, RuntimeUnavailable, ValidationRefused
 from ummanu.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from ummanu.webproto.owner_events import OwnerEventLayer
-from ummanu.webproto.po_auth import COOKIE_NAME as PO_COOKIE_NAME
-from ummanu.webproto.po_auth import COOKIE_PATH as PO_COOKIE_PATH
+from ummanu.webproto.po_auth import COOKIE_NAME as PO_COOKIE_NAME, COOKIE_PATH as PO_COOKIE_PATH
 from ummanu.webproto.reads import TASK_SNAPSHOT_EVENTS
 from ummanu.webproto.sprint_reads import NONE_SPELLING
 
@@ -121,12 +120,20 @@ ROUTES: tuple[Route, ...] = (
     # The owner's bell: list, mark one read, mark all read (notices only); board `owner_events` only.
     Route("GET", "/owner-events", "owner_events_page", "owner_events.owner_event_list", page=True),
     Route(
-        "POST", "/owner-events/read-all", "owner_events_read_all", "owner_events.mark_all_read",
-        body=FORM_BODY, page=True,
+        "POST",
+        "/owner-events/read-all",
+        "owner_events_read_all",
+        "owner_events.mark_all_read",
+        body=FORM_BODY,
+        page=True,
     ),
     Route(
-        "POST", "/owner-events/{event_id}/read", "owner_event_read", "owner_events.mark_read",
-        body=FORM_BODY, page=True,
+        "POST",
+        "/owner-events/{event_id}/read",
+        "owner_event_read",
+        "owner_events.mark_read",
+        body=FORM_BODY,
+        page=True,
     ),
 )
 
@@ -276,7 +283,9 @@ class WebApp:
             pages.bell_source(self._bell_section if self.owner_events is not None else None),
             pages.from_post(method == "POST"),
             self._one_health_reading(),
-            self.owner_events.one_reading() if isinstance(self.owner_events, OwnerEventLayer) else nullcontext(),
+            self.owner_events.one_reading()
+            if isinstance(self.owner_events, OwnerEventLayer)
+            else nullcontext(),
         ):
             return self._handle(method, path, query=query, body=body, headers=headers)
 
@@ -504,10 +513,9 @@ class WebApp:
         snapshot = self.reads.system_snapshot()
         pause = self._or_reason(self.pause_reads.pause_state)
         sprints = self._or_reason(lambda: self.sprint_reads.sprint_list(statuses=["open"]))
-        limits = self._limits_section()
         # A count only, so no token; an unavailable PO store just hides it.
         po = self._or_reason(self.po.po_running_count) if self.po is not None else None
-        return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, limits=limits, po=po))
+        return _html(200, pages.dashboard(snapshot, pause=pause, sprints=sprints, po=po))
 
     def _task_page(self, params, query, _body) -> Response:
         ref = params["ref"]
@@ -645,7 +653,7 @@ class WebApp:
         A refused run listing does not take the card page down.
         """
         try:
-            return {"available": True, "reason": None, "items": self.ops.run_list(ref)["items"]}
+            return {"available": True, "reason": None, "items": self.ops.card_runs(ref)["items"]}
         except ReadError as exc:
             return {"available": False, "reason": exc.message, "items": []}
 
@@ -1283,6 +1291,8 @@ def _redirect(location: str, *, what: str = "this sprint is open") -> Response:
 def _owner_read_feedback(marked: int, document: dict[str, Any]) -> str:
     held = document["held_count"]
     needs = document["needs_owner_count"]
-    return (f"Marked {marked} notices read; {needs} owner-attention events remain: "
-            f"{held} held by an unanswered handover or unresolved escalation, "
-            f"{needs - held} can be marked read individually. Bulk read marks notices only.")
+    return (
+        f"Marked {marked} notices read; {needs} owner-attention events remain: "
+        f"{held} held by an unanswered handover or unresolved escalation, "
+        f"{needs - held} can be marked read individually. Bulk read marks notices only."
+    )

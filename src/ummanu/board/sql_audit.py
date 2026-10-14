@@ -38,12 +38,13 @@ import hashlib
 import json
 import threading
 from collections.abc import Callable, Iterable, Iterator
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from ummanu.board import budget_candidates, origin_outbox
 from ummanu.board.audit_contract import is_protocol_event, require_claim
 from ummanu.board.models import EntityKind, Event, EventKind
+from ummanu.board.sql_rows import json_document, now as _now, rfc3339
 
 #: Every `kind` a `board_events` row may carry (§3.12).  A record whose kind is outside it is a
 #: generic audit record and stays in its `requests` row.
@@ -85,7 +86,7 @@ _CLAIMING_EFFECT_TABLES = (
 
 def _kinds_answering(kind: str) -> set[str]:
     """Every stored `kind` a `kind=` narrowing matches: itself, and each whose action it is."""
-    from ummanu.tasks import _MARKER_EVENT_ACTIONS
+    from ummanu.board.task_protocol.rows import _MARKER_EVENT_ACTIONS
 
     return {kind} | {stored for stored, action in _MARKER_EVENT_ACTIONS.items() if action == kind}
 
@@ -99,13 +100,9 @@ def _advisory_key(text: str) -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
 def _stamp(value: Any) -> str:
     if isinstance(value, datetime):
-        return value.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return rfc3339(value)
     return str(value or "")
 
 
@@ -134,7 +131,7 @@ class SqlTaskAudit:
 
     @staticmethod
     def _document(value: Any) -> dict[str, Any]:
-        return value if isinstance(value, dict) else json.loads(value or "{}")
+        return json_document(value)
 
     def _record(self, request_id: str, status: str) -> dict[str, Any] | None:
         rows = self._query(
@@ -290,7 +287,7 @@ class SqlTaskAudit:
 
     @staticmethod
     def _require_same_event(existing: dict[str, Any], event: dict[str, Any]) -> None:
-        from ummanu.tasks import TaskError
+        from ummanu.kernel.errors import TaskError
 
         if existing != event:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
@@ -311,7 +308,7 @@ class SqlTaskAudit:
             if self._record(request_id, "discarded") is not None:
                 if operation == "discard":
                     return None, None, False
-                from ummanu.tasks import TaskError
+                from ummanu.kernel.errors import TaskError
 
                 refusal = self.refusal(request_id) or {}
                 reason = refusal.get("reason") or "no reason recorded"
@@ -556,7 +553,7 @@ class SqlTaskAudit:
         refusal = {
             "reason": outcome["reason"],
             "staged_at": outcome["staged_at"],
-            "settled_at": settled.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "settled_at": rfc3339(settled),
             "settled_by": "stale-audit-settlement",
         }
         self._execute(

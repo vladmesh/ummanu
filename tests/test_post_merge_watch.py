@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+from tests import source_trees
 from tests.production_runtime_fixtures import registered_production_runtime
 from ummanu.board.models import Actor, CardState, EntityKind, Event
 from ummanu.board.transitions import transition_for
@@ -247,7 +248,7 @@ PUSH_MAIN = "on:\n  pull_request:\n  push:\n    branches: [main]\njobs: {}\n"
 def _watch(payload: dict, *, ci: str = "github", workspace: str = "", sha: str = SHA, now: float = 1000.0) -> dict:
     landing = MergeLanding(sha=sha, base="main", path="github-pr", ci=ci, branch=BRANCH)
     task = {"ref": REF, "project": "sample", "sprint": SPRINT}
-    return post_merge.open_watch(SimpleNamespace(), task, payload, landing, workspace=workspace, now=now)
+    return post_merge.open_watch(task, payload, landing, workspace=workspace, now=now)
 
 
 def _significant(events: list[dict]) -> list[dict]:
@@ -586,7 +587,7 @@ class ResolutionTests(unittest.TestCase):
         import ast
         import inspect
 
-        tree = ast.parse(inspect.getsource(post_merge))
+        tree = source_trees.parse(inspect.getsource(post_merge))
         rollups, terminal = set(), set()
         for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
             for node in ast.walk(function):

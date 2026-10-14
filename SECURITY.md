@@ -30,6 +30,9 @@ untrusted tenants. Anything an agent can reach, a compromised agent can reach.
   installation key opens every secret at once, and any process of the installation user can read
   it. There is no broker and no per-role grants.
 - Provider logins for agent runtimes are deliberately not stored by the product.
+- Host-local `runtime.env` is mode `0600` and outside the export allowlist, so no checkpoint or
+  archive carries it. Export eligibility follows the allowlist, independently of Git ignoring
+  ([Recovery](docs/RECOVERY.md#local-file-exclusion)).
 - State pushed to the private remote passes a secret scan before every commit. A detected secret
   fails the commit closed rather than publishing it.
 

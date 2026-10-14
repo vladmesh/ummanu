@@ -2,23 +2,24 @@
 
 from __future__ import annotations
 
-import fcntl
+import contextlib
 import hashlib
 import json
 import os
 import re
 import tempfile
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from ummanu._fsutil import file_lock, held_lock
 from ummanu.board.backend import entity_id
+from ummanu.kernel.errors import TaskError
 from ummanu.tasks import (
     BOARD_STORE_KIND,
-    TaskError,
     _digest,
     _now,
     _positive_int,
@@ -170,10 +171,11 @@ class ProductIssueTransaction:
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
         return self.directory / f"v1-{digest}.json"
 
-    def _lock(self):
+    @contextlib.contextmanager
+    def _lock(self) -> Iterator[None]:
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        return open(self.lock_path, "a+", encoding="utf-8")
+        with file_lock(self.lock_path):
+            yield
 
     @staticmethod
     def _atomic(path: Path, document: dict[str, Any]) -> None:
@@ -196,12 +198,8 @@ class ProductIssueTransaction:
     def existing(
         self, request_id: str, *, kind: str, intent: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        with self._lock() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                return self._existing_locked(request_id, kind=kind, intent=intent)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with self._lock():
+            return self._existing_locked(request_id, kind=kind, intent=intent)
 
     def _existing_locked(
         self, request_id: str, *, kind: str, intent: dict[str, Any]
@@ -235,33 +233,29 @@ class ProductIssueTransaction:
         self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         path = self._path(request_id)
-        with self._lock() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with self._lock():
+            existing, committed = self._existing_locked(request_id, kind=kind, intent=intent)
+            if existing is not None or committed is not None:
+                return existing, committed
             try:
-                existing, committed = self._existing_locked(request_id, kind=kind, intent=intent)
-                if existing is not None or committed is not None:
-                    return existing, committed
-                try:
-                    document = json.loads(path.read_text(encoding="utf-8"))
-                except FileNotFoundError:
-                    document = {
-                        "version": 1,
-                        "request_id": request_id,
-                        "kind": kind,
-                        "intent": intent,
-                        "event": event,
-                        "progress": {},
-                    }
-                    self._atomic(path, document)
-                except (OSError, ValueError):
-                    raise TaskError(
-                        "audit_pending", "Product/Issue transaction journal is unreadable", 4
-                    ) from None
-                if document.get("kind") != kind or document.get("intent") != intent:
-                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
-                return document, None
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                document = {
+                    "version": 1,
+                    "request_id": request_id,
+                    "kind": kind,
+                    "intent": intent,
+                    "event": event,
+                    "progress": {},
+                }
+                self._atomic(path, document)
+            except (OSError, ValueError):
+                raise TaskError(
+                    "audit_pending", "Product/Issue transaction journal is unreadable", 4
+                ) from None
+            if document.get("kind") != kind or document.get("intent") != intent:
+                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+            return document, None
 
     def pending_for_reference(self, reference: str, *, excluding: str) -> list[dict[str, Any]]:
         try:
@@ -298,12 +292,8 @@ class ProductIssueTransaction:
         request_id = document.get("request_id")
         if not isinstance(request_id, str):
             raise TaskError("audit_pending", "Product/Issue transaction has no request id", 4)
-        with self._lock() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                self._atomic(self._path(request_id), document)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with self._lock():
+            self._atomic(self._path(request_id), document)
 
     def complete(self, document: dict[str, Any]) -> None:
         request_id = str(document["request_id"])
@@ -386,23 +376,19 @@ class ProductIssueTransaction:
             or not isinstance(document.get("event"), dict)
         ):
             raise TaskError("validation", f"{source} is not a Product/Issue transaction document", 2)
-        with self._lock() as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with self._lock():
+            target = self._path(request_id)
+            if target.exists():
+                raise TaskError("validation", "that request id is already staged in the journal", 2)
+            self._atomic(target, document)
             try:
-                target = self._path(request_id)
-                if target.exists():
-                    raise TaskError("validation", "that request id is already staged in the journal", 2)
-                self._atomic(target, document)
-                try:
-                    source.unlink()
-                except OSError:
-                    raise TaskError(
-                        "audit_pending",
-                        f"the transaction is back in the journal but {source} could not be removed",
-                        4,
-                    ) from None
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                source.unlink()
+            except OSError:
+                raise TaskError(
+                    "audit_pending",
+                    f"the transaction is back in the journal but {source} could not be removed",
+                    4,
+                ) from None
         return document
 
 
@@ -1034,7 +1020,7 @@ class ProductIssueStore:
             try:
                 host = self._host()
                 result = self._host_mutation(lambda: host.recover_product_issue(request_id))
-            except Exception as recovery:
+            except Exception as recovery:  # noqa: BLE001 - normalize the host protocol at this boundary.
                 raise self._host_error(recovery) from None
             if result.entity.kind.value == PRODUCT_TYPE:
                 return self.show_product(result.entity.ref.removeprefix("product:"))
@@ -1043,18 +1029,14 @@ class ProductIssueStore:
         finish = self._finish_for(kind)
         intent = staged["intent"]
         event = staged.get("event") if isinstance(staged.get("event"), dict) else {}
-        with self.transactions.reference_lock(str(event.get("ref") or "")) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                document, completed = self.transactions.existing(request_id, kind=kind, intent=intent)
-                if completed is not None:
-                    return self._record_view(staged)
-                if document is None:
-                    raise TaskError("not_found", "no staged Product/Issue transaction has that request id", 2)
-                self._complete_transaction(document, finish)
-                return self._record_view(document)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with self.transactions.reference_lock(str(event.get("ref") or "")) as lock, held_lock(lock):
+            document, completed = self.transactions.existing(request_id, kind=kind, intent=intent)
+            if completed is not None:
+                return self._record_view(staged)
+            if document is None:
+                raise TaskError("not_found", "no staged Product/Issue transaction has that request id", 2)
+            self._complete_transaction(document, finish)
+            return self._record_view(document)
 
     def discard_transaction(self, request_id: str) -> dict[str, Any]:
         try:
@@ -1075,21 +1057,17 @@ class ProductIssueStore:
             raise
         self._finish_for(str(document.get("kind") or ""))
         event = document.get("event") if isinstance(document.get("event"), dict) else {}
-        with self.transactions.reference_lock(str(event.get("ref") or "")) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                if self.audit.committed_event(request_id) is not None:
-                    raise TaskError("validation", "that request is already committed; retry it instead", 2)
-                trace = self._backend_trace(document)
-                if trace:
-                    raise TaskError(
-                        "live_write",
-                        f"{trace}; retry the transaction with its request id instead of discarding it",
-                        3,
-                    )
-                self.transactions.drop(request_id)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with self.transactions.reference_lock(str(event.get("ref") or "")) as lock, held_lock(lock):
+            if self.audit.committed_event(request_id) is not None:
+                raise TaskError("validation", "that request is already committed; retry it instead", 2)
+            trace = self._backend_trace(document)
+            if trace:
+                raise TaskError(
+                    "live_write",
+                    f"{trace}; retry the transaction with its request id instead of discarding it",
+                    3,
+                )
+            self.transactions.drop(request_id)
         return {"request_id": request_id, "discarded": True}
 
     def _host(self):
@@ -1175,42 +1153,39 @@ class ProductIssueStore:
             )
         reference = f"product:{product_id}"
         request_id = request_id or str(uuid.uuid4())
-        with self.transactions.reference_lock(reference) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            host = self._host()
             try:
-                self._reject_other_pending_reference_operation(reference, request_id)
-                self._reject_other_pending_typed_operation(reference, request_id)
-                host = self._host()
-                try:
-                    claimed = host.canon.event(request_id) if host.canon is not None else None
-                except ValueError:
-                    claimed = True
-                if not claimed:
-                    unknown = sorted(set(projects) - registered_projects(self.instance))
-                    if unknown:
-                        raise TaskError(
-                            "validation", "unknown registered project(s): " + ", ".join(unknown), 2
-                        )
-                from ummanu.board import Actor, Create, Product
-
-                try:
-                    operation = Create(
-                        Product(
-                            reference,
-                            title,
-                            projects=tuple(sorted(projects)),
-                            description=description,
-                        ),
-                        Actor(role, actor),
-                        "Product created",
-                        request_id=request_id,
+                claimed = host.canon.event(request_id) if host.canon is not None else None
+            except ValueError:
+                claimed = True
+            if not claimed:
+                unknown = sorted(set(projects) - registered_projects(self.instance))
+                if unknown:
+                    raise TaskError(
+                        "validation", "unknown registered project(s): " + ", ".join(unknown), 2
                     )
-                    self._host_mutation(lambda: host.create(operation))
-                except Exception as exc:
-                    raise self._host_error(exc) from None
-                return self.show_product(product_id)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            from ummanu.board.host import Create
+            from ummanu.board.models import Actor, Product
+
+            try:
+                operation = Create(
+                    Product(
+                        reference,
+                        title,
+                        projects=tuple(sorted(projects)),
+                        description=description,
+                    ),
+                    Actor(role, actor),
+                    "Product created",
+                    request_id=request_id,
+                )
+                self._host_mutation(lambda: host.create(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_product(product_id)
 
     def create_issue(
         self,
@@ -1259,35 +1234,32 @@ class ProductIssueStore:
             )
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
         reference = f"issue:{digest}"
-        with self.transactions.reference_lock(reference) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                self._reject_other_pending_reference_operation(reference, request_id)
-                self._reject_other_pending_typed_operation(reference, request_id)
-                from ummanu.board import Actor, Create, Issue, RelatedRefs
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import Create
+            from ummanu.board.models import Actor, Issue, RelatedRefs
 
-                try:
-                    host = self._host()
-                    operation = Create(
-                        Issue(
-                            reference,
-                            title,
-                            f"product:{product}",
-                            priority=priority,
-                            issue_kind=issue_kind,
-                            description=description,
-                        ),
-                        Actor(role, actor),
-                        "Issue created",
-                        RelatedRefs(related),
-                        request_id=request_id,
-                    )
-                    self._host_mutation(lambda: host.create(operation))
-                except Exception as exc:
-                    raise self._host_error(exc) from None
-                return self.show_issue(reference)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            try:
+                host = self._host()
+                operation = Create(
+                    Issue(
+                        reference,
+                        title,
+                        f"product:{product}",
+                        priority=priority,
+                        issue_kind=issue_kind,
+                        description=description,
+                    ),
+                    Actor(role, actor),
+                    "Issue created",
+                    RelatedRefs(related),
+                    request_id=request_id,
+                )
+                self._host_mutation(lambda: host.create(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_issue(reference)
 
     def update_priority(
         self,
@@ -1303,58 +1275,55 @@ class ProductIssueStore:
         if priority not in ISSUE_PRIORITIES or not reason.strip():
             raise TaskError("validation", "priority update requires P0-P3 and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
-        with self.transactions.reference_lock(reference) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                self._reject_other_pending_reference_operation(reference, request_id)
-                self._reject_other_pending_typed_operation(reference, request_id)
-                from ummanu.board import Actor, EntityKind, Issue, Replace
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import Replace
+            from ummanu.board.models import Actor, EntityKind, Issue
 
-                host = self._host()
+            host = self._host()
+            try:
+                known = host.canon.event(request_id) if host.canon is not None else None
+            except ValueError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            if known is not None:
+                if (
+                    known.kind.value != "entity.updated"
+                    or known.entity_kind is not EntityKind.ISSUE
+                    or known.ref != reference
+                    or known.actor != Actor(role, actor)
+                    or known.reason != reason
+                    or known.data.get("priority") != priority
+                    or "append" in known.data
+                    or "edit" in known.data
+                ):
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
                 try:
-                    known = host.canon.event(request_id) if host.canon is not None else None
-                except ValueError as exc:
-                    raise TaskError("validation", str(exc), 2) from None
-                if known is not None:
-                    if (
-                        known.kind.value != "entity.updated"
-                        or known.entity_kind is not EntityKind.ISSUE
-                        or known.ref != reference
-                        or known.actor != Actor(role, actor)
-                        or known.reason != reason
-                        or known.data.get("priority") != priority
-                        or "append" in known.data
-                        or "edit" in known.data
-                    ):
-                        raise TaskError("validation", "request id belongs to another operation or payload", 2)
-                    try:
-                        self._host_mutation(lambda: host.recover_product_issue(request_id))
-                    except Exception as exc:
-                        raise self._host_error(exc) from None
-                    return self.show_issue(reference)
-                current = host.read(EntityKind.ISSUE, reference)
-                if not isinstance(current, Issue):
-                    raise TaskError("validation", "reference is not an Issue", 2)
-                if current.state.value == "closed":
-                    raise TaskError("closed", "cannot reprioritize a closed issue", 3)
-                desired = Issue(
-                    current.ref,
-                    current.title,
-                    current.product_ref,
-                    current.state,
-                    priority,
-                    current.issue_kind,
-                    current.description,
-                    current.close_reason,
-                )
-                try:
-                    operation = Replace(desired, Actor(role, actor), reason, request_id=request_id)
-                    self._host_mutation(lambda: host.replace(operation))
-                except Exception as exc:
+                    self._host_mutation(lambda: host.recover_product_issue(request_id))
+                except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            current = host.read(EntityKind.ISSUE, reference)
+            if not isinstance(current, Issue):
+                raise TaskError("validation", "reference is not an Issue", 2)
+            if current.state.value == "closed":
+                raise TaskError("closed", "cannot reprioritize a closed issue", 3)
+            desired = Issue(
+                current.ref,
+                current.title,
+                current.product_ref,
+                current.state,
+                priority,
+                current.issue_kind,
+                current.description,
+                current.close_reason,
+            )
+            try:
+                operation = Replace(desired, Actor(role, actor), reason, request_id=request_id)
+                self._host_mutation(lambda: host.replace(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_issue(reference)
 
     def append_description(
         self,
@@ -1372,69 +1341,66 @@ class ProductIssueStore:
             raise TaskError("validation", "description append requires a non-empty block and reason", 2)
         request_id = request_id or str(uuid.uuid4())
         body_sha256 = _digest(body)
-        with self.transactions.reference_lock(reference) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                self._reject_other_pending_reference_operation(reference, request_id)
-                self._reject_other_pending_typed_operation(reference, request_id)
-                from ummanu.board import Actor, DescriptionAppend, EntityKind, Issue, Replace
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import DescriptionAppend, Replace
+            from ummanu.board.models import Actor, EntityKind, Issue
 
-                host = self._host()
+            host = self._host()
+            try:
+                known = host.canon.event(request_id) if host.canon is not None else None
+            except ValueError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            if known is not None:
+                # The description already holds the block, so the replay is recognized by the
+                # digest of the block the caller asked for, never by rebuilding the text.
+                evidence = known.data.get("append")
+                if (
+                    known.kind.value != "entity.updated"
+                    or known.entity_kind is not EntityKind.ISSUE
+                    or known.ref != reference
+                    or known.actor != Actor(role, actor)
+                    or known.reason != reason
+                    or not isinstance(evidence, dict)
+                    or evidence.get("body_sha256") != body_sha256
+                ):
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
                 try:
-                    known = host.canon.event(request_id) if host.canon is not None else None
-                except ValueError as exc:
-                    raise TaskError("validation", str(exc), 2) from None
-                if known is not None:
-                    # The description already holds the block, so the replay is recognized by the
-                    # digest of the block the caller asked for, never by rebuilding the text.
-                    evidence = known.data.get("append")
-                    if (
-                        known.kind.value != "entity.updated"
-                        or known.entity_kind is not EntityKind.ISSUE
-                        or known.ref != reference
-                        or known.actor != Actor(role, actor)
-                        or known.reason != reason
-                        or not isinstance(evidence, dict)
-                        or evidence.get("body_sha256") != body_sha256
-                    ):
-                        raise TaskError("validation", "request id belongs to another operation or payload", 2)
-                    try:
-                        self._host_mutation(lambda: host.recover_product_issue(request_id))
-                    except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
-                        raise self._host_error(exc) from None
-                    return self.show_issue(reference)
-                current = host.read(EntityKind.ISSUE, reference)
-                if not isinstance(current, Issue):
-                    raise TaskError("validation", "reference is not an Issue", 2)
-                if current.state.value == "closed":
-                    raise TaskError("closed", "cannot append to a closed issue", 3)
-                description = appended_description(current.description, body, actor=actor, at=_now())
-                desired = Issue(
-                    current.ref,
-                    current.title,
-                    current.product_ref,
-                    current.state,
-                    current.priority,
-                    current.issue_kind,
-                    description,
-                    current.close_reason,
-                )
-                try:
-                    operation = Replace(
-                        desired,
-                        Actor(role, actor),
-                        reason,
-                        request_id=request_id,
-                        description_append=DescriptionAppend(
-                            body_sha256, _digest(current.description), _digest(description)
-                        ),
-                    )
-                    self._host_mutation(lambda: host.replace(operation))
+                    self._host_mutation(lambda: host.recover_product_issue(request_id))
                 except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            current = host.read(EntityKind.ISSUE, reference)
+            if not isinstance(current, Issue):
+                raise TaskError("validation", "reference is not an Issue", 2)
+            if current.state.value == "closed":
+                raise TaskError("closed", "cannot append to a closed issue", 3)
+            description = appended_description(current.description, body, actor=actor, at=_now())
+            desired = Issue(
+                current.ref,
+                current.title,
+                current.product_ref,
+                current.state,
+                current.priority,
+                current.issue_kind,
+                description,
+                current.close_reason,
+            )
+            try:
+                operation = Replace(
+                    desired,
+                    Actor(role, actor),
+                    reason,
+                    request_id=request_id,
+                    description_append=DescriptionAppend(
+                        body_sha256, _digest(current.description), _digest(description)
+                    ),
+                )
+                self._host_mutation(lambda: host.replace(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_issue(reference)
 
     def edit_description(
         self,
@@ -1452,64 +1418,61 @@ class ProductIssueStore:
             raise TaskError("validation", "description edit requires explicit text and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
         description_sha256 = _digest(description)
-        with self.transactions.reference_lock(reference) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                self._reject_other_pending_reference_operation(reference, request_id)
-                self._reject_other_pending_typed_operation(reference, request_id)
-                from ummanu.board import Actor, DescriptionEdit, EntityKind, Issue, Replace
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import DescriptionEdit, Replace
+            from ummanu.board.models import Actor, EntityKind, Issue
 
-                host = self._host()
+            host = self._host()
+            try:
+                known = host.canon.event(request_id) if host.canon is not None else None
+            except ValueError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            if known is not None:
+                evidence = known.data.get("edit")
+                if (
+                    known.kind.value != "entity.updated"
+                    or known.entity_kind is not EntityKind.ISSUE
+                    or known.ref != reference
+                    or known.actor != Actor(role, actor)
+                    or known.reason != reason
+                    or not isinstance(evidence, dict)
+                    or evidence.get("description_sha256") != description_sha256
+                ):
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
                 try:
-                    known = host.canon.event(request_id) if host.canon is not None else None
-                except ValueError as exc:
-                    raise TaskError("validation", str(exc), 2) from None
-                if known is not None:
-                    evidence = known.data.get("edit")
-                    if (
-                        known.kind.value != "entity.updated"
-                        or known.entity_kind is not EntityKind.ISSUE
-                        or known.ref != reference
-                        or known.actor != Actor(role, actor)
-                        or known.reason != reason
-                        or not isinstance(evidence, dict)
-                        or evidence.get("description_sha256") != description_sha256
-                    ):
-                        raise TaskError("validation", "request id belongs to another operation or payload", 2)
-                    try:
-                        self._host_mutation(lambda: host.recover_product_issue(request_id))
-                    except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
-                        raise self._host_error(exc) from None
-                    return self.show_issue(reference)
-                current = host.read(EntityKind.ISSUE, reference)
-                if not isinstance(current, Issue):
-                    raise TaskError("validation", "reference is not an Issue", 2)
-                if current.state.value == "closed":
-                    raise TaskError("closed", "cannot edit a closed issue", 3)
-                desired = Issue(
-                    current.ref,
-                    current.title,
-                    current.product_ref,
-                    current.state,
-                    current.priority,
-                    current.issue_kind,
-                    description,
-                    current.close_reason,
-                )
-                try:
-                    operation = Replace(
-                        desired,
-                        Actor(role, actor),
-                        reason,
-                        request_id=request_id,
-                        description_edit=DescriptionEdit(_digest(current.description), description_sha256),
-                    )
-                    self._host_mutation(lambda: host.replace(operation))
+                    self._host_mutation(lambda: host.recover_product_issue(request_id))
                 except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            current = host.read(EntityKind.ISSUE, reference)
+            if not isinstance(current, Issue):
+                raise TaskError("validation", "reference is not an Issue", 2)
+            if current.state.value == "closed":
+                raise TaskError("closed", "cannot edit a closed issue", 3)
+            desired = Issue(
+                current.ref,
+                current.title,
+                current.product_ref,
+                current.state,
+                current.priority,
+                current.issue_kind,
+                description,
+                current.close_reason,
+            )
+            try:
+                operation = Replace(
+                    desired,
+                    Actor(role, actor),
+                    reason,
+                    request_id=request_id,
+                    description_edit=DescriptionEdit(_digest(current.description), description_sha256),
+                )
+                self._host_mutation(lambda: host.replace(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_issue(reference)
 
     def close_issue(
         self,
@@ -1534,42 +1497,33 @@ class ProductIssueStore:
             raise TaskError(
                 "validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2
             )
-        with self.transactions.reference_lock(reference) as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                self._reject_other_pending_reference_operation(reference, request_id)
-                self._reject_other_pending_typed_operation(reference, request_id)
-                from ummanu.board import (
-                    Actor,
-                    EntityKind,
-                    Issue,
-                    IssueState,
-                    TransitionRequest,
-                )
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import TransitionRequest
+            from ummanu.board.models import Actor, EntityKind, Issue, IssueState
 
-                current = self._host().read(EntityKind.ISSUE, reference)
-                if isinstance(current, Issue) and current.state is IssueState.CLOSED:
-                    try:
-                        existing = (
-                            self._host().canon.event(request_id) if self._host().canon is not None else None
-                        )
-                    except ValueError:
-                        existing = None
-                    if existing is None:
-                        raise TaskError("closed", "issue is already closed", 3)
+            current = self._host().read(EntityKind.ISSUE, reference)
+            if isinstance(current, Issue) and current.state is IssueState.CLOSED:
                 try:
-                    host = self._host()
-                    operation = TransitionRequest(
-                        EntityKind.ISSUE,
-                        reference,
-                        IssueState.CLOSED,
-                        Actor(role, actor),
-                        reason,
-                        request_id=request_id,
+                    existing = (
+                        self._host().canon.event(request_id) if self._host().canon is not None else None
                     )
-                    self._host_mutation(lambda: host.transition(operation))
-                except Exception as exc:
-                    raise self._host_error(exc) from None
-                return self.show_issue(reference)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                except ValueError:
+                    existing = None
+                if existing is None:
+                    raise TaskError("closed", "issue is already closed", 3)
+            try:
+                host = self._host()
+                operation = TransitionRequest(
+                    EntityKind.ISSUE,
+                    reference,
+                    IssueState.CLOSED,
+                    Actor(role, actor),
+                    reason,
+                    request_id=request_id,
+                )
+                self._host_mutation(lambda: host.transition(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_issue(reference)
