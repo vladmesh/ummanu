@@ -24,8 +24,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ummanu.runtime.paths import env_value
-
 from .head_run_binding import head_run_binding
 
 if TYPE_CHECKING:  # Avoid a runtime import cycle with head.command.
@@ -159,7 +157,8 @@ def resolve_codex_home(
     configured = profile.get("codex_home")
     if configured:
         return CodexHome(str(configured), CODEX_HOME_PROFILE)
-    override = env_value("UMMANU_CODEX_HOME", nonempty=True)
+    # Keep the shared preflight's import boundary; same nonempty policy as paths.env_value.
+    override = os.environ.get("UMMANU_CODEX_HOME") or os.environ.get("TA_CODEX_HOME")
     if override:
         return CodexHome(override, CODEX_HOME_ENV)
     data_home = data_dir_codex_home(data_dir)
@@ -176,7 +175,7 @@ def codex_home(profile: Mapping[str, Any], *, data_dir: str | os.PathLike[str] |
 def data_dir_codex_home(data_dir: str | os.PathLike[str] | None = None) -> Path | None:
     """`<data_dir>/codex-home` of this installation, or None when no data dir is named.
 
-    A named data dir wins, then `UMMANU_DATA_DIR`. The lookup leaf imports only stdlib;
+    A named data dir wins, then `UMMANU_DATA_DIR`. Head launchers bind this setting;
     head launchers bind `UMMANU_DATA_DIR` (`ummanu.runtime.codex_home.bound_data_dir`).
     """
     if data_dir is not None:

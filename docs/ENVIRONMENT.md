@@ -5,7 +5,9 @@ overrides using only the listed TA names remain supported. No runtime.env rewrit
 secret migration or process-global normalization is required. New managed service
 output, launcher assignments and CI fixture pins use canonical names.
 
-`runtime.paths.env_value` owns Python alias lookup. Each row below names a canonical
+`runtime.paths.env_value` owns Python alias lookup. Shared Codex preflight retains
+its existing import boundary and uses the equivalent explicit nonempty lookup.
+Each row below names a canonical
 suffix: prepend `UMMANU_` for its canonical name and `TA_` for its explicit legacy
 name. For example, `RUNTIME_ENV_FILE` means `UMMANU_RUNTIME_ENV_FILE` and
 `TA_RUNTIME_ENV_FILE`. This inventory covers actual reads and writes, including
