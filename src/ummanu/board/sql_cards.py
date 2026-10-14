@@ -1391,25 +1391,28 @@ class SqlCardClient:
                 bag_updates[key] = text
             else:
                 bag_removals.append(key)
-        if bag_updates:
+        # Removals alone historically leave the clock untouched. Capture that condition
+        # before the shared extensions assignment makes a removal look like a typed write.
+        update_time = bool(assignments or bag_updates)
+        if bag_updates or bag_removals:
+            bag_expression = f"coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb)"
+            if bag_updates:
+                bag_expression = f"({bag_expression} || %s::jsonb)"
+                params.append(json.dumps(bag_updates))
+            if bag_removals:
+                # Merge first, then subtract the entire bound text[] in this same row write.
+                bag_expression += " - %s::text[]"
+                params.append(bag_removals)
             assignments.append(
                 f"extensions = jsonb_set(coalesce(extensions, '{{}}'::jsonb), '{{{EXTENSION_BAG}}}', "
-                f"coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) || %s::jsonb, true)"
+                f"{bag_expression}, true)"
             )
-            params.append(json.dumps(bag_updates))
         if assignments:
-            assignments.append("updated_at = %s")
-            params.append(_now())
+            if update_time:
+                assignments.append("updated_at = %s")
+                params.append(_now())
             params.append(ref)
             self._execute(f"UPDATE tasks SET {', '.join(assignments)} WHERE task_ref = %s", tuple(params))
-        if bag_removals:
-            # One statement for every key the bag drops: jsonb `-` takes the whole text[] at once.
-            self._execute(
-                "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
-                f"'{{{EXTENSION_BAG}}}', coalesce(extensions->'{EXTENSION_BAG}', '{{}}'::jsonb) - %s::text[], true) "
-                "WHERE task_ref = %s",
-                (bag_removals, ref),
-            )
         self._commit_unless_nested()
         return True
 

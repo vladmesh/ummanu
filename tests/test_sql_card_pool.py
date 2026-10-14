@@ -8,6 +8,7 @@ PostgreSQL is `tests/test_sql_card_reconnect_backend.py`.
 
 from __future__ import annotations
 
+import json
 import socket
 import tempfile
 import threading
@@ -147,6 +148,64 @@ class PoolCase(unittest.TestCase):
             worker.join(timeout=_WAIT * 2)
         self.assertFalse(any(worker.is_alive() for worker in workers), "a thread never finished")
         return failures
+
+
+class MetadataStatementTests(PoolCase):
+    """Execute the task handler with a recording driver; no JSONB interpretation here."""
+
+    def record(self, values: dict[str, Any]) -> list[tuple[str, tuple[Any, ...]]]:
+        executed: list[tuple[str, tuple[Any, ...]]] = []
+        original = _Cursor.execute
+
+        def recording(cursor: _Cursor, sql: str, params: tuple[Any, ...] = ()) -> None:
+            executed.append((sql, params))
+            original(cursor, sql, params)
+
+        with mock.patch.object(_Cursor, "execute", recording):
+            self.client.call("saveTaskMetadata", task_id=1, values=values)
+        return executed
+
+    def test_create_shaped_metadata_writes_the_task_row_once(self) -> None:
+        executed = self.record({
+            "record_type": "task", "project": "ummanu", "task_type": "code",
+            "complexity": "standard", "family_preference": "auto",
+        })
+        updates = [(sql, params) for sql, params in executed if sql.startswith("UPDATE tasks ")]
+        self.assertEqual(len(updates), 1, executed)
+        self.assertEqual(sum(sql.startswith("SELECT task_ref ") for sql, _ in executed), 1)
+        self.assertEqual(sum(sql.startswith("INSERT INTO projects ") for sql, _ in executed), 1)
+        sql, params = updates[0]
+        self.assertEqual(sql.count("extensions ="), 1)
+        self.assertIn("|| %s::jsonb) - %s::text[]", sql)
+        self.assertEqual(params[:4], ("ummanu", "code", "standard", "auto"))
+        self.assertEqual(json.loads(params[4]), {"record_type": "task"})
+        self.assertEqual(params[5], ["project", "task_type", "complexity", "family_preference"])
+
+    def test_task_update_count_and_clock_condition_do_not_grow_with_bag_keys(self) -> None:
+        for count in (1, 10):
+            for mode in ("mixed", "add", "typed", "remove", "empty"):
+                with self.subTest(count=count, mode=mode):
+                    values: dict[str, Any] = {}
+                    if mode in {"mixed", "add"}:
+                        values.update({f"unknown'{i}": f"value\\{i}" for i in range(count)})
+                    if mode in {"mixed", "remove"}:
+                        values.update({f"drop'{i}": "" for i in range(count)})
+                    if mode in {"mixed", "typed"}:
+                        values["claim"] = "worker"
+                    executed = self.record(values)
+                    updates = [(sql, params) for sql, params in executed if sql.startswith("UPDATE tasks ")]
+                    self.assertEqual(len(updates), int(mode != "empty"), executed)
+                    self.assertEqual(sum(sql.startswith("SELECT ") for sql, _ in executed), 1)
+                    if not updates:
+                        continue
+                    sql, params = updates[0]
+                    self.assertEqual("updated_at = %s" in sql, mode != "remove")
+                    self.assertEqual(sql.count("extensions ="), 1)
+                    for key in values:
+                        if key != "claim":
+                            self.assertNotIn(key, sql)
+                    if mode == "remove":
+                        self.assertEqual(params[:-1], ([f"drop'{i}" for i in range(count)],))
 
 
 class ConcurrencyTests(PoolCase):
