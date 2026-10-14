@@ -1,4 +1,14 @@
-"""In-memory BoardHost implementation for contract tests."""
+"""Test-only typed board mutations and their canonical in-memory audit owner.
+
+Simulates entity reads, lifecycle edges, request replay and staged/committed event confirmation
+through the production models, BoardEventCanon and MutationEventTransaction. It deliberately
+omits SQL role/configuration/admission checks, derived related refs, Issue close reasons,
+marker comments and recovery APIs. Create/replace accept every entity kind; timestamps truncate
+to seconds. MemoryAudit deep-copies records under an RLock, but neither it nor the host provides
+durable storage, database transactions or cross-process locks. Without an audit the host uses
+its own request map; foreign operations raise ValueError, while MemoryAudit claims raise
+TaskError(validation, exit code 2). See tests/fakes/README.md for the policy and CI evidence limits.
+"""
 
 from __future__ import annotations
 

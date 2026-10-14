@@ -14,10 +14,10 @@ from types import MethodType, SimpleNamespace
 from unittest import mock
 
 from tests import test_owned_cleanup as owned_fixtures, test_tick_board_snapshot as tick_fixtures
+from tests.fakes.board import MemoryAudit
 from tests.fakes.dispatcher import FakeCatalog
 from tests.support.cleanup_lock_probe import LockProbes, run_host_operations, run_production_operations
 from ummanu import restore
-from ummanu.board.fake import MemoryAudit
 from ummanu.board.host import TransitionRequest
 from ummanu.board.models import Actor, CardState, EntityKind
 from ummanu.board.tick_snapshot import tick_snapshot
@@ -53,8 +53,7 @@ class Audit(MemoryAudit):
         self._pending[request_id] = copy.deepcopy(event)
 
     def events(self, reference="", kind=None, **kwargs):
-        return [event for event in super().events(reference)
-                if kind is None or event["kind"] == kind]
+        return [event for event in super().events(reference) if kind is None or event["kind"] == kind]
 
     def pending_marker_owner(self, reference, content, *, request_id):
         return None
@@ -105,15 +104,37 @@ class NarrowCleanupLockTests(unittest.TestCase):
     def head_commands(self, suffix=""):
         request = lambda value: value + suffix
         actions = (
-            lambda: self.writer.comment(role="po", actor="test-po", reference="sample-1",
-                                        body="tick is still running", request_id=request("head-comment")),
-            lambda: self.writer.report(role="worker", actor="test-worker", reference="demo-8",
-                                       kind="done", body="Operation recorded", request_id=request("head-report")),
-            lambda: self.writer.move(role="po", actor="test-po", reference="sample-1", target="ready",
-                                     reason="reopen", request_id=request("head-move")),
-            lambda: self.writer.complete(role="po", actor="test-po", reference="demo-8", kind="operation",
-                                         body="## What was done\nRecorded\n## How to verify\nRead it",
-                                         request_id=request("head-complete")),
+            lambda: self.writer.comment(
+                role="po",
+                actor="test-po",
+                reference="sample-1",
+                body="tick is still running",
+                request_id=request("head-comment"),
+            ),
+            lambda: self.writer.report(
+                role="worker",
+                actor="test-worker",
+                reference="demo-8",
+                kind="done",
+                body="Operation recorded",
+                request_id=request("head-report"),
+            ),
+            lambda: self.writer.move(
+                role="po",
+                actor="test-po",
+                reference="sample-1",
+                target="ready",
+                reason="reopen",
+                request_id=request("head-move"),
+            ),
+            lambda: self.writer.complete(
+                role="po",
+                actor="test-po",
+                reference="demo-8",
+                kind="operation",
+                body="## What was done\nRecorded\n## How to verify\nRead it",
+                request_id=request("head-complete"),
+            ),
         )
         for action in actions:
             started = time.monotonic()
@@ -136,15 +157,31 @@ class NarrowCleanupLockTests(unittest.TestCase):
             host.prepare_worker(task=task, worker_id="demo-2-worker", head="test-head")
             self.owner.replay_one(key)
 
-        runtime = SimpleNamespace(data_dir=self.data, production_state=production.ProductionState(self.data),
-                                  pause=SimpleNamespace(summary=lambda: {"mode": "running"}))
-        with mock.patch.object(host, "_run_setup", side_effect=lambda *a, **k: block(host_entered, host_release)), \
-                mock.patch.object(host, "_launch", return_value=SimpleNamespace(
-                    handle="fake", leaf="", run={}, delivery_evidence={}, head_run={})), \
-                mock.patch.object(self.owner, "_scope_fence", side_effect=lambda *a, **k: block(replay_entered, replay_release)), \
-                mock.patch.object(production, "_production_mutation_guard", return_value=None), \
-                mock.patch.object(production, "_production_tick_body", side_effect=tick_body):
-            thread, errors = self.blocked_thread(lambda: production.production_tick(runtime), host_entered, host_release)
+        runtime = SimpleNamespace(
+            data_dir=self.data,
+            production_state=production.ProductionState(self.data),
+            pause=SimpleNamespace(summary=lambda: {"mode": "running"}),
+        )
+        with (
+            mock.patch.object(
+                host, "_run_setup", side_effect=lambda *a, **k: block(host_entered, host_release)
+            ),
+            mock.patch.object(
+                host,
+                "_launch",
+                return_value=SimpleNamespace(
+                    handle="fake", leaf="", run={}, delivery_evidence={}, head_run={}
+                ),
+            ),
+            mock.patch.object(
+                self.owner, "_scope_fence", side_effect=lambda *a, **k: block(replay_entered, replay_release)
+            ),
+            mock.patch.object(production, "_production_mutation_guard", return_value=None),
+            mock.patch.object(production, "_production_tick_body", side_effect=tick_body),
+        ):
+            thread, errors = self.blocked_thread(
+                lambda: production.production_tick(runtime), host_entered, host_release
+            )
             self.addCleanup(replay_release.set)
             self.head_commands("-host")
             thread.join(2)
@@ -177,10 +214,18 @@ class NarrowCleanupLockTests(unittest.TestCase):
 
         results = []
         with mock.patch.object(self.owner, "_dirty", side_effect=proof):
-            thread, errors = self.blocked_thread(lambda: results.append(self.owner.replay_one(key)), entered, release)
+            thread, errors = self.blocked_thread(
+                lambda: results.append(self.owner.replay_one(key)), entered, release
+            )
             started = time.monotonic()
-            self.writer.move(role="po", actor="test-po", reference="sample-1", target="ready",
-                             reason="return to work", request_id="race-move")
+            self.writer.move(
+                role="po",
+                actor="test-po",
+                reference="sample-1",
+                target="ready",
+                reason="return to work",
+                request_id="race-move",
+            )
             self.assertLess(time.monotonic() - started, 1)
             release.set()
             thread.join(5)
@@ -192,24 +237,33 @@ class NarrowCleanupLockTests(unittest.TestCase):
     def test_original_tick_and_writer_wrappers_block_the_head_command(self):
         """Counterfactual using the two global wrappers present at 93eb9018."""
         entered, release, completed = threading.Event(), threading.Event(), threading.Event()
-        runtime = SimpleNamespace(data_dir=self.data, production_state=production.ProductionState(self.data),
-                                  pause=SimpleNamespace(summary=lambda: {"mode": "running"}))
+        runtime = SimpleNamespace(
+            data_dir=self.data,
+            production_state=production.ProductionState(self.data),
+            pause=SimpleNamespace(summary=lambda: {"mode": "running"}),
+        )
 
         def body(*args):
             entered.set()
             self.assertTrue(release.wait(5))
 
         def comment():
-            self.writer.comment(role="po", actor="test-po", reference="sample-1", body="waiting",
-                                request_id="legacy-wait")
+            self.writer.comment(
+                role="po", actor="test-po", reference="sample-1", body="waiting", request_id="legacy-wait"
+            )
             completed.set()
 
         original_write = TaskWriter._write
-        with mock.patch.object(self.writer, "_write", MethodType(cleanup.serialized(original_write), self.writer)), \
-                mock.patch.object(production, "_production_mutation_guard", return_value=None), \
-                mock.patch.object(production, "_production_tick_body", side_effect=body):
-            tick, errors = self.blocked_thread(lambda: cleanup.serialized(production.production_tick)(runtime),
-                                               entered, release)
+        with (
+            mock.patch.object(
+                self.writer, "_write", MethodType(cleanup.serialized(original_write), self.writer)
+            ),
+            mock.patch.object(production, "_production_mutation_guard", return_value=None),
+            mock.patch.object(production, "_production_tick_body", side_effect=body),
+        ):
+            tick, errors = self.blocked_thread(
+                lambda: cleanup.serialized(production.production_tick)(runtime), entered, release
+            )
             head = threading.Thread(target=comment)
             head.start()
             self.addCleanup(head.join, 5)
@@ -229,8 +283,14 @@ class NarrowCleanupLockTests(unittest.TestCase):
             # A different process's move is deliberately invisible to board_write.
             self.store.rows[2]["column_id"] = 3
             with self.assertRaisesRegex(TaskError, "capacity"):
-                self.writer.claim(role="dispatcher", actor="test-dispatcher", reference="demo-9",
-                                  worker="demo-9-worker", cap=1, request_id="capacity-claim")
+                self.writer.claim(
+                    role="dispatcher",
+                    actor="test-dispatcher",
+                    reference="demo-9",
+                    worker="demo-9-worker",
+                    cap=1,
+                    request_id="capacity-claim",
+                )
         self.assertEqual(self.writer.reader.show("demo-9")["state"], "ready")
 
     def test_journal_updates_survive_replay_and_record_capture(self):
@@ -245,9 +305,13 @@ class NarrowCleanupLockTests(unittest.TestCase):
 
         with mock.patch.object(self.owner, "_dirty", side_effect=proof):
             thread, errors = self.blocked_thread(lambda: self.owner.replay_one(key), entered, release)
-            runtime = SimpleNamespace(host=CommandHostRuntime(FakeCatalog(), self.data, mode="real"),
-                                      data_dir=self.data, cleanup=self.owner, reader=self.writer.reader,
-                                      production_state=production.ProductionState(self.data))
+            runtime = SimpleNamespace(
+                host=CommandHostRuntime(FakeCatalog(), self.data, mode="real"),
+                data_dir=self.data,
+                cleanup=self.owner,
+                reader=self.writer.reader,
+                production_state=production.ProductionState(self.data),
+            )
             DispatcherRuntime.save_records(runtime, {}, {"sample-1": self.fixture.record})
             other = {**self.fixture.task, "id": "other", "ref": "other-1"}
             other_key = self.owner.journal.remember(other, {"attempt_id": "other-attempt"})
@@ -279,9 +343,11 @@ class NarrowCleanupLockTests(unittest.TestCase):
             self.assertTrue(lock_free(self.data))
             return remove(*args, **kwargs)
 
-        with mock.patch.object(cleanup, "_read_git", side_effect=read_git), \
-                mock.patch.object(self.fixture.backend, "stop", side_effect=stop_head), \
-                mock.patch.object(cleanup.git_worktree, "remove", side_effect=remove_workspace):
+        with (
+            mock.patch.object(cleanup, "_read_git", side_effect=read_git),
+            mock.patch.object(self.fixture.backend, "stop", side_effect=stop_head),
+            mock.patch.object(cleanup.git_worktree, "remove", side_effect=remove_workspace),
+        ):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed")
 
@@ -331,19 +397,34 @@ class NarrowCleanupLockTests(unittest.TestCase):
             self.assertTrue(lock_free(self.data))
             return SimpleNamespace(wait=wait)
 
-        with mock.patch.object(pty_client.subprocess, "Popen", side_effect=popen), \
-                self.assertRaises(pty_client.LocalPtySpawnError):
-            pty_client.spawn_head(root=self.data / "heads", run_id="launch-check", role="worker",
-                                  task="card:demo-2", command="fake", cwd=self.data,
-                                  launch_admission=admission)
+        with (
+            mock.patch.object(pty_client.subprocess, "Popen", side_effect=popen),
+            self.assertRaises(pty_client.LocalPtySpawnError),
+        ):
+            pty_client.spawn_head(
+                root=self.data / "heads",
+                run_id="launch-check",
+                role="worker",
+                task="card:demo-2",
+                command="fake",
+                cwd=self.data,
+                launch_admission=admission,
+            )
 
     def test_ownership_refusal_preserves_intent_without_blocking_new_owner(self):
         runtime = mock.Mock()
         record = self.fixture.record
         record.launch_intent = {"run_id": "not-yet-launched", "workspace": str(self.fixture.workspace)}
-        result = _worker_launch_failure(runtime, {}, {"sample-1": record}, "sample-1", record,
-                                        OwnershipChanged("card moved during setup"), step="claim",
-                                        attempt_id=record.attempt_id)
+        result = _worker_launch_failure(
+            runtime,
+            {},
+            {"sample-1": record},
+            "sample-1",
+            record,
+            OwnershipChanged("card moved during setup"),
+            step="claim",
+            attempt_id=record.attempt_id,
+        )
         self.assertEqual(result["status"], "skipped")
         self.assertEqual(record.launch_intent["run_id"], "not-yet-launched")
         self.assertEqual(runtime.mock_calls, [])
@@ -363,15 +444,25 @@ class NarrowCleanupLockTests(unittest.TestCase):
         self.fixture.head()
         key = self.fixture.request()
         probes = LockProbes(self.data)
-        with probes.patch(self.owner, "_attempt", name="replay_one", wraps=True), \
-                probes.patch(cleanup, "_read_git", wraps=True), \
-                probes.patch(self.fixture.backend, "stop", wraps=True), \
-                probes.patch(cleanup.git_worktree, "remove", wraps=True):
+        with (
+            probes.patch(self.owner, "_attempt", name="replay_one", wraps=True),
+            probes.patch(cleanup, "_read_git", wraps=True),
+            probes.patch(self.fixture.backend, "stop", wraps=True),
+            probes.patch(cleanup.git_worktree, "remove", wraps=True),
+        ):
             operations["replay_one"] = (self.owner.replay_one(key), probes)
         self.assertEqual(
             set(operations),
-            {"prepare_worker", "prepare_worker (fresh workspace)", "restart_worker", "start_review", "teardown",
-             "replay_one", "production_tick", "production_probe"},
+            {
+                "prepare_worker",
+                "prepare_worker (fresh workspace)",
+                "restart_worker",
+                "start_review",
+                "teardown",
+                "replay_one",
+                "production_tick",
+                "production_probe",
+            },
         )
         for name, (outcome, probes) in operations.items():
             with self.subTest(name):
@@ -415,9 +506,16 @@ class NarrowCleanupLockTests(unittest.TestCase):
 
         with mock.patch.object(self.owner, "_dirty", side_effect=proof):
             thread, errors = self.blocked_thread(
-                lambda: results.append(self.owner.cleanup(task, record, "done")), entered, release)
-            self.writer.move(role="po", actor="test-po", reference="sample-1", target="in_progress",
-                             reason="rework", request_id="assessment-race-rework")
+                lambda: results.append(self.owner.cleanup(task, record, "done")), entered, release
+            )
+            self.writer.move(
+                role="po",
+                actor="test-po",
+                reference="sample-1",
+                target="in_progress",
+                reason="rework",
+                request_id="assessment-race-rework",
+            )
             release.set()
             thread.join(5)
         self.assertFalse(thread.is_alive())
@@ -446,12 +544,16 @@ class NarrowCleanupLockTests(unittest.TestCase):
             self.assertEqual(len(self.fixture.stops), 2)
             self.store.rows[1]["column_id"] = 7
 
-        with mock.patch.object(assessment_decision, "recorded_decision", return_value=("release", "release", ())), \
-                mock.patch.object(release_lifecycle.e2e_stage, "run_stage", return_value=None), \
-                mock.patch.object(release_lifecycle, "read_release_gate", return_value=(None, object())), \
-                mock.patch("ummanu.dispatch.gate_lifecycle.accept_green_gate", return_value=None), \
-                mock.patch.object(release_lifecycle, "decision_pointer", return_value="release"), \
-                mock.patch.object(release_lifecycle.attempt_accounting, "terminal_effect", side_effect=terminal):
+        with (
+            mock.patch.object(
+                assessment_decision, "recorded_decision", return_value=("release", "release", ())
+            ),
+            mock.patch.object(release_lifecycle.e2e_stage, "run_stage", return_value=None),
+            mock.patch.object(release_lifecycle, "read_release_gate", return_value=(None, object())),
+            mock.patch("ummanu.dispatch.gate_lifecycle.accept_green_gate", return_value=None),
+            mock.patch.object(release_lifecycle, "decision_pointer", return_value="release"),
+            mock.patch.object(release_lifecycle.attempt_accounting, "terminal_effect", side_effect=terminal),
+        ):
             result = assessment_decision.advance_assessment(runtime, task, records, {}, "release-attempt")
         self.assertEqual(result["to"], "done")
         self.assertEqual(result["cleanup"]["reason"], "cleanup awaits terminal board claim settlement")
@@ -473,8 +575,10 @@ class NarrowCleanupLockTests(unittest.TestCase):
                 self.owner.journal.save(fresh)
             return original(intent_key, intent)
 
-        with mock.patch.object(self.owner.journal, "commit_intent", side_effect=commit), \
-                mock.patch.object(cleanup.git_worktree, "remove", wraps=cleanup.git_worktree.remove) as remove:
+        with (
+            mock.patch.object(self.owner.journal, "commit_intent", side_effect=commit),
+            mock.patch.object(cleanup.git_worktree, "remove", wraps=cleanup.git_worktree.remove) as remove,
+        ):
             results = self.owner.replay()
             self.assertTrue(conflicted)
             self.assertEqual(results[0]["status"], "pending")
@@ -490,8 +594,9 @@ class NarrowCleanupLockTests(unittest.TestCase):
         key = self.fixture.request()
         namespace = self.fixture.workspace / ".ummanu-task-env"
         namespace.mkdir()
-        self.fixture.host._decide_workspace_environment_ownership = (
-            lambda path: "dispatcher" if namespace.exists() else "absent")
+        self.fixture.host._decide_workspace_environment_ownership = lambda path: (
+            "dispatcher" if namespace.exists() else "absent"
+        )
         active = False
 
         @contextlib.contextmanager
@@ -523,10 +628,12 @@ class NarrowCleanupLockTests(unittest.TestCase):
             self.assertFalse(active)
             return rmtree(*args, **kwargs)
 
-        with mock.patch.object(self.store, "transaction", side_effect=transaction), \
-                mock.patch.object(cleanup.git_worktree, "remove", side_effect=dispose) as disposal, \
-                mock.patch.object(self.store, "call", side_effect=check), \
-                mock.patch.object(cleanup.shutil, "rmtree", side_effect=remove_environment) as environment:
+        with (
+            mock.patch.object(self.store, "transaction", side_effect=transaction),
+            mock.patch.object(cleanup.git_worktree, "remove", side_effect=dispose) as disposal,
+            mock.patch.object(self.store, "call", side_effect=check),
+            mock.patch.object(cleanup.shutil, "rmtree", side_effect=remove_environment) as environment,
+        ):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])
         disposal.assert_called_once()
@@ -548,9 +655,16 @@ class NarrowCleanupLockTests(unittest.TestCase):
         def move():
             attempted.set()
             try:
-                self.writer.board_host.transition(TransitionRequest(
-                    EntityKind.CARD, "sample-1", CardState.READY, Actor("po", "test-po"),
-                    "reopen after disposal", request_id="direct-transition"))
+                self.writer.board_host.transition(
+                    TransitionRequest(
+                        EntityKind.CARD,
+                        "sample-1",
+                        CardState.READY,
+                        Actor("po", "test-po"),
+                        "reopen after disposal",
+                        request_id="direct-transition",
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 - relay the writer thread's failure
                 failures.append(exc)
             finally:
@@ -562,10 +676,15 @@ class NarrowCleanupLockTests(unittest.TestCase):
             writer.start()
             self.addCleanup(writer.join, 5)
             self.assertTrue(attempted.wait(3))
-            self.assertFalse(finished.wait(.1))
+            self.assertFalse(finished.wait(0.1))
             started = time.monotonic()
-            self.writer.comment(role="po", actor="test-po", reference="sample-1", body="during disposal",
-                                request_id="disposal-comment")
+            self.writer.comment(
+                role="po",
+                actor="test-po",
+                reference="sample-1",
+                body="during disposal",
+                request_id="disposal-comment",
+            )
             self.assertLess(time.monotonic() - started, 1)
             release.set()
             disposal.join(5)
@@ -592,12 +711,14 @@ class NarrowCleanupLockTests(unittest.TestCase):
             # Its effect fence must precede SQL/capacity, rather than wait there.
             thread.start()
             self.assertTrue(attempted.wait(3))
-            self.assertFalse(acquired.wait(.1))
+            self.assertFalse(acquired.wait(0.1))
             yield
 
-        with mock.patch.object(restore, "_normalized_cards", return_value=[{"reference": "sample-1"}]), \
-                mock.patch.object(restore, "_import_normalized_board", return_value=0), \
-                mock.patch.object(self.store, "transaction", side_effect=transaction):
+        with (
+            mock.patch.object(restore, "_normalized_cards", return_value=[{"reference": "sample-1"}]),
+            mock.patch.object(restore, "_import_normalized_board", return_value=0),
+            mock.patch.object(self.store, "transaction", side_effect=transaction),
+        ):
             self.assertEqual(restore.import_normalized_board(self.data, client=self.store), 0)
         thread.join(5)
         self.assertTrue(acquired.is_set())
@@ -618,8 +739,9 @@ class NarrowCleanupLockTests(unittest.TestCase):
 
     def test_observer_cleanup_without_card_reader_stops_and_removes_workspace(self):
         _, path, record = self.fixture.observer()
-        owner = cleanup.CleanupOwner(SimpleNamespace(
-            data_dir=self.data, host=self.fixture.host, sprints=self.fixture.runtime.sprints))
+        owner = cleanup.CleanupOwner(
+            SimpleNamespace(data_dir=self.data, host=self.fixture.host, sprints=self.fixture.runtime.sprints)
+        )
         result = owner.cleanup_observer(record)
         self.assertEqual(result["status"], "completed", result["reason"])
         self.assertEqual(self.fixture.stops, [("observer-run", "")])
@@ -629,8 +751,9 @@ class NarrowCleanupLockTests(unittest.TestCase):
     def test_observer_stop_refusal_without_card_reader_preserves_workspace(self):
         _, path, record = self.fixture.observer()
         self.fixture.stop_failure = True
-        owner = cleanup.CleanupOwner(SimpleNamespace(
-            data_dir=self.data, host=self.fixture.host, sprints=self.fixture.runtime.sprints))
+        owner = cleanup.CleanupOwner(
+            SimpleNamespace(data_dir=self.data, host=self.fixture.host, sprints=self.fixture.runtime.sprints)
+        )
         result = owner.cleanup_observer(record)
         self.assertEqual(result["status"], "pending")
         self.assertIn("simulated stop failure", result["reason"])
@@ -670,7 +793,10 @@ class NarrowCleanupLockTests(unittest.TestCase):
         self.assertFalse(active)
         client.call.assert_called_once_with("lockOwnershipReference", reference="sprint:1", observer=True)
         current["status"] = "closed"
-        with self.assertRaisesRegex(OwnershipChanged, "launch ownership changed"), owner.admission(task, launch=True):
+        with (
+            self.assertRaisesRegex(OwnershipChanged, "launch ownership changed"),
+            owner.admission(task, launch=True),
+        ):
             self.fail("changed sprint admitted")
 
 
@@ -691,10 +817,14 @@ class TickPhaseLockTests(unittest.TestCase):
             with original(name):
                 yield
 
-        with mock.patch.object(production, "tick_phase", phase), \
-                mock.patch.object(production, "_production_mutation_guard", return_value=None):
+        with (
+            mock.patch.object(production, "tick_phase", phase),
+            mock.patch.object(production, "_production_mutation_guard", return_value=None),
+        ):
             result = production.production_tick(fixture.runtime)
         self.assertEqual(result["errors"], [])
-        self.assertTrue({"snapshot", "fence", "reconcile_production", "advance_active", "after-merge", "launches"}
-                        <= set(phases))
+        self.assertTrue(
+            {"snapshot", "fence", "reconcile_production", "advance_active", "after-merge", "launches"}
+            <= set(phases)
+        )
         self.assertNotIn("checkpoint", phases)
