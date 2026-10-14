@@ -190,7 +190,7 @@ def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
     module = _module_of(relative)
     package = module if relative.endswith("__init__.py") else module.rpartition(".")[0]
     found: list[tuple[int, str]] = []
-    for node in source_trees.walk(tree):
+    for node in source_trees.imports(tree):
         if isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name) for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
@@ -218,7 +218,11 @@ def _board_fake_offenders(relative: str, source: str) -> list[str]:
     offenders = []
     if relative == "src/ummanu/board/fake.py":
         offenders.append(f"{relative}: retired product location")
-    for node in source_trees.walk(tree):
+    # Imports need only statement traversal. A full expression walk is needed
+    # only when a host class or a dynamic import/patch call can be spelled here.
+    classes = "class" in source and source_trees.may_name(source, ("FakeBoardHost", "MemoryAudit"))
+    calls = source_trees.may_name(source, ("import_module", "__import__", "patch"))
+    for node in source_trees.walk(tree) if classes or calls else ():
         if isinstance(node, ast.ClassDef) and (
             (node.name == "FakeBoardHost" and relative != "tests/fakes/board.py")
             or (product and node.name == "MemoryAudit")
@@ -473,6 +477,23 @@ class NoOrcaInSourceTests(unittest.TestCase):
 
 
 class SourceLayoutTests(unittest.TestCase):
+    def test_board_double_static_imports_need_no_expression_walk(self) -> None:
+        for source, expected in (
+            ("from ummanu.board.models import Event\nVALUE = sum(range(100))\n", []),
+            ("from ummanu.board.fake import MemoryAudit\n", [
+                "src/ummanu/probe.py:1: ummanu.board.fake",
+                "src/ummanu/probe.py:1: ummanu.board.fake.MemoryAudit",
+            ]),
+            ("if True:\n    from tests.fakes import board\n", [
+                "src/ummanu/probe.py:2: tests.fakes",
+                "src/ummanu/probe.py:2: tests.fakes.board",
+            ]),
+        ):
+            with self.subTest(source=source), mock.patch.object(
+                source_trees, "walk", side_effect=AssertionError("unnecessary expression walk")
+            ):
+                self.assertEqual(_board_fake_offenders("src/ummanu/probe.py", source), expected)
+
     def test_board_double_has_one_test_owner_and_no_product_dependency(self) -> None:
         self.assertFalse((ROOT / "src/ummanu/board/fake.py").exists())
         owner = ROOT / "tests/fakes/board.py"
