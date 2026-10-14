@@ -537,7 +537,11 @@ class TheBlockingFlowItReplacesTests(HandoffTestCase):
 
     def blocking(self, run: HeadRun) -> float:
         started = self.clock.now
-        with mock.patch("ummanu.runtime.local_pty_head.time", self.clock):
+        with (
+            mock.patch("ummanu.runtime.local_pty_head.time", self.clock),
+            mock.patch("ummanu.runtime.local_pty_handoff.time", self.clock),
+            mock.patch("ummanu.runtime.local_pty_delivery.time", self.clock),
+        ):
             receipt = self.runtime().deliver(run, POINTER, subject=SUBJECT, transport=Transport())
         self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
         return self.clock.now - started

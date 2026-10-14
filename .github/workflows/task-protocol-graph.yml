@@ -55,6 +55,9 @@ on:
       - src/ummanu/product_issue_commands.py
       - src/ummanu/restore_commands.py
       - src/ummanu/runtime/paths.py
+      - src/ummanu/runtime/local_pty_*.py
+      - tests/test_local_pty_backend_owners.py
+      - tests/support/local_pty_owners.py
       - src/ummanu/secret_commands.py
       - src/ummanu/sprint_commands.py
       - src/ummanu/task_commands.py
