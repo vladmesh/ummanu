@@ -22,7 +22,15 @@ from ummanu.board.e2e_budget import (
     SPRINT_E2E_USED,
 )
 from ummanu.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD
-from ummanu.board.sql_rows import epoch as _epoch, grouped as _grouped, now as _now, rfc3339
+from ummanu.board.sql_rows import (
+    board_row,
+    comment_marker,
+    comment_row,
+    epoch as _epoch,  # noqa: F401 - the independent bulk-read oracle imports this name
+    grouped as _grouped,
+    now as _now,
+    rfc3339,
+)
 
 
 def _rfc3339(value: datetime | None) -> str:
@@ -79,21 +87,34 @@ class SqlSprintRecords:
     @staticmethod
     def _row(values: tuple[Any, ...]) -> dict[str, Any]:
         reference, board_key, goal, created, updated = values
-        return {
-            "id": int(board_key), "reference": str(reference), "title": str(goal),
-            "description": "", "column_id": 1, "position": 0, "swimlane_id": 0,
-            "date_creation": _epoch(created), "date_modification": _epoch(updated), "is_active": 1,
-        }
+        return board_row(
+            id=int(board_key),
+            reference=str(reference),
+            title=str(goal),
+            description="",
+            column_id=1,
+            position=0,
+            swimlane_id=0,
+            created=created,
+            updated=updated,
+            is_active=1,
+        )
 
     @staticmethod
     def _staged_row(key: int, row: dict[str, Any]) -> dict[str, Any]:
         created = row["created_at"]
-        return {
-            "id": key, "reference": row["reference"], "title": row["title"],
-            "description": row.get("description", ""), "column_id": 1, "position": 0,
-            "swimlane_id": 0, "date_creation": _epoch(created),
-            "date_modification": _epoch(created), "is_active": 1,
-        }
+        return board_row(
+            id=key,
+            reference=row["reference"],
+            title=row["title"],
+            description=row.get("description", ""),
+            column_id=1,
+            position=0,
+            swimlane_id=0,
+            created=created,
+            updated=created,
+            is_active=1,
+        )
 
     def row_by_reference(self, reference: str) -> dict[str, Any] | None:
         key = sprint_key(reference)
@@ -661,7 +682,7 @@ class SqlSprintRecords:
         ))
         return {
             key: [
-                {"id": identifier, "date_creation": _epoch(created), "comment": body}
+                comment_row(identifier, body, created)
                 for identifier, body, created in comments.get(references[key], [])
             ]
             for key in keys
@@ -669,8 +690,7 @@ class SqlSprintRecords:
 
     def create_comment(self, task_id: int, content: str, *, created_at: Any = None) -> int:
         reference = self._reference(int(task_id))
-        first = content.splitlines()[0] if content else ""
-        marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
+        marker = comment_marker(content)
         claimed = self._request(reference)
         request_id = claimed[0] if claimed else None
         actor = claimed[1].get("actor", {}) if claimed else {}

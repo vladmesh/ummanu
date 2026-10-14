@@ -12,6 +12,7 @@ form.  Older writers left `+00:00` and fractional seconds behind, so every reade
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
@@ -68,4 +69,62 @@ def grouped(rows: Iterable[tuple[Any, ...]]) -> dict[Any, list[Any]]:
     return groups
 
 
-__all__ = ["epoch", "grouped", "now", "parse_rfc3339", "rfc3339"]
+def board_row(
+    *,
+    id: Any,
+    reference: Any,
+    title: Any,
+    description: Any,
+    column_id: Any,
+    position: Any,
+    swimlane_id: Any,
+    created: datetime | None,
+    updated: datetime | None,
+    is_active: Any,
+    moved: datetime | None = None,
+) -> dict[str, Any]:
+    """The board shape, with identity, coercions and state already chosen by the adapter.
+
+    Supplied times use the board's whole-second spelling. An undated column move has no
+    key: inventing a creation-time substitute would give retention an unobserved episode.
+    """
+    row = {
+        "id": id,
+        "reference": reference,
+        "title": title,
+        "description": description,
+        "column_id": column_id,
+        "position": position,
+        "swimlane_id": swimlane_id,
+        "date_creation": epoch(created),
+        "date_modification": epoch(updated),
+    }
+    if moved is not None:
+        row["date_moved"] = epoch(moved)
+    row["is_active"] = is_active
+    return row
+
+
+def comment_row(identifier: Any, body: Any, created: datetime | None) -> dict[str, Any]:
+    """A comment in board order, retaining the supplied id and body."""
+    return {"id": identifier, "date_creation": epoch(created), "comment": body}
+
+
+def comment_marker(content: str) -> str | None:
+    """The bracketed first line, including an empty marker and its original whitespace."""
+    first = content.splitlines()[0] if content else ""
+    return first[1:-1] if first.startswith("[") and first.endswith("]") else None
+
+
+def json_document(value: Any) -> Any:
+    """Keep a decoded dict's identity; otherwise decode the stored JSON or empty document.
+
+    JSON scalars and arrays, and decoder failures, remain the caller's existing concern.
+    """
+    return value if isinstance(value, dict) else json.loads(value or "{}")
+
+
+__all__ = [
+    "board_row", "comment_marker", "comment_row", "epoch", "grouped", "json_document",
+    "now", "parse_rfc3339", "rfc3339",
+]
