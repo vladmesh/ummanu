@@ -21,6 +21,9 @@ on:
       - tests/test_host_owners.py
       - tests/support/host_owners.py
       - tests/config_dependencies.py
+      - src/ummanu/board/models.py
+      - src/ummanu/board/attempt_outcome.py
+      - tests/test_attempt_outcome_payload.py
       - src/ummanu/board/fake.py
       - tests/fakes/board.py
       - tests/test_architecture.py
