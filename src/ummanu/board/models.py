@@ -12,11 +12,18 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, ClassVar, TypeAlias
 
+from ummanu.board.attempt_outcome import (
+    ATTEMPT_OUTCOME_BLOCKED_REASONS as ATTEMPT_OUTCOME_BLOCKED_REASONS,
+    ATTEMPT_OUTCOME_COMPLETENESS as ATTEMPT_OUTCOME_COMPLETENESS,
+    ATTEMPT_OUTCOME_DISPOSITIONS as ATTEMPT_OUTCOME_DISPOSITIONS,
+    ATTEMPT_OUTCOME_VERDICTS as ATTEMPT_OUTCOME_VERDICTS,
+    validate_attempt_outcome_data,
+)
 from ummanu.board.roles import Role
 from ummanu.board.sql_rows import parse_rfc3339, rfc3339
 from ummanu.board.terminal_taxonomy import (
-    BLOCKED_REASONS,
-    TERMINAL_DISPOSITIONS,
+    BLOCKED_REASONS as BLOCKED_REASONS,
+    TERMINAL_DISPOSITIONS as TERMINAL_DISPOSITIONS,
     read_terminal_taxonomy,
 )
 
@@ -105,12 +112,6 @@ ATTEMPT_USAGE_ACCOUNTS = ("tokens", "session_totals", "phase_baseline")
 
 ATTEMPT_USAGE_ROLES = ("worker", "reviewer")
 ATTEMPT_USAGE_PHASES = ("worker", "review")
-
-ATTEMPT_OUTCOME_VERDICTS = ("green", "red", "blocked", "missing", "legacy")
-# Compatibility exports; the terminal taxonomy owns these vocabularies.
-ATTEMPT_OUTCOME_DISPOSITIONS = TERMINAL_DISPOSITIONS
-ATTEMPT_OUTCOME_BLOCKED_REASONS = BLOCKED_REASONS
-ATTEMPT_OUTCOME_COMPLETENESS = ("collected", "degraded", "missing", "legacy")
 
 
 class ProductState(StrEnum):
@@ -695,103 +696,12 @@ def _validate_attempt_outcome_event(
     entity_kind: EntityKind,
     data: dict[str, Any],
 ) -> None:
-    """Validate the sealed v1 attempt outcome without interpreting lifecycle state.
-
-    Keeping this at the normal typed-event boundary means an unknown version or
-    enum cannot silently become analytics data, while generic and older typed
-    records retain their released readers.
-    """
+    """Retain the Event kind/subject boundary before checking shared outcome facts."""
     if kind is not EventKind.ATTEMPT_OUTCOME:
         return
     if entity_kind is not EntityKind.CARD:
         raise ValueError("attempt outcome events require a Card subject")
-    required = {
-        "version",
-        "attempt_id",
-        "attempt",
-        "report_generation",
-        "sprint_ref",
-        "specification_revision",
-        "terminal_state",
-        "verdict",
-        "disposition",
-        "blocked_reason",
-        "source_event_ids",
-        "usage_completeness",
-    }
-    version = data.get("version")
-    if version == 1:
-        expected = required
-    elif version == 2:
-        expected = required | {"lineage_required"}
-    else:
-        raise ValueError("unsupported attempt outcome version")
-    if set(data) != expected:
-        raise ValueError(f"attempt outcome v{version} has an unsupported field set")
-    for name in ("attempt_id",):
-        value = data[name]
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"attempt outcome requires a non-empty {name}")
-    for name in ("attempt", "report_generation"):
-        value = data[name]
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            raise ValueError(f"attempt outcome requires a positive {name}")
-    for name in ("sprint_ref", "specification_revision"):
-        value = data[name]
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise ValueError(f"attempt outcome {name} must be a non-empty string or null")
-    if data["terminal_state"] not in {"done", "blocked", "in_progress"}:
-        raise ValueError("attempt outcome terminal state must be done, blocked or in_progress")
-    if data["verdict"] not in ATTEMPT_OUTCOME_VERDICTS:
-        raise ValueError("attempt outcome verdict is unsupported")
-    if data["disposition"] not in ATTEMPT_OUTCOME_DISPOSITIONS:
-        raise ValueError("attempt outcome disposition is unsupported")
-    blocked_reason = data["blocked_reason"]
-    if blocked_reason is not None and blocked_reason not in ATTEMPT_OUTCOME_BLOCKED_REASONS:
-        raise ValueError("attempt outcome blocked reason is unsupported")
-    if (data["disposition"] == "blocked") != (blocked_reason is not None):
-        raise ValueError("attempt outcome blocked reason is present exactly for blocked disposition")
-    refs = data["source_event_ids"]
-    if not isinstance(refs, dict) or set(refs) != {
-        "report",
-        "verdict",
-        "decision",
-        "effect",
-        "worker_usage",
-        "review_usage",
-    }:
-        raise ValueError("attempt outcome source_event_ids are incomplete")
-    for name, value in refs.items():
-        if value is not None and (not isinstance(value, str) or not value.strip()):
-            raise ValueError(f"attempt outcome source event {name} must be a non-empty string or null")
-    completeness = data["usage_completeness"]
-    if not isinstance(completeness, dict) or set(completeness) != {"worker", "review"}:
-        raise ValueError("attempt outcome usage completeness is incomplete")
-    for role in ("worker", "review"):
-        state = completeness[role]
-        if state not in ATTEMPT_OUTCOME_COMPLETENESS:
-            raise ValueError(f"attempt outcome {role} completeness is unsupported")
-        usage_ref = refs[f"{role}_usage"]
-        if state in {"collected", "degraded"} and usage_ref is None:
-            raise ValueError(f"attempt outcome {role} completeness requires its usage event ref")
-        if state in {"missing", "legacy"} and usage_ref is not None:
-            raise ValueError(f"attempt outcome {role} missingness carries no usage event ref")
-    if version != 2:
-        return
-    required_lineage = data["lineage_required"]
-    expected_lineage = {
-        "specification_revision",
-        "report",
-        "verdict",
-        "decision",
-        "effect",
-        "worker_usage",
-        "review_usage",
-    }
-    if not isinstance(required_lineage, dict) or set(required_lineage) != expected_lineage:
-        raise ValueError("attempt outcome lineage requiredness is incomplete")
-    if not all(isinstance(value, bool) for value in required_lineage.values()):
-        raise ValueError("attempt outcome lineage requiredness must be boolean")
+    validate_attempt_outcome_data(data)
 
 
 def _validate_terminal_taxonomy_event(
