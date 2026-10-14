@@ -7,7 +7,7 @@ is the live `<workspaces>/ummanu/pipeline/state/pipeline`, an operator holding a
 freeze on the host running the suite turns `runtime/dispatch._pipeline_paused()` true
 and every dispatch test quietly takes the "pipeline paused — no dispatch" branch
 instead of the lifecycle branch it asserts about. `tests/__init__.py` closes that by
-claiming a throwaway `TA_PIPELINE_STATE_DIR` for the whole run (secretary-1403).
+claiming a throwaway `UMMANU_PIPELINE_STATE_DIR` for the whole run (secretary-1403).
 
 These tests hold both ends of that seam: the default is in force and points somewhere
 this run owns, and the pause read itself still works — a suite that simply stopped
@@ -26,11 +26,9 @@ from pathlib import Path
 from unittest import mock
 
 import tests
-from ummanu.automations.agents.pipeline import pause as pipeline_pause
-from ummanu.automations.agents.pipeline import state as pipeline_state
+from ummanu.automations.agents.pipeline import pause as pipeline_pause, state as pipeline_state
 from ummanu.automations.runtime import dispatch
-from ummanu.runtime import shared_state
-from ummanu.runtime import state as runtime_state
+from ummanu.runtime import shared_state, state as runtime_state
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -54,7 +52,7 @@ def _write_production_like_state_dir(root: Path) -> Path:
 
 class SuitePipelineStateDirTests(unittest.TestCase):
     def test_the_suite_owns_the_pipeline_state_dir_it_resolved_at_import(self) -> None:
-        suite_dir = Path(os.environ["TA_PIPELINE_STATE_DIR"])
+        suite_dir = Path(os.environ["UMMANU_PIPELINE_STATE_DIR"])
         self.assertEqual(suite_dir, tests._SUITE_PIPELINE_STATE_DIR)
         self.assertEqual(shared_state.resolve_pipeline_state_dir(), suite_dir)
         # The import-time bindings, not just a fresh resolve: these are what dispatch reads.
@@ -71,12 +69,12 @@ class SuitePipelineStateDirTests(unittest.TestCase):
                 self.assertFalse(pipeline_pause.is_paused())
 
     def test_the_suite_default_replaces_an_ambient_override_from_the_operators_shell(self) -> None:
-        """A worker/reviewer shell exports the live installation's TA_PIPELINE_STATE_DIR. Importing
+        """A worker/reviewer shell exports the live installation's UMMANU_PIPELINE_STATE_DIR. Importing
         `tests` has to take that path away, so the check runs in a child process that inherits one."""
         with tempfile.TemporaryDirectory() as tmp:
             frozen = _write_production_like_state_dir(Path(tmp) / "workspaces")
             env = dict(os.environ)
-            env["TA_PIPELINE_STATE_DIR"] = str(frozen)
+            env["UMMANU_PIPELINE_STATE_DIR"] = str(frozen)
             env["PYTHONPATH"] = os.pathsep.join(
                 [str(_REPO_ROOT / "src"), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
             )
@@ -87,6 +85,7 @@ class SuitePipelineStateDirTests(unittest.TestCase):
             )
             done = subprocess.run(
                 [sys.executable, "-c", probe],
+                check=False,
                 cwd=str(_REPO_ROOT),
                 env=env,
                 capture_output=True,
@@ -118,7 +117,7 @@ class TriggeredDispatchIgnoresAProductionFreezeTests(unittest.TestCase):
         self.state_root = Path(self.tmp.name) / "state"
         self.workspace = str(Path(self.tmp.name) / "workspace")
         Path(self.workspace).mkdir()
-        env = mock.patch.dict(os.environ, {"TA_STATE": str(self.state_root)})
+        env = mock.patch.dict(os.environ, {"UMMANU_STATE": str(self.state_root)})
         env.start()
         self.addCleanup(env.stop)
         state_root_patch = mock.patch.object(runtime_state, "STATE_ROOT", self.state_root)

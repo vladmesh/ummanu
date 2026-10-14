@@ -45,7 +45,7 @@ from pathlib import Path
 import tests.broad
 
 print("tests-imported=%s" % ("tests" in sys.modules))
-print("patched=%s" % Path(os.environ.get("TA_PIPELINE_STATE_DIR", "")).name.startswith(
+print("patched=%s" % Path(os.environ.get("UMMANU_PIPELINE_STATE_DIR", "")).name.startswith(
     "ummanu-tests-pipeline-state."
 ))
 print("no-test-module-imported=%s" % (not any(

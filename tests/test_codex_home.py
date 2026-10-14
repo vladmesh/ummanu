@@ -1,6 +1,6 @@
 """Which CODEX_HOME a Codex head runs with, resolved at launch (secretary-1710, secretary-1723).
 
-The resolver has three rungs: the profile's `codex_home`, `TA_CODEX_HOME`, and
+The resolver has three rungs: the profile's `codex_home`, `UMMANU_CODEX_HOME`, and
 `<data_dir>/codex-home` when it holds a login (a non-empty `auth.json`). With none of them it fails
 closed with `CodexHomeLoginMissing`, whose message names the fix; the legacy Orca home it used to
 fall back to is gone (A20 step 7). Nothing here reads or writes the live homes: every data dir and
@@ -41,7 +41,8 @@ RESOLVERS = {"codex_home", "resolve_codex_home"}
 
 
 def _without(*names: str) -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if key not in names}
+    excluded = {*names, *("TA_" + name.removeprefix("UMMANU_") for name in names if name.startswith("UMMANU_"))}
+    return {key: value for key, value in os.environ.items() if key not in excluded}
 
 
 class ResolverOrderTests(unittest.TestCase):
@@ -51,9 +52,9 @@ class ResolverOrderTests(unittest.TestCase):
         self.data_dir = Path(tmp.name) / "data"
         self.data_home = self.data_dir / "codex-home"
         self.data_home.mkdir(parents=True)
-        # The suite pins TA_CODEX_HOME for every test; the lower rungs are only reachable without it.
+        # The suite pins UMMANU_CODEX_HOME for every test; the lower rungs are only reachable without it.
         env = mock.patch.dict(
-            os.environ, _without("TA_CODEX_HOME", "UMMANU_DATA_DIR", "UMMANU_INSTANCE"), clear=True
+            os.environ, _without("UMMANU_CODEX_HOME", "UMMANU_DATA_DIR", "UMMANU_INSTANCE"), clear=True
         )
         env.start()
         self.addCleanup(env.stop)
@@ -63,13 +64,13 @@ class ResolverOrderTests(unittest.TestCase):
 
     def test_the_profile_home_wins_over_every_other_rung(self) -> None:
         self.log_in()
-        os.environ["TA_CODEX_HOME"] = "/tmp/env-home"
+        os.environ["UMMANU_CODEX_HOME"] = "/tmp/env-home"
         home = resolve_codex_home({"codex_home": "/tmp/profile-home"}, data_dir=self.data_dir)
         self.assertEqual((home.path, home.kind), ("/tmp/profile-home", CODEX_HOME_PROFILE))
 
-    def test_ta_codex_home_wins_over_a_logged_in_data_dir_home(self) -> None:
+    def test_canonical_codex_home_wins_over_a_logged_in_data_dir_home(self) -> None:
         self.log_in()
-        os.environ["TA_CODEX_HOME"] = "/tmp/env-home"
+        os.environ["UMMANU_CODEX_HOME"] = "/tmp/env-home"
         home = resolve_codex_home({}, data_dir=self.data_dir)
         self.assertEqual((home.path, home.kind), ("/tmp/env-home", CODEX_HOME_ENV))
 
@@ -190,11 +191,11 @@ class ResolverOrderTests(unittest.TestCase):
         os.environ["UMMANU_DATA_DIR"] = str(self.data_dir)
         # With no login there is no current home, and a reader still scans rather than raising.
         self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], self.data_home / "sessions")
-        os.environ["TA_CODEX_HOME"] = str(self.data_dir.parent / "env-home")
+        os.environ["UMMANU_CODEX_HOME"] = str(self.data_dir.parent / "env-home")
         self.assertEqual(
             pipeline_codex_sessions.sessions_roots()[0], self.data_dir.parent / "env-home" / "sessions"
         )
-        os.environ.pop("TA_CODEX_HOME")
+        os.environ.pop("UMMANU_CODEX_HOME")
         self.log_in()
         self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], self.data_home / "sessions")
 
@@ -221,11 +222,11 @@ class LiveSessionCutoverTests(unittest.TestCase):
             os.environ,
             {
                 **_without(
-                    "TA_CODEX_HOME",
+                    "UMMANU_CODEX_HOME",
                     "UMMANU_INSTANCE",
                     "TA_CODEX_SESSIONS",
                     "UMMANU_CODEX_SESSIONS",
-                    "TA_CODEX_SESSIONS_DIR",
+                    "UMMANU_CODEX_SESSIONS_DIR",
                 ),
                 "HOME": str(self.home),
                 "UMMANU_DATA_DIR": str(self.data_dir),
@@ -304,11 +305,11 @@ class LiveSessionCutoverTests(unittest.TestCase):
         self.log_in()
         override = self.root / "override"
         override.mkdir()
-        os.environ["TA_CODEX_SESSIONS"] = str(override)
+        os.environ["UMMANU_CODEX_SESSIONS"] = str(override)
         self.assertEqual(pipeline_codex_sessions.sessions_roots(), [override])
         self.assertEqual(dispatcher_tui._sessions_roots(), [override])
-        os.environ.pop("TA_CODEX_SESSIONS")
-        os.environ["UMMANU_CODEX_SESSIONS"] = str(override)
+        os.environ.pop("UMMANU_CODEX_SESSIONS")
+        os.environ["TA_CODEX_SESSIONS"] = str(override)
         self.assertEqual(dispatcher_tui._sessions_roots(), [override])
         with mock.patch.object(discover, "CODEX_SESSIONS", override):
             self.rollout(self.data_home, "data-head", turn_at=datetime.now(UTC))

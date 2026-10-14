@@ -13,6 +13,7 @@ import sys
 import time
 from collections.abc import Callable
 
+from ummanu.infra.env import env_value
 from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 from ummanu.web.provider_usage import ProviderUsageLayer
@@ -53,7 +54,7 @@ def add_web_serve_subcommands(subparsers) -> None:
     group.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port to bind")
     group.add_argument(
         "--heads-registry",
-        default=os.environ.get("TA_HEADS_REGISTRY"),
+        default=env_value("UMMANU_HEADS_REGISTRY"),
         help="read head profiles from this registry instead of the installation's own",
     )
     group.add_argument(

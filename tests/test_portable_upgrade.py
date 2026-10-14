@@ -1465,7 +1465,7 @@ class InstallationOwnerTests(PortableFixture):
     def test_a_configured_workspaces_root_still_wins_over_the_owners_home(self) -> None:
         elsewhere = self.root / "elsewhere"
 
-        with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(elsewhere)}):
+        with mock.patch.dict(os.environ, {"UMMANU_WORKSPACES_ROOT": str(elsewhere)}):
             roots = upgrade.workspaces_root(self.home)
 
         self.assertEqual(roots, elsewhere)

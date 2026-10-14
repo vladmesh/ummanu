@@ -19,6 +19,7 @@ from ummanu.dispatch.worker_lifecycle import (
     ContinuationProviderCondition,
     head_run_binding,
 )
+from ummanu.infra.env import env_value
 from ummanu.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,
@@ -665,7 +666,7 @@ def _claude_session_paths_for(workspace: str):
 
 
 def _claude_projects_root() -> Path:
-    configured = os.environ.get("UMMANU_CLAUDE_PROJECTS") or os.environ.get("TA_CLAUDE_PROJECTS")
+    configured = env_value("UMMANU_CLAUDE_PROJECTS", nonempty=True)
     return Path(configured) if configured else Path.home() / ".claude" / "projects"
 
 
@@ -690,9 +691,9 @@ def _session_paths_for(workspace: str, *, session_root: Path | None = None):
 
 
 def _sessions_roots() -> list[Path]:
-    """`UMMANU_CODEX_SESSIONS`/`TA_CODEX_SESSIONS` alone when set, else every home a live Codex
+    """`UMMANU_CODEX_SESSIONS` (legacy `TA_CODEX_SESSIONS`) alone when set, else every home a live Codex
     head may be writing into (`codex_home.session_roots`), not only the current one."""
-    root = os.environ.get("UMMANU_CODEX_SESSIONS") or os.environ.get("TA_CODEX_SESSIONS")
+    root = env_value("UMMANU_CODEX_SESSIONS", nonempty=True)
     if root:
         return [Path(root)]
     return session_roots()
@@ -760,7 +761,7 @@ def _record_timestamp(record: dict[str, Any]) -> float | None:
     if not isinstance(raw, str) or not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        return datetime.fromisoformat(raw).timestamp()
     except ValueError:
         return None
 

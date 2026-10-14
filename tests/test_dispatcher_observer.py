@@ -5966,7 +5966,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
             os.environ,
             {
                 "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
-                "TA_CODEX_HOME": str(self.codex_home),
+                "UMMANU_CODEX_HOME": str(self.codex_home),
                 "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
             },
         )

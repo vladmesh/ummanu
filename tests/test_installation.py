@@ -679,7 +679,7 @@ class InstallationTests(unittest.TestCase):
     def test_pipeline_state_path_honors_the_dispatcher_override(self):
         with tempfile.TemporaryDirectory() as temporary:
             override = Path(temporary) / "overridden-pipeline-state"
-            with mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(override)}):
+            with mock.patch.dict(os.environ, {"UMMANU_PIPELINE_STATE_DIR": str(override)}):
                 self.assertEqual(pipeline_state_path(Path(temporary) / "home"), override)
 
     def test_pipeline_state_materialization_refuses_to_overwrite_different_live_history(self):

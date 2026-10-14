@@ -250,14 +250,14 @@ class RecoveryInventoryTests(unittest.TestCase):
             instance, report = self.fixture(root)
             workspaces = root / "workspaces"
             canonical = workspaces / "ummanu" / "pipeline" / "state" / "pipeline"
-            bound = {"UMMANU_INSTANCE": str(instance), "TA_WORKSPACES_ROOT": str(workspaces)}
+            bound = {"UMMANU_INSTANCE": str(instance), "UMMANU_WORKSPACES_ROOT": str(workspaces)}
             with mock.patch.dict(os.environ, bound, clear=True):
                 declared = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
-            with mock.patch.dict(os.environ, {**bound, "TA_PIPELINE_STATE_DIR": str(canonical)}, clear=True):
+            with mock.patch.dict(os.environ, {**bound, "UMMANU_PIPELINE_STATE_DIR": str(canonical)}, clear=True):
                 matching = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
             with mock.patch.dict(
                 os.environ,
-                {**bound, "TA_PIPELINE_STATE_DIR": str(root / "other-state")},
+                {**bound, "UMMANU_PIPELINE_STATE_DIR": str(root / "other-state")},
                 clear=True,
             ):
                 conflicting = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
@@ -315,7 +315,7 @@ class RecoveryInventoryTests(unittest.TestCase):
                 "HOME": str(root / "home"),
                 "UMMANU_INSTANCE": str(instance),
                 "UMMANU_RUNTIME_ENV_FILE": str(runtime),
-                "TA_PIPELINE_STATE_DIR": str(root / "run-state"),
+                "UMMANU_PIPELINE_STATE_DIR": str(root / "run-state"),
             }
             with (
                 mock.patch.dict(os.environ, bound_env, clear=True),

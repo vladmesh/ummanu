@@ -377,7 +377,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             catalog = object.__new__(InstanceCatalog)
             catalog._heads = {"profiles": {"claude-opus-high": profile}}  # type: ignore[attr-defined]
-            env = {**LAUNCH_ENV, "TA_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}
+            env = {**LAUNCH_ENV, "UMMANU_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}
             with mock.patch.dict(os.environ, env, clear=True):
                 launch = catalog.head_launch(  # type: ignore[attr-defined]
                     "claude-opus-high",

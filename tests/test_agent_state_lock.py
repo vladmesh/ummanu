@@ -54,7 +54,7 @@ class AgentStateLockTest(unittest.TestCase):
         self.state_dir = self.root / "curator"
         self.state = AgentState("curator", state_dir=self.state_dir)
         self.state.ensure_dir()
-        self.env = dict(os.environ, TA_STATE=str(self.root), PYTHONPATH=str(SRC))
+        self.env = dict(os.environ, UMMANU_STATE=str(self.root), PYTHONPATH=str(SRC))
         self.children: list[subprocess.Popen] = []
         self.addCleanup(self._reap)
 

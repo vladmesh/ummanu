@@ -469,7 +469,7 @@ class ShellWithoutAnExportedInstallationTests(Fixture):
         login.parent.mkdir(parents=True)
         login.write_text('{"token": "fixture"}\n', encoding="utf-8")
         # Nothing in the process env names an installation, a Codex home or a runtime env file.
-        named = ("UMMANU_INSTANCE", "UMMANU_DATA_DIR", "TA_CODEX_HOME", *role_env.RUNTIME_ENV_FILE_ENVS)
+        named = ("UMMANU_INSTANCE", "UMMANU_DATA_DIR", "UMMANU_CODEX_HOME", *role_env.RUNTIME_ENV_FILE_ENVS)
         environ = {key: value for key, value in os.environ.items() if key not in named}
         environ.update({"HOME": str(self.home), head_registry.REGISTRY_ENV: str(head_registry.HEADS_TOML)})
         for patcher in (

@@ -19,6 +19,7 @@ import os
 from typing import Any
 
 from ummanu.cli_output import print_error, usage_handler
+from ummanu.infra.env import env_value
 from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument
 from ummanu.webproto.command_reads import CommandReadLayer
@@ -294,7 +295,7 @@ def _run_common(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--heads-registry",
-        default=os.environ.get("TA_HEADS_REGISTRY"),
+        default=env_value("UMMANU_HEADS_REGISTRY"),
         help="read head profiles from this registry instead of the installation's own",
     )
     parser.add_argument(

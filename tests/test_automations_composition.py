@@ -277,7 +277,7 @@ class ModuleEntryTests(unittest.TestCase):
                 env = {
                     "PATH": "/usr/bin:/bin",
                     "HOME": str(root / "home"),
-                    "TA_STATE": str(root / "state"),
+                    "UMMANU_STATE": str(root / "state"),
                     "UMMANU_INSTANCE": str(root / "instance"),
                     "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
                 }
@@ -300,7 +300,7 @@ class UmmanuCliEntryTests(unittest.TestCase):
         return {
             "PATH": "/usr/bin:/bin",
             "HOME": str(root / "home"),
-            "TA_STATE": str(root / "state"),
+            "UMMANU_STATE": str(root / "state"),
             "UMMANU_INSTANCE": str(root / "instance"),
             "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
         }

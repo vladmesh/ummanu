@@ -469,7 +469,7 @@ class AgentSpecsTests(unittest.TestCase):
         home = Path("/home/owner")
         workspaces = home / "orca" / "workspaces" / "ummanu"
         with mock.patch.dict(os.environ):
-            os.environ.pop("TA_WORKSPACES_ROOT", None)
+            os.environ.pop("UMMANU_WORKSPACES_ROOT", None)
             worktrees = upgrade.desired_role_worktrees(product, home)
         self.assertEqual(
             worktrees, [workspaces / name for name in ("curator", "pipeline", "retro", "steward")]
@@ -1425,7 +1425,7 @@ class UpgradeStepTests(unittest.TestCase):
             )
             subprocess.run(["git", "-C", str(product), "remote", "add", "origin", str(product)], check=True)
 
-            with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root / "workspaces")}):
+            with mock.patch.dict(os.environ, {"UMMANU_WORKSPACES_ROOT": str(root / "workspaces")}):
                 result = upgrade.step_worktrees(self.context(FakeUnitInstaller(), product_root=product))
                 again = upgrade.step_worktrees(self.context(FakeUnitInstaller(), product_root=product))
 
@@ -1459,7 +1459,7 @@ class UpgradeStepTests(unittest.TestCase):
 
             with (
                 mock.patch.dict(
-                    os.environ, {"TA_WORKSPACES_ROOT": str(root / "home" / "orca" / "workspaces")}
+                    os.environ, {"UMMANU_WORKSPACES_ROOT": str(root / "home" / "orca" / "workspaces")}
                 ),
                 mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
                 mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
@@ -2014,7 +2014,7 @@ class PipelineStateStepTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.instance = self.root / "instance"
         self.state_dir = self.root / "home" / "pipeline" / "state" / "pipeline"
-        patcher = mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(self.state_dir)})
+        patcher = mock.patch.dict(os.environ, {"UMMANU_PIPELINE_STATE_DIR": str(self.state_dir)})
         patcher.start()
         self.addCleanup(patcher.stop)
 

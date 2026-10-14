@@ -20,16 +20,16 @@ Two hard rules, both from review 373:
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
+from ummanu.infra.env import env_value
 from ummanu.runtime.codex_home import session_roots
 
 
 def sessions_roots() -> list[Path]:
-    """Where Codex heads write their rollouts: `TA_CODEX_SESSIONS` alone when set, else every home
+    """Where Codex heads write their rollouts: `UMMANU_CODEX_SESSIONS` alone when set, else every home
     a live head may be writing into (`codex_home.session_roots`), not only the current one."""
-    configured = os.environ.get("TA_CODEX_SESSIONS")
+    configured = env_value("UMMANU_CODEX_SESSIONS", nonempty=True)
     return [Path(configured)] if configured else session_roots()
 
 

@@ -440,7 +440,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             self.assertEqual(vanished_state["tick_telemetry"]["incident_total"], 1)
             self.assertEqual(vanished_state["tick_telemetry"]["incident"]["unhealthy_ticks"], 2)
 
-            with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(state_path)}):
+            with mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(state_path)}):
                 problems, _detail = health._pipeline_status()
                 self.assertTrue(any("workspace_targeted_editable" in problem for problem in problems))
                 telemetry = production_telemetry.read()
@@ -485,7 +485,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             record_tick_telemetry(payload, {"status": "ok", "step": "production-tick"})
             state_path.write_text(json.dumps(payload), encoding="utf-8")
 
-            with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(state_path)}):
+            with mock.patch.dict(os.environ, {"UMMANU_PRODUCTION_STATE": str(state_path)}):
                 self.assertEqual(health._pipeline_status()[0], [])
                 with mock.patch.object(steward_signals, "STATE", steward_state):
                     hits, _pending = steward_signals._pipeline_tick_signals(dict(mark, **pending))

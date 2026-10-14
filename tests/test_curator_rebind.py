@@ -68,7 +68,7 @@ class CuratorRebindTests(unittest.TestCase):
             mock.patch.object(cli.discover, "codex_sessions", return_value=[]),
             mock.patch.object(cli.discover, "hermes_sessions", return_value=[]),
             mock.patch.object(cli.discover, "all_memory_files", return_value=[]),
-            mock.patch.dict(os.environ, {"HOME": str(self.home), "TA_CURATOR_WORKSPACE": str(self.new_ws)}),
+            mock.patch.dict(os.environ, {"HOME": str(self.home), "UMMANU_CURATOR_WORKSPACE": str(self.new_ws)}),
         ]
         for patch in self.patches:
             patch.start()
@@ -358,7 +358,7 @@ class CuratorRebindTests(unittest.TestCase):
     def test_refuses_a_rebound_identity_that_is_not_this_run(self) -> None:
         self._fixture()
         before = self._snapshot()
-        with mock.patch.dict(os.environ, {"TA_CURATOR_WORKSPACE": str(self.home / "somewhere")}):
+        with mock.patch.dict(os.environ, {"UMMANU_CURATOR_WORKSPACE": str(self.home / "somewhere")}):
             code, _, err = self._run()
         self.assertEqual(code, 1)
         self.assertIn("rebind refused (identity-not-current)", err)

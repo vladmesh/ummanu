@@ -12,6 +12,7 @@ from typing import Any
 from ummanu import _proc, head_registry, state_repo
 from ummanu.checkpoint import DEFAULT_REMOTE
 from ummanu.head_health import PROBE_TTL_SECONDS, HeadHealth, HeadReadiness, run_probe
+from ummanu.infra.env import env_value
 from ummanu.infra.github_credential import (
     CredentialError,
     CredentialReadiness,
@@ -439,19 +440,19 @@ def _path_rows(report) -> list[dict[str, Any]]:
             "make UMMANU_REPO match the installed head-registry source pin",
         ),
     ]
-    workspaces_override = os.environ.get("TA_WORKSPACES_ROOT") if environment_is_bound else None
+    workspaces_override = env_value("UMMANU_WORKSPACES_ROOT", nonempty=True) if environment_is_bound else None
     workspaces = (
         Path(workspaces_override).expanduser() if workspaces_override else Path.home() / "orca" / "workspaces"
     )
     canonical_state = (workspaces / "ummanu" / "pipeline" / "state" / "pipeline").resolve(strict=False)
-    state_override = os.environ.get("TA_PIPELINE_STATE_DIR") if environment_is_bound else None
+    state_override = env_value("UMMANU_PIPELINE_STATE_DIR", nonempty=True) if environment_is_bound else None
     rows.append(
         _path_row(
             "pipeline-run-state",
             canonical_state,
             state_override,
             canonical_state,
-            "remove TA_PIPELINE_STATE_DIR or make it match the declared workspaces-root contract",
+            "remove UMMANU_PIPELINE_STATE_DIR or make it match the declared workspaces-root contract",
         )
     )
     return rows

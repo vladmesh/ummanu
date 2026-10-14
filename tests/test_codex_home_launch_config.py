@@ -154,7 +154,7 @@ class _ManagedHomes(unittest.TestCase):
 
     def selectable_home(self) -> Path:
         """The home `resolve_codex_home` picks for a head with no profile or env override."""
-        environment = {key: value for key, value in os.environ.items() if key != "TA_CODEX_HOME"}
+        environment = {key: value for key, value in os.environ.items() if key not in ("UMMANU_CODEX_HOME", "TA_CODEX_HOME")}
         with mock.patch.dict(os.environ, {**environment, "HOME": str(self.runtime_home)}, clear=True):
             return Path(resolve_codex_home({}, data_dir=self.data_dir).path)
 

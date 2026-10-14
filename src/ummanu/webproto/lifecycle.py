@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+from ummanu.infra.env import env_value
 from ummanu.runtime.codex_preflight import CodexPreflightError, preflight_codex_launch
 from ummanu.runtime.head.command import HeadCommandError, render_head_command
 from ummanu.runtime.head.operations import NudgePointer
@@ -49,7 +49,7 @@ from ummanu.webproto.runs import (
 INITIATOR = "ummanu.webproto"
 
 #: Where a Claude head's first-run answers live; same file and env override as the pipeline's pane driver.
-CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
+CLAUDE_JSON = Path(env_value("UMMANU_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 
 #: The composer's "send" key, delivered as its own payload after the line. A raw-mode TUI reads a bare
 #: line feed as a newline inside the message, and reads text plus carriage return in one burst as a

@@ -3,7 +3,7 @@
 The watermark records how far each source was processed and advances only after the agent's
 durable output is committed, so a crash re-processes rather than drops. The lock is an `flock` (a
 killed run cannot keep it); the file records holder pid and start time for diagnostics. State root
-is `TA_STATE` or `~/ummanu-data/automation-state`, then `/<agent>`.
+is `UMMANU_STATE` or `~/ummanu-data/automation-state`, then `/<agent>`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
-STATE_ROOT = Path(os.environ.get("TA_STATE", str(Path.home() / "ummanu-data" / "automation-state")))
+from ummanu.infra.env import env_value
+
+STATE_ROOT = Path(env_value("UMMANU_STATE", str(Path.home() / "ummanu-data" / "automation-state")))
 
 # Precheck exit codes: 0 dispatches; the explicit skip/defer codes are clean; all others fail.
 # Skip is not 1, Python's uncaught-exception exit code.

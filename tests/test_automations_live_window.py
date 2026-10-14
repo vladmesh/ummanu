@@ -79,13 +79,13 @@ class InstalledUnitAgainstNewTreeTests(unittest.TestCase):
         exec_start, environment, working_directory = _unit_settings(payload)
         # The ExecStart every installed host already has; this card must not need a re-render.
         self.assertEqual(exec_start, f"{self.product}/scripts/ummanu-agent-gate.sh {agent}")
-        self.assertEqual(environment["TA_RUNTIME_PYTHONPATH"], str(self.product))
+        self.assertEqual(environment["UMMANU_RUNTIME_PYTHONPATH"], str(self.product))
         Path(working_directory).mkdir(parents=True, exist_ok=True)
         env = {
             "PATH": "/usr/bin:/bin",
             **environment,
-            "TA_GATE_BOARD_ATTEMPTS": "1",
-            "TA_GATE_BOARD_WAIT": "0",
+            "UMMANU_GATE_BOARD_ATTEMPTS": "1",
+            "UMMANU_GATE_BOARD_WAIT": "0",
         }
         return subprocess.run(
             shlex.split(exec_start),

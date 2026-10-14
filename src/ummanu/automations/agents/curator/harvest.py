@@ -1,8 +1,8 @@
 """Bounded curator batches with identity-bound two-phase advancement.
 
-Limits: TA_CURATOR_MAX_TURNS (200), TA_CURATOR_MAX_INPUT_BYTES (262144),
-TA_CURATOR_MAX_SOURCES (32), TA_CURATOR_MAX_ROWS_PER_SOURCE (512),
-TA_CURATOR_MAX_RECORD_BYTES (65536), TA_CURATOR_MAX_MEMORY_BYTES (65536).
+Limits: UMMANU_CURATOR_MAX_TURNS (200), UMMANU_CURATOR_MAX_INPUT_BYTES (262144),
+UMMANU_CURATOR_MAX_SOURCES (32), UMMANU_CURATOR_MAX_ROWS_PER_SOURCE (512),
+UMMANU_CURATOR_MAX_RECORD_BYTES (65536), UMMANU_CURATOR_MAX_MEMORY_BYTES (65536).
 """
 
 from __future__ import annotations
@@ -13,11 +13,12 @@ import json
 import math
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
+from ummanu.infra.env import env_value, legacy_name
 from ummanu.runtime.redact import redact
 
 from . import discover
@@ -73,23 +74,24 @@ class Limits:
     max_memory_bytes: int
 
     @classmethod
-    def from_env(cls) -> "Limits":
+    def from_env(cls) -> Limits:
         def get(name, default):
+            label = name if name in os.environ else legacy_name(name)
             try:
-                value = int(os.environ.get(name, default))
+                value = int(env_value(name, str(default)))
             except ValueError as exc:
-                raise ValueError(f"{name} must be a positive integer") from exc
+                raise ValueError(f"{label} must be a positive integer") from exc
             if value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
+                raise ValueError(f"{label} must be a positive integer")
             return value
 
         return cls(
-            get("TA_CURATOR_MAX_TURNS", 200),
-            get("TA_CURATOR_MAX_INPUT_BYTES", 262144),
-            get("TA_CURATOR_MAX_SOURCES", 32),
-            get("TA_CURATOR_MAX_ROWS_PER_SOURCE", 512),
-            get("TA_CURATOR_MAX_RECORD_BYTES", 65536),
-            get("TA_CURATOR_MAX_MEMORY_BYTES", 65536),
+            get("UMMANU_CURATOR_MAX_TURNS", 200),
+            get("UMMANU_CURATOR_MAX_INPUT_BYTES", 262144),
+            get("UMMANU_CURATOR_MAX_SOURCES", 32),
+            get("UMMANU_CURATOR_MAX_ROWS_PER_SOURCE", 512),
+            get("UMMANU_CURATOR_MAX_RECORD_BYTES", 65536),
+            get("UMMANU_CURATOR_MAX_MEMORY_BYTES", 65536),
         )
 
 
@@ -114,10 +116,10 @@ class _Budget:
 
 
 def current_identity() -> dict[str, str]:
-    workspace = Path(os.environ.get("TA_CURATOR_WORKSPACE") or Path.cwd()).resolve(strict=False)
+    workspace = Path(env_value("UMMANU_CURATOR_WORKSPACE", nonempty=True) or Path.cwd()).resolve(strict=False)
     result = {"workspace": str(workspace)}
-    for env, key in (("TA_CURATOR_RUN_ID", "run_id"), ("TA_CURATOR_SESSION_ID", "session_id")):
-        if value := os.environ.get(env):
+    for env, key in (("UMMANU_CURATOR_RUN_ID", "run_id"), ("UMMANU_CURATOR_SESSION_ID", "session_id")):
+        if value := env_value(env, nonempty=True):
             result[key] = value
     return result
 

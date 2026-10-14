@@ -15,7 +15,7 @@ worktree with its own environment, and the state file is the durable boundary be
 Path resolution follows the dispatcher's own, so the reader lands on the file the writer writes on
 any installation: `--data-dir`/`UMMANU_DATA_DIR` first, then `data_dir` out of the instance the
 dispatcher unit is started with. A reader's own unit gets that instance from `UMMANU_INSTANCE`,
-falling back to the directory of its rendered `TA_RUNTIME_ENV_FILE`. `TA_PRODUCTION_STATE`
+falling back to the directory of its rendered `UMMANU_RUNTIME_ENV_FILE`. `UMMANU_PRODUCTION_STATE`
 overrides the whole file.
 """
 
@@ -34,6 +34,7 @@ from ummanu.config import (
     validate,
 )
 from ummanu.head_health import resource_health_path as _resource_health_path
+from ummanu.infra.env import env_value
 from ummanu.runtime.paths import default_instance_path, instance_file as _config_file
 
 DEFAULT_INSTANCE = default_instance_path()
@@ -42,11 +43,11 @@ DEFAULT_INSTANCE = default_instance_path()
 def _instance_from_runtime_env() -> Path | None:
     """The instance dir implied by the role unit's own env-file path, or None if it has none.
 
-    Every packaged agent unit is rendered with `TA_RUNTIME_ENV_FILE=<instance>/runtime.env`, so on an
+    Every packaged agent unit is rendered with `UMMANU_RUNTIME_ENV_FILE=<instance>/runtime.env`, so on an
     installation whose instance is not the default one, a role that was never handed
     UMMANU_INSTANCE still resolves the instance the dispatcher runs against.
     """
-    configured = os.environ.get("TA_RUNTIME_ENV_FILE")
+    configured = env_value("UMMANU_RUNTIME_ENV_FILE", nonempty=True)
     return Path(configured).expanduser().parent if configured else None
 
 
@@ -102,7 +103,7 @@ def state_path() -> Path:
     """Recomputed per call, not frozen at import, so a test (or a unit with its own env) sees the
     override it just set — an import-time constant would freeze the wrong data plane for any
     process that resolves its environment after import."""
-    configured = os.environ.get("TA_PRODUCTION_STATE")
+    configured = env_value("UMMANU_PRODUCTION_STATE", nonempty=True)
     return Path(configured) if configured else data_dir() / "dispatcher" / "production-state.json"
 
 
@@ -111,9 +112,9 @@ def resource_health_path() -> Path:
 
     Writer: `ummanu.head_health.HeadHealth`, next to the dispatcher's own state under
     `<data_dir>/dispatcher/`. The steward reads it to see the verdict the dispatcher actually acted
-    on instead of running its own paid probes. `TA_PRODUCTION_RESOURCE_HEALTH` overrides the file.
+    on instead of running its own paid probes. `UMMANU_PRODUCTION_RESOURCE_HEALTH` overrides the file.
     """
-    configured = os.environ.get("TA_PRODUCTION_RESOURCE_HEALTH")
+    configured = env_value("UMMANU_PRODUCTION_RESOURCE_HEALTH", nonempty=True)
     return Path(configured) if configured else _resource_health_path(data_dir())
 
 

@@ -706,7 +706,7 @@ def _codex_home_lines(status: dict[str, object]) -> list[str]:
 
     _CODEX_HOME_KINDS = {
         CODEX_HOME_PROFILE: "profile codex_home",
-        CODEX_HOME_ENV: "TA_CODEX_HOME override",
+        CODEX_HOME_ENV: "UMMANU_CODEX_HOME override",
         CODEX_HOME_DATA_DIR: "data-dir home",
     }
 

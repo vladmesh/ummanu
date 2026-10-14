@@ -71,6 +71,7 @@ from ummanu.host_apply import (
     resolve_runtime_owner,
 )
 from ummanu.infra import git_worktree
+from ummanu.infra.env import env_value
 from ummanu.memory import DEFAULT_MODEL as DEFAULT_MEMORY_MODEL
 from ummanu.memory.client_config import (
     CODEX_HOME_SEEDED_FILES,
@@ -1115,7 +1116,7 @@ def workspaces_root(home: Path | str | None = None) -> Path:
     as root or against another account's installation. Materializing root's workspace paths for
     units the owner then runs is how a workspace ends up somewhere nothing materialized.
     """
-    configured = os.environ.get("TA_WORKSPACES_ROOT")
+    configured = env_value("UMMANU_WORKSPACES_ROOT", nonempty=True)
     if configured:
         return Path(configured)
     return Path(home if home is not None else Path.home()) / "orca" / "workspaces"

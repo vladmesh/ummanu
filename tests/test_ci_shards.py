@@ -798,8 +798,8 @@ class CiTestSuiteManifestTests(unittest.TestCase):
                 self.assertNotIn(name, environment)
             for name in (
                 "HOME",
-                "TA_CODEX_HOME",
-                "TA_PIPELINE_STATE_DIR",
+                "UMMANU_CODEX_HOME",
+                "UMMANU_PIPELINE_STATE_DIR",
                 "TEMP",
                 "TMP",
                 "TMPDIR",
