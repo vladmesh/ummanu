@@ -9,6 +9,7 @@ import shlex
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import mock
 
 from tests import source_trees
@@ -399,13 +400,56 @@ class NoOrcaInSourceTests(unittest.TestCase):
     def test_each_allowlist_entry_still_excuses_a_real_line(self) -> None:
         """An entry cannot outlive its code: it must match a line that the rule would flag."""
         excused: list[OrcaAllowance] = []
-        for relative, source in self._sources():
+        # Only an entry's own file can spend it; the ban test above scans every source.
+        for relative in sorted({allowance.path for allowance in ORCA_ALLOWLIST}):
+            source = (ROOT / relative).read_text(encoding="utf-8")
             excused.extend(_apply_allowlist(relative, source)[1])
         self.assertEqual(len(excused), len(set(excused)))
         for allowance in ORCA_ALLOWLIST:
             with self.subTest(path=allowance.path, line=allowance.line):
                 self.assertTrue(allowance.reason)
                 self.assertIn(allowance, excused, "no flagged line matches this entry any more")
+
+    def test_liveness_reads_a_future_allowance_file_once_and_ban_scans_siblings(self) -> None:
+        relative = "src/ummanu/future.py"
+        allowances = tuple(
+            OrcaAllowance(relative, f"{name} =", value, "fixture decision")
+            for name, value in (("FIRST", "orca"), ("SECOND", "orca-cli"))
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            (root / relative).write_text('FIRST = "orca"\nSECOND = "orca-cli"\n', encoding="utf-8")
+            (source_root / "sibling.py").write_text('FIRST = "orca"\n', encoding="utf-8")
+            with mock.patch.multiple(__name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=allowances):
+                with (
+                    mock.patch.object(Path, "read_text", autospec=True, side_effect=Path.read_text) as reads,
+                    mock.patch(f"{__name__}._apply_allowlist", wraps=_apply_allowlist) as apply,
+                ):
+                    NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
+                self.assertEqual([call.args[0] for call in reads.call_args_list], [root / relative])
+                self.assertEqual([call.args[0] for call in apply.call_args_list], [relative])
+                with self.assertRaisesRegex(AssertionError, "sibling.py"):
+                    NoOrcaInSourceTests().test_no_module_imports_or_names_orca()
+
+    def test_liveness_rejects_missing_or_stale_allowance_files(self) -> None:
+        relative = "src/ummanu/future.py"
+        allowance = OrcaAllowance(relative, "VALUE =", "orca", "fixture decision")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_root = root / "src/ummanu"
+            source_root.mkdir(parents=True)
+            (source_root / "sibling.py").write_text('VALUE = "orca"\n', encoding="utf-8")
+            with mock.patch.multiple(
+                __name__, ROOT=root, SOURCE_ROOT=source_root, ORCA_ALLOWLIST=(allowance,)
+            ):
+                for source in (None, 'VALUE = "retired"\n', 'OTHER = "orca"\n', 'VALUE = Path("orca")\n'):
+                    with self.subTest(source=source):
+                        if source is not None:
+                            (root / relative).write_text(source, encoding="utf-8")
+                        with self.assertRaises((FileNotFoundError, AssertionError)):
+                            NoOrcaInSourceTests().test_each_allowlist_entry_still_excuses_a_real_line()
 
     def test_each_planted_route_to_orca_fails_the_rule(self) -> None:
         planted = "src/ummanu/runtime/planted.py"
@@ -480,17 +524,26 @@ class SourceLayoutTests(unittest.TestCase):
     def test_board_double_static_imports_need_no_expression_walk(self) -> None:
         for source, expected in (
             ("from ummanu.board.models import Event\nVALUE = sum(range(100))\n", []),
-            ("from ummanu.board.fake import MemoryAudit\n", [
-                "src/ummanu/probe.py:1: ummanu.board.fake",
-                "src/ummanu/probe.py:1: ummanu.board.fake.MemoryAudit",
-            ]),
-            ("if True:\n    from tests.fakes import board\n", [
-                "src/ummanu/probe.py:2: tests.fakes",
-                "src/ummanu/probe.py:2: tests.fakes.board",
-            ]),
+            (
+                "from ummanu.board.fake import MemoryAudit\n",
+                [
+                    "src/ummanu/probe.py:1: ummanu.board.fake",
+                    "src/ummanu/probe.py:1: ummanu.board.fake.MemoryAudit",
+                ],
+            ),
+            (
+                "if True:\n    from tests.fakes import board\n",
+                [
+                    "src/ummanu/probe.py:2: tests.fakes",
+                    "src/ummanu/probe.py:2: tests.fakes.board",
+                ],
+            ),
         ):
-            with self.subTest(source=source), mock.patch.object(
-                source_trees, "walk", side_effect=AssertionError("unnecessary expression walk")
+            with (
+                self.subTest(source=source),
+                mock.patch.object(
+                    source_trees, "walk", side_effect=AssertionError("unnecessary expression walk")
+                ),
             ):
                 self.assertEqual(_board_fake_offenders("src/ummanu/probe.py", source), expected)
 
