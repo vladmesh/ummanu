@@ -44,7 +44,7 @@ from typing import Any
 from ummanu.board import budget_candidates, origin_outbox
 from ummanu.board.audit_contract import is_protocol_event, require_claim
 from ummanu.board.models import EntityKind, Event, EventKind
-from ummanu.board.sql_rows import now as _now, rfc3339
+from ummanu.board.sql_rows import json_document, now as _now, rfc3339
 
 #: Every `kind` a `board_events` row may carry (§3.12).  A record whose kind is outside it is a
 #: generic audit record and stays in its `requests` row.
@@ -131,7 +131,7 @@ class SqlTaskAudit:
 
     @staticmethod
     def _document(value: Any) -> dict[str, Any]:
-        return value if isinstance(value, dict) else json.loads(value or "{}")
+        return json_document(value)
 
     def _record(self, request_id: str, status: str) -> dict[str, Any] | None:
         rows = self._query(

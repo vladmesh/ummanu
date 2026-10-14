@@ -204,9 +204,9 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(replay, stamped)
         self.assertEqual(
             self.client._query(
-                "SELECT body, request_id FROM product_comments ORDER BY comment_id"
+                "SELECT body, request_id, marker FROM product_comments ORDER BY comment_id"
             ),
-            [("ordinary product note", None), (stamped_body, "product-create")],
+            [("ordinary product note", None, None), (stamped_body, "product-create", "product:note")],
         )
 
         self.store.update_priority(

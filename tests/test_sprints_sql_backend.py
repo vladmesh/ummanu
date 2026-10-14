@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
@@ -17,6 +18,7 @@ from tests.fakes.sprints import SprintFixture
 from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
 from ummanu import sprints
+from ummanu.board import sql_sprints
 from ummanu.board.sql_sprints import sprint_key
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
@@ -55,6 +57,35 @@ class SqlSprintAtomicityTests(SprintFixture):
             self.client._query("SELECT count(*) FROM board_events WHERE request_id=%s", (request_id,)),
             [(0,)],
         )
+
+    def test_staged_persisted_projection_and_comment_marker_actor_stamp(self) -> None:
+        reference = "sprint:1000"
+        written = datetime(2026, 9, 1, 0, 0, 1, 900000, tzinfo=UTC)
+        with self.client.transaction(), mock.patch.object(sql_sprints, "_now", return_value=written):
+            key = self.client.sprints.create(title="projection", description="", reference=reference)
+            staged = self.client.sprints.row_by_reference(reference)
+            self.assertIn(staged, self.client.sprints.rows())
+            self.assertEqual(self.client.sprints.comments_of([key]), {key: []})
+            self.client.sprints.save_metadata(key, {
+                "sprint_goal": "projection", "sprint_definition_of_done": "round trip", "sprint_status": "open",
+            })
+            persisted = self.client.sprints.row_by_reference(reference)
+            self.assertEqual(persisted, staged)
+            self.assertEqual(list(persisted), ["id", "reference", "title", "description", "column_id", "position",
+                                               "swimlane_id", "date_creation", "date_modification", "is_active"])
+            self.assertNotIn(key, self.client.sprints.staged)
+            self.assertEqual(self.client.sprints.metadata_of([key])[key]["sprint_goal"], "projection")
+            identifier = self.client.sprints.create_comment(key, "[]\r\nraw", created_at=written.isoformat())
+        self.assertEqual(self.client._query(
+            "SELECT marker, body, created_at FROM sprint_comments WHERE comment_id=%s", (identifier,)
+        ), [("", "[]\r\nraw", written)])
+        comment = self.client.sprints.comments_of([key])[key][0]
+        self.assertEqual(comment, {"id": identifier, "date_creation": "1788220801", "comment": "[]\r\nraw"})
+        self.writer.comment(role="po", actor="operator", reference=reference, body="stamped", request_id="projection-note")
+        self.writer.comment(role="po", actor="operator", reference=reference, body="stamped", request_id="projection-note")
+        self.assertEqual(self.client._query(
+            "SELECT marker, body, actor_role, actor_id FROM sprint_comments WHERE request_id=%s", ("projection-note",)
+        ), [("po", "[po]\nstamped", "po", "operator")])
 
     def _read_state(self):
         """Exact persisted rows and files, after fixture setup and outside the read trap."""

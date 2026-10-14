@@ -47,8 +47,12 @@ from ummanu.board.backend import card_transport_key, record_key_kind
 from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.sql_product_issues import ProductIssueRecords
 from ummanu.board.sql_rows import (
-    epoch as _epoch,
+    board_row,
+    comment_marker,
+    comment_row,
+    epoch as _epoch,  # noqa: F401 - the independent bulk-read oracle imports this name
     grouped as _grouped,
+    json_document,
     now as _now,
     parse_rfc3339,
     rfc3339 as _rfc3339,
@@ -972,28 +976,24 @@ class SqlCardClient:
             updated,
             moved,
         ) = values
-        bag = extensions if isinstance(extensions, dict) else json.loads(extensions or "{}")
+        bag = json_document(extensions)
         lane = (bag.get(EXTENSION_BAG) or {}).get("swimlane")
         transport_key = card_transport_key(board_key)
         if transport_key is None:
             raise SqlCardError(f"card {ref} carries malformed transport key {board_key!r}")
-        return {
-            "id": transport_key,
-            "reference": ref,
-            "title": _text(title),
-            "description": _text(description),
-            "column_id": _state_column(ref, state),
-            "position": position,
-            "swimlane_id": self._lane_id(lane),
-            "date_creation": _epoch(created),
-            "date_modification": _epoch(updated),
-            # §3.5's `date_moved`, added by revision `0004`: when this card entered the column it
-            # is in.  A row the store cannot date — every row written before that revision —
-            # answers no value at all rather than a substitute, which is what keeps Done
-            # retention refusing an episode nobody can name (§8.6).
-            **({"date_moved": _epoch(moved)} if moved is not None else {}),
-            "is_active": 0 if archived else 1,
-        }
+        return board_row(
+            id=transport_key,
+            reference=ref,
+            title=_text(title),
+            description=_text(description),
+            column_id=_state_column(ref, state),
+            position=position,
+            swimlane_id=self._lane_id(lane),
+            created=created,
+            updated=updated,
+            moved=moved,
+            is_active=0 if archived else 1,
+        )
 
     def _rows(self, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
         clause = f" WHERE {where}" if where else ""
@@ -1322,7 +1322,7 @@ class SqlCardClient:
                 meta["supersedes"] = supersedes[ref][0]
             if issues.get(ref):
                 meta["issues"] = ",".join(f"issue:{issue_id}" for issue_id in issues[ref])
-            bag = values[18] if isinstance(values[18], dict) else json.loads(values[18] or "{}")
+            bag = json_document(values[18])
             for name, value in (bag.get(EXTENSION_BAG) or {}).items():
                 if name != "swimlane":
                     meta[name] = _text(value)
@@ -1488,7 +1488,7 @@ class SqlCardClient:
         ))
         return {
             key: [
-                {"id": identifier, "date_creation": _epoch(created), "comment": body}
+                comment_row(identifier, body, created)
                 for identifier, body, created in comments.get(refs[key], [])
             ]
             for key in keys
@@ -1512,8 +1512,7 @@ class SqlCardClient:
             written = _timestamp(created_at)
             if written is None:
                 raise SqlCardError(f"a comment on {ref} names created_at {created_at!r}, which is not a time")
-        first = content.splitlines()[0] if content else ""
-        marker = first[1:-1] if first.startswith("[") and first.endswith("]") else None
+        marker = comment_marker(content)
         rows = self._query(
             "INSERT INTO task_comments (task_ref, marker, body, created_at) "
             "VALUES (%s, %s, %s, %s) RETURNING comment_id",
