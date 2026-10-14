@@ -66,7 +66,6 @@ from ummanu.po import (
     runner as po_runner,
     service as po_service,
     store as po_store,
-    token as po_token,
 )
 from ummanu.po.client import PoServiceClient, ServiceUnavailable
 from ummanu.po.queue import PoQueue, QueueError, queue_dir
@@ -101,7 +100,6 @@ from ummanu.webproto.errors import (
     RuntimeUnavailable,
     ValidationRefused,
 )
-from ummanu.webproto.po_auth import PoTokenLayer
 from ummanu.webproto.po_ops import PoLayer
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -709,13 +707,8 @@ class EndpointSupport(ServiceFixture):
     def layer(self, client: PoServiceClient | None = None) -> PoLayer:
         return PoLayer(self.root, data_dir=self.data, store=self.store(), client=client, models=MODELS)
 
-    def app(self, layer: PoLayer) -> tuple[WebApp, dict[str, str]]:
-        po_token.ensure_token(self.data)
-        cookie = po_token.cookie_value(po_token.read_token(self.data))
-        app = WebApp(
-            *(Recording() for _ in range(8)), po_auth=PoTokenLayer(self.root, data_dir=self.data), po=layer
-        )
-        return app, {"Cookie": f"{po_token.COOKIE_NAME}={cookie}"}
+    def app(self, layer: PoLayer) -> WebApp:
+        return WebApp(*(Recording() for _ in range(8)), po=layer)
 
 
 class EndpointTests(EndpointSupport):
@@ -811,12 +804,11 @@ class EndpointTests(EndpointSupport):
         with self.assertRaises(ServiceUnavailable):
             PoServiceClient(self.data).status()
 
-        app, headers = self.app(layer)
+        app = self.app(layer)
         response = app.handle(
             "POST",
             "/po/sessions/s-1/messages",
             body=urlencode([("request_id", "m-2"), ("text", "hello")]).encode(),
-            headers=headers,
         )
         self.assertEqual(response.status, 503)
         self.assertIn("PO service is not running", response.body.decode())
@@ -902,7 +894,7 @@ class OutcomeUnknownTests(EndpointSupport):
         service = self.service(run=False)
         session_id = self.session(service)
         service.submit(session_id=session_id, text="GATE hold", request_id="hold")
-        app, headers = self.app(self.layer())
+        app = self.app(self.layer())
         route = f"/po/sessions/{session_id}/messages"
         with listening(service):
             with self.lose_the_reply():
@@ -910,7 +902,6 @@ class OutcomeUnknownTests(EndpointSupport):
                     "POST",
                     route,
                     body=urlencode({"request_id": "original", "text": "do this once"}).encode(),
-                    headers=headers,
                 )
             body = response.body.decode()
             self.assertEqual(response.status, 503)
@@ -929,7 +920,6 @@ class OutcomeUnknownTests(EndpointSupport):
                 "POST",
                 route,
                 body=urlencode({"request_id": "original", "text": "do this once"}).encode(),
-                headers=headers,
             )
 
         self.assertEqual(retry.status, 303)
@@ -1000,8 +990,8 @@ def fail_once(target, name: str, when):
 class AcceptanceAnswerTests(EndpointSupport):
     """Review 17: after acceptance a request is answered as accepted, and a refused form keeps its id."""
 
-    def post(self, app, headers, route: str, fields: dict[str, str]):
-        return app.handle("POST", route, body=urlencode(fields).encode(), headers=headers)
+    def post(self, app, route: str, fields: dict[str, str]):
+        return app.handle("POST", route, body=urlencode(fields).encode())
 
     def test_a_failed_lookup_after_the_queue_write_answers_accepted_and_a_resend_is_the_same_message(
         self,
@@ -1009,7 +999,7 @@ class AcceptanceAnswerTests(EndpointSupport):
         service = self.service(run=False)
         session_id = self.session(service)
         service.submit(session_id=session_id, text="GATE hold", request_id="hold")
-        app, headers = self.app(self.layer())
+        app = self.app(self.layer())
         route = f"/po/sessions/{session_id}/messages"
         lookups: list[str] = []
 
@@ -1020,10 +1010,10 @@ class AcceptanceAnswerTests(EndpointSupport):
         patch, failed = fail_once(FakePoStore, "request", second_lookup)
         with listening(service):
             with patch:
-                first = self.post(app, headers, route, {"request_id": "original", "text": "do this once"})
+                first = self.post(app, route, {"request_id": "original", "text": "do this once"})
             self.assertEqual(failed, [(mock.ANY, "original")], "the post-enqueue lookup failed once")
             self.assertEqual(first.status, 303, first.body.decode())
-            again = self.post(app, headers, route, {"request_id": "original", "text": "do this once"})
+            again = self.post(app, route, {"request_id": "original", "text": "do this once"})
 
         self.assertEqual(again.status, 303)
         self.assertEqual(self.queued(), ["do this once"])
@@ -1032,7 +1022,7 @@ class AcceptanceAnswerTests(EndpointSupport):
         service = self.service(run=False)
         session_id = self.session(service)
         service.submit(session_id=session_id, text="GATE hold", request_id="hold")
-        app, headers = self.app(self.layer())
+        app = self.app(self.layer())
         route = f"/po/sessions/{session_id}/messages"
         real_put = service.queue.put
 
@@ -1042,20 +1032,20 @@ class AcceptanceAnswerTests(EndpointSupport):
 
         with listening(service):
             with mock.patch.object(service.queue, "put", side_effect=put_then_fail):
-                first = self.post(app, headers, route, {"request_id": "original", "text": "do this once"})
+                first = self.post(app, route, {"request_id": "original", "text": "do this once"})
             body = first.body.decode()
             self.assertEqual(first.status, 503)
             self.assertIn("may have accepted this message", body)
             self.assertEqual(form_request_ids(body, route), ["original"])
             self.assertEqual(
-                self.post(app, headers, route, {"request_id": "original", "text": "do this once"}).status, 303
+                self.post(app, route, {"request_id": "original", "text": "do this once"}).status, 303
             )
 
         self.assertEqual(self.queued(), ["do this once"])
 
     def test_every_post_acceptance_failure_of_a_session_create_ends_with_one_session(self) -> None:
         service = self.service(run=False)
-        app, headers = self.app(self.layer())
+        app = self.app(self.layer())
         form = {"request_id": "create-once", "cli": "claude", "model": "opus", "effort": "high"}
         real_claim = FakePoStore.claim_session
 
@@ -1065,7 +1055,7 @@ class AcceptanceAnswerTests(EndpointSupport):
 
         with listening(service):
             with mock.patch.object(FakePoStore, "claim_session", commit_then_fail):
-                first = self.post(app, headers, "/po/sessions", form)
+                first = self.post(app, "/po/sessions", form)
             body = first.body.decode()
             self.assertEqual(first.status, 503)
             self.assertIn("may have opened this session", body)
@@ -1076,10 +1066,10 @@ class AcceptanceAnswerTests(EndpointSupport):
             # The resend is the replay; its one enrichment read fails, and it is still the session.
             patch, failed = fail_once(FakePoStore, "session", lambda _store, sid: sid == session_id)
             with patch:
-                again = self.post(app, headers, "/po/sessions", form)
+                again = self.post(app, "/po/sessions", form)
             self.assertEqual(len(failed), 1)
             self.assertEqual((again.status, again.headers["Location"]), (303, f"/po/sessions/{session_id}"))
-            third = self.post(app, headers, "/po/sessions", form)
+            third = self.post(app, "/po/sessions", form)
 
         self.assertEqual(third.headers["Location"], f"/po/sessions/{session_id}")
         self.assertEqual(len(self.board.sessions), 1)
@@ -1171,26 +1161,19 @@ class KeptRequestIdTests(ServiceFixture):
     }
 
     def forms(self, failure: Exception) -> tuple[list[str], list[str]]:
-        po_token.ensure_token(self.data)
-        cookie = po_token.cookie_value(po_token.read_token(self.data))
         po = Recording(
             po_send=failure, po_create_session=failure, po_session=self.SESSION, po_overview=self.OVERVIEW
         )
-        app = WebApp(
-            *(Recording() for _ in range(8)), po_auth=PoTokenLayer(self.root, data_dir=self.data), po=po
-        )
-        headers = {"Cookie": f"{po_token.COOKIE_NAME}={cookie}"}
+        app = WebApp(*(Recording() for _ in range(8)), po=po)
         sent = app.handle(
             "POST",
             "/po/sessions/s-1/messages",
             body=urlencode({"request_id": "form-1", "text": "hello"}).encode(),
-            headers=headers,
         )
         created = app.handle(
             "POST",
             "/po/sessions",
             body=urlencode({"request_id": "form-2", "cli": "claude", "model": "opus"}).encode(),
-            headers=headers,
         )
         return (
             form_request_ids(sent.body.decode(), "/po/sessions/s-1/messages"),

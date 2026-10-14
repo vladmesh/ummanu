@@ -38,6 +38,8 @@ OWNERS = (
     upgrade_services,
     upgrade_types,
 )
+#: The owners `capture` drives, in its parameter order.
+CAPTURED = (upgrade, upgrade_checkout, upgrade_dependencies, upgrade_host, upgrade_services, upgrade_types)
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -103,7 +105,7 @@ class UpgradeOwnersTests(unittest.TestCase):
 
     def test_file_only_characterization_and_optional_external_base(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            packet = capture(*OWNERS, Path(tmp) / "candidate")
+            packet = capture(*CAPTURED, Path(tmp) / "candidate")
             self.assertEqual(packet["steps"]["steps"][-1]["status"], "failed")
             self.assertEqual([row[0] for row in packet["trace"]], ["first", "failed"])
             self.assertEqual([row[1] for row in packet["errors"]], [2, 2, 1, 1, 1, 1])
@@ -120,7 +122,7 @@ class UpgradeOwnersTests(unittest.TestCase):
                 baseline = importlib.util.module_from_spec(spec)
                 with mock.patch.dict(sys.modules, {spec.name: baseline}):
                     spec.loader.exec_module(baseline)
-                    old = capture(*(baseline,) * len(OWNERS), Path(tmp) / "base")
+                    old = capture(*(baseline,) * len(CAPTURED), Path(tmp) / "base")
                 self.assertEqual(old, packet)
             destination = os.environ.get("UMMANU_UPGRADE_PACKET_OUT")
             if destination:

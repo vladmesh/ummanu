@@ -48,25 +48,6 @@ TURN_MARKS: dict[str, tuple[str, str]] = {
 }
 
 
-def po_login(message: str) -> str:
-    body = "\n".join(
-        [
-            '<div class="lead"><h1>Product owner</h1></div>',
-            f'<p class="refused">{escape(message)}</p>',
-            '<form class="sprint" method="post" action="/po/login">',
-            '<div class="field"><label for="po-token">PO token</label> ',
-            '<input id="po-token" name="token" type="password" autocomplete="off" required></div>',
-            '<button type="submit">open</button>',
-            "</form>",
-            (
-                '<p class="hint empty">the token is the file <code>po-web-token</code> in the installation\'s '
-                "data directory; OPERATIONS.md says how to read and rotate it.</p>"
-            ),
-        ]
-    )
-    return _page("Product owner", body, nav="po")
-
-
 def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
     if not refusal:
         return ""

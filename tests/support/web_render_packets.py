@@ -92,7 +92,6 @@ def packets():
             yield f"po-overview-{closed}-{cli}", "po_page", [overview], {"request_id": "request<&>", "now": NOW,
                 "submitted": {"cli": cli, "model": model, "effort": effort}, "refusal": {"message": "<refused>"}}
     yield "po-no-models", "po_page", [{}], {"request_id": "r", "now": NOW}
-    yield "po-login", "po_login", ["<token>"], {}
     for state, running, queued in (("open", False, 0), ("open", True, 2), ("closed", False, 0)):
         document = {"session": {**session, "state": state}, "turns": [{"seq": 1, "state": "running" if running else "completed"}],
                     "running": running, "running_seq": 1, "efforts": efforts,

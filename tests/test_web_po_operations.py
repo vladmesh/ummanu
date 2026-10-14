@@ -1,6 +1,6 @@
 """`/po` end to end: the real PO layer, PO service and runner, fake `claude`/`codex`, PostgreSQL 16.
 
-Every request goes through `WebApp.handle` with a valid PO cookie; the layer writes through the PO
+Every request goes through `WebApp.handle`; the layer writes through the PO
 service's Unix socket, and the service owns the runner. The fakes are the ones `tests.test_po_runner`
 drives the runner with (`SLEEP` keeps a turn running).
 """
@@ -23,7 +23,7 @@ from urllib.parse import urlencode
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
 from tests.sql_backend_fixtures import PostgresBoard
 from tests.web_fakes import Recording
-from ummanu.po import store as po_store, token as po_token
+from ummanu.po import store as po_store
 from ummanu.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS
 from ummanu.po.queue import PoQueue
 from ummanu.po.runner import PoRunner
@@ -31,7 +31,6 @@ from ummanu.po.service import PoService, listening
 from ummanu.po.store import PoStore
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import PoRequestConflict, ValidationRefused
-from ummanu.webproto.po_auth import PoTokenLayer
 from ummanu.webproto.po_ops import PoLayer
 
 BOARD: PostgresBoard
@@ -81,13 +80,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.addCleanup(loop.join, 10)
         self.addCleanup(self.service.stop)
         self.layer = PoLayer(self.root, data_dir=self.data, store=self.store, models=MODELS)
-        po_token.ensure_token(self.data)
-        self.cookie = po_token.cookie_value(po_token.read_token(self.data))
-        self.app = WebApp(
-            *(Recording() for _ in range(8)),
-            po_auth=PoTokenLayer(self.root, data_dir=self.data),
-            po=self.layer,
-        )
+        self.app = WebApp(*(Recording() for _ in range(8)), po=self.layer)
 
     def stop_everything(self) -> None:
         for turn in self.store.running_turns():
@@ -103,14 +96,11 @@ class PoWebOperationTests(unittest.TestCase):
 
     # --- requests ---------------------------------------------------------------------------
 
-    def headers(self) -> dict[str, str]:
-        return {"Cookie": f"{po_token.COOKIE_NAME}={self.cookie}"}
-
     def post(self, path: str, fields: list[tuple[str, str]]):
-        return self.app.handle("POST", path, body=urlencode(fields).encode(), headers=self.headers())
+        return self.app.handle("POST", path, body=urlencode(fields).encode())
 
     def get(self, path: str):
-        return self.app.handle("GET", path, headers=self.headers())
+        return self.app.handle("GET", path)
 
     def create(
         self, cli: str = "claude", model: str = "opus", request_id: str = "create-1", effort: str = "high"
@@ -179,11 +169,7 @@ class PoWebOperationTests(unittest.TestCase):
         self,
     ) -> None:
         self.layer = PoLayer(self.root, data_dir=self.data, store=self.store, models=DEFAULT_MODELS)
-        self.app = WebApp(
-            *(Recording() for _ in range(8)),
-            po_auth=PoTokenLayer(self.root, data_dir=self.data),
-            po=self.layer,
-        )
+        self.app = WebApp(*(Recording() for _ in range(8)), po=self.layer)
         form = self.get("/po").body.decode()
         self.assertIn('<option value="fable" data-cli="claude" selected>', form)
         self.assertIn('<option value="high" data-cli="claude" selected>high</option>', form)
@@ -225,11 +211,7 @@ class PoWebOperationTests(unittest.TestCase):
         models = models_from_instance(instance)
         self.assertEqual(models, DEFAULT_MODELS)
         self.layer = PoLayer(self.root, data_dir=self.data, store=self.store, models=models)
-        self.app = WebApp(
-            *(Recording() for _ in range(8)),
-            po_auth=PoTokenLayer(self.root, data_dir=self.data),
-            po=self.layer,
-        )
+        self.app = WebApp(*(Recording() for _ in range(8)), po=self.layer)
         form = self.get("/po").body.decode()
         # The raw id stays the value the form posts; the text is the name.
         self.assertIn('<option value="claude-opus-5-5" data-cli="claude">Opus 5.5</option>', form)
@@ -835,7 +817,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn(f"/po/sessions/{kept}", overview)
         self.assertIn('href="/po?closed=1">closed sessions (1)</a>', overview)
         self.assertIn('id="po-new"', overview)
-        listed = self.app.handle("GET", "/po", query="closed=1", headers=self.headers())
+        listed = self.app.handle("GET", "/po", query="closed=1")
         self.assertEqual(listed.status, 200)
         listed_page = listed.body.decode()
         self.assertIn(f'<a class="title" href="/po/sessions/{session_id}">hello</a>', listed_page)
@@ -1250,7 +1232,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual(self.rename(session_id, "archived").status, 303)
 
         self.assertEqual(self.store.session(session_id).title, "archived")
-        listed = self.app.handle("GET", "/po", query="closed=1", headers=self.headers())
+        listed = self.app.handle("GET", "/po", query="closed=1")
         self.assertIn(f'href="/po/sessions/{session_id}">archived</a>', listed.body.decode())
 
     def po_rename_cli(self, *arguments: str, env: dict[str, str] | None = None) -> tuple[int, str, str]:

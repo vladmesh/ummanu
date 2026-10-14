@@ -36,7 +36,7 @@ from ummanu.memory.client_config import (
     reconciled_codex_homes,
 )
 from ummanu.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
-from ummanu.po import token as po_token, workspace as po_workspace
+from ummanu.po import workspace as po_workspace
 from ummanu.runtime import interactive_workspace
 from ummanu.runtime.paths import env_value
 
@@ -183,27 +183,6 @@ def step_interactive_workspace(context: UpgradeContext) -> StepResult:
         "changed",
         f"{action} {', '.join(result.changed)} in {result.path} ({sources})",
     )
-
-
-def step_po_token(context: UpgradeContext) -> StepResult:
-    """Create `DATA_DIR/po-web-token` (0600, runtime user) if absent; an existing token is never rewritten.
-
-    Rotation is deleting the file and running this step again.
-    """
-    data_dir = _data_dir(context)
-    if data_dir is None:
-        return StepResult("po-token", "skipped", "instance data directory is unresolved")
-    path = po_token.token_path(data_dir)
-    try:
-        created = po_token.ensure_token(data_dir, dry_run=context.dry_run)
-        if not context.dry_run:
-            _set_runtime_owner(path, context.runtime_user)
-    except (po_token.TokenError, GitError) as exc:
-        return StepResult("po-token", "failed", str(exc))
-    if created:
-        action = "would create" if context.dry_run else "created"
-        return StepResult("po-token", "changed", f"{action} {path} (mode 0600)")
-    return StepResult("po-token", "unchanged", f"{path} exists; never rewritten")
 
 
 def _role_skills_manifest(context: UpgradeContext) -> Path:
