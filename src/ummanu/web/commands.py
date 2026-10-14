@@ -13,14 +13,18 @@ import sys
 import time
 from collections.abc import Callable
 
-from ummanu.runtime.paths import env_value
 from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 from ummanu.web.provider_usage import ProviderUsageLayer
 from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT, LoopbackOnly, serve
 from ummanu.webproto.card_ops import CardOperationLayer
 from ummanu.webproto.command_reads import CommandReadLayer
-from ummanu.webproto.commands import add_command_parser, add_instance_argument, print_error
+from ummanu.webproto.commands import (
+    add_command_parser,
+    add_instance_argument,
+    heads_registry_default,
+    print_error,
+)
 from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
@@ -54,7 +58,7 @@ def add_web_serve_subcommands(subparsers) -> None:
     group.add_argument("--port", type=int, default=DEFAULT_PORT, help="the port to bind")
     group.add_argument(
         "--heads-registry",
-        default=env_value("UMMANU_HEADS_REGISTRY"),
+        default=heads_registry_default(),
         help="read head profiles from this registry instead of the installation's own",
     )
     group.add_argument(

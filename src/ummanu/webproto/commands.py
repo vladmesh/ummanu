@@ -285,6 +285,11 @@ def add_web_run_subcommands(subparsers) -> None:
     group.set_defaults(handler=usage_handler("web-run subcommand required"))
 
 
+def heads_registry_default() -> str | None:
+    """Registry override for web parsers, read by the protocol layer at construction time."""
+    return env_value("UMMANU_HEADS_REGISTRY")
+
+
 def _run_common(parser: argparse.ArgumentParser) -> None:
     add_instance_argument(parser, help="path to an instance dir or instance.yaml")
     parser.add_argument(
@@ -294,7 +299,7 @@ def _run_common(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--heads-registry",
-        default=env_value("UMMANU_HEADS_REGISTRY"),
+        default=heads_registry_default(),
         help="read head profiles from this registry instead of the installation's own",
     )
     parser.add_argument(
