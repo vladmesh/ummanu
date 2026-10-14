@@ -11,13 +11,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+from tests.fakes.board import FakeBoardHost, MemoryAudit
 from ummanu.board.card_transitions import (
     CARD_TRANSITIONS,
     CardTransitionForbidden,
     card_transition,
 )
 from ummanu.board.events import BoardEventCanon, BoardEventPending, MutationEventTransaction
-from ummanu.board.fake import FakeBoardHost, MemoryAudit
 from ummanu.board.host import Create, Replace, SprintSupplement, TransitionRequest
 from ummanu.board.models import (
     Actor,
@@ -70,9 +70,7 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertEqual(result.event.related_refs.refs, ("sprint:943", "head-run:1417"))
 
     def test_same_state_card_transition_is_rejected_by_the_registry(self) -> None:
-        self.host.create(
-            Create(Card("ummanu-1417", "Protocol seam", CardState.READY), self.actor, "create")
-        )
+        self.host.create(Create(Card("ummanu-1417", "Protocol seam", CardState.READY), self.actor, "create"))
 
         with self.assertRaises(InvalidTransition):
             self.host.transition(
@@ -143,7 +141,10 @@ class BoardHostContractTests(unittest.TestCase):
         )
         audit = MemoryAudit()
         host = FakeBoardHost([sprint], audit=audit)
-        with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")), self.assertRaises(BoardEventPending):
+        with (
+            mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")),
+            self.assertRaises(BoardEventPending),
+        ):
             host.transition(operation)
 
         with self.assertRaises(ValueError):
@@ -180,7 +181,10 @@ class BoardHostContractTests(unittest.TestCase):
                 request_id=f"edge-{index}",
             )
             if index == 0:
-                with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")), self.assertRaises(BoardEventPending):
+                with (
+                    mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")),
+                    self.assertRaises(BoardEventPending),
+                ):
                     host.transition(operation)
                 self.assertEqual(host.read(EntityKind.SPRINT, sprint.ref).state, target)
                 self.assertEqual(host.transition(operation).entity.state, target)
@@ -204,9 +208,7 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertEqual(host.events, [])
 
     def test_replace_cannot_bypass_the_lifecycle_registry(self) -> None:
-        self.host.create(
-            Create(Card("ummanu-1417", "Protocol seam", CardState.READY), self.actor, "create")
-        )
+        self.host.create(Create(Card("ummanu-1417", "Protocol seam", CardState.READY), self.actor, "create"))
 
         with self.assertRaises(InvalidTransition):
             self.host.replace(
@@ -570,7 +572,10 @@ class BoardMutationTransactionTests(unittest.TestCase):
 
     def test_event_write_failure_is_pending_and_replay_does_not_repeat_backend(self) -> None:
         transaction = MutationEventTransaction(self.canon, request_id="pending-1", event=self.event)
-        with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")), self.assertRaises(BoardEventPending):
+        with (
+            mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")),
+            self.assertRaises(BoardEventPending),
+        ):
             transaction.execute(lambda: "backend result", confirm=lambda: "replayed")
         self.assertEqual(self.canon.audit.status(), {"ok": False, "pending": 1})
 
@@ -649,7 +654,10 @@ class BoardMutationTransactionTests(unittest.TestCase):
     def test_an_unconfirmed_pending_record_is_never_resolved_by_the_read_that_failed(self) -> None:
         """A pending replay that cannot confirm keeps the record instead of publishing it."""
         transaction = MutationEventTransaction(self.canon, request_id="unconfirmed", event=self.event)
-        with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")), self.assertRaises(BoardEventPending):
+        with (
+            mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")),
+            self.assertRaises(BoardEventPending),
+        ):
             transaction.execute(lambda: "issued", confirm=lambda: "confirmed")
 
         with self.assertRaises(BoardEventPending):

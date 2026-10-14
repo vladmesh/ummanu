@@ -16,10 +16,10 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
+from tests.fakes.board import FakeBoardHost
 from ummanu.board import backend, sql_rows
 from ummanu.board.events import event_id, render_marker_comment
 from ummanu.board.extension_bag import bag_json, card_bag
-from ummanu.board.fake import FakeBoardHost
 from ummanu.board.host import Create, MarkerComment, TransitionRequest
 from ummanu.board.models import (
     Actor,
@@ -103,13 +103,22 @@ class TimeFormatTests(unittest.TestCase):
     def test_a_written_time_round_trips_through_the_readers(self) -> None:
         for microseconds in (False, True):
             written = sql_rows.rfc3339(MOMENT, microseconds=microseconds)
-            self.assertEqual(sql_rows.parse_rfc3339(written), MOMENT if microseconds else MOMENT.replace(microsecond=0))
-            self.assertEqual(sql_rows.rfc3339(sql_rows.parse_rfc3339(written), microseconds=microseconds), written)
+            self.assertEqual(
+                sql_rows.parse_rfc3339(written), MOMENT if microseconds else MOMENT.replace(microsecond=0)
+            )
+            self.assertEqual(
+                sql_rows.rfc3339(sql_rows.parse_rfc3339(written), microseconds=microseconds), written
+            )
 
     def test_an_event_record_reads_its_occurred_at_in_the_old_spelling(self) -> None:
         event = Event(
-            "board-event-1", EventKind.ENTITY_CREATED, EntityKind.CARD, "ummanu-1",
-            Actor("worker", "worker-1"), "created", MOMENT,
+            "board-event-1",
+            EventKind.ENTITY_CREATED,
+            EntityKind.CARD,
+            "ummanu-1",
+            Actor("worker", "worker-1"),
+            "created",
+            MOMENT,
         )
         record = event.to_record("request-1")
         self.assertEqual(record["occurred_at"], "2026-10-12T20:20:42.123456Z")
@@ -119,7 +128,11 @@ class TimeFormatTests(unittest.TestCase):
 
     def test_a_waiting_owner_mark_reads_in_either_spelling(self) -> None:
         for since in SPELLINGS:
-            card = {"extensions": {"extra": {WAITING_OWNER: since, WAITING_OWNER_REASON: "why", WAITING_OWNER_BY: "po"}}}
+            card = {
+                "extensions": {
+                    "extra": {WAITING_OWNER: since, WAITING_OWNER_REASON: "why", WAITING_OWNER_BY: "po"}
+                }
+            }
             with self.subTest(since=since):
                 self.assertEqual(waiting_owner(card), {"since": since, "reason": "why", "by": "po"})
 
@@ -139,8 +152,16 @@ class TimeFormatTests(unittest.TestCase):
         for at in (SPELLINGS[0], SPELLINGS[1]):
             client = _Recording(answer)
             with self.subTest(at=at):
-                self.assertTrue(client.sprints.charge_e2e("sprint:1", task_ref="ummanu-1", dispatch_id="d-1", at=at)["charged"])
-                [charged_at] = [params[3] for sql, params in client.statements if sql.startswith("INSERT INTO sprint_e2e_charges")]
+                self.assertTrue(
+                    client.sprints.charge_e2e("sprint:1", task_ref="ummanu-1", dispatch_id="d-1", at=at)[
+                        "charged"
+                    ]
+                )
+                [charged_at] = [
+                    params[3]
+                    for sql, params in client.statements
+                    if sql.startswith("INSERT INTO sprint_e2e_charges")
+                ]
                 self.assertEqual(charged_at, MOMENT)
 
     def test_a_sprint_charge_is_rendered_to_the_microsecond(self) -> None:
@@ -211,7 +232,10 @@ class CardClientRefusalTests(unittest.TestCase):
             (backend.record_key("issue", "abc"), f"not issue key {backend.record_key('issue', 'abc')}"),
             (backend.record_key("product", "ummanu"), "not product key"),
         ):
-            with self.subTest(key=key), self.assertRaisesRegex(SqlCardError, f"removeTask removes only a Sprint, {named}"):
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(SqlCardError, f"removeTask removes only a Sprint, {named}"),
+            ):
                 client._rpc_removeTask(task_id=key)
         self.assertEqual(client.statements, [])
 
@@ -250,20 +274,42 @@ class EventIdGoldenTests(unittest.TestCase):
     def test_the_sql_host_builders(self) -> None:
         card = Card("ummanu-1417", "Protocol seam", CardState.IN_PROGRESS)
         transition = TransitionRequest(
-            EntityKind.CARD, card.ref, CardState.VALIDATE, self.ACTOR, "handed to review", self.RELATED, "golden-transition"
+            EntityKind.CARD,
+            card.ref,
+            CardState.VALIDATE,
+            self.ACTOR,
+            "handed to review",
+            self.RELATED,
+            "golden-transition",
         )
         marker = MarkerComment(
-            card.ref, EventKind.CARD_REPORTED, self.ACTOR, "all green",
-            {"marker": "report:done", "body": "all green", "status": "done"}, self.RELATED, "golden-marker",
+            card.ref,
+            EventKind.CARD_REPORTED,
+            self.ACTOR,
+            "all green",
+            {"marker": "report:done", "body": "all green", "status": "done"},
+            self.RELATED,
+            "golden-marker",
         )
         ids = {
             "sprint": SqlBoardHost._sprint_event(
-                EventKind.SPRINT_CLOSED, Sprint("sprint:943", "Ship the seam"), self.ACTOR, "Sprint closed",
-                self.RELATED, "golden-sprint", source="open", target="closed",
+                EventKind.SPRINT_CLOSED,
+                Sprint("sprint:943", "Ship the seam"),
+                self.ACTOR,
+                "Sprint closed",
+                self.RELATED,
+                "golden-sprint",
+                source="open",
+                target="closed",
             ).event_id,
             "entity": SqlBoardHost._entity_event(
-                None, EventKind.ENTITY_CREATED, Product("product:ummanu", "Ummanu"), self.ACTOR, "created",  # type: ignore[arg-type]
-                self.RELATED, "golden-product",
+                None,
+                EventKind.ENTITY_CREATED,
+                Product("product:ummanu", "Ummanu"),
+                self.ACTOR,
+                "created",  # type: ignore[arg-type]
+                self.RELATED,
+                "golden-product",
             ).event_id,
             "transition": SqlBoardHost._event(
                 card, EventKind.CARD_SUBMITTED, transition, self.RELATED, "golden-transition"
@@ -290,34 +336,61 @@ class MarkerValidationTests(unittest.TestCase):
     def event(**data: Any) -> Event:
         body = str(data.get("body", "the body"))
         return Event(
-            "board-event-1", EventKind.CARD_REPORTED, EntityKind.CARD, "ummanu-1",
-            Actor("worker", "worker-1"), body, MOMENT, data={"body": body, **data},
+            "board-event-1",
+            EventKind.CARD_REPORTED,
+            EntityKind.CARD,
+            "ummanu-1",
+            Actor("worker", "worker-1"),
+            body,
+            MOMENT,
+            data={"body": body, **data},
         )
 
     def test_an_invalid_marker_is_refused_at_creation(self) -> None:
         for data, message in (
             ({"marker": "report:done", "status": "blocked"}, "unsupported marker payload"),
             ({"marker": "report:blocked", "status": "blocked"}, "supported classification"),
-            ({"marker": "report:done", "status": "done", "classification": "external_fact"}, "no classification"),
+            (
+                {"marker": "report:done", "status": "done", "classification": "external_fact"},
+                "no classification",
+            ),
             ({"marker": "", "status": "done"}, "non-empty marker and body"),
         ):
             with self.subTest(data=data), self.assertRaisesRegex(ValueError, message):
                 self.event(**data)
         with self.assertRaisesRegex(ValueError, "reason must match its body"):
             Event(
-                "board-event-1", EventKind.CARD_VERDICTED, EntityKind.CARD, "ummanu-1", Actor("reviewer", "r-1"),
-                "other", MOMENT, data={"marker": "review:green", "body": "body", "status": "green"},
+                "board-event-1",
+                EventKind.CARD_VERDICTED,
+                EntityKind.CARD,
+                "ummanu-1",
+                Actor("reviewer", "r-1"),
+                "other",
+                MOMENT,
+                data={"marker": "review:green", "body": "body", "status": "green"},
             )
 
     def test_a_valid_marker_renders_its_grammar(self) -> None:
-        self.assertEqual(render_marker_comment(self.event(marker="report:done", status="done")), "[report:done]\nthe body")
         self.assertEqual(
-            render_marker_comment(self.event(marker="report:blocked", status="blocked", classification="external_fact")),
+            render_marker_comment(self.event(marker="report:done", status="done")), "[report:done]\nthe body"
+        )
+        self.assertEqual(
+            render_marker_comment(
+                self.event(marker="report:blocked", status="blocked", classification="external_fact")
+            ),
             "[report:blocked]\nclassification: external_fact\n\nthe body",
         )
 
     def test_a_non_marker_event_is_not_rendered(self) -> None:
-        event = Event("board-event-1", EventKind.CARD_STARTED, EntityKind.CARD, "ummanu-1", Actor("worker", "w"), "go", MOMENT)
+        event = Event(
+            "board-event-1",
+            EventKind.CARD_STARTED,
+            EntityKind.CARD,
+            "ummanu-1",
+            Actor("worker", "w"),
+            "go",
+            MOMENT,
+        )
         with self.assertRaisesRegex(ValueError, "not a Card marker occurrence"):
             render_marker_comment(event)
 
@@ -347,12 +420,29 @@ class FrozenRevisionKeyTests(unittest.TestCase):
 
     def test_0004_frozen_copy_agrees_with_the_live_function(self) -> None:
         revision = importlib.import_module("ummanu.board.migrations.versions.0004_product_issue_sql")
-        identifiers = ("ummanu", "f" * 20, "0001", " padded ", "ü-ñ", "sprint:0", "sprint:1596", "sprint:canary", "sprint:١")
+        identifiers = (
+            "ummanu",
+            "f" * 20,
+            "0001",
+            " padded ",
+            "ü-ñ",
+            "sprint:0",
+            "sprint:1596",
+            "sprint:canary",
+            "sprint:١",
+        )
         for kind in backend.RECORD_KINDS:
             for identifier in identifiers:
                 with self.subTest(kind=kind, identifier=identifier):
-                    self.assertEqual(revision.record_key(kind, identifier), backend.record_key(kind, identifier))
-        for kind, identifier in (("card", "x"), ("product", "  "), ("sprint", "sprint:500000000"), ("sprint", "sprint:01")):
+                    self.assertEqual(
+                        revision.record_key(kind, identifier), backend.record_key(kind, identifier)
+                    )
+        for kind, identifier in (
+            ("card", "x"),
+            ("product", "  "),
+            ("sprint", "sprint:500000000"),
+            ("sprint", "sprint:01"),
+        ):
             with self.subTest(kind=kind, identifier=identifier):
                 with self.assertRaises(ValueError):
                     revision.record_key(kind, identifier)
@@ -376,23 +466,29 @@ class StatementCountTests(unittest.TestCase):
 
     def test_card_metadata_links_and_bag_removals(self) -> None:
         def write(client: _Recording, n: int) -> None:
-            client._rpc_saveTaskMetadata(task_id=1, values={
-                "retry_heads": ",".join(f"head-{i}" for i in range(n)),
-                "blocked_by": ",".join(f"ummanu-{i + 2}" for i in range(n)),
-                "issues": ",".join(f"issue:{i}" for i in range(n)),
-                **{f"note-{i}": "" for i in range(n)},
-            })
+            client._rpc_saveTaskMetadata(
+                task_id=1,
+                values={
+                    "retry_heads": ",".join(f"head-{i}" for i in range(n)),
+                    "blocked_by": ",".join(f"ummanu-{i + 2}" for i in range(n)),
+                    "issues": ",".join(f"issue:{i}" for i in range(n)),
+                    **{f"note-{i}": "" for i in range(n)},
+                },
+            )
 
         # DELETE + INSERT for each of the three links, and one bag removal for every dropped key.
         self.assert_constant(self.counted(write), 7)
 
     def test_sprint_relations(self) -> None:
         def write(client: _Recording, n: int) -> None:
-            client.sprints._replace_relations("sprint:1", {
-                "sprint_repositories": json.dumps([f"/repo/{i}" for i in range(n)]),
-                "sprint_issues": json.dumps([f"issue:{i}" for i in range(n)]),
-                "sprint_reservations": json.dumps([f"project-{i}" for i in range(n)]),
-            })
+            client.sprints._replace_relations(
+                "sprint:1",
+                {
+                    "sprint_repositories": json.dumps([f"/repo/{i}" for i in range(n)]),
+                    "sprint_issues": json.dumps([f"issue:{i}" for i in range(n)]),
+                    "sprint_reservations": json.dumps([f"project-{i}" for i in range(n)]),
+                },
+            )
 
         # Repositories: DELETE + one upsert-and-link; issues: DELETE + INSERT; reservations:
         # release, status read, the project rows and the reservation upsert.
@@ -401,7 +497,9 @@ class StatementCountTests(unittest.TestCase):
     def test_a_repeated_reservation_keeps_its_last_place(self) -> None:
         client = _Recording(lambda sql, params: [("open",)])
         client.sprints._replace_relations("sprint:1", {"sprint_reservations": json.dumps(["a", "b", "a"])})
-        [params] = [params for sql, params in client.statements if sql.startswith("INSERT INTO sprint_projects")]
+        [params] = [
+            params for sql, params in client.statements if sql.startswith("INSERT INTO sprint_projects")
+        ]
         self.assertEqual((params[4], params[5]), (["a", "b"], [2, 1]))
 
     def test_restored_budget_events(self) -> None:
@@ -411,21 +509,33 @@ class StatementCountTests(unittest.TestCase):
             return []
 
         def write(client: _Recording, n: int) -> None:
-            client.sprints._apply("sprint:1", {
-                "sprint_budget": json.dumps({"by_type": {"red_review": n, "blocked": 1}}),
-                "sprint_budget_uncharged": json.dumps({"infrastructure_blocked": n}),
-            })
+            client.sprints._apply(
+                "sprint:1",
+                {
+                    "sprint_budget": json.dumps({"by_type": {"red_review": n, "blocked": 1}}),
+                    "sprint_budget_uncharged": json.dumps({"infrastructure_blocked": n}),
+                },
+            )
 
         # The two request reads, the DELETE and one INSERT of every restored occurrence.
         self.assert_constant(self.counted(write, answer), 4)
 
     def test_restored_budget_events_keep_their_listed_order(self) -> None:
-        client = _Recording(lambda sql, params: [("restore-1", {})] if "FROM requests" in sql and params[-1] == "restored" else [])
-        client.sprints._apply("sprint:1", {
-            "sprint_budget": json.dumps({"by_type": {"red_review": 2, "blocked": 1}}),
-            "sprint_budget_uncharged": json.dumps({"infrastructure_blocked": 1}),
-        })
-        [params] = [params for sql, params in client.statements if sql.startswith("INSERT INTO sprint_budget_events")]
+        client = _Recording(
+            lambda sql, params: (
+                [("restore-1", {})] if "FROM requests" in sql and params[-1] == "restored" else []
+            )
+        )
+        client.sprints._apply(
+            "sprint:1",
+            {
+                "sprint_budget": json.dumps({"by_type": {"red_review": 2, "blocked": 1}}),
+                "sprint_budget_uncharged": json.dumps({"infrastructure_blocked": 1}),
+            },
+        )
+        [params] = [
+            params for sql, params in client.statements if sql.startswith("INSERT INTO sprint_budget_events")
+        ]
         self.assertEqual(
             list(zip(params[3], params[4], params[5], strict=True)),
             [

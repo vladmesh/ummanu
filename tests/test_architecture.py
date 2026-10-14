@@ -55,9 +55,7 @@ def _absolute_imports(relative: str, source: str) -> list[tuple[ast.stmt, str, b
             found.extend((node, alias.name, id(node) in top_level) for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
             found.append((node, node.module, id(node) in top_level))
-            found.extend(
-                (node, f"{node.module}.{alias.name}", id(node) in top_level) for alias in node.names
-            )
+            found.extend((node, f"{node.module}.{alias.name}", id(node) in top_level) for alias in node.names)
     return found
 
 
@@ -114,9 +112,13 @@ def _imports_automations(relative: str, source: str) -> list[str]:
     if relative.startswith("src/ummanu/"):
         tree = source_trees.parse(source, filename=relative)
         for node in source_trees.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.level and (
-                (node.module or "").split(".")[0] == "automations"
-                or any(alias.name == "automations" for alias in node.names)
+            if (
+                isinstance(node, ast.ImportFrom)
+                and node.level
+                and (
+                    (node.module or "").split(".")[0] == "automations"
+                    or any(alias.name == "automations" for alias in node.names)
+                )
             ):
                 offenders.add(f"{relative}:{node.lineno}: {AUTOMATIONS_PACKAGE}")
     return sorted(offenders)
@@ -201,6 +203,49 @@ def _imported_modules(relative: str, source: str) -> list[tuple[int, str]]:
             found.append((node.lineno, target))
             found.extend((node.lineno, f"{target}.{alias.name}") for alias in node.names)
     return found
+
+
+def _board_fake_offenders(relative: str, source: str) -> list[str]:
+    """Retired imports, product test dependencies and misplaced host definitions."""
+    product = relative.startswith("src/")
+    tree = source_trees.parse(source, filename=relative)
+    targets = _imported_modules(relative, source)
+    aliases = {
+        alias.asname or alias.name: alias.name.rpartition(".")[2]
+        for node in source_trees.imports(tree)
+        for alias in node.names
+    }
+    offenders = []
+    if relative == "src/ummanu/board/fake.py":
+        offenders.append(f"{relative}: retired product location")
+    for node in source_trees.walk(tree):
+        if isinstance(node, ast.ClassDef) and (
+            (node.name == "FakeBoardHost" and relative != "tests/fakes/board.py")
+            or (product and node.name == "MemoryAudit")
+        ):
+            offenders.append(f"{relative}:{node.lineno}: misplaced {node.name}")
+        if isinstance(node, ast.Call):
+            called = (
+                node.func.id
+                if isinstance(node.func, ast.Name)
+                else (node.func.attr if isinstance(node.func, ast.Attribute) else "")
+            )
+            if (
+                aliases.get(called, called) in {"import_module", "__import__", "patch"}
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+            ):
+                target = node.args[0].value
+                if target.startswith(".") and len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                    import importlib.util
+
+                    target = importlib.util.resolve_name(target, node.args[1].value)
+                targets.append((node.lineno, target))
+    for line, target in targets:
+        if _names(target, "ummanu.board.fake") or (product and _names(target, "tests")):
+            offenders.append(f"{relative}:{line}: {target}")
+    return offenders
 
 
 def _first_shell_word(text: str) -> str:
@@ -428,6 +473,50 @@ class NoOrcaInSourceTests(unittest.TestCase):
 
 
 class SourceLayoutTests(unittest.TestCase):
+    def test_board_double_has_one_test_owner_and_no_product_dependency(self) -> None:
+        self.assertFalse((ROOT / "src/ummanu/board/fake.py").exists())
+        owner = ROOT / "tests/fakes/board.py"
+        tree = source_trees.parse(owner.read_text())
+        self.assertEqual(
+            [node.name for node in tree.body if isinstance(node, ast.ClassDef)],
+            ["MemoryAudit", "FakeBoardHost"],
+        )
+        offenders = []
+        for directory in ("src", "tests", "scripts"):
+            naming = (
+                ("fake", "FakeBoardHost", "MemoryAudit", "tests")
+                if directory == "src"
+                else ("ummanu.board", "FakeBoardHost")
+            )
+            for path, _tree in source_trees.modules(ROOT / directory, naming=naming):
+                offenders.extend(_board_fake_offenders(path.relative_to(ROOT).as_posix(), path.read_text()))
+        self.assertEqual(offenders, [])
+
+    def test_board_double_guard_detects_planted_imports_and_locations(self) -> None:
+        for relative, source in (
+            ("src/ummanu/board/fake.py", ""),
+            ("src/ummanu/board/probe.py", "from . import fake as owner\n"),
+            ("tests/probe.py", "from ummanu.board.fake import MemoryAudit\n"),
+            ("src/ummanu/probe.py", "from tests.fakes import board\n"),
+            (
+                "src/ummanu/probe.py",
+                "from importlib import import_module as load\nload('tests.fakes.board')\n",
+            ),
+            ("tests/probe.py", "import importlib as loader\nloader.import_module('.fake', 'ummanu.board')\n"),
+            ("tests/probe.py", "from unittest.mock import patch as p\np('ummanu.board.fake.uuid')\n"),
+            ("tests/fakes/duplicate.py", "class FakeBoardHost: pass\n"),
+            ("src/ummanu/probe.py", "class MemoryAudit: pass\n"),
+        ):
+            with self.subTest(relative=relative, source=source):
+                self.assertTrue(_board_fake_offenders(relative, source))
+        self.assertEqual(
+            _board_fake_offenders(
+                "tests/probe.py",
+                "FORBIDDEN = ('ummanu.board.fake',)\nfrom tests.fakes.board import MemoryAudit\n",
+            ),
+            [],
+        )
+
     def test_test_support_never_imports_a_test_module(self) -> None:
         """Shared fakes are a one-way dependency, not bridges between test modules."""
         offenders: list[str] = []
@@ -474,7 +563,9 @@ async def asynchronous():
         offenders: list[str] = []
         for name in DISPATCH_FLOW_MODULES:
             relative = f"src/ummanu/dispatch/{name}.py"
-            offenders.extend(_imports_dispatch_state_machine(relative, (ROOT / relative).read_text(encoding="utf-8")))
+            offenders.extend(
+                _imports_dispatch_state_machine(relative, (ROOT / relative).read_text(encoding="utf-8"))
+            )
         self.assertEqual(offenders, [])
         # Every spelling of the back edge is caught, at module level or inside a function.
         for source in (
@@ -487,11 +578,18 @@ async def asynchronous():
             "from ..dispatch.runtime import DispatcherRuntime\n",
         ):
             with self.subTest(source=source):
-                self.assertEqual(len(_imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source)), 1)
+                self.assertEqual(
+                    len(_imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source)), 1
+                )
         # A sibling flow module or a similarly named module is not the state machine.
-        for source in ("from ummanu.dispatch import runtime_preflight\n", "from .gate_lifecycle import run_gate\n"):
+        for source in (
+            "from ummanu.dispatch import runtime_preflight\n",
+            "from .gate_lifecycle import run_gate\n",
+        ):
             with self.subTest(source=source):
-                self.assertEqual(_imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source), [])
+                self.assertEqual(
+                    _imports_dispatch_state_machine("src/ummanu/dispatch/planted.py", source), []
+                )
 
     def test_no_ummanu_module_imports_the_agents_back(self) -> None:
         """The dependency runs one way: `ummanu.automations` -> the rest of `ummanu`."""
@@ -605,13 +703,16 @@ class OneBoardClientTests(unittest.TestCase):
 
         parameters = inspect.signature(backend.board_client).parameters
         self.assertEqual([name for name in parameters], ["instance_dir", "serves", "role"])
-        tree = source_trees.parse((ROOT / "src" / "ummanu" / "board" / "backend.py").read_text(encoding="utf-8"))
+        tree = source_trees.parse(
+            (ROOT / "src" / "ummanu" / "board" / "backend.py").read_text(encoding="utf-8")
+        )
         environment = [
             node.lineno
             for node in source_trees.walk(tree)
             if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv"}
         ]
         self.assertEqual(environment, [], "board/backend.py reads the process environment")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -631,7 +732,13 @@ RESOURCE_HEALTH_FILE = "resource_health.json"
 HEAD_REGISTRY_HOME = "ummanu/head_registry.py"
 HEAD_PAIR_FILES = ("heads.yaml", "source.yaml")
 ONBOARDING_STORAGE_HOME = "ummanu/runtime/onboarding_storage.py"
-ONBOARDING_STORAGE_NAMES = ("adapter-drafts", "gate-runs", "provision-runs", "compatibility-manifests", ".locks")
+ONBOARDING_STORAGE_NAMES = (
+    "adapter-drafts",
+    "gate-runs",
+    "provision-runs",
+    "compatibility-manifests",
+    ".locks",
+)
 SINGLE_HOME_ASSIGNMENTS = {
     "ROLE_ALLOWLIST": ROLE_ENV_HOME,
     "SENSITIVE_ENV_NAME_RE": ROLE_ENV_HOME,
@@ -777,7 +884,9 @@ class SingleHomeTests(unittest.TestCase):
             with self.subTest(label):
                 offenders = _second_copies({path: text})
                 self.assertEqual(len(offenders), 1, offenders)
-                self.assertTrue(offenders[0].startswith(path) and offenders[0].endswith(label.strip()), offenders)
+                self.assertTrue(
+                    offenders[0].startswith(path) and offenders[0].endswith(label.strip()), offenders
+                )
         # The homes themselves are not second copies.
         self.assertEqual(
             _second_copies(
