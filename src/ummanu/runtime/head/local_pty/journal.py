@@ -94,7 +94,8 @@ class JournalReadResult:
         if self.truncated_tail or self.malformed or not self.ordered:
             return False
         fresh = [event["seq"] for event in self.events if event["seq"] > seq]
-        return bool(fresh or not self.partial_head) and all(
+        reaches_floor = bool(self.events and self.events[-1]["seq"] == seq)
+        return bool(fresh or reaches_floor or not self.partial_head) and all(
             value == seq + index for index, value in enumerate(fresh, start=1)
         )
 
@@ -282,7 +283,7 @@ def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _retained(descriptor: int, run_id: str) -> tuple[bytes, int]:
-    """Stream legacy input once, with bounded lines/anchors/suffix; never repair damaged input.
+    """Stream legacy input with bounded lines/anchors/suffix; never repair damaged input.
 
     Keep the first start for UI metadata, and the current binding, start, drain, stopping and
     exit verbatim. A new binding begins the next scoped incarnation before its start exists.
@@ -314,16 +315,17 @@ def _retained(descriptor: int, run_id: str) -> tuple[bytes, int]:
             seq, kind = raw["seq"], raw["kind"]
             previous = seq
             if kind == SCOPE_BOUND:
-                if scope_pending:
-                    raise JournalError("duplicate current scope binding")
                 proof = raw.get("binding")
-                if not isinstance(proof, dict):
+                if (not isinstance(proof, dict) or not isinstance(proof.get("invocation_id"), str)
+                        or not proof["invocation_id"]):
                     raise JournalError("existing scope binding is malformed")
                 old = anchors.get(SCOPE_BOUND)
                 if (old is not None and json.loads(old[1])["binding"].get("invocation_id")
                         == proof.get("invocation_id")):
                     raise JournalError("duplicate current scope invocation")
                 anchors = {key: value for key, value in anchors.items() if key == "first"}
+                # A new native invocation supersedes an unstarted pre-head crash's binding too.
+                # Preserve its original record as the current anchor, never synthesize proof.
                 scope_pending = True
             elif kind == RUN_STARTED:
                 if not scope_pending and SCOPE_BOUND in anchors:
@@ -342,6 +344,23 @@ def _retained(descriptor: int, run_id: str) -> tuple[bytes, int]:
                 recent_bytes -= len(recent.popleft()[1])
     kept = dict(recent)
     kept.update(anchors.values())
+    binding = anchors.get(SCOPE_BOUND)
+    if binding is not None:
+        # Pending invocations can interleave: A, B, A is still a duplicate of the current A.
+        # Count only that final invocation in a second bounded-memory scan, rather than keeping
+        # an unbounded set of all legacy invocations or letting compaction erase the duplicate.
+        invocation = json.loads(binding[1])["binding"]["invocation_id"]
+        matches = 0
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            while line := stream.readline(JOURNAL_RECORD_BYTES + 1):
+                if line.strip():
+                    event = json.loads(line)
+                    if (event["kind"] == SCOPE_BOUND
+                            and event["binding"]["invocation_id"] == invocation):
+                        matches += 1
+                        if matches > 1:
+                            raise JournalError("duplicate current scope invocation")
     return b"".join(kept[seq] for seq in sorted(kept)), previous
 
 

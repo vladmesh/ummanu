@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
+from tests.support.local_pty_journal import small_limits
 from ummanu.dispatch import launch, production, review as dispatcher_review
 from ummanu.dispatch.host import CommandHostRuntime
 from ummanu.dispatch.launch import (
@@ -51,7 +52,12 @@ from ummanu.runtime.head.handoff import (
     handoff_budget,
     handoff_pending_stage,
 )
-from ummanu.runtime.head.local_pty import JournalReadResult, client as client_module, protocol
+from ummanu.runtime.head.local_pty import (
+    JournalReadResult,
+    client as client_module,
+    journal as journal_owner,
+    protocol,
+)
 from ummanu.runtime.head.local_pty.journal import JOURNAL_SCHEMA_VERSION
 from ummanu.runtime.head.local_pty.supervisor import Supervisor
 from ummanu.runtime.head.operations import NudgePointer
@@ -525,6 +531,82 @@ class AQuietHeadIsHandedOffInsideTheBudgetTests(HandoffTestCase):
         self.assertEqual(again.status, HEAD_OK, again.reason)
         self.assertEqual(supervisor.offered, [SUBJECT, f"{SUBJECT}:submit"])
         self.assertLess(took, 0.01, "one status and one journal read")
+
+
+class APartialTailStillObservesTheCurrentFloorTests(HandoffTestCase):
+    def prepare_history(self, *, rotate: bool):
+        supervisor, run = self.head()
+        # Replace the scripted startup fixture with actual writer records. Native scope authority
+        # is tested by its secure reader elsewhere; this is a fake-clock delivery fixture.
+        supervisor.journal.write_bytes(b"")
+        supervisor.journal.chmod(0o600)
+        if rotate:
+            small_limits(self)
+            # The retained suffix itself exceeds the real default 64 KiB reader window.
+            for name, value in {"JOURNAL_RECENT_BYTES": 65536, "JOURNAL_RETAIN_BYTES": 90112,
+                                "JOURNAL_MAX_BYTES": 94208, "JOURNAL_TRANSIENT_BYTES": 184320}.items():
+                self.enterContext(mock.patch.object(journal_owner, name, value))
+        inodes = set()
+        with journal_owner.JournalWriter(supervisor.journal, run.run_id) as writer:
+            writer.append("scope.bound", binding={"invocation_id": "scripted"})
+            writer.append("run.started", head_pid=supervisor.head_pid)
+            for _ in range(180):
+                writer.append("provider.progressed", turn=1, output_bytes=1, padding="x" * 1100)
+                inodes.add(supervisor.journal.stat().st_ino)
+            supervisor.seq = writer.seq
+        self.assertGreater(supervisor.journal.stat().st_size, local_pty.JOURNAL_TAIL_BYTES)
+        self.assertEqual(len(inodes) > 1, rotate)
+        return supervisor, run
+
+    def exercise_first_delivery(self, *, rotate: bool):
+        supervisor, run = self.prepare_history(rotate=rotate)
+        runtime = self.runtime()
+        floor = runtime.handoff_floor(run)
+        self.assertEqual(floor, supervisor.seq)
+        reading = local_pty.read_tail(supervisor.journal)
+        self.assertTrue(reading.partial_head)
+        self.assertEqual(reading.events[-1]["seq"], floor)
+        self.assertTrue(reading.covers_since(floor))
+        handoff = PromptHandoff(floor=floor, began_at=self.clock.wall())
+        self.assertEqual(runtime.handoff_started(run, SUBJECT, handoff), HANDOFF_NOT_STARTED)
+        receipt, _, _ = self.tick(run, handoff, runtime=runtime)
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(supervisor.offered, [SUBJECT, f"{SUBJECT}:submit"])
+        self.assertEqual(supervisor.accepted, [SUBJECT, f"{SUBJECT}:submit"])
+        address = runtime._address(run)
+        records = runtime._accepted_records(address, floor)
+        self.assertEqual(sum(event["subject"] == SUBJECT for event in records), 1)
+        witnessed = runtime._report_of(address, {"id": 1}, len(POINTER.text.encode()) + 1,
+                                       floor, established=False)
+        self.assertTrue(witnessed.journalled)
+        self.assertFalse(witnessed.fatal)
+        self.assertEqual(runtime.handoff_started(run, SUBJECT, handoff), HANDOFF_STARTED)
+        self.assertEqual(self.tick(run, handoff, runtime=runtime)[0].status, HEAD_OK)
+        self.assertEqual(supervisor.offered, [SUBJECT, f"{SUBJECT}:submit"])
+
+    def test_idle_unrotated_journal_above_default_window_types_once(self):
+        self.exercise_first_delivery(rotate=False)
+
+    def test_idle_compacted_journal_above_default_window_types_once(self):
+        self.exercise_first_delivery(rotate=True)
+
+    def test_empty_partial_window_and_evicted_floor_without_fresh_records_stay_unknown(self):
+        supervisor, run = self.head()
+        supervisor.append("provider.progressed", -600, turn=1, padding="x" * 70000)
+        runtime = self.runtime()
+        handoff = self.handoff(supervisor)
+        reading = local_pty.read_tail(supervisor.journal)
+        self.assertTrue(reading.partial_head)
+        self.assertEqual(reading.events, ())
+        self.assertFalse(reading.covers_since(handoff.floor))
+        from ummanu.runtime.head.handoff import HANDOFF_UNKNOWN
+
+        self.assertEqual(runtime.handoff_started(run, SUBJECT, handoff), HANDOFF_UNKNOWN)
+        receipt = self.tick(run, handoff, runtime=runtime)[0]
+        self.assertTrue(receipt.reason.startswith(DELIVER_HANDOFF_UNESTABLISHED))
+        self.assertEqual(supervisor.offered, [])
+        cut = JournalReadResult(events=({"seq": 10},), partial_head=True)
+        self.assertFalse(cut.covers_since(11))
 
 
 class TheBlockingFlowItReplacesTests(HandoffTestCase):

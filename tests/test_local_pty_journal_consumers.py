@@ -203,9 +203,103 @@ class RetainedJournalConsumerTests(unittest.TestCase):
               self.assertRaises(subprocess.TimeoutExpired)):
             process.wait(timeout=0)
         with self.path.open("ab") as stream:
-            stream.write(b"{torn")
+            stream.write(b"not-json\n")  # Complete corruption remains a hard refusal.
         with self.assertRaisesRegex(RunnerError, "damaged"):
             process.wait(timeout=0)
+
+    def test_po_transient_torn_tail_retries_before_accepting_exact_matching_exit(self):
+        from ummanu.po import runner
+
+        with j.JournalWriter(self.path, "run") as writer:
+            start = writer.append(j.RUN_STARTED, head_pid=20)
+            writer.append(j.RUN_EXITED, head_pid=20, signal=9, head_loss_reason="memory_limit")
+        complete = j.read_events(self.path)
+        torn = replace(complete, truncated_tail=True)
+        now = [0.0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        clock = SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
+        with (mock.patch.object(runner, "process_identity", return_value="exact-supervisor"),
+              mock.patch.object(runner, "time", clock),
+              mock.patch.object(runner, "still_running", return_value=True) as alive,
+              mock.patch.object(runner, "read_events", side_effect=[torn, complete])):
+            process = ScopedPoProcess(replace(self.handle(), journal_started_seq=start["seq"]))
+            self.assertEqual(process.wait(timeout=1), -9)
+        self.assertEqual(process.head_loss_reason, "memory_limit")
+        self.assertEqual(sleeps, [0.05], "the complete exit in the torn reading was not success")
+        alive.assert_called_once_with(30, "exact-supervisor")
+
+    def test_po_persistently_torn_live_tail_times_out_at_callers_deadline(self):
+        from ummanu.po import runner
+
+        now = [0.0]
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        clock = SimpleNamespace(monotonic=lambda: now[0], sleep=sleep)
+        with (mock.patch.object(runner, "process_identity", return_value="exact-supervisor"),
+              mock.patch.object(runner, "time", clock),
+              mock.patch.object(runner, "still_running", return_value=True),
+              mock.patch.object(runner, "read_events", return_value=j.JournalReadResult(truncated_tail=True))):
+            process = ScopedPoProcess(self.handle())
+            with self.assertRaises(subprocess.TimeoutExpired):
+                process.wait(timeout=0.12)
+        self.assertAlmostEqual(now[0], 0.12)
+        self.assertAlmostEqual(sleeps[-1], 0.02)
+        self.assertIsNone(process.head_loss_reason)
+
+    def test_po_torn_tail_with_dead_supervisor_never_borrows_complete_prior_exit(self):
+        from ummanu.po import runner
+
+        prior = {"kind": j.RUN_EXITED, "run_id": "run", "seq": 2, "head_pid": 20, "exit_code": 0}
+        with (mock.patch.object(runner, "process_identity", return_value="exact-supervisor"),
+              mock.patch.object(runner, "time", SimpleNamespace(monotonic=lambda: 0,
+                               sleep=mock.Mock(side_effect=AssertionError("dead supervisor cannot wait")))),
+              mock.patch.object(runner, "still_running", return_value=False),
+              mock.patch.object(runner, "read_events", return_value=j.JournalReadResult(
+                  events=(prior,), truncated_tail=True))):
+            process = ScopedPoProcess(self.handle())
+            with self.assertRaisesRegex(RunnerError, "without a run.exited"):
+                process.wait(timeout=1)
+        self.assertIsNone(process.head_loss_reason)
+
+    def test_multiple_prehead_bindings_preserve_failed_launch_cleanup_sequence_floor(self):
+        with j.JournalWriter(self.path, "run") as writer:
+            for number in range(32):
+                writer.append(j.SCOPE_BOUND, binding={"invocation_id": f"failed-{number}"})
+            floor = writer.seq
+        lifecycle = mock.Mock(generation="new-generation")
+        lifecycle.started_or_exited.side_effect = ScopedHeadLifecycle.started_or_exited
+        lifecycle.launcher_argv.side_effect = lambda argv, **_kwargs: argv
+        started = []
+
+        def launch(*_args, **_kwargs):
+            with j.JournalWriter(self.path, "run") as writer:
+                writer.append(j.SCOPE_BOUND, binding={"invocation_id": "new"})
+                started.append(writer.append(j.RUN_STARTED, head_pid=20, supervisor_pid=30))
+                self.progress(writer)
+            return SimpleNamespace(wait=lambda: 0)
+
+        with (mock.patch.object(client, "ScopedHeadLifecycle", return_value=lifecycle) as factory,
+              mock.patch.object(client.subprocess, "Popen", side_effect=launch),
+              mock.patch.object(client, "_identity_written", return_value=False)):
+            factory.from_run_dir.return_value = None
+            with self.assertRaises(client.LocalPtySpawnError) as error:
+                client.spawn_head(root=self.root, run_id="run", command="true", role="worker",
+                                  task="task", memory_limit_mib=96, timeout=0)
+        self.assertEqual(error.exception.reason, "timeout")
+        self.assertTrue(error.exception.cleanup_complete)
+        lifecycle.started_or_exited.assert_called_with(mock.ANY, floor)
+        lifecycle.cancel_started.assert_called_once_with(socket_path=self.directory / protocol.SOCKET_NAME,
+                                                        journal_path=self.path, started_seq=started[0]["seq"])
+        self.assertLess(len(j.read_events(self.path).events), floor)
 
     def test_po_launch_sequence_fences_reused_pid_in_new_incarnation(self):
         with j.JournalWriter(self.path, "run") as writer:

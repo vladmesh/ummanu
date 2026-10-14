@@ -98,6 +98,11 @@ append would cross that limit, the writer streams the old file into a retained s
 complete records. The six anchors cost at most 6 MiB, the replacement at most 7 MiB; records
 shared by prefix and suffix are written once, in original sequence order. A new scope binding
 begins the next scoped incarnation before its start, so a pre-head crash keeps its authority.
+After a pre-head crash, another distinct native invocation may supersede that pending binding;
+`scope.bound(a), scope.bound(b), run.started(b)` is supported history. The latest original
+binding becomes the current anchor and earlier unstarted bindings become optional history.
+Reopen and rotation still refuse a duplicate current invocation or multiple starts borrowing
+one binding. Scope inventory validates the original native proof through its secure descriptor.
 Old optional progress, inputs and turn boundaries may be evicted. Current terminal outcomes,
 including the typed memory-limit reason, and launch-time native attestation remain original
 records, never reconstructions from mutable scope ownership.
@@ -122,9 +127,13 @@ An external reader may keep an unlinked old inode alive until it closes its desc
 15 MiB bound covers writer-owned active/staging files and descriptors, not arbitrary readers'
 descriptor lifetimes. No bounded archive discovery or foreign-path fallback is needed.
 
-Released unrotated schema-1 journals remain readable. Reopen streams a valid legacy input once
+Released unrotated schema-1 journals remain readable. Reopen streams a valid legacy input
 with bounded record, anchor and suffix memory, preserving exact original authority and last
-sequence. If that input is already larger than 8 MiB, its one-time conversion begins with those
+sequence. For scoped history it makes a second streaming scan to reject any duplicate of the
+current invocation, including nonadjacent pending bindings, without retaining an unbounded
+invocation set. Steady-state reopen reads at most twice the 8 MiB canonical cap; legacy input
+has the same two-scan limit relative to its existing size. If that input is already larger than
+8 MiB, its one-time conversion begins with those
 existing bytes plus at most 7 MiB staging; it never makes another full-size copy. It removes the
 legacy excess before open returns and before the first successful append. Existing records
 over 1 MiB receive the same named refusal without mutation. Untouched old running supervisors
@@ -136,12 +145,18 @@ report `partial_head` for either an evicted prefix or an interior sequence gap. 
 `head_run_journal` is retained history, not a completeness witness. `read_tail` and `tail_window`
 keep their 64 KiB byte window and expose the same incompleteness. Torn, malformed and unordered
 remain distinct damage readings. `head_view` exposes partial history. `head_run_first_record`
-reads at most two maximum records (binding then start) and returns only task, role, run ID and
-time, never command or proof. Reused directories retain the first start's historical metadata.
+reads complete lines incrementally through any pending bindings, stopping at the first start.
+Its overall byte cap is 8 MiB and its record cap 1 MiB; reaching a cap before a complete start
+is unavailable metadata, not permission to infer identity. It returns only task, role, run ID
+and time, never command or proof. Reused directories retain the first start's historical metadata.
 Terminal readers inspect the retained set and fence exits to the current incarnation; PO wait
 also matches the launched head PID and internal handle's start sequence and refuses damaged
 exit evidence. Handles constructed by released callers without that sequence retain their
 PID-based fallback; new launches always capture the sequence.
+A transient torn append while the exact PO supervisor remains alive is pending: wait rereads
+within the existing caller deadline, with each poll capped to its remaining time. It accepts
+no earlier complete exit through that torn record. Complete corruption still refuses, and a
+supervisor gone without trustworthy exit evidence remains an unavailable terminal outcome.
 
 Both launch owners, `client.spawn_head` (including failure cleanup) and
 `ScopedHeadLifecycle.launch_until_started` / `started_or_exited`, use original sequence floors,
@@ -152,7 +167,29 @@ an old retained turn or start cannot answer for newer unknown state. Handoff and
 recovery require every sequence above their floor, including interior gaps after an older
 pinned anchor. Missing typed/submit evidence then means unavailable, never nothing landed or
 permission to replay input. A complete recent suffix above a floor can still witness delivery.
+When no record is above the floor, an ordered intact tail that actually contains the current
+floor record proves this handoff has not started, even if the byte window was cut below it.
+An empty partial window or a window missing that last/floor record cannot make this conclusion.
 Supervisor stderr logs, output tails and run-directory garbage collection are separate policies.
+
+### Refused journal recovery
+
+A torn, malformed, foreign or substituted journal is retained as evidence. `ummanu head-status
+--workspace PATH` reads the dispatcher's recorded head witnesses; it repairs no journal. The
+owning runtime's `LocalPtyHeadRuntime.stop` verifies the recorded HeadRun identity and scope
+generation and requires `ScopedHeadLifecycle`'s recursive empty proof. Dispatcher stop/recovery
+and the PO service's `stop_turn` operation use that owned lifecycle; `run.exited` alone cannot
+settle descendants. Failure to prove ownership or emptiness leaves recovery unresolved.
+
+After confirmed settlement, callers that allocate a fresh launch identity can create a new
+canonical run directory; the PO runner's scoped-launch path allocates a fresh UUID only after
+the previous owner's settlement. A caller that retains a damaged run_id still receives the
+journal refusal on relaunch. There is no journal-repair CLI or automatic repair of those bytes.
+If the owning product cannot allocate a fresh run through its supported lifecycle, an authorized
+external recovery operation must arrange that replacement after confirmed scope settlement,
+preserving the damaged directory for audit. Supported upgrade or host reconciliation does not
+cleanse this journal or grant adoption. Recovery guidance must not direct live unlink/truncation
+or a new start beside an unresolved scope.
 
 ## Supported protocol and prompt contracts (CON-13 / CON-14)
 

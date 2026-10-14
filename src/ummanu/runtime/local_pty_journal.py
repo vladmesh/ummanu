@@ -14,7 +14,12 @@ from typing import Any
 
 from ummanu.runtime.head import local_pty
 from ummanu.runtime.head.local_pty import protocol
-from ummanu.runtime.head.local_pty.journal import JOURNAL_RECORD_BYTES, SCOPE_BOUND, _unique
+from ummanu.runtime.head.local_pty.journal import (
+    JOURNAL_MAX_BYTES,
+    JOURNAL_RECORD_BYTES,
+    SCOPE_BOUND,
+    _unique,
+)
 from ummanu.runtime.local_pty_values import _Address
 
 
@@ -326,27 +331,30 @@ def head_run_first_record(run_dir: str | os.PathLike[str]) -> dict[str, Any] | N
 
     Only those four fields, never the record itself: `run.started` carries the head's command,
     and the command carries the head's memory token. `None` when there is no journal; the read is
-    bounded to two maximum records (a scope binding may precede the start), and no `run.started`
+    incremental, at most `JOURNAL_MAX_BYTES` with a per-record `JOURNAL_RECORD_BYTES` cap.
+    Multiple pre-head crash bindings may precede the first start. No complete `run.started`
     record raises `ValueError`. `OSError` propagates, as it does from the other readers here.
     """
     path = Path(run_dir) / protocol.JOURNAL_NAME
     try:
         with open(path, "rb") as journal:
-            head = journal.read(2 * JOURNAL_RECORD_BYTES)
+            remaining = JOURNAL_MAX_BYTES
+            while remaining:
+                line = journal.readline(min(JOURNAL_RECORD_BYTES + 1, remaining))
+                remaining -= len(line)
+                if len(line) > JOURNAL_RECORD_BYTES or not line.endswith(b"\n"):
+                    raise ValueError("the journal's first start is outside a complete bounded record")
+                if not line.strip():
+                    continue
+                record = json.loads(line.decode("utf-8"), object_pairs_hook=_unique)
+                if isinstance(record, dict) and record.get("kind") == SCOPE_BOUND:
+                    continue
+                if not isinstance(record, dict) or record.get("kind") != local_pty.RUN_STARTED:
+                    raise ValueError("the journal does not begin with scope bindings or run.started")
+                return {key: record.get(key) for key in ("task", "role", "run_id", "at")}
     except FileNotFoundError:
         return None
-    line, newline, rest = head.partition(b"\n")
-    if not newline:
-        raise ValueError("the journal's first record is not a complete line")
-    record = json.loads(line.decode("utf-8"), object_pairs_hook=_unique)
-    if isinstance(record, dict) and record.get("kind") == SCOPE_BOUND:
-        line, newline, _rest = rest.partition(b"\n")
-        if not newline:
-            raise ValueError("the journal's first start is not a complete line")
-        record = json.loads(line.decode("utf-8"), object_pairs_hook=_unique)
-    if not isinstance(record, dict) or record.get("kind") != local_pty.RUN_STARTED:
-        raise ValueError("the journal does not begin with run.started")
-    return {key: record.get(key) for key in ("task", "role", "run_id", "at")}
+    raise ValueError("the journal's first start is outside the metadata read limit")
 
 
 def head_run_journal_tail(run_dir: str | os.PathLike[str]) -> local_pty.JournalReadResult:

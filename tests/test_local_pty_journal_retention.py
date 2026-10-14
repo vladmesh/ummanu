@@ -47,6 +47,67 @@ class ProducerRecordBudgetTests(unittest.TestCase):
         self.assertNotIn(command, json.dumps(metadata))
 
 
+class MetadataReadBoundsTests(unittest.TestCase):
+    def test_multiple_pending_bindings_stop_incremental_reads_at_first_start(self):
+        from ummanu.runtime import local_pty_journal as views
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        path = root / "journal.jsonl"
+        prefix = b"".join(encoded(seq, j.SCOPE_BOUND, binding={"invocation_id": f"native-{seq}",
+                             "secret": "PROOF"}) for seq in range(1, 6))
+        prefix += encoded(6, j.RUN_STARTED, role="worker", task="task", command="COMMAND-SECRET")
+        path.write_bytes(prefix + encoded(7, padding="x" * (3 * 1024 * 1024)))
+        consumed = []
+        real_open = open
+
+        class MeasuredStream:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self.stream.__exit__(*args)
+
+            def readline(self, limit):
+                line = self.stream.readline(limit)
+                consumed.append(len(line))
+                return line
+
+        with mock.patch("builtins.open", side_effect=lambda *args, **kwargs:
+                        MeasuredStream(real_open(*args, **kwargs))):
+            metadata = views.head_run_first_record(root)
+        self.assertEqual(sum(consumed), len(prefix))
+        self.assertEqual(metadata, {"role": "worker", "task": "task", "run_id": "run",
+                                   "at": 1791975600.0})
+        self.assertNotIn("SECRET", json.dumps(metadata))
+        self.assertNotIn("PROOF", json.dumps(metadata))
+
+    def test_metadata_refuses_record_total_torn_and_duplicate_field_damage(self):
+        from ummanu.runtime import local_pty_journal as views
+
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        path = root / "journal.jsonl"
+        prefix = b"".join(encoded(seq, j.SCOPE_BOUND, binding={"invocation_id": str(seq)})
+                           for seq in range(1, 5))
+        start = encoded(5, j.RUN_STARTED, role="worker", command="PRIVATE")
+        for raw, record_cap, total_cap in (
+            (prefix + start, 4096, len(prefix)),
+            (start, len(start) - 1, 4096),
+            (prefix + start[:-1], 4096, 4096),
+            (start.replace(b'"seq":5', b'"seq":5,"seq":5'), 4096, 4096),
+        ):
+            with self.subTest(record_cap=record_cap, total_cap=total_cap):
+                path.write_bytes(raw)
+                with (mock.patch.object(views, "JOURNAL_RECORD_BYTES", record_cap),
+                      mock.patch.object(views, "JOURNAL_MAX_BYTES", total_cap),
+                      self.assertRaises(ValueError) as error):
+                    views.head_run_first_record(root)
+                self.assertNotIn("PRIVATE", str(error.exception))
+
+
 class JournalRetentionTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -114,6 +175,27 @@ class JournalRetentionTests(unittest.TestCase):
             self.exercise_upper_bound(module.JournalWriter)
         self.assertGreater(self.path.stat().st_size, j.JOURNAL_MAX_BYTES)
 
+    def test_both_review_blockers_reproduce_on_exact_rejected_candidate_source(self):
+        fixture = Path(__file__).parent / "fixtures/local_pty_journal_d8510b98.py.txt"
+        source = fixture.read_bytes()
+        self.assertEqual(hashlib.sha256(source).hexdigest(), "7b14fc96af57797260a435f14bb4e4951b1adff210f2fd9a1c648b534b1e98ba")
+        module = types.ModuleType("ummanu278_rejected_journal_fixture")
+        self.enterContext(mock.patch.dict(sys.modules, {module.__name__: module}))
+        exec(compile(source, str(fixture), "exec"), module.__dict__)
+        self.write(encoded(1, j.RUN_STARTED) + b"".join(encoded(seq, padding="x" * 1100)
+                                                      for seq in range(2, 160)))
+        old = module.read_tail(self.path)
+        self.assertTrue(old.partial_head)
+        self.assertFalse(old.covers_since(159))
+        self.assertTrue(j.read_tail(self.path).covers_since(159))
+        self.write(encoded(1, j.SCOPE_BOUND, binding={"invocation_id": "a"})
+                   + encoded(2, j.SCOPE_BOUND, binding={"invocation_id": "b"})
+                   + encoded(3, j.RUN_STARTED))
+        with self.assertRaisesRegex(module.JournalError, "duplicate current scope binding"):
+            module.JournalWriter(self.path, "run").open()
+        with j.JournalWriter(self.path, "run") as writer:
+            self.assertEqual(writer.seq, 3)
+
     def test_scoped_authority_and_terminal_records_survive_many_rotations(self):
         with j.JournalWriter(self.path, "run") as writer:
             bound = writer.append(j.SCOPE_BOUND, binding={"invocation_id": "native", "proof": "s" * 2200})
@@ -143,6 +225,25 @@ class JournalRetentionTests(unittest.TestCase):
         self.assertIn(current, result.events)
         self.assertNotIn(old_exit, result.events)
         self.assertEqual(result.of_kind(j.SCOPE_BOUND), (binding,))
+
+    def test_distinct_pending_native_bindings_reopen_before_start_and_many_rotations(self):
+        with j.JournalWriter(self.path, "run") as writer:
+            writer.append(j.SCOPE_BOUND, binding={"invocation_id": "prehead-crash"})
+        with j.JournalWriter(self.path, "run") as writer:
+            self.assertEqual(writer.seq, 1)
+            binding = writer.append(j.SCOPE_BOUND, binding={"invocation_id": "replacement"})
+        with j.JournalWriter(self.path, "run") as writer:
+            self.assertEqual(writer.seq, 2)
+            start = writer.append(j.RUN_STARTED, head_pid=20)
+            for _ in range(200):
+                writer.append(j.PROVIDER_PROGRESSED, turn=1, padding="x" * 1100)
+                self.assertLessEqual(self.aggregate()[0], j.JOURNAL_MAX_BYTES)
+        with j.JournalWriter(self.path, "run") as writer:
+            self.assertEqual(writer.seq, 203)
+            self.assertEqual(writer.append(j.RUN_EXITED, head_pid=20)["seq"], 204)
+        reading = j.read_events(self.path)
+        self.assertEqual(reading.of_kind(j.SCOPE_BOUND), (binding,))
+        self.assertEqual(reading.of_kind(j.RUN_STARTED), (start,))
 
     def test_empty_and_large_legacy_input_enforce_cap_without_copying_whole_input(self):
         for empty in (b"", b"\n\n"):
@@ -351,6 +452,10 @@ class JournalRetentionTests(unittest.TestCase):
             encoded(1, j.RUN_STARTED).replace(b'"run"', b'"foreign"'),
             encoded(1, j.SCOPE_BOUND, binding={"invocation_id": "native"})
             + encoded(2, j.SCOPE_BOUND, binding={"invocation_id": "native"}),
+            encoded(1, j.SCOPE_BOUND, binding={"invocation_id": False}),
+            encoded(1, j.SCOPE_BOUND, binding={"invocation_id": "native"})
+            + encoded(2, j.SCOPE_BOUND, binding={"invocation_id": "distinct"})
+            + encoded(3, j.SCOPE_BOUND, binding={"invocation_id": "native"}),
             encoded(1, j.SCOPE_BOUND, binding={"invocation_id": "native"})
             + encoded(2, j.RUN_STARTED) + encoded(3, j.RUN_STARTED),
         ):
