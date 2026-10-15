@@ -327,7 +327,7 @@ class BarLayoutTests(RouteFixture):
 
     def test_the_po_composer_sits_above_the_bar_rather_than_under_it(self) -> None:
         page = self.get("/po/sessions/s-1")
-        self.assertIn('<textarea id="po-text" name="text" required>', page)
+        self.assertIn('<textarea id="po-text" name="text">', page)
         # The composer is inside <main>, which the reserved padding sits below; the bar follows it.
         self.assertLess(page.index('id="po-text"'), page.index("</main>"))
         self.assertLess(page.index("</main>"), page.index('<footer class="statusbar"'))
@@ -759,7 +759,7 @@ class BarRefreshTests(RouteFixture):
     def test_the_po_composer_is_a_field_the_guard_covers(self) -> None:
         """The composer is a textarea, which is what makes the rule above cover a half-written message."""
         page = self.get("/po/sessions/s-1")
-        self.assertIn('<textarea id="po-text" name="text" required>', page)
+        self.assertIn('<textarea id="po-text" name="text">', page)
         self.assertIn("for (const field of document.querySelectorAll('textarea,", page)
 
 
