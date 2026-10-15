@@ -222,6 +222,7 @@ class GeneratedPacketInvariantTests(unittest.TestCase):
             ["git", "-C", str(repo), "check-ignore", "TASK.md", "REVIEW.md"],
             text=True,
             capture_output=True,
+            check=False,
         )
 
         self.assertEqual(ignored.returncode, 0, ignored.stderr)
