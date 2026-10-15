@@ -414,6 +414,52 @@ class TheLampCostsOneCollectionTests(TransportFixture):
         self.get("/doctor")
         self.assertEqual(self.collected, 1)
 
+    def test_a_refreshed_reading_serves_the_next_window_without_a_request_collecting(self) -> None:
+        app = self.app()
+        self.assertIn("lamp lamp-green", self.lamp(self.get("/", app=app)))
+        self.status = EVERY_PROBLEM
+        self.clock += CACHE_SECONDS + 1
+        self.doctor.refresh()
+        self.assertEqual(self.collected, 2)
+
+        self.assertIn("lamp lamp-red", self.lamp(self.get("/", app=app)))
+        self.assertEqual(self.collected, 2, "the request answered from the refreshed reading")
+
+    def test_a_request_is_answered_while_a_refresh_is_still_collecting(self) -> None:
+        app = self.app()
+        self.get("/", app=app)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocked() -> dict[str, Any]:
+            entered.set()
+            self.assertTrue(release.wait(10), "the collector was never released")
+            return health_snapshot(EVERY_PROBLEM)
+
+        self.doctor.read_health = blocked
+        refreshing = threading.Thread(target=self.doctor.refresh)
+        refreshing.start()
+        self.assertTrue(entered.wait(10), "the refresh never reached the collector")
+        try:
+            self.assertIn("lamp lamp-green", self.lamp(self.get("/", app=app)))
+        finally:
+            release.set()
+            refreshing.join(10)
+        self.assertIn("lamp lamp-red", self.lamp(self.get("/", app=app)))
+
+    def test_keep_fresh_collects_until_it_is_stopped(self) -> None:
+        stop = threading.Event()
+
+        def read_then_stop() -> dict[str, Any]:
+            stop.set()
+            return self.read_health()
+
+        self.doctor.read_health = read_then_stop
+        self.doctor.keep_fresh(stop)
+        self.assertEqual(self.collected, 1)
+        self.assertEqual(self.doctor.doctor_snapshot()["colour"], "green")
+        self.assertEqual(self.collected, 1)
+
 
 # -- criterion 6: recorded state only, over the real read layer ----------------------------------
 

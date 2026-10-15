@@ -12,6 +12,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import sys
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,6 +20,7 @@ from typing import Any
 from uuid import uuid4
 
 from ummanu.web.app import MAX_BODY_BYTES, WebApp
+from ummanu.web.doctor import DoctorLayer
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8787
@@ -302,8 +304,14 @@ def build_server(app: WebApp, *, host: str = DEFAULT_HOST, port: int = DEFAULT_P
 
 
 def serve(app: WebApp, *, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
-    """Bind, announce where to point a browser, and serve until interrupted."""
+    """Bind, announce where to point a browser, and serve until interrupted.
+
+    The doctor layer's health reading is kept fresh by a thread of its own while serving.
+    """
     server = build_server(app, host=host, port=port)
+    stop = threading.Event()
+    if isinstance(app.doctor, DoctorLayer):
+        threading.Thread(target=app.doctor.keep_fresh, args=(stop,), name="doctor-refresh", daemon=True).start()
     bound_host, bound_port = server.server_address[0], server.server_address[1]
     shown = f"[{bound_host}]" if ":" in str(bound_host) else bound_host
     print(f"ummanu web on http://{shown}:{bound_port} — {LOOPBACK_ONLY}", file=sys.stderr)
@@ -312,6 +320,7 @@ def serve(app: WebApp, *, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) ->
     except KeyboardInterrupt:
         print("stopping", file=sys.stderr)
     finally:
+        stop.set()
         server.shutdown()
         server.server_close()
     return 0
