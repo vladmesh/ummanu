@@ -1476,7 +1476,7 @@ def _production_claim_ready(
     for active in _production_tasks(runtime, set(ACTIVE_STATES)):
         if active.get("type") == "code" and active.get("project") and not is_steward_report(active):
             active_code.setdefault(str(active["project"]), []).append(str(active["ref"]))
-    skipped: list[dict[str, str]] = []
+    skipped: list[dict[str, Any]] = []
     sprint_cache: dict[str, dict[str, Any]] = {}
     sprint_errors: dict[str, str] = {}
     blockers: dict[str, Any] = {}
@@ -1570,13 +1570,11 @@ def _production_claim_ready(
         # below and ends the pass, which stops cards that had somewhere to go — see
         # CLAIM_SKIP_ACTIONS for the registry a new skip has to join.
         if is_claim_skip(outcome):
-            skipped.append(
-                {
-                    "ref": task["ref"],
-                    "reason": str(outcome.get("reason") or "head resource is not ready"),
-                    "until": skip_until(outcome),
-                }
-            )
+            reason = str(outcome.get("reason") or "head resource is not ready")
+            skip: dict[str, Any] = {"ref": task["ref"], "reason": reason}
+            if until := skip_until(outcome):
+                skip["until"] = until
+            skipped.append(skip)
             continue
         if skipped:
             outcome["skipped_ready"] = skipped
