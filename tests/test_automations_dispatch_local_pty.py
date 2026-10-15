@@ -102,6 +102,8 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         self.addCleanup(self._reap_everything)
         self.state = runtime_state.AgentState(self.AGENT, self.state_root / self.AGENT)
         self.prompt_after_start = False
+        #: The program a head without a composer runs.
+        self.head_command = HEAD_COMMAND
         #: Flags for the composer head a prompt-after-start profile is rendered as.
         self.tui_flags: tuple[str, ...] = ()
         self.submitted_file = self.data_dir / "submitted.jsonl"
@@ -135,7 +137,7 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
                 [sys.executable, "-u", str(FAKE_TUI), str(self.submitted_file), *self.tui_flags]
             )
             return HeadCommand(command, prompt_after_start=True, adapter="codex")
-        return HeadCommand(HEAD_COMMAND, prompt_after_start=False, adapter="claude")
+        return HeadCommand(self.head_command, prompt_after_start=False, adapter="claude")
 
     def _reads(self, registry):
         """What each `load_registry()` of this tick answers, and how many it took.
@@ -186,6 +188,7 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
             enter(mock.patch.object(local_pty_head, "PROMPT_POLL_SECONDS", 0.05))
             enter(mock.patch.object(local_pty_head, "PROMPT_FIRST_OUTPUT_SECONDS", 2.0))
             enter(mock.patch.object(local_pty_head, "SUBMIT_CONFIRM_SECONDS", 3.0))
+            enter(mock.patch.object(dispatch, "LAUNCH_CONFIRM_SECONDS", 3.0))
             enter(
                 mock.patch.object(
                     dispatch,
@@ -668,6 +671,16 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
         self.assertEqual(record["run_id"], run_dir.name)
         self.assertEqual(record["workspace"], str(self.workspace))
         self.assertEqual(record["role"], self.AGENT)
+
+    def test_a_head_that_exits_127_at_launch_fails_the_tick(self) -> None:
+        self.head_command = "/bin/sh -c 'exit 127'"
+
+        with self.assertRaises(dispatch.LocalPtyDispatchError) as raised:
+            self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME))
+
+        self.assertIn("exited at launch", str(raised.exception))
+        self.assertIsNone(self.state.load_head_run())
+        self.assertEqual(self.actions(), ["supervised-start-failed"])
 
     def test_the_record_is_written_the_way_its_neighbours_are(self) -> None:
         """One small file in this agent's own state directory, replaced rather than rewritten."""

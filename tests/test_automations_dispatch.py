@@ -53,6 +53,9 @@ class RecordingRuntime:
         run.to_json.return_value = {"run_id": "run-1"}
         return mock.Mock(status=dispatch.HEAD_ALIVE, ok=True, run=run, evidence={}, reason="")
 
+    def observe(self, run):
+        return mock.Mock(status=dispatch.HEAD_ALIVE, ok=True, last_output_at=time.time())
+
 
 class TriggeredDispatchTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -347,9 +350,12 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         self.command = dispatch.DispatchCommand(
             "/retro", "codex", "codex", None, prompt_after_start=True, head_profile=self.profile
         )
-        data_dir = mock.patch.object(dispatch, "_installation_data_dir", return_value=self.root / "data")
-        data_dir.start()
-        self.addCleanup(data_dir.stop)
+        for patcher in (
+            mock.patch.object(dispatch, "_installation_data_dir", return_value=self.root / "data"),
+            mock.patch.object(dispatch, "LAUNCH_CONFIRM_SECONDS", 0.0),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _trusted(self) -> dict:
         import tomllib
@@ -571,6 +577,51 @@ class UnconfirmedStopTests(unittest.TestCase):
         self.assertEqual(runtime.starts, [record["run_id"], record["run_id"]])
         actions = [json.loads(line).get("action") for line in (state.dir / "runs.jsonl").read_text().splitlines()]
         self.assertEqual(actions, ["supervised-start-failed", "supervised-busy-skip"])
+
+
+class _DeadAtLaunchRuntime(RecordingRuntime):
+    """A head whose command exits 127 the moment it is spawned."""
+
+    def observe(self, run):
+        return mock.Mock(status=dispatch.HEAD_GONE, ok=False, reason="head-exited", evidence={"exit_code": 127})
+
+
+class LaunchDeathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.workspace = str(self.root / "workspace")
+        Path(self.workspace).mkdir()
+        for patcher in (
+            mock.patch.object(dispatch, "_installation_data_dir", return_value=self.root / "data"),
+            mock.patch.object(dispatch, "_ensure_claude_ready"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_standing_head_that_exits_at_launch_fails_the_tick_and_its_report(self) -> None:
+        state = runtime_state.AgentState("steward", state_dir=self.root / "state")
+        reports = RecordingReports()
+        command = dispatch.DispatchCommand(
+            "/steward --card ummanu-report-1", "claude '/steward'", "claude-opus", "ummanu-report-1",
+            head_profile={"adapter": "claude", "runtime": LOCAL_PTY_RUNTIME},
+        )
+
+        with (
+            mock.patch.object(dispatch, "_local_pty_runtime", return_value=_DeadAtLaunchRuntime()),
+            self.assertRaises(dispatch.LocalPtyDispatchError) as raised,
+        ):
+            dispatch._supervised_bring_up(
+                "steward", self.workspace, state, "dispatch", command,
+                reports=dispatch._TickReports("steward", state, "dispatch", report_board=reports),
+            )
+
+        self.assertIn("exited at launch", str(raised.exception))
+        self.assertIsNone(state.load_head_run())
+        self.assertIn("exited at launch", reports.moves[0][2])
+        actions = [json.loads(line).get("action") for line in (state.dir / "runs.jsonl").read_text().splitlines()]
+        self.assertEqual(actions[-1], "supervised-start-failed")
 
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ from ummanu.runtime.codex_preflight import (
 from ummanu.runtime.head import (
     HEAD_ALIVE,
     HEAD_BUSY,
+    HEAD_GONE,
     STANDING_BINDING,
     HeadRun,
     HeadSpec,
@@ -591,6 +592,9 @@ IDLE_HEAD_GRACE_SECONDS = 600.0
 #: goes Blocked instead of Done: two periods of the steward's three-hourly sweep. An idle head is
 #: retired after IDLE_HEAD_GRACE_SECONDS, so a head this old is stuck inside its turn.
 STALE_BUSY_HEAD_SECONDS = 6 * 3600
+#: How long a tick watches a head launched with its prompt for an exit before reporting it raised.
+LAUNCH_CONFIRM_SECONDS = 10.0
+LAUNCH_CONFIRM_POLL_SECONDS = 0.2
 #: How long the tick waits for a retired head's supervisor to release its socket.
 IDLE_STOP_SUPERVISOR_EXIT_SECONDS = 10.0
 #: The launch identity a supervised head writes beside its socket in its run directory (the
@@ -760,6 +764,21 @@ def _retire_refused_head(
     )
 
 
+def _launch_death(runtime: Any, run: HeadRun) -> str | None:
+    """Why a head given its prompt on its command line is not alive LAUNCH_CONFIRM_SECONDS after launch.
+
+    Output does not end the wait: a launch that fails prints its own error before it exits.
+    """
+    deadline = time.monotonic() + LAUNCH_CONFIRM_SECONDS
+    while True:
+        seen = runtime.observe(run)
+        if seen.status == HEAD_GONE:
+            return f"the head {run.run_id} exited at launch ({seen.reason}: {seen.evidence})"
+        if time.monotonic() >= deadline:
+            return None if seen.ok else f"the head {run.run_id} could not be observed after launch ({seen.reason})"
+        time.sleep(LAUNCH_CONFIRM_POLL_SECONDS)
+
+
 def _head_launched_at(state: AgentState) -> float | None:
     """When this role's recorded head was launched (its head_run record's write), or None without one."""
     try:
@@ -877,6 +896,15 @@ def _supervised_bring_up(
         )
         raise failure
     live = receipt.run
+    if pointer is None:
+        died = _launch_death(runtime, live)
+        if died is not None:
+            failure = LocalPtyDispatchError(died)
+            reports.failed(cmd, failure)
+            state.log_run(
+                event, action="supervised-start-failed", result="error", reference=cmd.card_ref, error=died
+            )
+            raise failure
     state.save_head_run(live.to_json())
     reports.taken(cmd, live.handle)
     state.log_run(event, action="supervised-started", reference=cmd.card_ref)
