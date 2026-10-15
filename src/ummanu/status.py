@@ -64,7 +64,8 @@ def collect_status(
     protocol (the web dashboard) would otherwise pay that whole pass -- and carry every sprint's
     full status, hundreds of kilobytes on a live installation -- on a read whose subject is the
     host. `probe_panels` overrides the default of probing each attempt's runtime panel, which is
-    the other per-attempt cost this collector has; `None` keeps the released behaviour.
+    the other per-attempt cost this collector has; `None` keeps the released behaviour. An offline
+    or fixture call that skips sprints opens no board store and reports no card total.
     """
     assert report.data_dir is not None
     data_dir = report.data_dir
@@ -101,17 +102,17 @@ def collect_status(
     recovery = recovery or collect_recovery_inventory(report, inspect_live=False, checkpoint=checkpoint)
     if probe_panels is None:
         probe_panels = not offline and host_fixture is None
-    board, owned = _board(report.instance_path.parent, sprint_client)
-    try:
-        card_total = _card_count(board)
-        sprint_section = (
-            _sprints(data_dir, report.instance, production, board)
-            if sprints
-            else {"items": [], "error": None, "skipped": "sprints were not read on this call"}
-        )
-    finally:
-        if owned is not None:
-            owned.close()
+    skipped = {"items": [], "error": None, "skipped": "sprints were not read on this call"}
+    if not sprints and (offline or host_fixture is not None):
+        card_total, sprint_section = None, skipped
+    else:
+        board, owned = _board(report.instance_path.parent, sprint_client)
+        try:
+            card_total = _card_count(board)
+            sprint_section = _sprints(data_dir, report.instance, production, board) if sprints else skipped
+        finally:
+            if owned is not None:
+                owned.close()
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
         "installation": {
