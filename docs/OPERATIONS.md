@@ -1676,8 +1676,8 @@ Tests often start child interpreters with an environment built from scratch, whi
 prefix is already set. A venv made ready before this file existed is still accepted and gains the file on
 its next bring-up. Children started with an interpreter outside the workspace venv are not covered.
 
-When the adapter declares `broad_check` without `broad_check.interpreter`, the candidate's `.[dev]` is
-installed into this environment, so worker and reviewer tools and the inner broad suite resolve there.
+When the adapter declares `broad_check` without `broad_check.interpreter`, the candidate's
+`.[dev,typecheck]` is installed into this environment, so worker and reviewer tools and the inner broad suite resolve there.
 That install may need package-index access; an unavailable index is a bring-up failure, never
 permission to install into the production virtualenv. An adapter with no `broad_check` gets a bare
 environment. Adapter setup runs with neither virtualenv active and the production venv off `PATH`. A

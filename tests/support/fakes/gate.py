@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 
@@ -52,13 +53,43 @@ def github_fixture():
         "gate repo view": (0, "org/repo", ""),
         "gate attestation base": (0, "b" * 40, ""),
     })
-    # The two API questions share a label; answers follow their endpoint.
+    # The API questions share a label; answers follow their endpoint.
     original = host._answer
     def answer(args, label):
         if label == "gate gh api":
-            payload = ('[{"id":1,"name":"tests","status":"COMPLETED","conclusion":"SUCCESS",'
-                       '"details_url":"https://github.com/org/repo/actions/runs/7"}]') if args[2].endswith("check-runs") else "[]"
+            if args[2].endswith("check-runs"):
+                payload = ('{"total_count":1,"check_runs":[{"id":1,"name":"tests","status":"COMPLETED",'
+                           '"conclusion":"SUCCESS","details_url":"https://github.com/org/repo/actions/runs/7"}]}')
+            elif args[2].endswith("status"):
+                payload = '{"total_count":0,"statuses":[]}'
+            else:
+                payload = ('{"total_count":1,"workflow_runs":[{"id":7,"event":"pull_request",'
+                           '"status":"completed","conclusion":"success"}]}')
             return CompletedProcess(args, 0, payload, "")
         return original(args, label)
     host._answer = answer
     return host, {"ref": "p-1", "project": "p", "title": "Gate"}, SimpleNamespace(), sha
+
+
+class CiAnswers(ScriptedGateHost):
+    """`gh api` CI answers by endpoint: the check-runs, statuses and workflow runs of one sha.
+
+    A string in `raw` replaces the whole stdout of the endpoint whose path ends with its key.
+    """
+
+    def __init__(self, check_runs=(), workflow_runs=(), statuses=(), raw=None):
+        super().__init__({})
+        self.lists = {"check-runs": ("check_runs", list(check_runs)), "status": ("statuses", list(statuses))}
+        self.workflow_runs = list(workflow_runs)
+        self.raw = dict(raw or {})
+
+    def _answer(self, args, label):
+        path = args[2].split("?", 1)[0]
+        for suffix, text in self.raw.items():
+            if path.endswith(suffix):
+                return CompletedProcess(args, 0, text, "")
+        key, items = next(
+            (value for suffix, value in self.lists.items() if path.endswith(suffix)),
+            ("workflow_runs", self.workflow_runs),
+        )
+        return CompletedProcess(args, 0, json.dumps({"total_count": len(items), key: items}), "")

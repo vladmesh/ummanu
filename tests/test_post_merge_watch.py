@@ -630,6 +630,30 @@ class ResolutionTests(unittest.TestCase):
         _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
         self.assertEqual(post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1001.0), [])
 
+    def test_a_terminal_failure_is_red_while_another_required_check_was_never_posted(self) -> None:
+        checks = [_check("fast", conclusion="failure")]
+        runtime = _runtime(_GhHost(check_runs=checks, required=["fast", "matrix"]))
+        payload: dict = {}
+        _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
+        post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1001.0)
+        [event] = _significant(runtime.writer.events)
+        fact = event["payload"]["post_merge_ci"]
+        self.assertEqual((fact["result"], fact["failed_checks"]), ("red", ["fast"]))
+
+    def test_a_check_with_conclusion_and_completed_at_is_terminal_whatever_its_status(self) -> None:
+        ghost = {**_check("detect", status="in_progress"), "completed_at": "2026-10-06T20:14:33Z"}
+        runtime = _runtime(_GhHost(check_runs=[ghost]))
+        payload: dict = {}
+        _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
+        outcomes = post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1001.0)
+        self.assertEqual([outcome["result"] for outcome in outcomes], ["green"])
+
+    def test_a_conclusion_outside_the_github_vocabulary_holds_the_watch(self) -> None:
+        runtime = _runtime(_GhHost(check_runs=[_check("unit", conclusion="mystery")]))
+        payload: dict = {}
+        _watch(payload, workspace=_workspace(self.root, PUSH_MAIN))
+        self.assertEqual(post_merge.reconcile_post_merge_watches(runtime, payload, {}, now=1001.0), [])
+
     def test_an_unknown_merge_commit_is_read_from_the_pull_request_later(self) -> None:
         host = _GhHost(check_runs=[_check("unit")], merge_commit="")
         runtime = _runtime(host)

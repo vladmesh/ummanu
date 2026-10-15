@@ -16,6 +16,9 @@ from ummanu.dispatch.helpers import _tail, safe_one_line
 from ummanu.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
 
 _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
+_PASS_CONCLUSIONS = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+#: The conclusion `_rollup` gives a required check that was never posted once every run has settled.
+MISSING_CONCLUSION = "MISSING"
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
 # `gh run view --log[-failed]` emits one line per log entry as `<job>\t<step>\t<content>`.
 _ERROR_MARK_RE = re.compile(r"##\[error\]")
@@ -224,16 +227,22 @@ def _name_with_owner(host, workspace: str) -> str:
 def _poll_ci(
     host, repo: str, sha: str, required: list[str] | None = None
 ) -> tuple[str, dict | None, list[dict]]:
-    """Combined CI rollup for `sha`: GitHub-Actions check-runs plus legacy commit statuses,
-    narrowed to `required` when the adapter declares a required set."""
-    items: list[dict] = []
-    runs = _gh_api(host, f"repos/{repo}/commits/{sha}/check-runs", jq=".check_runs")
-    if isinstance(runs, list):
-        items.extend(item for item in runs if isinstance(item, dict))
-    statuses = _gh_api(host, f"repos/{repo}/commits/{sha}/status", jq=".statuses")
-    if isinstance(statuses, list):
-        items.extend(item for item in statuses if isinstance(item, dict))
-    rollup, failed = _rollup(items, required)
+    """Combined CI rollup for `sha` over every page of check-runs and commit statuses, narrowed to
+    `required`. A cancelled `workflow_dispatch` run is auxiliary, so its check runs are left out."""
+    runs = _gh_api_pages(host, f"repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs")
+    auxiliary = {
+        str(run.get("id"))
+        for run in runs
+        if run.get("event") == "workflow_dispatch" and run.get("conclusion") == "cancelled"
+    }
+    items = [
+        item
+        for item in _gh_api_pages(host, f"repos/{repo}/commits/{sha}/check-runs", "check_runs")
+        if _actions_run_id(item) not in auxiliary
+    ]
+    items.extend(_gh_api_pages(host, f"repos/{repo}/commits/{sha}/status", "statuses"))
+    settled = bool(runs) and all(run.get("status") == "completed" for run in runs)
+    rollup, failed = _rollup(items, required, runs_settled=settled)
     return rollup, failed, _selected_checks(items, required or [])
 
 
@@ -261,21 +270,59 @@ def _terminal_check(item: dict) -> dict[str, str]:
 
 
 def _gh_api(host, path: str, *, jq: str):
+    """The parsed JSON `gh api` printed; an empty or unparseable answer is GateTransportError."""
     completed = _backend_call(host, ["gh", "api", path, "--jq", jq], "gate gh api")
     if completed.returncode != 0:
         raise HostError(f"gate gh api failed: {_tail(_answer(completed))}")
     text = (completed.stdout or "").strip()
     if not text:
-        return []
+        raise GateTransportError(f"gate gh api {path} answered with no output")
     try:
         return json.loads(text)
     except ValueError:
-        return []
+        raise GateTransportError(f"gate gh api {path} answered with unreadable JSON: {_tail(text, 3)}") from None
+
+
+def _gh_api_pages(host, path: str, key: str) -> list[dict]:
+    """Every `key` item across all pages of a GitHub list answer that carries `total_count`.
+
+    An empty, unreadable or short page set is GateTransportError, never a shorter list.
+    """
+    completed = _backend_call(
+        host, ["gh", "api", path, "--paginate", "--jq", f"{{total_count, {key}}}"], "gate gh api"
+    )
+    if completed.returncode != 0:
+        raise HostError(f"gate gh api failed: {_tail(_answer(completed))}")
+    text = (completed.stdout or "").strip()
+    if not text:
+        raise GateTransportError(f"gate gh api {path} answered with no output")
+    decoder = json.JSONDecoder()
+    items: list[dict] = []
+    totals: set[int] = set()
+    position = 0
+    while position < len(text):
+        try:
+            page, position = decoder.raw_decode(text, position)
+        except ValueError:
+            raise GateTransportError(f"gate gh api {path} answered with unreadable JSON: {_tail(text, 3)}") from None
+        while position < len(text) and text[position].isspace():
+            position += 1
+        listed = page.get(key) if isinstance(page, dict) else None
+        total = page.get("total_count") if isinstance(page, dict) else None
+        if not isinstance(listed, list) or not isinstance(total, int) or isinstance(total, bool):
+            raise GateTransportError(f"gate gh api {path} answered a page without total_count and {key}")
+        if not all(isinstance(item, dict) for item in listed):
+            raise GateTransportError(f"gate gh api {path} answered a {key} entry that is not an object")
+        totals.add(total)
+        items.extend(listed)
+    if len(totals) != 1 or len(items) != totals.pop():
+        raise GateTransportError(f"gate gh api {path} answered {len(items)} {key} against its total_count")
+    return items
 
 
 def _check_result(item: dict) -> str:
-    """One rollup entry -> 'pass' | 'fail' | 'pending'. Handles both a GitHub-Actions check-run
-    (status/conclusion) and a legacy commit status (state)."""
+    """One check run or commit status -> 'pass' | 'fail' | 'pending'. A check run is terminal once it
+    has a conclusion and is `completed` or has `completed_at`; an unknown conclusion stays pending."""
     if "state" in item and "status" not in item:
         state = str(item.get("state", "")).upper()
         if state in ("FAILURE", "ERROR"):
@@ -283,9 +330,15 @@ def _check_result(item: dict) -> str:
         if state == "SUCCESS":
             return "pass"
         return "pending"
-    if str(item.get("status", "")).upper() != "COMPLETED":
+    conclusion = str(item.get("conclusion") or "").upper()
+    finished = str(item.get("status", "")).upper() == "COMPLETED" or bool(item.get("completed_at"))
+    if not finished or not conclusion:
         return "pending"
-    return "fail" if str(item.get("conclusion", "")).upper() in _FAIL_CONCLUSIONS else "pass"
+    if conclusion in _FAIL_CONCLUSIONS:
+        return "fail"
+    if conclusion in _PASS_CONCLUSIONS:
+        return "pass"
+    return "pending"
 
 
 def _check_name(item: dict) -> str:
@@ -294,23 +347,25 @@ def _check_name(item: dict) -> str:
     return str(item.get("name") or item.get("context") or "").strip()
 
 
-def _rollup(items: list[dict], required: list[str] | None = None) -> tuple[str, dict | None]:
+def _rollup(
+    items: list[dict], required: list[str] | None = None, *, runs_settled: bool = False
+) -> tuple[str, dict | None]:
     """Combine CI checks into an overall status.
 
-Keep PENDING while any required job runs, even beside an early failure.
-Only after all settle should the aggregate report FAILURE or SUCCESS.
+PENDING while any selected check runs. Once every posted check is terminal a failure is FAILURE
+even if a required check was never posted; a required check still absent is PENDING, or a
+FAILURE with conclusion MISSING_CONCLUSION when `runs_settled` says every workflow run completed.
     """
+    missing: list[str] = []
     if required:
-        by_name = {name: [] for name in required}
+        by_name: dict[str, list[dict]] = {name: [] for name in required}
         for item in items:
             bucket = by_name.get(_check_name(item))
             if bucket is not None:
                 bucket.append(item)
         items = [item for name in required for item in by_name[name]]
-        if any(not bucket for bucket in by_name.values()):
-            # a required check has not been posted for this sha yet
-            return "PENDING", None
-    if not items:
+        missing = [name for name in required if not by_name[name]]
+    if not items and not missing:
         return "NONE", None
     first_fail = None
     pending = False
@@ -324,6 +379,10 @@ Only after all settle should the aggregate report FAILURE or SUCCESS.
         return "PENDING", None
     if first_fail is not None:
         return "FAILURE", first_fail
+    if missing:
+        if runs_settled:
+            return "FAILURE", {"name": missing[0], "status": "completed", "conclusion": MISSING_CONCLUSION}
+        return "PENDING", None
     return "SUCCESS", None
 
 
