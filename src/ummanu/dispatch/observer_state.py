@@ -65,6 +65,8 @@ class ObserverDelivery:
     held_since: float = 0.0
     deadline: float = 0.0
     attempts: int = 0
+    # Heads replaced for refusing this batch's wakes; only an acknowledgement clears it.
+    replacements: int = 0
     next_at: float = 0.0
     reason: str = ""
     # Cumulative observer-wake evidence is distinct from per-batch retries and card-head counters.
@@ -94,6 +96,7 @@ class ObserverDelivery:
             "held_since": self.held_since,
             "deadline": self.deadline,
             "attempts": self.attempts,
+            "replacements": self.replacements,
             "next_at": self.next_at,
             "reason": self.reason,
             "wake_attempts": self.wake_attempts,
@@ -129,6 +132,7 @@ class ObserverDelivery:
             held_since=_float(payload.get("held_since")),
             deadline=_float(payload.get("deadline")),
             attempts=_int(payload.get("attempts")),
+            replacements=_int(payload.get("replacements")),
             next_at=_float(payload.get("next_at")),
             reason=str(payload.get("reason") or ""),
             wake_attempts=_int(payload.get("wake_attempts")),
@@ -170,6 +174,8 @@ class ObserverRecord:
     bound: bool = False
     state: str = "pending"
     launched_at: float = 0.0
+    # The kernel boot the head was launched in; a heartbeat never written in another boot is a dead head.
+    launched_boot: str = ""
     last_action: str = ""
     last_action_at: float = 0.0
     # Work-state explanation, independent of idle/deferred/stop lifecycle reasons.
@@ -224,6 +230,7 @@ class ObserverRecord:
             "bound": self.bound,
             "state": self.state,
             "launched_at": self.launched_at,
+            "launched_boot": self.launched_boot,
             "last_action": self.last_action,
             "last_action_at": self.last_action_at,
             "state_reason": self.state_reason,
@@ -269,6 +276,7 @@ class ObserverRecord:
             bound=bool(payload.get("bound")),
             state=str(payload.get("state") or "pending"),
             launched_at=_float(payload.get("launched_at")),
+            launched_boot=str(payload.get("launched_boot") or ""),
             last_action=str(payload.get("last_action") or ""),
             last_action_at=_float(payload.get("last_action_at")),
             state_reason=str(payload.get("state_reason") or ""),

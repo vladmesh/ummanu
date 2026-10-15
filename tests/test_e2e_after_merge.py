@@ -22,8 +22,7 @@ from tests.e2e_stage_fixtures import REPO, E2eGitHubHost, E2eStageFixture, Simul
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
 from ummanu._fsutil import file_lock
-from ummanu.board import po_origin as origin_field
-from ummanu.board import po_execution
+from ummanu.board import po_execution, po_origin as origin_field
 from ummanu.board.e2e_disposition import completion_identity
 from ummanu.board.e2e_record import AfterMergeMark, e2e_state
 from ummanu.board.owner_events import OwnerEventStore
@@ -33,9 +32,9 @@ from ummanu.dispatch.post_merge import reconcile_post_merge_watches, watches
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import new_attempt_id, now_rfc3339
 from ummanu.dispatch.types import HostError
+from ummanu.po.store import PoStore
 from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, is_significant_card_event
-from ummanu.po.store import PoStore
 from ummanu.webproto.sprint_reads import card_waits
 
 SPRINT = "sprint:1031"
@@ -1113,6 +1112,24 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(len([c for c in self.reader.list() if c.get("type") == "operation"]), 1)
         self.assertEqual(self.run_of(operation["po_execution"]["sources"][0]).disposition, operation["ref"])
         self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
+
+    def test_a_settled_red_run_rewrites_no_covered_card_on_later_passes(self) -> None:
+        cards, _run = self.run_to("failure")
+        [hotfix] = self.hotfixes()
+
+        def updated() -> list[Any]:
+            return [
+                self.board._query("SELECT updated_at FROM tasks WHERE task_ref=%s", (ref,))
+                for ref in cards
+            ]
+
+        before = updated()
+        self.am_tick()
+        self.am_tick()
+
+        self.assertEqual(updated(), before)
+        for card in cards:
+            self.assertEqual(self.mark(card)["state"], f"red -> {hotfix['ref']}")
 
     def test_a_replayed_red_outcome_cuts_no_second_hotfix(self) -> None:
         cards, run = self.run_to("failure")

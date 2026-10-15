@@ -54,8 +54,7 @@ from ummanu.runtime.head.identity import publish_heartbeat
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.journal import RUN_STARTED, read_events
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from ummanu.runtime.tui_delivery import READINESS_BUSY
-from ummanu.runtime.tui_delivery import delivery_readiness_state as _delivery_readiness_state
+from ummanu.runtime.tui_delivery import READINESS_BUSY, delivery_readiness_state as _delivery_readiness_state
 
 PROFILE = "claude-local-pty"
 #: The stand-in head: it writes down which process it is and what it was run with, then stays up.
@@ -617,7 +616,7 @@ class ObserverTaskIdentityTests(unittest.TestCase):
         )
         status = observer_head_status(self._record())
         self.assertEqual(status["state"], HEARTBEAT_LIVE_MATCH, status)
-        self.assertFalse(observer_head_is_dead(status))
+        self.assertFalse(observer_head_is_dead(self._record(), status))
 
     def test_a_legacy_spelling_does_not_excuse_another_run(self) -> None:
         publish_heartbeat(

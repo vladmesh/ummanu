@@ -211,9 +211,12 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   card refuses, with a `validation` error, a workspace without that file.
 
   After the report is accepted and the review, if required, is done, and before the card parks in
-  Assessment or is released outside a parking sprint, the dispatcher copies `.ummanu-report/` to
-  `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge write
-  --dir`, actor `dispatcher`; files only, no Git), then writes one `[completion:research]` comment
+  Assessment or is released outside a parking sprint, the dispatcher copies `report.md` and the small
+  text attachments of `.ummanu-report/` (`.md`, `.txt` and `.csv` files of at most 256 KiB each, 2 MiB
+  in all) to `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge
+  write --dir`, actor `dispatcher`; files only, no Git). Every other file stays in the workspace and
+  is listed, with that path, under `## Not transferred` at the end of the copied `report.md`; a file
+  left behind never Blocks the card. It then writes one `[completion:research]` comment
   whose request id is keyed on the report generation. The observer therefore decides with the report
   already in knowledge, and a replayed tick writes and comments nothing new. An observer release
   repeats the transfer, a no-op for a card parked green and the transfer itself for a card parked by
@@ -221,9 +224,9 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   fresh link; the checkpoint history keeps the earlier rounds.
 
   If the transfer is refused or fails, the card goes to Blocked with the reason `research report
-  transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `source_missing`,
-  `source_empty`, `special_file` (a symlink, a special file or an entry whose name starts with
-  `.git`), `secret`, `size_cap` or `write_failed` (a filesystem or git error). No link is written, nothing is committed under
+  transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `secret` (in a copied
+  text file), `size_cap` (a `report.md` over the 20 MiB knowledge cap) or `write_failed` (a filesystem
+  or git error). No link is written, nothing is committed under
   `reports/<card ref>/`, and the workspace is kept. The completion evidence check is unchanged and
   still the only check before Done.
 
@@ -3250,7 +3253,9 @@ record's `worker_comment_deliveries` points the worker at it once: the keys are 
 saved, `TASK.md` is re-rendered for the same generation and decision, and only then the pointer, "re-read
 its comments section", goes out through the same worker delivery as the report prompt. A tick repeat or
 a restarted dispatcher sends nothing again; a failed send is recorded as delivery evidence and not
-retried, and the next round's `TASK.md` carries the comment either way. A worker that is parked in Assessment,
+retried, and the next round's `TASK.md` carries the comment either way. A send the head refuses because
+it is mid-turn is not a failure: its keys move to `worker_comments_owed` and a later tick points the
+worker at them once the turn ends. A worker that is parked in Assessment,
 held for validation, paused or between rounds is sent nothing and nothing is recorded; the next round's
 `TASK.md` carries the comment. `decision` and `operation` cards have no worker and are unaffected.
 

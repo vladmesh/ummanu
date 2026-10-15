@@ -865,8 +865,11 @@ class DispatcherRecord:
     # The PO, owner and observer comments this card's live worker was pointed at mid-round
     # (secretary-1768), by the key `worker_comments.comment_key` gives each: its audit event id.
     # Written before the pointer is sent, so a tick repeat or a restarted dispatcher never sends the
-    # same comment twice. Only grows; a new round's TASK.md carries every comment anyway.
+    # same comment twice. A new round's TASK.md carries every comment anyway.
     worker_comment_deliveries: tuple[str, ...] = ()
+    # Comment keys whose pointer a mid-turn head refused: TASK.md already holds them, so only this
+    # keeps them owed until a later tick points the worker at them.
+    worker_comments_owed: tuple[str, ...] = ()
     # Durable worker ownership while validation has the checkout. This is deliberately one typed
     # state value rather than four optional fields whose combinations callers would have to infer.
     worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
@@ -1059,6 +1062,7 @@ class DispatcherRecord:
             "worker_idle_confirmations": self.worker_idle_confirmations,
             "worker_report_nudge": self.worker_report_nudge.to_json(),
             "worker_comment_deliveries": list(self.worker_comment_deliveries),
+            "worker_comments_owed": list(self.worker_comments_owed),
             "worker_progress_at": self.worker_progress_at,
             "worker_continuation": self.worker_continuation.to_json(),
             "worker_continuation_liveness": self.worker_continuation_liveness.to_json(),
@@ -1212,6 +1216,9 @@ class DispatcherRecord:
                 item
                 for item in payload.get("worker_comment_deliveries") or ()
                 if isinstance(item, str) and item
+            ),
+            worker_comments_owed=tuple(
+                item for item in payload.get("worker_comments_owed") or () if isinstance(item, str) and item
             ),
             worker_continuation=WorkerContinuation.from_json(payload.get("worker_continuation")),
             worker_continuation_liveness=WorkerContinuationLiveness.from_json(

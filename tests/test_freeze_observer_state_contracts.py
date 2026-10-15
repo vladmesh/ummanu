@@ -163,26 +163,38 @@ class ObserverStateReasonTests(unittest.TestCase):
         self.assertEqual(record.idle_reason, "old idle")
         self.assertEqual(record.state_reason, "a fresh wait")
 
-    def test_idle_grace_and_snapshot_expose_correct_reason(self) -> None:
+    def test_idle_grace_snapshot_reads_the_quiet_age_at_read_time(self) -> None:
         record = observer.ObserverRecord(sprint="sprint:1", state="waiting")
         observer._mark_idle_grace(record, since=12.0, reason="no pending work")
         self.assertEqual(record.state_reason, "no pending work")
         payload = {"observers": {"sprint:1": record.to_json()}}
+        dead = {"alive": False, "pid_known": False, "reason": "not-running"}
+        expected = {
+            100.0: "no pending work; its terminal has been quiet for 88s",
+            700.0: "no pending work; its terminal has been quiet for 688s",
+        }
+        for now, reason in expected.items():
+            with (
+                mock.patch.object(observer, "observer_alive", return_value=dead),
+                mock.patch.object(observer.time, "time", return_value=now),
+            ):
+                snapshot = observer.observer_snapshot(payload)
+                status_rows = status._observers(payload)
+            self.assertEqual(snapshot[0]["state_reason"], reason)
+            self.assertEqual(snapshot[0]["idle_reason"], reason)
+            self.assertEqual(status_rows[0]["state_reason"], reason)
+
+    def test_a_head_that_left_idle_grace_reports_no_idle_reason(self) -> None:
+        record = observer.ObserverRecord(sprint="sprint:1", state="waiting")
+        observer._mark_idle_grace(record, since=12.0, reason="no pending work")
+        observer._set_observer_state(record, "running")
+        payload = {"observers": {"sprint:1": record.to_json()}}
         with mock.patch.object(
-            observer, "observer_alive", return_value={
-                "alive": False, "pid_known": False, "reason": "not-running"
-            }
+            observer, "observer_alive", return_value={"alive": True, "pid_known": True, "reason": "pid"}
         ):
             snapshot = observer.observer_snapshot(payload)
-        self.assertEqual(snapshot[0]["state_reason"], "no pending work")
-        self.assertEqual(snapshot[0]["idle_reason"], "no pending work")
-        with mock.patch.object(
-            observer, "observer_alive", return_value={
-                "alive": False, "pid_known": False, "reason": "not-running"
-            }
-        ):
-            status_rows = status._observers(payload)
-        self.assertEqual(status_rows[0]["state_reason"], "no pending work")
+        self.assertEqual(snapshot[0]["idle_reason"], "")
+        self.assertEqual(snapshot[0]["idle_since"], 0.0)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ def _proc_starttime_ticks(pid: int) -> str:
     return fields[STARTTIME]
 
 
-def _boot_id() -> str:
+def current_boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
 
 
@@ -168,7 +168,7 @@ def publish_heartbeat(pid_file: str, identity: Mapping[str, str], *, pid: int | 
     record = {
         "version": HEARTBEAT_VERSION,
         "pid": current_pid,
-        "boot_id": _boot_id(),
+        "boot_id": current_boot_id(),
         "proc_starttime_ticks": _proc_starttime_ticks(current_pid),
         "run_id": str(identity.get("run_id") or ""),
         "role": str(identity.get("role") or ""),
@@ -230,7 +230,7 @@ def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = N
     except OSError as exc:
         return _unreadable(type(exc).__name__)
     try:
-        boot_matches = str(record["boot_id"]) == _boot_id()
+        boot_matches = str(record["boot_id"]) == current_boot_id()
         start_matches = str(record["proc_starttime_ticks"]) == _proc_starttime_ticks(pid)
     except FileNotFoundError:
         if _process_state(pid) == _PROCESS_GONE:
