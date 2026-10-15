@@ -4578,12 +4578,14 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/projects/{project}` | `reads.system_snapshot` (+ `sprint_reads.sprint_list`) | one project's registration details and collapsible sprint list |
 | GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
 | POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
+| GET | `/sprints/{ref}/heads/{run_id}` | `reads.sprint_head_view` | the sprint's observer head in the card head view's shape, read-only; a run id other than the one the dispatcher's observer record holds is 404 |
 | GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: its current card, gate, heads and budget, **what it waits on** (`work.waiting_on`: a run, the owner or the PO, each linking its card; nothing when the list is empty), the observer's last decision, its cards, Definition of Done, resume and issues, its pins, and whether its observer is up |
 | GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
 | GET | `/api/tasks/{ref}/runs` | `ops.run_list` | every product run of one card |
 | GET | `/api/tasks/{ref}/heads/{run_id}` | `reads.head_view` | the head view's document |
+| GET | `/api/sprints/{ref}/heads/{run_id}` | `reads.sprint_head_view` | the observer head view's document |
 | GET | `/api/runs/{run_id}` | `ops.run_state` | one run, and where its ending settles |
 | POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
 | POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |

@@ -1,11 +1,11 @@
-"""A card's heads, and a read-only view of one local-pty head's journal.
+"""A card's or a sprint's heads, and a read-only view of one local-pty head's journal.
 
 Read-only like `head-status`: nothing here delivers, attaches, drains, stops or writes.
 
 - A card's runs are only the ones it recorded: the dispatcher record's current worker/reviewer runs
-  and every `launch_id` named by its `routing` and `attempt.usage` history events. Any other run id
-  is not found, so a path is only built from a recorded run id; a run directory whose journal names
-  another card is not read.
+  and every `launch_id` named by its `routing` and `attempt.usage` history events. A sprint's run is
+  its observer record's current one. Any other run id is not found, so a path is only built from a
+  recorded run id; a run directory whose journal names another task is not read.
 - A row joins, by run id, the `routing` launch configuration with what the latest `attempt.usage`
   occurrence says the CLI resolved (:mod:`ummanu.runtime.provider_models`). Neither fills the
   other's gaps.
@@ -23,8 +23,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from ummanu.dispatch.observer_state import ObserverRecord
 from ummanu.routing_journal import MODEL_UNKNOWN, RoutingHeadSnapshot
-from ummanu.runtime.head import HeadRun, HeadRunError, TaskRefError
+from ummanu.runtime.head import HeadRun, HeadRunError, TaskRef, TaskRefError
+from ummanu.runtime.head.identity import task_binding
 from ummanu.runtime.head_runtime_backends import head_runtime_name, is_legacy_record
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from ummanu.runtime.local_pty_head import (
@@ -172,31 +174,50 @@ def recorded_heads(record: Any, history: Iterable[dict[str, Any]] | None) -> lis
     return list(found.values())
 
 
+def observer_heads(record: ObserverRecord | None) -> list[RecordedHead]:
+    """The sprint's observer run the dispatcher holds, or none when it holds no readable run."""
+    if record is None:
+        return []
+    run_id = _run_id(record.head_run.get("run_id"))
+    if not run_id:
+        return []
+    return [
+        RecordedHead(
+            run_id=run_id,
+            role="observer",
+            head=record.fallback_head or record.head,
+            runtime=_runtime_of(record.head_run),
+            current=True,
+        )
+    ]
+
+
 def _attempt(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def head_rows(ref: str, heads: list[RecordedHead], root: Path) -> list[dict[str, Any]]:
+def head_rows(task: TaskRef, heads: list[RecordedHead], root: Path) -> list[dict[str, Any]]:
     """One row per recorded head for the card page: role, run id, state, and whether it has a view."""
-    return [_row(ref, head, root) for head in heads]
+    return [_row(task, head, root) for head in heads]
 
 
 def head_view(
-    ref: str, run_id: str, heads: list[RecordedHead], root: Path, *, observed_at: str
+    task: TaskRef, run_id: str, heads: list[RecordedHead], root: Path, *, observed_at: str
 ) -> dict[str, Any] | None:
-    """The read-only view of one of the card's heads, or `None` when the card recorded no such run.
+    """The read-only view of one of the task's heads, or `None` when the task recorded no such run.
 
     The run directory is built from the matched recorded value, never from `run_id` itself.
     """
     head = next((head for head in heads if head.run_id == run_id), None)
     if head is None:
         return None
-    row = _row(ref, head, root)
+    row = _row(task, head, root)
     document: dict[str, Any] = {
         "schema_version": 1,
         "kind": "head_view",
         "observed_at": observed_at,
-        "ref": ref,
+        "ref": task.ref,
+        "task_kind": task.kind,
         "run_id": head.run_id,
         "head": row,
         "read_only": READ_ONLY_NOTICE,
@@ -212,10 +233,10 @@ def head_view(
 # -- one head --------------------------------------------------------------------------------
 
 
-def _row(ref: str, head: RecordedHead, root: Path) -> dict[str, Any]:
-    """What the card page says about one recorded head, decided from the run directory it names."""
+def _row(task: TaskRef, head: RecordedHead, root: Path) -> dict[str, Any]:
+    """What a page says about one recorded head, decided from the run directory it names."""
     row: dict[str, Any] = {
-        "ref": ref,
+        "ref": task.ref,
         "role": head.role or "head",
         "run_id": head.run_id,
         "head": head.head or None,
@@ -251,11 +272,11 @@ def _row(ref: str, head: RecordedHead, root: Path) -> dict[str, Any]:
         # Only the card's history names this run and no local-pty journal exists; local-pty runs
         # always leave one (never swept), so this is a legacy run.
         return {**row, "runtime": ORCA_LEGACY_RUNTIME, "legacy_record": True, "reason": LEGACY_NOTICE}
-    if identity.get("task") != f"card:{ref}":
+    if identity.get("task") != task_binding(task.kind, task.ref):
         return {
             **row,
             "runtime": LOCAL_PTY_RUNTIME,
-            "reason": "the run directory under this run id belongs to another card, so it is not read",
+            "reason": f"the run directory under this run id belongs to another {task.kind}, so it is not read",
         }
     row.update(runtime=LOCAL_PTY_RUNTIME, local_pty=True)
     lease = _source("supervisor lock", lambda: _lease(root, head.run_id), state=UNKNOWN)

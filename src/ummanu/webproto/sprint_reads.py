@@ -257,6 +257,15 @@ class _Production:
         record = records.get(card) if isinstance(records, dict) else None
         return record if isinstance(record, dict) else None
 
+    def observer_run_id(self, sprint: str) -> str | None:
+        """The run id of the observer head the dispatcher holds for one sprint, or `None`."""
+        observers = self.payload.get("observers")
+        record = observers.get(sprint) if isinstance(observers, dict) else None
+        head_run = record.get("head_run") if isinstance(record, dict) else None
+        if not isinstance(head_run, dict):
+            return None
+        return str(head_run.get("run_id") or "") or None
+
     def post_merge_watch(self, card: str) -> dict[str, Any] | None:
         """The dispatcher's post-merge CI watch for one card while CI has not answered, else `None`."""
         live = self.payload.get(WATCHES_KEY)
@@ -757,7 +766,11 @@ class SprintSections(SectionSet):
             return {
                 "state": state,
                 "reason": reason,
-                "record": None if observer is None else _observer_record(observer),
+                "record": (
+                    None
+                    if observer is None
+                    else {**_observer_record(observer), "run_id": production.observer_run_id(reference)}
+                ),
             }
 
         return read.decide(

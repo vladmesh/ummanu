@@ -826,6 +826,11 @@ class SprintPageTests(SprintTransportFixture):
         other = self.page(sprint_document(launch="running", record={**record, "head": "claude-opus"}))
         self.assertIn("not the declared head", other)
 
+    def test_the_observer_head_the_dispatcher_holds_links_to_its_head_view(self) -> None:
+        record = {"head": OBSERVER_PROFILE, "run_id": "c" * 32}
+        markup = self.page(sprint_document(launch="running", record=record))
+        self.assertIn(f'href="/sprints/sprint%3A1/heads/{"c" * 32}"', markup)
+
     def test_the_page_says_where_the_current_card_stands_and_since_when(self) -> None:
         """The duration in the text, the exact ISO moment as the title -- `_reset`'s convention."""
         markup = self.page(

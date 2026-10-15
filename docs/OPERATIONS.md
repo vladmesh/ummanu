@@ -3548,4 +3548,5 @@ no lifecycle call, no rebinding, no harder probing.
 
 The web card page lists the card's heads under **Heads** (role, run id, state); each local-pty one links to
 `/tasks/<ref>/heads/<run_id>` (JSON: `/api/tasks/...`), a read-only view with no input or control and the
-journal tail. The page does not render the head's PTY output.
+journal tail. The page does not render the head's PTY output. The sprint page links its observer head the
+same way, at `/sprints/<ref>/heads/<run_id>` (JSON: `/api/sprints/...`).

@@ -330,7 +330,7 @@ def sprint(document: dict[str, Any]) -> str:
             f'<section class="panel">{_sprint_tabs(ref, value, work)}</section>',
             "</div>",
             '<div class="col">',
-            _panel("Sprint", _sprint_fields(value, observer)),
+            _panel("Sprint", _sprint_fields(ref, value, observer)),
             _panel(
                 "Tell the observer",
                 _comment_form(
@@ -536,7 +536,7 @@ def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -
     )
 
 
-def _sprint_fields(value: dict[str, Any] | None, observer: dict[str, Any]) -> str:
+def _sprint_fields(ref: str, value: dict[str, Any] | None, observer: dict[str, Any]) -> str:
     """What the sprint was opened on, and where its observer stands -- the facts no chip carries."""
     if value is None:
         return '<p class="empty">no sprint was read, so there is nothing to show here.</p>'
@@ -545,7 +545,7 @@ def _sprint_fields(value: dict[str, Any] | None, observer: dict[str, Any]) -> st
         [
             ["projects", _listed(value.get("reservations"), "this sprint reserves no project")],
             ["repositories", _listed(value.get("repositories"), "this sprint names no repository")],
-            ["observer", _observer_line(observer)],
+            ["observer", _observer_line(ref, observer)],
             *_executor_rows(value.get("executors") or {}),
         ],
     )
@@ -558,7 +558,7 @@ def _listed(values: Any, empty: str) -> str:
     return ", ".join(escape(one) for one in items)
 
 
-def _observer_line(observer: dict[str, Any]) -> str:
+def _observer_line(ref: str, observer: dict[str, Any]) -> str:
     """The declared observer and, separately, whether one is up; the held head only if different."""
     declared = observer.get("declared") or {}
     launch = observer.get("launch") or {}
@@ -585,12 +585,20 @@ def _observer_line(observer: dict[str, Any]) -> str:
         if record.get("heartbeat_state")
         else ""
     )
+    run_id = str(record.get("run_id") or "")
+    head_link = (
+        f'<div class="reason"><a href="/sprints/{quote(ref, safe="")}/heads/{quote(run_id, safe="")}">'
+        f"observer head {escape(run_id)}</a></div>"
+        if run_id and ref
+        else ""
+    )
     return (
         _source_block(launch.get("source"), what="whether this sprint's observer is up")
         + f'{said} <span class="launch state state-{escape(state)}">{escape(words)}</span>'
         + f'<div class="reason">{escape(str(launch.get("reason") or "no reason was recorded"))}</div>'
         + differs
         + heartbeat
+        + head_link
     )
 
 
