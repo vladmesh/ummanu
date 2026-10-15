@@ -249,7 +249,7 @@ class ProcStatTests(unittest.TestCase):
                 observe(list(OWNERS), stat())
                 self.assertGreater(parse.call_count, 0, module.__name__)
         with (tempfile.TemporaryDirectory() as scratch,
-              mock.patch.object(identity, "_boot_id", return_value="boot"),
+              mock.patch.object(identity, "current_boot_id", return_value="boot"),
               mock.patch.object(identity, "_proc_starttime_ticks", return_value="patched")):
             path = Path(scratch) / "head.pid"
             identity.publish_heartbeat(str(path), {"run_id": "r", "role": "worker", "task": "t"}, pid=30)

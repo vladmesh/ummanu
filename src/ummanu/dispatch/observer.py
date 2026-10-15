@@ -67,6 +67,7 @@ from ummanu.dispatch.tui import (
 )
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.watchdog import (
+    HEARTBEAT_NOT_YET_WRITTEN,
     head_run_process_status,
     heartbeat_is_dead,
     heartbeat_is_live_match,
@@ -85,6 +86,7 @@ from ummanu.kernel.errors import TaskError
 from ummanu.role_skills import skill_delivery
 from ummanu.runtime import head as head_ops
 from ummanu.runtime.codex_preflight import CodexFanoutRecordingError
+from ummanu.runtime.head.identity import current_boot_id
 from ummanu.runtime.role_env import observer_binding
 from ummanu.sprint_observer import (
     KIND_HEAD,
@@ -175,14 +177,21 @@ confirmed-dead process permits a replacement.
     )
 
 
-def observer_head_is_dead(status: dict[str, Any]) -> bool:
+def observer_head_is_dead(record: ObserverRecord, status: dict[str, Any]) -> bool:
     """Whether the observer's recorded process is positively dead.
 
-Require a readable identity naming a pid that is gone or unreaped on this boot.
-Missing, partial, unreadable, legacy pid-only and foreign live identities do
-not authorize a replacement.
+A readable identity naming a pid gone or unreaped on this boot, or no identity
+at all from a head launched in an earlier boot. Anything else is inconclusive.
     """
-    return heartbeat_is_dead(status)
+    return heartbeat_is_dead(status) or _unwritten_in_earlier_boot(record, status)
+
+
+def _unwritten_in_earlier_boot(record: ObserverRecord, status: dict[str, Any]) -> bool:
+    return (
+        str(status.get("state") or "") == HEARTBEAT_NOT_YET_WRITTEN
+        and bool(record.launched_boot)
+        and record.launched_boot != current_boot_id()
+    )
 
 
 def observer_alive(
@@ -204,6 +213,8 @@ alive during its grace period. Reuse a supplied status when available.
         }
     if status.get("known"):
         return {"alive": heartbeat_is_live_match(status), "reason": "pid", "pid_known": True}
+    if _unwritten_in_earlier_boot(record, status):
+        return {"alive": False, "reason": "launched-in-an-earlier-boot", "pid_known": True}
     grace = initial_output_stall_seconds()
     if record.launched_at and now - record.launched_at <= grace:
         return {"alive": True, "reason": "pid-not-written-yet", "pid_known": False}
@@ -363,7 +374,7 @@ Deliberate stops and pending stops are not deaths.
     ):
         return None
     try:
-        return record.launches if observer_head_is_dead(observer_head_status(record)) else None
+        return record.launches if observer_head_is_dead(record, observer_head_status(record)) else None
     except Exception:  # noqa: BLE001 - the bell's reading never decides a tick
         return None
 
@@ -528,12 +539,13 @@ def _reconcile_open_sprint(
     # intent and an abandoned handle both mean "not the live observer of this sprint" whatever the
     # process is doing — so the two are kept apart instead of one standing in for the other.
     head_status = observer_head_status(record) if head_may_be_running else {}
-    head_process_alive = head_may_be_running and bool(observer_alive(record, status=head_status)["alive"])
+    head_liveness = observer_alive(record, status=head_status) if head_may_be_running else {}
+    head_process_alive = bool(head_liveness.get("alive"))
     # Positive death of this record's launch identity, from the same reading. It is what makes a
     # bring-up over a headless open sprint conditional on the head rather than on the queue: a
     # process that is provably gone cannot be woken and cannot be the second head a launch would
     # put beside a live one.
-    head_is_dead = head_may_be_running and observer_head_is_dead(head_status)
+    head_is_dead = head_may_be_running and observer_head_is_dead(record, head_status)
     head_is_live = (
         head_may_be_running and not unresolved_intent and not record.abandoned_handle and head_process_alive
     )
@@ -633,6 +645,22 @@ def _reconcile_open_sprint(
             # bring-up whose replacement the host refused was never attempted again — this card's
             # own deadlock, reached by another route (secretary-1478 round 3).
             dead_head_bringup = head_is_dead
+        elif not head_is_dead and head_liveness and not head_liveness["pid_known"] and not head_process_alive:
+            # The fence holds this sprint on the same unread identity, so it is not an idle head.
+            reason = (
+                "the observer head's launch identity cannot be read "
+                f"({head_liveness['reason']}), so it is neither confirmed nor provably dead"
+            )
+            _set_observer_state(record, "unconfirmed", reason=reason)
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-unconfirmed",
+                "head": record.head,
+                "launches": record.launches,
+                "reason": reason,
+            }
         elif not head_is_dead:
             _set_observer_state(record, "idle", reason="no unacknowledged significant card event")
             return {
@@ -2528,6 +2556,7 @@ identity before the host responds so interrupted launches remain recoverable.
     record.state = "launching"
     record.state_reason = ""
     record.launched_at = now
+    record.launched_boot = current_boot_id()
     record.last_action = "launching"
     record.last_action_at = now
     record.deferred_reason = ""

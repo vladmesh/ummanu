@@ -1031,10 +1031,36 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-idle"])
+        [action] = self.actions(result)
+        self.assertEqual(action["action"], "observer-unconfirmed")
+        self.assertIn("pid-file-is-unreadable", action["reason"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 1)
         self.assertEqual(self.host.stopped_observers, [])
+
+    def test_an_observer_launched_before_a_reboot_is_relaunched_on_the_first_tick(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        Path(self.observers()["sprint:1"].pid_file).unlink()
+        payload = self.runtime.production_state.load()
+        observers = load_observers(payload)
+        observers["sprint:1"].launched_boot = "an-earlier-boot"
+        put_observers(payload, observers)
+        self.runtime.production_state.save(payload)
+        self.expire_launch_grace()
+
+        relaunched = self.runtime.production_tick()
+        cleared = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(relaunched)], ["observer-relaunched"])
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+        self.assertEqual(
+            [action["observer_reason"] for action in self.actions(relaunched, "observer-fence")],
+            ["observer_head_dead"],
+        )
+        self.assertEqual(
+            [action["action"] for action in self.actions(cleared, "observer-fence")], ["observer-fence-cleared"]
+        )
 
     def test_an_unreadable_launch_identity_is_not_evidence_of_a_dead_head(self) -> None:
         """secretary-1478: a half-written or corrupt record answers nothing, so nothing is done."""
@@ -1045,7 +1071,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-idle"])
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-unconfirmed"])
         self.assertEqual(self.observers()["sprint:1"].launches, 1)
         self.assertEqual(self.host.stopped_observers, [])
 

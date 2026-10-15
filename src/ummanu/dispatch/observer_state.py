@@ -174,6 +174,8 @@ class ObserverRecord:
     bound: bool = False
     state: str = "pending"
     launched_at: float = 0.0
+    # The kernel boot the head was launched in; a heartbeat never written in another boot is a dead head.
+    launched_boot: str = ""
     last_action: str = ""
     last_action_at: float = 0.0
     # Work-state explanation, independent of idle/deferred/stop lifecycle reasons.
@@ -228,6 +230,7 @@ class ObserverRecord:
             "bound": self.bound,
             "state": self.state,
             "launched_at": self.launched_at,
+            "launched_boot": self.launched_boot,
             "last_action": self.last_action,
             "last_action_at": self.last_action_at,
             "state_reason": self.state_reason,
@@ -273,6 +276,7 @@ class ObserverRecord:
             bound=bool(payload.get("bound")),
             state=str(payload.get("state") or "pending"),
             launched_at=_float(payload.get("launched_at")),
+            launched_boot=str(payload.get("launched_boot") or ""),
             last_action=str(payload.get("last_action") or ""),
             last_action_at=_float(payload.get("last_action_at")),
             state_reason=str(payload.get("state_reason") or ""),
