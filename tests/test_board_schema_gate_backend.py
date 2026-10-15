@@ -48,6 +48,7 @@ OWED = (
     "0028_owner_turns",
     "0029_po_channel",
     "0030_po_input_context",
+    "0031_sprint_dod_items",
 )
 
 

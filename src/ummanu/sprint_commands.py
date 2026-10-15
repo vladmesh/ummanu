@@ -26,6 +26,7 @@ from pathlib import Path
 
 from ummanu.board.backend import SPRINT, board_client
 from ummanu.board.roles import Role
+from ummanu.board.sprint_dod import WEIGHTS
 from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, load_config
 from ummanu.kernel.errors import TaskError
@@ -82,6 +83,13 @@ def add_sprint_subcommands(subparsers) -> None:
     created.add_argument("--goal", required=True)
     created.add_argument("--definition-of-done", default="")
     created.add_argument("--dod-file")
+    created.add_argument(
+        "--dod-item",
+        action="append",
+        default=[],
+        help="one addressable Definition of Done item, in order; repeat for more. Ids d1, d2, ... "
+        "follow the order. Without it the DoD is free text only",
+    )
     created.add_argument(
         "--local-run-exceptions-file",
         help="JSON list of {project, argv, rationale} exceptions declared at creation; default []",
@@ -229,7 +237,39 @@ def add_sprint_subcommands(subparsers) -> None:
     decisions.add_argument("--request-id")
     _add_data_dir_args(decisions)
     decisions.set_defaults(handler=run_owner_decisions)
+    _add_dod_subcommands(commands)
     sprint.set_defaults(handler=usage_handler("sprint subcommand required"))
+
+
+def _add_dod_subcommands(commands) -> None:
+    """`sprint dod`: the addressable Definition of Done items, their weights and their evidence."""
+    dod = commands.add_parser("dod", help="the sprint's addressable Definition of Done items")
+    verbs = dod.add_subparsers(dest="dod_command")
+    for name, handler, roles, help_text in (
+        ("add", run_dod_add, ("po",), "PO only: append items to the DoD; a free-text DoD becomes addressable"),
+        ("set-weight", run_dod_set_weight, ("po", "observer"),
+         "weigh one item 1, 2, 3, 5, 8 or 13 by its expected difficulty; repeat to re-estimate"),
+        ("meet", run_dod_meet, ("po", "observer"), "mark one item met, naming its evidence"),
+        ("reopen", run_dod_reopen, ("po", "observer"), "take back a met item whose evidence did not hold"),
+    ):
+        command = verbs.add_parser(name, help=help_text)
+        command.add_argument("--ref", required=True)
+        command.add_argument("--role", required=True, choices=roles)
+        command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+        _add_data_dir_args(command)
+        command.add_argument("--request-id")
+        if name == "add":
+            command.add_argument("--text", action="append", required=True, help="one item's wording; repeat for more")
+        else:
+            command.add_argument("--item", required=True, help="the item id, d1, d2, ...")
+        if name == "set-weight":
+            command.add_argument("--weight", type=int, required=True, choices=WEIGHTS)
+        if name == "meet":
+            command.add_argument("--evidence", required=True, help="the card, PR or sprint comment that shows it")
+        else:
+            command.add_argument("--reason", required=True)
+        command.set_defaults(handler=handler)
+    dod.set_defaults(handler=usage_handler("sprint dod subcommand required"))
 
 
 def _runs(minimum: int) -> Callable[[str], int]:
@@ -499,6 +539,7 @@ def run_create(args: argparse.Namespace) -> int:
             e2e_budget=args.e2e_budget,
             local_run_exceptions=local_run_exceptions,
             standing_decisions=standing_decisions,
+            dod_items=args.dod_item,
         ),
     )
 
@@ -672,3 +713,31 @@ def run_close(args: argparse.Namespace) -> int:
 
 def run_close_result(args: argparse.Namespace) -> int:
     return _operation(args, lambda layer: layer.sprint_close_result(args.ref, args.event_id))
+
+
+def run_dod_add(args: argparse.Namespace) -> int:
+    return _write(args, lambda writer: writer.add_dod_items(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        texts=args.text, reason=args.reason, request_id=args.request_id,
+    ))
+
+
+def run_dod_set_weight(args: argparse.Namespace) -> int:
+    return _write(args, lambda writer: writer.set_dod_weight(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        item=args.item, weight=args.weight, reason=args.reason, request_id=args.request_id,
+    ))
+
+
+def run_dod_meet(args: argparse.Namespace) -> int:
+    return _write(args, lambda writer: writer.meet_dod_item(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        item=args.item, evidence=args.evidence, request_id=args.request_id,
+    ))
+
+
+def run_dod_reopen(args: argparse.Namespace) -> int:
+    return _write(args, lambda writer: writer.reopen_dod_item(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        item=args.item, reason=args.reason, request_id=args.request_id,
+    ))

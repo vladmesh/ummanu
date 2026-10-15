@@ -198,6 +198,8 @@ class Sprint(Base):
     po_session = sa.Column(sa.Text)
     allowed_productions = sa.Column(ARRAY(sa.Text), nullable=False, server_default=sa.text("'{}'::text[]"))
     owner_decisions = sa.Column(JSONB, nullable=False, server_default=sa.text("'[]'::jsonb"))
+    # Addressable DoD items (0031); NULL for a sprint whose DoD is only the text above.
+    dod_items = sa.Column(JSONB)
     local_run_exceptions = sa.Column(JSONB, nullable=False, server_default=sa.text("'[]'::jsonb"))
     # The e2e run budget (0023): runs the sprint may dispatch and runs it dispatched, one
     # `sprint_e2e_charges` row each. Every sprint opened before it reads 3 and 0.
@@ -229,6 +231,7 @@ class Sprint(Base):
         sa.CheckConstraint("e2e_budget >= 0 AND e2e_used >= 0", name="sprint_e2e_counts_are_not_negative"),
         sa.CheckConstraint("jsonb_typeof(owner_decisions) = 'array'", name="sprint_owner_decisions_are_array"),
         sa.CheckConstraint("jsonb_typeof(local_run_exceptions) = 'array'", name="sprint_local_runs_are_array"),
+        sa.CheckConstraint("dod_items IS NULL OR jsonb_typeof(dod_items) = 'array'", name="sprint_dod_items_are_array"),
         # §3.13 step 2: `tasks` and `sprint_resumes` do not exist yet, and both relations are
         # mutual, so these are emitted as ALTER TABLE after every table is created.
         sa.ForeignKeyConstraint(
@@ -1036,6 +1039,7 @@ JSONB_COLUMNS = (
     ("po_feed", "metadata"),
     ("sprint_resumes", "po_request"),
     ("sprints", "owner_decisions"),
+    ("sprints", "dod_items"),
     ("sprints", "local_run_exceptions"),
     ("products", "extensions"),
     ("sprints", "observer"),

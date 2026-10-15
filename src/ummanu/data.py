@@ -21,6 +21,7 @@ from ummanu._fsutil import (
     write_json as _write_json,
     write_ndjson as _write_ndjson,
 )
+from ummanu.board import sprint_dod
 from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.local_run import parse_local_run_exceptions
 from ummanu.board.owner_decisions import stored_decisions
@@ -315,6 +316,8 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         **({"po_session": str(sprint["po_session"])} if sprint.get("po_session") else {}),
         **({"local_run_exceptions": local_run_exceptions} if local_run_exceptions else {}),
         **({"owner_decisions": stored_decisions(sprint["owner_decisions"])} if sprint.get("owner_decisions") else {}),
+        # Only for a sprint with addressable items; a free-text DoD exports as it always did.
+        **({"dod_items": sprint_dod.items_of(sprint["dod"])} if (sprint.get("dod") or {}).get("structured") else {}),
         **({"e2e": {key: sprint["e2e"][key] for key in ("budget", "used", "charges")}}
            if sprint.get("e2e") and (sprint["e2e"]["budget"] != 3 or sprint["e2e"]["used"] or sprint["e2e"]["charges"]) else {}),
         **(

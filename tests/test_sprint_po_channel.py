@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, NEUTRAL_PO_NOTES, REQUEST_PO_NOTES
 from tests.po_fake_store import FakePoStore
-from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, REQUEST_PO_NOTES, NEUTRAL_PO_NOTES
 from ummanu import sprint_commands
 from ummanu.board.po_channel import requests_po
 from ummanu.board.sprint_read import RESUME_FIELDS, SprintResume
@@ -388,6 +388,7 @@ class SqlAdapterTests(unittest.TestCase):
                 0,
                 [],  # creation-only local-run exceptions (0026)
                 [],  # quoted standing owner decisions (0027)
+                None,  # no addressable DoD items (0031)
             )
             self.executed: list[tuple[str, tuple]] = []
 

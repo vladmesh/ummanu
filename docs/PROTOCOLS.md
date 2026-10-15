@@ -2276,6 +2276,10 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `budget_recorded` | `accepted` |
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
+| `dod_item_met` | `refused` — `closed`, exit status `3` |
+| `dod_item_reopened` | `refused` — `closed`, exit status `3` |
+| `dod_item_weighed` | `refused` — `closed`, exit status `3` |
+| `dod_items_added` | `refused` — `closed`, exit status `3` |
 | `e2e_budget_raised` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
 | `production_allowed` | `refused` — `closed`, exit status `3` |

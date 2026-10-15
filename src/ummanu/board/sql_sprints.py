@@ -12,7 +12,7 @@ import tempfile
 from datetime import datetime
 from typing import Any
 
-from ummanu.board import owner_decisions
+from ummanu.board import owner_decisions, sprint_dod
 from ummanu.board.backend import record_key, sprint_reference_number
 from ummanu.board.e2e_budget import (
     DEFAULT_E2E_BUDGET,
@@ -177,7 +177,7 @@ class SqlSprintRecords:
         for values in self.client._query(
             "SELECT board_key, ref, goal, definition_of_done, product_id, status, observer, "
             "worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, allowed_productions, "
-            "e2e_budget, e2e_used, local_run_exceptions, owner_decisions "
+            "e2e_budget, e2e_used, local_run_exceptions, owner_decisions, dod_items "
             "FROM sprints "
             "WHERE board_key = ANY(%s::bigint[])",
             (keys,),
@@ -239,7 +239,7 @@ class SqlSprintRecords:
         for key in keys:
             (
                 reference, goal, dod, product, status, observer, worker, reviewer, current, source,
-                po_session, productions, e2e_budget, e2e_used, local_run_exceptions, decisions,
+                po_session, productions, e2e_budget, e2e_used, local_run_exceptions, decisions, dod_items,
             ) = rows[key]
             reference = str(reference)
             values: dict[str, str] = {
@@ -282,6 +282,8 @@ class SqlSprintRecords:
             )
             if decisions:
                 values[owner_decisions.FIELD] = json.dumps(decisions, sort_keys=True, separators=(",", ":"))
+            if dod_items is not None:
+                values[sprint_dod.FIELD] = sprint_dod.encode(dod_items)
             # The e2e run budget (0023), only where it is not the default a sprint reads without it (3,
             # nothing used, no charge), as the 0016 fields: a sprint that never spent a run reads as it did.
             if int(e2e_budget) != DEFAULT_E2E_BUDGET:
@@ -337,8 +339,10 @@ class SqlSprintRecords:
         self.client._execute(
             "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, status, "
             "observer, worker_pin, reviewer_pin, current_task_ref, source_audit, po_session, "
-            "allowed_productions, e2e_budget, e2e_used, local_run_exceptions, owner_decisions, created_at, updated_at, closed_at) "
-            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)",
+            "allowed_productions, e2e_budget, e2e_used, local_run_exceptions, owner_decisions, dod_items, "
+            "created_at, updated_at, closed_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,NULL,%s::jsonb,%s,%s::text[],%s,%s,%s::jsonb,%s::jsonb,"
+            "%s::jsonb,%s,%s,%s)",
             (reference, sprint_key(reference), number, meta["sprint_goal"],
              meta["sprint_definition_of_done"], meta.get("sprint_product") or None, status,
              json.dumps(observer) if observer is not None else None, worker, reviewer,
@@ -346,6 +350,7 @@ class SqlSprintRecords:
              self._productions(meta.get("sprint_allowed_productions")),
              int(meta.get(SPRINT_E2E_BUDGET) or DEFAULT_E2E_BUDGET), int(meta.get(SPRINT_E2E_USED) or 0),
              meta.get(LOCAL_RUN_EXCEPTIONS_FIELD, "[]"), meta.get(owner_decisions.FIELD, "[]"),
+             meta.get(sprint_dod.FIELD) or None,
              now, now, None if status == "open" else now),
         )
         self._replace_relations(reference, meta)
@@ -498,6 +503,10 @@ class SqlSprintRecords:
             owner_decisions.stored_decisions(values[owner_decisions.FIELD])
             assignments.append("owner_decisions = %s::jsonb")
             params.append(values[owner_decisions.FIELD])
+        if sprint_dod.FIELD in values:
+            sprint_dod.stored_items(values[sprint_dod.FIELD])
+            assignments.append("dod_items = %s::jsonb")
+            params.append(str(values[sprint_dod.FIELD]) or None)
         # The budget as a sprint is created or restored with it, and a raise, which adds in place.
         if SPRINT_E2E_BUDGET in values:
             assignments.append("e2e_budget = %s")

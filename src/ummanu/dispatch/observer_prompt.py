@@ -65,6 +65,7 @@ def render_observer_prompt(
         "",
         str(sprint.get("definition_of_done") or "(empty definition of done)"),
         "",
+        *_dod_item_lines(sprint.get("dod")),
         "## Repositories",
         "",
         "\n".join(f"- {repo}" for repo in repositories) or "- (none recorded)",
@@ -190,6 +191,18 @@ def _observer_comments(sprint: dict[str, Any]) -> list[Any]:
     if "comments" not in sprint or not isinstance(comments, list):
         raise TaskError("backend_error", "live sprint comments are unavailable", 1)
     return comments
+
+def _dod_item_lines(dod: dict[str, Any] | None) -> list[str]:
+    """The addressable DoD items with state and weight, or nothing for a free-text DoD."""
+    if not dod or not dod.get("structured"):
+        return []
+    lines = ["## Definition of Done items", ""]
+    for item in dod["items"]:
+        weight = item["weight"] if item["weight"] is not None else "not weighed"
+        evidence = f"; evidence: {item['evidence']}" if item["evidence"] else ""
+        lines.append(f"- {item['id']} [{item['state']}, weight {weight}{evidence}] {item['text']}")
+    return [*lines, "", f"{dod['met']} of {dod['total']} met.", ""]
+
 
 def _production_lines(sprint: dict[str, Any]) -> list[str]:
     """The registered projects whose production this sprint's operations may touch, as created."""

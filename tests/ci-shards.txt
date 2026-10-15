@@ -247,6 +247,8 @@ unit tests/test_sprint_read.py
 unit tests/test_sprint_admission.py
 unit tests/test_sprint_close_model.py
 unit tests/test_sprint_write.py
+unit tests/test_sprint_dod.py
+integration-board tests/test_sprint_dod_backend.py
 unit tests/test_local_run_policy.py
 integration-board tests/test_sprints_sql_backend.py
 integration-board tests/test_sql_board_bulk_reads.py
