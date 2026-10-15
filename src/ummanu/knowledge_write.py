@@ -176,7 +176,7 @@ def check_knowledge_directory(
     """Everything :func:`write_knowledge_directory` refuses, asked without writing anything.
 
     The source must be a real, non-empty directory of regular files and subdirectories: a symlink or a
-    special file anywhere in it is refused, as is a name Git reads (`_GIT_CONTROL_NAMES`), a total size
+    special file anywhere in it is refused, as is a name Git reads (`GIT_CONTROL_NAMES`), a total size
     over `KNOWLEDGE_DIRECTORY_CAP_BYTES`, and a text file the secret gate would change. A binary file (one
     that is not UTF-8 or holds a NUL byte) is copied unchanged and is not secret-scanned.
     """
@@ -396,7 +396,7 @@ def _clean_parts(value: str, what: str) -> PurePosixPath:
 
 # Names Git itself reads: `.git` is a repository, and the other three change what a later commit of
 # the instance repository records. Any other dot name, `.github` included, is plain content.
-_GIT_CONTROL_NAMES = frozenset({".git", ".gitignore", ".gitattributes", ".gitmodules"})
+GIT_CONTROL_NAMES = frozenset({".git", ".gitignore", ".gitattributes", ".gitmodules"})
 
 
 def _directory_files(source: Path) -> tuple[tuple[PurePosixPath, bytes], ...]:
@@ -418,7 +418,7 @@ def _directory_files(source: Path) -> tuple[tuple[PurePosixPath, bytes], ...]:
         for name in sorted([*dirnames, *filenames]):
             path = Path(root) / name
             relative = PurePosixPath(path.relative_to(source).as_posix())
-            if name in _GIT_CONTROL_NAMES:
+            if name in GIT_CONTROL_NAMES:
                 raise KnowledgeValidationError(f"source holds a name Git reads: {relative}", "special_file")
             try:
                 entry = path.lstat()
