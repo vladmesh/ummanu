@@ -48,6 +48,12 @@ def tearDownModule() -> None:
     BOARD.stop()
 
 
+#: The smallest byte strings each image kind is recognised by.
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 24
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 24
+WEBP = b"RIFF\x10\x00\x00\x00WEBPVP8 " + b"\x00" * 16
+
+
 class PoWebOperationTests(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -382,7 +388,7 @@ class PoWebOperationTests(unittest.TestCase):
         for line in (
             "if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;",
             "if (event.isComposing || event.keyCode === 229) return;",
-            "if (submitted || !draft.value.trim()) return;",
+            "if (submitted || (!draft.value.trim() && !attachedCount())) return;",
             "form.requestSubmit();",
             "if (submitted) { event.preventDefault(); return; }",
             "if (button) button.disabled = true;",
@@ -416,6 +422,60 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn("remember 42", page)
         self.assertIn('data-state="completed"', page)
         self.assertNotIn("stop turn", page)
+
+    def upload(self, session_id: str, data: bytes):
+        return self.app.handle("POST", f"/po/sessions/{session_id}/attachments", body=data)
+
+    def test_an_attached_image_reaches_the_head_by_its_path_and_shows_in_the_feed(self) -> None:
+        session_id = self.create()
+        uploaded = self.upload(session_id, PNG)
+        self.assertEqual(uploaded.status, 200, uploaded.body.decode())
+        stored = json.loads(uploaded.body)
+        path = Path(stored["path"])
+        self.assertEqual(path.parent, (self.data / "po" / "sessions" / session_id / "attachments").absolute())
+        self.assertEqual(path.read_bytes(), PNG)
+
+        response = self.post(
+            f"/po/sessions/{session_id}/messages",
+            [("request_id", "message-image"), ("text", "what is wrong here?"), ("attachment", stored["name"])],
+        )
+
+        self.assertEqual(response.status, 303, response.body.decode())
+        self.settle(session_id)
+        [(_, _, asked), (_, _, answered)] = self.feed(session_id)
+        self.assertTrue(asked.startswith("what is wrong here?"))
+        self.assertIn(str(path), asked)
+        self.assertIn(str(path), answered, "the head was started with the image's path")
+        source = f"/po/sessions/{session_id}/attachments/{stored['name']}"
+        self.assertIn(f'<img class="po-thumb" src="{source}"', self.page(session_id))
+        image = self.get(source)
+        self.assertEqual((image.status, image.content_type, image.body), (200, "image/png", PNG))
+
+    def test_png_jpeg_and_webp_are_kept_once_by_content_and_other_bytes_are_refused(self) -> None:
+        session_id = self.create()
+        for data, extension in ((PNG, "png"), (JPEG, "jpg"), (WEBP, "webp")):
+            with self.subTest(extension=extension):
+                first, again = (json.loads(self.upload(session_id, data).body) for _ in range(2))
+                self.assertEqual(first, again)
+                self.assertTrue(first["name"].endswith("." + extension))
+        for data in (b"GIF89a" + b"\x00" * 16, b"<svg xmlns='http://www.w3.org/2000/svg'/>", b""):
+            with self.subTest(data=data[:6]):
+                self.assertEqual(self.upload(session_id, data).status, 400)
+        stored = sorted(path.suffix for path in (self.data / "po" / "sessions" / session_id / "attachments").iterdir())
+        self.assertEqual(stored, [".jpg", ".png", ".webp"])
+
+    def test_a_message_naming_an_image_the_session_does_not_hold_starts_no_turn(self) -> None:
+        holder = self.create(request_id="create-holder")
+        other = self.create(request_id="create-other")
+        name = json.loads(self.upload(holder, PNG).body)["name"]
+
+        response = self.post(
+            f"/po/sessions/{other}/messages", [("request_id", "message-foreign"), ("text", "see"), ("attachment", name)]
+        )
+
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.store.turns(other), [])
+        self.assertEqual(self.get(f"/po/sessions/{other}/attachments/{name}").status, 404)
 
     def test_while_a_turn_runs_the_page_says_so_and_a_second_message_waits_in_the_queue(self) -> None:
         session_id = self.create("codex", "gpt-5.6-sol")

@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from uuid import uuid4
 
-from ummanu.web.app import MAX_BODY_BYTES, WebApp
+from ummanu.web.app import WebApp
 from ummanu.web.doctor import DoctorLayer
 
 DEFAULT_HOST = "127.0.0.1"
@@ -160,7 +160,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _answer_body(self, method: str, *, head: bool = False) -> None:
         path, _, query = self.path.partition("?")
         try:
-            body = self._read_body()
+            body = self._read_body(self.server.app.body_limit(method, path))
         except _BodyRefused as exc:
             # Unread bytes must never be parsed as a second request on this connection.
             self.close_connection = True
@@ -228,7 +228,7 @@ class _Handler(BaseHTTPRequestHandler):
         ).encode()
         self._write(500, body, "text/plain; charset=utf-8", head=head)
 
-    def _read_body(self) -> bytes:
+    def _read_body(self, limit: int) -> bytes:
         if self.headers.get_all("Transfer-Encoding"):
             raise _BodyRefused("this service does not accept Transfer-Encoding")
         lengths = self.headers.get_all("Content-Length") or []
@@ -241,9 +241,9 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(declared)
         except ValueError:
             raise _BodyRefused("this request declares an invalid Content-Length") from None
-        if length > MAX_BODY_BYTES:
+        if length > limit:
             raise _BodyRefused(
-                f"this request body is larger than the {MAX_BODY_BYTES} bytes accepted here",
+                f"this request body is larger than the {limit} bytes accepted here",
                 413,
             )
         return self.rfile.read(length) if length > 0 else b""
@@ -263,11 +263,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        # Pages are one self-contained file each and load nothing external. `form-action 'self'` lets
-        # the sprint form submit to this service and nowhere else.
+        # Pages are one self-contained file each and load nothing external but this service's own
+        # images (a PO session's attachments). `form-action 'self'` lets the sprint form submit to
+        # this service and nowhere else.
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'",
+            "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'",
         )
         for name, value in (extra or {}).items():
             self.send_header(name, value)
