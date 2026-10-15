@@ -1,4 +1,4 @@
-"""Round facts from a real checkout, and the two stale rules over them."""
+"""Round facts from a real checkout, the two stale rules over them, and the one typed record."""
 
 from __future__ import annotations
 
@@ -7,13 +7,20 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
+from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
+from ummanu.board.task_protocol.rows import is_significant_card_event, stale_round_fact
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
+from ummanu.dispatch.observer import render_observer_wake_context
 from ummanu.dispatch.stale_round import (
+    ESTIMATE_FACTOR,
     RULE_ESTIMATE,
     RULE_QUIET,
     WorkspaceReading,
     read_round_workspace,
+    record_stale_round,
     round_facts,
     stale_rule,
 )
@@ -21,6 +28,7 @@ from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.worker_lifecycle import StaleRound
 
+REF = "ummanu-9001"
 GIT_IDENTITY = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid"]
 
 
@@ -121,6 +129,112 @@ class StaleRuleTests(unittest.TestCase):
         self.assertEqual(self.rule(quiet, elapsed=1799, verdict=alive), "", "quiet starts at the round")
         unknown = WorkspaceReading(unknown="checkout gone")
         self.assertEqual(self.rule(unknown, elapsed=3600, verdict=alive), "")
+
+
+class _Writer:
+    """The card writer's `stale_round`, idempotent by request id like the audit it stands for."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+        self.request_ids: set[str] = set()
+
+    def stale_round(self, *, actor: str, reference: str, body: str, fact: dict, request_id: str) -> dict:
+        if request_id not in self.request_ids:
+            self.request_ids.add(request_id)
+            self.events.append(
+                {
+                    "event_id": f"evt-{len(self.events)}",
+                    "kind": "commented",
+                    "outcome": "success",
+                    "ref": reference,
+                    "actor": {"role": "dispatcher", "id": actor},
+                    "payload": {"marker": "dispatcher", "body_sha256": "x", "stale_round": dict(fact)},
+                    "body": body,
+                }
+            )
+        return {}
+
+
+class StaleRecordTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.start = 1_700_000_000.0
+        self.record = _record(self.start)
+        self.record.report_generation = 1
+        self.record.worker_started_at = self.start
+        self.records = {REF: self.record}
+        self.runtime = SimpleNamespace(
+            owner="dispatcher",
+            writer=_Writer(),
+            save_records=lambda payload, records: None,
+            host=SimpleNamespace(
+                round_workspace=lambda task, record: WorkspaceReading(
+                    commits=2,
+                    newest_commit_at=self.start + 600,
+                    files_changed=3,
+                    lines_added=40,
+                    lines_removed=7,
+                    newest_file_at=self.start + 900,
+                )
+            ),
+        )
+
+    def tick(self, now: float) -> None:
+        task = {"ref": REF, "type": "code"}
+        record_stale_round(
+            self.runtime, task, self.record, self.records, {}, VitalityVerdict.HEALTHY_ACTIVE, now=now
+        )
+
+    def test_a_stale_round_is_recorded_once_with_its_facts_in_the_payload(self) -> None:
+        past = self.start + ESTIMATE_FACTOR * DEFAULT_ESTIMATE_MINUTES * 60 + 1
+        for step in range(4):
+            self.tick(past + step * 60)
+
+        [event] = self.runtime.writer.events
+        self.assertTrue(event["body"].startswith("Stale round: rule estimate"))
+        self.assertEqual(
+            stale_round_fact(event),
+            {
+                "card": REF,
+                "rule": RULE_ESTIMATE,
+                "generation": 1,
+                "elapsed_seconds": round(past - self.start),
+                "estimate_minutes": DEFAULT_ESTIMATE_MINUTES,
+                "commits": 2,
+                "files_changed": 3,
+                "lines_added": 40,
+                "lines_removed": 7,
+                "last_change_at": "2023-11-14T22:28:20Z",
+                "workspace_unknown": "",
+            },
+        )
+
+    def test_the_stale_record_wakes_the_observer_and_a_plain_dispatcher_comment_does_not(self) -> None:
+        self.tick(self.start + ESTIMATE_FACTOR * DEFAULT_ESTIMATE_MINUTES * 60 + 1)
+        [event] = self.runtime.writer.events
+        plain = {**event, "payload": {"marker": "dispatcher", "body_sha256": "x"}}
+        by_worker = {**event, "actor": {"role": "worker", "id": "worker"}}
+
+        self.assertTrue(is_significant_card_event(event, linked_refs={REF}))
+        self.assertFalse(is_significant_card_event(event, linked_refs={"ummanu-1"}))
+        self.assertFalse(is_significant_card_event(plain, linked_refs={REF}))
+        self.assertIsNone(stale_round_fact(plain))
+        self.assertIsNone(stale_round_fact(by_worker))
+
+    def test_the_wake_context_names_the_stale_card_and_its_facts(self) -> None:
+        self.tick(self.start + ESTIMATE_FACTOR * DEFAULT_ESTIMATE_MINUTES * 60 + 1)
+        [event] = self.runtime.writer.events
+
+        text = render_observer_wake_context(
+            {"ref": "sprint:77", "comments": []}, change="linked-card", stale_round=[stale_round_fact(event)]
+        )
+
+        self.assertIn("Stale round decision:", text)
+        self.assertIn(
+            f"Stale round on {REF}: rule estimate, report generation 1."
+            f" Elapsed {ESTIMATE_FACTOR * DEFAULT_ESTIMATE_MINUTES} min; estimate {DEFAULT_ESTIMATE_MINUTES} min;"
+            " 2 commits, 3 files, +40/-7 lines, last change 2023-11-14T22:28:20Z.",
+            text,
+        )
 
 
 if __name__ == "__main__":

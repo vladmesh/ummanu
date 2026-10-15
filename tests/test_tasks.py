@@ -3656,6 +3656,39 @@ class AssessmentStateTests(CardStoreCase):
                 release_merge=marker,
             )
 
+    def test_a_stale_round_record_is_one_dispatcher_comment_whose_fact_wakes_the_observer(self) -> None:
+        fact = {
+            "card": "ummanu-468",
+            "rule": "quiet",
+            "generation": 1,
+            "elapsed_seconds": 1800,
+            "estimate_minutes": 60,
+            "commits": 1,
+            "files_changed": 2,
+            "lines_added": 10,
+            "lines_removed": 3,
+            "last_change_at": "2026-01-01T00:00:00Z",
+            "workspace_unknown": "",
+        }
+        for _ in range(2):
+            self.writer.stale_round(
+                actor="d",
+                reference="ummanu-468",
+                body="Stale round: rule quiet",
+                fact=fact,
+                request_id="stale-round-ummanu-468-1",
+            )
+        woken = [
+            event
+            for event in self.writer.audit.events("ummanu-468")
+            if is_significant_observer_event(event, linked_refs={"ummanu-468"}, sprint_ref=SPRINT)
+        ]
+        self.assertEqual([event["payload"]["stale_round"] for event in woken if event["kind"] == "commented"], [fact])
+        self.assertEqual(
+            [c["comment"] for c in self.client.comments(12) if "Stale round:" in c["comment"]],
+            ["[dispatcher]\nStale round: rule quiet"],
+        )
+
     def test_exact_decision_replay_uses_its_original_assessment_visit(self) -> None:
         self._park()
         first = self._decide("accept", request_id="replay-after-later-visit")

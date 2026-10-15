@@ -3211,6 +3211,39 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertTrue(state["pending"])
         self.assertIn("[po]\n" + cutoff, [row["body"] for row in state["sprint"]["comments"]])
 
+    def test_a_stale_round_record_wakes_the_observer_once_with_its_facts(self) -> None:
+        self.open_sprint()
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.runtime.production_tick()
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        fact = {
+            "card": "ummanu-510",
+            "rule": "quiet",
+            "generation": 1,
+            "elapsed_seconds": 1800,
+            "estimate_minutes": 60,
+            "commits": 0,
+            "files_changed": 0,
+            "lines_added": 0,
+            "lines_removed": 0,
+            "last_change_at": "",
+            "workspace_unknown": "",
+        }
+        self.writer.stale_round(
+            actor="dispatcher",
+            reference="ummanu-510",
+            body="Stale round: rule quiet",
+            fact=fact,
+            request_id="stale-round-ummanu-510-1",
+        )
+
+        woke = self.runtime.production_tick()
+        later = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
+        self.assertNotIn("observer-nudged", [row["action"] for row in self.actions(later)])
+        self.assertEqual(self.host.observer_wake_stale_round[-1], [fact])
+
     def test_wake_carries_the_event_states_single_live_sprint_snapshot(self) -> None:
         self.open_sprint()
         self.board.save_metadata(12, sprint_ref="sprint:1")

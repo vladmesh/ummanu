@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
@@ -661,12 +661,14 @@ class WorkerReportNudge:
 class StaleRound:
     """When report round `generation` opened, and its one stale record once a tick found it stale.
 
-    `body` is frozen before the comment and `recorded` set after it, so a replay resends the same body.
+    `body` and `fact` are frozen before the comment and `recorded` set after it, so a replay
+    resends the same record.
     """
 
     generation: int = 0
     started_at: float = 0.0
     body: str = ""
+    fact: dict[str, Any] = field(default_factory=dict)
     recorded: bool = False
 
     def to_json(self) -> dict[str, Any]:
@@ -674,6 +676,7 @@ class StaleRound:
             "generation": self.generation,
             "started_at": self.started_at,
             "body": self.body,
+            **({"fact": dict(self.fact)} if self.fact else {}),
             "recorded": self.recorded,
         }
 
@@ -685,6 +688,7 @@ class StaleRound:
             generation=int(value.get("generation") or 0),
             started_at=float(value.get("started_at") or 0.0),
             body=str(value.get("body") or ""),
+            fact=dict(value.get("fact") or {}),
             recorded=bool(value.get("recorded")),
         )
 

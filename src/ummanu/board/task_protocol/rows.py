@@ -422,8 +422,12 @@ POST_MERGE_CI_KEY = "post_merge_ci"
 POST_MERGE_CI_RESULTS = ("green", "red", "absent", "timeout")
 
 
-def post_merge_ci_fact(event: dict[str, Any]) -> dict[str, Any] | None:
-    """The post-merge CI result a dispatcher card event records, or None for any other event."""
+#: The payload key of the one card event that records a stale worker round.
+STALE_ROUND_KEY = "stale_round"
+
+
+def _dispatcher_comment_fact(event: dict[str, Any], key: str) -> dict[str, Any] | None:
+    """The typed fact under `key` in a successful dispatcher card comment, or None."""
     if is_protocol_event(event) or str(event.get("kind") or "") != "commented":
         return None
     if str(event.get("outcome") or "") != "success":
@@ -432,8 +436,22 @@ def post_merge_ci_fact(event: dict[str, Any]) -> dict[str, Any] | None:
     if str(actor.get("role") or "") != "dispatcher":
         return None
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    fact = payload.get(POST_MERGE_CI_KEY)
-    if not isinstance(fact, dict) or str(fact.get("result") or "") not in POST_MERGE_CI_RESULTS:
+    fact = payload.get(key)
+    return fact if isinstance(fact, dict) else None
+
+
+def post_merge_ci_fact(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The post-merge CI result a dispatcher card event records, or None for any other event."""
+    fact = _dispatcher_comment_fact(event, POST_MERGE_CI_KEY)
+    if fact is None or str(fact.get("result") or "") not in POST_MERGE_CI_RESULTS:
+        return None
+    return fact
+
+
+def stale_round_fact(event: dict[str, Any]) -> dict[str, Any] | None:
+    """The stale worker round a dispatcher card event records, or None for any other event."""
+    fact = _dispatcher_comment_fact(event, STALE_ROUND_KEY)
+    if fact is None or not str(fact.get("rule") or ""):
         return None
     return fact
 
@@ -467,8 +485,8 @@ def is_merged_release(event: dict[str, Any]) -> bool:
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
     """Decide whether a card transition wakes the observer or invalidates resume
     freshness. Ignore machine telemetry and observer decisions; a merged release's Done
-    is not a wake, but its post-merge CI result is. Other Done transitions remain
-    wakes.
+    is not a wake, but its post-merge CI result is, and so is a stale round record. Other
+    Done transitions remain wakes.
     """
     if str(event.get("ref") or "") not in linked_refs:
         return False
@@ -478,7 +496,7 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
     if str(actor.get("role") or "") == "observer":
         return False
-    if post_merge_ci_fact(event) is not None:
+    if post_merge_ci_fact(event) is not None or stale_round_fact(event) is not None:
         return True
     if is_dispatcher_hotfix(event):
         # A red after-merge e2e run's hotfix card, cut in the sprint: a decision, as a Blocked card is.
