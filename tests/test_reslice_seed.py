@@ -505,8 +505,8 @@ class _MergeHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
-        if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
-            return subprocess.CompletedProcess(args, 0, f"{self.pr_base}\n", "")
+        if args[:3] == ["gh", "pr", "view"] and "baseRefName,isDraft" in args:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"baseRefName": self.pr_base, "isDraft": False}), "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
 

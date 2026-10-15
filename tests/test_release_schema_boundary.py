@@ -153,7 +153,7 @@ class _ReleaseHost(CommandHostRuntime):
                 return subprocess.CompletedProcess(list(args), 0, "", "")
             if "mergeCommit" in args:
                 return subprocess.CompletedProcess(list(args), 0, git(self.workspace, "rev-parse", BRANCH) + "\n", "")
-            return subprocess.CompletedProcess(list(args), 0, "main\n", "")
+            return subprocess.CompletedProcess(list(args), 0, json.dumps({"baseRefName": "main", "isDraft": False}), "")
         return super()._run(args, label, cwd=cwd)
 
 

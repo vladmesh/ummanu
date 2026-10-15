@@ -217,7 +217,7 @@ class _Host(CommandHostRuntime):
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         if args[:1] == ["gh"]:
             self.gh.append(list(args))
-            answer = "main\n" if args[:3] == ["gh", "pr", "view"] else ""
+            answer = json.dumps({"baseRefName": "main", "isDraft": False}) if args[:3] == ["gh", "pr", "view"] else ""
             return subprocess.CompletedProcess(args, 0, answer, "")
         return super()._run(args, label, cwd=cwd)
 

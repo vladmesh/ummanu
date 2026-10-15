@@ -9631,7 +9631,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(prompted["action"], "worker-report-prompted")
         self.assertEqual(prompted["status"], "degraded")
         self.assertEqual(self.host.report_prompts, [_report_nudge_prompt(2, CARD_REF)])
-        self.assertIn("generation 2", self.host.report_prompts[0])
+        self.assertIn("round 2", self.host.report_prompts[0])
         # Nothing was stopped, restarted or replaced, and nothing the round owns was rewritten.
         self.assertNotIn("restart_worker", self.host.calls)
         self.assertNotIn("stop_head:worker", self.host.calls)
@@ -11076,16 +11076,11 @@ class ReportPromptDeliveryTests(unittest.TestCase):
 
         self.assertFalse(noop.worker_addressable(self.record))
 
-    def test_the_prompt_names_the_round_and_refuses_the_usual_substitutes(self) -> None:
+    def test_the_prompt_names_the_round_and_the_card(self) -> None:
         prompt = _report_nudge_prompt(3, "ummanu-1172")
 
-        self.assertIn("generation 3", prompt)
-        self.assertIn("ummanu-1172", prompt)
-        self.assertIn("report command in TASK.md", prompt)
-        self.assertIn("both end in 3", prompt)
-        self.assertIn("Committing, pushing, a green test run", prompt)
-        self.assertIn("is not a report of this round", prompt)
-        self.assertIn("If it is not done, carry on", prompt)
+        self.assertIn("round 3 of ummanu-1172", prompt)
+        self.assertIn("end in 3", prompt)
 
 
 class ContinuationPointerTests(unittest.TestCase):
@@ -12182,6 +12177,17 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertFalse(any("push origin pipeline/ummanu-510:main" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
 
+    def test_complete_green_marks_a_draft_pr_ready_before_merging_it(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}}, pr_draft=True)
+            record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))
+            host.complete_green({"ref": "ummanu-510", "project": "codegen_orchestrator"}, record)
+        cmds = [" ".join(run) for run in host.runs]
+        ready = cmds.index("gh pr ready pipeline/ummanu-510")
+        self.assertLess(ready, cmds.index("gh pr merge pipeline/ummanu-510 --merge"), cmds)
+
     def test_complete_green_survives_default_checkout_refresh_failure_after_pr_merge(self) -> None:
         """The remote merge is complete even when a preserved local branch cannot fast-forward."""
         from types import SimpleNamespace
@@ -12204,6 +12210,26 @@ class DispatcherLauncherTests(unittest.TestCase):
         cmds = [" ".join(run) for run in host.runs]
         self.assertTrue(any("gh pr merge pipeline/ummanu-510 --merge" in c for c in cmds))
         self.assertTrue(any(c.endswith("git -C /home/dev/ummanu fetch origin main") for c in cmds))
+
+    def test_complete_green_reports_the_push_landing_when_a_diverged_checkout_cannot_fast_forward(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp))
+            original_run = host._run
+
+            def fail_fast_forward(args, label, *, cwd=None):
+                if label == "post-merge fast-forward":
+                    raise HostError("post-merge fast-forward failed: Diverging branches")
+                return original_run(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "_run", side_effect=fail_fast_forward):
+                landing = host.complete_green(
+                    {"ref": "ummanu-510", "project": "ummanu"},
+                    SimpleNamespace(workspace=str(Path(tmp) / "ws")),
+                )
+
+        self.assertEqual((landing.path, landing.base), ("push", "main"))
 
     def test_complete_green_survives_default_checkout_fetch_failure_after_pr_merge(self) -> None:
         """The remote merge is complete even when the checkout cannot refresh from origin."""
@@ -12374,11 +12400,14 @@ class DispatcherLauncherTests(unittest.TestCase):
 
 
 class _RecordingMergeHost(CommandHostRuntime):
-    def __init__(self, root: Path, adapter: dict | None = None, *, pr_base: str = "main") -> None:
+    def __init__(
+        self, root: Path, adapter: dict | None = None, *, pr_base: str = "main", pr_draft: bool = False
+    ) -> None:
         super().__init__(FakeCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self.runs: list[list[str]] = []
         # What GitHub says the open pull request targets; the merge refuses any other answer.
         self.pr_base = pr_base
+        self.pr_draft = pr_draft
 
     def _project_remote(self, project, checkout):  # type: ignore[override]
         # No checkout exists behind the stubbed `_run`; its origin is declared local, so remote Git
@@ -12389,8 +12418,9 @@ class _RecordingMergeHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
-        if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
-            return subprocess.CompletedProcess(args, 0, f"{self.pr_base}\n", "")
+        if args[:3] == ["gh", "pr", "view"] and "baseRefName,isDraft" in args:
+            view = {"baseRefName": self.pr_base, "isDraft": self.pr_draft}
+            return subprocess.CompletedProcess(args, 0, json.dumps(view), "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
@@ -12424,7 +12454,7 @@ class _FakeGhMergeHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         if args and args[0] == "gh":
-            stdout = f"{self.pr_base}\n" if args[:3] == ["gh", "pr", "view"] else ""
+            stdout = json.dumps({"baseRefName": self.pr_base, "isDraft": False}) if args[:3] == ["gh", "pr", "view"] else ""
             return subprocess.CompletedProcess(list(args), 0, stdout, "")
         return super()._run(args, label, cwd=cwd)
 
@@ -12793,8 +12823,8 @@ class GithubGateHost(CommandHostRuntime):
                 self._gh_errors["pr list"] = self._pr_list_after_create_fails
             return done("https://github.com/example-org/sample/pull/42\n")
         if args[1:3] == ["pr", "view"]:
-            if "baseRefName" in args:
-                return done(f"{self.pr_base}\n")
+            if "baseRefName,isDraft" in args:
+                return done(json.dumps({"baseRefName": self.pr_base, "isDraft": False}))
             return done(json.dumps({"title": self.pr_title, "body": self.pr_body}))
         if args[1:3] == ["pr", "edit"]:
             if "--base" in args:

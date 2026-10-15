@@ -35,11 +35,13 @@ side makes it a no-op:
   (`dispatch/e2e_stage.py`) reads the frozen result off this wait card and acts on it; the comment is
   what the card's history shows of it. A card that no longer exists takes nothing and gives the
   delivery up; any other board error postpones it.
-- `observer`: the terminal move itself, last: Done for `target_reached`, Blocked for every other
-  outcome, with the result as the move's comment. The observer's wake on Done/Blocked is the delivery.
+- `observer`: the terminal move itself, last: Done for `target_reached` and `cancelled` (a cancel is
+  the return address's own decision and carries its reason), Blocked for `deadline_passed` and
+  `source_unreachable`, with the result as the move's comment. The observer's wake on Done/Blocked
+  is the delivery.
 
-A wait card's Blocked, and a dependent's, carry `wait_outcome` in their transition data: an outcome,
-not a pipeline restart, so the sprint budget does not charge them.
+A wait card's terminal move, and a dependent's Blocked, carry `wait_outcome` in their transition
+data: an outcome, not a pipeline restart, so the sprint budget does not charge them.
 """
 
 from __future__ import annotations
@@ -500,17 +502,18 @@ def _deliver(
         }
     outcome = str(result.get("outcome") or "")
     reached = outcome == TARGET_REACHED
+    closed = reached or outcome == CANCELLED
     record = render_outcome_record(ref, spec, state)
     runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,
         reference=ref,
-        target="done" if reached else "blocked",
+        target="done" if closed else "blocked",
         reason=record,
         request_id=delivery_request_id(ref, TERMINAL_MOVE, wait_card.OBSERVER, str(result.get("key") or "")),
         **(
             {}
-            if reached
+            if closed
             else {
                 "terminal_taxonomy": normalize_terminal_taxonomy(
                     disposition="blocked", blocked_reason="other"
@@ -525,7 +528,7 @@ def _deliver(
         "wait-target-reached" if reached else "wait-ended",
         outcome=outcome,
         summary=result.get("summary"),
-        state="done" if reached else "blocked",
+        state="done" if closed else "blocked",
     )
 
 
