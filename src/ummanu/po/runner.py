@@ -1241,10 +1241,11 @@ def po_provider_error(cli: str, stdout: str, stderr: str) -> ProviderError | Non
     """Read refusal from the last classifiable Claude error result or Codex error/turn.failed event,
     else from stderr: the CLI's final error, not a retry notice before it.
 
-    Return None when absent; never interpret answer text as an error record.
+    Records are read in stream order and a later one replaces an earlier one. Return None when
+    absent; never interpret answer text as an error record.
     """
     found: ProviderError | None = None
-    for document in _json_documents(stdout, whole=cli == "claude"):
+    for document in _json_documents(stdout, whole=False):
         if not isinstance(document, dict):
             continue
         text = ""

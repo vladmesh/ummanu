@@ -8,8 +8,9 @@ file `$FAKE_LOG.gate` exists, `FAIL` exits non-zero, `SILENT` exits zero without
 `NOPERSIST` makes Claude save no conversation. While the file `$FAKE_LOG.quota-<cli>` exists, that
 CLI refuses every turn with its provider's own spent-usage-limit message, as the real one does; Codex's
 names a reset (`codex_quota_wall`) three days after the refusal, so it never expires with the calendar.
-While the file `$FAKE_LOG.refuse-codex` exists, Codex prints each of its lines as an `error` event and
-fails the turn on the last one, as the real CLI does after its own retries; it also logs `$CODEX_HOME`.
+While the file `$FAKE_LOG.refuse-<cli>` exists, that CLI prints each of its lines as an error record
+(Codex an `error` event, then `turn.failed` on the last line; Claude an `is_error` result per line) and
+fails the turn, as the real CLI does after its own retries. Codex also logs `$CODEX_HOME`.
 
 Each also says which model it ran the way the real CLI does: Claude's result object keys `modelUsage`
 by the full id (`FAKE_CLAUDE_RESOLVED` of the alias it was given, the session's own model first and a
@@ -57,6 +58,11 @@ if flag == "--resume" and session not in saved:
     sys.exit(1)
 if flag == "--session-id" and session in saved:
     print(f"Error: Session ID {session} is already in use.", file=sys.stderr)
+    sys.exit(1)
+if os.path.exists(log + ".refuse-claude"):
+    for line in open(log + ".refuse-claude").read().splitlines():
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "session_id": session,
+                          "result": line}), flush=True)
     sys.exit(1)
 if os.path.exists(log + ".quota-claude"):
     print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "session_id": session,

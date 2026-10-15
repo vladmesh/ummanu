@@ -139,6 +139,25 @@ class PoCodexHomeTests(unittest.TestCase):
         self.assertIn("(server)", event.text)
         self.assertEqual(self.health()["openai-sub"]["status"], "unavailable")
 
+    def test_the_last_claude_error_result_is_the_one_recorded(self) -> None:
+        self.log_in()
+        refusal = self.log.with_name(self.log.name + ".refuse-claude")
+        retry, final = "API Error: 503 Service Unavailable", "API Error: 401 invalid token \u00b7 Please run /login"
+        for lines, status, summary, other in (
+            ((retry, final), "unauthenticated", "401 invalid token", "503"),
+            ((final, retry), "unavailable", "503 Service Unavailable", "401"),
+        ):
+            with self.subTest(final=lines[-1]):
+                refusal.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                session = self.runner.create_session("claude", "opus", "high")
+                turn = self.run_turn(session.session_id, "hello")
+                self.assertEqual(turn.state, po_store.COMPLETED, turn.reason)
+                self.assertEqual(self.runner.store.session(session.session_id).cli, "codex")
+                recorded = self.health()["claude-sub"]
+                self.assertEqual(recorded["status"], status)
+                self.assertIn(summary, recorded["reason"])
+                self.assertNotIn(other, recorded["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
