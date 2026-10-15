@@ -676,7 +676,7 @@ class StaleRound:
             "generation": self.generation,
             "started_at": self.started_at,
             "body": self.body,
-            "fact": dict(self.fact),
+            **({"fact": dict(self.fact)} if self.fact else {}),
             "recorded": self.recorded,
         }
 
