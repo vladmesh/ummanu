@@ -1424,6 +1424,26 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertNotIn("review", self.stored_metadata("ummanu-468"))
         self.assertEqual((card["review"], card["live_impact"]), ("required", False))
 
+    def test_create_refuses_a_dependency_nothing_can_release(self) -> None:
+        self.add_card(reference="ummanu-760", title="Blocked predecessor", state="blocked", metadata={"project": "ummanu"})
+        self.add_card(reference="ummanu-761", title="Archived", state="done", archived=True, metadata={"project": "ummanu"})
+        self.add_card(reference="ummanu-762", title="Ready predecessor", state="ready", metadata={"project": "ummanu"})
+        refused = {
+            "ummanu-763": {"blocked_by": "ummanu-760"},
+            "ummanu-764": {"blocked_by": "ummanu-761"},
+            "ummanu-765": {"blocked_by": "ummanu-762", "supersedes": "ummanu-762", "seed_ref": "a" * 40},
+        }
+        before = self.board_snapshot()
+        for reference, fields in refused.items():
+            with self.subTest(reference=reference), self.assertRaises(TaskError) as raised:
+                self.create_kind(reference, "code", **fields)
+            self.assertEqual(raised.exception.code, "dependency_unreleasable")
+        self.assertBoardUnchanged(before)
+
+        created = self.create_kind("ummanu-766", "code", blocked_by="ummanu-762")
+
+        self.assertEqual(created["task"]["blocked_by"], "ummanu-762")
+
     def test_create_accepts_a_review_override_in_both_directions(self) -> None:
         self.create_kind("ummanu-540", "code", review="skipped")
         self.create_kind("ummanu-541", "research", review="required")

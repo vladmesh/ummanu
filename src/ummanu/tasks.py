@@ -1037,6 +1037,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     "a seed requires --supersedes naming the predecessor card it inherits from",
                     2,
                 )
+            if blocked_by:
+                self._refuse_unreleasable_dependency(blocked_by, supersedes)
         linked_sprint: dict[str, Any] | None = None
         if sprint:
             from ummanu.sprints import SprintReader
@@ -1393,6 +1395,23 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 except Exception as exc:
                     raise _CommittedWriteError() from exc
                 return created_ref
+
+    def _refuse_unreleasable_dependency(self, blocked_by: str, supersedes: str) -> None:
+        """A new card's `blocked_by` must name a card that can still reach Done."""
+        if blocked_by == supersedes:
+            raise TaskError(
+                "dependency_unreleasable",
+                f"blocked_by names {blocked_by}, the card this one supersedes; a successor does not wait for it",
+                2,
+            )
+        dependency = self.reader.show(blocked_by)
+        if dependency["closed"] or dependency["state"] == "blocked":
+            held = "archived" if dependency["closed"] else "Blocked"
+            raise TaskError(
+                "dependency_unreleasable",
+                f"blocked_by names {blocked_by}, which is {held}; nothing would release this card from Ready",
+                2,
+            )
 
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
