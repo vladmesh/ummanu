@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.board.task_routing import PO_EXECUTED_TYPES, TaskReview, TaskType
+from ummanu.knowledge_write import GIT_CONTROL_NAMES
 
 #: The kinds the PO service executes (`decision`, `operation`); they are no-candidate kinds too.
 PO_EXECUTED_KINDS = frozenset(kind.value for kind in PO_EXECUTED_TYPES)
@@ -271,7 +272,9 @@ def no_candidate_report_contract(kind: str) -> list[str]:
             f"directory to `{research_report_path('<card ref>')}` in the instance repository and links",
             "it on the card; that link is the completion evidence. The copy is refused, and the card",
             "Blocked, for a symlink or special file, a secret in any text file, or more than 20 MiB in",
-            "total. A rework round's next report replaces the directory.",
+            "total, and for any entry named "
+            + ", ".join(f"`{name}`" for name in sorted(GIT_CONTROL_NAMES))
+            + " (other dot names such as `.github` are copied). A rework round's next report replaces the directory.",
             "",
         ]
     return []

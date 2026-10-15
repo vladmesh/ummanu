@@ -218,7 +218,8 @@ budget is the loop breaker.
 A card is fresh, self-sufficient for a head without your context, in one of the sprint's
 `repositories`, linked to the sprint at once. Its spec: Goal, Context (pointers, not copy-paste),
 checkable Acceptance criteria, Out of scope. Work that pulls changes beyond its repository is a chain
-with `--blocked-by`.
+with `--blocked-by`. CI, the pull request and the exact-SHA gate are machinery-owned: a CI item of the
+DoD stays a sprint-close condition and never becomes a card's Acceptance criterion.
 
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \

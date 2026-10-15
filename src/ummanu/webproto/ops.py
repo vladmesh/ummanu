@@ -29,6 +29,7 @@ from ummanu.runtime.head.spec import HeadSpec, HeadSpecError
 from ummanu.runtime.head_runtime_backends import build_head_runtime
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from ummanu.runtime.heads import HeadRegistryError, load_registry
+from ummanu.runtime.prompt_document import worker_style
 from ummanu.tasks import task_audit_for
 from ummanu.webproto import run_events, run_state as run_state_reads, sources
 from ummanu.webproto.admission import Admission, admit
@@ -612,6 +613,10 @@ class OperationLayer(ProtocolBoundary):
                 "",
                 "Then stop working and wait. The product that owns this head reads that file, ends",
                 "the process and records the run's outcome; you do not need to exit yourself.",
+                "",
+                "## Code style",
+                "",
+                worker_style(),
                 "",
             ]
         )

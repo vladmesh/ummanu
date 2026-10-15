@@ -51,6 +51,7 @@ from ummanu.runtime.head.runtime import (
     StopReceipt,
 )
 from ummanu.runtime.heads import Registry
+from ummanu.runtime.prompt_document import worker_style
 from ummanu.webproto import (
     admission as admission_module,
     lifecycle as lifecycle_module,
@@ -363,6 +364,7 @@ class StartTests(ProductRuntimeFixture):
         body = Path(run["run_dir"], "TASK.md").read_text(encoding="utf-8")
         self.assertIn("Add a line to README.md.", body)
         self.assertIn("UMMANU_RUN_RESULT", body)
+        self.assertIn(worker_style(), body, "a product run carries the same style guide as a pipeline worker")
 
     def test_an_interactive_head_is_pointed_at_its_task_after_it_comes_up(self) -> None:
         """A TUI that is still drawing its banner takes a line into an unsent composer."""

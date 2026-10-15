@@ -1003,10 +1003,13 @@ once, and never as a retried infrastructure failure.
 
 A `github` gate opens the pull request the `pull_request` workflow needs. Title and body are built
 deterministically from the board; no model is involved. The title is `<ref>: <card title>` (it lands
-in the merge commit). The body names the card and the target branch, quotes the card's statement and
-carries the worker's `report:done` account; each source is bounded, redacted like other board
-excerpts, and omitted when not yet present. Every later gate run, and the one before merge, brings
-an already-open PR up to the best description it can build.
+in the merge commit). The body is a fixed English template: `## What` (the first prose paragraph of the
+worker's `report:done`, or the card title before a report exists), `## Why` (the first prose paragraph
+of the card statement), `## How verified` (the required checks CI runs on the candidate's exact SHA)
+and a final `Card: <ref>` line. Each paragraph is bounded by `UMMANU_PR_BODY_SECTION_CHARS` (800),
+redacted like other board excerpts, and stripped of board references (`issue:`, `sprint:`, `task:`,
+`research:`) and host paths. The paragraphs keep the language they were written in. Every later gate
+run, and the one before merge, brings an already-open PR up to the best description it can build.
 
 On every tick an open PR is checked against the card's integration base and retargeted when it
 points elsewhere. The candidate, card state and worker are untouched. Because `pull_request`
@@ -1025,6 +1028,10 @@ a PR a person opened (including one with an empty body), one edited after the ga
 opened before the record existed, and any PR whose card lost its record to a restore, reinstallation
 or re-adoption. Text that already matches the record is not re-sent. Anyone who can edit the
 dispatcher's production state can claim any PR; repository write access does not confer that.
+
+The one edit allowed in a PR the gate does not own removes AI attribution: a line crediting an agent
+(a generated-by footer such as a harness writes, or an agent `Co-Authored-By:`) is deleted from the
+body, the rest of the text and the title are kept, and the PR stays unowned.
 
 The description is not a condition on the code: a refused update leaves the PR and the gate verdict
 unchanged. A PR that cannot be opened at all is a gate failure, because the project's CI never runs.
@@ -3247,11 +3254,20 @@ retried, and the next round's `TASK.md` carries the comment either way. A worker
 held for validation, paused or between rounds is sent nothing and nothing is recorded; the next round's
 `TASK.md` carries the comment. `decision` and `operation` cards have no worker and are unaffected.
 
+### The round summary at the top of a worker TASK.md
+
+Every worker `TASK.md` opens with `## This round`: the report generation and, measured against the
+`TASK.md` the checkout already holds, which round-bound sections are new (observer decision, protocol
+prerequisites, reviewer findings, mechanical gate failure) and how many comments arrived, plus the
+previous submission's SHA and outcome. A checkout without a `TASK.md` gets "read it whole". The full
+document below it is unchanged and stays authoritative.
+
 ### Code style in the worker and review packets
 
 Every worker `TASK.md`, for any project, card kind and head family, carries `## Code style`: the text of
-`packaging/worker-style.md`, before the report dispositions. The dispatcher reads the file from the
-checkout it runs from, like the other `packaging/` assets. A project's `AGENTS.md` wins on conflict.
+`packaging/worker-style.md`, with its code and docs rules, before the report dispositions. A product
+run's `TASK.md` carries the same section last. Both read the file from the checkout the process runs
+from, like the other `packaging/` assets. A project's `AGENTS.md` wins on conflict.
 
 A code card's `REVIEW.md` carries the style checklist S1-S7 for the lines the diff adds. It is the one
 exception to the rule that a RED blocker states a concrete reachable scenario: a violation of S1-S4 (a

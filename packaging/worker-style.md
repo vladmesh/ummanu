@@ -25,3 +25,6 @@ Code
 
 Report
 13. In report:done state: prose lines added and removed, each new test and the behaviour it proves, any alias kept and the card that may drop it. Why: the reviewer checks these against the diff.
+
+Docs
+14. Docs hold the current state only: no history, task progress, experiments, option comparisons or acceptance evidence in any file; reasoning goes into the report. On a behaviour change rewrite its one canonical description in place and delete stale copies elsewhere. Why: a doc reads as the contract; copies drift.
