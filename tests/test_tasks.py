@@ -875,6 +875,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                         "swimlane": "Ummanu",
                     }
                 },
+                # A worker card with no stored estimate reads the default.
+                "estimate": {"minutes": DEFAULT_ESTIMATE_MINUTES, "source": "default"},
                 "comments": [],
             },
         )
