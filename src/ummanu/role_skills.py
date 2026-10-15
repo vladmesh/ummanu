@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.config import DataDirError, instance_data_dir
+from ummanu.kernel.identifiers import is_machine_id, machine_id_refusal
 from ummanu.po.workspace import workspace_dir
 from ummanu.runtime.paths import (
     MissingDefaultInstance,
@@ -327,6 +328,13 @@ def _identifier(value: str, where: str, source: ManifestSource) -> str:
     return value
 
 
+def _role_name(value: str, where: str, source: ManifestSource) -> str:
+    """A role name in the machine identifier grammar, or a refusal naming the manifest to edit."""
+    if not is_machine_id(value):
+        raise RegistryError(f"{source.path}: {machine_id_refusal(where, value)}")
+    return value
+
+
 def _within(root: Path, path: Path) -> bool:
     root_abs = _absolute(root)
     path_abs = _absolute(path)
@@ -355,13 +363,13 @@ def load_registry(
         for role_name, role in _table(data, "roles", source).items():
             if not isinstance(role, dict):
                 raise RegistryError(f"{source.path}: [roles.{role_name}] must be a table")
-            _identifier(role_name, f"[roles.{role_name}] role name", source)
+            _role_name(role_name, f"[roles.{role_name}] role name", source)
             declared = roles.setdefault(role_name, [])
             seen = {skill for skill, _ in declared}
             for entry in _string_list(role, "skills", f"roles.{role_name}", source):
                 owner, _, skill = entry.rpartition("/")
                 if owner:
-                    _identifier(owner, f"roles.{role_name}.skills entry {entry!r} role", source)
+                    _role_name(owner, f"roles.{role_name}.skills entry {entry!r} role", source)
                 _identifier(skill, f"roles.{role_name}.skills entry", source)
                 if skill not in seen:
                     declared.append((skill, source))

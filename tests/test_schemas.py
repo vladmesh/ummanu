@@ -298,12 +298,14 @@ class SchemaInvalidTests(unittest.TestCase):
         data["host"] = {"units": []}
         self.assertEqual(validate(data, "instance", "instance.yaml"), [])
 
-    def test_binding_bad_id_pattern(self):
-        data = copy.deepcopy(VALID_BINDING)
-        data["id"] = "Bad_Id"
-        errors = validate(data, "project-binding", "b.yaml")
-        self.assertTrue(errors)
-        self.assertTrue(any(e.path == "id" for e in errors), errors)
+    def test_binding_ids_outside_the_machine_id_grammar_name_their_field(self):
+        for field in ("id", "adapter"):
+            for value in ("Bad_Id", "проект", "café", "two words"):
+                with self.subTest(field=field, value=value):
+                    data = copy.deepcopy(VALID_BINDING)
+                    data[field] = value
+                    errors = validate(data, "project-binding", "b.yaml")
+                    self.assertEqual([e.path for e in errors], [field], errors)
 
     def test_binding_wrong_type(self):
         data = copy.deepcopy(VALID_BINDING)

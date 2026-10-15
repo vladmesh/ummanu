@@ -107,6 +107,7 @@ from ummanu.dispatch.ownership import (
     reference_lock as reference_lock,
 )
 from ummanu.kernel.errors import TaskError as TaskError
+from ummanu.kernel.identifiers import is_machine_id, machine_id_refusal
 from ummanu.projects.integration_base import integration_base_refusal, seed_ref_refusal
 from ummanu.runtime.redact import redact
 from ummanu.runtime.references import (
@@ -125,7 +126,6 @@ from ummanu.board.task_protocol.rows import (
     _DECISION_BOUND_ROLES as _DECISION_BOUND_ROLES,
     _MARKER_EVENT_ACTIONS as _MARKER_EVENT_ACTIONS,
     _READY_RESET_METADATA as _READY_RESET_METADATA,
-    _SLUG_RE as _SLUG_RE,
     _TYPED_RECORD_TYPES as _TYPED_RECORD_TYPES,
     _WAIT_FIELDS as _WAIT_FIELDS,
     MASQUERADE as MASQUERADE,
@@ -1013,8 +1013,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             raise TaskError("validation", f"codex launch mode must be {known}", 2)
         if priority:
             raise TaskError("validation", "tasks do not accept product priority", 2)
-        if slug and not _SLUG_RE.match(slug):
-            raise TaskError("validation", "slug must match [a-z0-9-]{1,30}", 2)
+        if slug and (not is_machine_id(slug) or len(slug) > 30):
+            raise TaskError("validation", machine_id_refusal("slug", slug) + ", at most 30 characters", 2)
         # Seed and integration base are two different refs (secretary-1541). A restore reproduces
         # cards that were admitted under the older single-field contract, so it carries whatever
         # they hold; the dispatcher refuses such a base fast and typed when it next runs the card.

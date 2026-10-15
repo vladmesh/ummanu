@@ -3587,7 +3587,7 @@ Diagnosis, stale draft recovery, re-onboarding and verification:
 
 ## Memory
 
-Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<project-dir>/<slug>.md`, one
+Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<project-id>/<slug>.md`, one
 distilled markdown record per fact. The curator is the writer role; other agents read through
 `memory_search`, `memory_get` and `memory_list`.
 
@@ -3598,8 +3598,15 @@ python3 -P -m ummanu memory propose --instance INSTANCE --actor ACTOR \
 python3 -P -m ummanu memory commit --instance INSTANCE --actor ACTOR --propose-id ID
 python3 -P -m ummanu memory supersede --instance INSTANCE --actor ACTOR \
   --scope SCOPE --slug SLUG --file FACT.md --supersedes OLD-ID
+python3 -P -m ummanu memory move-scope --instance INSTANCE --actor ACTOR --from DIR --to SCOPE
 python3 -P -m ummanu memory reindex --instance INSTANCE
 ```
+
+A project scope is `project:<id>` with the id of a registered project binding, in the machine
+identifier grammar `[a-z0-9][a-z0-9-]*`; `propose` refuses any other spelling and `commit`, `supersede`
+and `move-scope` also refuse an id the registry does not hold. `move-scope` moves every fact under one
+canon directory into such a scope with its bytes unchanged, all or nothing, and refuses when a fact id
+already exists in the target; `ummanu doctor` names each stored scope directory outside the grammar.
 
 Write authority is split. `propose` stages a fact in the curator inbox
 (`<data_dir>/memory/.staging/<propose-id>`) and touches no canon; `commit` and `supersede` write
@@ -3618,7 +3625,7 @@ Facts whose owner needs product-owner judgment use the `review:po` scope
 (`state/memory/facts/po-review`): a triage basket, not operational truth. Entries carry the
 `pending-review` tag, their source sprint/session and candidate project scopes. Interactive PO, curator
 and retro identities may read it; worker, reviewer, observer and steward grants never do. The PO reads it
-with `scope=review:po` and publishes the resolved fact into `global` or `project:<dir>` with
+with `scope=review:po` and publishes the resolved fact into `global` or `project:<id>` with
 `supersede`, atomically removing the review entry.
 
 Curator input is a bounded, two-phase batch protocol. Each source is routed from the selected

@@ -487,6 +487,14 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     memory_supersede.add_argument("--tags", default="")
     memory_supersede.add_argument("--pinned", action="store_true")
     memory_supersede.set_defaults(handler=run_memory_supersede)
+
+    memory_move_scope = memory_subcommands.add_parser(
+        "move-scope", help="move every fact of one canon scope directory into a registered scope"
+    )
+    add_memory_write_common(memory_move_scope)
+    memory_move_scope.add_argument("--from", dest="source_dir", required=True, metavar="DIR")
+    memory_move_scope.add_argument("--to", dest="scope", required=True, metavar="SCOPE")
+    memory_move_scope.set_defaults(handler=run_memory_move_scope)
     memory.set_defaults(handler=usage_handler("memory subcommand required"))
 
     knowledge = subparsers.add_parser(
@@ -572,6 +580,7 @@ def run_config_check(args: argparse.Namespace) -> int:
 def run_doctor(args: argparse.Namespace) -> int:
     from ummanu.config import validate_instance
     from ummanu.infra.doctor_findings import accepted, active_findings
+    from ummanu.infra.identifier_findings import MACHINE_ID_INVALID
     from ummanu.runtime import interactive_workspace
 
     instance_path = Path(args.instance)
@@ -635,7 +644,7 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"error: head fallback: {finding['message']}")
         elif finding["code"] == "dispatcher_tick_p95_slow":
             print(f"red: {finding['code']}: {finding['message']}")
-        elif str(finding["code"]).startswith("live_root."):
+        elif str(finding["code"]).startswith("live_root.") or finding["code"] == MACHINE_ID_INVALID:
             print(f"{finding['code']}: {finding['message']}")
         if accepted(finding):
             raw = {key: value for key, value in finding.items()
@@ -895,6 +904,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     from ummanu.infra.checkpoint_run import load_checkpoint_state
     from ummanu.infra.doctor_findings import apply_acceptance
     from ummanu.infra.fallback import fallback_errors
+    from ummanu.infra.identifier_findings import stored_identifier_findings
     from ummanu.infra.recovery_inventory import collect_recovery_inventory
 
     findings: list[dict[str, object]] = []
@@ -909,6 +919,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend(automation_busy_findings(report.data_dir))
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     findings.extend(doctor_live_root_findings(report, args, inspect_host=inspect_host))
+    findings.extend(stored_identifier_findings(report.instance_path.parent))
     collected: CollectResult | None = None
     expected = None
     diffs = None
@@ -1949,6 +1960,26 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
         )
     except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("supersede", exc)
+    _print_memory_write_result(result)
+    return 0
+
+
+def run_memory_move_scope(args: argparse.Namespace) -> int:
+    from ummanu.memory_write import move_memory_scope
+
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = move_memory_scope(
+            data_dir,
+            _instance_dir(args.instance),
+            actor=args.actor,
+            source_dir=args.source_dir,
+            scope=args.scope,
+        )
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
+        return _print_memory_error("move-scope", exc)
     _print_memory_write_result(result)
     return 0
 

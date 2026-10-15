@@ -700,6 +700,36 @@ class StatusCliTests(unittest.TestCase):
             text,
         )
 
+    def test_doctor_reports_a_stored_memory_scope_outside_the_machine_id_grammar_and_keeps_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fact = root / "state" / "memory" / "facts" / "codegen_orchestrator" / "drifted.md"
+            fact.parent.mkdir(parents=True)
+            fact.write_text("a drifted fact\n", encoding="utf-8")
+            (root / "state" / "memory" / "facts" / "codegen-orchestrator").mkdir()
+            (root / "state" / "memory" / "facts" / "codegen-orchestrator" / "kept.md").write_text(
+                "a fact in the registered scope\n", encoding="utf-8"
+            )
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: test\n"
+                f"data_dir: {root / 'data'}\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["doctor", "--offline", "--json", "--instance", str(instance)])
+            payload = json.loads(output.getvalue())
+            self.assertEqual(fact.read_text(encoding="utf-8"), "a drifted fact\n")
+        self.assertEqual(code, 1, payload)
+        invalid = [finding for finding in payload["findings"] if finding["code"] == "machine_id_invalid"]
+        self.assertEqual(
+            [(finding["field"], finding["name"], finding["source"]) for finding in invalid],
+            [("memory scope", "codegen_orchestrator", str(fact.parent))],
+        )
+        self.assertIn("must match [a-z0-9][a-z0-9-]*", invalid[0]["message"])
+
     def test_doctor_json_reports_an_unresolved_divergence_even_offline(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "data"

@@ -43,8 +43,8 @@
     },
     "adapter": {
       "type": "string",
-      "minLength": 1,
-      "description": "Adapter id, resolved under adapters/."
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Adapter id, kebab-case, resolved under adapters/."
     },
     "default_branch": {
       "type": "string",

@@ -478,6 +478,33 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
 
+    def test_product_ids_outside_the_machine_id_grammar_are_refused_before_any_write(self) -> None:
+        before = (self.audit_events(), self.request_state())
+        for field, product_id, projects in (
+            ("product id", "продукт", ["ummanu"]),
+            ("product id", "café", ["ummanu"]),
+            ("product id", "two words", ["ummanu"]),
+            ("product id", "under_score", ["ummanu"]),
+            ("project id", "ummanu", ["codegen_orchestrator"]),
+        ):
+            with self.subTest(product_id=product_id, projects=projects):
+                with self.assertRaisesRegex(TaskError, rf"{field} .* must match \[a-z0-9\]\[a-z0-9-\]\*") as raised:
+                    self.store.create_product(
+                        product_id=product_id,
+                        projects=projects,
+                        title="Продукт",
+                        description="",
+                        actor="po",
+                    )
+                self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual((self.audit_events(), self.request_state()), before)
+        self.assert_product_absent("ummanu")
+
+        product = self.store.create_product(
+            product_id="ummanu", projects=["ummanu"], title="Продукт", description="", actor="po"
+        )
+        self.assertEqual((product["id"], product["title"]), ("ummanu", "Продукт"))
+
     def test_request_id_conflicts_are_rejected_before_a_second_write(self) -> None:
         self.store.create_product(
             product_id="ummanu",

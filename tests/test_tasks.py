@@ -711,6 +711,22 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertBoardUnchanged(before)
 
+    def test_create_refuses_a_slug_outside_the_machine_id_grammar_before_any_write(self) -> None:
+        before = self.board_snapshot()
+        for slug in ("задача", "café", "two words", "under_score", "-leading", "Upper", "a" * 31):
+            with self.subTest(slug=slug):
+                with self.assertRaisesRegex(TaskError, r"slug .* must match \[a-z0-9\]\[a-z0-9-\]\*") as raised:
+                    self.writer.create(
+                        role="po",
+                        actor="p",
+                        project="ummanu",
+                        task_type="code",
+                        title="Задача с русским заголовком",
+                        slug=slug,
+                    )
+                self.assertEqual(raised.exception.code, "validation")
+        self.assertBoardUnchanged(before)
+
     def test_generic_create_keeps_in_progress_closed_to_steward_reports(self) -> None:
         self.assertNotIn("steward_report", inspect.signature(self.writer.create).parameters)
         before = self.board_snapshot()

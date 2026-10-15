@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml  # type: ignore[import-untyped]  # no PyYAML stubs in the typecheck extra
 
+from ummanu.kernel.identifiers import is_machine_id, machine_id_refusal
 from ummanu.runtime.paths import env_value
 
 from .head.command import (
@@ -180,6 +181,8 @@ def validate_registry(resources: dict, profiles: dict) -> None:
         if not isinstance(res, dict):
             raise HeadRegistryError(f"resource {rid!r} must be a table, got {type(res).__name__}")
     for pid, prof in profiles.items():
+        if not is_machine_id(pid):
+            raise HeadRegistryError(machine_id_refusal("profile name", pid))
         if not isinstance(prof, dict):
             raise HeadRegistryError(f"profile {pid!r} must be a table, got {type(prof).__name__}")
         resource = _named(prof.get("resource"), f"profile {pid!r} resource")

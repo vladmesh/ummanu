@@ -45,6 +45,8 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
         self.root = Path(tmpdir.name)
         self.data_dir = self.root / "ummanu-data"
         self.instance_dir = init_instance_repo(self.root / "instance")
+        (self.instance_dir / "projects").mkdir(exist_ok=True)
+        (self.instance_dir / "projects" / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
         self.fact = self.root / "fact.md"
         self.fact.write_text("a fact the butler noticed\n", encoding="utf-8")
 

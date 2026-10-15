@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from ummanu.memory import access as memory_access
-from ummanu.memory import grant_env
+from ummanu.memory import access as memory_access, grant_env
 from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
 
 
@@ -185,10 +184,12 @@ class MemoryAccessTests(unittest.TestCase):
         )
         resolved = self.resolve(grant)
         assert isinstance(resolved, memory_access.MemoryReadIdentity)
-        denial = memory_access.narrow(resolved, "pro ject")
-        assert isinstance(denial, memory_access.MemoryAccessDenial)
-        self.assertEqual(denial.response(), {"status": "denied", "error": "scope_malformed"})
-        self.assertEqual(denial.identity, resolved)
+        for scope in ("pro ject", "project:codegen_orchestrator", "project:проект", "Alpha"):
+            with self.subTest(scope=scope):
+                denial = memory_access.narrow(resolved, scope)
+                assert isinstance(denial, memory_access.MemoryAccessDenial)
+                self.assertEqual(denial.response(), {"status": "denied", "error": "scope_malformed"})
+                self.assertEqual(denial.identity, resolved)
 
     def test_scheduled_launch_helper_issues_a_heartbeat_bound_grant(self) -> None:
         run = self.head_run("curator", TaskRef.standing("curator"))
