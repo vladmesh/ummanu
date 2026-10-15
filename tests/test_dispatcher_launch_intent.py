@@ -1158,9 +1158,9 @@ class LaunchIntentTests(unittest.TestCase):
         )
 
     def release_after_green_verdict(self) -> dict:
-        """Park the green verdict, decide release, and hand back the tick that merged."""
+        """Park the green verdict, decide accept, and hand back the tick that merged."""
         self.assertEqual(self.tick()["to"], "assessment")
-        self.decide("release")
+        self.decide("accept")
         return self.tick()
 
     def rework_after_red_review(self) -> None:

@@ -115,7 +115,7 @@ class BlockClassification(StrEnum):
 
 
 class TaskDecision(StrEnum):
-    RELEASE = "release"
+    ACCEPT = "accept"
     REWORK = "rework"
     RESLICE = "reslice"
 
@@ -134,7 +134,7 @@ ACTIVE_STATES: frozenset[CardState] = frozenset(
 DECIDED_TARGETS: frozenset[CardState] = frozenset({CardState.DONE, CardState.IN_PROGRESS})
 UNDECIDED_EXITS: frozenset[CardState] = frozenset({CardState.READY, CardState.VALIDATE, CardState.ISSUES})
 DECISION_TARGETS: dict[TaskDecision, CardState] = {
-    TaskDecision.RELEASE: CardState.DONE,
+    TaskDecision.ACCEPT: CardState.DONE,
     TaskDecision.REWORK: CardState.IN_PROGRESS,
     TaskDecision.RESLICE: CardState.BLOCKED,
 }

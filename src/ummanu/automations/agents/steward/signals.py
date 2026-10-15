@@ -32,7 +32,7 @@ STATE = AgentState("steward")
 # and "Done" (terminal) are excluded — sitting there indefinitely is the expected shape, not an
 # anomaly.
 # "Assessment" is in for the opposite reason: it waits on the observer rather than on a head, so
-# no watchdog times it out. If the observer never comes back to decide release, rework or reslice,
+# no watchdog times it out. If the observer never comes back to decide accept, rework or reslice,
 # this signal is the only thing that notices.
 STALE_COLUMNS = ("Ready", "In progress", "Validate", "Assessment", "Blocked")
 STALE_HOURS = float(env_value("UMMANU_STEWARD_STALE_HOURS", "24"))

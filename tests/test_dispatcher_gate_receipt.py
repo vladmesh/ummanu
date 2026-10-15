@@ -442,7 +442,7 @@ class AttestationLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_release_commit_crash_retries_frozen_audit_before_merge(self):
         self.prepare_green_review()
         self.assertEqual(self.tick()["to"], "assessment")
-        self._decide("release", request_id="attestation-release")
+        self._decide("accept", request_id="attestation-release")
         strict = self.writer.comment
 
         def crash(**kwargs):

@@ -145,7 +145,7 @@ def recorded_decision(
     if not isinstance(body, str) or not body.strip():
         body = _last_marker_body(task, f"decision:{decision}") or ""
     if (
-        decision not in {"release", "rework", "reslice"}
+        decision not in {"accept", "rework", "reslice"}
         or not isinstance(body, str)
         or not body.strip()
     ):

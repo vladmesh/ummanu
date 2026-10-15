@@ -245,7 +245,7 @@ class LegacyRecordBlocksTheCardTests(DispatcherRuntimeFixture, unittest.TestCase
             request_id="review-green",
         )
 
-        result = self._park_and_decide("release")
+        result = self._park_and_decide("accept")
 
         self.assertEqual(result["status"], "blocked", result)
         self.assertEqual(result["reason"], "release cleanup refused")

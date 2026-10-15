@@ -273,7 +273,7 @@ def release_parked(
     payload: dict[str, Any],
     attempt_id: str,
 ) -> dict[str, Any]:
-    """Perform a release decision: re-check the mechanical state, then merge."""
+    """Perform an accept decision: re-check the mechanical state, then merge."""
     from ummanu.dispatch import gate_lifecycle
 
     if not has_candidate(task):
@@ -292,8 +292,8 @@ def release_parked(
             payload,
             attempt_id,
             step="assessment",
-            move_reason=decision_pointer(runtime, task, "release"),
-            decision="release",
+            move_reason=decision_pointer(runtime, task, "accept"),
+            decision="accept",
             verdict=released_verdict(record),
         )
     # The release audit's e2e stage reads the gate itself and binds to the SHA it validated: a SHA with
@@ -338,8 +338,8 @@ def release_parked(
         payload,
         attempt_id,
         step="assessment",
-        move_reason=decision_pointer(runtime, task, "release"),
-        decision="release",
+        move_reason=decision_pointer(runtime, task, "accept"),
+        decision="accept",
         verdict=released_verdict(record),
     )
 
@@ -381,7 +381,7 @@ def read_release_gate(
             attempt_id,
             step="assessment",
             action="release-gate-transport-blocked",
-            prefix="Observer decision: release. ",
+            prefix="Observer decision: accept. ",
         ), None
     if kind != "drift":
         # Only a result handed back to this path clears the transport retry budget.
@@ -423,7 +423,7 @@ def read_release_gate(
             attempt_id,
             blocked_reason="implementation" if kind == "drift" else "gate",
             action=f"release-{kind}-blocked",
-            reason=f"Observer decision: release. {summary}",
+            reason=f"Observer decision: accept. {summary}",
             step="assessment",
             outcome=f"release {kind}",
         ), None
@@ -512,7 +512,7 @@ def release_effect(
     except HostError as exc:
         # Cleanup is a provenance boundary, not best effort. A mismatch keeps the checkout and
         # prevents Done so the next tick cannot repeatedly run an already-failed release path.
-        # The move carries no decision: a release decision moves a card to Done and nowhere else,
+        # The move carries no decision: an accept decision moves a card to Done and nowhere else,
         # so the board refuses a Blocked move that names it, and the card would stay in Assessment.
         return block_merge_path(runtime,
             task,
@@ -535,7 +535,7 @@ def release_effect(
             decision=decision,
             request_id=_attempt_request_id(record.attempt_id or attempt_id, "review-green", ref),
             terminal_state="done",
-            disposition="release",
+            disposition="accept",
             verdict=verdict,
             release_merge=release_merge,
         )

@@ -20,7 +20,7 @@ The sprint system builds its remaining programme through itself:
    impossible or materially incomplete;
 5. more than two parallel sprints.
 
-Reviewer verdict and release decision stay distinct. At the budget boundary the observer may accept a
+Reviewer verdict and accept decision stay distinct. At the budget boundary the observer may accept a
 mechanically green, architecturally convergent increment with follow-up issues, reslice it, or use the
 last fix round. It never rewrites a red review into green.
 

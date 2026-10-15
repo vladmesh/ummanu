@@ -28,10 +28,10 @@ facts:
     sha256: 17ccda217965f48e25291ab40e2b7977ce910a34f9ac37fcd9fd793418fea1a4
   - id: validation-review-assessment
     path: validation-review-assessment.md
-    sha256: 8776ca900c4990e5471c33e7130e886ac9b67b5ed042de80b3e31899b7e14872
+    sha256: 63fa0a80efc6cd21354599f033d48fcf550ca1b5a8968576f4aaf1e2c1f95628
   - id: roles-and-authority
     path: roles-and-authority.md
-    sha256: bdfbb8dff12c558703a80abb1cc890417746b827f6bfb826422cf546e85242e1
+    sha256: 34190b20ca09c44dcd2b61653672f5ec703636310da0a92021cf8cb7052431ae
   - id: operational-boundaries
     path: operational-boundaries.md
     sha256: 4800af33353cb15992e7da79f7559d8e54974895a04537e24a45ddaef9612234

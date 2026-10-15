@@ -11,14 +11,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-TerminalDisposition = Literal["release", "rework", "reslice", "blocked", "drop", "operator_stop"]
+TerminalDisposition = Literal["accept", "rework", "reslice", "blocked", "drop", "operator_stop"]
 BlockedReason = Literal[
     "implementation", "review", "task_contract", "gate", "provider", "infrastructure", "operator", "other"
 ]
 BudgetClass = Literal["blocked", "infrastructure_blocked"]
 
 TERMINAL_DISPOSITIONS = (
-    "release",
+    "accept",
     "rework",
     "reslice",
     "blocked",

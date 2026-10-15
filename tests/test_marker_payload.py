@@ -65,7 +65,7 @@ class MarkerPayloadTests(unittest.TestCase):
         self.assertEqual(operation.data, data)
 
     def test_typed_payload_projects_the_released_dictionary(self) -> None:
-        payload = DecisionPayload("release", "ship it", ("worker_local_broad_check_receipt",))
+        payload = DecisionPayload("accept", "ship it", ("worker_local_broad_check_receipt",))
         operation = MarkerComment(
             "card:1",
             EventKind.CARD_DECIDED,
@@ -76,9 +76,9 @@ class MarkerPayloadTests(unittest.TestCase):
         self.assertEqual(
             operation.data,
             {
-                "marker": "decision:release",
+                "marker": "decision:accept",
                 "body": "ship it",
-                "decision": "release",
+                "decision": "accept",
                 "protocol_prerequisites": ["worker_local_broad_check_receipt"],
             },
         )

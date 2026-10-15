@@ -114,7 +114,7 @@ def outcome(
     verdict: str = "green",
     card_ref: str = CARD,
     terminal_state: str = "done",
-    disposition: str = "release",
+    disposition: str = "accept",
     effect_id: str | None = "effect",
 ) -> Event:
     return Event(

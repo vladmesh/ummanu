@@ -553,7 +553,7 @@ def terminal_effect(
     )
     if obligation is not None:
         obligation = {"card_ref": task["ref"], **obligation}
-    if decision in {"release", "reslice"}:
+    if decision in {"accept", "reslice"}:
         # These paths have no frozen continuation. Their native transition intent owns
         # the reason once staged, including full-body reasons written by released code.
         # The writer/host still checks the complete operation identity and data below.
@@ -563,7 +563,7 @@ def terminal_effect(
             existing is not None
             and existing.entity_kind is EntityKind.CARD
             and existing.kind is (
-                EventKind.CARD_RELEASED if decision == "release" else EventKind.CARD_BLOCKED
+                EventKind.CARD_RELEASED if decision == "accept" else EventKind.CARD_BLOCKED
             )
             and existing.ref == task["ref"]
             and existing.actor == Actor("dispatcher", runtime.owner)

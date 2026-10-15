@@ -227,7 +227,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id=verdict_request,
         )
         self.assertEqual(self.tick()["to"], "assessment")
-        self._decide("release", request_id="release-after-adoption")
+        self._decide("accept", request_id="release-after-adoption")
         self.tick()
 
         outcome = self._outcomes()[0].event.data
@@ -298,7 +298,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(released["to"], "done")
         occurrence = self._outcomes()[0].event.data
-        self.assertEqual((occurrence["verdict"], occurrence["disposition"]), ("green", "release"))
+        self.assertEqual((occurrence["verdict"], occurrence["disposition"]), ("green", "accept"))
         self.assertIsNotNone(occurrence["source_event_ids"]["report"])
         self.assertIsNotNone(occurrence["source_event_ids"]["verdict"])
         self.assertIsNone(occurrence["source_event_ids"]["decision"])
@@ -433,13 +433,13 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id=self._review_verdict_request_id("green"),
         )
 
-        self._park_and_decide("release")
+        self._park_and_decide("accept")
 
         outcomes = self._outcomes()
         self.assertEqual(len(outcomes), 1)
         self.assertEqual(
             (outcomes[0].event.data["verdict"], outcomes[0].event.data["disposition"]),
-            ("green", "release"),
+            ("green", "accept"),
         )
         self.assertFalse(outcomes[0].pending)
         data = outcomes[0].event.data
@@ -500,7 +500,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.production_state.put_records(payload, {CARD_REF: record})
         self.runtime.production_state.save(payload)
 
-        self._decide("release", request_id="release-after-baseline-loss")
+        self._decide("accept", request_id="release-after-baseline-loss")
         self.tick()
         outcome = self._outcomes()[0].event.data
         self.assertIsNotNone(outcome["source_event_ids"]["verdict"])

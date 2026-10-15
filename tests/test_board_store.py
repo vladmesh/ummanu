@@ -719,6 +719,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0032_accept_decision",
                 "0031_sprint_dod_items",
                 "0030_po_input_context",
                 "0029_po_channel",

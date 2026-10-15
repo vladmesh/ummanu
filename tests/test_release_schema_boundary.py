@@ -730,7 +730,7 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
     def release_card(self, record: DispatcherRecord, records: dict, payload: dict) -> dict:
         return release_lifecycle.release_effect(
             self.runtime, self.reader.show(CARD_REF), record, records, payload, record.attempt_id,
-            step="assessment", move_reason="Observer decision: release.", decision="release",
+            step="assessment", move_reason="Observer decision: accept.", decision="accept",
         )
 
     def operations(self) -> list[dict[str, Any]]:

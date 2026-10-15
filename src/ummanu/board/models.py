@@ -558,7 +558,7 @@ def _validate_control_marker_event(
             raise ValueError("Card verdict event has an unsupported marker payload")
         return
     decision = data.get("decision")
-    if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
+    if decision not in {"accept", "rework", "reslice"} or marker != f"decision:{decision}":
         raise ValueError("Card decision event has an unsupported marker payload")
     # The field was added after `card.decided` was released. Historical records declare no
     # protocol prerequisite, while every newly written value remains shape-checked below.

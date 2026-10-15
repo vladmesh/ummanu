@@ -51,7 +51,7 @@ def _done(*, actor: str = "dispatcher", release_merge: dict | None = None, sourc
         EntityKind.CARD,
         REF,
         Actor(actor, actor),
-        "Observer decision: release.",
+        "Observer decision: accept.",
         datetime(2026, 9, 25, tzinfo=UTC),
         source_state=source.value,
         target_state=CardState.DONE.value,
@@ -327,7 +327,7 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
     def release(self, task: dict) -> dict:
         return release_lifecycle.release_effect(
             self.runtime, task, self.record, self.records, self.payload, "attempt-1",
-            step="assessment", move_reason="Observer decision: release.", decision="release",
+            step="assessment", move_reason="Observer decision: accept.", decision="accept",
         )
 
     def test_a_merge_records_a_durable_watch_before_done_and_marks_the_done(self) -> None:

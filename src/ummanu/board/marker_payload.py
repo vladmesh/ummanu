@@ -7,8 +7,9 @@ project back to the released dictionary shape when an event is staged.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping, TypeAlias
+from typing import Any, TypeAlias
 
 WireItems: TypeAlias = tuple[tuple[str, object], ...]
 
@@ -74,8 +75,8 @@ class DecisionPayload:
     wire_items: WireItems = ()
 
     def __post_init__(self) -> None:
-        if self.decision not in {"release", "rework", "reslice"}:
-            raise ValueError("Card decision must be release, rework or reslice")
+        if self.decision not in {"accept", "rework", "reslice"}:
+            raise ValueError("Card decision must be accept, rework or reslice")
         if not isinstance(self.body, str) or not self.body.strip():
             raise ValueError("Card decision body must be non-empty")
         if any(not isinstance(value, str) or not value for value in self.protocol_prerequisites):

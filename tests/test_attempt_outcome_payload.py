@@ -31,7 +31,7 @@ def outcome_data(version=1):
     data = {
         "version": version, "attempt_id": "attempt-1", "attempt": 1,
         "report_generation": 2, "sprint_ref": None, "specification_revision": None,
-        "terminal_state": "done", "verdict": "green", "disposition": "release",
+        "terminal_state": "done", "verdict": "green", "disposition": "accept",
         "blocked_reason": None,
         "source_event_ids": dict.fromkeys(
             ("report", "verdict", "decision", "effect", "worker_usage", "review_usage")
@@ -117,7 +117,7 @@ def boundary_vectors():
     for field, values in (
         ("terminal_state", ("done", "blocked", "in_progress")),
         ("verdict", ("green", "red", "blocked", "missing", "legacy")),
-        ("disposition", ("release", "rework", "reslice", "drop", "operator_stop")),
+        ("disposition", ("accept", "rework", "reslice", "drop", "operator_stop")),
         ("blocked_reason", ("implementation", "review", "task_contract", "gate", "provider", "infrastructure", "operator", "other")),
     ):
         for value in values:
@@ -400,7 +400,7 @@ class AttemptOutcomePayloadTests(unittest.TestCase):
             specification_revision="spec-1",
             terminal_state=AttemptOutcomeTerminalState.DONE,
             verdict=AttemptOutcomeVerdict.GREEN,
-            disposition="release",
+            disposition="accept",
             blocked_reason=None,
             source_event_ids=AttemptOutcomeSourceEventIds(
                 report="report-1",
@@ -453,7 +453,7 @@ class AttemptOutcomePayloadTests(unittest.TestCase):
                 specification_revision=None,
                 terminal_state=AttemptOutcomeTerminalState.DONE,
                 verdict=AttemptOutcomeVerdict.GREEN,
-                disposition="release",
+                disposition="accept",
                 blocked_reason=None,
                 source_event_ids=AttemptOutcomeSourceEventIds(
                     report=None,

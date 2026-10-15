@@ -17,7 +17,7 @@ from ummanu.board.terminal_taxonomy import (
 
 class TerminalTaxonomyTests(unittest.TestCase):
     def test_all_dispositions_are_independent_and_nonblocked_have_no_reason(self) -> None:
-        for disposition in ("release", "rework", "reslice", "drop", "operator_stop"):
+        for disposition in ("accept", "rework", "reslice", "drop", "operator_stop"):
             with self.subTest(disposition=disposition):
                 taxonomy = normalize_terminal_taxonomy(disposition=disposition)
                 self.assertEqual((taxonomy.disposition, taxonomy.blocked_reason), (disposition, None))
@@ -53,7 +53,7 @@ class TerminalTaxonomyTests(unittest.TestCase):
         with self.assertRaisesRegex(TerminalTaxonomyValidationError, "blocked reason"):
             normalize_terminal_taxonomy(disposition="blocked", blocked_reason="free-form prose")
         with self.assertRaisesRegex(TerminalTaxonomyValidationError, "exactly"):
-            normalize_terminal_taxonomy(disposition="release", blocked_reason="operator")
+            normalize_terminal_taxonomy(disposition="accept", blocked_reason="operator")
 
     def test_missing_and_legacy_reads_are_explicitly_legacy_other(self) -> None:
         taxonomy = read_terminal_taxonomy({}, disposition="blocked")
