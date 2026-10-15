@@ -19,6 +19,7 @@ from ummanu.web.page_parts import (
     _close_form,
     _comment_form,
     _current_card_box,
+    _dod_scale,
     _entries,
     _external,
     _field,
@@ -378,6 +379,8 @@ def _sprint_now(work: dict[str, Any], observer: dict[str, Any]) -> str:
     heads = _sprint_heads({**work, "observer": observer})
     if heads:
         parts.append(heads)
+    if "dod" in work:
+        parts.append(_dod_scale(work["dod"]))
     budget = _mapping(work.get("budget"))
     if budget:
         parts.append(_budget_line(budget))
@@ -476,6 +479,21 @@ def _observer_call(work: dict[str, Any]) -> str:
 CALL_FIELDS = {"selected_step", "selected_why", "rejected_alternatives", "next_safe_step", "recorded_at"}
 
 
+def _dod_items_table(items: list[dict[str, Any]]) -> str:
+    """Each addressable item with its state, weight and the evidence that met it."""
+    rows = [
+        [
+            f'<span class="mono">{escape(str(item.get("id") or ""))}</span>',
+            _chip(str(item.get("state") or ""), "ok" if item.get("state") == "met" else ""),
+            escape(str(item.get("weight") if item.get("weight") is not None else "not weighed")),
+            _long(item.get("text"), chars=200),
+            _long(item.get("evidence")) if item.get("evidence") else "",
+        ]
+        for item in items
+    ]
+    return _rows(["item", "state", "weight", "", "evidence"], rows)
+
+
 def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -> str:
     """The secondary tabs: cards, Definition of Done, resume, issues."""
     if value is None:
@@ -494,11 +512,11 @@ def _sprint_tabs(ref: str, value: dict[str, Any] | None, work: dict[str, Any]) -
         else '<p class="empty">the observer has cut no card for this sprint yet.</p>'
     )
     dod = str(value.get("definition_of_done") or "")
+    items = _entries(_mapping(value.get("dod")).get("items"))
     dod_body = (
-        f'<div class="doc">{markdown.render(dod)}</div>'
-        if dod.strip()
-        else '<p class="empty">this sprint has no Definition of Done.</p>'
-    )
+        (_dod_items_table(items) if items else "")
+        + (f'<div class="doc">{markdown.render(dod)}</div>' if dod.strip() else "")
+    ) or '<p class="empty">this sprint has no Definition of Done.</p>'
     resume = _mapping(value.get("resume"))
     # The call's fields are left out only when the call panel drew them, from the journal's decision.
     decision = _mapping(work.get("decision"))
