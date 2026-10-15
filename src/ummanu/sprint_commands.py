@@ -252,6 +252,14 @@ def _add_po_edit_subcommands(commands) -> None:
     )
     switched.add_argument("--session", required=True, help="the open PO session the sprint answers to from now on")
     _add_po_edit_arguments(switched, run_set_po_session, request_id_required=True)
+    charged = commands.add_parser(
+        "e2e-charge",
+        help="PO only: charge one manually dispatched e2e run to the sprint's e2e budget before the run; "
+        "a repeat of the same run charges nothing",
+    )
+    charged.add_argument("--run", required=True, help="the workflow run URL, or its run id")
+    charged.add_argument("--card", required=True, help="the sprint card the run verifies")
+    _add_po_edit_arguments(charged, run_e2e_charge)
 
 
 def _add_po_edit_arguments(
@@ -604,6 +612,20 @@ def run_set_po_session(args: argparse.Namespace) -> int:
             actor=args.actor or args.role,
             reference=args.ref,
             session_id=args.session,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_e2e_charge(args: argparse.Namespace) -> int:
+    return _write(
+        args,
+        lambda writer: writer.charge_manual_e2e(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            run=args.run,
+            card=args.card,
             request_id=args.request_id,
         ),
     )

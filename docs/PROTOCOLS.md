@@ -1720,6 +1720,20 @@ payload names `add` (the owner's N), `authorized_by` (the comment's event id) an
 or stopped sprint refuses it. The waiting
 cards dispatch on the next tick, and the PO completes the decision card as usual.
 
+**A run dispatched by hand.** A stand run the PO starts itself (`workflow_dispatch`) is charged before
+the run:
+
+```bash
+python3 -P -m ummanu sprint e2e-charge --ref <sprint> --role po --run <run URL or id> --card <card> [--request-id ID]
+```
+
+`--role po` only, `--card` a card of that sprint, `--run` a GitHub Actions run URL or its numeric id.
+The charge is the dispatcher's conditional charge with dispatch id `manual-run-<run id>`, recorded with
+one `e2e_charged` audit event (`run`, `card`, `dispatch_id`); the default request id is
+`e2e-charge-<run id>`. A run already charged answers `already_charged` and charges nothing. A spent
+budget or a standing `e2e_refusal` refuses it (`e2e_budget_spent`, exit status 3) and nothing is
+written; a sprint that is not open is refused (`closed`).
+
 **Budget spent, a card outside every sprint.** At its cap the stage dispatches nothing:
 
 - a card with a PO origin ([PO delegation](#po-delegation)) gets the same decision card, cut with that
@@ -2277,6 +2291,7 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
 | `e2e_budget_raised` | `refused` — `closed`, exit status `3` |
+| `e2e_charged` | `refused` — `closed`, exit status `3` |
 | `executors_set` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
 | `production_allowed` | `refused` — `closed`, exit status `3` |

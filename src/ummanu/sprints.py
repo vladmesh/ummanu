@@ -61,6 +61,7 @@ from ummanu.board.sprint_write import (
     SprintWriteSnapshot,
 )
 from ummanu.board.task_protocol.rows import (
+    _charge_time,
     _digest,
     _now,
     _rfc3339,
@@ -1898,6 +1899,79 @@ class SprintWriter(SprintLifecycleMixin):
         )
         return result
 
+    def charge_manual_e2e(
+        self, *, role: str, actor: str, reference: str, run: str, card: str, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Charge one manually dispatched e2e run of `card` to its open sprint's budget; role
+        `po` only. Keyed by the run id: a repeat charges nothing, and a spent budget refuses.
+        """
+        self._role(role, {"po"}, actor=actor)
+        run_id = sprint_e2e.manual_run_id(run)
+        card = str(card or "").strip()
+        if not card:
+            raise TaskError("validation", "--card names the card the run belongs to; it is empty", 2)
+        if TaskReader(self.client).show(card).get("sprint") != reference:
+            raise TaskError("validation", f"{card} is not a card of {reference}", 2)
+        return self._charge_manual_e2e_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            run_id=run_id,
+            card=card,
+            request_id=request_id or f"e2e-charge-{run_id}",
+        )
+
+    @_sql_atomic
+    def _charge_manual_e2e_atomic(
+        self, *, role: str, actor: str, reference: str, run_id: str, card: str, request_id: str
+    ) -> dict[str, Any]:
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        dispatch_id = sprint_e2e.MANUAL_DISPATCH_PREFIX + run_id
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("run"), payload.get("card")) != (
+                "e2e_charged",
+                reference,
+                run_id,
+                card,
+            ):
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a charge is "
+                    "repeated only with the same sprint, --run and --card",
+                    2,
+                )
+        else:
+            sprint = self.reader.show(reference)
+            status = str(sprint.get("status") or "")
+            if status != SprintState.OPEN.value:
+                raise TaskError("closed", f"sprint {reference} is {status}; it takes no e2e charge", 3)
+            if any(charge["dispatch_id"] == dispatch_id for charge in sprint["e2e"]["charges"]):
+                return {"action": "already_charged", "sprint": sprint, "event_id": None}
+
+        def mutation(snapshot: SprintWriteSnapshot) -> None:
+            charge = self.client.call(
+                "chargeSprintE2e", sprint_ref=reference, task_ref=card, dispatch_id=dispatch_id, at=_charge_time()
+            )
+            if not charge.get("charged"):
+                raise TaskError(
+                    "e2e_budget_spent",
+                    f"sprint {reference} has no e2e run left (e2e: {charge['used']} of {charge['budget']}) "
+                    "or a standing owner decision refuses more; raise the budget before the run",
+                    3,
+                )
+
+        return self._write(
+            "e2e_charged",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"run": run_id, "card": card, "dispatch_id": dispatch_id},
+            mutation,
+        )
+
     def _decision_inputs(self, entries: Any) -> list[dict[str, Any]]:
         try:
             parsed = owner_decisions.parse_decisions(entries)
@@ -2553,6 +2627,7 @@ class SprintWriter(SprintLifecycleMixin):
             "owner_decisions_recorded",
             "resume_recorded",
             "executors_set",
+            "e2e_charged",
         }:
             raise TaskError("closed", "sprint is closed", 3)
         event = self._event(kind, role, actor, reference, request_id, payload, sprint)
