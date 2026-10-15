@@ -924,6 +924,11 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         expected, collected, diffs = collect_host_inventory(report, args)
         for kind, reason in collected.errors.items():
             findings.append({"code": "host_inventory_unavailable", "kind": kind, "message": reason})
+        if collected.inventory.runtime_scopes is not None:
+            findings.extend(
+                {"code": "runtime_scope_owner_unreadable", "run_dir": run_dir, "message": reason}
+                for run_dir, reason in sorted(collected.inventory.runtime_scopes.degraded.items())
+            )
         unavailable = unavailable or bool(collected.errors)
         for kind, diff in diffs.items():
             if kind in collected.errors:
@@ -2353,6 +2358,8 @@ def print_host_inventory(
     if collected.inventory.runtime_scopes is not None:
         for unit, scope in sorted(collected.inventory.runtime_scopes.scopes.items()):
             print(f"runtime scope: {unit} preserved by {scope['role']} lifecycle ({scope['generation']})")
+        for run_dir, reason in sorted(collected.inventory.runtime_scopes.degraded.items()):
+            print(f"runtime scope owner unreadable: {run_dir}: {reason}")
     for kind in KINDS:
         reason = collected.errors.get(kind)
         if reason:
