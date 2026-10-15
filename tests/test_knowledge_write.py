@@ -114,11 +114,13 @@ class KnowledgeRepoCase(unittest.TestCase):
 
         if getattr(self, "checkpoint_client", None) is None:
             self.checkpoint_client = card_store(self, empty_seed(), instance_dir=self.instance_dir)
-        with mock.patch("ummanu.checkpoint.export_board", side_effect=board_export):
-            with mock.patch("ummanu.checkpoint.export_runs", side_effect=runs_export):
-                return CheckpointWriter(
-                    self.data_dir, self.instance_dir, client=self.checkpoint_client
-                ).write()
+        with (
+            mock.patch("ummanu.checkpoint.export_board", side_effect=board_export),
+            mock.patch("ummanu.checkpoint.export_runs", side_effect=runs_export),
+        ):
+            return CheckpointWriter(
+                self.data_dir, self.instance_dir, client=self.checkpoint_client
+            ).write()
 
     def write(self, *, document: str = DOCUMENT, text: str = BODY, actor: str = "po"):
         return write_knowledge_document(self.instance_dir, document=document, actor=actor, text=text)

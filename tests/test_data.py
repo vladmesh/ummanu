@@ -100,9 +100,8 @@ class DataLayoutTests(unittest.TestCase):
             manifest_path = data_dir / "data-manifest.json"
             original_manifest = manifest_path.read_text(encoding="utf-8")
 
-            with mock.patch("ummanu.data.Path.write_text", new=partial_manifest_write):
-                with self.assertRaises(RuntimeError):
-                    init_layout(data_dir)
+            with mock.patch("ummanu.data.Path.write_text", new=partial_manifest_write), self.assertRaises(RuntimeError):
+                init_layout(data_dir)
 
             self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
             self.assertEqual(list(data_dir.glob(".data-manifest.json.*.tmp")), [])
@@ -114,9 +113,11 @@ class DataLayoutTests(unittest.TestCase):
             manifest_path = data_dir / "data-manifest.json"
             original_manifest = manifest_path.read_text(encoding="utf-8")
 
-            with mock.patch("ummanu.data.Path.write_text", side_effect=OSError("full")):
-                with self.assertRaises(RuntimeError):
-                    init_layout(data_dir)
+            with (
+                mock.patch("ummanu.data.Path.write_text", side_effect=OSError("full")),
+                self.assertRaises(RuntimeError),
+            ):
+                init_layout(data_dir)
 
             self.assertEqual(manifest_path.read_text(encoding="utf-8"), original_manifest)
             self.assertEqual(list(data_dir.glob(".data-manifest.json.*.tmp")), [])
@@ -210,14 +211,16 @@ class ExportTests(unittest.TestCase):
 
     def test_export_board_uses_the_reader_not_a_subprocess_or_pipeline_path(self):
         reader = TaskExportReader(client=self.store)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            with mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")):
-                result = export_board(
-                    Path(tmpdir) / "ummanu-data",
-                    instance_dir=Path(tmpdir),
-                    reader=reader,  # type: ignore[arg-type]
-                    sprint_client=self.store,
-                )
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")),
+        ):
+            result = export_board(
+                Path(tmpdir) / "ummanu-data",
+                instance_dir=Path(tmpdir),
+                reader=reader,  # type: ignore[arg-type]
+                sprint_client=self.store,
+            )
 
         self.assertEqual(result.source, "ummanu task")
         self.assertEqual(reader.calls, 1)
@@ -320,11 +323,13 @@ class ExportTests(unittest.TestCase):
                     raise OSError("full")
                 return original_replace(source, destination)
 
-            with mock.patch("ummanu.data.os.replace", side_effect=fail_on_ndjson_publish):
-                with self.assertRaisesRegex(RuntimeError, "could not publish board export"):
-                    export_board(
-                        data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store
-                    )
+            with (
+                mock.patch("ummanu.data.os.replace", side_effect=fail_on_ndjson_publish),
+                self.assertRaisesRegex(RuntimeError, "could not publish board export"),
+            ):
+                export_board(
+                    data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store
+                )
 
             current_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
             current_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
@@ -1022,9 +1027,11 @@ class ExportTests(unittest.TestCase):
                     raise OSError("full")
                 return original_replace(source, destination)
 
-            with mock.patch("ummanu.data.os.replace", side_effect=fail_on_watermarks_publish):
-                with self.assertRaisesRegex(RuntimeError, "could not publish runs export"):
-                    export_runs(root / "ummanu-data", state_dir=state)
+            with (
+                mock.patch("ummanu.data.os.replace", side_effect=fail_on_watermarks_publish),
+                self.assertRaisesRegex(RuntimeError, "could not publish runs export"),
+            ):
+                export_runs(root / "ummanu-data", state_dir=state)
 
             current_runs = (runs_dir / "runs.ndjson").read_text(encoding="utf-8")
             current_watermarks = (runs_dir / "watermarks.json").read_text(encoding="utf-8")
@@ -1091,9 +1098,11 @@ class ExportTests(unittest.TestCase):
             )
             (transcripts / "project" / "second.jsonl").write_text("{}\n", encoding="utf-8")
 
-            with mock.patch("ummanu.data.shutil.copy2", side_effect=OSError("full")):
-                with self.assertRaisesRegex(RuntimeError, "could not copy transcripts"):
-                    export_transcripts(root / "ummanu-data", roots=[transcripts], copy=True)
+            with (
+                mock.patch("ummanu.data.shutil.copy2", side_effect=OSError("full")),
+                self.assertRaisesRegex(RuntimeError, "could not copy transcripts"),
+            ):
+                export_transcripts(root / "ummanu-data", roots=[transcripts], copy=True)
 
             current_inventory = (transcripts_dir / "inventory.json").read_text(encoding="utf-8")
             current_ndjson = (transcripts_dir / "inventory.ndjson").read_text(encoding="utf-8")
@@ -1267,8 +1276,7 @@ def git(cwd: Path, *args: str) -> str:
         ["git", *args],
         cwd=cwd,
         check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     return result.stdout.strip()

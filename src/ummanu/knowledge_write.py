@@ -25,8 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ummanu import state_repo
-from ummanu._fsutil import content_revision
-from ummanu._fsutil import write_text_atomic as _write_text_atomic
+from ummanu._fsutil import content_revision, write_text_atomic as _write_text_atomic
 from ummanu.runtime.redact import redact
 
 
@@ -367,7 +366,7 @@ def _clean_document(document: str) -> PurePosixPath:
     value = document.strip()
     if not value:
         raise KnowledgeValidationError("document path is required")
-    if value.startswith("/") or value.startswith("~"):
+    if value.startswith(("/", "~")):
         raise KnowledgeValidationError("document path must be relative to state/knowledge")
     value = value.removeprefix("state/knowledge/").rstrip("/")
     if not value.endswith(".md"):

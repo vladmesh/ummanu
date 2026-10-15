@@ -17,9 +17,12 @@ import hmac
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ummanu.web.server import DEFAULT_HOST as DEFAULT_UPSTREAM_HOST
-from ummanu.web.server import DEFAULT_PORT as DEFAULT_UPSTREAM_PORT
-from ummanu.web.server import LoopbackOnly, resolve_bind
+from ummanu.web.server import (
+    DEFAULT_HOST as DEFAULT_UPSTREAM_HOST,
+    DEFAULT_PORT as DEFAULT_UPSTREAM_PORT,
+    LoopbackOnly,
+    resolve_bind,
+)
 
 #: The single account the front knows. Roles and users are a different card; this one has an owner.
 USERNAME = "owner"

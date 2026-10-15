@@ -24,8 +24,7 @@ from typing import Any
 from unittest import mock
 from urllib.parse import quote, urlencode
 
-from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER
-from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER, SprintProtocolFixture
 from ummanu.web.app import ROUTES, WebApp, cross_origin_reason
 from ummanu.web.server import build_server
 from ummanu.webproto.errors import (
