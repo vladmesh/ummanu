@@ -18,6 +18,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -898,6 +899,8 @@ class CreateRuleTests(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()),
                     tempfile.TemporaryDirectory() as tmp,
                 ):
+                    (Path(tmp) / "projects").mkdir()
+                    (Path(tmp) / "projects" / "ummanu.yaml").write_text("id: ummanu\nenabled: true\n", encoding="utf-8")
                     code = main(
                         [
                             "task",
