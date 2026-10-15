@@ -162,11 +162,12 @@ Then write it:
 
 ```
 python3 -P -m ummanu automations curator memory-write \
-  --actor curator --scope <global|project:<dir>|review:po> --slug <kebab-slug> --file /tmp/fact.md
+  --actor curator --scope <global|project:<canonical-id>|review:po> --slug <kebab-slug> --file /tmp/fact.md
 ```
 
-- `--scope` is `global`, `project:<dir>`, or `review:po`. It picks the canon directory: a project scope lands in
-  `facts/<dir>/`; PO review lands in `facts/po-review/`.
+- `--scope` is `global`, `project:<canonical-id>`, or `review:po`. The id is the registered binding's `id`,
+  never the repository's directory name; any other project scope is refused. A project scope lands in
+  `facts/<canonical-id>/`; PO review lands in `facts/po-review/`.
 - `--slug` is a short kebab-case summary of the fact, the card's name in the canon.
 - `--file` is the temporary file. Metadata goes in the file's frontmatter (`tags`, `source`, `pinned`,
   `supersedes`) or in flags (`--tags`, `--pinned`, `--supersedes <old-slug>`, `--source`); flags override

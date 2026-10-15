@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ummanu.kernel.identifiers import is_machine_id
 from ummanu.runtime.head import HeadRun, HeadRunError, TaskRefError
 from ummanu.runtime.head.identity import head_process_status
 
@@ -256,10 +257,10 @@ def normalize_scope(scope: str | None) -> str | None:
         return None
     if value in {"global", PRODUCT_UMMANU_SCOPE, PO_REVIEW_SCOPE}:
         return value
-    if value.startswith("project:"):
-        name = value.removeprefix("project:")
-        return f"project:{_name(name, 'scope')}"
-    return f"project:{_name(value, 'scope')}"
+    name = value.removeprefix("project:")
+    if not is_machine_id(name):
+        raise MemoryAccessError("invalid scope")
+    return f"project:{name}"
 
 
 def _read_payload(grant_id: str, data_dir: str | Path | None) -> dict[str, Any] | None:

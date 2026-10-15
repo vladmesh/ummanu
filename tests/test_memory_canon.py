@@ -32,7 +32,12 @@ from ummanu.memory.canon import (
 from ummanu.memory.pack import load_product_pack, materialize_product_pack
 from ummanu.memory_errors import MemoryValidationError
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
-from ummanu.memory_write import commit_memory_proposal, propose_memory_fact, supersede_memory_fact
+from ummanu.memory_write import (
+    commit_memory_proposal,
+    move_memory_scope,
+    propose_memory_fact,
+    supersede_memory_fact,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src" / "ummanu"
@@ -167,6 +172,9 @@ class CanonCase(unittest.TestCase):
         ledger = self.instance / "state" / "memory" / "packs" / "other-pack.json"
         ledger.parent.mkdir(parents=True)
         ledger.write_text('{"untouched": true}\n', encoding="utf-8")
+        (self.instance / "projects").mkdir()
+        for project in ("ummanu", "project-new"):
+            (self.instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
         self.assertFalse((self.instance / ".git").exists())
 
     def seed(self, facts: dict[str, str]) -> None:
@@ -317,6 +325,69 @@ class AllOrNothingWriteTests(CanonCase):
         ):
             transaction.write(self.instance / "instance.yaml", "x\n")
         self.assertFalse((self.instance / "instance.yaml").exists())
+
+
+class ProjectScopeTests(CanonCase):
+    """A project scope is the registered project id, in the machine identifier grammar."""
+
+    def test_a_scope_outside_the_grammar_is_refused_before_anything_is_staged(self):
+        before = self.canon_files()
+        for scope in ("project:codegen_orchestrator", "project:проект", "project:Ummanu", "project:a b"):
+            with (
+                self.subTest(scope=scope),
+                self.assertRaisesRegex(MemoryValidationError, r"must match \[a-z0-9\]\[a-z0-9-\]\*"),
+            ):
+                self.commit("refused", scope=scope)
+        self.assertEqual(self.canon_files(), before)
+        self.assertFalse((self.memory_dir / ".staging").exists())
+
+    def test_a_scope_the_registry_does_not_hold_is_refused_without_a_canon_write(self):
+        before = self.canon_files()
+        with self.assertRaisesRegex(MemoryValidationError, "'codegen' is not a registered project id"):
+            self.supersede(scope="project:codegen", supersedes=("global/old",))
+        self.assertEqual(self.canon_files(), before)
+
+        self.commit("registered", scope="project:project-new")
+        self.assertTrue((self.facts / "project-new" / "registered.md").is_file())
+
+    def test_move_scope_carries_every_fact_byte_for_byte_into_the_registered_scope(self):
+        self.seed({"under_score/a.md": "fact a\r\nCRLF\r\n", "under_score/nested/b.md": "fact b\n"})
+        drifted = {
+            "a": (self.facts / "under_score" / "a.md").read_bytes(),
+            "nested/b": (self.facts / "under_score" / "nested" / "b.md").read_bytes(),
+        }
+
+        result = move_memory_scope(
+            self.data_dir, self.instance, actor=ACTOR, source_dir="under_score", scope="project:project-new"
+        )
+
+        self.assertEqual(
+            sorted(result.changed_facts),
+            ["under_score/a -> project-new/a", "under_score/nested/b -> project-new/nested/b"],
+        )
+        for fact, data in drifted.items():
+            self.assertEqual((self.facts / "project-new" / f"{fact}.md").read_bytes(), data)
+        self.assertEqual([path for path in (self.facts / "under_score").rglob("*.md")], [])
+        self.assertEqual(result.commit, canon_revision(self.facts))
+        self.assertIsNone(pending_undo(self.memory_dir))
+
+    def test_move_scope_refuses_a_fact_id_the_target_already_holds_and_moves_nothing(self):
+        self.seed({"under_score/other.md": "drifted twin\n", "under_score/fresh.md": "fresh\n"})
+        before = self.canon_files()
+        with self.assertRaisesRegex(MemoryValidationError, "target scope already holds: ummanu/other.md"):
+            move_memory_scope(
+                self.data_dir, self.instance, actor=ACTOR, source_dir="under_score", scope="project:ummanu"
+            )
+        self.assertEqual(self.canon_files(), before)
+
+    def test_move_scope_refuses_an_unregistered_target(self):
+        self.seed({"under_score/a.md": "fact a\n"})
+        before = self.canon_files()
+        with self.assertRaisesRegex(MemoryValidationError, "'under-score' is not a registered project id"):
+            move_memory_scope(
+                self.data_dir, self.instance, actor=ACTOR, source_dir="under_score", scope="project:under-score"
+            )
+        self.assertEqual(self.canon_files(), before)
 
 
 class ContentRevisionTests(CanonCase):

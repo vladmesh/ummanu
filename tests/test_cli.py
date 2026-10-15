@@ -61,6 +61,8 @@ def init_instance_repo(instance_dir: Path) -> None:
     git(instance_dir, "add", "instance.yaml")
     git(instance_dir, "commit", "--quiet", "-m", "config")
 
+UMMANU_BINDING = "id: ummanu\nrepo: /srv/ummanu\nenabled: false\nadapter: ummanu\ndefault_branch: main\n"
+
 
 class BoardCommandInstanceTests(unittest.TestCase):
     """Every board command names the installation it talks to, reads included.
@@ -845,6 +847,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("fact from cli\n", encoding="utf-8")
 
@@ -980,6 +984,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("verified cli fact\n", encoding="utf-8")
             _propose_code, propose_output = self.run_cli(
@@ -1059,6 +1065,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("cli retryable fact\n", encoding="utf-8")
             propose_code, propose_output = self.run_cli(
@@ -1146,6 +1154,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("fact from cli\n", encoding="utf-8")
 

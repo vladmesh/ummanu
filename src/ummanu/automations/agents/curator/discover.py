@@ -19,6 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from ummanu.config import ConfigError, load_config
+from ummanu.kernel.identifiers import is_machine_id
 from ummanu.runtime.codex_home import session_roots
 from ummanu.runtime.paths import default_instance_path, env_value, instance_dir
 from ummanu.sprints import SPRINT_REFERENCE_PREFIX, SprintReader, sprint_client
@@ -47,7 +48,6 @@ CODEX_SESSIONS: Path | None = Path(_CODEX_SESSIONS_OVERRIDE) if _CODEX_SESSIONS_
 ROUTE_UNKNOWN = "unknown"
 ROUTE_GLOBAL = "global"
 ROUTE_PO_REVIEW = "review:po"
-_PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
 
 
 def selected_instance() -> Path:
@@ -103,7 +103,7 @@ def project_bindings(instance: Path | None = None) -> list[dict]:
         project_id, repo = binding.get("id"), binding.get("repo")
         if (
             not all(isinstance(value, str) and value for value in (project_id, repo))
-            or not _PROJECT_ID.fullmatch(project_id)
+            or not is_machine_id(project_id)
             or not Path(repo).is_absolute()
         ):
             continue

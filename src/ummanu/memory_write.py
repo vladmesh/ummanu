@@ -16,8 +16,15 @@ from ummanu._fsutil import (
     write_json as _write_json,
     write_text_atomic as _write_text_atomic,
 )
+from ummanu.kernel.identifiers import MachineIdError, require_machine_id
 from ummanu.memory.access import PO_REVIEW_SCOPE, PO_REVIEW_SCOPE_DIR
-from ummanu.memory.canon import canon_revision, canon_transaction, parse_frontmatter, recover_canon_undo
+from ummanu.memory.canon import (
+    canon_revision,
+    canon_transaction,
+    fact_files,
+    parse_frontmatter,
+    recover_canon_undo,
+)
 from ummanu.memory_errors import (
     MemoryExportPublishError,
     MemoryLockError,  # noqa: F401  # Public compatibility re-export.
@@ -222,6 +229,64 @@ def supersede_memory_fact(
         return result
 
 
+def move_memory_scope(
+    data_dir: Path,
+    instance_dir: Path,
+    *,
+    actor: str,
+    source_dir: str,
+    scope: str,
+) -> MemoryWriteResult:
+    """Move every fact of the canon directory `source_dir` into `scope`, bytes unchanged, all or nothing.
+
+    A fact whose id already exists in the target scope refuses the whole move.
+    """
+    data_dir = data_dir.expanduser().resolve()
+    memory_dir = data_dir / "memory"
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_canonical_writer_actor(actor, op="move-scope")
+    source_dir = _clean_path_part(source_dir.strip(), "source scope directory")
+    target_dir = _scope_dir(scope)
+    if source_dir == target_dir:
+        raise MemoryValidationError("source and target scope are the same directory")
+    reject_legacy_memory_journal(memory_dir)
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    _require_registered_scope(instance_dir, target_dir)
+    facts_dir, _created = init_memory_journal(instance_dir)
+    with _memory_journal_lock(memory_dir), state_repo.state_repo_lock(instance_dir):
+        recover_canon_undo(memory_dir)
+        moves = [
+            (fact_id, path, facts_dir / target_dir / path.relative_to(facts_dir / source_dir))
+            for fact_id, path in fact_files(facts_dir)
+            if fact_id.startswith(source_dir + "/")
+        ]
+        if not moves:
+            raise MemoryValidationError(f"no memory facts under scope directory {source_dir!r}")
+        taken = sorted(str(target.relative_to(facts_dir)) for _, _, target in moves if target.exists())
+        if taken:
+            raise MemoryValidationError("target scope already holds: " + ", ".join(taken))
+        with canon_transaction(memory_dir, facts_dir.parent) as transaction:
+            for _fact_id, path, target in moves:
+                transaction.write(target, path.read_bytes().decode("utf-8"))
+                transaction.remove(path)
+            revision = canon_revision(facts_dir)
+        moved = tuple(
+            f"{fact_id} -> {target.relative_to(facts_dir).as_posix().removesuffix('.md')}"
+            for fact_id, _path, target in moves
+        )
+        result = MemoryWriteResult(
+            op="move-scope",
+            facts_dir=facts_dir,
+            commit=revision,
+            fact=f"{source_dir} -> {target_dir}",
+            actor=actor,
+            source=actor,
+            changed_facts=moved,
+        )
+        _publish_write_export(memory_dir, result)
+    return result
+
+
 def _ensure_proposer_actor(actor: str) -> None:
     """Authority to stage a proposal for the curator inbox.
 
@@ -273,8 +338,26 @@ def _scope_dir(scope: str) -> str:
     if value == PO_REVIEW_SCOPE:
         return PO_REVIEW_SCOPE_DIR
     if value.startswith("project:"):
-        return _clean_path_part(value.removeprefix("project:"), "scope")
-    raise MemoryValidationError("scope must be global, review:po, or project:<dir>")
+        try:
+            return require_machine_id("project scope", value.removeprefix("project:"))
+        except MachineIdError as exc:
+            raise MemoryValidationError(str(exc)) from None
+    raise MemoryValidationError("scope must be global, review:po, or project:<registered project id>")
+
+
+def _require_registered_scope(instance_dir: Path, scope_dir: str) -> None:
+    """A project scope names a project of the registry, so one project never has two scopes."""
+    if scope_dir in {"global", PO_REVIEW_SCOPE_DIR}:
+        return
+    from ummanu.kernel.errors import TaskError
+    from ummanu.product_issues import registered_projects
+
+    try:
+        registered = registered_projects(instance_dir)
+    except TaskError as exc:
+        raise MemoryValidationError(exc.message) from None
+    if scope_dir not in registered:
+        raise MemoryValidationError(f"project scope {scope_dir!r} is not a registered project id")
 
 
 def _clean_slug(slug: str) -> str:
@@ -531,8 +614,9 @@ def _apply_memory_write(
     `state/memory` at the same moment never sees half of it.
     """
     reject_legacy_memory_journal(memory_dir)
-    facts_dir, _created = init_memory_journal(instance_dir)
     instance_dir = Path(instance_dir).expanduser().resolve()
+    _require_registered_scope(instance_dir, _scope_dir(str(proposal["scope"])))
+    facts_dir, _created = init_memory_journal(instance_dir)
     with state_repo.state_repo_lock(instance_dir):
         return _write_locked(memory_dir, facts_dir, proposal, op=op)
 
