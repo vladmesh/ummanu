@@ -621,12 +621,15 @@ CAUSE_WORKSPACE_CONTRACT = "workspace_contract"
 # The card names an integration base this project cannot integrate into (secretary-1541). Nothing
 # about the code was judged, but no host repairs it either: it is the card's own contract.
 CAUSE_BASE_BRANCH_CONTRACT = "base_branch_contract"
+# The card names a project the instance does not enable for workloads.
+CAUSE_PROJECT_NOT_ENABLED = "project_not_enabled"
 CAUSE_ADMISSION_REFUSED = "admission_refused"
 BRING_UP_CAUSE_CLASSES = {
     CAUSE_LAUNCH_ABORTED: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_HOST_UNAVAILABLE: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_WORKSPACE_CONTRACT: FAILURE_CLASS_TASK,
     CAUSE_BASE_BRANCH_CONTRACT: FAILURE_CLASS_TASK,
+    CAUSE_PROJECT_NOT_ENABLED: FAILURE_CLASS_TASK,
     CAUSE_ADMISSION_REFUSED: FAILURE_CLASS_ADMISSION,
 }
 STAGE_CLAIM = "claim"

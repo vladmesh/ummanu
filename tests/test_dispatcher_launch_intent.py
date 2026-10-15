@@ -50,7 +50,14 @@ from ummanu.dispatch.git_workspace import GitWorkspaceManager
 from ummanu.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
 from ummanu.dispatch.host_runtime import lifecycle as host_lifecycle
-from ummanu.dispatch.launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
+from ummanu.dispatch.launch import (
+    CAUSE_HOST_UNAVAILABLE,
+    CAUSE_PROJECT_NOT_ENABLED,
+    LAUNCH_DELIVERY_MAX_ATTEMPTS,
+    STAGE_CLAIM,
+    classify_bring_up_failure,
+    launch_intent_liveness,
+)
 from ummanu.dispatch.production import _budget_event_type
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import (
@@ -3417,17 +3424,19 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
             mock.patch.object(self.host, "_run") as run,
             mock.patch.object(self.host, "_launch") as launch,
         ):
-            for project, reason in (
-                ("unknown", "not registered"),
-                ("inventory-only", "registered but not enabled"),
-                ("unavailable", "repo.*unavailable"),
+            for project, reason, cause in (
+                ("unknown", "not registered", CAUSE_PROJECT_NOT_ENABLED),
+                ("inventory-only", "registered but not enabled", CAUSE_PROJECT_NOT_ENABLED),
+                ("unavailable", "repo.*unavailable", CAUSE_HOST_UNAVAILABLE),
             ):
-                with self.subTest(project=project), self.assertRaisesRegex(HostError, reason):
+                with self.subTest(project=project), self.assertRaisesRegex(HostError, reason) as raised:
                     self.host.prepare_worker(
                         {"ref": "ummanu-1", "project": project, "workspace": {}},
                         "card-1",
                         "worker",
                     )
+                failure = classify_bring_up_failure(raised.exception, None, "worker", stage=STAGE_CLAIM, attempt_id="a")
+                self.assertEqual(failure.cause, cause)
 
         run.assert_not_called()
         launch.assert_not_called()
