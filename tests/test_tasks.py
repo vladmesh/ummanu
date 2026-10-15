@@ -5031,6 +5031,111 @@ class ReportDurabilityGateTests(CardStoreCase):
             writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ok")
         self.assertEqual(caught.exception.code, "uncommitted")
 
+    PARTIAL = "## Done\nThe parser.\n\n## Not working\nThe writer.\n\n## Propose to extract\nThe writer.\n"
+
+    def _head(self) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.workspace), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def _partial(self, body: str = PARTIAL, request_id: str = "partial-1", classification: str = "") -> dict:
+        return self.writer.report(
+            role="worker",
+            actor="w",
+            reference="ummanu-468",
+            kind="partial",
+            body=body,
+            classification=classification,
+            request_id=request_id,
+        )
+
+    def test_a_partial_report_pins_the_committed_head_and_replays(self) -> None:
+        head = self._head()
+        first = self._partial()
+
+        self.assertEqual(first["action"], "reported")
+        data = self.writer.board_host.canon.event("partial-1").data
+        self.assertEqual((data["marker"], data["status"]), ("report:partial", "partial"))
+        self.assertIsNone(data["classification"])
+        self.assertEqual(data["partial_commit"], head)
+        self.assertEqual(len(head), 40)
+        comment = self.writer.reader.show("ummanu-468")["comments"][-1]
+        self.assertEqual(comment["marker"], "report:partial")
+        self.assertIn("## Propose to extract", comment["comment"])
+
+        (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.workspace), "commit", "-qam", "more"], check=True, capture_output=True)
+        replay = self._partial()
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(replay["event_id"], first["event_id"])
+        self.assertEqual(self.writer.board_host.canon.event("partial-1").data["partial_commit"], head)
+        self.assertEqual(len(self.client.comments(12)), 1)
+
+    def test_a_partial_report_missing_a_section_is_refused_naming_it(self) -> None:
+        sections = {"Done": "The parser.", "Not working": "The writer.", "Propose to extract": "The writer."}
+        for name in sections:
+            for text in ("", None):
+                body = "".join(
+                    f"## {heading}\n{text if heading == name else content}\n\n"
+                    for heading, content in sections.items()
+                    if not (heading == name and text is None)
+                )
+                with self.subTest(section=name, present=text is not None), self.assertRaises(TaskError) as caught:
+                    self._partial(body, request_id=f"partial-{name}-{text is None}")
+                self.assertEqual(caught.exception.code, "validation")
+                self.assertIn(f"`## {name}`", caught.exception.message.split("missing or empty:")[1])
+        self.assertEqual(self.client.comments(12), [])
+        self.assertEqual(
+            [method for method, _params in self.client.calls if not method.startswith("get")], []
+        )
+
+    def test_a_partial_report_with_a_classification_is_refused(self) -> None:
+        with self.assertRaises(TaskError) as caught:
+            self._partial(classification="external_fact")
+        self.assertEqual(caught.exception.code, "validation")
+        self.assertIn("no classification", caught.exception.message)
+        self.assertEqual(self.client.comments(12), [])
+
+    def test_a_partial_report_from_a_dirty_workspace_is_refused(self) -> None:
+        (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
+        with self.assertRaises(TaskError) as caught:
+            self._partial()
+        self.assertEqual(caught.exception.code, "uncommitted")
+        self.assertIn("code.py", caught.exception.message)
+        self.assertEqual(
+            [method for method, _params in self.client.calls if not method.startswith("get")], []
+        )
+
+    def test_a_research_or_infra_partial_report_records_no_commit(self) -> None:
+        (self.workspace / "notes.md").write_text("draft\n", encoding="utf-8")
+        for kind in ("research", "infra"):
+            with self.subTest(kind=kind):
+                self.client.save_metadata(12, task_type=kind)
+                self.assertEqual(self._partial(request_id=f"partial-{kind}")["action"], "reported")
+                self.assertNotIn("partial_commit", self.writer.board_host.canon.event(f"partial-{kind}").data)
+
+    def test_the_cli_records_a_partial_report(self) -> None:
+        self.client.save_metadata(12, task_type="research")
+        body = Path(self.tmpdir.name) / "partial.md"
+        body.write_text(self.PARTIAL, encoding="utf-8")
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task", "report", "--role", "worker", "--ref", "ummanu-468", "--kind", "partial",
+                    "--instance", self.tmpdir.name, "--data-dir", str(Path(self.tmpdir.name) / "cli"),
+                    "--body-file", str(body), "--request-id", "cli-partial",
+                ]
+            )
+
+        self.assertEqual(code, 0, errors.getvalue())
+        self.assertEqual(json.loads(output.getvalue())["action"], "reported")
+        self.assertEqual(self.client.comments(12)[-1]["comment"].splitlines()[0], "[report:partial]")
+
 
 class BlockedContractTests(CardStoreCase):
     """Why a card is blocked, and what the observer did about it (secretary-1034).

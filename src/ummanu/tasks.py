@@ -29,6 +29,7 @@ from ummanu.board.completion_evidence import (
     is_headless,
     is_po_executed,
     is_wait,
+    partial_report_fields,
     po_completion_fields,
     render_po_completion_record,
     research_report_refusal,
@@ -201,6 +202,7 @@ from ummanu.board.task_protocol.rows import (
     specification_revision as specification_revision,
     standing_decision as standing_decision,
     workspace_dirt as workspace_dirt,
+    workspace_head,
 )
 from ummanu.board.task_protocol.sprint_guard import SprintGuardMixin
 
@@ -1643,7 +1645,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             return ""
 
     def _require_committed_workspace(self) -> None:
-        """Refuse a done report from a dirty checkout. The worker runs the protocol
+        """Refuse a done or partial report from a dirty checkout. The worker runs the protocol
         from its own workspace, so failing here lets it commit and retry inside the
         same session instead of learning from the dispatcher that its card went to
         blocked.
@@ -1679,11 +1681,12 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
     ) -> dict[str, Any]:
         """A worker's report, and for a blocked one the kind of blocker it hit. The
         classification is required rather than offered: an external fact and a wrong
-        task definition are repaired by different people.
+        task definition are repaired by different people. A partial report on a code
+        card pins the committed checkout HEAD as `partial_commit`.
         """
         role = self._role(role, {Role.WORKER}, actor=actor)
         body = self._redact_for_board(body)
-        if kind not in {"done", "blocked"} or not body.strip():
+        if kind not in {"done", "blocked", "partial"} or not body.strip():
             raise TaskError("validation", "reports require a non-empty body", 2)
         classification = classification.strip()
         if kind == "blocked" and classification not in BLOCK_CLASSIFICATION_VALUES:
@@ -1692,8 +1695,12 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 "blocked reports require --classification, one of " + ", ".join(BLOCK_CLASSIFICATION_VALUES),
                 2,
             )
-        if kind == "done" and classification:
-            raise TaskError("validation", "a done report carries no classification", 2)
+        if kind in {"done", "partial"} and classification:
+            raise TaskError("validation", f"a {kind} report carries no classification", 2)
+        if kind == "partial":
+            _fields, refusal = partial_report_fields(body)
+            if refusal:
+                raise TaskError("validation", refusal, 2)
         classification_value = BlockClassification(classification) if classification else None
         request_id = request_id or str(uuid.uuid4())
         # Resolve immutable ownership before either fresh admission or a card
@@ -1711,7 +1718,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             if not legacy_owned:
                 raise
         marker_data = owned.data if owned is not None else {}
-        check_data = {}
+        check_data: dict[str, Any] = {}
         if owned is None and not legacy_owned:
             # This is the writer boundary for a worker report.  Bind the
             # report to the specification it actually answered now, rather
@@ -1742,6 +1749,13 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     refusal = self._research_report_refusal()
                     if refusal:
                         raise TaskError("validation", refusal, 2)
+            elif kind == "partial" and has_candidate(current):
+                self._require_committed_workspace()
+                workspace = self.workspace or Path.cwd()
+                head = workspace_head(workspace)
+                if head is None:
+                    raise TaskError("validation", f"a partial report needs a commit; {workspace} has no HEAD", 2)
+                check_data = {"partial_commit": head}
             revision = specification_revision(self.audit.events(reference), current["description"])
             specification_data = {
                 "description_sha256": _digest(current["description"]),
@@ -1755,8 +1769,9 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 for name in ("description_sha256", "specification_revision")
                 if name in marker_data
             }
-            if "worker_check" in marker_data:
-                check_data = {"worker_check": marker_data["worker_check"]}
+            check_data = {
+                name: marker_data[name] for name in ("worker_check", "partial_commit") if name in marker_data
+            }
         return self._marker_write(
             action="reported",
             event_kind=EventKind.CARD_REPORTED,

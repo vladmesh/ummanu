@@ -223,8 +223,8 @@ def add_task_subcommands(subparsers) -> None:
         else:
             command.add_argument("--body-file")
         if name == "report":
-            command.add_argument("--kind", required=True, choices=("done", "blocked"))
-            # Required with `--kind blocked`, refused with `--kind done`; the writer holds both
+            command.add_argument("--kind", required=True, choices=("done", "blocked", "partial"))
+            # Required with `--kind blocked`, refused otherwise; the writer holds both
             # rules so the protocol is the same from a script as from the CLI.
             command.add_argument("--classification", default="", choices=("", *(value.value for value in BlockClassification)))
         if name == "verdict":

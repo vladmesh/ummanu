@@ -355,6 +355,14 @@ class MarkerValidationTests(unittest.TestCase):
                 "no classification",
             ),
             ({"marker": "", "status": "done"}, "non-empty marker and body"),
+            ({"marker": "report:paused", "status": "paused"}, "unsupported marker payload"),
+            (
+                {"marker": "report:partial", "status": "partial", "classification": "external_fact"},
+                "no classification",
+            ),
+            ({"marker": "report:partial", "status": "partial", "partial_commit": "abc123"}, "40-character"),
+            ({"marker": "report:partial", "status": "partial", "partial_commit": "A" * 40}, "40-character"),
+            ({"marker": "report:done", "status": "done", "partial_commit": "a" * 40}, "no partial_commit"),
         ):
             with self.subTest(data=data), self.assertRaisesRegex(ValueError, message):
                 self.event(**data)
@@ -369,6 +377,12 @@ class MarkerValidationTests(unittest.TestCase):
                 MOMENT,
                 data={"marker": "review:green", "body": "body", "status": "green"},
             )
+
+    def test_a_partial_report_is_accepted_with_or_without_its_commit(self) -> None:
+        for extra in ({"partial_commit": "0123456789abcdef0123456789abcdef01234567"}, {}):
+            with self.subTest(extra=extra):
+                event = self.event(marker="report:partial", status="partial", classification=None, **extra)
+                self.assertEqual(render_marker_comment(event), "[report:partial]\nthe body")
 
     def test_a_valid_marker_renders_its_grammar(self) -> None:
         self.assertEqual(

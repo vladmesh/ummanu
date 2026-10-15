@@ -19,6 +19,7 @@ from ummanu.board.attempt_outcome import (
     ATTEMPT_OUTCOME_VERDICTS as ATTEMPT_OUTCOME_VERDICTS,
     validate_attempt_outcome_data,
 )
+from ummanu.board.marker_payload import REPORT_STATUSES, check_report_fields
 from ummanu.board.roles import Role
 from ummanu.board.sql_rows import parse_rfc3339, rfc3339
 from ummanu.board.terminal_taxonomy import (
@@ -544,13 +545,9 @@ def _validate_control_marker_event(
         raise ValueError("control-plane marker event reason must match its body")
     if kind is EventKind.CARD_REPORTED:
         status = data.get("status")
-        if status not in {"done", "blocked"} or marker != f"report:{status}":
+        if status not in REPORT_STATUSES or marker != f"report:{status}":
             raise ValueError("Card report event has an unsupported marker payload")
-        classification = data.get("classification")
-        if status == "blocked" and classification not in {"external_fact", "wrong_task_definition"}:
-            raise ValueError("blocked Card report requires a supported classification")
-        if status == "done" and classification is not None:
-            raise ValueError("done Card report carries no classification")
+        check_report_fields(status, data.get("classification"), data.get("partial_commit"))
         return
     if kind is EventKind.CARD_VERDICTED:
         status = data.get("status")
