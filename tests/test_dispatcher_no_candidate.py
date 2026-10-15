@@ -132,7 +132,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._report_done(INFRA_REPORT)
         self.assertEqual(self.tick()["to"], "validate")
 
-        released = self._park_and_decide("release")
+        released = self._park_and_decide("accept")
 
         self.assertEqual(released["to"], "done")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
@@ -165,7 +165,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         # The record is gone by the time the observer releases: the check reads the board, not the
         # acceptance that wrote it.
         self.board.remove_comments(12, "[completion:infra]")
-        self._decide("release")
+        self._decide("accept")
 
         blocked = self.tick()
 
@@ -269,7 +269,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self._committed_report(), [f"{REPORT_DIR}/report.md"])
         self.assertEqual(len(self._comments("[completion:research]")), 1)
         transferred = self._report_identity()
-        self._decide("release")
+        self._decide("accept")
 
         self.assertEqual(self.tick()["to"], "done")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
@@ -292,7 +292,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._write_report({"report.md": "second\n"})
         self._report_done("second write-up")
         self.assertEqual(self.tick()["to"], "validate")
-        released = self._park_and_decide("release")
+        released = self._park_and_decide("accept")
 
         self.assertEqual(released["to"], "done")
         self.assertEqual(self._committed_report(), [f"{REPORT_DIR}/report.md"])
@@ -428,7 +428,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._run_worker_to_validate()
 
-        released = self._park_and_decide("release")
+        released = self._park_and_decide("accept")
 
         self.assertEqual(released["to"], "done")
         self.assertEqual(self.host.reviews, [])
@@ -466,7 +466,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self._report_done(INFRA_REPORT.replace("exits 0", "prints ok"))
         self.assertEqual(self.tick()["to"], "validate")
-        released = self._park_and_decide("release")
+        released = self._park_and_decide("accept")
 
         self.assertEqual(released["to"], "done")
         records = self._comments("[completion:infra]")

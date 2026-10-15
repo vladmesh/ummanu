@@ -1272,7 +1272,7 @@ Exit statuses: unknown sprint or malformed filter `2` (`not_found` / `validation
 A code card of a project that declares `validation.e2e` waits for its e2e run after green CI and its
 review ([Protocols](PROTOCOLS.md#the-e2e-stage)). While it does:
 
-- the code card stays in **Validate** (in **Assessment** when a release decision is waiting for a run);
+- the code card stays in **Validate** (in **Assessment** when an accept decision is waiting for a run);
   its heads are not re-launched and its gate is not re-read;
 - `task show --ref <card>` carries `e2e`: `runs_dispatched`, the sprint whose e2e budget it spends
   (`budget`) or, outside every sprint, its own `run_cap` (3 plus the owner's raises), and per run the
@@ -2115,7 +2115,7 @@ Neither command reconciles or starts processes.
 
 A green verdict on a card whose sprint declares an observer parks the card in Assessment
 ([Tasks](PROTOCOLS.md#tasks)) once the mechanical gate is green; the merge runs on the tick that performs
-a recorded `release`. Red or pending gates resolve in Validate. A card with no observer merges on the
+a recorded `accept`. Red or pending gates resolve in Validate. A card with no observer merges on the
 verdict's tick. Gate receipt rules are in [Receipt names](PROTOCOLS.md#receipt-names).
 
 A release the dispatcher cannot carry out takes the card to Blocked with the failure; it never sends the

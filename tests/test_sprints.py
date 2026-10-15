@@ -1293,7 +1293,7 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
                         role="observer",
                         actor="observer",
                         reference=card["ref"],
-                        kind="release",
+                        kind="accept",
                         body="releasing a card of a sprint I do not observe",
                         request_id="cross-sprint-decision",
                     ),

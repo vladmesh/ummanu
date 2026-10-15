@@ -567,7 +567,7 @@ def _act(
     if outcome == wait_card.TARGET_REACHED and conclusion == FAILURE:
         summary, log, fingerprint = _red_evidence(runtime, run)
         if step == "assessment":
-            # A release decision opens no rework round: the card stops with the evidence on it.
+            # An accept decision opens no rework round: the card stops with the evidence on it.
             _close(
                 run,
                 f"Observer decision: release. The e2e stage is red: {summary}. The card is Blocked "

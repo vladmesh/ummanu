@@ -923,7 +923,7 @@ class ReleaseStageTests(unittest.TestCase):
             write(path, payload)
 
         for target, name, value in (
-            (assessment_decision, "recorded_decision", self.clock.work(250, ("release", "Ship it.", ()))),
+            (assessment_decision, "recorded_decision", self.clock.work(250, ("accept", "Ship it.", ()))),
             (release_lifecycle, "attempt_accounting", self.accounting),
             (gate_lifecycle, "accept_green_gate", self.clock.work(400)),  # the release gate attestation
             (production, "write_json", slow_write),

@@ -138,7 +138,7 @@ class CliLiveDefaultsTests(unittest.TestCase):
             mock.patch("ummanu.tasks.TaskWriter") as writer,
         ):
             for verb, extra, method, key in [
-                ("decide", ["--kind", "release"], "decide", "body"),
+                ("decide", ["--kind", "accept"], "decide", "body"),
                 ("move", ["--to", "done"], "move", "reason"),
                 ("archive", [], "archive", "reason"),
                 ("handover", ["--to", "owner"], "handover", "reason"),

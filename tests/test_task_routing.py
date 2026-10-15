@@ -36,7 +36,7 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
         self.assertEqual(FAMILY_PREFERENCE_VALUES, {"auto", "claude", "codex"})
         self.assertEqual(ROUTING_PHASE_VALUES, {"worker", "review", "verdict"})
         self.assertEqual(BLOCK_CLASSIFICATION_VALUES, ("external_fact", "wrong_task_definition"))
-        self.assertEqual(DECISION_VALUES, {"release", "rework", "reslice"})
+        self.assertEqual(DECISION_VALUES, {"accept", "rework", "reslice"})
         self.assertEqual(TaskType.CODE, "code")
         self.assertEqual(TaskComplexity.FRONTIER, "frontier")
         self.assertEqual(FamilyPreference.CODEX, "codex")
@@ -48,7 +48,7 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
         self.assertEqual(
             DECISION_TARGETS,
             {
-                TaskDecision.RELEASE: CardState.DONE,
+                TaskDecision.ACCEPT: CardState.DONE,
                 TaskDecision.REWORK: CardState.IN_PROGRESS,
                 TaskDecision.RESLICE: CardState.BLOCKED,
             },

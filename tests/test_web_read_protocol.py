@@ -483,7 +483,7 @@ class TaskSnapshotTests(ReadLayerFixture):
         self.board.replace_comments(12, [
             {"date_creation": 1, "comment": "[report:done]\nthe work is done"},
             {"date_creation": 2, "comment": "[review:green]\nno blockers"},
-            {"date_creation": 3, "comment": "[decision:release]\nship it"},
+            {"date_creation": 3, "comment": "[decision:accept]\nship it"},
         ])
 
     def test_a_task_snapshot_carries_state_project_events_and_result(self) -> None:
@@ -523,7 +523,7 @@ class TaskSnapshotTests(ReadLayerFixture):
         self.assertEqual(snapshot["agents"]["items"][0]["project"], "ummanu")
         self.assertEqual(snapshot["work"]["worker_report"]["value"], "done")
         self.assertEqual(snapshot["work"]["review_verdict"]["value"], "green")
-        self.assertEqual(snapshot["work"]["decision"]["value"], "release")
+        self.assertEqual(snapshot["work"]["decision"]["value"], "accept")
         self.assertEqual(snapshot["work"]["outcome"]["kind"], "decision")
         self.assertFalse(snapshot["work"]["outcome"]["terminal"])
         self.assertEqual(len(snapshot["events"]["items"]), 1)

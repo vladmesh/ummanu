@@ -248,7 +248,7 @@ the decision with a reason; the dispatcher performs it:
 
 ```bash
 python3 -P -m ummanu task decide --role observer --actor observer --ref <card-ref> \
-  --kind release|rework|reslice --reason-file <reason.md>
+  --kind accept|rework|reslice --reason-file <reason.md>
 ```
 
 Every exit from Assessment is refused to you; the decision is your whole part (`docs/PROTOCOLS.md`,
@@ -256,7 +256,7 @@ Decisions on a parked card). A card left alone wakes the steward as stale, an es
 A failed release lands in Blocked with the failure: read it before recutting (a rejected merge and a
 checkout moved under the park differ); deciding again fixes neither.
 
-Default to release; hold a card only for a named reason to recut or fix the task.
+Default to accept; hold a card only for a named reason to recut or fix the task.
 
 A rework decision addresses every prior stable blocker ID: accept, reject or defer each, with an issue
 ref per deferral and a precise quotation the next worker report can cite. A worker's "fixed" is a claim

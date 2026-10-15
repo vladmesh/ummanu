@@ -95,7 +95,7 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         self.assertIn(SHA, green)
 
         # The release audit on the same SHA: no second run.
-        self._decide("release")
+        self._decide("accept")
         released = self.tick()
         self.assertEqual(released["to"], "done", released)
         self.assertEqual(len(self.host.dispatches), 1)
@@ -128,13 +128,13 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         self.assertNotIn("e2e", self.card())
 
     def test_a_release_decided_without_a_green_run_waits_for_one_before_the_merge(self) -> None:
-        """A card parked by a red review never ran the stage; a release decision runs it, once."""
+        """A card parked by a red review never ran the stage; an accept decision runs it, once."""
         self.arrange()
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
         self._review_red()
         self.assertEqual(self.tick()["to"], "assessment")
-        self._decide("release")
+        self._decide("accept")
 
         waiting = self.tick()
         self.assertEqual((waiting["action"], waiting["step"]), ("e2e-waiting", "assessment"), waiting)
@@ -211,7 +211,7 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         self.to_waiting()
         self.conclude("success")
         self.assertEqual(self.tick()["to"], "assessment")
-        self._decide("release")
+        self._decide("accept")
         self.host.move_on_gate = [SECOND_SHA]
         self.host.base_only = {(SHA, SECOND_SHA)}
 

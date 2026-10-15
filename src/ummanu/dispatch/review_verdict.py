@@ -130,7 +130,7 @@ def advance_review_verdict(
         reviewed_commit=reviewed,
         move_reason=(
             "review:red. The card is parked in Assessment: the reviewer is stopped and "
-            "the worker of this round is held, waiting for a release, rework or reslice "
+            "the worker of this round is held, waiting for an accept, rework or reslice "
             "decision."
         ),
     )
@@ -249,7 +249,7 @@ def park_green_verdict(
         reviewed_commit=pinned,
         move_reason=(
             f"{'review:green' if reviewed else 'report:done, review skipped'}. The card is parked "
-            f"in Assessment: {waits} for a release, rework or reslice decision."
+            f"in Assessment: {waits} for an accept, rework or reslice decision."
         ),
     )
 

@@ -3462,14 +3462,14 @@ class AssessmentStateTests(CardStoreCase):
         """Carrying the word is not deciding: the audit is what the refusal reads."""
         self._park()
 
-        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+        with self.assertRaisesRegex(TaskError, "no accept decision is recorded"):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
                 reference="ummanu-468",
                 target="done",
                 reason="",
-                decision="release",
+                decision="accept",
                 request_id="claimed-release",
             )
 
@@ -3478,43 +3478,43 @@ class AssessmentStateTests(CardStoreCase):
     def test_a_decision_from_an_earlier_parking_does_not_release_a_later_one(self) -> None:
         """A decision is about the round it was written for, not about every later round."""
         self._park()
-        self._decide("release")
+        self._decide("accept")
         self.writer.move(
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
             target="done",
             reason="",
-            decision="release",
+            decision="accept",
             request_id="first-release",
         )
         self._park(request_id="parked-again")
 
-        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+        with self.assertRaisesRegex(TaskError, "no accept decision is recorded"):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
                 reference="ummanu-468",
                 target="done",
                 reason="",
-                decision="release",
+                decision="accept",
                 request_id="replayed-release",
             )
 
     def test_exact_decision_replay_survives_dispatcher_leaving_assessment(self) -> None:
         self._park()
-        first = self._decide("release", request_id="replay-after-release")
+        first = self._decide("accept", request_id="replay-after-release")
         self.writer.move(
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
             target="done",
             reason="",
-            decision="release",
+            decision="accept",
             request_id="apply-release",
         )
 
-        replay = self._decide("release", request_id="replay-after-release")
+        replay = self._decide("accept", request_id="replay-after-release")
 
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
@@ -3524,7 +3524,7 @@ class AssessmentStateTests(CardStoreCase):
                 [
                     comment
                     for comment in self.client.comments(12)
-                    if comment["comment"] == "[decision:release]\nthe round converged"
+                    if comment["comment"] == "[decision:accept]\nthe round converged"
                 ]
             ),
             1,
@@ -3535,15 +3535,15 @@ class AssessmentStateTests(CardStoreCase):
         predicate reads as "not yet"; the post-merge CI result is one dispatcher card event that is
         the wake, and a replay of either writes nothing new."""
         self._park()
-        self._decide("release")
+        self._decide("accept")
         marker = {"base": "main", "merge_sha": "a" * 40, "path": "github-pr"}
         first = self.writer.move(
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
             target="done",
-            reason="Observer decision: release.",
-            decision="release",
+            reason="Observer decision: accept.",
+            decision="accept",
             request_id="merged-release",
             release_merge=marker,
         )
@@ -3552,8 +3552,8 @@ class AssessmentStateTests(CardStoreCase):
             actor="d",
             reference="ummanu-468",
             target="done",
-            reason="Observer decision: release.",
-            decision="release",
+            reason="Observer decision: accept.",
+            decision="accept",
             request_id="merged-release",
             release_merge=marker,
         )
@@ -3603,14 +3603,14 @@ class AssessmentStateTests(CardStoreCase):
 
     def test_exact_decision_replay_uses_its_original_assessment_visit(self) -> None:
         self._park()
-        first = self._decide("release", request_id="replay-after-later-visit")
+        first = self._decide("accept", request_id="replay-after-later-visit")
         self.writer.move(
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
             target="done",
             reason="",
-            decision="release",
+            decision="accept",
             request_id="apply-first-visit",
         )
         # A PO may return the Card to Validate before the dispatcher parks a
@@ -3618,7 +3618,7 @@ class AssessmentStateTests(CardStoreCase):
         self.client.move(12, "validate")
         self._park(request_id="park-second-visit")
 
-        replay = self._decide("release", request_id="replay-after-later-visit")
+        replay = self._decide("accept", request_id="replay-after-later-visit")
 
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
@@ -3627,7 +3627,7 @@ class AssessmentStateTests(CardStoreCase):
                 [
                     comment
                     for comment in self.client.comments(12)
-                    if comment["comment"] == "[decision:release]\nthe round converged"
+                    if comment["comment"] == "[decision:accept]\nthe round converged"
                 ]
             ),
             1,
@@ -3635,32 +3635,32 @@ class AssessmentStateTests(CardStoreCase):
 
     def test_unowned_decision_remains_refused_after_leaving_assessment(self) -> None:
         self._park()
-        self._decide("release", request_id="first-release")
+        self._decide("accept", request_id="first-release")
         self.writer.move(
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
             target="done",
             reason="",
-            decision="release",
+            decision="accept",
             request_id="apply-first-release",
         )
 
         with self.assertRaisesRegex(TaskError, "only recorded on a card in Assessment") as raised:
-            self._decide("release", request_id="unowned-after-release")
+            self._decide("accept", request_id="unowned-after-release")
 
         self.assertEqual(raised.exception.code, "transition_forbidden")
 
     def test_mismatched_decision_replay_is_refused_before_assessment_admission(self) -> None:
         self._park()
-        self._decide("release", request_id="mismatched-after-release")
+        self._decide("accept", request_id="mismatched-after-release")
         self.writer.move(
             role="dispatcher",
             actor="d",
             reference="ummanu-468",
             target="done",
             reason="",
-            decision="release",
+            decision="accept",
             request_id="apply-mismatched-release",
         )
 
@@ -3848,8 +3848,8 @@ class AssessmentStateTests(CardStoreCase):
     def test_assessment_visit_accepts_one_canonical_decision_across_delivery_retries(self) -> None:
         self._park()
 
-        first = self._decide("release", request_id="decision-first-delivery")
-        replay = self._decide("release", request_id="decision-retried-delivery")
+        first = self._decide("accept", request_id="decision-first-delivery")
+        replay = self._decide("accept", request_id="decision-retried-delivery")
 
         self.assertFalse(first["replayed"])
         self.assertTrue(replay["replayed"])
@@ -3857,7 +3857,7 @@ class AssessmentStateTests(CardStoreCase):
         decisions = self.writer.audit.events("ummanu-468", kind="decided")
         self.assertEqual(len(decisions), 1)
         self.assertTrue(decisions[0]["data"]["assessment_visit"])
-        with self.assertRaisesRegex(TaskError, "already has a release decision") as raised:
+        with self.assertRaisesRegex(TaskError, "already has a accept decision") as raised:
             self._decide("rework", request_id="decision-conflicting-delivery")
         self.assertEqual(raised.exception.code, "decision_already_recorded")
 
@@ -3888,7 +3888,7 @@ class AssessmentStateTests(CardStoreCase):
             except TaskError as exc:
                 outcomes.append((kind, exc))
 
-        threads = [threading.Thread(target=decide, args=(kind,)) for kind in ("release", "rework")]
+        threads = [threading.Thread(target=decide, args=(kind,)) for kind in ("accept", "rework")]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -3913,7 +3913,7 @@ class AssessmentStateTests(CardStoreCase):
                         role="observer",
                         actor="observer",
                         reference="ummanu-468",
-                        kind="release",
+                        kind="accept",
                         body=body,
                         request_id="same-id-different-body",
                     )
@@ -3953,7 +3953,7 @@ class AssessmentStateTests(CardStoreCase):
             event("moved", actor="dispatcher", payload={"to": "validate"}),
             event("moved", actor="dispatcher", payload={"from": "assessment", "to": "issues"}),
             event("routing", actor="dispatcher"),
-            event("decided", actor="observer", payload={"decision": "release"}),
+            event("decided", actor="observer", payload={"decision": "accept"}),
         ):
             self.assertFalse(
                 is_significant_observer_event(
@@ -4033,7 +4033,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="observer",
                 actor="observer",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="  ",
                 request_id="empty-reason",
             )
@@ -4051,7 +4051,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="worker",
                 actor="w",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="ship it",
                 request_id="worker-decision",
             )
@@ -4064,7 +4064,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="observer",
                 actor="observer",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="ship it",
                 request_id="unparked-decision",
             )
@@ -4093,24 +4093,24 @@ class AssessmentStateTests(CardStoreCase):
                 role="po",
                 actor="operator",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="ship it",
                 request_id="po-decision",
             )
 
     def test_a_decision_moves_the_card_where_that_decision_goes(self) -> None:
-        """A recorded release paired with a move back to In progress is a rework nobody decided."""
+        """A recorded accept paired with a move back to In progress is a rework nobody decided."""
         self._park()
-        self._decide("release")
+        self._decide("accept")
 
-        with self.assertRaisesRegex(TaskError, "release decision moves the card to done") as raised:
+        with self.assertRaisesRegex(TaskError, "accept decision moves the card to done") as raised:
             self.writer.move(
                 role="dispatcher",
                 actor="d",
                 reference="ummanu-468",
                 target="in_progress",
                 reason="",
-                decision="release",
+                decision="accept",
                 request_id="release-to-in-progress",
             )
 
@@ -4145,7 +4145,7 @@ class AssessmentStateTests(CardStoreCase):
         """
         self._park()
 
-        self._decide("release", request_id="decision-performed-by-observer")
+        self._decide("accept", request_id="decision-performed-by-observer")
         with self.assertRaises(TaskError) as raised:
             self.writer.move(
                 role="observer",
@@ -4153,7 +4153,7 @@ class AssessmentStateTests(CardStoreCase):
                 reference="ummanu-468",
                 target="done",
                 reason="",
-                decision="release",
+                decision="accept",
                 request_id="observer-performs-release",
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
@@ -4167,7 +4167,7 @@ class AssessmentStateTests(CardStoreCase):
             reference="ummanu-468",
             target="done",
             reason="",
-            decision="release",
+            decision="accept",
             request_id="dispatcher-performs-release",
         )
         self.assertEqual(performed["task"]["state"], "done")
@@ -4186,7 +4186,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="observer",
                 actor="observer",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="ship it",
                 request_id="decision-without-a-sprint",
             )
@@ -4200,7 +4200,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="observer",
                 actor="observer",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="ship it",
                 request_id="decision-from-another-sprint",
             )
@@ -4221,7 +4221,7 @@ class AssessmentStateTests(CardStoreCase):
             role="observer",
             actor="observer",
             reference="ummanu-468",
-            kind="release",
+            kind="accept",
             body="deciding from this card's own head",
             request_id="decision-from-its-own-head",
         )
@@ -4236,7 +4236,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="observer",
                 actor="observer",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="deciding about a sprint I do not observe",
                 request_id="decision-from-another-head",
             )
@@ -4250,7 +4250,7 @@ class AssessmentStateTests(CardStoreCase):
                 role="observer",
                 actor="observer",
                 reference="ummanu-468",
-                kind="release",
+                kind="accept",
                 body="deciding from a head nobody bound",
                 request_id="decision-from-an-unbound-head",
             )
@@ -4300,17 +4300,17 @@ class AssessmentStateTests(CardStoreCase):
         read against the card and its destination like anybody else's."""
         self._park()
 
-        with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
+        with self.assertRaisesRegex(TaskError, "no accept decision is recorded"):
             self.writer.move(
                 role="po",
                 actor="operator",
                 reference="ummanu-468",
                 target="done",
                 reason="",
-                decision="release",
+                decision="accept",
                 request_id="po-claimed-release",
             )
-        self._decide("release")
+        self._decide("accept")
         with self.assertRaises(TaskError) as mismatched:
             self.writer.move(
                 role="po",
@@ -4318,7 +4318,7 @@ class AssessmentStateTests(CardStoreCase):
                 reference="ummanu-468",
                 target="in_progress",
                 reason="",
-                decision="release",
+                decision="accept",
                 sprint_override=True,
                 sprint_override_reason="stepping in on a reserved project",
                 request_id="po-mismatched-release",
@@ -4432,7 +4432,7 @@ class AssessmentStateTests(CardStoreCase):
                     "--role",
                     "observer",
                     "--kind",
-                    "release",
+                    "accept",
                     "--reason-file",
                     str(reason),
                     "--instance",
@@ -4451,7 +4451,7 @@ class AssessmentStateTests(CardStoreCase):
             "--to",
             "done",
             "--decision",
-            "release",
+            "accept",
             "--request-id",
             "cli-to",
         )
@@ -5556,7 +5556,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipFixture):
             role="observer",
             actor="observer",
             reference="ummanu-468",
-            kind="release",
+            kind="accept",
             body=body,
             request_id=request_id,
         )
@@ -5565,7 +5565,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipFixture):
         expected = {
             "report": ("card.reported", "report:done"),
             "verdict": ("card.verdict", "review:green"),
-            "decision": ("card.decided", "decision:release"),
+            "decision": ("card.decided", "decision:accept"),
         }
         for family, (kind, marker) in expected.items():
             with self.subTest(family=family):

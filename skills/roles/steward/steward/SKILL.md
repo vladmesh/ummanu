@@ -68,7 +68,7 @@ Run it from your workspace (your starting directory). It returns five kinds of s
   state file was replaced.
 - `stale`: cards stuck in Ready, In progress, Validate, Assessment or Blocked for longer than
   `TA_STEWARD_STALE_HOURS` (24h default). Nothing else watches Assessment, where a card waits on the
-  observer's release / rework / reslice decision. Your only move there is the escalation `task move --to
+  observer's accept / rework / reslice decision. Your only move there is the escalation `task move --to
   blocked` with a reason file; the decision itself belongs to the observer.
 - `resource_flip`: a resource's health changed since the previous run, to red or back to green, read from
   the verdict cache the production dispatcher writes. Each carries `last_transition` (from, to, both

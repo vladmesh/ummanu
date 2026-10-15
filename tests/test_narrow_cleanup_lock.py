@@ -546,12 +546,12 @@ class NarrowCleanupLockTests(unittest.TestCase):
 
         with (
             mock.patch.object(
-                assessment_decision, "recorded_decision", return_value=("release", "release", ())
+                assessment_decision, "recorded_decision", return_value=("accept", "accept", ())
             ),
             mock.patch.object(release_lifecycle.e2e_stage, "run_stage", return_value=None),
             mock.patch.object(release_lifecycle, "read_release_gate", return_value=(None, object())),
             mock.patch("ummanu.dispatch.gate_lifecycle.accept_green_gate", return_value=None),
-            mock.patch.object(release_lifecycle, "decision_pointer", return_value="release"),
+            mock.patch.object(release_lifecycle, "decision_pointer", return_value="accept"),
             mock.patch.object(release_lifecycle.attempt_accounting, "terminal_effect", side_effect=terminal),
         ):
             result = assessment_decision.advance_assessment(runtime, task, records, {}, "release-attempt")

@@ -2551,7 +2551,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green",
         )
         # The green verdict parks the card; the merge happens on the observer's release.
-        done = self._park_and_decide("release")
+        done = self._park_and_decide("accept")
 
         self.assertEqual(done["to"], "done")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "done")
@@ -3446,7 +3446,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         parked = self.runtime.production_state.load()["records"]["ummanu-510"]
         self.assertEqual(parked["gate_attestation"]["command_or_check_set_digest"], "b" * 64)
 
-        self._decide("release", request_id="attested-release")
+        self._decide("accept", request_id="attested-release")
         self.assertEqual(self.tick()["to"], "done")
         comments = self.reader.show("ummanu-510")["comments"]
         release_audit = next(item["body"] for item in comments if "release audit" in item["body"])
@@ -3501,7 +3501,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 request_id=self._review_verdict_request_id("green"),
             )
             self.assertEqual(self.tick()["to"], "assessment")
-            self._decide("release", request_id="opaque-release-decision")
+            self._decide("accept", request_id="opaque-release-decision")
             terminal = self.tick()
 
         self.assertEqual(terminal["to"], "done")
@@ -3514,7 +3514,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         outcome = outcomes[0].event
         self.assertFalse(outcomes[0].pending)
         self.assertEqual(outcome.data["verdict"], "green")
-        self.assertEqual(outcome.data["disposition"], "release")
+        self.assertEqual(outcome.data["disposition"], "accept")
         self.assertEqual(outcome.data["terminal_state"], "done")
         self.assertEqual(outcome.data["version"], 2)
         self.assertTrue(
@@ -4432,7 +4432,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.completed, [])
 
         # Now record the decision, so the broken effect is actually reached.
-        self._decide("release")
+        self._decide("accept")
 
         failed = self.tick()
 
@@ -4609,7 +4609,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green-release-pending-stall",
         )
         self.assertEqual(self.tick()["to"], "assessment")
-        self._decide("release")
+        self._decide("accept")
         self.assertEqual(self.tick()["action"], "merge-gate-pending")
         payload = self.runtime.production_state.load()
         record = payload["records"]["ummanu-510"]
@@ -4686,7 +4686,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green-audited",
         )
 
-        self.assertEqual(self._park_and_decide("release")["to"], "done")
+        self.assertEqual(self._park_and_decide("accept")["to"], "done")
 
         audit = task_audit_for(self.board)
         decided = audit.events("ummanu-510", kind="decided")[-1]
@@ -4697,7 +4697,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             and (event.get("transition") or {}).get("source") == "assessment"
         ]
         self.assertEqual(decided["kind"], "card.decided")
-        self.assertEqual(decided["data"]["decision"], "release")
+        self.assertEqual(decided["data"]["decision"], "accept")
         self.assertEqual(len(moved), 1)
         self.assertEqual(moved[0]["transition"]["target"], "done")
 
@@ -4719,7 +4719,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
         self.assertEqual(self.tick()["to"], "assessment")
         self.host.commit = "moved-under-the-park-c0ffee"
-        self._decide("release")
+        self._decide("accept")
 
         blocked = self.tick()
 
@@ -4738,7 +4738,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._drive_to_green_verdict()
         self.assertEqual(self.tick()["to"], "assessment")
-        self._decide("release")
+        self._decide("accept")
 
         def die_before_publishing(task: dict, record) -> None:
             raise OSError("the dispatcher died on its way into the merge")
@@ -4878,7 +4878,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(recovered["to"], "assessment")
         self.assertEqual(self.host.completed, [], "recovery merges nothing on its own")
-        self._decide("release")
+        self._decide("accept")
 
         released = self.tick()
 
@@ -5478,7 +5478,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("ummanu-510")["state"], "validate")
         self.assertEqual(self.host.completed, [])
 
-        released = self._park_and_decide("release")
+        released = self._park_and_decide("accept")
 
         self.assertEqual(released["to"], "done")
         self.assertEqual(self.host.completed, ["ummanu-510"])
@@ -5530,7 +5530,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green-release-transport",
         )
 
-        deferred = self._park_and_decide("release")
+        deferred = self._park_and_decide("accept")
 
         self.assertEqual(deferred["action"], "gate-transport-retry")
         self.assertEqual(deferred["step"], "assessment")
@@ -5559,7 +5559,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green-release-transport-spent",
         )
 
-        self.assertEqual(self._park_and_decide("release")["action"], "gate-transport-retry")
+        self.assertEqual(self._park_and_decide("accept")["action"], "gate-transport-retry")
         for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS - 2):
             self.assertEqual(self.tick()["action"], "gate-transport-retry")
 
@@ -5568,7 +5568,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
         reason = self._blocked_reason()
-        self.assertIn("Observer decision: release.", reason)
+        self.assertIn("Observer decision: accept.", reason)
         self.assertIn("transport failure, not a red gate", reason)
         self.assertIn("TLS handshake timeout", reason)
         self.assertEqual(self.host.completed, [])
@@ -5666,7 +5666,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green",
         )
 
-        result = self._park_and_decide("release")
+        result = self._park_and_decide("accept")
 
         self.assertEqual(result["to"], "done")
         self.assertEqual(self.host.completed, ["ummanu-510"])
@@ -5686,7 +5686,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green",
         )
 
-        self._park_and_decide("release")
+        self._park_and_decide("accept")
 
         self.assertIn("complete_green", self.host.calls)
         self.assertIn("teardown", self.host.calls)
@@ -5713,7 +5713,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._drive_to_green_verdict()
         if release:
             self.assertEqual(self.tick()["to"], "assessment")
-            self._decide("release")
+            self._decide("accept")
         self.host.gate_results = [HostError("gate backend failed")]
         action = "release-failed-blocked" if release else "merge-gate-blocked"
         attempt = self._pilot_record()["attempt_id"]
@@ -5954,7 +5954,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green-attempt-2",
         )
         self.assertEqual(
-            self._park_and_decide("release", request_id="decision-release-attempt-2")["to"], "done"
+            self._park_and_decide("accept", request_id="decision-release-attempt-2")["to"], "done"
         )
 
         card = self.reader.show("ummanu-510")
@@ -6701,7 +6701,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="review-green-pinned",
         )
 
-        done = self._park_and_decide("release")
+        done = self._park_and_decide("accept")
 
         self.assertEqual(done["to"], "done")
         self.assertEqual(self.host.completed, ["ummanu-510"])
@@ -7580,7 +7580,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             request_id="existing-verdict",
         )
 
-        result = self._park_and_decide("release")
+        result = self._park_and_decide("accept")
 
         self.assertEqual(result["to"], "done")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "done")

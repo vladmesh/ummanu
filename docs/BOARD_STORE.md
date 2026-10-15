@@ -816,6 +816,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0029_po_channel` | nullable typed PO wait on `sprint_resumes`, object CHECK; released six-field resumes, delivery cursors and audit are unchanged. Task PO execution assignment and per-run disposition use existing extension bags. Downgrade refuses while a typed PO wait exists. |
 | `0030_po_input_context` | nullable object metadata on `po_feed`; accepted queue context is copied with turn claim; historical bytes are unchanged; downgrade refuses to lose recorded delivery positions |
 | `0031_sprint_dod_items` | nullable DoD item array on `sprints`, array CHECK; every existing sprint stays NULL (free-text DoD, unstructured); downgrade refuses while any sprint has items |
+| `0032_accept_decision` | data only, `release_safety = "destructive"`: the observer's Assessment decision value `release` becomes `accept` in `task_comments.marker` (`decision:accept`) and, at any depth of `board_events.data` and `requests.intent`, under the keys `decision` and `disposition` and in a `decision:` `marker`; no column; the downgrade writes `release` back the same way |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -1209,7 +1210,7 @@ and restore reads stay outside latency-sensitive paths.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0031_sprint_dod_items`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0032_accept_decision`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

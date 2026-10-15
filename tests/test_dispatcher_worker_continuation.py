@@ -275,7 +275,7 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
                 self.runtime, self.task, self.record, self.records, self.payload, "tick"
             )
         reason = effect.call_args.kwargs["move_reason"]
-        self.assertIn("[decision:release]", reason)
+        self.assertIn("[decision:accept]", reason)
         self.assertNotIn(body, reason)
         with mock.patch.object(assessment_decision, "attempt_accounting", self.accounting):
             assessment_decision.reslice_parked(
@@ -1315,7 +1315,7 @@ class DecisionNativeReplayTests(unittest.TestCase):
         return {"event_id": result.event.event_id}
 
     def effect(self, decision, reason, request_id="decision-move"):
-        target = "done" if decision == "release" else "blocked"
+        target = "done" if decision == "accept" else "blocked"
         return attempt_accounting.terminal_effect(
             self.runtime,
             {"ref": "sample-1"},
@@ -1329,7 +1329,7 @@ class DecisionNativeReplayTests(unittest.TestCase):
         )
 
     def test_release_and_reslice_replay_owned_full_reason_and_new_pointer(self):
-        for decision in ("release", "reslice"):
+        for decision in ("accept", "reslice"):
             for original in (
                 "Observer decision: " + decision + ". Full released reason.",
                 "Observer decision: " + decision + ". See canonical-event.",
@@ -1390,7 +1390,7 @@ class DecisionNativeReplayTests(unittest.TestCase):
         self.assertEqual(self.record.report_generation, 2)
 
     def test_mismatched_native_identity_and_data_still_refuse(self):
-        self.effect("release", "original pointer")
+        self.effect("accept", "original pointer")
         owned = self.host.canon.committed("decision-move")
         for field, value in (
             ("ref", "other-1"),
@@ -1404,7 +1404,7 @@ class DecisionNativeReplayTests(unittest.TestCase):
                     mock.patch.object(self.host.canon, "event", return_value=foreign),
                     self.assertRaisesRegex(ValueError, "another operation or payload"),
                 ):
-                    self.effect("release", "new pointer")
+                    self.effect("accept", "new pointer")
                 self.assertEqual(self.host.canon.committed("decision-move"), owned)
                 self.assertEqual(self.host._move_card.call_count, 1)
 

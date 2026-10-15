@@ -161,7 +161,7 @@ after an observer `rework`) is a fresh one. Its path is:
 
 ```text
 report:done → Validate → reviewer, only if review: required
-  → Assessment and an observer release/rework/reslice decision, if the sprint parks for decisions;
+  → Assessment and an observer accept/rework/reslice decision, if the sprint parks for decisions;
     otherwise release at once
   → completion evidence check → teardown of the workspace and heads → Done
 ```
@@ -173,7 +173,7 @@ one for any kind. A `code` card with `skipped` still runs the full mechanical ga
 release; it only has no reviewer step. A release without a reviewer records the verdict as `missing`.
 
 **Completion evidence.** Every way a card reaches Done (an automatic release outside a parking
-sprint, an observer release from Assessment, and a release replayed after a lost tick) passes one
+sprint, an observer accept from Assessment, and a release replayed after a lost tick) passes one
 dispatcher check. For `code` the evidence is the merge the release performs. For `research` and
 `infra` it is a marked comment on the card written by the dispatcher; a comment from any other role
 that carries the marker is not evidence. Without it the card goes to Blocked, not Done, with the
@@ -218,7 +218,7 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   is listed, with that path, under `## Not transferred` at the end of the copied `report.md`; a file
   left behind never Blocks the card. It then writes one `[completion:research]` comment
   whose request id is keyed on the report generation. The observer therefore decides with the report
-  already in knowledge, and a replayed tick writes and comments nothing new. An observer release
+  already in knowledge, and a replayed tick writes and comments nothing new. An observer accept
   repeats the transfer, a no-op for a card parked green and the transfer itself for a card parked by
   a red verdict. A rework round's next report replaces the directory's whole contents and writes a
   fresh link; the checkpoint history keeps the earlier rounds.
@@ -1428,19 +1428,19 @@ A card parks only where a decision can come from: its sprint is open and declare
 head. A card with no linked sprint, or whose sprint declares `--observer none` or has closed, acts on
 its verdict on its own tick.
 
-The observer records the decision; the dispatcher performs it: merge and `assessment -> done` for a
-release, a new worker round and `assessment -> in_progress` for a rework, `assessment -> blocked` for
+The observer records the decision; the dispatcher performs it: merge and `assessment -> done` for an
+accept, a new worker round and `assessment -> in_progress` for a rework, `assessment -> blocked` for
 a reslice.
 
 ```bash
 python3 -P -m ummanu task decide --role observer --ref PROJECT-N \
-  --kind release --reason-file REASON.md --request-id REQUEST_ID
+  --kind accept --reason-file REASON.md --request-id REQUEST_ID
 ```
 
-`--kind` is `release`, `rework` or `reslice`; the reason is required. Only the observer decides, and
+`--kind` is `accept`, `rework` or `reslice`; the reason is required. Only the observer decides, and
 only about a card whose project an open sprint reserves; otherwise it is refused.
 
-A move out of Assessment carries the decision it performs, with one destination each: `release` →
+A move out of Assessment carries the decision it performs, with one destination each: `accept` →
 Done, `rework` → In progress, `reslice` → Blocked. A `--decision` the card's audit does not hold since
 it entered the column, or paired with the wrong destination, is refused whoever passes it. The
 dispatcher must carry a decision: its move to Done or In progress without `--decision` is refused, as
@@ -2937,7 +2937,7 @@ lifecycle owner only after its terminal effect is confirmed. No card move, merge
 gate, observer decision or recovery decision reads it.
 
 Dispatcher terminal effects cross one forward-only typed taxonomy before observational fields are
-written. Disposition axis: `release|rework|reslice|blocked|drop|operator_stop`; blocked-reason axis:
+written. Disposition axis: `accept|rework|reslice|blocked|drop|operator_stop`; blocked-reason axis:
 `implementation|review|task_contract|gate|provider|infrastructure|operator|other`. The transition keeps
 the taxonomy's `source_evidence` beside its normalized reason (a worker `wrong_task_definition` report
 maps to `task_contract` with that source token; `external_fact` stays source evidence under `other`).

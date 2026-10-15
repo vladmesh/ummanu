@@ -9,4 +9,4 @@ Mechanical failures, merge conflicts, unavailable required evidence, or unrecove
 
 `Assessment` is a durable wait for a human-direction decision, not a queue for another machine check. For sprint work with an active observer, a substantive reviewer verdict parks the card in Assessment after the mechanical gates have passed. The retained worker workspace is preserved while the decision is pending.
 
-The three Assessment decisions are `release`, `rework`, and `reslice`: release permits the release effect, rework starts another work round, and reslice sends the card to Blocked for replanning. A decision is recorded before its effect, so a reviewer verdict alone never authorizes a merge or a new round.
+The three Assessment decisions are `accept`, `rework`, and `reslice`: accept permits the release effect, rework starts another work round, and reslice sends the card to Blocked for replanning. A decision is recorded before its effect, so a reviewer verdict alone never authorizes a merge or a new round.
