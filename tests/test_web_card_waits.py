@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import re
-import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, ClassVar
@@ -22,11 +21,9 @@ from jsonschema import Draft202012Validator
 from tests.po_fake_store import FakePoStore
 from tests.web_fakes import Recording
 from ummanu.board.e2e_record import e2e_view
-from ummanu.po import token as po_token
 from ummanu.web import page_assets, page_po, pages
 from ummanu.web.app import WebApp
 from ummanu.webproto.errors import RuntimeUnavailable
-from ummanu.webproto.po_auth import PoTokenLayer
 from ummanu.webproto.po_ops import PoLayer
 from ummanu.webproto.sprint_reads import WAITING_ON_KINDS, card_waits
 
@@ -129,11 +126,6 @@ def delegated_details(html: str) -> tuple[str, str]:
 
 class PageFixture(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.data = self.tmp / "data"
-        self.data.mkdir()
-        po_token.ensure_token(self.data)
-        self.cookie = po_token.cookie_value(po_token.read_token(self.data))
         self.po = Recording(
             po_session_titles={
                 "kind": "po_session_titles",
@@ -163,8 +155,7 @@ class PageFixture(unittest.TestCase):
             Recording(),
         ]
         po_layer = self.po if po == "default" else po
-        auth = PoTokenLayer(self.tmp, data_dir=self.data) if po_layer is not None else None
-        return WebApp(*layers, po_auth=auth, po=po_layer)
+        return WebApp(*layers, po=po_layer)
 
     def card_page(self, document: dict[str, Any], **options: Any) -> str:
         response = self.app(Recording(task_snapshot=document), **options).handle(
@@ -174,9 +165,7 @@ class PageFixture(unittest.TestCase):
         return response.body.decode()
 
     def po_get(self, path: str, reads: Recording, *, query: str = "") -> Any:
-        return self.app(reads).handle(
-            "GET", path, query=query, headers={"Cookie": f"{po_token.COOKIE_NAME}={self.cookie}"}
-        )
+        return self.app(reads).handle("GET", path, query=query)
 
 
 class CardOriginTests(PageFixture):

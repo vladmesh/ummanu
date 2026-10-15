@@ -25,6 +25,7 @@ import json
 import os
 import socket
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -205,6 +206,17 @@ def write_restart_marker(data_dir: Path | str, reason: str) -> Path:
     return path
 
 
+def read_restart_marker(data_dir: Path | str) -> dict[str, str] | None:
+    """The pending restart request: `reason` and `requested_at` (the marker's mtime); None without one."""
+    path = restart_marker_path(data_dir)
+    try:
+        requested_at = datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    return {"reason": str(document["reason"]), "requested_at": requested_at}
+
+
 def request_restart(
     data_dir: Path | str, reason: str, *, client: PoServiceClient | None = None
 ) -> RestartAnswer:
@@ -237,6 +249,7 @@ __all__ = [
     "ServiceRefused",
     "ServiceUnavailable",
     "process_receipt_path",
+    "read_restart_marker",
     "request_restart",
     "restart_marker_path",
     "service_dir",

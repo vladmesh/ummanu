@@ -657,26 +657,8 @@ psql "$UMMANU_DB_READ_URL" -c "SELECT session_id, seq, state, reason FROM po_tur
 
 `/po` is a client of the PO service ([The PO service](#the-po-service)): its pages read the board store
 and the queue, and every create, send, stop and close goes over the service's socket. `ummanu
-web-serve` builds no runner and recovers no turn. A PO head is a shell on this host, so `/po` has its own token on top of the
-front's password.
-
-**The token** is `DATA_DIR/po-web-token`: one line, mode 0600, owned by the runtime user, outside
-`DATA_DIR/po`. The `po-token` step of install and upgrade creates it from `secrets` (256 bits) when it
-is absent and never rewrites an existing one. Read it on the host:
-
-```bash
-sudo -u RUNTIME_USER cat DATA_DIR/po-web-token
-```
-
-**Rotate** by deleting the file and running the step again (`ummanu upgrade`, or install). Every
-browser cookie issued under the old token stops working on the next request; nothing needs a restart.
-
-**Logging in.** Open `/po`, enter the token. The form posts to `/po/login`, which compares it with
-`hmac.compare_digest` and sets cookie `ummanu_po`: `HttpOnly; SameSite=Strict; Path=/po`, 30 days,
-plus `Secure` when the request came through the TLS front (the front sets `X-Forwarded-Proto: https`).
-The cookie value is an HMAC keyed by the token, never the token. Without a valid cookie every `/po`
-route answers 401 (a page with the login form, or JSON `po_token_required`) before the PO service or the
-board store is touched; a missing token file answers 503. Routes: [Protocols](PROTOCOLS.md#routes).
+web-serve` builds no runner and recovers no turn. `/po` is behind the front's password like every other
+page. Routes: [Protocols](PROTOCOLS.md#routes).
 
 **The page.** `/po` lists open sessions, newest activity first, and opens a new one with a CLI, a model
 from the list below and a reasoning effort (the CLI's first offered one preselected; there is no
@@ -909,8 +891,7 @@ and only from the installation named by `--base-url`: three dashboard pages and,
 an operator's browser is doing, the `/po` overview and one session's JSON. It makes no POST and
 starts no head. It also cannot be sent anywhere else: its one opener follows no redirect — a 3xx
 from any route ends the run instead — and reads no `http_proxy`/`https_proxy` variable, because
-either would time a different installation under this route's name and hand it this installation's
-PO cookie.
+either would time a different installation under this route's name.
 
 It prints, with the Definition of Done threshold beside each number and whether that number meets it:
 
@@ -1000,7 +981,7 @@ the scenario the DoD names.** So the exit statuses are
 
 Everything else includes: the installation is unreachable; any request on any route answers
 non-2xx, including a 3xx (a missing route, a refusal, a redirect, or the transport's contained 500
-under the load being measured); the data directory or the PO token cannot be resolved or read; a
+under the load being measured); the data directory cannot be resolved; a
 session's JSON cannot be read for whether it is running, at selection or in any later poll; a
 poll started more than 100 ms off its three-second schedule, either way; a round ran with no poll
 issued for it; the installation has **no open PO session**; and
@@ -1019,8 +1000,7 @@ makes on this installation — polled on the same cadence. The output names it a
 and every concurrent label carries `substitute poll`, so such a run is never read as the DoD
 scenario itself. An installation with no open session at all still exits 2.
 
-The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
-command as the runtime user. The data directory is resolved the way the product resolves it:
+The data directory is resolved the way the product resolves it:
 `--data-dir`, then `UMMANU_DATA_DIR`, then `UMMANU_INSTANCE`, then the instance the CLI
 itself defaults to (`ummanu.onboarding.DEFAULT_INSTANCE`, read through
 `ummanu.config.instance_data_dir`). That last step is what makes the one command above work in
@@ -3175,7 +3155,6 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `pipeline-state` | restore the dispatcher's untracked run journals (`state/pipeline/`) from the instance checkpoint; a live journal that does not extend the checkpoint fails the step and is never overwritten |
 | `role-skills` | `role_skills sync` into shell skill directories |
 | `po-workspace-owner` | hand the whole PO workspace, delivered skills included, to the runtime user |
-| `po-token` | create `DATA_DIR/po-web-token` (0600, runtime user) if absent; an existing token is never rewritten |
 | `web-front-config` | render `DATA_DIR/webfront/Caddyfile` from `host.web_front.sites` before `host` starts the front; with no sites in instance config the existing file is kept byte for byte |
 | `host` | `reconcile apply`: units from `packaging/systemd` |
 | `memory` | start a stopped memory service; restart an active one whose process receipt is missing, belongs to another process or binds another revision, source, dependency digest, `MEMORY_MODEL` or pack digest (or whose code, unit or pack this run changed); then a bounded `memory_list` read and a new receipt |

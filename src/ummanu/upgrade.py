@@ -61,7 +61,6 @@ from ummanu.installation.upgrade.workspaces import (
     step_interactive_workspace,
     step_memory_clients,
     step_memory_pack,
-    step_po_token,
     step_po_workspace,
     step_po_workspace_owner,
     step_registries,
@@ -93,7 +92,6 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pipeline_state,
     step_role_skills,
     step_po_workspace_owner,
-    step_po_token,
     # Before the host step: it enables and starts the front, whose ExecStartPre validates this file.
     step_web_front_config,
     step_host,

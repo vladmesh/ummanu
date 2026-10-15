@@ -11,7 +11,7 @@ from ummanu.web.page_overview import (
     projects_page as projects_page,
     sprints_page as sprints_page,
 )
-from ummanu.web.page_po import po_login as po_login, po_page as po_page, po_session as po_session
+from ummanu.web.page_po import po_page as po_page, po_session as po_session
 from ummanu.web.page_shell import error as error, redirect as redirect
 from ummanu.web.page_sprint import sprint as sprint, sprint_form as sprint_form
 from ummanu.web.page_values import (

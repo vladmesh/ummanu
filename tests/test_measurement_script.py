@@ -285,8 +285,8 @@ class AgainstAStubDashboard(unittest.TestCase):
         a dashboard that breaks under the load being measured.
 
         `redirect` is `(path, location)`: that path answers 302 and points somewhere else, which is
-        how a case models a front, a proxy or a wrong `--base-url` trying to send the script — and
-        the PO cookie it carries — to another installation.
+        how a case models a front, a proxy or a wrong `--base-url` trying to send the script to
+        another installation.
 
         `listed` is the `/po` overview's sessions as `(id, running)` pairs, in the order the page
         lists them; the default is the product's interesting case, one session with a turn running.
@@ -402,8 +402,7 @@ class AgainstAStubDashboard(unittest.TestCase):
                 measure, "resolve_data_dir", return_value=(Path("/nonexistent/data"), "a test fixture")
             )
         )
-        # What these two resolve to for real is exercised in `DataDirectoryResolutionTests`.
-        self.enterContext(mock.patch.object(measure, "po_cookie", return_value="ummanu_po=deadbeef"))
+        # What this resolves to for real is exercised in `DataDirectoryResolutionTests`.
         self.clock: VirtualClock | None = None
         self.quiet_between_rounds = True
         if self.VIRTUAL:
@@ -627,12 +626,12 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         self.outside = self.server  # type: ignore[attr-defined]
         return outside
 
-    def test_a_redirect_is_refused_and_the_po_cookie_never_leaves_the_named_installation(self) -> None:
+    def test_a_redirect_is_refused_and_no_request_leaves_the_named_installation(self) -> None:
         """The reviewer's two-server reproduction, as the acceptance criterion states it.
 
         `urllib.request.urlopen` follows redirects, so a 302 on `/po` used to be recorded as a 200
-        for `/po` — a route that did not answer — and the derived PO cookie was delivered to
-        whatever the `Location` named. Here the redirect target is a second local server, and the
+        for `/po`, a route that did not answer, and the request was sent to whatever the
+        `Location` named. Here the redirect target is a second local server, and the
         two things asserted are that the run exits 2 and that the second server was never spoken
         to at all.
         """
@@ -648,7 +647,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         self.assertEqual(
             self.outside.seen,  # type: ignore[attr-defined]
             [],
-            "the redirect target received a request, so the cookie left the named installation",
+            "the redirect target received a request, so the run left the named installation",
         )
 
     def test_a_redirect_on_any_route_of_the_inventory_is_unmeasurable(self) -> None:
@@ -687,11 +686,10 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             spec.loader.exec_module(module)
         return module
 
-    def test_a_proxy_in_the_environment_never_receives_the_request_or_the_cookie(self) -> None:
+    def test_a_proxy_in_the_environment_never_receives_the_request(self) -> None:
         """Criterion 2's other door: `build_opener` keeps the default `ProxyHandler`.
 
-        With `http_proxy` set, that handler sends every request — and the `Cookie` header the `/po`
-        reads carry — to the proxy, while the output still names the base URL. The reviewer
+        With `http_proxy` set, that handler sends every request to the proxy, while the output still names the base URL. The reviewer
         reproduced it against a recording proxy on this interpreter. Here the second local server
         is the proxy, the script is imported with the variables already set, and the assertion is
         that the proxy is never spoken to at all while the installation answers normally.
@@ -702,14 +700,14 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             {"http_proxy": proxy, "HTTP_PROXY": proxy, "https_proxy": proxy, "all_proxy": proxy}
         )
 
-        sample = fresh.fetch(base, measure.PO_OVERVIEW, cookie="ummanu_po=probe")
+        sample = fresh.fetch(base, measure.PO_OVERVIEW)
 
         self.assertEqual(sample.status, 200)
         self.assertIn(("GET", measure.PO_OVERVIEW), self.server.seen)  # type: ignore[attr-defined]
         self.assertEqual(
             self.outside.seen,  # type: ignore[attr-defined]
             [],
-            "the proxy received the request, and the PO cookie with it",
+            "the proxy received the request",
         )
 
     def test_a_whole_run_under_a_proxy_environment_stays_on_the_named_installation(self) -> None:
@@ -723,7 +721,6 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             mock.patch.object(
                 fresh, "resolve_data_dir", return_value=(Path("/nonexistent/data"), "a test fixture")
             ),
-            mock.patch.object(fresh, "po_cookie", return_value="ummanu_po=deadbeef"),
             mock.patch.object(fresh, "WARM_REQUESTS", 2),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
@@ -739,7 +736,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         base = self.serve(redirect=("/", f"{outside}/elsewhere"))
 
         with self.assertRaises(measure.Unmeasurable) as refused:
-            measure.fetch(base, "/", cookie="ummanu_po=deadbeef")
+            measure.fetch(base, "/")
 
         self.assertIn("302", str(refused.exception))
         self.assertEqual(self.outside.seen, [])  # type: ignore[attr-defined]
@@ -821,7 +818,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
                 answered.set()
             return sample
         with mock.patch.object(measure, "fetch", side_effect=observe_poll), measure.SessionPoll(
-                base, scenario.poll_target, scenario.cookie) as poll:
+                base, scenario.poll_target) as poll:
             self.clock.demand(1)  # type: ignore[union-attr]
             self.assertTrue(answered.wait(5), "the selected running session was never polled")
         poll.check()
@@ -1084,7 +1081,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
 
     def test_a_poll_counts_as_in_flight_only_while_it_actually_was(self) -> None:
         """Interval overlap, from recorded windows: started before the end, ended after the start."""
-        poll = measure.SessionPoll("http://127.0.0.1:1", "/po/api/sessions/x", "c")
+        poll = measure.SessionPoll("http://127.0.0.1:1", "/po/api/sessions/x")
         poll.windows = [(0.0, 1.0), (5.0, 6.0), (9.5, 10.5), (20.0, 21.0)]
 
         # A round from 10.0 to 12.0: the third poll was still in flight when it began.
@@ -1597,8 +1594,7 @@ class RoundsUnderThePollTests(AgainstAStubDashboard):
 
     def test_the_no_poll_baseline_asks_nothing_of_po_and_says_so(self) -> None:
         base = self.serve()
-        with mock.patch.object(measure, "po_cookie", side_effect=AssertionError("no token is read")):
-            code, text = self.run_main(base, "--no-poll")
+        code, text = self.run_main(base, "--no-poll")
 
         self.assertEqual(code, measure.EXIT_MET, text)
         self.assertIn("/po poll: none", text)
@@ -1657,7 +1653,7 @@ class RealClockSmokeTests(AgainstAStubDashboard):
         with (
             mock.patch.object(measure, "POLL_INTERVAL_SECONDS", 0.05),
             mock.patch.object(measure, "fetch", side_effect=counted),
-            measure.SessionPoll(base, scenario.poll_target, scenario.cookie) as poll,
+            measure.SessionPoll(base, scenario.poll_target) as poll,
         ):
             item = measure.measure_concurrent(base, poll)
             # A bound on a hang, not a measurement: the timer keeps polling on its own.
@@ -1674,11 +1670,9 @@ class RealClockSmokeTests(AgainstAStubDashboard):
 class DataDirectoryResolutionTests(unittest.TestCase):
     """Where the documented command finds the installation, with nothing in the environment.
 
-    The reviewer ran `python3 scripts/measure_dashboard.py` in an ordinary checkout shell on this
-    host. That shell does not inherit the service unit's `UMMANU_DATA_DIR` or
-    `UMMANU_INSTANCE`, so the script resolved no data directory, could not read the PO token,
-    and measured the concurrency without the poll while an open session existed. It now falls
-    through to the instance the CLI itself defaults to, read with the product's own resolution.
+    An ordinary checkout shell does not inherit the service unit's `UMMANU_DATA_DIR` or
+    `UMMANU_INSTANCE`, so the script falls through to the instance the CLI itself defaults to,
+    read with the product's own resolution.
     """
 
     def instance(self) -> tuple[Path, Path]:
@@ -1747,8 +1741,8 @@ class MeasurementScriptDocumentationTests(unittest.TestCase):
             if isinstance(node, ast.Import)
             for alias in node.names
         }
-        # `ummanu` is this repository, not a dependency: the PO cookie rule is imported from the
-        # product rather than copied. Everything else has to be in the standard library.
+        # `ummanu` is this repository, not a dependency: the data directory rule is imported from
+        # the product rather than copied. Everything else has to be in the standard library.
         outside = imported - set(sys.stdlib_module_names) - {"ummanu", ""}
         self.assertEqual(outside, set())
 
