@@ -60,7 +60,13 @@ from ummanu.board.sprint_write import (
     SprintMutationReceipt,
     SprintWriteSnapshot,
 )
-from ummanu.board.task_protocol.rows import _digest, _now, _rfc3339, admit_role, is_significant_observer_event
+from ummanu.board.task_protocol.rows import (
+    _digest,
+    _now,
+    _rfc3339,
+    admit_role,
+    is_significant_observer_event,
+)
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.kernel.errors import TaskError
 from ummanu.kernel.sprint_policy import (
@@ -87,6 +93,7 @@ from ummanu.sprint_observer import (
     installed_head_profiles,
     is_executable,
     parse_observer,
+    pinned_executor,
     stored_executors,
 )
 from ummanu.tasks import TaskReader, task_audit_for
@@ -1749,6 +1756,73 @@ class SprintWriter(SprintLifecycleMixin):
             mutation,
         )
 
+    def set_executors(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        worker: str | None = None,
+        reviewer: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-pin an open sprint's worker and/or reviewer profile; role `po` only. A role left
+        out keeps its pin, and a card already cut keeps the profiles it was written with.
+        """
+        self._role(role, {"po"}, actor=actor)
+        if worker is None and reviewer is None:
+            raise TaskError("validation", "sprint executors needs --worker, --reviewer or both", 2)
+        stated = self._executor_intent(worker=worker, reviewer=reviewer)
+        return self._set_executors_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            pins={executor: profile for executor, profile in stated.items() if profile},
+            request_id=request_id or str(uuid.uuid4()),
+        )
+
+    @_sql_atomic
+    def _set_executors_atomic(
+        self, *, role: str, actor: str, reference: str, pins: dict[str, str], request_id: str
+    ) -> dict[str, Any]:
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        previous: dict[str, str] = {}
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("pins")) != ("executors_set", reference, pins):
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a re-pin is "
+                    "repeated only with the same sprint, --worker and --reviewer",
+                    2,
+                )
+        else:
+            sprint = self.reader.show(reference)
+            status = str(sprint.get("status") or "")
+            if status != SprintState.OPEN.value:
+                raise TaskError("closed", f"sprint {reference} is {status}; its executors are final", 3)
+            previous = {executor: pinned_executor(sprint, executor) for executor in pins}
+            if previous == pins:
+                return {"action": "already_set", "sprint": sprint, "event_id": None}
+
+        def mutation(sprint: SprintWriteSnapshot) -> None:
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(sprint),
+                values={EXECUTOR_FIELDS[executor]: encode_executor(profile) for executor, profile in pins.items()},
+            )
+
+        return self._write(
+            "executors_set",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"pins": pins, "previous": previous},
+            mutation,
+        )
+
     def _decision_inputs(self, entries: Any) -> list[dict[str, Any]]:
         try:
             parsed = owner_decisions.parse_decisions(entries)
@@ -2403,6 +2477,7 @@ class SprintWriter(SprintLifecycleMixin):
             "production_allowed",
             "owner_decisions_recorded",
             "resume_recorded",
+            "executors_set",
         }:
             raise TaskError("closed", "sprint is closed", 3)
         event = self._event(kind, role, actor, reference, request_id, payload, sprint)

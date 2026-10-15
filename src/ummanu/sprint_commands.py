@@ -229,7 +229,35 @@ def add_sprint_subcommands(subparsers) -> None:
     decisions.add_argument("--request-id")
     _add_data_dir_args(decisions)
     decisions.set_defaults(handler=run_owner_decisions)
+    _add_po_edit_subcommands(commands)
     sprint.set_defaults(handler=usage_handler("sprint subcommand required"))
+
+
+def _add_po_edit_subcommands(commands) -> None:
+    """The PO's edits of an open sprint. Every board role parses: the writer admits `po` only and
+    answers the others with `role_forbidden`.
+    """
+    executors = commands.add_parser(
+        "executors",
+        help="PO only: re-pin the worker and/or reviewer profile of an open sprint; cards cut after it "
+        "run on the new pins",
+    )
+    for executor in ("worker", "reviewer"):
+        executors.add_argument(
+            f"--{executor}", help=f"head profile the sprint's next cards run their {executor} on; omit it to keep the pin"
+        )
+    _add_po_edit_arguments(executors, run_executors)
+
+
+def _add_po_edit_arguments(
+    command: argparse.ArgumentParser, handler: Callable[[argparse.Namespace], int]
+) -> None:
+    command.add_argument("--ref", required=True)
+    command.add_argument("--role", required=True, choices=tuple(role.value for role in Role))
+    command.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
+    command.add_argument("--request-id")
+    _add_data_dir_args(command)
+    command.set_defaults(handler=handler)
 
 
 def _runs(minimum: int) -> Callable[[str], int]:
@@ -544,6 +572,20 @@ def run_e2e_budget(args: argparse.Namespace) -> int:
             reference=args.ref,
             add=args.add,
             authorized_by=args.authorized_by,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_executors(args: argparse.Namespace) -> int:
+    return _write(
+        args,
+        lambda writer: writer.set_executors(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            worker=args.worker,
+            reviewer=args.reviewer,
             request_id=args.request_id,
         ),
     )

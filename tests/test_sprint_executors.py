@@ -280,6 +280,116 @@ class SprintCardExecutorTests(SprintFixture):
                 self.assertEqual(card["routing"]["review_head_override"], review or None)
 
 
+class SprintExecutorRepinTests(SprintFixture):
+    """`sprint executors`: the PO re-pins an open sprint, and only cards cut after it follow."""
+
+    def _card(self, sprint: str, request_id: str, **kwargs) -> dict:
+        return TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer",
+            actor="observer",
+            project="ummanu",
+            task_type="code",
+            title="work",
+            target="ready",
+            sprint=sprint,
+            request_id=request_id,
+            **kwargs,
+        )["task"]
+
+    def _repin(self, reference: str, request_id: str, **pins: str) -> dict:
+        return self.writer.set_executors(
+            role="po", actor="po", reference=reference, request_id=request_id, **pins
+        )
+
+    def _cli(self, *argv: str) -> tuple[int, str]:
+        output, errors = io.StringIO(), io.StringIO()
+        with self.board_injected(), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main(
+                ["sprint", "executors", *argv, "--data-dir", self.tmp.name, "--instance", str(self.instance)]
+            )
+        return code, output.getvalue() + errors.getvalue()
+
+    def test_a_swap_moves_the_next_card_and_leaves_the_cut_one(self) -> None:
+        reference = self._create(goal="swap", worker="codex-observer", reviewer="claude-observer")["sprint"][
+            "ref"
+        ]
+        before = self._card(reference, "before")
+
+        code, output = self._cli(
+            "--ref", reference, "--role", "po", "--actor", "po", "--request-id", "swap",
+            "--worker", "claude-observer", "--reviewer", "codex-observer",
+        )
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual(
+            self.sprint(reference)["executors"],
+            {"worker": executor_pinned("claude-observer"), "reviewer": executor_pinned("codex-observer")},
+        )
+        after = self._card(reference, "after")
+        self.assertEqual(
+            (after["routing"]["head_override"], after["routing"]["review_head_override"]),
+            ("claude-observer", "codex-observer"),
+        )
+        with self.assertRaises(TaskError) as raised:
+            self._card(reference, "old-pin", head="codex-observer")
+        self.assertEqual(raised.exception.code, "sprint_executor_pinned")
+        kept = TaskWriter(self.client, data_dir=self.tmp.name).reader.show(before["ref"])  # type: ignore[arg-type]
+        self.assertEqual(kept["routing"]["head_override"], "codex-observer")
+        [event] = SqlTaskAudit(self.client).events(reference, kind="executors_set")
+        self.assertEqual(
+            event["payload"],
+            {
+                "pins": {"worker": "claude-observer", "reviewer": "codex-observer"},
+                "previous": {"worker": "codex-observer", "reviewer": "claude-observer"},
+            },
+        )
+
+    def test_a_role_left_out_keeps_its_pin_and_an_unpinned_role_can_gain_one(self) -> None:
+        reference = self._create(goal="one role", worker="codex-observer")["sprint"]["ref"]
+
+        self._repin(reference, "reviewer-only", reviewer="claude-observer")
+
+        self.assertEqual(
+            self.sprint(reference)["executors"],
+            {"worker": executor_pinned("codex-observer"), "reviewer": executor_pinned("claude-observer")},
+        )
+
+    def test_a_repeat_replays_and_a_conflicting_or_empty_request_is_refused(self) -> None:
+        reference = self._create(goal="replay", worker="codex-observer")["sprint"]["ref"]
+        first = self._repin(reference, "swap", worker="claude-observer")
+
+        self.assertEqual(self._repin(reference, "swap", worker="claude-observer")["event_id"], first["event_id"])
+        self.assertEqual(self._repin(reference, "again", worker="claude-observer")["action"], "already_set")
+        refusals = (
+            ({"request_id": "swap", "worker": "codex-observer"}, "validation"),
+            ({"request_id": "nothing"}, "validation"),
+            ({"request_id": "unknown", "worker": "retired-observer"}, "validation"),
+            ({"request_id": "none", "reviewer": "none"}, "validation"),
+        )
+        for call, code in refusals:
+            with self.subTest(call=call):
+                with self.assertRaises(TaskError) as raised:
+                    self.writer.set_executors(role="po", actor="po", reference=reference, **call)
+                self.assertEqual(raised.exception.code, code)
+        with self.assertRaises(TaskError) as raised:
+            self.writer.set_executors(
+                role="observer", actor="observer", reference=reference, worker="codex-observer"
+            )
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertEqual(len(SqlTaskAudit(self.client).events(reference, kind="executors_set")), 1)
+        self.assertEqual(self.sprint(reference)["executors"]["worker"], executor_pinned("claude-observer"))
+
+    def test_a_closed_sprint_is_not_repinned(self) -> None:
+        reference = self._create(goal="closed")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=reference, decisions=KEEP_THE_ISSUE_OPEN)
+
+        with self.assertRaises(TaskError) as raised:
+            self._repin(reference, "late", worker="codex-observer")
+
+        self.assertEqual(raised.exception.code, "closed")
+        self.assertEqual(SqlTaskAudit(self.client).events(reference, kind="executors_set"), [])
+
+
 class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
     """The pins through the entity's own recovery path: export, parity, restore.
 

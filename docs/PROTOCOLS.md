@@ -2277,6 +2277,7 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
 | `e2e_budget_raised` | `refused` — `closed`, exit status `3` |
+| `executors_set` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
 | `production_allowed` | `refused` — `closed`, exit status `3` |
 | `owner_decisions_recorded` | `refused` — `closed`, exit status `3` |
@@ -2463,6 +2464,19 @@ read substitutes `role_defaults`, an empty string or `null`, and no pin is infer
 option. A named profile is resolved against the head registry at `sprint create`, before any row,
 field or audit event; an unknown profile or unreadable registry is refused. `sprint reopen` does not
 restate pins; they survive a close.
+
+The PO re-pins an open sprint with
+
+```bash
+python3 -P -m ummanu sprint executors --ref <sprint> --role po [--worker HEAD] [--reviewer HEAD] [--request-id ID]
+```
+
+At least one option; a role left out keeps its pin. The profiles are checked as at create, the write
+holds the admission lock and records one `executors_set` audit event (`pins`, `previous`). Cards cut
+after it run on the new pins; a card already cut keeps the profiles it was written with until a
+`task edit` restates them. A repeat of the request id replays, the same request id with other pins is
+`validation`, pins equal to the stored ones answer `already_set` with no event, and a sprint that is not
+open is refused (`closed`).
 
 The observer launch document prints both roles in an `## Executors` section: the pinned profile, or
 that the owner fixed none and the observer chooses per card.
