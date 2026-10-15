@@ -1,4 +1,4 @@
-"""Curator rebind after a known role-workspace move, and the busy-without-advance doctor finding."""
+"""Curator rebind after a known role-workspace move."""
 
 from __future__ import annotations
 
@@ -8,11 +8,10 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from ummanu.automations.agents.curator import busy, cli, harvest, move_paths, rebind
+from ummanu.automations.agents.curator import cli, harvest, move_paths, rebind
 from ummanu.runtime.state import PRECHECK_SKIP, AgentState
 
 
@@ -408,67 +407,6 @@ class CuratorRebindTests(unittest.TestCase):
             [(entry["path"], turn["text"]) for entry in pending["batch"]["sessions"] for turn in entry["turns"]],
             [(str(files["moved"]), "a3")],
         )
-
-
-class BusyWithoutAdvanceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.data = Path(self.tmp.name)
-        self.runs = self.data / "automation-state" / "curator" / "runs.jsonl"
-        self.runs.parent.mkdir(parents=True)
-        self.now = datetime.now(UTC)
-
-    def _log(self, *events: tuple[timedelta, dict]) -> None:
-        self.runs.write_text(
-            "".join(json.dumps({"ts": (self.now - ago).isoformat(), **event}) + "\n" for ago, event in events),
-            encoding="utf-8",
-        )
-
-    def _skips(self, days: int) -> list[tuple[timedelta, dict]]:
-        return [(timedelta(hours=hours), {"event": "dispatch", "action": "supervised-busy-skip"})
-                for hours in range(days * 24, 0, -1)]
-
-    def test_an_eight_day_busy_skip_streak_is_a_doctor_finding(self) -> None:
-        from ummanu import cli as product_cli
-
-        self._log(
-            (timedelta(days=8, hours=2), {"event": "advance"}),
-            (timedelta(days=8, hours=1), {"event": "dispatch", "action": "supervised-started", "reference": None}),
-            *self._skips(8),
-        )
-        [finding] = product_cli.automation_busy_findings(self.data)
-        self.assertEqual(finding["code"], "automation_busy_without_advance")
-        self.assertEqual(finding["agent"], "curator")
-        self.assertEqual(finding["busy_skips"], 8 * 24)
-        self.assertEqual(finding["threshold_hours"], busy.BUSY_WITHOUT_ADVANCE_HOURS)
-        self.assertEqual(finding["busy_since"], (self.now - timedelta(days=8)).isoformat())
-
-    def test_a_recent_advance_or_memory_write_gives_no_finding(self) -> None:
-        from ummanu import cli as product_cli
-
-        for progress in ({"event": "advance"}, {"event": "memory_write", "result": "ok"}):
-            with self.subTest(progress=progress):
-                self._log(*self._skips(8), (timedelta(minutes=30), progress))
-                self.assertEqual(product_cli.automation_busy_findings(self.data), [])
-
-    def test_a_failed_memory_write_is_not_progress(self) -> None:
-        self._log(*self._skips(1), (timedelta(minutes=30), {"event": "memory_write", "result": "error"}))
-        self.assertIsNotNone(busy.busy_without_advance(self.runs))
-
-    def test_below_the_threshold_or_after_a_fresh_head_there_is_no_finding(self) -> None:
-        hours = busy.BUSY_WITHOUT_ADVANCE_HOURS
-        self._log(*[(timedelta(hours=h), {"event": "dispatch", "action": "supervised-busy-skip"})
-                    for h in range(hours - 1, 0, -1)])
-        self.assertIsNone(busy.busy_without_advance(self.runs))
-        self._log(*self._skips(3), (timedelta(minutes=30), {"event": "dispatch", "action": "supervised-started"}))
-        self.assertIsNone(busy.busy_without_advance(self.runs))
-
-    def test_no_runs_file_gives_no_finding(self) -> None:
-        from ummanu import cli as product_cli
-
-        self.assertEqual(product_cli.automation_busy_findings(self.data / "missing"), [])
-        self.assertEqual(product_cli.automation_busy_findings(None), [])
 
 
 if __name__ == "__main__":

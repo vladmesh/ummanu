@@ -3331,9 +3331,13 @@ project directories, such as the sprint:1475 rename, and before the next tick, w
   line with the same digest; the retry appends a new `rebind` line, and the applied attempt is the one whose digest
   matches the published state. A second run finds nothing and writes nothing. `--dry-run` writes nothing.
 
-`ummanu doctor` reports `automation_busy_without_advance` for the curator when its supervised head has been answered
-`supervised-busy-skip` for longer than `BUSY_WITHOUT_ADVANCE_HOURS` (6 h) with no `advance` or successful
-`memory_write` in `runs.jsonl` and no head started since. The head is stuck: inspect and stop it rather than wait.
+`ummanu doctor` reports `automation_busy_without_advance` for a standing agent whose dispatch has been answered
+`supervised-busy-skip` past its threshold (`BUSY_WITHOUT_ADVANCE_HOURS`: 6 h for the curator and the steward's
+three-hourly sweep; the first skip for retro and the steward's deep sweep) with no progress record (`advance`,
+`deep-sweep-advance` for the deep sweep, or a successful `memory_write`) and no head started since. The head is stuck:
+inspect and stop it rather than wait. `ummanu automations health` is red for an agent whose last three head
+dispatches were busy skips. A steward tick refused over a head launched more than `STALE_BUSY_HEAD_SECONDS` (6 h)
+ago closes its report card Blocked with the run id, launch time and refusal; a shorter skip closes it Done.
 A head that only finished its turn and sat idle (a Codex TUI keeps its composer open after the turn) is
 not this finding any more: the next tick ends it with `stop_if_quiescent` once its supervisor shows no turn
 open, no delivery in flight and no output for `IDLE_HEAD_GRACE_SECONDS` (10 min), logs

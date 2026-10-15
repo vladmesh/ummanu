@@ -1033,6 +1033,21 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         )
         self.assertEqual(self.actions()[-1], "supervised-busy-skip")
 
+    def test_a_head_busy_past_two_sweep_periods_blocks_the_report_card(self) -> None:
+        """A busy refusal over a head launched long ago is no quiet skip: the tick's card goes Blocked,
+        and the head is still the only one."""
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        standing = self._standing_report()
+        launched = time.time() - dispatch.STALE_BUSY_HEAD_SECONDS - 60
+        os.utime(self.state.head_run_file, (launched, launched))
+
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(self.board.in_progress(), [standing])
+        self.assertIn((self.AGENT, self.board.cards[-1]["reference"], "Blocked"), self.board.moves)
+        self.assertEqual(self.actions()[-1], "supervised-busy-skip")
+        self.assertEqual(self.actions().count("supervised-started"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -485,6 +485,11 @@ class _TickReports:
                      action="dispatch-release", report_board=self.report_board)
         self.settled = True
 
+    def busy_stale(self, cmd: DispatchCommand, note: str) -> None:
+        _move_report(self.state, self.event, cmd.card_ref, target="blocked", reason=note,
+                     action="dispatch-busy-escalation", report_board=self.report_board)
+        self.settled = True
+
     def failed(self, cmd: DispatchCommand, failure: BaseException) -> None:
         _move_report(
             self.state, self.event, cmd.card_ref, target="done",
@@ -582,6 +587,10 @@ SUPERVISED_PROVIDER_FAILURE = "supervised-provider-failure"
 #: later tick is a busy-skip over a head that has nothing left to do. The grace keeps a head that
 #: only paused inside its turn from being taken for finished.
 IDLE_HEAD_GRACE_SECONDS = 600.0
+#: How long after its launch a head may keep refusing ticks as busy before the tick's report card
+#: goes Blocked instead of Done: two periods of the steward's three-hourly sweep. An idle head is
+#: retired after IDLE_HEAD_GRACE_SECONDS, so a head this old is stuck inside its turn.
+STALE_BUSY_HEAD_SECONDS = 6 * 3600
 #: How long the tick waits for a retired head's supervisor to release its socket.
 IDLE_STOP_SUPERVISOR_EXIT_SECONDS = 10.0
 #: The launch identity a supervised head writes beside its socket in its run directory (the
@@ -751,6 +760,14 @@ def _retire_refused_head(
     )
 
 
+def _head_launched_at(state: AgentState) -> float | None:
+    """When this role's recorded head was launched (its head_run record's write), or None without one."""
+    try:
+        return state.head_run_file.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
 def _supervised_bring_up(
     agent: str,
     ws: str,
@@ -808,12 +825,26 @@ def _supervised_bring_up(
         # report card this tick made is closed, because no head will ever write it; the report the
         # working head is writing is untouched, because that head is untouched.
         refusal = str((receipt.evidence or {}).get("refusal") or "busy")
-        reports.undispatched(
-            cmd,
-            "the head of this role is still working, so this tick raised none and delivered "
-            f"nothing.\n\nrefusal: {refusal}\n{receipt.reason}",
+        launched = _head_launched_at(state)
+        stale = launched is None or time.time() - launched > STALE_BUSY_HEAD_SECONDS
+        if stale:
+            launch_text = "unrecorded" if launched is None else datetime.fromtimestamp(launched, UTC).isoformat()
+            reports.busy_stale(
+                cmd,
+                f"the head of this role has been working since its launch longer than "
+                f"{STALE_BUSY_HEAD_SECONDS // 3600}h, so this tick raised none and delivered nothing; the "
+                f"head may be stuck mid-turn.\n\nrun: {run_id}\nlaunched: {launch_text}\n"
+                f"refusal: {refusal}\n{receipt.reason}",
+            )
+        else:
+            reports.undispatched(
+                cmd,
+                "the head of this role is still working, so this tick raised none and delivered "
+                f"nothing.\n\nrefusal: {refusal}\n{receipt.reason}",
+            )
+        state.log_run(
+            event, action="supervised-busy-skip", reference=cmd.card_ref, error=refusal, stale=stale
         )
-        state.log_run(event, action="supervised-busy-skip", reference=cmd.card_ref, error=refusal)
         print(f"dispatch[{agent}]: head {run_id} is still up ({refusal}) — no dispatch")
         return 0
     if not receipt.ok:
