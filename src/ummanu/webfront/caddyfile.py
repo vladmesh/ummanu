@@ -17,9 +17,12 @@ import hmac
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ummanu.web.server import DEFAULT_HOST as DEFAULT_UPSTREAM_HOST
-from ummanu.web.server import DEFAULT_PORT as DEFAULT_UPSTREAM_PORT
-from ummanu.web.server import LoopbackOnly, resolve_bind
+from ummanu.web.server import (
+    DEFAULT_HOST as DEFAULT_UPSTREAM_HOST,
+    DEFAULT_PORT as DEFAULT_UPSTREAM_PORT,
+    LoopbackOnly,
+    resolve_bind,
+)
 
 #: The single account the front knows. Roles and users are a different card; this one has an owner.
 USERNAME = "owner"
@@ -110,6 +113,8 @@ def render(config: FrontConfig) -> str:
     lines.append("\t# No public name, so no publicly trusted certificate is obtainable: the")
     lines.append("\t# internal CA is the honest option, and OPERATIONS.md says what a browser shows.")
     lines.append("\ttls internal")
+    lines.append("\t# Pages and JSON are text that polls on a timer; compressing them cuts the wire bytes.")
+    lines.append("\tencode zstd gzip")
     lines.append("")
     lines.append("\t# A browser that authenticated before can present the 30-day bearer. Its value is")
     lines.append("\t# derived from an independent secret; rotating the password rotates that secret too.")

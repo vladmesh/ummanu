@@ -78,7 +78,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
         self.assertEqual(codex_preflight.codex_home({}), str(suite_home))
         with mock.patch.dict(os.environ):
             os.environ.pop("UMMANU_CODEX_SESSIONS", None)
-            os.environ.pop("UMMANU_CODEX_SESSIONS", None)
+            os.environ.pop("TA_CODEX_SESSIONS", None)
             self.assertEqual(dispatcher_tui._sessions_roots()[0], suite_home / "sessions")
             self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], suite_home / "sessions")
 

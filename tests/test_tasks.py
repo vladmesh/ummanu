@@ -2668,6 +2668,25 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             event = self.writer.audit.committed_event(request_id)
             self.assertEqual(_budget_event_type(event), charged, request_id)
 
+    def test_the_dispatcher_closes_a_cancelled_wait_as_done_but_not_an_unreached_one(self) -> None:
+        for reference, outcome in (("ummanu-625", "cancelled"), ("ummanu-626", "deadline_passed")):
+            self.create_wait(reference)
+            self.place_card(reference, "in_progress")
+            self.freeze(reference, outcome)
+
+        self.writer.move(
+            role="dispatcher", actor="d", reference="ummanu-625", target="done", reason="[wait:cancelled]",
+            request_id="wait-done-625", wait_outcome="cancelled",
+        )
+        with self.assertRaises(TaskError) as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="ummanu-626", target="done", reason="[wait:deadline_passed]",
+                request_id="wait-done-626", wait_outcome="deadline_passed",
+            )
+
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertEqual((self.card_state("ummanu-625"), self.card_state("ummanu-626")), ("done", "in_progress"))
+
     def test_only_the_dispatcher_records_a_wait_state_and_only_on_a_wait_card(self) -> None:
         self.create_wait("ummanu-624")
         self.writer.record_wait_state(role="dispatcher", actor="d", reference="ummanu-624", state='{"since":"t"}')

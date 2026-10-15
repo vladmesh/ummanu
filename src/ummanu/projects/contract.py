@@ -62,15 +62,8 @@ What each state buys a card is settled here and not re-decided by a caller:
   true on 2026-08-28, and ``ummanu``'s own adapter declares one now too.)
 * ``fit`` goes to work, as it always did.
 
-Declaring ``broad_check`` is mandatory for a project that gets cards. Until this issue an adapter
-that declared none fell back to a default nobody wrote down for it — this interpreter, importing
-``ummanu`` — which was a true contract for the Ummanu project alone. Every other registered
-project got one of two wrong answers: a checkout with no ``ummanu`` package was refused as
-``cannot_attest_project``, whose wording blamed a substituted package instead of naming the real
-cause, and a checkout that happened to hold one was attested against a contract its owner never
-wrote. Silence is now its own named refusal, ``broad_check_not_declared``, which says the one true
-thing about it. ``cannot_attest_project`` is left to mean what it says: a *declared* contract that
-cannot attest its own checkout. Nothing here judges a checkout by its layout any more — what a
+Declaring ``broad_check`` is mandatory for a project that gets cards; an adapter that declares none
+is refused as ``broad_check_not_declared``. Nothing here judges a checkout by its layout: what a
 declared run actually imported is caught afterwards, by the receipt's own import provenance.
 """
 
@@ -93,18 +86,12 @@ BROAD_CHECK_INCOMPLETE = "broad_check_incomplete"
 # contract substituted for it.
 BROAD_CHECK_NOT_DECLARED = "broad_check_not_declared"
 INTERPRETER_UNAVAILABLE = "interpreter_unavailable"
-# A DECLARED contract that cannot attest its own checkout. It used to double as the diagnosis for
-# an adapter that declared nothing, which is what made its wording mislead: it named a package the
-# project never asked for. `decide` no longer reaches it — a declared contract is executed as
-# declared, and what such a run imported is caught afterwards by the receipt's own provenance.
-CANNOT_ATTEST_PROJECT = "cannot_attest_project"
 CONTRACT_REFUSALS = (
     ADAPTER_UNAVAILABLE,
     ADAPTER_INVALID,
     BROAD_CHECK_INCOMPLETE,
     BROAD_CHECK_NOT_DECLARED,
     INTERPRETER_UNAVAILABLE,
-    CANNOT_ATTEST_PROJECT,
 )
 
 # Enumerated answer states.
@@ -132,7 +119,6 @@ WORKER_ERROR_CODES = {
     BROAD_CHECK_INCOMPLETE: "invalid_project_adapter",
     BROAD_CHECK_NOT_DECLARED: "invalid_project_adapter",
     INTERPRETER_UNAVAILABLE: "interpreter_start_failed",
-    CANNOT_ATTEST_PROJECT: "invalid_project_adapter",
 }
 
 

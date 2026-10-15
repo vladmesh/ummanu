@@ -2,8 +2,8 @@
 Description=Run ummanu production dispatcher every minute
 
 [Timer]
-OnBootSec=30s
-OnUnitActiveSec=60s
+OnBootSec={{UMMANU_DISPATCHER_ON_BOOT_SEC}}
+OnUnitActiveSec={{UMMANU_DISPATCHER_ON_UNIT_ACTIVE_SEC}}
 AccuracySec=5s
 Unit=ummanu-dispatcher-production.service
 

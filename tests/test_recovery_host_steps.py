@@ -443,12 +443,21 @@ class DrainedTickFenceTests(unittest.TestCase):
 
     def test_a_launch_that_was_due_and_failed_stays_critical(self) -> None:
         failed = self.deferred("host refused the observer launch; retry in 30s")
-        for pause_mode, record in (("drain", failed), ("", failed), ("", None)):
+        for pause_mode, record in (("drain", failed), ("", failed)):
             fence = observer_fence(self.runtime(), self.payload(record), pause_mode=pause_mode)
 
             [outcome] = fence["outcomes"]
             self.assertEqual(outcome["status"], "critical", (pause_mode, record))
             self.assertEqual(production.degraded_actions(fence["outcomes"]), [outcome])
+
+    def test_an_unpaused_sprint_whose_first_launch_is_due_is_fenced_without_an_incident(self) -> None:
+        fence = observer_fence(self.runtime(), self.payload(None), pause_mode="")
+
+        [outcome] = fence["outcomes"]
+        self.assertEqual(outcome["status"], "deferred")
+        self.assertEqual(outcome["observer_reason"], REASON_NO_RECORD)
+        self.assertEqual(production.degraded_actions(fence["outcomes"]), [])
+        self.assertTrue(production.fenced_task(fence, self.CARD))
 
     def tick_exit(self, record: ObserverRecord | None) -> tuple[int, dict]:
         """One drained production tick through the command's exit-status rule, everything but the

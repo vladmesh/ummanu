@@ -30,7 +30,7 @@ from ummanu.web.provider_usage import (
     CODEX_USAGE_URL,
     ProviderUsageLayer,
 )
-from ummanu.webproto.errors import InstallationUnavailable
+from ummanu.webproto.errors import InstallationUnavailable, ValidationRefused
 
 #: What a path placeholder is filled with when this test drives the route it belongs to. A route
 #: added with a placeholder nobody listed here fails :meth:`RouteFixture.concrete` rather than being
@@ -221,7 +221,6 @@ class RouteFixture(unittest.TestCase):
             *self.layers,
             provider_usage=self.usage if provider_usage is ... else provider_usage,
             doctor=self.doctor if doctor is ... else doctor,
-            po_auth=Recording(po_admits={"admitted": True}),
             po=self.po if po is ... else po,
             owner_events=self.owner_events,
         )
@@ -264,6 +263,7 @@ class EveryPageCarriesTheBarTests(RouteFixture):
                 "/sprints",
                 "/sprints/new",
                 "/sprints/ummanu-9",
+                "/sprints/ummanu-9/heads/r-1",
                 "/projects",
                 "/projects/ummanu",
                 "/history",
@@ -537,7 +537,7 @@ class BarCostsNoExtraReadTests(RouteFixture):
                 bar = bar_of(self.get(path, app=app))
                 self.assertIn("74%", bar)
                 self.assertIn("41%", bar)
-        self.assertEqual(len(paths) * 5, 65, "the walk really did render many pages")
+        self.assertEqual(len(paths) * 5, 70, "the walk really did render many pages")
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
 
     def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:
@@ -986,7 +986,7 @@ class ClaudeUtilizationIsAPercentageTests(unittest.TestCase):
 
 
 class RefreshGuardCoversTypedSecretsTests(RouteFixture):
-    """A password field holds typed content like any other, and the /po token is typed into one."""
+    """A password field holds typed content like any other."""
 
     def selector(self) -> str:
         found = re.search(
@@ -998,42 +998,29 @@ class RefreshGuardCoversTypedSecretsTests(RouteFixture):
     def test_the_typed_content_guard_matches_a_password_field(self) -> None:
         self.assertIn("input[type=password]", self.selector())
 
-    def test_the_po_login_page_carries_a_password_field_the_guard_now_covers(self) -> None:
-        app = self.app(po=self.po)
-        app.po_auth = Recording(po_admits={"admitted": False})
-        response = app.handle("GET", "/po")
-        self.assertEqual(response.status, 401)
-        page = response.body.decode("utf-8")
-        self.assertIn('<input id="po-token" name="token" type="password"', page)
-        self.assertIn("input[type=password]", page)
-
 
 class APostResultDoesNotReloadItselfTests(RouteFixture):
     """A page answering a submission must not tick into the browser's resubmission prompt."""
 
-    def refused_login(self) -> str:
-        app = self.app(po=self.po)
-        app.po_auth = Recording(po_login={"admitted": False})
-        response = app.handle("POST", "/po/login", body=b"token=wrong")
-        self.assertEqual(response.status, 401)
+    def refused_rename(self) -> str:
+        self.po.answers["po_rename"] = ValidationRefused("the title is longer than 120 characters")
+        response = self.app().handle("POST", "/po/sessions/s-1/title", body=b"title=x")
+        self.assertEqual(response.status, 400)
         return response.body.decode("utf-8")
 
     def test_a_page_rendered_from_a_post_carries_no_auto_reload(self) -> None:
-        page = self.refused_login()
+        page = self.refused_rename()
         self.assertNotIn("window.location.reload()", page)
         self.assertNotIn(page_assets._REFRESH_SCRIPT, page)
 
     def test_that_same_page_reached_by_a_get_does_carry_it(self) -> None:
-        app = self.app(po=self.po)
-        app.po_auth = Recording(po_admits={"admitted": False})
-        page = app.handle("GET", "/po").body.decode("utf-8")
-        self.assertIn(page_assets._REFRESH_SCRIPT, page)
+        self.assertIn(page_assets._REFRESH_SCRIPT, self.get("/po/sessions/s-1"))
 
     def test_the_post_result_still_carries_the_bar_it_simply_does_not_reload(self) -> None:
-        self.assertIn("<b>Claude</b>", bar_of(self.refused_login()))
+        self.assertIn("<b>Claude</b>", bar_of(self.refused_rename()))
 
     def test_the_mark_is_unset_again_once_the_request_is_answered(self) -> None:
-        self.refused_login()
+        self.refused_rename()
         self.assertIn(page_assets._REFRESH_SCRIPT, self.get("/"))
 
 

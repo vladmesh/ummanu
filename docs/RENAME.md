@@ -52,9 +52,9 @@ exemption. No live records or historical fixture bytes are translated by this po
 `ummanu config check --instance LIVE_ROOT` uses `infra.old_name_guard.LIVE_ROOT_ALLOWLIST` over
 the live root's exported files, without Git. The product guard shares its matcher. The live-root
 table has H spellings and I/R card spellings in any path, R references matching
-`\bprojects/secretary/` only in `state/knowledge/*`, and R `^(?:source|supersedes):.*$` front-matter
-lines only in `state/memory/facts/*`. Whole-file R rows are exactly `state/board/*`,
-`state/knowledge/*` and `state/runs/*`. They exclude live instructions:
+`\bprojects/secretary/` only in `state/knowledge/*`. Whole-file R rows are exactly `state/board/*`,
+`state/knowledge/*`, `state/runs/*` and `state/memory/facts/*` (curated facts quote their sources
+under the names those had). They exclude live instructions:
 `LIVE_KNOWLEDGE = ("state/knowledge/runbooks/[!0-9]*", "state/knowledge/plans/current-*")`.
 Receipt directories `gate-runs/**` and `provision-runs/**` are historical instance paths, not
 exported live-root rows. The retired instance guard's receipt rows are therefore not ported.

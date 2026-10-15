@@ -24,8 +24,7 @@ from typing import Any
 from unittest import mock
 from urllib.parse import quote, urlencode
 
-from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER
-from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER, SprintProtocolFixture
 from ummanu.web.app import ROUTES, WebApp, cross_origin_reason
 from ummanu.web.server import build_server
 from ummanu.webproto.errors import (
@@ -825,6 +824,11 @@ class SprintPageTests(SprintTransportFixture):
         self.assertNotIn("not the declared head", main)
         other = self.page(sprint_document(launch="running", record={**record, "head": "claude-opus"}))
         self.assertIn("not the declared head", other)
+
+    def test_the_observer_head_the_dispatcher_holds_links_to_its_head_view(self) -> None:
+        record = {"head": OBSERVER_PROFILE, "run_id": "c" * 32}
+        markup = self.page(sprint_document(launch="running", record=record))
+        self.assertIn(f'href="/sprints/sprint%3A1/heads/{"c" * 32}"', markup)
 
     def test_the_page_says_where_the_current_card_stands_and_since_when(self) -> None:
         """The duration in the text, the exact ISO moment as the title -- `_reset`'s convention."""

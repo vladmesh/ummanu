@@ -163,7 +163,7 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument(
         "--seed-ref",
         default="",
-        help="git ref or object id the card's checkout starts from (a reslice successor's predecessor candidate)",
+        help="git ref or full 40-character object id the card's checkout starts from (a reslice successor's predecessor candidate)",
     )
     task_create.add_argument(
         "--supersedes", default="", help="reference of the predecessor card a --seed-ref inherits from"

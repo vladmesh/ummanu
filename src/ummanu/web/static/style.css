@@ -421,12 +421,14 @@ body { padding-bottom: var(--bar-height); }
 .statusbar .window .dot { color: var(--faint); }
 .resets { color: var(--muted); font-variant-numeric: tabular-nums; }
 /* The Codex reset credits fold into one chip-sized label; the details (expiry, whether a reset
-   applies, the button) open above the bar, so the bar itself keeps one chip per fact. */
-.statusbar details.credits { position: relative; display: inline-block; }
+   applies, the button) open above the bar, so the bar itself keeps one chip per fact.
+   The pop is fixed to the viewport, not absolute to the label: the row scrolls sideways, and a
+   scrolling box clips an absolute child on both axes, which hid the pop and swallowed its clicks. */
+.statusbar details.credits { display: inline-block; }
 .statusbar details.credits > summary { list-style: none; cursor: pointer; font-family: var(--mono); font-size: inherit; color: var(--muted); background: var(--raised); border: 1px dashed var(--line-strong); border-radius: 999px; padding: .05rem .5rem; }
 .statusbar details.credits > summary::-webkit-details-marker { display: none; }
 .statusbar details.credits > summary:hover, .statusbar details.credits[open] > summary { color: var(--ink); border-style: solid; }
-.statusbar .credits-pop { position: absolute; bottom: calc(100% + .5rem); left: 0; z-index: 7; display: grid; gap: .35rem; min-width: 18rem; max-width: 26rem; padding: .6rem .8rem; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18); white-space: normal; font-family: var(--sans, inherit); color: var(--ink); }
+.statusbar .credits-pop { position: fixed; bottom: calc(var(--bar-height) + .5rem); left: max(12px, calc((100vw - 1280px) / 2 + 20px)); z-index: 7; display: grid; gap: .35rem; width: max-content; min-width: min(18rem, calc(100vw - 24px)); max-width: min(26rem, calc(100vw - 24px)); box-sizing: border-box; padding: .6rem .8rem; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; box-shadow: 0 6px 24px rgba(0,0,0,.18); white-space: normal; font-family: var(--sans, inherit); color: var(--ink); }
 .statusbar .credits-pop .pop-line { display: block; }
 .statusbar .credits-pop .pop-line.expires { color: var(--muted); font-variant-numeric: tabular-nums; }
 .statusbar .credits-pop .pop-line.warn { color: var(--warn); }

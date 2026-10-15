@@ -219,7 +219,7 @@ class AgentState:
 
     @contextmanager
     def lock(self) -> Iterator[None]:
-        """Exclusive run lock; raises SystemExit if another run of this agent holds it.
+        """Exclusive run lock; exits 0 with a stderr line if another run of this agent holds it.
 
         `flock` is the mutex, dropped by the kernel when the holder dies. The pid/start record is
         diagnostics, and still refuses a live holder of the legacy bare-pid form without `flock`.
@@ -278,7 +278,9 @@ class AgentState:
     def _refuse(self, record: dict) -> NoReturn:
         holder = record.get("pid") if record.get("pid") is not None else (record.get("raw") or "?")
         self.log_run("lock-refused", holder_pid=holder, recorded_start=record.get("start"))
-        raise SystemExit(f"{self.agent}: another run holds the lock ({self.lockfile}, pid {holder})")
+        # Losing the lock to a concurrent run is ordinary timer overlap, not a failed run.
+        print(f"{self.agent}: another run holds the lock ({self.lockfile}, pid {holder})", file=sys.stderr)
+        raise SystemExit(0)
 
 
 _LOCK_ACQUIRE_ATTEMPTS = 8

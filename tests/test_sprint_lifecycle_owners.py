@@ -6,6 +6,7 @@ import ast
 import contextlib
 import inspect
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -58,8 +59,8 @@ class SprintLifecycleOwnersTests(unittest.TestCase):
         for owner in owners.OWNERS[1:]:
             self.assertEqual(owners.facade_dependencies(owner, sources[owner]), set())
         methods = [node for node in inventory["SprintLifecycleMixin"][1].body if isinstance(node, ast.FunctionDef)]
-        self.assertEqual(len(methods), 26)
-        self.assertEqual(len([n for n in inventory["SprintWriter"][1].body if isinstance(n, ast.FunctionDef)]) + len(methods), 81)
+        self.assertEqual(len(methods), 27)
+        self.assertEqual(len([n for n in inventory["SprintWriter"][1].body if isinstance(n, ast.FunctionDef)]) + len(methods), 82)
         self.assertEqual(len([n for n in inventory["SprintReader"][1].body if isinstance(n, ast.FunctionDef)]), 13)
         self.assertEqual(len([n for n in inventory["_AuditOnce"][1].body if isinstance(n, ast.FunctionDef)]), 2)
         self.assertFalse(any(isinstance(n, ast.Name) and n.id in {"SprintWriter", "SprintReader", "super"}
@@ -96,6 +97,7 @@ class SprintLifecycleOwnersTests(unittest.TestCase):
                          ["self", "role", "actor", "reference", "decisions", "request_id", "reason", "closeout"])
         writer = object.__new__(sprints.SprintWriter)
         writer.client = mock.Mock()
+        writer.data_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         with (mock.patch.object(sprints.SprintWriter, "_role"),
               mock.patch.object(writer, "_guard_observer_identity"),
               mock.patch.object(sprints.SprintWriter, "_close_atomic", return_value={"event_id": "evt1"}) as step,

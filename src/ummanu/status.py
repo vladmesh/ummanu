@@ -214,13 +214,15 @@ def _sprints(
     *,
     client: SqlCardClient | None = None,
 ) -> dict[str, Any]:
-    """Read the sprint entity and live board without consulting observer context."""
+    """Read the sprint entity and live board without consulting observer context.
+
+    A client the caller passes stays open; one created here is closed before returning.
+    """
+    owned = None
     try:
-        reader = SprintReader(
-            client if client is not None else board_client(instance_dir, serves=(SPRINT,)),
-            data_dir=data_dir,
-            thresholds=budget_thresholds(instance),
-        )
+        if client is None:
+            client = owned = board_client(instance_dir, serves=(SPRINT,))
+        reader = SprintReader(client, data_dir=data_dir, thresholds=budget_thresholds(instance))
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
         return {
             "items": reader.statuses(observers=observers, headless=headless_cards(production), create=False),
@@ -228,6 +230,9 @@ def _sprints(
         }
     except TaskError as exc:
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
+    finally:
+        if owned is not None:
+            owned.close()
 
 
 def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:

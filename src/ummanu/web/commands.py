@@ -30,7 +30,6 @@ from ummanu.webproto.ops import OperationLayer
 from ummanu.webproto.owner_events import OwnerEventLayer
 from ummanu.webproto.pause_ops import PauseOperationLayer
 from ummanu.webproto.pause_reads import PauseReadLayer
-from ummanu.webproto.po_auth import PoTokenLayer
 from ummanu.webproto.po_ops import PoLayer
 from ummanu.webproto.provider_ops import ProviderOperationLayer, codex_usage_home
 from ummanu.webproto.reads import ReadLayer, hold_store_exclusion
@@ -129,7 +128,6 @@ def run_web_serve(args: argparse.Namespace) -> int:
         CardOperationLayer(args.instance, data_dir=args.data_dir),
         usage,
         doctor,
-        po_auth=PoTokenLayer(args.instance, data_dir=args.data_dir),
         po=po,
         owner_events=owner_events,
         provider_ops=ProviderOperationLayer(args.instance, usage=usage),

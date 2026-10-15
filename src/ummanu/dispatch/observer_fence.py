@@ -73,9 +73,10 @@ REASON_DEFERRED = "observer_launch_deferred"
 REASON_ABANDONED = "observer_handle_abandoned"
 REASON_BOARD_UNAVAILABLE = "sprint_board_unavailable"
 
-# A pause claims nothing new and launches no observer, so under one a launch that is merely waiting
-# for the resume is not a failure: the sprint stays fenced, with the outcome status `deferred`
-# instead of `critical`. A launch that was due and failed is still critical.
+# A launch that has not been attempted is not a failure: the sprint stays fenced, with the outcome
+# status `deferred` instead of `critical`. Unpaused, the observer pass later in the same tick makes
+# it; a pause claims nothing new and launches no observer, so under one it waits for the resume. A
+# launch that was due and failed is still critical.
 PAUSED_LAUNCH_MODES = frozenset({"drain", "freeze"})
 STATUS_DEFERRED = "deferred"
 
@@ -223,8 +224,9 @@ def _sprint_verdict(
 ) -> dict[str, Any] | None:
     """Why this sprint is fenced, or None when it is free to run.
 
-    `critical: False` marks a launch the pause is holding back: no record yet, or the deferral the
-    drain itself wrote. The reason stays the same one an unpaused tick reports.
+    `critical: False` marks a launch nobody has attempted yet: no record, which this tick's observer
+    pass launches unless a pause holds it back, or the deferral the drain itself wrote. Every failed
+    launch leaves a record, so a launch that was due and failed stays critical.
     """
     try:
         decision = observer_decision(runtime, sprint)
@@ -247,8 +249,9 @@ def _sprint_verdict(
             }
         return {
             "reason": REASON_NO_RECORD,
-            "message": f"declared observer {head} has not been launched",
+            "message": f"declared observer {head} has not been launched: its first launch is due this tick",
             "head": head,
+            "critical": False,
         }
     if record.head != head:
         # A blank head is a record that never got one, and it is a mismatch like any other: what
@@ -316,7 +319,7 @@ def _raise(
 ) -> dict[str, Any]:
     """Open or keep the fence on one sprint, writing the fact once per reason.
 
-    Critical, unless the verdict is a launch a pause holds back: then `deferred`, and the cards are
+    Critical, unless the verdict is a launch not yet attempted: then `deferred`, and the cards are
     fenced all the same.
     """
     ref = str(sprint.get("ref") or "")

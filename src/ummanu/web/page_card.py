@@ -242,7 +242,8 @@ def head_view(document: dict[str, Any]) -> str:
     run_id = str(document.get("run_id") or "")
     head = _mapping(document.get("head"))
     journal = _mapping(document.get("journal"))
-    card = f"/tasks/{quote(ref, safe='')}"
+    owner = "sprints" if document.get("task_kind") == "sprint" else "tasks"
+    back = f"/{owner}/{quote(ref, safe='')}"
     tail = journal.get("tail")
     body = "\n".join(
         [
@@ -252,10 +253,11 @@ def head_view(document: dict[str, Any]) -> str:
                 _shown(lambda: _head_journal(journal)),
                 count=(len(tail) if isinstance(tail, list) else 0) or None,
             ),
-            f'<p><a href="{escape(card)}">back to {escape(ref or "the card")}</a></p>',
+            f'<p><a href="{escape(back)}">back to {escape(ref or "the card")}</a></p>',
         ]
     )
-    return _page(f"Head {run_id}", body, nav="dashboard", crumbs=((ref, card), (run_id, "")))
+    nav = "sprints" if owner == "sprints" else "dashboard"
+    return _page(f"Head {run_id}", body, nav=nav, crumbs=((ref, back), (run_id, "")))
 
 
 def _shown(draw: Callable[[], str]) -> str:

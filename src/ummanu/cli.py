@@ -509,6 +509,14 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     )
     knowledge_write.set_defaults(handler=run_knowledge_write)
 
+    knowledge_delete = knowledge_subcommands.add_parser(
+        "delete", help="remove one markdown document from state/knowledge under the writer lock"
+    )
+    _add_instance(knowledge_delete)
+    knowledge_delete.add_argument("--actor", required=True)
+    knowledge_delete.add_argument("--path", required=True, help="document path relative to state/knowledge")
+    knowledge_delete.set_defaults(handler=run_knowledge_delete)
+
     knowledge_list = knowledge_subcommands.add_parser(
         "list", help="list documents currently in state/knowledge"
     )
@@ -1979,6 +1987,32 @@ def run_knowledge_write(args: argparse.Namespace) -> int:
         {
             "ok": True,
             "op": "write",
+            "document": result.document,
+            "path": str(result.path),
+            "commit": result.commit,
+            "actor": result.actor,
+            "changed": result.changed,
+        }
+    )
+    return 0
+
+
+def run_knowledge_delete(args: argparse.Namespace) -> int:
+    from ummanu.knowledge_write import KnowledgeError, KnowledgeValidationError, delete_knowledge_document
+    from ummanu.state_repo import StateRepoError
+
+    try:
+        result = delete_knowledge_document(_instance_dir(args.instance), document=args.path, actor=args.actor)
+    except KnowledgeValidationError as exc:
+        _print_json({"ok": False, "op": "delete", "error": "validation", "message": str(exc)})
+        return MEMORY_EXIT_VALIDATION
+    except (KnowledgeError, StateRepoError) as exc:
+        _print_json({"ok": False, "op": "delete", "error": "runtime", "message": str(exc)})
+        return 1
+    _print_json(
+        {
+            "ok": True,
+            "op": "delete",
             "document": result.document,
             "path": str(result.path),
             "commit": result.commit,

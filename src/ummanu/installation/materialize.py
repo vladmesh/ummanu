@@ -31,7 +31,7 @@ from ummanu.installation.models import InstallError, PipelineStateMaterializatio
 from ummanu.installation.support import _checked_data_target, _data_target_entries, _set_installation_owner
 from ummanu.installation.upgrade.dependencies import _snapshot_install
 from ummanu.installation.upgrade.host import step_host, step_pipeline_state
-from ummanu.installation.upgrade.types import UpgradeContext, UpgradeResult
+from ummanu.installation.upgrade.types import StepResult, UpgradeContext, UpgradeResult
 from ummanu.installation.upgrade.workspaces import step_head_registry, workspaces_root
 from ummanu.kernel.errors import TaskError
 from ummanu.memory_journal import export_memory_snapshot
@@ -357,6 +357,15 @@ def pipeline_state_path(runtime_home: Path) -> Path:
 
 
 
+class MaterializeError(InstallError):
+    """The materializer stopped at a failed step; `steps` runs up to and including that step."""
+
+    def __init__(self, steps: list[StepResult]) -> None:
+        failed = steps[-1]
+        super().__init__(f"materializer {failed.name} failed: {failed.detail}")
+        self.steps = tuple(steps)
+
+
 def materialize_host(
     instance: Path,
     product_root: Path,
@@ -397,14 +406,12 @@ def materialize_host(
             host_index = steps.index(step_host)
             prepared = run_steps(context, steps=steps[:host_index])
             if not prepared.ok:
-                failed = prepared.steps[-1]
-                raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
+                raise MaterializeError(prepared.steps)
             before_host(context)
             finished = run_steps(context, steps=steps[host_index:])
             result = UpgradeResult(steps=[*prepared.steps, *finished.steps])
     if not result.ok:
-        failed = result.steps[-1]
-        raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
+        raise MaterializeError(result.steps)
     return result
 
 

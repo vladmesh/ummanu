@@ -203,6 +203,10 @@ class RenderedConfigTests(unittest.TestCase):
         site = parse(rendered())[0]
         self.assertIn(("tls", ("internal",)), [(d.name, d.args) for d in site.directives])
 
+    def test_every_site_answer_is_compressed_for_a_browser_that_accepts_it(self) -> None:
+        site = parse(rendered())[0]
+        self.assertIn(("encode", ("zstd", "gzip")), [(d.name, d.args) for d in site.directives])
+
     def test_a_plain_http_site_address_is_refused(self) -> None:
         with self.assertRaises(FrontConfigError):
             rendered(sites=("http://front.example",))

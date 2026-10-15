@@ -2,9 +2,9 @@
 
 Stateless transport over :mod:`ummanu.webproto`: no session, cache or state between requests (watch
 cursors and form request ids live in the client). The only decision made here is who may make a
-mutation (:func:`cross_origin_reason`, plus the PO token under /po), once on the POST path. `ROUTES`
-is the whole surface: no route runs a command, script or path, and there is no catch-all (unrouted
-path 404, unrouted method 405). See docs/PROTOCOLS.md, "Serving the pipeline locally".
+mutation (:func:`cross_origin_reason`), once on the POST path. `ROUTES` is the whole surface: no
+route runs a command, script or path, and there is no catch-all (unrouted path 404, unrouted method
+405). See docs/PROTOCOLS.md, "Serving the pipeline locally".
 """
 
 from __future__ import annotations
@@ -13,8 +13,7 @@ import json
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass, field, replace
-from http.cookies import CookieError, SimpleCookie
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import parse_qs, quote, unquote
 
@@ -24,7 +23,6 @@ from ummanu.web.statuses import status_for
 from ummanu.webproto.errors import OperationPending, ReadError, RuntimeUnavailable, ValidationRefused
 from ummanu.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from ummanu.webproto.owner_events import OwnerEventLayer
-from ummanu.webproto.po_auth import COOKIE_NAME as PO_COOKIE_NAME, COOKIE_PATH as PO_COOKIE_PATH
 from ummanu.webproto.reads import TASK_SNAPSHOT_EVENTS
 from ummanu.webproto.sprint_reads import NONE_SPELLING
 
@@ -82,6 +80,8 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/sprints/new", "sprint_form", "sprint_reads.sprint_options", page=True),
     Route("POST", "/sprints", "sprint_create", "sprint_ops.sprint_create", body=FORM_BODY, page=True),
     Route("GET", "/sprints/{ref}", "sprint_page", "sprint_reads.sprint_state", page=True),
+    # The sprint's observer head, read-only, in the card head view's shape; another run id is 404.
+    Route("GET", "/sprints/{ref}/heads/{run_id}", "sprint_head_page", "reads.sprint_head_view", page=True),
     Route("GET", "/api/system", "system", "reads.system_snapshot"),
     Route("GET", "/api/tasks/{ref}", "task", "reads.task_snapshot"),
     Route("GET", "/api/tasks/{ref}/events", "events", "reads.task_events"),
@@ -99,6 +99,7 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", "/api/pause/drain", "pause_drain", "pause_ops.pause_drain"),
     Route("POST", "/api/pause/resume", "pause_resume", "pause_ops.pause_resume"),
     Route("GET", "/api/sprints", "sprints", "sprint_reads.sprint_list"),
+    Route("GET", "/api/sprints/{ref}/heads/{run_id}", "sprint_head", "reads.sprint_head_view"),
     Route("POST", "/api/sprints/{ref}/comment", "sprint_comment", "sprint_ops.sprint_comment"),
     Route("POST", "/api/sprints/{ref}/close", "sprint_close", "sprint_ops.sprint_close"),
     Route("GET", "/api/history", "commands", "command_reads.command_history"),
@@ -107,8 +108,7 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", "/api/tasks/{ref}/move", "task_move", "card_ops.task_move"),
     # Spends one Codex rate-limit reset credit; idempotent on `request_id` (also the provider's redeem id).
     Route("POST", "/api/providers/codex/reset-limit", "codex_reset_limit", "provider_ops.codex_reset_limit"),
-    # The PO head: every /po route requires the PO token (:func:`requires_po_token`) except login.
-    Route("POST", "/po/login", "po_login", "po_auth.po_login", body=FORM_BODY, page=True),
+    # The PO head, behind the same front password as every other route.
     Route("GET", "/po", "po_page", "po.po_overview", page=True),
     Route("POST", "/po/sessions", "po_create", "po.po_create_session", body=FORM_BODY, page=True),
     Route("GET", "/po/sessions/{session}", "po_session_page", "po.po_session", page=True),
@@ -137,11 +137,8 @@ ROUTES: tuple[Route, ...] = (
     ),
 )
 
-#: The prefix the PO token guards, and the cookie's `Path`: one value, so no route under it is outside.
-PO_PREFIX = PO_COOKIE_PATH
-#: The only /po routes answered without a valid cookie.
-PO_OPEN_ROUTES = frozenset({("POST", "/po/login")})
-PO_LOGIN_FIELDS = frozenset({"token"})
+#: Every route under this prefix needs the PO layer.
+PO_PREFIX = "/po"
 PO_CREATE_FIELDS = frozenset({"request_id", "cli", "model", "effort"})
 PO_SEND_FIELDS = frozenset({"request_id", "text"})
 PO_STOP_FIELDS = frozenset({"seq"})
@@ -150,24 +147,13 @@ PO_RENAME_FIELDS = frozenset({"title"})
 #: Form fields of every /po POST, by handler. A set with `request_id` marks a route whose operation
 #: takes the id into `PoStore`'s request transaction (held by `tests.test_web_po_transport`).
 PO_FORM_FIELDS = {
-    "po_login": PO_LOGIN_FIELDS,
     "po_create": PO_CREATE_FIELDS,
     "po_send": PO_SEND_FIELDS,
     "po_stop": PO_STOP_FIELDS,
     "po_close": PO_CLOSE_FIELDS,
     "po_rename": PO_RENAME_FIELDS,
 }
-#: How long a browser keeps the PO cookie. Replacing the token file ends it sooner.
-PO_COOKIE_MAX_AGE = 30 * 24 * 3600
-PO_TOKEN_REQUIRED = "the PO head is behind its own token; enter it to continue"
-PO_TOKEN_WRONG = "that is not this installation's PO token"
 PO_NOT_SERVED = "this web process was built without the PO layers, so /po is not served"
-
-
-def requires_po_token(route: Route) -> bool:
-    """Whether `route` is answered only with a valid PO cookie: everything under /po but the login."""
-    under = route.pattern == PO_PREFIX or route.pattern.startswith(PO_PREFIX + "/")
-    return under and (route.method, route.pattern) not in PO_OPEN_ROUTES
 
 
 #: The fields each POST accepts, and the only ones; unknown fields are refused, never ignored.
@@ -233,7 +219,6 @@ class WebApp:
         provider_usage: Any | None = None,
         doctor: Any | None = None,
         *,
-        po_auth: Any | None = None,
         po: Any | None = None,
         owner_events: Any | None = None,
         provider_ops: Any | None = None,
@@ -250,8 +235,7 @@ class WebApp:
         #: Cached recorded health behind the doctor lamp and page. Optional: without it every page
         #: is served and the lamp reads unknown (red).
         self.doctor = doctor
-        #: PO token check and sessions. Optional: without them /po is not served.
-        self.po_auth = po_auth
+        #: PO sessions. Optional: without them /po is not served.
         self.po = po
         #: The owner's bell. Optional: without it no bell is drawn and its routes answer the reason.
         self.owner_events = owner_events
@@ -311,18 +295,15 @@ class WebApp:
             reason = cross_origin_reason(headers)
             if reason is not None:
                 return self._deny(route, status=403, code="cross_origin", message=reason)
-        # The PO token, checked by path here so any future /po route is guarded too.
-        if route.pattern == PO_PREFIX or route.pattern.startswith(PO_PREFIX + "/"):
-            refusal = self._po_gate(route, headers)
-            if refusal is not None:
-                return refusal
+        # Checked by path so any future /po route is refused too when the PO layer is not built.
+        if self.po is None and (route.pattern == PO_PREFIX or route.pattern.startswith(PO_PREFIX + "/")):
+            return self._deny(route, status=503, code="po_unavailable", message=PO_NOT_SERVED)
         handler: Callable[..., Response] = getattr(self, f"_{route.handler}")
         try:
             payload = _payload(route, body)
-            response = handler(params, _query(query), payload)
+            return handler(params, _query(query), payload)
         except ReadError as exc:
             return self._error(route, exc)
-        return _secure_cookie(response, headers)
 
     def match(self, method: str, path: str) -> tuple[Route | None, dict[str, Any]]:
         """The route for this request, or why there is none: 404 for a path, 405 for a method.
@@ -369,6 +350,9 @@ class WebApp:
 
     def _head(self, params, _query, _body) -> Response:
         return _json(200, self.reads.head_view(params["ref"], params["run_id"]))
+
+    def _sprint_head(self, params, _query, _body) -> Response:
+        return _json(200, self.reads.sprint_head_view(params["ref"], params["run_id"]))
 
     def _task_runs(self, params, _query, _body) -> Response:
         return _json(200, self.ops.run_list(params["ref"]))
@@ -539,6 +523,9 @@ class WebApp:
 
     def _head_page(self, params, _query, _body) -> Response:
         return _html(200, pages.head_view(self.reads.head_view(params["ref"], params["run_id"])))
+
+    def _sprint_head_page(self, params, _query, _body) -> Response:
+        return _html(200, pages.head_view(self.reads.sprint_head_view(params["ref"], params["run_id"])))
 
     def _sprints_page(self, _params, query, _body) -> Response:
         view = "archive" if _one(query, "view") == "archive" else "active"
@@ -757,41 +744,6 @@ class WebApp:
         )
 
     # -- the PO head -----------------------------------------------------------------------
-
-    def _po_gate(self, route: Route, headers: Any) -> Response | None:
-        """Why this /po request is refused before its handler, or `None` when it may go on.
-
-        Only the token file is read; without a valid cookie nothing reaches the PO service or board.
-        """
-        if self.po_auth is None or self.po is None:
-            return self._deny(route, status=503, code="po_unavailable", message=PO_NOT_SERVED)
-        if (route.method, route.pattern) in PO_OPEN_ROUTES:
-            return None
-        try:
-            admitted = bool(self.po_auth.po_admits(_presented_cookie(headers)).get("admitted"))
-        except ReadError as exc:
-            return self._error(route, exc)
-        if admitted:
-            return None
-        if route.page:
-            return _html(401, pages.po_login(PO_TOKEN_REQUIRED))
-        return _json(401, {"error": {"code": "po_token_required", "message": PO_TOKEN_REQUIRED}})
-
-    def _po_login(self, _params, _query, body) -> Response:
-        _fields(body, PO_LOGIN_FIELDS, "PO login")
-        answer = self.po_auth.po_login(_first(body, "token"))
-        if not answer.get("admitted") or not answer.get("cookie"):
-            return _html(401, pages.po_login(PO_TOKEN_WRONG))
-        cookie = (
-            f"{PO_COOKIE_NAME}={answer['cookie']}; Path={PO_COOKIE_PATH}; Max-Age={PO_COOKIE_MAX_AGE}; "
-            "HttpOnly; SameSite=Strict"
-        )
-        return Response(
-            303,
-            pages.redirect("/po", what="the PO head is open").encode("utf-8"),
-            HTML_TYPE,
-            {"Location": "/po", "Set-Cookie": cookie},
-        )
 
     def _po_page(self, _params, query, _body) -> Response:
         closed = _first(query, "closed") == "1"
@@ -1245,37 +1197,6 @@ def _keeps_request_id(exc: ReadError) -> bool:
     id. Anything else may follow an accepted request, and only the same id makes a resend a replay.
     """
     return exc.data.get("nothing_written") is not True
-
-
-def _presented_cookie(headers: Any) -> str:
-    """The PO cookie's value from the `Cookie` header, or "" when there is none or it does not parse."""
-    raw = _header(headers, "Cookie")
-    if not raw:
-        return ""
-    jar: SimpleCookie = SimpleCookie()
-    try:
-        jar.load(raw)
-    except CookieError:
-        return ""
-    morsel = jar.get(PO_COOKIE_NAME)
-    return morsel.value if morsel is not None else ""
-
-
-def via_tls(headers: Any) -> bool:
-    """Whether the browser reached this service through the TLS front.
-
-    The front sets `X-Forwarded-Proto` and replaces a client's value; a loopback client forging it
-    only makes its own cookie stricter.
-    """
-    return _header(headers, "X-Forwarded-Proto").split(",")[0].strip().lower() == "https"
-
-
-def _secure_cookie(response: Response, headers: Any) -> Response:
-    """A cookie set in answer to a request that came through TLS is `Secure`."""
-    cookie = response.headers.get("Set-Cookie")
-    if not cookie or not via_tls(headers):
-        return response
-    return replace(response, headers={**response.headers, "Set-Cookie": f"{cookie}; Secure"})
 
 
 def _redirect(location: str, *, what: str = "this sprint is open") -> Response:

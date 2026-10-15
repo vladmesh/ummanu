@@ -28,6 +28,9 @@ venv's isolated `runtime_preflight.py`. The preflight runs by pathname before th
 point can import an editable package, refuses foreign or task-workspace provenance with the existing
 production-state diagnostic, and execs the tick only after a valid observation. It is materialized
 with the unit through `reconcile apply` or `ummanu upgrade`; do not copy or edit it on the host.
+Its cadence is a product constant, `DISPATCHER_ON_UNIT_ACTIVE_SEC` (and `DISPATCHER_ON_BOOT_SEC`) in
+`src/ummanu/host.py`: the timer renders it and reconcile and doctor compare against it, so a change
+is that one edit and reaches the live timer through `ummanu upgrade` or `reconcile apply`.
 Every one-shot unit that can launch a local-pty head (the production tick and the curator, retro,
 steward and deep-sweep ticks) sets `KillMode=process`: the head's supervisor outlives the tick, and
 systemd's default control-group kill would SIGTERM it the moment the tick exits. A new one-shot unit

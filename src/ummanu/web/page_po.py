@@ -48,25 +48,6 @@ TURN_MARKS: dict[str, tuple[str, str]] = {
 }
 
 
-def po_login(message: str) -> str:
-    body = "\n".join(
-        [
-            '<div class="lead"><h1>Product owner</h1></div>',
-            f'<p class="refused">{escape(message)}</p>',
-            '<form class="sprint" method="post" action="/po/login">',
-            '<div class="field"><label for="po-token">PO token</label> ',
-            '<input id="po-token" name="token" type="password" autocomplete="off" required></div>',
-            '<button type="submit">open</button>',
-            "</form>",
-            (
-                '<p class="hint empty">the token is the file <code>po-web-token</code> in the installation\'s '
-                "data directory; OPERATIONS.md says how to read and rotate it.</p>"
-            ),
-        ]
-    )
-    return _page("Product owner", body, nav="po")
-
-
 def _po_refusal(refusal: dict[str, Any] | None, refused: str = "send") -> str:
     if not refusal:
         return ""
@@ -423,6 +404,7 @@ def po_session(
         turn_state = ""
     if queued:
         turn_state += " " + _chip(f"{len(queued)} queued", "accent")
+        turn_state += _po_queue_hold(document.get("queue_hold"))
     last = turns[-1] if turns else {}
     # The script's polling baseline is read from the page (initial or swapped in), never the JSON.
     polled = (
@@ -567,6 +549,23 @@ def _po_entry(entry: dict[str, Any]) -> str:
     return (
         f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
         f" · {escape(str(entry.get('created_at') or ''))}</div>{shown}</li>"
+    )
+
+
+def _po_queue_hold(hold: dict[str, Any] | None) -> str:
+    """Why the queue waits beyond this session's own turn: a pending restart and the turns it waits for."""
+    if not hold:
+        return ""
+    waits = ", ".join(
+        f'<a href="/po/sessions/{quote(session)}">session {escape(session[:8])}</a> turn {turn["seq"]}'
+        for turn in hold["running"]
+        for session in [str(turn["session_id"])]
+    )
+    return (
+        f' <span class="held">held: PO service restart ({escape(str(hold["detail"]))}) '
+        f'pending since {escape(str(hold["since"]))}; '
+        + (f"waits for {waits}" if waits else "the service exits for it at idle")
+        + "</span>"
     )
 
 

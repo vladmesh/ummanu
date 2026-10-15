@@ -52,7 +52,7 @@ from ummanu.runtime.head.runtime import (
 from ummanu.runtime.heads import Registry
 from ummanu.tasks import task_audit_for
 from ummanu.web import page_shell, pages
-from ummanu.web.app import ROUTES, WebApp
+from ummanu.web.app import PO_FORM_FIELDS, ROUTES, WebApp
 from ummanu.web.server import (
     DEFAULT_HOST,
     LoopbackOnly,
@@ -424,12 +424,25 @@ class StatusMappingTests(unittest.TestCase):
         ).encode("utf-8"),
     }
 
+    #: A value for every field a /po form takes; each route posts only its own fields.
+    PO_FORM_VALUES: ClassVar[dict[str, str]] = {
+        "request_id": "r",
+        "cli": "claude",
+        "model": "opus",
+        "effort": "high",
+        "text": "hi",
+        "seq": "1",
+        "title": "a title",
+    }
+
     def _body(self, route) -> bytes:
-        if route.pattern == "/po/login":
-            return urlencode([("token", "t")]).encode("utf-8")
         if route.pattern.startswith("/owner-events/"):
             # The owner event forms carry only the view to return to; none is the unread default.
             return b""
+        if route.handler in PO_FORM_FIELDS:
+            return urlencode(
+                [(name, self.PO_FORM_VALUES[name]) for name in sorted(PO_FORM_FIELDS[route.handler])]
+            ).encode("utf-8")
         if route.body == "form":
             return self.BODIES["form"]
         if route.method != "POST":
@@ -449,11 +462,9 @@ class StatusMappingTests(unittest.TestCase):
 
     def test_every_route_answers_a_refusal_with_the_status_of_its_code(self) -> None:
         for error, status in self.CODES.items():
-            # The PO layers refuse too: the token check itself answers a refusing token layer with
-            # the status of its code, so every /po route is held to the same table.
+            # The PO layer refuses too, so every /po route is held to the same table.
             app = WebApp(
                 *(RaisingLayer(error) for _ in range(LAYERS)),
-                po_auth=RaisingLayer(error),
                 po=RaisingLayer(error),
                 owner_events=RaisingLayer(error),
                 provider_ops=RaisingLayer(error),
@@ -504,6 +515,8 @@ class RouteTableTests(TransportFixture):
         ("GET", "/api/tasks/{ref}/events"),
         ("GET", "/api/tasks/{ref}/runs"),
         ("GET", "/api/tasks/{ref}/heads/{run_id}"),
+        ("GET", "/sprints/{ref}/heads/{run_id}"),
+        ("GET", "/api/sprints/{ref}/heads/{run_id}"),
         ("GET", "/api/runs/{run_id}"),
         ("POST", "/api/runs/start"),
         ("POST", "/api/runs/review"),
@@ -521,7 +534,6 @@ class RouteTableTests(TransportFixture):
         ("POST", "/api/tasks/{ref}/comment"),
         ("POST", "/api/tasks/{ref}/move"),
         ("POST", "/api/providers/codex/reset-limit"),
-        ("POST", "/po/login"),
         ("GET", "/po"),
         ("POST", "/po/sessions"),
         ("GET", "/po/sessions/{session}"),
@@ -545,7 +557,7 @@ class RouteTableTests(TransportFixture):
                 self.assertRegex(
                     route.operation,
                     r"^(reads|ops|sprint_reads|sprint_ops|pause_reads|pause_ops|command_reads|card_ops"
-                    r"|doctor|po_auth|po|owner_events|provider_ops)\.[a-z_]+$",
+                    r"|doctor|po|owner_events|provider_ops)\.[a-z_]+$",
                 )
 
     def test_there_is_no_endpoint_that_runs_something_it_was_given(self) -> None:

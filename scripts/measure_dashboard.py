@@ -31,10 +31,9 @@ That rule lives in exactly four places, and nowhere else:
      redirect handler and with an empty `ProxyHandler` — so every request in the script passes
      through it, and no caller re-implements the check or is able to forget it. A caller that
      genuinely wants to tolerate a status says so with `tolerate=` and a written reason; a 3xx is
-     refused even then, because a followed redirect would measure a different installation and
-     would carry this installation's PO cookie to it, and a proxy would do the same without even a
-     response to show for it.
-  2. :func:`prepare` proves the whole scenario is reproducible — data directory, PO token, and a
+     refused even then, because a followed redirect would measure a different installation, and
+     a proxy would send the request elsewhere without even a response to show for it.
+  2. :func:`prepare` proves the whole scenario is reproducible — data directory and a
      session whose own JSON says a turn is **running**, which is the only kind of session a `/po`
      page polls at all — before any clock starts.
   3. :func:`measure_concurrent` proves the round was *launched by a due poll*: the poll for the
@@ -67,12 +66,12 @@ is a GET or a HEAD, and the whole list is :data:`READ_REQUESTS` below. There is 
 that starts or stops a head, and nothing is written to the board, the state directory or the
 instance repository. Every request goes to `--base-url` and nowhere else: the opener follows no
 redirect and reads no proxy variable, so neither a response nor the caller's environment can send
-this script — or the PO cookie it carries — to another host or port, and the list below stays the
+this script to another host or port, and the list below stays the
 complete inventory of what a run asks for.
 
 Standard library only. What it imports from the product is the product's own resolution of an
-installation — where a data directory comes from, and how the PO cookie is derived — because a
-second copy of those rules here would be a second thing to keep in step.
+installation — where a data directory comes from — because a second copy of that rule here would
+be a second thing to keep in step.
 """
 
 from __future__ import annotations
@@ -305,7 +304,6 @@ class Scenario:
     base_url: str
     data_dir: Path
     data_dir_source: str
-    cookie: str
     poll_target: str
     poll_explanation: str
     #: True when no turn was running and `--poll-idle-session` chose an idle session instead.
@@ -365,8 +363,8 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
 #: `build_opener` keeps the default handlers except the ones a passed handler replaces, and both
 #: passed here are replacements: the refusing subclass leaves an opener that cannot follow a
 #: redirect, and `ProxyHandler({})` leaves one that reads no proxy environment at all. Without the
-#: second, `http_proxy` in the caller's shell is enough to send every request — and the PO cookie
-#: one of them carries — to a host the base URL never named, while the output still reports the
+#: second, `http_proxy` in the caller's shell is enough to send every request to a host the base
+#: URL never named, while the output still reports the
 #: base URL. Built once, at module level, so a second opener would be as visible to a reader as a
 #: second `urlopen` was.
 _OPENER = urllib.request.build_opener(_RefuseRedirects(), urllib.request.ProxyHandler({}))
@@ -377,7 +375,6 @@ def fetch(
     route: str,
     *,
     method: str = "GET",
-    cookie: str = "",
     tolerate: frozenset[int] = frozenset(),
     on_start: Callable[[float], None] | None = None,
 ) -> Sample:
@@ -394,8 +391,7 @@ def fetch(
     opener has no redirect handler, so the request that was made is the request that was listed,
     and the only host and port this script ever speaks to is `base_url`. That is a trust boundary
     rather than a measurement nicety — a followed 302 on `/po` would be recorded as a 200 for the
-    route that actually answered 302, and would hand this installation's PO cookie to whatever the
-    redirect named.
+    route that actually answered 302.
 
     `tolerate` is the deliberate escape hatch for a status a caller genuinely needs, named at the
     call site with a written reason. The default is refusal, so a new call site cannot forget the
@@ -412,8 +408,6 @@ def fetch(
     if method not in READ_METHODS:
         raise ValueError(f"{method} is not a read; this script makes no writing request")
     request = urllib.request.Request(base_url.rstrip("/") + route, method=method)
-    if cookie:
-        request.add_header("Cookie", cookie)
     started = CLOCK.now()
     if on_start is not None:
         on_start(started)
@@ -431,8 +425,7 @@ def fetch(
         raise Unmeasurable(
             f"{method} {route} on {base_url} answered {status}, a redirect. This script measures "
             f"the installation it was given and nothing else, so the redirect was not followed: "
-            f"following it would time a different installation under this route's name and would "
-            f"send this installation's PO cookie to wherever it points"
+            f"following it would time a different installation under this route's name"
         )
     if not (200 <= status < 300) and status not in tolerate:
         raise Unmeasurable(
@@ -460,8 +453,7 @@ def resolve_data_dir(argument: str | None) -> tuple[Path, str]:
     (`ummanu.onboarding.DEFAULT_INSTANCE`) — read through `ummanu.config.instance_data_dir`
     rather than a second copy of the mapping. The default instance matters because the documented
     command is run from an ordinary checkout shell, which does not inherit the service unit's
-    environment: without this step that shell resolved no data directory at all, could not read the
-    PO token, and quietly measured a scenario the DoD does not name.
+    environment: without this step that shell resolved no data directory at all.
 
     A failure here raises rather than returning None. "An unresolvable data dir only costs the
     poll" was the old comment, and it was wrong: the poll is not a garnish, it is half the
@@ -493,33 +485,6 @@ def resolve_data_dir(argument: str | None) -> tuple[Path, str]:
         ) from None
 
 
-def po_cookie(data_dir: Path) -> str:
-    """This installation's PO cookie, or a refusal naming what would fix it.
-
-    The derivation is imported from the product rather than copied: the cookie is an HMAC keyed by
-    the token file, and a second implementation of that rule here would be a second thing to keep
-    in step with `ummanu.po.token`.
-    """
-    _product_path()
-    try:
-        from ummanu.po.token import COOKIE_NAME, TokenError, cookie_value, read_token
-    except ImportError as exc:
-        raise Unmeasurable(f"the PO cookie rule could not be imported from this checkout: {exc}") from None
-    try:
-        token = read_token(data_dir)
-    except TokenError as exc:
-        raise Unmeasurable(
-            f"{exc}. The concurrent scenario is measured while a PO session is polled, so this "
-            f"token is part of the measurement, not an extra"
-        ) from None
-    except OSError as exc:
-        raise Unmeasurable(
-            f"the PO token under {data_dir} is not readable by this user ({exc}); run this command "
-            f"as the runtime user that owns the installation"
-        ) from None
-    return f"{COOKIE_NAME}={cookie_value(token)}"
-
-
 def session_is_running(route: str, body: bytes) -> bool:
     """Whether the session's own JSON says a turn is running — read from the body, not the page.
 
@@ -547,7 +512,7 @@ def session_is_running(route: str, body: bytes) -> bool:
     return running
 
 
-def choose_poll_target(base_url: str, cookie: str, *, idle: bool = False) -> tuple[str, str, bool]:
+def choose_poll_target(base_url: str, *, idle: bool = False) -> tuple[str, str, bool]:
     """The session to poll, how it was chosen and whether it is a substitute, or an empty target
     and why there is none.
 
@@ -569,21 +534,19 @@ def choose_poll_target(base_url: str, cookie: str, *, idle: bool = False) -> tup
     heaviest read the page's poll makes on this installation. The caller labels every number taken
     under it as such.
     """
-    overview = fetch(base_url, PO_OVERVIEW, cookie=cookie)
+    overview = fetch(base_url, PO_OVERVIEW)
     sessions = _SESSION_LINK.findall(overview.body.decode("utf-8", "replace"))
     if not sessions:
         return "", f"{PO_OVERVIEW} answered, and lists no open session to poll", False
     sizes: dict[str, int] = {}
     for session in sessions:
         route = PO_SESSION_JSON.format(session=session)
-        # The probe is made at the polled route with the polled cookie, so a session that passes
-        # it has been proved pollable by the same request the measurement will repeat.
-        body = fetch(base_url, route, cookie=cookie).body
+        # The probe is made at the polled route, so a session that passes it has been proved
+        # pollable by the same request the measurement will repeat.
+        body = fetch(base_url, route).body
         if session_is_running(route, body):
-            return route, (
-                f"the first session {PO_OVERVIEW} lists whose own JSON reports a running turn "
-                f"({session}), read with this installation's PO cookie"
-            ), False
+            found = f"the first session {PO_OVERVIEW} lists whose own JSON reports a running turn ({session})"
+            return route, found, False
         sizes.setdefault(session, len(body))
     listed = f"{len(sessions)} open session(s)" if len(sessions) > 1 else "one open session"
     if idle:
@@ -605,7 +568,7 @@ def prepare(
     """Prove the specified scenario can be reproduced here, before a single clock starts.
 
     Every step raises :class:`Unmeasurable` on failure, so a run that gets past this point has an
-    installation that answers, a data plane, a readable token, a session with a turn running, and
+    installation that answers, a data plane, a session with a turn running, and
     one poll of that session that actually returned — the probe in :func:`choose_poll_target` is
     that poll, made at the route the measurement will repeat. Nothing downstream re-checks any of
     it.
@@ -616,23 +579,20 @@ def prepare(
     except Unmeasurable as exc:
         raise Unmeasurable(f"{base_url} is not reachable: {exc}") from None
     if no_poll:
-        # The baseline asks nothing of /po, so it needs neither the token nor a session.
+        # The baseline asks nothing of /po, so it needs no session.
         return Scenario(
             base_url=base_url,
             data_dir=data_dir,
             data_dir_source=data_dir_source,
-            cookie="",
             poll_target="",
             poll_explanation="none by request (--no-poll): the baseline the poll is compared against",
             no_poll=True,
         )
-    cookie = po_cookie(data_dir)
-    poll_target, poll_explanation, substitute = choose_poll_target(base_url, cookie, idle=poll_idle)
+    poll_target, poll_explanation, substitute = choose_poll_target(base_url, idle=poll_idle)
     return Scenario(
         base_url=base_url,
         data_dir=data_dir,
         data_dir_source=data_dir_source,
-        cookie=cookie,
         poll_target=poll_target,
         poll_explanation=poll_explanation,
         poll_substitute=substitute,
@@ -712,10 +672,9 @@ class SessionPoll:
     when every request had one (:func:`collect_rounds`).
     """
 
-    def __init__(self, base_url: str, route: str, cookie: str, *, substitute: bool = False) -> None:
+    def __init__(self, base_url: str, route: str, *, substitute: bool = False) -> None:
         self.base_url = base_url
         self.route = route
-        self.cookie = cookie
         #: An idle session polled as a stand-in answers `running: false` throughout; that is not
         #: a turn ending.
         self.substitute = substitute
@@ -822,7 +781,7 @@ class SessionPoll:
                 pass
 
         try:
-            sample = fetch(self.base_url, self.route, cookie=self.cookie, on_start=started)
+            sample = fetch(self.base_url, self.route, on_start=started)
             running = session_is_running(self.route, sample.body)
         except Unmeasurable as exc:
             # Recorded, not swallowed: `check` reports it on the caller's thread. Scheduling stops
@@ -1100,9 +1059,7 @@ def _measure(scenario: Scenario, report: Report) -> None:
             f"is running, or pass --poll-idle-session for a labelled stand-in"
         )
 
-    with SessionPoll(
-        scenario.base_url, scenario.poll_target, scenario.cookie, substitute=scenario.poll_substitute
-    ) as poll:
+    with SessionPoll(scenario.base_url, scenario.poll_target, substitute=scenario.poll_substitute) as poll:
         report.concurrent, report.discarded = collect_rounds(scenario.base_url, poll)
     # Read after the block, so the poll thread has been stopped and joined and the record of what
     # it did is final rather than a snapshot of a thread still running.
@@ -1349,7 +1306,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default=None,
         help=(
-            "where the PO token lives; defaults to UMMANU_DATA_DIR, then UMMANU_INSTANCE, "
+            "the installation's data directory; defaults to UMMANU_DATA_DIR, then UMMANU_INSTANCE, "
             "then the instance the CLI defaults to"
         ),
     )

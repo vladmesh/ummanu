@@ -1132,16 +1132,25 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
                 sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci
             )
             raise
+        except HostError:
+            # The push already landed. Only the production checkout's refresh activates the merged
+            # code, so only its failure stays a release failure for the next tick to replay.
+            if self._is_production_checkout(repo):
+                raise
         with tick_stage("release_runtime"):
             self._require_production_runtime("release-after")
         return MergeLanding(sha=self._pushed_branch_head(record, branch), base=base, path="push", ci=ci)
 
     def _advance_checkout(self, repo: Path, ref: str) -> None:
         """Fast-forward a project checkout to `ref` after a merge."""
-        if self.mode != "noop" and _same_repo(repo, Path(self.production_runtime.product_root)):
+        if self._is_production_checkout(repo):
             production_checkout.advance(self._run, repo, ref, instance_dir=self.catalog.instance_dir)
             return
         self._run(["git", "-C", str(repo), "merge", "--ff-only", ref], "post-merge fast-forward")
+
+    def _is_production_checkout(self, repo: Path) -> bool:
+        """Whether `repo` is the checkout the dispatcher itself runs from."""
+        return self.mode != "noop" and _same_repo(repo, Path(self.production_runtime.product_root))
 
     def _pushed_branch_head(self, record: DispatcherRecord, branch: str) -> str:
         """The commit a `branch:base` push just landed. A non-fast-forward push is rejected, so after
@@ -1159,19 +1168,29 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         with tick_stage("release_landed"):
             return pr_merge_commit(self._run, branch, Path(record.workspace))
 
-    def _require_pr_base(self, record: DispatcherRecord, branch: str, base: str) -> None:
-        """Refuse the merge unless the open pull request for `branch` targets `base`."""
+    def _prepare_pr_merge(self, record: DispatcherRecord, branch: str, base: str) -> None:
+        """Refuse the merge unless the open pull request for `branch` targets `base`.
+
+        A draft pull request is marked ready: the pipeline owns it, and GitHub refuses to merge a draft.
+        """
+        workspace = Path(record.workspace)
         completed = self._run(
-            ["gh", "pr", "view", branch, "--json", "baseRefName", "-q", ".baseRefName"],
-            "merge pr base",
-            cwd=Path(record.workspace),
+            ["gh", "pr", "view", branch, "--json", "baseRefName,isDraft"], "merge pr base", cwd=workspace
         )
-        observed = (completed.stdout or "").strip()
+        try:
+            view = json.loads(completed.stdout or "")
+            observed, draft = view["baseRefName"], view["isDraft"]
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HostError(
+                f"pull request for {branch!r} is unreadable ({completed.stdout!r}); nothing was merged"
+            ) from exc
         if observed != base:
             raise HostError(
                 f"pull request for {branch!r} targets {observed or '(unreadable)'!r}, not the "
                 f"integration base {base!r}; nothing was merged"
             )
+        if draft:
+            self._run(["gh", "pr", "ready", branch], "merge pr ready", cwd=workspace)
 
     def _merge_github_pr(
         self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str
@@ -1182,7 +1201,7 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         Verify PR base before merge; local refresh is best-effort except production activation refusal.
         """
         with tick_stage("release_merge"):
-            self._require_pr_base(record, branch, base)
+            self._prepare_pr_merge(record, branch, base)
             self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         default_branch = self.catalog.project_default_branch(task["project"])
@@ -2203,16 +2222,20 @@ def _review_launch_handoff(intent: Any) -> PromptHandoff | None:
 
 
 def _report_nudge_prompt(generation: int, reference: str) -> str:
-    """What a worker that stopped working without reporting is told, once per round."""
-    card = f" for {reference}" if reference else ""
+    """What a worker that stopped working without reporting is told, once per round.
+
+    It names actions only: a reply typed into the pane reaches nobody, so the nudge must not invite one.
+    """
+    card = f" of {reference}" if reference else ""
     return (
-        f"The dispatcher is still waiting for the worker report of generation {generation}{card}, "
-        "and this head is sitting at its prompt with nothing delivered for that round. If the work "
-        "is done, report it now with the report command in TASK.md at the workspace root: its "
-        f"--request-id and its body file both end in {generation}. If it is not done, carry on — "
-        "this changes nothing about the task, the round or what the round owes. Committing, "
-        "pushing, a green test run or an earlier round's report command is not a report of this "
-        "round: the card moves only when that command runs."
+        f"Dispatcher watchdog: this head is idle at its prompt and round {generation}{card} has no "
+        "report. Do not reply to this message: text typed here is read by nobody and moves nothing. "
+        "Take one action now. Work done: run the done report command in TASK.md at the workspace "
+        "root. Cannot proceed: run the matching blocked report command in TASK.md. Otherwise: "
+        "resume the work itself and run the done report command when it is finished. Each command's "
+        f"--request-id and body file end in {generation}. Commits, pushes, a green test run or an "
+        "earlier round's report command do not count: the card moves only when this round's report "
+        "command runs."
     )
 
 

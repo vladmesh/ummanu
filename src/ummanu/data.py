@@ -402,62 +402,67 @@ def export_runs(
     *,
     state_dir: Path = PIPELINE_STATE_DIR,
 ) -> DataExport:
+    """Export the run journals under ``state_dir``; an absent state dir exports zero runs."""
     data_dir = data_dir.expanduser().resolve()
     state_dir = state_dir.expanduser().resolve()
-    if not state_dir.is_dir():
-        raise RuntimeError(f"state source not found: {state_dir}")
+    if state_dir.exists() and not state_dir.is_dir():
+        raise RuntimeError(f"state source is not a directory: {state_dir}")
 
     runs_dir = data_dir / "runs"
     _ensure_dir(runs_dir, "runs data dir")
     records: list[dict[str, Any]] = []
     watermarks: list[dict[str, Any]] = []
-    try:
-        snapshot = Path(tempfile.mkdtemp(prefix=".state-", suffix=".tmp", dir=runs_dir))
-    except OSError as exc:
-        raise RuntimeError(f"could not create runs snapshot: {exc}") from None
-    try:
-        _copy_tree(state_dir, snapshot)
-        for path, file_stat in _regular_files_under(snapshot, context="runs snapshot"):
-            if path.name.endswith(".lock") or path.suffix not in {".json", ".jsonl"}:
-                continue
-            relative = path.relative_to(snapshot).as_posix()
-            try:
-                text = path.read_text(encoding="utf-8")
-                lines = ndjson_lines(text) if path.suffix == ".jsonl" else text.splitlines()
-            except OSError as exc:
-                raise RuntimeError(f"could not read state file {relative}: {exc}") from None
-            except UnicodeError as exc:
-                raise RuntimeError(f"could not decode state file {relative}: {exc}") from None
-            watermarks.append(
-                {
-                    "path": relative,
-                    "bytes": file_stat.st_size,
-                    "mtime": int(file_stat.st_mtime),
-                    "lines": len(lines),
-                }
-            )
-            if path.suffix == ".jsonl":
-                for number, line in enumerate(lines, start=1):
-                    if not line.strip():
-                        continue
-                    records.append(
-                        {
-                            "source": relative,
-                            "line": number,
-                            "record": _parse_jsonl_line(line, relative, number),
-                        }
-                    )
+    cards: Any = {}
+    claims: Any = {}
+    # The state dir lives in a gitignored worktree path that a fresh checkout does not carry.
+    if state_dir.is_dir():
+        try:
+            snapshot = Path(tempfile.mkdtemp(prefix=".state-", suffix=".tmp", dir=runs_dir))
+        except OSError as exc:
+            raise RuntimeError(f"could not create runs snapshot: {exc}") from None
+        try:
+            _copy_tree(state_dir, snapshot)
+            for path, file_stat in _regular_files_under(snapshot, context="runs snapshot"):
+                if path.name.endswith(".lock") or path.suffix not in {".json", ".jsonl"}:
+                    continue
+                relative = path.relative_to(snapshot).as_posix()
+                try:
+                    text = path.read_text(encoding="utf-8")
+                    lines = ndjson_lines(text) if path.suffix == ".jsonl" else text.splitlines()
+                except OSError as exc:
+                    raise RuntimeError(f"could not read state file {relative}: {exc}") from None
+                except UnicodeError as exc:
+                    raise RuntimeError(f"could not decode state file {relative}: {exc}") from None
+                watermarks.append(
+                    {
+                        "path": relative,
+                        "bytes": file_stat.st_size,
+                        "mtime": int(file_stat.st_mtime),
+                        "lines": len(lines),
+                    }
+                )
+                if path.suffix == ".jsonl":
+                    for number, line in enumerate(lines, start=1):
+                        if not line.strip():
+                            continue
+                        records.append(
+                            {
+                                "source": relative,
+                                "line": number,
+                                "record": _parse_jsonl_line(line, relative, number),
+                            }
+                        )
 
-        cards_path = snapshot / "pipeline" / "cards.json"
-        cards = _read_json_file_strict(cards_path) if cards_path.is_file() else {}
-        if not isinstance(cards, dict):
-            raise RuntimeError(f"state card mapping must be an object: {cards_path}")  # noqa: TRY004 - export refusal
-        claims_path = snapshot / "pipeline" / "claims.json"
-        claims = _read_json_file_strict(claims_path) if claims_path.is_file() else {}
-        if not isinstance(claims, dict):
-            raise RuntimeError(f"state claims must be an object: {claims_path}")  # noqa: TRY004 - export refusal
-    finally:
-        _cleanup_staging_dir(snapshot)
+            cards_path = snapshot / "pipeline" / "cards.json"
+            cards = _read_json_file_strict(cards_path) if cards_path.is_file() else {}
+            if not isinstance(cards, dict):
+                raise RuntimeError(f"state card mapping must be an object: {cards_path}")  # noqa: TRY004 - export refusal
+            claims_path = snapshot / "pipeline" / "claims.json"
+            claims = _read_json_file_strict(claims_path) if claims_path.is_file() else {}
+            if not isinstance(claims, dict):
+                raise RuntimeError(f"state claims must be an object: {claims_path}")  # noqa: TRY004 - export refusal
+        finally:
+            _cleanup_staging_dir(snapshot)
 
     try:
         staging = Path(tempfile.mkdtemp(prefix=".runs-export-", suffix=".tmp", dir=runs_dir))

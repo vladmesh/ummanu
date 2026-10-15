@@ -25,8 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ummanu import state_repo
-from ummanu._fsutil import content_revision
-from ummanu._fsutil import write_text_atomic as _write_text_atomic
+from ummanu._fsutil import content_revision, write_text_atomic as _write_text_atomic
 from ummanu.runtime.redact import redact
 
 
@@ -38,7 +37,7 @@ class KnowledgeValidationError(KnowledgeError):
     """The document or its path is not something this writer accepts.
 
     `reason` is a short fixed word a caller can branch on (`path`, `source_missing`, `source_empty`,
-    `special_file`, `secret`, `size_cap`); `""` where no caller needs one.
+    `special_file`, `secret`, `size_cap`, `missing`); `""` where no caller needs one.
     """
 
     def __init__(self, message: str, reason: str = "") -> None:
@@ -177,8 +176,8 @@ def check_knowledge_directory(
     """Everything :func:`write_knowledge_directory` refuses, asked without writing anything.
 
     The source must be a real, non-empty directory of regular files and subdirectories: a symlink or a
-    special file anywhere in it is refused, as is a `.git` entry, a total size over
-    `KNOWLEDGE_DIRECTORY_CAP_BYTES`, and a text file the secret gate would change. A binary file (one
+    special file anywhere in it is refused, as is a name Git reads (`_GIT_CONTROL_NAMES`), a total size
+    over `KNOWLEDGE_DIRECTORY_CAP_BYTES`, and a text file the secret gate would change. A binary file (one
     that is not UTF-8 or holds a NUL byte) is copied unchanged and is not secret-scanned.
     """
     actor = _clean_actor(actor)
@@ -242,6 +241,42 @@ def write_knowledge_directory(
         path=target,
         commit=revision,
         actor=checked.actor,
+        changed=True,
+    )
+
+
+def delete_knowledge_document(instance_dir: Path, *, document: str, actor: str) -> KnowledgeWriteResult:
+    """Remove one document from `state/knowledge` under the writer lock, with any parent it leaves empty.
+
+    `commit` is the content revision of the removed document. A document that is not there is refused
+    with reason `missing`.
+    """
+    actor = _clean_actor(actor)
+    relative = _clean_document(document)
+    root = _live_root(instance_dir)
+    knowledge = state_repo.knowledge_dir(root)
+    target = knowledge / relative
+    with state_repo.state_repo_lock(root):
+        _recover_interrupted_swaps(root)
+        payload = _current_bytes(target)
+        if payload is None:
+            raise KnowledgeValidationError(f"state/knowledge/{relative} is not a document", "missing")
+        try:
+            target.unlink()
+        except OSError as exc:
+            raise KnowledgeError(f"could not remove state/knowledge/{relative}: {exc}") from None
+        parent = target.parent
+        while parent != knowledge and knowledge in parent.parents:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    return KnowledgeWriteResult(
+        document=str(relative),
+        path=target,
+        commit=content_revision({str(relative): hashlib.sha256(payload).hexdigest()}),
+        actor=actor,
         changed=True,
     )
 
@@ -331,7 +366,7 @@ def _clean_document(document: str) -> PurePosixPath:
     value = document.strip()
     if not value:
         raise KnowledgeValidationError("document path is required")
-    if value.startswith("/") or value.startswith("~"):
+    if value.startswith(("/", "~")):
         raise KnowledgeValidationError("document path must be relative to state/knowledge")
     value = value.removeprefix("state/knowledge/").rstrip("/")
     if not value.endswith(".md"):
@@ -359,6 +394,11 @@ def _clean_parts(value: str, what: str) -> PurePosixPath:
     return relative
 
 
+# Names Git itself reads: `.git` is a repository, and the other three change what a later commit of
+# the instance repository records. Any other dot name, `.github` included, is plain content.
+_GIT_CONTROL_NAMES = frozenset({".git", ".gitignore", ".gitattributes", ".gitmodules"})
+
+
 def _directory_files(source: Path) -> tuple[tuple[PurePosixPath, bytes], ...]:
     """Every regular file below `source`, sorted, after the structural and size refusals."""
     try:
@@ -378,10 +418,8 @@ def _directory_files(source: Path) -> tuple[tuple[PurePosixPath, bytes], ...]:
         for name in sorted([*dirnames, *filenames]):
             path = Path(root) / name
             relative = PurePosixPath(path.relative_to(source).as_posix())
-            # `.gitignore`, `.gitattributes` and `.gitmodules` change what a later commit of the
-            # instance repository records, so every `.git*` name is refused, not only `.git` itself.
-            if name.startswith(".git"):
-                raise KnowledgeValidationError(f"source holds a .git entry: {relative}", "special_file")
+            if name in _GIT_CONTROL_NAMES:
+                raise KnowledgeValidationError(f"source holds a name Git reads: {relative}", "special_file")
             try:
                 entry = path.lstat()
             except OSError as exc:

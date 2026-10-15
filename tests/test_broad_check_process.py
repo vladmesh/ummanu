@@ -865,13 +865,7 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
                 )
 
     def test_a_registered_project_that_declares_no_contract_is_refused_before_any_run(self) -> None:
-        """The new shape on the CLI's own error path, which behaves like every other refusal.
-
-        This supersedes the test that asserted `cannot_attest_project` here. That refusal was
-        reached through Ummanu's default lent to a project that never declared it, and its
-        message named the substituted package instead of the real cause. The refusal is now
-        `broad_check_not_declared`, read off the same enumeration the dispatcher's preflight reads,
-        and the CLI contract around it is unchanged: exit 2, the structured
+        """`broad_check_not_declared` on the CLI's error path: exit 2, the structured
         `invalid_project_adapter` code on stderr, no receipt document and no run.
         """
         (self.root / "project_suite.py").write_text("print('suite')\n", encoding="utf-8")

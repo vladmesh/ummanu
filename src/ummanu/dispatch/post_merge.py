@@ -15,7 +15,9 @@ with the gate's own machinery and resolves the watch to exactly one of four resu
 
 `read_merge_ci` is the one place the answers become green or red, and only from a reading that is
 complete and exact: every answer well-formed, every check run and the status naming the full merge
-commit, all check-run pages read up to `total_count`, every required check present. Anything else
+commit, all check-run pages read up to `total_count`, every required check present. The check runs
+of GitHub-managed `dynamic` workflow runs (Dependabot Updates and the like) are not the merge's CI
+and are left out before anything is judged. Anything else
 (a transport error, an unreadable or malformed `gh` answer, a partial page set, a check for another
 commit, a completed check with no conclusion, a run that has not started) is pending until the
 ceiling, whatever the other answer says.
@@ -299,11 +301,11 @@ def _read_ci(runtime: Any, watch: dict[str, Any]) -> dict[str, Any] | None:
             watch["repo"] = _name_with_owner(host, str(repo_dir))
         repo = str(watch["repo"])
         required = _required_checks(host, {"project": project})
-        pages, status = _fetch_answers(host, repo, sha)
+        pages, status, dynamic = _fetch_answers(host, repo, sha)
     except (HostError, OSError, ValueError, TypeError, AttributeError) as exc:
         watch["last_state"] = safe_one_line(f"CI unreadable: {exc}", limit=300)
         return None
-    reading = read_merge_ci(pages, status, sha, required)
+    reading = read_merge_ci(pages, status, dynamic, sha, required)
     runs = _runs(repo, list(reading.checks))
     if runs:
         watch["last_runs"] = runs
@@ -353,11 +355,13 @@ def _count(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
-def _fetch_answers(host: Any, repo: str, sha: str) -> tuple[list[str | None], str | None]:
-    """Every check-runs page up to the answer's own `total_count`, and the combined status.
+def _fetch_answers(host: Any, repo: str, sha: str) -> tuple[list[str | None], str | None, str | None]:
+    """Every check-runs page up to the answer's own `total_count`, the combined status, and the
+    commit's `dynamic` workflow runs.
 
     Only the paging is decided here: a page that is not a usable object stops the reading, and
-    `read_merge_ci` then finds it short.
+    `read_merge_ci` then finds it short. The workflow runs are asked last, so every check run
+    already read belongs to a run that answer can name.
     """
     pages: list[str | None] = []
     read = 0
@@ -373,7 +377,8 @@ def _fetch_answers(host: Any, repo: str, sha: str) -> tuple[list[str | None], st
         if read >= total:
             break
     status = _answer(host, f"repos/{repo}/commits/{sha}/status?per_page={_PAGE_SIZE}")
-    return pages, status
+    dynamic = _answer(host, f"repos/{repo}/actions/runs?head_sha={sha}&event=dynamic&per_page={_PAGE_SIZE}")
+    return pages, status, dynamic
 
 
 @dataclass(frozen=True)
@@ -391,7 +396,11 @@ _STATUS_STATES = {"success", "failure", "error", "pending"}
 
 
 def read_merge_ci(
-    check_run_pages: list[str | None], status_answer: str | None, sha: str, required: list[str]
+    check_run_pages: list[str | None],
+    status_answer: str | None,
+    dynamic_runs_answer: str | None,
+    sha: str,
+    required: list[str],
 ) -> CiReading:
     """The one place the post-merge watch turns raw `gh` answers for the merge commit into a result.
 
@@ -402,6 +411,8 @@ def read_merge_ci(
     - every check run (`head_sha`) and the status object (`sha`) name exactly the full merge commit;
     - the check runs read across all pages add up to the answer's `total_count`, and so do the
       statuses;
+    - the commit's `dynamic` workflow runs answered completely (`total_count` and `workflow_runs`);
+      their check runs are dropped before the checks below;
     - every declared required check is present.
 
     If any one of these fails the whole reading is pending, whatever the other answer says. Only
@@ -433,6 +444,16 @@ def read_merge_ci(
             runs.append(item)
     if len(runs) != total:
         return pending(f"read {len(runs)} of {total} check run(s)", runs)
+    dynamic = _json_object(dynamic_runs_answer)
+    workflow_runs = dynamic.get("workflow_runs") if dynamic is not None else None
+    if dynamic is None or not isinstance(workflow_runs, list) or _count(dynamic.get("total_count")) is None:
+        return pending("the dynamic workflow runs are not a readable answer", runs)
+    if dynamic["total_count"] != len(workflow_runs):
+        return pending(f"read {len(workflow_runs)} of {dynamic['total_count']} dynamic workflow run(s)", runs)
+    if not all(isinstance(run, dict) and _count(run.get("id")) is not None for run in workflow_runs):
+        return pending("a dynamic workflow run has no id", runs)
+    managed = {str(run["id"]) for run in workflow_runs}
+    runs = [item for item in runs if _actions_run_id(item) not in managed]
     for item in runs:
         if item.get("head_sha") != sha:
             return pending("a check run does not name the merge commit", runs)

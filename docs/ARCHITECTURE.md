@@ -542,8 +542,8 @@ live under `state/knowledge/projects/<project id>/<section>/`, with the id from 
 repository carries contracts and code; the reasoning behind its development is installation state.
 
 Knowledge is not indexed, not returned by `memory_search` and never loaded wholesale into a head's
-context. Format is free markdown. Writes go through `ummanu knowledge write`, which owns only
-`state/knowledge`, takes the shared live-root writer lock, starts no Git child and refuses documents
+context. Format is free markdown. Writes go through `ummanu knowledge write` and `delete`, which own only
+`state/knowledge`, take the shared live-root writer lock, start no Git child and refuse documents
 containing secrets ([Protocols](PROTOCOLS.md#knowledge)).
 
 ### The persona boundary

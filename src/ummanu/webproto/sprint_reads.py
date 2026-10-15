@@ -51,6 +51,7 @@ from ummanu.dispatch.observer import (
     delivery_evidence_summary,
     observer_snapshot,
 )
+from ummanu.dispatch.post_merge import WATCHES_KEY
 from ummanu.head_registry import HeadRegistryConfigError, installed_heads, installed_pair
 from ummanu.kernel.errors import TaskError
 from ummanu.product_issues import ProductIssueStore, registered_projects
@@ -255,6 +256,21 @@ class _Production:
         records = self.payload.get("records")
         record = records.get(card) if isinstance(records, dict) else None
         return record if isinstance(record, dict) else None
+
+    def observer_run_id(self, sprint: str) -> str | None:
+        """The run id of the observer head the dispatcher holds for one sprint, or `None`."""
+        observers = self.payload.get("observers")
+        record = observers.get(sprint) if isinstance(observers, dict) else None
+        head_run = record.get("head_run") if isinstance(record, dict) else None
+        if not isinstance(head_run, dict):
+            return None
+        return str(head_run.get("run_id") or "") or None
+
+    def post_merge_watch(self, card: str) -> dict[str, Any] | None:
+        """The dispatcher's post-merge CI watch for one card while CI has not answered, else `None`."""
+        live = self.payload.get(WATCHES_KEY)
+        watch = live.get(card) if isinstance(live, dict) else None
+        return watch if isinstance(watch, dict) and not watch.get("result") else None
 
 
 #: One sprint's board row and status view, or `(None, None)` when the sprint board did not answer.
@@ -607,6 +623,7 @@ class SprintSections(SectionSet):
           once handed over;
         * the dispatcher: `working`, degraded `blocked`, or no record. A column alone is not evidence a
           head runs (`docs/OPERATIONS.md`);
+        * a Done card whose post-merge CI the dispatcher still watches: `waiting` on that CI;
         * otherwise the board's `waiting` for Ready, Issues or Done.
 
         `card` is the sprint's current card, or null.
@@ -668,6 +685,23 @@ class SprintSections(SectionSet):
                 "card": current,
             }
 
+        def post_merge_ci(sprint: _Sprint, production: _Production) -> dict[str, Any] | None:
+            _reference, _status, current = _subject(sprint)
+            if sprint[1] is None or current is None:
+                return None
+            watch = production.post_merge_watch(current)
+            if watch is None:
+                return None
+            sha = str(watch.get("merge_sha") or "")[:12] or "its merge"
+            base = str(watch.get("base") or "") or "the base"
+            started = watch.get("started_at")
+            since = f" since {sources.isoformat(float(started))}" if isinstance(started, int | float) else ""
+            return {
+                "state": WAITING_WAITING,
+                "reason": f"{current} is done: the dispatcher is watching the CI of {sha} on {base}{since}",
+                "card": current,
+            }
+
         def board_settled(sprint: _Sprint, linked: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
             current, card = _card_of(sprint, linked)
             settled = _board_wait(current, card)
@@ -690,6 +724,7 @@ class SprintSections(SectionSet):
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_holds_it),
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), with_the_po),
             Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), dispatcher_holds_it),
+            Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), post_merge_ci),
             Rule(SOURCE_CARDS, (SOURCE_SPRINTS, SOURCE_CARDS), board_settled),
             Rule(SOURCE_LIVENESS, (SOURCE_SPRINTS, SOURCE_LIVENESS), nothing_claimed),
             blank={"state": WAITING_UNKNOWN, "reason": None, "card": None},
@@ -731,7 +766,11 @@ class SprintSections(SectionSet):
             return {
                 "state": state,
                 "reason": reason,
-                "record": None if observer is None else _observer_record(observer),
+                "record": (
+                    None
+                    if observer is None
+                    else {**_observer_record(observer), "run_id": production.observer_run_id(reference)}
+                ),
             }
 
         return read.decide(
@@ -1114,7 +1153,7 @@ class SprintReadLayer(ProtocolBoundary):
         if not reference:
             raise TaskNotFound("a sprint reference is required")
         report, installation = self._installation(now=now)
-        read = self._read_once(report, installation, self.data_dir(report), now=now)
+        read = self._read_once(report, installation, self.data_dir(report), now=now, sprint=reference)
         row, view = _find(read, reference)
         if row is None and read.answered(SOURCE_SPRINTS):
             raise TaskNotFound(f"the board holds no sprint {reference!r}")
@@ -1266,6 +1305,7 @@ class SprintReadLayer(ProtocolBoundary):
         *,
         now: float,
         listing: frozenset[str] | None = None,
+        sprint: str | None = None,
     ) -> SourceSet:
         """Every source a sprint document is built from, read once each, never once per sprint.
 
@@ -1273,8 +1313,9 @@ class SprintReadLayer(ProtocolBoundary):
         not inside `status_views`, so an unreadable `board/events.ndjson` cannot fail the sprint board.
 
         `listing` is the listing's status filter; with it the journal is read as a slice covering only
-        kept non-terminal sprints (`_journal_references`). Other documents read the whole journal,
-        since comment delivery is placed by position in the whole stream.
+        kept non-terminal sprints (`_journal_references`). `sprint` keeps that one sprint's row and
+        its slice. Other documents read the whole journal, since comment delivery is placed by
+        position in the whole stream.
 
         Uses `SprintReader.list(create=False)`, never `show` (which creates the board).
         """
@@ -1288,6 +1329,8 @@ class SprintReadLayer(ProtocolBoundary):
         refused: Exception | None = None
         try:
             rows = reader.list(statuses=set(listing or ()), create=False)
+            if sprint is not None:
+                rows = [row for row in rows if str(row.get("ref") or "") == sprint]
         except Exception as exc:  # noqa: BLE001 -- confined to this source read
             refused = exc
         journal = self._journal(
@@ -1295,7 +1338,11 @@ class SprintReadLayer(ProtocolBoundary):
             client=client,
             now=now,
             # With no rows the slice is empty; the journal's mark then comes from the store's probe.
-            references=None if listing is None else _journal_references(rows or [], linked),
+            references=(
+                None
+                if listing is None and sprint is None
+                else _journal_references(rows or [], linked)
+            ),
         )
         try:
             if rows is None:

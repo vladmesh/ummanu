@@ -25,6 +25,8 @@ wholesale. A document is read on purpose when the history of a question is neede
 ```bash
 python3 -P -m ummanu knowledge write --instance <instance dir> --actor ummanu \
   --path decisions/2026-07-25-sprint-1.md --file /tmp/sprint-1.md
+python3 -P -m ummanu knowledge delete --instance <instance dir> --actor ummanu \
+  --path runbooks/retired-runbook.md
 python3 -P -m ummanu knowledge list --instance <instance dir>
 ```
 
@@ -40,5 +42,7 @@ tick carries the document out.
   again.
 - The format is free; no frontmatter or metadata is required.
 - Writing the same content a second time returns `changed: false` and writes nothing.
+- A document whose subject is gone (a retired runbook, a dropped pointer) is removed with
+  `knowledge delete` rather than marked outdated. The repository history keeps it.
 - A document containing a secret is rejected (a validation error, exit code 2) and never reaches disk.
   Remove the token from the text rather than working around the check.

@@ -195,6 +195,9 @@ SENSITIVE_ENV_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Git reads COUNT, KEY_n and VALUE_n as one unit and refuses to run on a partial one.
+GIT_CONFIG_BUNDLE_RE = re.compile(r"GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)")
+
 
 def is_sensitive_env_name(name: str) -> bool:
     """Whether an env variable's name declares credential material.
@@ -296,6 +299,10 @@ def runtime_env(
         if _is_sensitive_name(key) and key not in allowed:
             continue
         env[key] = value
+    git_config = [key for key in base if GIT_CONFIG_BUNDLE_RE.fullmatch(key)]
+    if any(key not in env for key in git_config):
+        for key in git_config:
+            env.pop(key, None)
 
     # Only trusted ambient bindings cross this seam; runtime.env grants neither spelling.
     for name in (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV):

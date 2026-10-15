@@ -20,15 +20,19 @@ from tests.web_head_view_fixtures import (
     FINISHED_EARLIER,
     FOREIGN,
     LEGACY,
+    OBSERVER,
     OTHER,
     REF,
     SECRET,
+    SPRINT,
     TOKEN,
     WORKER,
     HeadViewFixture,
     _routing,
+    _run,
 )
-from ummanu.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
+from ummanu.dispatch.observer_state import ObserverRecord
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from ummanu.web.app import ROUTES
 from ummanu.webproto import head_view as head_reads
 
@@ -266,6 +270,41 @@ class HostileJournalValuesTests(HeadViewFixture):
                 failed.assert_called_once()
                 self.assertEqual(status, 200)
                 self.assertIn("this section could not be shown (RuntimeError)", page)
+
+
+class TheSprintObserverHeadTests(HeadViewFixture):
+    def setUp(self) -> None:
+        super().setUp()
+        self.observers[SPRINT] = ObserverRecord(
+            sprint=SPRINT,
+            head="claude-opus-high",
+            head_run=_run(SPRINT, OBSERVER, role="observer", runtime=LOCAL_PTY_RUNTIME),
+        ).to_json()
+        self.write_production()
+
+    def test_the_observer_run_shows_its_journal_on_a_sprint_keyed_page(self) -> None:
+        self.run_dir(OBSERVER, task=SPRINT, tail=b"printed only to the terminal\n")
+        status, page = self.get(f"/sprints/{SPRINT}/heads/{OBSERVER}")
+        self.assertEqual(status, 200)
+        self.assertIn("turn.finished", page)
+        self.assertIn('href="/sprints/sprint%3A1490"', page)
+        self.assertNotIn("printed only to the terminal", page)
+        document = json.loads(self.app().handle("GET", f"/api/sprints/{SPRINT}/heads/{OBSERVER}").body)
+        self.assertEqual((document["ref"], document["task_kind"]), (SPRINT, "sprint"))
+        self.assertEqual((document["head"]["role"], document["head"]["state"]), ("observer", "finished"))
+
+    def test_only_the_run_the_observer_record_holds_is_found(self) -> None:
+        self.run_dir(WORKER, tail=b"x\n")
+        for path in (f"/sprints/{SPRINT}/heads/{WORKER}", f"/sprints/sprint:1491/heads/{OBSERVER}"):
+            with self.subTest(path=path):
+                self.assertEqual(self.get(path)[0], 404)
+
+    def test_a_run_directory_naming_another_task_is_not_read(self) -> None:
+        self.run_dir(OBSERVER, task="sprint:1491", subject="meant for another sprint")
+        status, page = self.get(f"/sprints/{SPRINT}/heads/{OBSERVER}")
+        self.assertEqual(status, 200)
+        self.assertIn("belongs to another sprint", page)
+        self.assertNotIn("meant for another sprint", page)
 
 
 class NoOrcaOnThesePathsTests(HeadViewFixture):

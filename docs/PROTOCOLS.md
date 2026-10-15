@@ -1389,7 +1389,7 @@ treats an unrecognised answer as permission:
 
 - `fit` — the card is issued;
 - `refused(shape)` — one of `adapter_unavailable`, `adapter_invalid`, `broad_check_incomplete`,
-  `broad_check_not_declared`, `interpreter_unavailable`, `cannot_attest_project`. Always before the
+  `broad_check_not_declared`, `interpreter_unavailable`. Always before the
   card is put in work (no workspace, head or round). The card is blocked through the
   [bring-up](#bring-up-outcomes) vocabulary as infrastructure, with action token
   `contract-preflight-blocked` and the refusal shape as evidence;
@@ -1403,8 +1403,7 @@ only that it is complete and that the named interpreter starts; what a run actua
 caught by the receipt's provenance.
 
 Declaring `broad_check` is mandatory for every project that gets cards. An adapter without one is
-refused as `broad_check_not_declared` and its cards block at preflight. `cannot_attest_project` means
-a declared contract that cannot attest its own checkout.
+refused as `broad_check_not_declared` and its cards block at preflight.
 
 Observers consume the worker report, reviewer verdict and gate receipt before code/CI exploration. A
 valid executed gate receipt suppresses a routine broad rerun; none/noop or missing evidence does not.
@@ -4592,12 +4591,14 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/projects/{project}` | `reads.system_snapshot` (+ `sprint_reads.sprint_list`) | one project's registration details and collapsible sprint list |
 | GET | `/sprints/new` | `sprint_reads.sprint_options` | the "new sprint" form, on this installation's own products, open issues, projects and head profiles |
 | POST | `/sprints` | `sprint_ops.sprint_create` | open one sprint from that form; 303 to its page, or the form again with what was refused |
+| GET | `/sprints/{ref}/heads/{run_id}` | `reads.sprint_head_view` | the sprint's observer head in the card head view's shape, read-only; a run id other than the one the dispatcher's observer record holds is 404 |
 | GET | `/sprints/{ref}` | `sprint_reads.sprint_state` | one sprint: its current card, gate, heads and budget, **what it waits on** (`work.waiting_on`: a run, the owner or the PO, each linking its card; nothing when the list is empty), the observer's last decision, its cards, Definition of Done, resume and issues, its pins, and whether its observer is up |
 | GET | `/api/system` | `reads.system_snapshot` | the dashboard's document |
 | GET | `/api/tasks/{ref}` | `reads.task_snapshot` | the card page's document; `?events=N` sets the tail length |
 | GET | `/api/tasks/{ref}/events` | `reads.task_events` | one page of history; `?cursor=C&limit=N` |
 | GET | `/api/tasks/{ref}/runs` | `ops.run_list` | every product run of one card |
 | GET | `/api/tasks/{ref}/heads/{run_id}` | `reads.head_view` | the head view's document |
+| GET | `/api/sprints/{ref}/heads/{run_id}` | `reads.sprint_head_view` | the observer head view's document |
 | GET | `/api/runs/{run_id}` | `ops.run_state` | one run, and where its ending settles |
 | POST | `/api/runs/start` | `ops.run_start` | raise a worker; body `{ref, request_id, profile, instruction?}` |
 | POST | `/api/runs/review` | `ops.run_review` | raise a reviewer; body `{request_id, profile, worker_run_id?, ref?}` |
@@ -4615,7 +4616,6 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`, or role and actor `owner` on a card carrying `waiting_owner` (the owner's answer, which the dispatcher forwards to the PO; a repeated request id keeps its first role); body `{request_id, body}` |
 | POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
 | POST | `/api/providers/codex/reset-limit` | `provider_ops.codex_reset_limit` | spend one Codex rate-limit reset credit, under role `po` and actor `web`; body `{request_id}`, sent to the provider as `redeem_request_id`. A committed record for the id is returned as it stands (`replayed: true`) and nothing is sent; otherwise the Codex usage is re-read past the cache, and no available credit is `refused` without a consume (whether a reset applies is the provider's call: `applicable_available_count` follows an undocumented rule and the provider's own client offers the reset on any available credit, so the consume is sent and the answer recorded); otherwise consume is POSTed (30 s) and its `outcome` recorded: `reset`, `nothing_to_reset`, `no_credit`, `already_redeemed`, or `error` with its `reason`. Every answer is a `codex_reset_limit` record of the board audit, so `/history` lists it and `/api/history/{request_id}` answers for it; a `reset` clears the provider cache |
-| POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `ummanu_po`, or 401. The one `/po` route without the token |
 | GET | `/po` | `po.po_overview` | open PO sessions (with `?closed=1` the closed ones, with `closed_at` and a link back; the open list links to them with `closed_count`), newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by its `title` when set (then the start of its first message on a line of its own), else by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one), with last activity, CLI, model, state, running turn, short id and a `close` form; and the new-session form (CLI and model from `po.models`) |
 | POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
 | GET | `/po/sessions/{session}` | `po.po_session` (+ `reads.po_delegated`) | one PO session: its title heading the page when set and a rename form beside the header, feed, turn states, message box, stop while a turn runs, close while none does; a closed one shows `closed_at`/`closed_by` and no message box or close; and the **Delegated cards** it delegated or inherited as a successor, each with its ref linked, title, kind, column and last return state, from one board listing (a board that refused is said as itself) |
@@ -4623,7 +4623,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
 | POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn or a queued message renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
 | POST | `/po/sessions/{session}/title` | `po.po_rename` | set the session's title, open or closed; form `title`, no request id (a repeat sets the same value); trimmed, one line, at most 120 characters, empty clears it; 303 to the session, or the session rendered with the refusal and the text kept (400 `validation`); unknown session 404 |
-| GET | `/po/api/sessions/{session}` | `po.po_session` (+ `reads.po_delegated`) | the session page's document with `delegated`, the `po_delegated` read; polled while a turn runs or a message is queued, the poll asking `?cards=0`, which reads no board and answers `delegated: null` |
+| GET | `/po/api/sessions/{session}` | `po.po_session` (+ `reads.po_delegated`) | the session page's document with `delegated`, the `po_delegated` read, and `queue_hold` while messages are queued and a PO service restart is pending (`reason: restart_pending`, the restart's `detail`, `since`, and the `running` turns of any session it waits for; the page shows it beside the queued chip), else null; polled while a turn runs or a message is queued, the poll asking `?cards=0`, which reads no board and answers `delegated: null` |
 | GET | `/owner-events` | `owner_events.owner_event_list` | the owner's bell: the unread owner events by default, `?all=1` every event (unread highlighted); open `needs_owner` events first, then newest first, with its class badge and subject link; `?unread=1` or any other value is the unread default; the board without `owner_events` reads as no events with the source `unavailable` ([Owner events](#owner-events-and-the-bell)) |
 | POST | `/owner-events/read-all` | `owner_events.mark_all_read` | mark every unread notice read; a `needs_owner` event is never touched; form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
 | POST | `/owner-events/{event_id}/read` | `owner_events.mark_read` | mark one event read; a `needs_owner` event whose card carries `waiting_owner` is refused (409 `owner_conflict`); form `view?` (`all` returns to `?all=1`; missing or any other value to the unread default); 303 to the list |
@@ -4645,12 +4645,7 @@ form (`application/x-www-form-urlencoded`) with `request_id`, `product`, `goal`,
 `issues`, `projects`, `observer`, `worker` and `reviewer`, and the `/po` POSTs, which take forms too. An
 unknown field is refused.
 
-**`/po` is behind the PO token.** Every route whose path is `/po` or starts with `/po/` requires cookie
-`ummanu_po` whose value matches the HMAC of `DATA_DIR/po-web-token`, checked once in
-`WebApp.handle` after the cross-origin check and before any handler; the only exception is `POST
-/po/login`. Without it a page route answers 401 with the login form and a JSON route 401
-`po_token_required`; neither reaches the PO service or the board store. Token and cookie:
-[Operations](OPERATIONS.md#the-po-head-in-the-dashboard). A `/po` `request_id` belongs to one operation
+A `/po` `request_id` belongs to one operation
 and its inputs installation-wide (`po_requests`): repeated with the same inputs it answers the recorded
 session, the turn, or the message still queued, and does nothing else; reused otherwise it is 409
 `request_conflict`. Reads come from the board store and the queue directory; every write goes to the PO
@@ -4850,6 +4845,8 @@ python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
   --path decisions/2026-07-25-sprint-1.md --file DOC.md
 python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
   --path projects/codegen-orchestrator/brainstorms/qa-node.md --file DOC.md
+python3 -P -m ummanu knowledge delete --instance INSTANCE --actor ACTOR \
+  --path decisions/2026-07-25-sprint-1.md
 python3 -P -m ummanu knowledge list --instance INSTANCE
 ```
 
@@ -4859,6 +4856,10 @@ checkpoint (the legacy tick's commit or the exporter's cut) carries it out (no m
 A document containing a secret is rejected with code 2 and nothing reaches disk. Rewriting identical
 content reports `changed: false` and writes nothing. The answer's `commit` is the content revision
 of what was written (`sha256:...`), not a Git commit ([Recovery](RECOVERY.md#writers)).
+
+`delete` removes one document under the same lock, with any directory it leaves empty; the next
+checkpoint drops it and the repository history keeps it. Its `commit` is the content revision of the
+removed document. A path that names no document is refused with code 2.
 
 `write` takes exactly one of `--file` and `--dir`. With `--dir`, `--path` names a directory below
 `state/knowledge` (same segment rules, no `..`, not absolute), and under one writer lock its whole
@@ -4872,8 +4873,8 @@ python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
 ```
 
 Refused with code 2 before anything is written: a missing source or one with no files; a symlink,
-special file or an entry whose name starts with `.git` (`.git`, `.gitignore`, `.gitattributes`,
-`.gitmodules`) anywhere in it; a text file (UTF-8 without NUL bytes) that contains a secret; a total
+special file or an entry Git reads (`.git`, `.gitignore`, `.gitattributes`, `.gitmodules`)
+anywhere in it (any other dot name, `.github` included, is copied); a text file (UTF-8 without NUL bytes) that contains a secret; a total
 size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned. Empty
 subdirectories are not kept. If the write fails at any step the previous directory is put back and
 `state/knowledge` is byte-identical to before.

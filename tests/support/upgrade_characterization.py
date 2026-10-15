@@ -16,7 +16,7 @@ from ummanu.host_apply import HostCommandError, UnitProcessIdentity
 from ummanu.installation import materialize
 
 
-def capture(entry, checkout, dependencies, workspaces, host, services, types, root: Path) -> dict:
+def capture(entry, checkout, dependencies, host, services, types, root: Path) -> dict:
     """Use the same fixture on concrete candidate owners or an explicitly supplied old module."""
     packet = {"order": [step.__name__ for step in entry.STEPS]}
     report = SimpleNamespace(
@@ -229,14 +229,6 @@ def capture(entry, checkout, dependencies, workspaces, host, services, types, ro
         pip.call_args.kwargs,
     ]
     packet["dependency_bytes"] = (report.data_dir / "upgrade" / "dependency-receipt.json").read_text()
-
-    with (
-        mock.patch.object(workspaces.po_token, "ensure_token", return_value=True) as token,
-        mock.patch.object(workspaces, "_set_runtime_owner") as owner,
-    ):
-        packet["workspace"] = asdict(workspaces.step_po_token(context()))
-    token.assert_called_once_with(report.data_dir, dry_run=False)
-    owner.assert_called_once_with(report.data_dir / "po-web-token", None)
 
     identity = UnitProcessIdentity(123, 456, "invocation")
     inputs = {

@@ -861,7 +861,7 @@ class _ReleaseHost(CommandHostRuntime):
         return self.leaf(label)
 
     def _run(self, args, label, *, cwd=None):
-        stdout = {"merge pr base": "main\n", "post-merge commit": RELEASE_SHA + "\n",
+        stdout = {"merge pr base": json.dumps({"baseRefName": "main", "isDraft": False}), "post-merge commit": RELEASE_SHA + "\n",
                   "post-merge landed commit": RELEASE_SHA + "\n"}.get(label, "")
         return self.leaf(label, SimpleNamespace(stdout=stdout, stderr="", returncode=0))
 

@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
-from ummanu.po.client import OutcomeUnknown, PoServiceClient, ServiceRefused, ServiceUnavailable
+from ummanu.po.client import (
+    OutcomeUnknown,
+    PoServiceClient,
+    ServiceRefused,
+    ServiceUnavailable,
+    read_restart_marker,
+)
 from ummanu.po.context_budget import CONTEXT_METRIC, context_budget_bytes, conversation_bytes
 from ummanu.po.models import (
     DEFAULT_EFFORTS,
@@ -121,6 +127,7 @@ class PoLayer(ProtocolBoundary):
     def po_session(self, session_id: str) -> dict[str, Any]:
         """The session, its turns and feed from the store, and its messages still in the service's queue.
 
+        `queue_hold` says why queued messages wait beyond this session's own turn (see :meth:`_queue_hold`).
         `efforts` is what the installation offers per CLI (none on an unreadable config).
         """
         store = self._store_or_refuse()
@@ -132,6 +139,7 @@ class PoLayer(ProtocolBoundary):
             threshold = context_budget_bytes(None if self._models is not None else self._instance_config())
         except ValueError as exc:
             raise RuntimeUnavailable(str(exc)) from None
+        queued = self._queued(session_id)
         return {
             "kind": "po_session",
             "session": _session(session, running=running is not None),
@@ -140,7 +148,8 @@ class PoLayer(ProtocolBoundary):
             "running": running is not None,
             "running_seq": running.seq if running is not None else None,
             "last_turn": _turn(turns[-1]) if turns else None,
-            "queued": self._queued(session_id),
+            "queued": queued,
+            "queue_hold": self._queue_hold(store) if queued else None,
             "efforts": self._offered_efforts(),
             "context_budget": {"measured_bytes": conversation_bytes(feed),
                                "threshold_bytes": threshold, "metric": CONTEXT_METRIC},
@@ -160,6 +169,28 @@ class PoLayer(ProtocolBoundary):
                 continue
             sessions[session_id] = {"title": session.title, "state": session.state}
         return {"kind": "po_session_titles", "sessions": sessions}
+
+    def _queue_hold(self, store: PoStore) -> dict[str, Any] | None:
+        """A pending PO service restart, which holds every session's queue until no turn of any session runs.
+
+        `running` names the turns it waits for; None when no restart is pending.
+        """
+        try:
+            marker = read_restart_marker(self._resolved_data_dir())
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise RuntimeUnavailable(f"the PO service restart marker is unreadable: {exc}") from None
+        if marker is None:
+            return None
+        turns = self._store(store.running_turns)
+        return {
+            "reason": "restart_pending",
+            "detail": marker["reason"],
+            "since": marker["requested_at"],
+            "running": [
+                {"session_id": turn.session_id, "seq": turn.seq, "started_at": _time(turn.started_at)}
+                for turn in turns
+            ],
+        }
 
     def _offered_efforts(self) -> dict[str, list[str]]:
         try:

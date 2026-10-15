@@ -20,6 +20,7 @@ import hashlib
 import inspect
 import io
 import json
+import os
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -1061,6 +1062,25 @@ class CurrentCardStateTests(SprintWorkFixture):
         self.assertIsNone(standing["age_seconds"])
         self.assertIn("no current card", standing["reason"])
 
+    def test_the_watched_page_reads_only_its_own_sprint_slice_of_the_journal(self) -> None:
+        """Another sprint's card history never reaches this page, and the page still dates its card."""
+        self.add_sprint_row("sprint:1004", status="open", current_task="ummanu-9004")
+        self._typed_move(self.LAST, "ready", "in_progress")
+        self._typed_move(self.AFTER, "ready", "in_progress", ref="ummanu-9004")
+        audit_type = type(task_audit_for(self.board))
+        asked: list[Any] = []
+        original = audit_type.events
+
+        def recording(audit, *args, **kwargs):
+            asked.append(kwargs.get("references"))
+            return original(audit, *args, **kwargs)
+
+        with mock.patch.object(audit_type, "events", recording):
+            watched = self.reads().sprint_state(self.reference)
+
+        self.assertEqual(asked, [{self.reference, self.card}])
+        self.assertEqual(watched["work"]["current_card_state"]["since"], self.LAST)
+
     def test_a_journal_nobody_can_read_takes_away_this_and_nothing_else(self) -> None:
         """Criterion 2: the new part is unavailable, and the card's own fields still stand."""
         self._typed_move(self.LAST, "ready", "in_progress")
@@ -1405,6 +1425,29 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
         self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
         self.assertIn("cut the next card", waiting["reason"])
 
+    def test_a_finished_card_under_post_merge_ci_waits_on_that_ci_until_it_answers(self) -> None:
+        reference, card = self._sprint_on_a_card()
+        self._move(card, "Done")
+        sha = "ab12cd34ef56" + "0" * 28
+        watch = {"ref": card, "base": "main", "merge_sha": sha, "started_at": 1788650000.0, "result": None}
+        state = self.data_dir / "dispatcher" / "production-state.json"
+
+        def write(watched: dict[str, Any]) -> None:
+            payload = {"phase": "production", "records": {}, "observers": {}, "post_merge_watches": watched}
+            state.write_text(json.dumps(payload), encoding="utf-8")
+
+        write({card: watch})
+        for operation, work in self._work(reference):
+            with self.subTest(operation=operation):
+                waiting = work["waiting"]
+                self.assertEqual(waiting["state"], sprint_reads_module.WAITING_WAITING)
+                self.assertIn(f"watching the CI of {sha[:12]} on main since 2026-09-05T23:13:20Z", waiting["reason"])
+                self.assertEqual(waiting["card"], card)
+
+        write({card: {**watch, "result": {"result": "green"}}})
+        waiting = self._entry(self.reads().sprint_list(), reference)["waiting"]
+        self.assertIn("cut the next card", waiting["reason"])
+
     def test_an_active_column_with_no_record_still_prefers_what_the_board_settled(self) -> None:
         """The dispatcher answered, and holds no record: the column is the better answer where it
         has one, and the bare "no record" is what is left where it does not."""
@@ -1621,7 +1664,13 @@ class SprintReadCommandTests(SprintProtocolFixture):
 
     def test_an_installation_that_does_not_validate_is_the_backend_status(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+        with (
+            mock.patch.dict("os.environ"),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            for name in ("UMMANU_INSTANCE", "UMMANU_RUNTIME_ENV_FILE", "UMMANU_DATA_DIR"):
+                os.environ.pop(name, None)
             code = main(["sprint", "list", "--instance", str(self.tmp / "not-an-instance")])
 
         self.assertEqual(code, _EXIT_BY_CODE["backend_unavailable"])

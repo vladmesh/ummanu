@@ -93,6 +93,13 @@ class IntegrationBaseRuleTests(unittest.TestCase):
         self.assertIn("object id", integration_base_refusal("5" * 40))
         self.assertEqual(seed_ref_refusal("5" * 40), "")
 
+    def test_an_abbreviated_object_id_is_refused_as_a_seed(self) -> None:
+        refusal = seed_ref_refusal("7afdabc")
+
+        self.assertIn("abbreviated object id", refusal)
+        self.assertIn("40-character", refusal)
+        self.assertEqual(seed_ref_refusal("release-9"), "")
+
     def test_a_ref_that_is_not_a_ref_is_refused_before_it_reaches_git(self) -> None:
         for value in ("--upload-pack=evil", "a//b", "../etc", "main/"):
             with self.subTest(value=value):
@@ -498,8 +505,8 @@ class _MergeHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
-        if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
-            return subprocess.CompletedProcess(args, 0, f"{self.pr_base}\n", "")
+        if args[:3] == ["gh", "pr", "view"] and "baseRefName,isDraft" in args:
+            return subprocess.CompletedProcess(args, 0, json.dumps({"baseRefName": self.pr_base, "isDraft": False}), "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
 

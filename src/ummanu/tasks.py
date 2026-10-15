@@ -2443,15 +2443,18 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
 
     def _dispatcher_wait_edge_refusal(self, task: dict[str, Any], source: str, target: str) -> str:
         """Why the dispatcher may not take one of its two wait edges here, or `""`. In
-        progress -> Done is a wait card's `target_reached`, once its result is frozen;
+        progress -> Done is a wait card's `target_reached` or `cancelled`, once its result is frozen;
         Ready -> Blocked is a card held by a wait card (`blocked_by`) that ended
         another way, or the hotfix card the dispatcher itself cut for a red after-merge
         e2e run that no open sprint and no PO origin owns.
         """
         if (source, target) == ("in_progress", "done"):
             result = wait_card.wait_state(task).result if is_wait(task) else None
-            if result is None or result.get("outcome") != wait_card.TARGET_REACHED:
-                return "the dispatcher moves an In progress card to Done only as a wait card's target_reached"
+            if result is None or result.get("outcome") not in (wait_card.TARGET_REACHED, wait_card.CANCELLED):
+                return (
+                    "the dispatcher moves an In progress card to Done only as a wait card's "
+                    "target_reached or cancelled"
+                )
         if (source, target) == ("ready", "blocked"):
             created = self.audit.events(str(task.get("ref") or ""), kind="created")
             if any(

@@ -113,7 +113,7 @@ class BackupTests(unittest.TestCase):
             _write_instance(instance, data_dir)
             _write_export_surface(data_dir)
             git_dir = data_dir / "memory" / "facts" / ".git"
-            subprocess.run(["git", "init", str(git_dir.parent)], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["git", "init", "--quiet", "--initial-branch", "main", str(git_dir.parent)], check=True)
             (git_dir / "hooks").mkdir(exist_ok=True)
             (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
             (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")

@@ -102,8 +102,8 @@ from ummanu.dispatch.types import (
 )
 from ummanu.infra.checkpoint_run import load_checkpoint_state, run_checkpoint
 from ummanu.projects.contract import (
+    ADAPTER_INVALID,
     BROAD_CHECK_NOT_DECLARED,
-    CANNOT_ATTEST_PROJECT,
     CONTRACT_REFUSALS,
     UNDECIDABLE_NO_REGISTERED_PROJECT,
     UNDECIDABLE_PROJECT_UNAVAILABLE,
@@ -7077,7 +7077,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(len(targets), 2, "the card was claimed once and blocked once")
         return events[targets[0] + 1 : targets[1]]
 
-    def _preflight_blocked(self, shape: str = CANNOT_ATTEST_PROJECT) -> dict:
+    def _preflight_blocked(self, shape: str = ADAPTER_INVALID) -> dict:
         self._refused_contract(shape)
         self.start_dispatcher()
         return self.tick()
@@ -7139,14 +7139,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 self.assertFalse((self.data_dir / "workspaces").exists())
 
     def test_an_adapter_that_declares_no_broad_check_blocks_before_the_claim(self) -> None:
-        """The shape this issue adds, on the seam the other refusals already use.
-
-        It is worth its own test beside the loop because it is the live case: eight registered
-        projects said `cannot_attest_project` before this change and say this instead. What is
-        asserted is the boundary — the card is refused before `writer.claim` does anything with a
-        workspace or a head — and that the refusal carried is the new shape rather than the one it
-        used to be masked by.
-        """
+        """The card is refused before `writer.claim` does anything with a workspace or a head, and
+        the refusal carried names the undeclared contract."""
         message = self._refused_contract(BROAD_CHECK_NOT_DECLARED)
         self.start_dispatcher()
 
@@ -7158,7 +7152,6 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             blocked["contract_refusal"],
             {"shape": BROAD_CHECK_NOT_DECLARED, "adapter": "ummanu", "detail": message},
         )
-        self.assertNotIn(CANNOT_ATTEST_PROJECT, self.reader.show(CARD_REF)["comments"][-1]["body"])
         self.assertEqual(
             self.asked_while,
             [("ummanu", "ready", [])],
@@ -9638,7 +9631,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(prompted["action"], "worker-report-prompted")
         self.assertEqual(prompted["status"], "degraded")
         self.assertEqual(self.host.report_prompts, [_report_nudge_prompt(2, CARD_REF)])
-        self.assertIn("generation 2", self.host.report_prompts[0])
+        self.assertIn("round 2", self.host.report_prompts[0])
         # Nothing was stopped, restarted or replaced, and nothing the round owns was rewritten.
         self.assertNotIn("restart_worker", self.host.calls)
         self.assertNotIn("stop_head:worker", self.host.calls)
@@ -10745,7 +10738,7 @@ class HeadPromptTests(unittest.TestCase):
             ),
             (
                 "unfit",
-                ContractVerdict.as_refused(CANNOT_ATTEST_PROJECT, "example", "cannot attest"),
+                ContractVerdict.as_refused(ADAPTER_INVALID, "example", "invalid adapter"),
                 False,
             ),
             (
@@ -11083,16 +11076,11 @@ class ReportPromptDeliveryTests(unittest.TestCase):
 
         self.assertFalse(noop.worker_addressable(self.record))
 
-    def test_the_prompt_names_the_round_and_refuses_the_usual_substitutes(self) -> None:
+    def test_the_prompt_names_the_round_and_the_card(self) -> None:
         prompt = _report_nudge_prompt(3, "ummanu-1172")
 
-        self.assertIn("generation 3", prompt)
-        self.assertIn("ummanu-1172", prompt)
-        self.assertIn("report command in TASK.md", prompt)
-        self.assertIn("both end in 3", prompt)
-        self.assertIn("Committing, pushing, a green test run", prompt)
-        self.assertIn("is not a report of this round", prompt)
-        self.assertIn("If it is not done, carry on", prompt)
+        self.assertIn("round 3 of ummanu-1172", prompt)
+        self.assertIn("end in 3", prompt)
 
 
 class ContinuationPointerTests(unittest.TestCase):
@@ -12189,6 +12177,17 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertFalse(any("push origin pipeline/ummanu-510:main" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
 
+    def test_complete_green_marks_a_draft_pr_ready_before_merging_it(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}}, pr_draft=True)
+            record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))
+            host.complete_green({"ref": "ummanu-510", "project": "codegen_orchestrator"}, record)
+        cmds = [" ".join(run) for run in host.runs]
+        ready = cmds.index("gh pr ready pipeline/ummanu-510")
+        self.assertLess(ready, cmds.index("gh pr merge pipeline/ummanu-510 --merge"), cmds)
+
     def test_complete_green_survives_default_checkout_refresh_failure_after_pr_merge(self) -> None:
         """The remote merge is complete even when a preserved local branch cannot fast-forward."""
         from types import SimpleNamespace
@@ -12211,6 +12210,26 @@ class DispatcherLauncherTests(unittest.TestCase):
         cmds = [" ".join(run) for run in host.runs]
         self.assertTrue(any("gh pr merge pipeline/ummanu-510 --merge" in c for c in cmds))
         self.assertTrue(any(c.endswith("git -C /home/dev/ummanu fetch origin main") for c in cmds))
+
+    def test_complete_green_reports_the_push_landing_when_a_diverged_checkout_cannot_fast_forward(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp))
+            original_run = host._run
+
+            def fail_fast_forward(args, label, *, cwd=None):
+                if label == "post-merge fast-forward":
+                    raise HostError("post-merge fast-forward failed: Diverging branches")
+                return original_run(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "_run", side_effect=fail_fast_forward):
+                landing = host.complete_green(
+                    {"ref": "ummanu-510", "project": "ummanu"},
+                    SimpleNamespace(workspace=str(Path(tmp) / "ws")),
+                )
+
+        self.assertEqual((landing.path, landing.base), ("push", "main"))
 
     def test_complete_green_survives_default_checkout_fetch_failure_after_pr_merge(self) -> None:
         """The remote merge is complete even when the checkout cannot refresh from origin."""
@@ -12381,11 +12400,14 @@ class DispatcherLauncherTests(unittest.TestCase):
 
 
 class _RecordingMergeHost(CommandHostRuntime):
-    def __init__(self, root: Path, adapter: dict | None = None, *, pr_base: str = "main") -> None:
+    def __init__(
+        self, root: Path, adapter: dict | None = None, *, pr_base: str = "main", pr_draft: bool = False
+    ) -> None:
         super().__init__(FakeCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self.runs: list[list[str]] = []
         # What GitHub says the open pull request targets; the merge refuses any other answer.
         self.pr_base = pr_base
+        self.pr_draft = pr_draft
 
     def _project_remote(self, project, checkout):  # type: ignore[override]
         # No checkout exists behind the stubbed `_run`; its origin is declared local, so remote Git
@@ -12396,8 +12418,9 @@ class _RecordingMergeHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
-        if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
-            return subprocess.CompletedProcess(args, 0, f"{self.pr_base}\n", "")
+        if args[:3] == ["gh", "pr", "view"] and "baseRefName,isDraft" in args:
+            view = {"baseRefName": self.pr_base, "isDraft": self.pr_draft}
+            return subprocess.CompletedProcess(args, 0, json.dumps(view), "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
@@ -12431,7 +12454,7 @@ class _FakeGhMergeHost(CommandHostRuntime):
 
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         if args and args[0] == "gh":
-            stdout = f"{self.pr_base}\n" if args[:3] == ["gh", "pr", "view"] else ""
+            stdout = json.dumps({"baseRefName": self.pr_base, "isDraft": False}) if args[:3] == ["gh", "pr", "view"] else ""
             return subprocess.CompletedProcess(list(args), 0, stdout, "")
         return super()._run(args, label, cwd=cwd)
 
@@ -12800,8 +12823,8 @@ class GithubGateHost(CommandHostRuntime):
                 self._gh_errors["pr list"] = self._pr_list_after_create_fails
             return done("https://github.com/example-org/sample/pull/42\n")
         if args[1:3] == ["pr", "view"]:
-            if "baseRefName" in args:
-                return done(f"{self.pr_base}\n")
+            if "baseRefName,isDraft" in args:
+                return done(json.dumps({"baseRefName": self.pr_base, "isDraft": False}))
             return done(json.dumps({"title": self.pr_title, "body": self.pr_body}))
         if args[1:3] == ["pr", "edit"]:
             if "--base" in args:
@@ -14756,10 +14779,9 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertNotIn("one or more jobs failed", result.log)
 
     def test_github_gate_red_fragment_keeps_unmarked_error_ahead_of_the_runner_echo(self) -> None:
-        """secretary-766 review: gh only tags its own generic completion line with `##[error]`;
-        the actual Python exception above it usually carries no marker at all. Filtering the
-        fragment down to `##[error]`-only lines then keeps just the completion echo and drops
-        the real cause — reproduced here with the exact two-line log from the review."""
+        """A red gate fragment keeps the unmarked exception line, not only the runner's error-marked echo.
+
+        The runner marks only its generic completion line; the real cause above it carries no marker."""
         run_log = "tests\tRun script\tFileNotFoundError: absent\ntests\tRun script\t##[error]Process completed with exit code 1."
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")

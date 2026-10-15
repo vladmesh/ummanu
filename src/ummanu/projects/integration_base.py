@@ -31,6 +31,8 @@ CARD_BRANCH_PREFIX = "pipeline/"
 # traversal is refused here rather than quoted at every call site.
 _REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 _EXACT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+# A remote serves an object only by its full id, so an abbreviated one cannot be fetched.
+_ABBREVIATED_SHA_RE = re.compile(r"^[0-9a-f]{7,39}$")
 
 
 class IntegrationBaseError(ValueError):
@@ -84,6 +86,11 @@ def integration_base_refusal(value: str) -> str:
 
 def seed_ref_refusal(value: str) -> str:
     """Why `value` may not be a card's seed, or "" when it may."""
+    if _ABBREVIATED_SHA_RE.match(str(value or "")):
+        return (
+            f"seed ref {value!r} looks like an abbreviated object id; the dispatcher fetches the seed "
+            "from the project remote, which serves an object only by its full 40-character id"
+        )
     return ref_shape_refusal(value, field="seed ref")
 
 

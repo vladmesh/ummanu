@@ -87,6 +87,18 @@ class ExpectationTests(unittest.TestCase):
         self.assertEqual(expected.projects, {"/opt/checkouts/widget"})
         self.assertIn("ummanu-dispatcher-production.timer", expected.units)
 
+    def test_the_installed_dispatcher_timer_and_its_desired_state_name_one_cadence(self):
+        name = "ummanu-dispatcher-production.timer"
+        plan = build_plan({"host": {"unit_prefix": "ummanu-"}}, [], packaged=SHIPPED_UNITS)
+        (resource,) = [resource for resource in plan if resource.name == name]
+        spec = json.loads(resource.spec)
+        (unit,) = [unit for unit in SHIPPED_UNITS if unit.name == name]
+        lines = unit.content.decode().splitlines()
+
+        self.assertIn(f"OnBootSec={spec['on_boot_sec']}", lines)
+        self.assertIn(f"OnUnitActiveSec={spec['on_unit_active_sec']}", lines)
+        self.assertEqual(spec["digest"], unit.digest)
+
     def test_doctor_compares_projects_and_units_only(self):
         """Orca repo registrations are Orca's own state: doctor has no section for them."""
         expected = build_doctor_expectations(

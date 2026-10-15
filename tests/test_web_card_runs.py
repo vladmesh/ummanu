@@ -390,20 +390,13 @@ class CardRunRenderTests(unittest.TestCase):
                 self.assertEqual(counts["mutations"], [])
             self.assertEqual({p: p.read_bytes() for p in after_preparation}, after_preparation)
 
-    def test_startup_does_not_suppress_defects_or_unrelated_security_and_bind_failures(self):
+    def test_startup_does_not_suppress_defects_or_unrelated_bind_failures(self):
         with (
             self._command_startup(lambda app, **_: 0) as (serving, _diagnostic),
             mock.patch.object(
                 OperationLayer, "prepare_card_runs", side_effect=TypeError("preparation defect")
             ),
             self.assertRaisesRegex(TypeError, "preparation defect"),
-        ):
-            commands.run_web_serve(self._startup_args())
-        serving.assert_not_called()
-        with (
-            self._command_startup(lambda app, **_: 0) as (serving, _diagnostic),
-            mock.patch.object(commands, "PoTokenLayer", side_effect=RuntimeError("security setup defect")),
-            self.assertRaisesRegex(RuntimeError, "security setup defect"),
         ):
             commands.run_web_serve(self._startup_args())
         serving.assert_not_called()

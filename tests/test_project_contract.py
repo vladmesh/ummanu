@@ -33,7 +33,6 @@ from ummanu.projects.contract import (
     ADAPTER_UNAVAILABLE,
     BROAD_CHECK_INCOMPLETE,
     BROAD_CHECK_NOT_DECLARED,
-    CANNOT_ATTEST_PROJECT,
     CONTRACT_FIT,
     CONTRACT_REFUSALS,
     CONTRACT_REFUSED,
@@ -120,13 +119,7 @@ class ProjectContractTests(unittest.TestCase):
         self.assertEqual(refused.adapter, "example")
         self.assertIn("example", refused.message)
         self.assertIn("broad_check", refused.message)
-        self.assertIn(
-            "declares no broad-check contract",
-            refused.message,
-            "the message says the one true thing about this project: it declared nothing. It does "
-            "not name a package the project never asked for, which is what made the old "
-            "`cannot_attest_project` wording mislead every reader of it",
-        )
+        self.assertIn("declares no broad-check contract", refused.message)
 
     def test_a_ummanu_shaped_checkout_earns_the_same_refusal_as_any_other(self) -> None:
         """The second bad outcome the default had, and the less visible one.
@@ -566,22 +559,6 @@ class ProjectContractTests(unittest.TestCase):
 
         self.assertEqual(verdict.state, CONTRACT_REFUSED)
         self.assertEqual(verdict.refusal.shape, ADAPTER_INVALID)
-
-    def test_no_checkout_layout_decides_anything_here_any_more(self) -> None:
-        """`cannot_attest_project` stops being the mask an undeclared contract wore.
-
-        It was only ever produced by the layout heuristic behind the default, so `decide` no longer
-        reaches it at all: a declared contract is executed as declared, and what such a run
-        actually imported is caught afterwards by the receipt's own import provenance. The shape
-        stays enumerated for that meaning — a *declared* contract that cannot attest its own
-        checkout — and this test pins that no adapter shape reaches it by declaring nothing.
-        """
-        self.adapter()
-        self.package("codegen_orchestrator")
-
-        self.assertEqual(self.refusal().shape, BROAD_CHECK_NOT_DECLARED)
-        self.assertNotEqual(self.refusal().shape, CANNOT_ATTEST_PROJECT)
-        self.assertIn(CANNOT_ATTEST_PROJECT, CONTRACT_REFUSALS)
 
     def test_every_enumerated_shape_has_one_worker_error_code(self) -> None:
         """The enumeration is the whole list, and neither side may grow a sixth of its own."""

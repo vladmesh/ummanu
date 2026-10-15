@@ -59,15 +59,17 @@ class SprintLifecycleMixin:
         self._role(role, {"po", "observer"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
-        closed = self._close_atomic(
-            role=role,
-            actor=actor,
-            reference=reference,
-            decisions=decisions,
-            request_id=request_id,
-            reason=reason,
-            closeout=closeout,
-        )
+        # Admission before the SQL transaction and its advisory lock, the order create takes them in.
+        with sprint_admission_lock(self.data_dir):
+            closed = self._close_atomic(
+                role=role,
+                actor=actor,
+                reference=reference,
+                decisions=decisions,
+                request_id=request_id,
+                reason=reason,
+                closeout=closeout,
+            )
         # After the close committed, once per close record: a repeat of this request id answers the
         # same record and writes nothing new, and a reopened sprint's next close is a new record.
         owner_events.record(
@@ -97,7 +99,7 @@ class SprintLifecycleMixin:
             raise TaskError("validation", str(exc), 2) from None
         intent = SprintCloseIntent(Role(role), actor, reference)
         intent_document = intent.to_document()
-        with sprint_admission_lock(self.data_dir), self.transactions.reference_lock(reference) as lock, held_lock(lock):
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             document, committed = self.transactions.existing(
                 request_id,
                 kind=SPRINT_CLOSED,
@@ -769,7 +771,6 @@ class SprintLifecycleMixin:
             "cleanup": CleanupJournal(self.data_dir).summary(sprint=str(event["ref"])),
         }
 
-    @_sql_atomic
     def reopen(
         self,
         *,
@@ -783,6 +784,22 @@ class SprintLifecycleMixin:
         fresh explicit observer selection rather than inheriting a closed or migrated
         value; write it before transitioning to open.
         """
+        # Admission before the SQL transaction and its advisory lock, the order create takes them in.
+        with sprint_admission_lock(self.data_dir):
+            return self._reopen_atomic(
+                role=role, actor=actor, reference=reference, request_id=request_id, observer=observer
+            )
+
+    @_sql_atomic
+    def _reopen_atomic(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str | None,
+        observer: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         self._role(role, {"po"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
         intent = SprintReopenIntent(
@@ -792,33 +809,32 @@ class SprintLifecycleMixin:
             observer=self._observer_intent(observer, executable=True),
         )
         intent_document = intent.to_document()
-        with sprint_admission_lock(self.data_dir):
-            document, committed = self.transactions.existing(
-                request_id, kind=SPRINT_REOPENED, intent=intent_document
+        document, committed = self.transactions.existing(
+            request_id, kind=SPRINT_REOPENED, intent=intent_document
+        )
+        if committed is not None:
+            return self._committed_result(SPRINT_REOPENED, committed)
+        if document is None:
+            sprint_document = self.reader.show(reference, include_cards=False)
+            sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
+            self._check_reopen(sprint, reference)
+            event = self._event(
+                SPRINT_REOPENED,
+                role,
+                actor,
+                reference,
+                request_id,
+                {"intent": intent_document},
+                sprint,
+            )
+            document, committed = self.transactions.begin(
+                request_id, kind=SPRINT_REOPENED, intent=intent_document, event=event
             )
             if committed is not None:
                 return self._committed_result(SPRINT_REOPENED, committed)
             if document is None:
-                sprint_document = self.reader.show(reference, include_cards=False)
-                sprint = SprintWriteSnapshot.from_document(sprint_document, thresholds=self.thresholds)
-                self._check_reopen(sprint, reference)
-                event = self._event(
-                    SPRINT_REOPENED,
-                    role,
-                    actor,
-                    reference,
-                    request_id,
-                    {"intent": intent_document},
-                    sprint,
-                )
-                document, committed = self.transactions.begin(
-                    request_id, kind=SPRINT_REOPENED, intent=intent_document, event=event
-                )
-                if committed is not None:
-                    return self._committed_result(SPRINT_REOPENED, committed)
-                if document is None:
-                    raise TaskError("audit_pending", "sprint transaction claim is unavailable", 4)
-            return self._run_reopen(document)
+                raise TaskError("audit_pending", "sprint transaction claim is unavailable", 4)
+        return self._run_reopen(document)
 
     def _check_reopen(self, sprint: SprintWriteSnapshot, reference: str) -> None:
         """Every rule an open sprint has to satisfy, read live before any write."""
