@@ -16,23 +16,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ummanu.cli import main
-from ummanu.data import export_board, init_layout, normalize_sprint_entity
-from ummanu.dispatch.observer import render_observer_prompt
-from ummanu.restore import RestoreError, import_normalized_board
-from ummanu.sprint_observer import (
-    REVIEWER_FIELD,
-    WORKER_FIELD,
-    executor_malformed,
-    executor_pinned,
-    executor_unset,
-    head_choice,
-    parse_executor,
-)
-from ummanu.head_registry import generated_pair
-from ummanu.sprints import SprintReader, SprintWriter
-from ummanu.board.sql_audit import SqlTaskAudit
-from ummanu.tasks import TaskError, TaskWriter
 from tests.fakes.sprints import (
     KEEP_THE_ISSUE_OPEN,
     SprintBackendFixture,
@@ -41,6 +24,21 @@ from tests.fakes.sprints import (
 )
 from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.cli import main
+from ummanu.data import export_board, init_layout, normalize_sprint_entity
+from ummanu.dispatch.observer import render_observer_prompt
+from ummanu.head_registry import generated_pair
+from ummanu.restore import RestoreError, import_normalized_board
+from ummanu.sprint_observer import (
+    executor_malformed,
+    executor_pinned,
+    executor_unset,
+    head_choice,
+    parse_executor,
+)
+from ummanu.sprints import SprintReader, SprintWriter
+from ummanu.tasks import TaskError, TaskWriter
 
 UNSET_BOTH = {"worker": executor_unset(), "reviewer": executor_unset()}
 

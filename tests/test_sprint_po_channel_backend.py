@@ -17,19 +17,19 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
-from tests.sql_backend_fixtures import PostgresBoard
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, NEUTRAL_PO_NOTES, REQUEST_PO_NOTES
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
-from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, REQUEST_PO_NOTES, NEUTRAL_PO_NOTES
+from tests.sql_backend_fixtures import PostgresBoard
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_execution import assignment, create_assignment
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.cli import main
 from ummanu.dispatch.po_cards import ServicePoChannel, advance_po_card, claim_po_card
 from ummanu.dispatch.state import new_attempt_id
+from ummanu.po.context_budget import rollover_request_id
 from ummanu.po.runner import PoRunner
 from ummanu.po.service import PoService, listening
 from ummanu.po.sprints import BoardSprintSessions
-from ummanu.po.context_budget import rollover_request_id
 from ummanu.po.store import COMPLETED, PoStore, RequestConflict
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
@@ -90,9 +90,9 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
                 delivery, through = f"syntax-delivery-{index}", f"syntax-event-{index}"
                 bad = self.entry(code["ref"], selected_step=body, next_safe_step=body)
                 for entry in (bad, {**bad, "po_request": {"card": code["ref"], "action": body}}):
-                    self.assert_refused(lambda entry=entry: self.writer.resume(role="observer", actor="observer",
-                        reference=self.ref, entry=entry, delivery_id=delivery, through_event=through,
-                        request_id=request), request)
+                    self.assert_refused(lambda entry=entry, delivery=delivery, through=through, request=request:
+                        self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+                        delivery_id=delivery, through_event=through, request_id=request), request)
                 corrected = {**bad, "current_task": operation["ref"],
                              "po_request": {"card": operation["ref"], "action": body}}
                 accepted = self.writer.resume(role="observer", actor="observer", reference=self.ref,
@@ -226,7 +226,7 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
                     request_id="concurrent", delivery_id="d", through_event="e")
             except TaskError as exc:
                 outcomes.append(exc.code)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - the thread hands any failure to the asserting test.
                 outcomes.append(exc)
             finally:
                 finished.set()
@@ -277,9 +277,9 @@ class StandalonePoExecutionBackendTests(SprintFixture):
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)
         self.reader = TaskReader(self.client)
         self.request = "dispatcher-e2e-cap-ummanu-12-3"
-        self.fields = dict(role="dispatcher", actor="dispatcher", project="ummanu", task_type="decision",
-            title="PO budget disposition", description="GATE: choose a safe disposition without a grant",
-            po_execution=create_assignment(self.request, "e2e_budget", ["ummanu-12"]), request_id=self.request)
+        self.fields = {"role": "dispatcher", "actor": "dispatcher", "project": "ummanu", "task_type": "decision",
+            "title": "PO budget disposition", "description": "GATE: choose a safe disposition without a grant",
+            "po_execution": create_assignment(self.request, "e2e_budget", ["ummanu-12"]), "request_id": self.request}
 
     def test_assignment_create_dedup_and_route_persistence_are_atomic(self):
         before = self.client.card_count()
