@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ummanu import head_registry
-from ummanu.board.backend import SPRINT, board_client
+from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.checkpoint import checkpoint_snapshot
 from ummanu.dispatch.headless import headless_cards, headless_worker
 from ummanu.dispatch.observer import observer_snapshot
@@ -100,6 +100,17 @@ def collect_status(
     recovery = recovery or collect_recovery_inventory(report, inspect_live=False, checkpoint=checkpoint)
     if probe_panels is None:
         probe_panels = not offline and host_fixture is None
+    board, owned = _board(report.instance_path.parent, sprint_client)
+    try:
+        card_total = _card_count(board)
+        sprint_section = (
+            _sprints(data_dir, report.instance, production, board)
+            if sprints
+            else {"items": [], "error": None, "skipped": "sprints were not read on this call"}
+        )
+    finally:
+        if owned is not None:
+            owned.close()
     return {
         "schema_version": STATUS_SCHEMA_VERSION,
         "installation": {
@@ -110,14 +121,10 @@ def collect_status(
             "head_registry": _head_registry(report.instance_path.parent, report.data_dir),
             "interactive_workspace": interactive_workspace.describe(data_dir),
             "cards": {
-                "total": _card_count(data_dir),
+                "total": card_total,
                 "active_attempts": len(_attempts(production, probe_panels=False)),
             },
-            "sprints": _sprints(
-                data_dir, report.instance_path.parent, report.instance, production, client=sprint_client
-            )
-            if sprints
-            else {"items": [], "error": None, "skipped": "sprints were not read on this call"},
+            "sprints": sprint_section,
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
@@ -206,23 +213,29 @@ def _head_registry(instance_dir: Path, data_dir: Path | None = None) -> dict[str
     return record
 
 
+def _board(instance_dir: Path, client: SqlCardClient | None) -> tuple[SqlCardClient | TaskError, SqlCardClient | None]:
+    """The board client the card total and the sprints read share, the refusal when none can be
+    built, and the client this call owns and must close (None when the caller passed one)."""
+    if client is not None:
+        return client, None
+    try:
+        owned = board_client(instance_dir, serves=(CARD, SPRINT))
+    except TaskError as exc:
+        return exc, None
+    return owned, owned
+
+
 def _sprints(
     data_dir: Path,
-    instance_dir: Path,
     instance: dict[str, Any],
     production: dict[str, Any],
-    *,
-    client: SqlCardClient | None = None,
+    board: SqlCardClient | TaskError,
 ) -> dict[str, Any]:
-    """Read the sprint entity and live board without consulting observer context.
-
-    A client the caller passes stays open; one created here is closed before returning.
-    """
-    owned = None
+    """Read the sprint entity and live board without consulting observer context."""
+    if isinstance(board, TaskError):
+        return {"items": [], "error": {"code": board.code, "message": board.message}}
     try:
-        if client is None:
-            client = owned = board_client(instance_dir, serves=(SPRINT,))
-        reader = SprintReader(client, data_dir=data_dir, thresholds=budget_thresholds(instance))
+        reader = SprintReader(board, data_dir=data_dir, thresholds=budget_thresholds(instance))
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
         return {
             "items": reader.statuses(observers=observers, headless=headless_cards(production), create=False),
@@ -230,9 +243,6 @@ def _sprints(
         }
     except TaskError as exc:
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
-    finally:
-        if owned is not None:
-            owned.close()
 
 
 def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:
@@ -539,11 +549,13 @@ def _load_average() -> list[float] | None:
         return None
 
 
-def _card_count(data_dir: Path) -> int | None:
-    path = data_dir / "board" / "cards.ndjson"
+def _card_count(board: SqlCardClient | TaskError) -> int | None:
+    """The board store's card total, or None when the store cannot be read."""
+    if isinstance(board, TaskError):
+        return None
     try:
-        return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    except (OSError, UnicodeError):
+        return board.card_count()
+    except TaskError:
         return None
 
 

@@ -112,27 +112,50 @@ class DoctorLayer:
             pin.reading = reading
         return reading
 
+    def refresh(self) -> HealthReading:
+        """Collect a reading now and publish it unless a newer one was published meanwhile.
+
+        Collects outside the lock, so requests keep answering from the current reading.
+        """
+        reading = self._collect(self.now())
+        with self._lock:
+            if self._cached is None or self._cached.observed <= reading.observed:
+                self._cached = reading
+            return self._cached
+
+    def keep_fresh(self, stop: threading.Event) -> None:
+        """Refresh every half window until `stop` is set, so no request waits for a collection."""
+        while not stop.is_set():
+            self.refresh()
+            stop.wait(CACHE_SECONDS / 2)
+
     def _current(self) -> HealthReading:
         """The reading of the current window, collecting it -- once, under the lock -- if due."""
+        cached = self._cached
+        if cached is not None and self.now() - cached.observed < CACHE_SECONDS:
+            return cached
         with self._lock:
             observed = self.now()
             cached = self._cached
             if cached is not None and observed - cached.observed < CACHE_SECONDS:
                 return cached
-            snapshot: dict[str, Any] | ReadError
-            try:
-                snapshot = self.read_health()
-            except ReadError as exc:
-                snapshot = exc
-            document = _classify(snapshot)
-            if isinstance(snapshot, dict):
-                snapshot["health"]["combined"] = {
-                    "colour": document["colour"], "findings": document["problems"],
-                    "problems": [problem["message"] for problem in document["problems"]
-                                 if problem.get("source") == "status" or not accepted(problem)],
-                }
-            self._cached = HealthReading(observed, snapshot, document)
+            self._cached = self._collect(observed)
             return self._cached
+
+    def _collect(self, observed: float) -> HealthReading:
+        snapshot: dict[str, Any] | ReadError
+        try:
+            snapshot = self.read_health()
+        except ReadError as exc:
+            snapshot = exc
+        document = _classify(snapshot)
+        if isinstance(snapshot, dict):
+            snapshot["health"]["combined"] = {
+                "colour": document["colour"], "findings": document["problems"],
+                "problems": [problem["message"] for problem in document["problems"]
+                             if problem.get("source") == "status" or not accepted(problem)],
+            }
+        return HealthReading(observed, snapshot, document)
 
 
 def _classify(reading: dict[str, Any] | ReadError) -> dict[str, Any]:

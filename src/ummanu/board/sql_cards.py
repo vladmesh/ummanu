@@ -867,6 +867,10 @@ class SqlCardClient:
                 answers.update(read(groups[family]))
         return answers
 
+    def card_count(self) -> int:
+        """Stored Card rows, archived included; Product, Issue and Sprint rows are not cards."""
+        return int(self._query("SELECT count(*) FROM tasks")[0][0])
+
     def restore_card_rows(self) -> list[dict[str, Any]]:
         """Stored Card rows only; Product/Issue ownership is not restore emptiness."""
         return self._rows()
