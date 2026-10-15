@@ -108,6 +108,8 @@ OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
 # Bounded refused deliveries prevent an unreachable head from retrying forever.
 OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT = 3
+# Heads one unacknowledged batch may replace before the sprint waits fenced on the owner.
+OBSERVER_MAX_REPLACEMENTS = 2
 
 EVENT_LAUNCHED = "observer_launched"
 EVENT_RELAUNCHED = "observer_relaunched"
@@ -863,6 +865,7 @@ def _reset_delivery_to_idle(
     delivery.held_since = 0.0
     delivery.deadline = 0.0
     delivery.attempts = 0
+    delivery.replacements = 0
     delivery.next_at = 0.0
     delivery.reason = ""
 
@@ -1100,9 +1103,12 @@ def _fail_delivery(
     if record.delivery.attempts < observer_wake_max_attempts():
         return outcome
     attempts = record.delivery.attempts
+    if record.delivery.replacements >= OBSERVER_MAX_REPLACEMENTS:
+        return _hold_unreachable_observer(runtime, ref, record, outcome)
     # The replacement opens its own delivery attempt count: the next failing batch gets the same
     # bounded retries before it costs the sprint another head.
     record.delivery.attempts = 0
+    record.delivery.replacements += 1
     # An emergency replacement. The head has refused every wake it was given, so it is stuck or
     # gone; a stop that refused because it looked busy would leave the sprint on the head that is
     # not working and park the replacement behind a bounded backoff for as long as it stays stuck.
@@ -1120,6 +1126,47 @@ def _fail_delivery(
     if unlaunched:
         replaced["reason"] += f"; that replacement did not come up: {unlaunched}"
     return replaced
+
+
+def observer_unreachable(record: ObserverRecord) -> bool:
+    """Whether the last head one unacknowledged batch may replace has refused its wakes too."""
+    delivery = record.delivery
+    return (
+        delivery.stage != DeliveryStage.IDLE
+        and delivery.replacements >= OBSERVER_MAX_REPLACEMENTS
+        and delivery.attempts >= observer_wake_max_attempts()
+    )
+
+
+def _hold_unreachable_observer(
+    runtime: Any, ref: str, record: ObserverRecord, outcome: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep the head and the fence, and tell the owner once per batch, instead of another replacement.
+
+    The wakes keep retrying on their capped backoff, so a head that takes the batch after all is
+    acknowledged and released the ordinary way.
+    """
+    delivery = record.delivery
+    evidence = (
+        f"{delivery.replacements} replaced heads refused the wakes of batch {delivery.delivery_id} "
+        f"(through {delivery.through_event}); {delivery.wake_failures} wakes failed in total, "
+        f"the last at {delivery.last_failure_method}: {delivery.last_failure_reason}"
+    )
+    owner_events.record(
+        owner_events.OBSERVER_DEAD,
+        ref,
+        f"The observer of {ref} cannot be reached: {evidence}. The dispatcher stopped replacing it and "
+        "keeps the sprint fenced until a head acknowledges the batch.",
+        f"{owner_events.OBSERVER_DEAD}:{ref}:unreachable:{delivery.through_event}",
+        to=getattr(getattr(runtime, "reader", None), "client", None),
+    )
+    _set_observer_state(record, "unreachable", reason=evidence)
+    return {
+        **outcome,
+        "action": "observer-unreachable",
+        "reason": f"{outcome['reason']}; no further replacement: {evidence}",
+        "replacements": delivery.replacements,
+    }
 
 
 def _wake_pending(ref: str, record: ObserverRecord) -> dict[str, Any]:

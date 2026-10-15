@@ -39,7 +39,7 @@ from tests.sql_backend_fixtures import card_store
 from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import BOARD_ID
-from ummanu.dispatch import observer_fence as dispatcher_observer_fence
+from ummanu.dispatch import observer as observer_module, observer_fence as dispatcher_observer_fence
 from ummanu.dispatch.cleanup import RETRY_COOLDOWN, CleanupOwner
 from ummanu.dispatch.heartbeat import heartbeat_identity
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
@@ -57,6 +57,7 @@ from ummanu.dispatch.observer import (
     _observer_event_state,
     _wake_for_event,
     load_observers,
+    observer_ack_deadline_seconds,
     observer_alive,
     observer_launch_prompt,
     observer_pid_file,
@@ -680,6 +681,58 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIn("stop_observer", self.host.calls)
         self.assertNotIn("stop_observer_if_quiescent", self.host.calls)
         self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
+    def test_a_batch_no_head_takes_stops_replacing_after_two_heads_and_stays_fenced(self) -> None:
+        self.open_sprint()
+        self.board.save_metadata(12, sprint_ref="sprint:1")
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher",
+            actor="dispatcher",
+            reference="ummanu-510",
+            body="card changed",
+            request_id="undeliverable-event",
+        )
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        refusal = HostError("observer wake was not delivered: pane-stayed-ready")
+        actions: list[str] = []
+
+        with (
+            mock.patch.object(self.host, "nudge_observer", side_effect=refusal),
+            mock.patch.object(observer_module.owner_events, "record") as bell,
+        ):
+            for _ in range(20):
+                result = self.runtime.production_tick()
+                actions.extend(row["action"] for row in self.actions(result))
+                self.expire_wake_retry()
+                self.age_delivery(observer_ack_deadline_seconds() + 1, deadline=True)
+            fenced = self.runtime.production_tick()
+
+        self.assertEqual(actions.count("observer-relaunched"), 2)
+        self.assertEqual(self.observers()["sprint:1"].launches, 3)
+        self.assertIn("observer-unreachable", actions)
+        self.assertEqual(actions[-1], "observer-unreachable")
+        [fence] = self.actions(fenced, "observer-fence")
+        self.assertEqual(fence["observer_reason"], "observer_unreachable")
+        notices = {call.args[3] for call in bell.call_args_list if call.args[0] == "observer_dead"}
+        self.assertEqual(len(notices), 1, "one owner notice for the batch, however often it is refused")
+
+        entry = {
+            "selected_step": "read board",
+            "selected_why": "card changed",
+            "rejected_alternatives": "wait",
+            "current_task": "ummanu-510",
+            "dod_state": "open",
+            "next_safe_step": "resume",
+        }
+        self.acknowledge_delivery(entry, request_id="late-observer-ack")
+        self.runtime.production_tick()
+        released = self.runtime.production_tick()
+
+        self.assertEqual(self.observers()["sprint:1"].delivery.replacements, 0)
+        self.assertEqual(
+            [row["action"] for row in self.actions(released, "observer-fence")], ["observer-fence-cleared"]
+        )
 
     def test_a_head_making_no_provider_progress_is_replaced_even_when_it_looks_busy(self) -> None:
         """The other emergency replacement, and it is emergency for the same reason.
