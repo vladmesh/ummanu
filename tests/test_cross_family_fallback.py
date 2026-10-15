@@ -20,6 +20,7 @@ from unittest import mock
 
 from ummanu.dispatch.observer import ObserverRecord
 from ummanu.head_health import (
+    HELD_VERDICT_REPROBE_SECONDS,
     QUOTA_BACKOFF_SECONDS,
     HeadHealth,
     failure_status,
@@ -225,12 +226,12 @@ class ExpiryTests(unittest.TestCase):
                 "codex-terra-high", self.health.check, lambda head: Catalog.profiles[head]["fallback"]
             )
 
-    def test_a_red_resource_is_held_to_its_reset_and_a_pong_does_not_clear_it(self) -> None:
+    def test_a_red_resource_is_trusted_without_a_probe_within_the_reprobe_interval(self) -> None:
         until = NOW + 3 * 86400
         self.health.record("openai-sub", "exhausted", "spent", now=NOW, until=until)
         with mock.patch("ummanu.head_health._proc.run_isolated", return_value=self.pong) as probe:
-            # Well past the probe TTL, a day before the reset.
-            choice = self.walk(until - 86400)
+            # Past the probe TTL, inside the re-probe interval.
+            choice = self.walk(NOW + HELD_VERDICT_REPROBE_SECONDS - 60)
 
         self.assertEqual(choice.head, "claude-opus-high")
         self.assertTrue(choice.substituted)
@@ -239,6 +240,35 @@ class ExpiryTests(unittest.TestCase):
         # Only the fallback's resource was probed; the red one was not asked.
         self.assertEqual(len(probe.call_args_list), 1)
         self.assertIn("claude-sub", probe.call_args.args[0][-1])
+
+    def test_a_ready_reprobe_ends_a_far_hold_early(self) -> None:
+        until = NOW + 3 * 86400
+        self.health.record("openai-sub", "exhausted", "spent", now=NOW, until=until)
+        with mock.patch("ummanu.head_health._proc.run_isolated", return_value=self.pong):
+            choice = self.walk(NOW + HELD_VERDICT_REPROBE_SECONDS + 1)
+
+        self.assertEqual(choice.head, "codex-terra-high")
+        self.assertEqual(self.health.snapshot()["openai-sub"]["status"], "ready")
+
+    def test_a_red_reprobe_keeps_the_hold_to_its_reset(self) -> None:
+        until = NOW + 3 * 86400
+        self.health.record("openai-sub", "exhausted", "spent", now=NOW, until=until)
+        refused = subprocess.CompletedProcess("probe", 1, "", "status=provider-unavailable")
+        later = NOW + HELD_VERDICT_REPROBE_SECONDS + 1
+        with mock.patch("ummanu.head_health._proc.run_isolated", side_effect=[refused, self.pong]):
+            choice = self.walk(later)
+
+        rejected = dict(choice.rejected)["codex-terra-high"]
+        self.assertEqual((rejected.status, rejected.reason, rejected.until), ("exhausted", "spent", until))
+        self.assertEqual(self.health.snapshot()["openai-sub"]["checked_at"], later)
+
+    def test_an_operator_reprobe_replaces_a_held_verdict(self) -> None:
+        self.health.record("openai-sub", "exhausted", "spent", now=NOW, until=NOW + 3 * 86400)
+        with mock.patch("ummanu.head_health._proc.run_isolated", return_value=self.pong):
+            verdict = self.health.reprobe("openai-sub")
+
+        self.assertEqual((verdict.status, verdict.until), ("ready", 0.0))
+        self.assertEqual(self.health.snapshot()["openai-sub"]["status"], "ready")
 
     def test_once_it_expires_a_fresh_probe_decides_and_the_primary_is_used_again(self) -> None:
         until = NOW + 3600

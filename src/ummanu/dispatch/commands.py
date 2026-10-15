@@ -42,6 +42,7 @@ def add_dispatcher_subcommands(subparsers) -> None:
         ("production-tick", run_dispatcher_production_tick),
         ("production-observe", run_dispatcher_production_observe),
         ("resource-health", run_dispatcher_resource_health),
+        ("resource-reprobe", run_dispatcher_resource_reprobe),
         ("production-run", run_dispatcher_production_run),
     ):
         command = commands.add_parser(name)
@@ -57,6 +58,10 @@ def add_dispatcher_subcommands(subparsers) -> None:
             command.add_argument("--interval-seconds", type=float, default=60.0)
             command.add_argument("--max-interval-seconds", type=float, default=300.0)
             command.add_argument("--max-ticks", type=int)
+        if name == "resource-reprobe":
+            command.add_argument(
+                "--resource", required=True, help="probe this resource now; its answer replaces any held verdict"
+            )
 
     dispatcher.set_defaults(handler=usage_handler("dispatcher subcommand required"))
 
@@ -151,6 +156,17 @@ def run_dispatcher_resource_health(args: argparse.Namespace) -> int:
             "status": "ok",
             "step": "resource-health",
             "resources": runtime.head_health.snapshot(),
+        },
+    )
+
+
+def run_dispatcher_resource_reprobe(args: argparse.Namespace) -> int:
+    return _run_production(
+        args,
+        lambda runtime: {
+            "status": "ok",
+            "step": "resource-reprobe",
+            "verdict": runtime.head_health.reprobe(args.resource).to_json(),
         },
     )
 

@@ -26,6 +26,9 @@ from ummanu.runtime.provider_errors import (
 from ummanu.runtime.resource_probe import probe_timeout_s
 
 PROBE_TTL_SECONDS = 300
+# How long a red verdict with a far `until` is trusted before a probe checks it again. Only a ready
+# probe ends the hold early; any other answer keeps it to its `until`.
+HELD_VERDICT_REPROBE_SECONDS = 3600
 # How long a resource a head's own turn found spent or refused stays red when the provider named no
 # reset time (ummanu-108). Bounded, and followed by a fresh probe; a reset the provider names is
 # held to exactly, however far off it is.
@@ -106,8 +109,8 @@ def probe_env() -> dict[str, str]:
 class HeadReadiness:
     """One verdict on a resource. `until` (epoch, 0.0 = none) is when a red verdict expires.
 
-    A verdict with an `until` in the future is held to it: no probe runs before then, because a
-    cheap probe answering `pong` is no proof there is quota for real work (ummanu-108).
+    A verdict with an `until` in the future holds until then, re-checked by a probe every
+    `HELD_VERDICT_REPROBE_SECONDS`; a ready probe ends it early.
     """
 
     resource: str
@@ -421,10 +424,16 @@ class HeadHealth:
         # A fresh recorded verdict answers before the probe command is even looked at: it may have
         # come from a head's own provider error rather than from a probe (`record`), and it holds
         # for its TTL on a resource with no probe as much as on one with a probe. A verdict with an
-        # expiry holds until that expiry instead, however long, and is probed afresh once it passes.
+        # expiry is trusted for `HELD_VERDICT_REPROBE_SECONDS` at a time until that expiry.
+        held: HeadReadiness | None = None
         if isinstance(entry, dict):
             until = _float(entry.get("until"))
-            fresh = now < until if until else now - _float(entry.get("checked_at")) < PROBE_TTL_SECONDS
+            age = now - _float(entry.get("checked_at"))
+            fresh = now < until and age < HELD_VERDICT_REPROBE_SECONDS if until else age < PROBE_TTL_SECONDS
+            if until and now < until:
+                held = HeadReadiness(
+                    resource, str(entry.get("status") or "unknown"), str(entry.get("reason") or ""), now, until=until
+                )
             if fresh:
                 return HeadReadiness(
                     resource,
@@ -444,6 +453,8 @@ class HeadHealth:
             return HeadReadiness(resource, "unknown", "resource has no probe command", time.time())
 
         verdict = self._run(resource, probe, now)
+        if held is not None and verdict.status != "ready":
+            verdict = held
         cache[resource] = verdict.to_json()
         try:
             self._save(cache)
@@ -469,6 +480,17 @@ class HeadHealth:
         cache[resource] = verdict.to_json()
         self._save(cache)
         return verdict
+
+    def reprobe(self, resource: str) -> HeadReadiness:
+        """Probe `resource` now and record the answer, replacing any held verdict, red or green.
+
+        Raises `HostError` for a resource the catalog names no probe for.
+        """
+        probe = str(self.catalog.resource(resource).get("probe") or "")
+        if not probe:
+            raise HostError(f"resource {resource} has no probe command")
+        verdict = self._run(resource, probe, time.time())
+        return self.record(resource, verdict.status, verdict.reason, now=verdict.checked_at, until=verdict.until)
 
     def snapshot(self) -> dict[str, Any]:
         return self._load()

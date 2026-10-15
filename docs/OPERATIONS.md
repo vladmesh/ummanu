@@ -3489,6 +3489,9 @@ reason under `skipped_ready`, and the scan continues with the next card.
 - `unauthenticated`: re-authenticate that runtime's CLI in the profile's runtime home, then wait for the TTL.
 - `unavailable`: do not restart cards; check provider status and re-read after the TTL.
 - `exhausted`: wait for the quota; cards with a fallback already moved.
+- A red verdict with an expiry is probed again every hour and a ready probe ends it early.
+  `ummanu dispatcher resource-reprobe --instance <dir> --resource <id>` probes now and records the
+  answer, replacing a held verdict.
 - `probe_broken`: run the registry's probe string by hand under the dispatcher's environment and repair
   what it names; `doctor` prints the failing line.
 
