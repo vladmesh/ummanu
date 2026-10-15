@@ -14,7 +14,14 @@ from unittest import mock
 from tests.support.local_pty_journal import small_limits
 from ummanu.po.runner import RunnerError, ScopedPoProcess
 from ummanu.runtime import local_pty_journal as views
+from ummanu.runtime.head.identity import (
+    HEARTBEAT_LIVE_MATCH,
+    HEARTBEAT_NOT_YET_WRITTEN,
+    HEARTBEAT_UNREADABLE,
+    current_boot_id,
+)
 from ummanu.runtime.head.local_pty import client, journal as j, protocol
+from ummanu.runtime.head.local_pty.run_end import RUN_END_EARLIER_BOOT, RUN_END_EXITED, RunEnd
 from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from ummanu.runtime.local_pty_delivery import DeliveryMixin
 from ummanu.runtime.local_pty_durable import _journal_state, _supervisor_state
@@ -322,3 +329,47 @@ class RetainedJournalConsumerTests(unittest.TestCase):
         self.assertNotIn("SECRET", json.dumps(metadata))
         self.assertTrue(views.head_run_journal_read(self.directory).partial_head)
         self.assertTrue(self.handle().events().partial_head)
+
+
+class HeadRunEndTests(unittest.TestCase):
+    """`head_run_end` proves a run ended from its own journal or a launch lost with its boot."""
+
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.path = self.root / "run" / protocol.JOURNAL_NAME
+        self.path.parent.mkdir()
+
+    def end(self, *, heartbeat_state=HEARTBEAT_LIVE_MATCH, launched_boot=""):
+        return views.head_run_end(
+            self.root, "run", heartbeat_state=heartbeat_state, launched_boot=launched_boot
+        )
+
+    def test_an_exit_after_the_start_is_the_end_with_its_signal(self):
+        with j.JournalWriter(self.path, "run") as writer:
+            writer.append(j.RUN_STARTED, head_pid=20)
+            writer.append(j.RUN_EXITED, signal=15, exit_code=None)
+        self.assertEqual(self.end(launched_boot=current_boot_id()), RunEnd(RUN_END_EXITED, 15))
+
+    def test_a_start_after_the_last_exit_is_a_running_incarnation(self):
+        with j.JournalWriter(self.path, "run") as writer:
+            writer.append(j.RUN_STARTED, head_pid=20)
+            writer.append(j.RUN_EXITED, signal=15, exit_code=None)
+            writer.append(j.RUN_STARTED, head_pid=21)
+        self.assertIsNone(self.end())
+
+    def test_an_identity_lost_with_an_earlier_boot_is_the_end(self):
+        for state in (HEARTBEAT_NOT_YET_WRITTEN, HEARTBEAT_UNREADABLE):
+            with self.subTest(state=state):
+                self.assertEqual(
+                    self.end(heartbeat_state=state, launched_boot="an-earlier-boot"),
+                    RunEnd(RUN_END_EARLIER_BOOT),
+                )
+
+    def test_a_missing_journal_or_launch_boot_alone_proves_nothing(self):
+        for state, boot in (
+            (HEARTBEAT_NOT_YET_WRITTEN, ""),
+            (HEARTBEAT_UNREADABLE, current_boot_id()),
+            (HEARTBEAT_LIVE_MATCH, "an-earlier-boot"),
+        ):
+            with self.subTest(state=state, boot=boot):
+                self.assertIsNone(self.end(heartbeat_state=state, launched_boot=boot))

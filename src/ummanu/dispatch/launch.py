@@ -49,6 +49,7 @@ from ummanu.dispatch.watchdog import (
     pid_file_path,
 )
 from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head.identity import current_boot_id
 
 PANE_STATE_LABELS = {
     READINESS_BUSY: "busy",
@@ -274,6 +275,9 @@ new round here so an interrupted rework cannot resume in its rejected round.
         policy_round = record.review_baseline if role == REVIEW_ROLE else record.report_generation
         setattr(record, snapshot_field, snapshot_for_round(task, role, policy_round, previous_snapshot))
     record.workspace_settled = False
+    previous_launch_boot = record.worker_launch_boot
+    if role == WORKER_ROLE:
+        record.worker_launch_boot = current_boot_id()
     record.launch_intent = LaunchIntent(
         role=role,
         action=action,
@@ -298,6 +302,7 @@ new round here so an interrupted rework cannot resume in its rejected round.
     except STORAGE_ERRORS as exc:
         record.launch_intent = previous
         record.workspace_settled = previous_workspace_settled
+        record.worker_launch_boot = previous_launch_boot
         setattr(record, snapshot_field, previous_snapshot)
         return f"{type(exc).__name__}: {exc}"
     return None

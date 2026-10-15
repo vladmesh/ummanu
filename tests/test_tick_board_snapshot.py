@@ -252,7 +252,8 @@ class TickBoardSnapshotTests(unittest.TestCase):
         self.runtime = SimpleNamespace(
             owner="unit-test", data_dir=self.root, reader=self.reader, writer=self.writer,
             audit=self.store.audit, sprints=SprintReader(self.store, data_dir=self.root),
-            host=SimpleNamespace(), catalog=SimpleNamespace(instance={}, observer_profile=lambda head: {}),
+            host=SimpleNamespace(head_run_end=lambda run, **facts: None),
+            catalog=SimpleNamespace(instance={}, observer_profile=lambda head: {}),
             production_state=production.ProductionState(self.root), save_records=lambda payload, records: None,
             _tick_task=lambda task, *args: {"status": "ok", "ref": task["ref"], "action": "idle"},
         )

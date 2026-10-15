@@ -512,7 +512,7 @@ class DispatcherProducerTests(unittest.TestCase):
             mock.patch.object(observer, "_reconcile_open_sprint", return_value={"action": "observer-launch-deferred"}),
         ):
             observer.reconcile_observers(runtime, {})
-        self.assertIsNone(observer._dead_launch(None))
+        self.assertIsNone(observer._dead_launch(runtime, None))
         self.assertEqual(self.events.rows, {})
 
     def test_a_head_given_up_after_its_respawn_writes_one_head_dead(self) -> None:

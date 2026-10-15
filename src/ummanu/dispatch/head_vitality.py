@@ -16,6 +16,7 @@ from ummanu.dispatch.watchdog import (
     HEARTBEAT_IDENTITY_MISMATCH,
     HEARTBEAT_LIVE_MATCH,
 )
+from ummanu.runtime.local_pty_head import RunEnd
 
 # Serialisation version of ``VitalitySnapshot``. The next card persists episodes keyed by this
 # vocabulary, so a schema change later must bump this and answer for old payloads explicitly
@@ -268,6 +269,18 @@ class VitalitySnapshot:
             observed_at=observed_at,
             source=SnapshotSource.PID_HEARTBEAT,
             reason=f"pid heartbeat is inconclusive: {state or 'no classification'}",
+        )
+
+    @classmethod
+    def from_run_end(cls, end: RunEnd, *, run_id: str, observed_at: float) -> VitalitySnapshot:
+        """The pid heartbeat channel's answer for a run proven ended (`head_run_end`)."""
+        return cls(
+            run_id=run_id,
+            source=SnapshotSource.PID_HEARTBEAT,
+            observed_at=observed_at,
+            availability=SourceAvailability.AVAILABLE,
+            process=ProcessState.DEAD,
+            reason=f"the run has ended: {end.describe()}"[:REASON_LIMIT],
         )
 
     @classmethod
@@ -656,7 +669,8 @@ def _parse_child_cursor(
 def status_has_vitality_observation(status: Any) -> bool:
     """Whether any supported channel was observed, including unavailable journal answers."""
     return isinstance(status, dict) and (
-        isinstance(status.get("pid_status"), dict)
+        isinstance(status.get("run_end"), RunEnd)
+        or isinstance(status.get("pid_status"), dict)
         or isinstance(status.get("provider_progress"), dict)
         or "idle" in status
         or isinstance(status.get("child_activity"), dict)
@@ -679,7 +693,10 @@ def snapshots_from_status(
         return []
     snapshots: list[VitalitySnapshot] = []
     pid_status = status.get("pid_status")
-    if isinstance(pid_status, dict):
+    run_end = status.get("run_end")
+    if isinstance(run_end, RunEnd):
+        snapshots.append(VitalitySnapshot.from_run_end(run_end, run_id=run_id, observed_at=observed_at))
+    elif isinstance(pid_status, dict):
         snapshots.append(
             VitalitySnapshot.from_pid_heartbeat(pid_status, run_id=run_id, observed_at=observed_at)
         )

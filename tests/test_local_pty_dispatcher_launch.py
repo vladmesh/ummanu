@@ -616,7 +616,7 @@ class ObserverTaskIdentityTests(unittest.TestCase):
         )
         status = observer_head_status(self._record())
         self.assertEqual(status["state"], HEARTBEAT_LIVE_MATCH, status)
-        self.assertFalse(observer_head_is_dead(self._record(), status))
+        self.assertFalse(observer_head_is_dead(status, None))
 
     def test_a_legacy_spelling_does_not_excuse_another_run(self) -> None:
         publish_heartbeat(

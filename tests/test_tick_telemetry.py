@@ -622,6 +622,7 @@ class CardStageTests(unittest.TestCase):
         host = mock.Mock(spec=CommandHostRuntime)
         host.mode = "real"
         host.worker_status.side_effect = self.clock.work(40, {"last_activity": 5.0})
+        host.head_run_end.return_value = None
         host.committing.side_effect = lambda flush: contextlib.nullcontext()
         reader = mock.Mock()
         reader.show.side_effect = lambda ref: self.clock.work(20, {"ref": ref, "project": "p"})()
@@ -656,8 +657,8 @@ class CardStageTests(unittest.TestCase):
 
         def record(workspace):
             return SimpleNamespace(workspace=workspace, worker="worker-1", attempt_id="a-1", paused_worker_at=None,
-                                   worker_progress_at=0.0, activation_recovery=None,
-                                   to_json=lambda: {"attempt_id": "a-1"})
+                                   worker_progress_at=0.0, activation_recovery=None, worker_head_run={},
+                                   worker_launch_boot="", to_json=lambda: {"attempt_id": "a-1"})
 
         records = {"slow-1": record("/w/slow-1"), "fail-2": record("/w/fail-2"), "quick-3": record("")}
         tasks = [{"ref": ref, "state": "in_progress"} for ref in records]
