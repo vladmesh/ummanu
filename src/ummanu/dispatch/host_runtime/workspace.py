@@ -183,7 +183,7 @@ class WorkspaceEnvironmentMixin:
         if self._candidate_environment_install_required(project) and (root / "pyproject.toml").is_file():
             before = self._workspace_extra_files(root)
             self._run(
-                [str(environment / "bin" / "python3"), "-m", "pip", "install", "-e", ".[dev]"],
+                [str(environment / "bin" / "python3"), "-m", "pip", "install", "-e", ".[dev,typecheck]"],
                 "workspace candidate dependencies",
                 cwd=root,
             )

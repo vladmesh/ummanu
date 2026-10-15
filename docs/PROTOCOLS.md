@@ -1356,7 +1356,7 @@ packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA 
 delta.
 
 Worker and reviewer shells run with `workspace/.ummanu-task-env/venv/bin` first. When an adapter
-declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev]` install supplies the
+declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev,typecheck]` install supplies the
 project runtime there. Adapter setup runs outside both virtualenvs, and an explicit relative
 broad-check interpreter may select the adapter's own `.venv`. The role environment removes the
 launcher's production `PYTHONPATH` and binds only the workspace-owned test-guard startup directory
