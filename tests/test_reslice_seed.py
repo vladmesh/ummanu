@@ -373,7 +373,11 @@ class _GateHost(CommandHostRuntime):
             return done(json.dumps({"title": "t", "body": "b"}))
         if args[1] == "api":
             if args[2].endswith("/check-runs"):
-                return done(json.dumps(self.check_runs))
+                return done(json.dumps({"total_count": len(self.check_runs), "check_runs": self.check_runs}))
+            if args[2].endswith("/status"):
+                return done(json.dumps({"total_count": 0, "statuses": []}))
+            if "/actions/runs?head_sha=" in args[2]:
+                return done(json.dumps({"total_count": 0, "workflow_runs": []}))
             return done("[]")
         return done()
 

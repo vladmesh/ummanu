@@ -12765,6 +12765,7 @@ class GithubGateHost(CommandHostRuntime):
         pr_open: bool,
         check_runs: list,
         statuses: list | None = None,
+        workflow_runs: list | None = None,
         run_log: str = "",
         run_log_error: bool = False,
         api_error: str = "",
@@ -12786,6 +12787,7 @@ class GithubGateHost(CommandHostRuntime):
         self.pr_closed_reopened = 0
         self._check_runs = check_runs
         self._statuses = statuses or []
+        self._workflow_runs = workflow_runs or []
         self._run_log = run_log
         self._run_log_error = run_log_error
         self.rerun_status = {"status": "IN_PROGRESS", "conclusion": ""}
@@ -12850,9 +12852,12 @@ class GithubGateHost(CommandHostRuntime):
                 return subprocess.CompletedProcess(args, 1, "", self._api_error)
             path = args[2]
             if path.endswith("/check-runs"):
-                return done(json.dumps(self._check_runs))
+                return done(json.dumps({"total_count": len(self._check_runs), "check_runs": self._check_runs}))
             if path.endswith("/status"):
-                return done(json.dumps(self._statuses))
+                return done(json.dumps({"total_count": len(self._statuses), "statuses": self._statuses}))
+            if "/actions/runs?head_sha=" in path:
+                runs = self._workflow_runs
+                return done(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
         return done("[]")
 
     def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
@@ -14335,6 +14340,7 @@ class DispatcherGateTests(unittest.TestCase):
                 "gate pr list",  # gh pr list (which number did it get, to record it?)
                 "gate pr view",  # gh pr view (what did GitHub store? that is what is digested)
                 "gate repo view",  # gh repo view --json nameWithOwner
+                "gate gh api",  # gh api .../actions/runs?head_sha=
                 "gate gh api",  # gh api .../check-runs
                 "gate gh api",  # gh api .../status
             ],
