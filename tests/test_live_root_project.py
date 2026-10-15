@@ -21,6 +21,7 @@ from ummanu.dispatch.host import CommandHostRuntime, live_root_project_refusal
 from ummanu.dispatch.runtime_provenance import RuntimeProvenance
 from ummanu.dispatch.types import HostError
 from ummanu.head_health import HeadReadiness
+from ummanu.kernel.capacity_policy import DEFAULT_CODE_CONCURRENCY, DEFAULT_HEAD_CAPACITY
 from ummanu.projects.contract import ADAPTER_INVALID, ContractVerdict
 
 
@@ -39,6 +40,12 @@ class _Catalog:
 
     def project_default_branch(self, project: str) -> str:
         return "main"
+
+    def head_capacity(self) -> int:
+        return DEFAULT_HEAD_CAPACITY
+
+    def code_concurrency(self, project: str) -> int:
+        return DEFAULT_CODE_CONCURRENCY
 
     def integration_base(self, project: str, override: str | None) -> str:
         return "main"
