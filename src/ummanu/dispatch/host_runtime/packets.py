@@ -1044,6 +1044,8 @@ class PromptPacketMixin:
             "branch introduced the defect or it was pre-existing, and whether the repair appears local or",
             "would change architecture, a compatibility promise, a product contract, or a trust boundary.",
             "Report evidence; do not silently widen the supported boundary or decide sprint scope.",
+            "When the worker reports with evidence that a card requirement cannot be done as written,",
+            "answer that evidence first: accept it, or show why it is wrong. Do not repeat the requirement.",
             "",
             *(style_checklist() if has_candidate(task) else []),
             *(
