@@ -16,6 +16,7 @@ from tests.fakes.dispatcher import FakeCatalog
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
 from ummanu.board.completion_evidence import (
+    RESEARCH_TRANSFER_FILE_CAP_BYTES,
     has_candidate,
     infra_completion_record,
     infra_report_fields,
@@ -222,6 +223,39 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual([c["marker"] for c in dispatcher], ["dispatcher"])
         self.assertFalse((self.data_dir / ".git").exists(), "the transfer makes no Git call")
 
+    def test_research_transfer_takes_small_text_and_names_what_stays_in_the_workspace(self) -> None:
+        self._instance_repo()
+        self._kind("research", review="skipped")
+        self.start_dispatcher()
+        self._unobserved()
+        self.tick()
+        self._write_report(
+            {
+                "report.md": "# Findings\n",
+                "notes.txt": "context\n",
+                "data/results.csv": "a,b\n1,2\n",
+                "data/cards.json": "{}\n",
+                "data/huge.csv": "x\n" * (RESEARCH_TRANSFER_FILE_CAP_BYTES // 2 + 1),
+                "__pycache__/probe.cpython-312.pyc": "bytecode\n",
+            }
+        )
+        self._report_done("findings written up")
+        while self.reader.show(CARD_REF)["state"] not in {"done", "blocked"}:
+            self.tick()
+
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
+        self.assertEqual(
+            self._committed_report(),
+            [f"{REPORT_DIR}/data/results.csv", f"{REPORT_DIR}/notes.txt", f"{REPORT_DIR}/report.md"],
+        )
+        report = (self.data_dir / REPORT_DIR / "report.md").read_text(encoding="utf-8")
+        workspace = Path(self.writer.workspace) / ".ummanu-report"
+        self.assertTrue(report.startswith("# Findings\n"))
+        self.assertIn(f"kept at `{workspace}`", report)
+        for kept in ("data/cards.json", "data/huge.csv", "__pycache__/probe.cpython-312.pyc"):
+            self.assertIn(f"`{kept}`", report)
+            self.assertTrue((workspace / kept).is_file())
+
     def test_research_in_a_parking_sprint_is_transferred_and_linked_before_the_release_decision(self) -> None:
         self._instance_repo()
         self._kind("research")
@@ -299,7 +333,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._unobserved()
         self.tick()
-        self._write_report({"report.md": "findings\n", "scripts/probe.sh": LEAKED})
+        self._write_report({"report.md": "findings\n", "notes/probe.md": LEAKED})
         self._report_done("findings written up")
         self.assertEqual(self.tick()["to"], "validate")
 

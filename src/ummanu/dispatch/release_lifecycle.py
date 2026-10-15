@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from ummanu.board.completion_evidence import (
     RESEARCH_REPORT_DIR,
+    RESEARCH_REPORT_FILE,
+    RESEARCH_TRANSFER_FILE_CAP_BYTES,
+    RESEARCH_TRANSFER_SUFFIXES,
+    RESEARCH_TRANSFER_TOTAL_CAP_BYTES,
     has_candidate,
     missing_completion_evidence,
     render_research_completion_link,
@@ -142,7 +150,8 @@ def transfer_research_report(
 ) -> dict[str, Any] | None:
     """Move a research card's report directory into knowledge and link it; None when done.
 
-    `<workspace>/.ummanu-report/` replaces `state/knowledge/reports/<ref>/` through the knowledge
+    The report of `<workspace>/.ummanu-report/` and its small text attachments replace
+    `state/knowledge/reports/<ref>/` through the knowledge
     directory writer (files only, no Git; the next checkpoint carries them), then one
     `[completion:research]` comment keyed on the report generation is written, so a replayed tick
     writes nothing new and no second link. A refused or failed
@@ -174,12 +183,14 @@ def _transfer_research_report(
         message = f"the workspace holds no non-empty {RESEARCH_REPORT_DIR}/report.md"
     else:
         try:
-            write_knowledge_directory(
-                Path(runtime.catalog.instance_dir),
-                directory=research_report_path(ref),
-                actor="dispatcher",
-                source_dir=source,
-            )
+            with tempfile.TemporaryDirectory(prefix="ummanu-research-") as staging:
+                _stage_research_report(source, Path(staging))
+                write_knowledge_directory(
+                    Path(runtime.catalog.instance_dir),
+                    directory=research_report_path(ref),
+                    actor="dispatcher",
+                    source_dir=Path(staging),
+                )
         except KnowledgeValidationError as exc:
             refusal, message = exc.reason or "refused", str(exc)
         except (KnowledgeError, StateRepoError, OSError) as exc:
@@ -214,6 +225,44 @@ def _transfer_research_report(
         ),
     )
     return None
+
+
+def _stage_research_report(source: Path, staging: Path) -> None:
+    """Copy the report and its small text attachments into `staging`, naming every file left behind.
+
+    `report.md` always goes; another regular file goes when its suffix is a text one and it fits
+    the per-file and total caps. What stays is listed at the end of the staged `report.md`.
+    """
+    report = source / RESEARCH_REPORT_FILE
+    shutil.copyfile(report, staging / RESEARCH_REPORT_FILE)
+    budget = RESEARCH_TRANSFER_TOTAL_CAP_BYTES
+    kept: list[str] = []
+    for root, dirnames, filenames in os.walk(source):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = Path(root) / name
+            relative = path.relative_to(source)
+            if relative == Path(RESEARCH_REPORT_FILE):
+                continue
+            entry = path.lstat()
+            if not stat.S_ISREG(entry.st_mode) or path.suffix.lower() not in RESEARCH_TRANSFER_SUFFIXES:
+                kept.append(f"- `{relative}`: not a text attachment")
+            elif entry.st_size > RESEARCH_TRANSFER_FILE_CAP_BYTES:
+                kept.append(f"- `{relative}`: {entry.st_size} bytes, over the per-file cap")
+            elif entry.st_size > budget:
+                kept.append(f"- `{relative}`: {entry.st_size} bytes, over what the total cap leaves")
+            else:
+                budget -= entry.st_size
+                (staging / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, staging / relative)
+    if kept:
+        with (staging / RESEARCH_REPORT_FILE).open("a", encoding="utf-8") as handle:
+            handle.write(
+                "\n\n## Not transferred\n\n"
+                f"These files were not copied to knowledge and are kept at `{source}`:\n\n"
+                + "\n".join(kept)
+                + "\n"
+            )
 
 
 def release_parked(
