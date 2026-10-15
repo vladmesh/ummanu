@@ -87,7 +87,7 @@ class RunNotFound(ReadError):
 
 
 class HeadRunNotFound(ReadError):
-    """The card recorded no head run under this identifier: not its own, or no run at all."""
+    """The card or sprint recorded no head run under this identifier: not its own, or no run at all."""
 
     code = "not_found"
 

@@ -80,6 +80,8 @@ ROUTES: tuple[Route, ...] = (
     Route("GET", "/sprints/new", "sprint_form", "sprint_reads.sprint_options", page=True),
     Route("POST", "/sprints", "sprint_create", "sprint_ops.sprint_create", body=FORM_BODY, page=True),
     Route("GET", "/sprints/{ref}", "sprint_page", "sprint_reads.sprint_state", page=True),
+    # The sprint's observer head, read-only, in the card head view's shape; another run id is 404.
+    Route("GET", "/sprints/{ref}/heads/{run_id}", "sprint_head_page", "reads.sprint_head_view", page=True),
     Route("GET", "/api/system", "system", "reads.system_snapshot"),
     Route("GET", "/api/tasks/{ref}", "task", "reads.task_snapshot"),
     Route("GET", "/api/tasks/{ref}/events", "events", "reads.task_events"),
@@ -97,6 +99,7 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", "/api/pause/drain", "pause_drain", "pause_ops.pause_drain"),
     Route("POST", "/api/pause/resume", "pause_resume", "pause_ops.pause_resume"),
     Route("GET", "/api/sprints", "sprints", "sprint_reads.sprint_list"),
+    Route("GET", "/api/sprints/{ref}/heads/{run_id}", "sprint_head", "reads.sprint_head_view"),
     Route("POST", "/api/sprints/{ref}/comment", "sprint_comment", "sprint_ops.sprint_comment"),
     Route("POST", "/api/sprints/{ref}/close", "sprint_close", "sprint_ops.sprint_close"),
     Route("GET", "/api/history", "commands", "command_reads.command_history"),
@@ -348,6 +351,9 @@ class WebApp:
     def _head(self, params, _query, _body) -> Response:
         return _json(200, self.reads.head_view(params["ref"], params["run_id"]))
 
+    def _sprint_head(self, params, _query, _body) -> Response:
+        return _json(200, self.reads.sprint_head_view(params["ref"], params["run_id"]))
+
     def _task_runs(self, params, _query, _body) -> Response:
         return _json(200, self.ops.run_list(params["ref"]))
 
@@ -517,6 +523,9 @@ class WebApp:
 
     def _head_page(self, params, _query, _body) -> Response:
         return _html(200, pages.head_view(self.reads.head_view(params["ref"], params["run_id"])))
+
+    def _sprint_head_page(self, params, _query, _body) -> Response:
+        return _html(200, pages.head_view(self.reads.sprint_head_view(params["ref"], params["run_id"])))
 
     def _sprints_page(self, _params, query, _body) -> Response:
         view = "archive" if _one(query, "view") == "archive" else "active"

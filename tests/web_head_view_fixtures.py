@@ -30,6 +30,7 @@ from ummanu.webproto.journal import CommittedAudit
 from ummanu.webproto.reads import ReadLayer
 
 REF = "ummanu-9"
+SPRINT = "sprint:1490"
 OTHER = "ummanu-8"
 #: The shape `memory.access.issue_grant` hands a head: a grant id, a dot, `token_urlsafe(32)`.
 SECRET = "Zq3xY7abCDefGhIJkLmNoPqRsTuVwXyZ012345678_9"
@@ -39,6 +40,7 @@ REVIEWER = "b" * 32
 FOREIGN = "c" * 32
 LEGACY = "d" * 32
 FINISHED_EARLIER = "e" * 32
+OBSERVER = "f" * 32
 
 
 def _instance(root: Path) -> Path:
@@ -84,7 +86,7 @@ def _run(ref: str, run_id: str, *, role: str, runtime: str) -> dict[str, Any]:
         run_id=run_id,
         spec=HeadSpec(profile_id=f"claude-{runtime}", adapter="claude", runtime=runtime),
         workspace="/w",
-        task_ref=TaskRef.card(ref),
+        task_ref=TaskRef.sprint(ref) if ref.startswith("sprint:") else TaskRef.card(ref),
         role=role,
         leaf=f"leaf-{run_id}",
     ).to_json()
@@ -119,6 +121,7 @@ class HeadViewFixture(unittest.TestCase):
                 "review_head_run": _run(REF, LEGACY, role="reviewer", runtime=ORCA_LEGACY_RUNTIME),
             }
         }
+        self.observers: dict[str, Any] = {}
         self.write_production()
         test = self
 
@@ -139,7 +142,8 @@ class HeadViewFixture(unittest.TestCase):
 
     def write_production(self) -> None:
         (self.data_dir / "dispatcher" / "production-state.json").write_text(
-            json.dumps({"phase": "production", "records": self.records}), encoding="utf-8"
+            json.dumps({"phase": "production", "records": self.records, "observers": self.observers}),
+            encoding="utf-8",
         )
 
     def layer(self) -> ReadLayer:
@@ -164,6 +168,7 @@ class HeadViewFixture(unittest.TestCase):
         ref: str = REF,
         tail: bytes | None = None,
         subject: str = "a nudge",
+        task: str | None = None,
     ) -> Path:
         """A finished run directory, optionally with an old tail to prove the page ignores it."""
         directory = self.root / run_id
@@ -175,7 +180,7 @@ class HeadViewFixture(unittest.TestCase):
                 command=f"env UMMANU_MEMORY_ACCESS_TOKEN={TOKEN} claude --dangerously",
                 environment={"UMMANU_MEMORY_ACCESS_TOKEN": TOKEN},
                 role="worker",
-                task=f"card:{ref}",
+                task=task or f"card:{ref}",
             )
             journal.append(INPUT_ACCEPTED, bytes=12, subject=subject)
             journal.append(TURN_STARTED, turn=1)

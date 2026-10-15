@@ -22,11 +22,13 @@ from ummanu.board.owner_handover import waiting_owner
 from ummanu.board.production_rights import touches_production
 from ummanu.checkpoint import rpo_problem
 from ummanu.config import InstanceReport, validate_instance
+from ummanu.dispatch.observer_state import load_observers
 from ummanu.dispatch.state import DispatcherRecord
 
 # Public row disposition for transports, shared with the native doctor evaluator.
 from ummanu.infra.doctor_findings import accepted as accepted
 from ummanu.kernel.errors import TaskError
+from ummanu.runtime.head import TaskRef
 from ummanu.status import collect_status
 from ummanu.tasks import TaskReader, task_audit_for
 from ummanu.webproto import agents as agent_reads, head_view as head_reads, sources
@@ -338,10 +340,45 @@ class ReadLayer(ProtocolBoundary):
             ) from None
         heads = head_reads.recorded_heads(record, history)
         document = head_reads.head_view(
-            reference, str(run_id or ""), heads, self._heads_root(data_dir), observed_at=sources.isoformat(now)
+            TaskRef.card(reference),
+            str(run_id or ""),
+            heads,
+            self._heads_root(data_dir),
+            observed_at=sources.isoformat(now),
         )
         if document is None:
             raise HeadRunNotFound(f"card {reference} recorded no head run {str(run_id or '')[:80]!r}")
+        return document
+
+    def sprint_head_view(self, ref: str, run_id: str) -> dict[str, Any]:
+        """A read-only view of a sprint's observer head, the same document `head_view` gives a card.
+
+        `run_id` must be the run the dispatcher's observer record for this sprint holds; any other
+        is not found.
+        """
+        now = self._clock()
+        reference = str(ref or "")
+        if not reference:
+            raise TaskNotFound("a sprint reference is required")
+        data_dir = self.data_dir()
+        try:
+            payload = json.loads(self._production_path(data_dir).read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise TypeError("the dispatcher production state is not an object")
+            observers = load_observers(payload)
+        except Exception as exc:  # noqa: BLE001 -- confined to this source read
+            raise InstallationUnavailable(
+                f"the dispatcher production state could not be read: {_reason(exc)}"
+            ) from None
+        document = head_reads.head_view(
+            TaskRef.sprint(reference),
+            str(run_id or ""),
+            head_reads.observer_heads(observers.get(reference)),
+            self._heads_root(data_dir),
+            observed_at=sources.isoformat(now),
+        )
+        if document is None:
+            raise HeadRunNotFound(f"sprint {reference} holds no observer head run {str(run_id or '')[:80]!r}")
         return document
 
     def _tail(
@@ -383,7 +420,7 @@ class ReadLayer(ProtocolBoundary):
             if source.state != sources.AVAILABLE
         ]
         heads = head_reads.recorded_heads(record, history)
-        items = head_reads.head_rows(ref, heads, self._heads_root(data_dir))
+        items = head_reads.head_rows(TaskRef.card(ref), heads, self._heads_root(data_dir))
         source = (
             sources.unavailable(
                 "this card's head runs may be incomplete: " + "; ".join(str(reason) for reason in missing),

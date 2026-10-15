@@ -515,6 +515,8 @@ class RouteTableTests(TransportFixture):
         ("GET", "/api/tasks/{ref}/events"),
         ("GET", "/api/tasks/{ref}/runs"),
         ("GET", "/api/tasks/{ref}/heads/{run_id}"),
+        ("GET", "/sprints/{ref}/heads/{run_id}"),
+        ("GET", "/api/sprints/{ref}/heads/{run_id}"),
         ("GET", "/api/runs/{run_id}"),
         ("POST", "/api/runs/start"),
         ("POST", "/api/runs/review"),
