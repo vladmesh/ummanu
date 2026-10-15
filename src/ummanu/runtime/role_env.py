@@ -222,21 +222,12 @@ def docker_guard_dir() -> Path:
 
 
 def _docker_bindings(env: dict[str, str]) -> dict[str, str]:
-    """Resolve native Docker before adding the guard, skipping previous guard PATH entries."""
-    for directory in env.get("PATH", "").split(os.pathsep):
-        if not directory or not Path(directory).is_absolute():
-            continue
-        candidate = Path(directory) / "docker"
-        if candidate.resolve().parent.name == "docker-bin":
-            continue
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            backend = str(candidate.resolve())
-            break
-    else:
-        # Still bind the guard when Docker is absent. Executing it refuses, never falls through.
-        backend = ""
+    """Resolve native Docker before adding the guard, skipping previous guard PATH entries.
+
+    An absent Docker is still bound, as an empty backend the guard refuses.
+    """
     return {
-        docker_guard.BACKEND_ENV: backend,
+        docker_guard.BACKEND_ENV: docker_guard.native_backend(env.get("PATH", "")),
         docker_guard.PYTHON_ENV: str(managed_venv_bin() / "python3"),
         docker_guard.SOURCE_ENV: runtime_pythonpath(),
     }

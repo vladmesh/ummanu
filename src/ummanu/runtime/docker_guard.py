@@ -223,11 +223,25 @@ def _heavy_allowed(args: list[str], env: dict[str, str]) -> bool:
     return any(entry.argv == ("docker", *args) for entry in entries)
 
 
+def native_backend(search_path: str) -> str:
+    """The first absolute native `docker` on `search_path` that is not a guard shim, else ""."""
+    for directory in search_path.split(os.pathsep):
+        if not directory or not Path(directory).is_absolute():
+            continue
+        candidate = Path(directory) / "docker"
+        if candidate.resolve().parent.name == "docker-bin":
+            continue
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate.resolve())
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     env = dict(os.environ)
     heavy_allowed = _heavy_allowed(args, env)
-    backend = env.get(BACKEND_ENV, "")
+    # A harness that scrubs the launch bindings keeps PATH; an empty binding means none was found.
+    backend = env[BACKEND_ENV] if BACKEND_ENV in env else native_backend(env.get("PATH", ""))
     try:
         path = Path(backend)
         if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):

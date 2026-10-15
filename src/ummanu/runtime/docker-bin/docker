@@ -1,14 +1,22 @@
 #!/bin/sh
-# The role launcher supplies these bindings from the configured product, never the candidate.
-if [ ! -x "${UMMANU_DOCKER_PYTHON:-}" ] || [ ! -r "${UMMANU_DOCKER_SOURCE:-}/ummanu/runtime/docker_guard.py" ]; then
+# The role launcher binds the product runtime; a harness that scrubs those bindings still reaches
+# the product checkout this shim lives in, never the candidate.
+# Lexical, not resolved: the checkout's src may be a symlink, and `..` would leave the checkout.
+case $0 in
+    /*/src/ummanu/runtime/docker-bin/docker) root=${0%/src/ummanu/runtime/docker-bin/docker} ;;
+    *) root=/nonexistent ;;
+esac
+python=${UMMANU_DOCKER_PYTHON:-$root/.venv/bin/python3}
+source=${UMMANU_DOCKER_SOURCE:-$root/src}
+if [ ! -x "$python" ] || [ ! -r "$source/ummanu/runtime/docker_guard.py" ]; then
     printf '%s\n' 'docker-guard: product runtime unavailable; repair the role launch' >&2
     exit 125
 fi
-exec "$UMMANU_DOCKER_PYTHON" -I -c 'import sys
+exec "$python" -I -c 'import sys
 sys.path.insert(0, sys.argv.pop(1))
 try:
     from ummanu.runtime.docker_guard import main
 except ImportError:
     print("docker-guard: product module unavailable; repair the role launch", file=sys.stderr)
     sys.exit(125)
-sys.exit(main())' "$UMMANU_DOCKER_SOURCE" "$@"
+sys.exit(main())' "$source" "$@"
