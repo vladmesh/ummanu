@@ -404,6 +404,7 @@ def po_session(
         turn_state = ""
     if queued:
         turn_state += " " + _chip(f"{len(queued)} queued", "accent")
+        turn_state += _po_queue_hold(document.get("queue_hold"))
     last = turns[-1] if turns else {}
     # The script's polling baseline is read from the page (initial or swapped in), never the JSON.
     polled = (
@@ -548,6 +549,23 @@ def _po_entry(entry: dict[str, Any]) -> str:
     return (
         f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
         f" · {escape(str(entry.get('created_at') or ''))}</div>{shown}</li>"
+    )
+
+
+def _po_queue_hold(hold: dict[str, Any] | None) -> str:
+    """Why the queue waits beyond this session's own turn: a pending restart and the turns it waits for."""
+    if not hold:
+        return ""
+    waits = ", ".join(
+        f'<a href="/po/sessions/{quote(session)}">session {escape(session[:8])}</a> turn {turn["seq"]}'
+        for turn in hold["running"]
+        for session in [str(turn["session_id"])]
+    )
+    return (
+        f' <span class="held">held: PO service restart ({escape(str(hold["detail"]))}) '
+        f'pending since {escape(str(hold["since"]))}; '
+        + (f"waits for {waits}" if waits else "the service exits for it at idle")
+        + "</span>"
     )
 
 

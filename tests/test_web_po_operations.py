@@ -447,6 +447,27 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn("hurry up", feed[2][2])
         self.assertEqual(self.store.request("message-2").seq, 2)
 
+    def test_a_message_held_by_a_pending_restart_names_the_restart_and_the_turn_it_waits_for(self) -> None:
+        busy = self.create("codex", "gpt-5.6-sol", request_id="create-busy")
+        self.assertEqual(self.send(busy, "SLEEP please", "message-busy").status, 303)
+        self.spawned(1)
+        self.send(busy, "after you", "message-own")
+        self.assertIsNone(self.document(busy)["queue_hold"])
+
+        self.assertEqual(self.service.request_restart(reason="upgrade to abc123")["restart"], "deferred")
+        idle = self.create("codex", "gpt-5.6-sol", request_id="create-idle")
+        self.assertEqual(self.send(idle, "hello", "message-held").status, 303)
+
+        document = self.document(idle)
+        self.assertEqual([item["text"] for item in document["queued"]], ["hello"])
+        hold = document["queue_hold"]
+        self.assertEqual((hold["reason"], hold["detail"]), ("restart_pending", "upgrade to abc123"))
+        self.assertTrue(hold["since"])
+        self.assertEqual([(turn["session_id"], turn["seq"]) for turn in hold["running"]], [(busy, 1)])
+        page = self.page(idle)
+        self.assertIn("held: PO service restart (upgrade to abc123)", page)
+        self.assertIn(f'<a href="/po/sessions/{busy}">session {busy[:8]}</a> turn 1', page)
+
     def test_stop_interrupts_the_running_turn_and_the_next_message_goes_through(self) -> None:
         session_id = self.create()
         sid = self.store.session(session_id).cli_session_id
