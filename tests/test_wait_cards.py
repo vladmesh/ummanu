@@ -392,6 +392,12 @@ class DispatcherCase(unittest.TestCase):
         runtime = runtime or self.runtime()
         return advance_wait_card(runtime, self.board.show(WAIT), {}, {}, new_attempt_id())
 
+    def assertEndedDone(self, outcome: str) -> None:
+        [move] = self.board.moves(WAIT)
+        self.assertEqual((move["from"], move["to"], move["wait_outcome"]), ("in_progress", "done", outcome))
+        self.assertEqual(self.board.cards[WAIT]["state"], "done")
+        self.assertTrue(move["reason"].startswith(f"[wait:{outcome}]\n"))
+
     def assertEndedBlocked(self, outcome: str) -> None:
         [move] = self.board.moves(WAIT)
         self.assertEqual(
@@ -991,8 +997,11 @@ class OtherOutcomeTests(DispatcherCase):
         )
 
     def assertDeliveredEverywhere(self, outcome: str) -> None:
-        self.assertEndedBlocked(outcome)
-        self.assertNotIn("done", [move["to"] for move in self.board.log if move["kind"] == "move"])
+        if outcome == CANCELLED:
+            self.assertEndedDone(outcome)
+        else:
+            self.assertEndedBlocked(outcome)
+            self.assertNotIn("done", [move["to"] for move in self.board.log if move["kind"] == "move"])
         [delivered] = self.po.inputs.values()
         self.assertIn(f"Outcome: {outcome}", delivered["text"])
         # A Ready dependent is Blocked with the outcome; one in Issues gets the comment only.
