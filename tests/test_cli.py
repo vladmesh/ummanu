@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -82,14 +83,19 @@ class BoardCommandInstanceTests(unittest.TestCase):
         return top.choices[name].__dict__["_subparsers"]._group_actions[0].choices  # type: ignore[union-attr]
 
     def test_every_task_and_sprint_subcommand_takes_an_instance(self) -> None:
-        for group in ("task", "sprint"):
-            for name, parser in self._subparsers(group).items():
-                options = {
-                    option
-                    for action in parser._actions  # type: ignore[union-attr]
-                    for option in action.option_strings
-                }
-                self.assertIn("--instance", options, f"{group} {name} names no installation")
+        pending = [
+            (f"{group} {name}", parser)
+            for group in ("task", "sprint")
+            for name, parser in self._subparsers(group).items()
+        ]
+        while pending:
+            command, parser = pending.pop()
+            nested = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
+            if nested:
+                pending.extend((f"{command} {name}", child) for name, child in nested[0].choices.items())
+                continue
+            options = {option for action in parser._actions for option in action.option_strings}
+            self.assertIn("--instance", options, f"{command} names no installation")
 
 
 class CliTests(unittest.TestCase):
