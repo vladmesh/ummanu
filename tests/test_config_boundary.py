@@ -86,11 +86,11 @@ class ConfigBoundaryTests(unittest.TestCase):
     def test_capacity_consumers_share_fail_closed_settings(self) -> None:
         self.assertIs(sprints.open_sprint_limit, sprint_policy.open_sprint_limit)
         self.assertIs(sprints.open_sprint_limit_invalid, config.open_sprint_limit_invalid)
-        for value in (1, 2, 0, 3, -1, True, False, "2", "", 1.5, None):
+        for value in (1, 2, 3, 0, 4, -1, True, False, "2", "", 1.5, None):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as temporary:
                 path = self.instance(Path(temporary), open_sprint_limit=value)
-                expected = value if type(value) is int and value in (1, 2) else 1
-                invalid = not (type(value) is int and value in (1, 2))
+                expected = value if type(value) is int and value in (1, 2, 3) else 1
+                invalid = not (type(value) is int and value in (1, 2, 3))
                 self.assertEqual(sprints.instance_open_sprint_limit(path), expected)
                 report = config.validate_instance(path)
                 self.assertEqual(config.open_sprint_limit_invalid(report.instance), invalid)
