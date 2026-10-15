@@ -1034,6 +1034,27 @@ class CheckpointGitCostTests(unittest.TestCase):
         self.assertEqual(sorted(path.name for path in segments.iterdir()), ["00000000.ndjson"])
         self.assertEqual(self.committed_text("audit.ndjson"), '{"request_id": "r-9"}\n')
 
+    def test_a_log_over_the_segment_limit_is_cut_at_line_ends_and_reads_back_whole(self):
+        rows = [{"request_id": f"r-{n}", "note": "x" * 20} for n in range(6)]
+        # Each row is 54 bytes, so two fit under the limit and a third does not.
+        with mock.patch("ummanu.board.checkpoint_layout.MAX_SEGMENT_BYTES", 120):
+            self.append_audit(rows[:4])
+            self.assertEqual(self.write().status, "committed")
+            segments = self.instance_dir / "state" / "board" / "audit" / "0000"
+            first = sorted(path.name for path in segments.iterdir())
+            self.append_audit(rows[4:])
+            self.assertEqual(self.write().status, "committed")
+            parts = sorted(segments.iterdir())
+
+        self.assertEqual(len(first), 2)
+        self.assertEqual(len(parts), 3)
+        for part in parts:
+            self.assertLessEqual(part.stat().st_size, 120)
+            self.assertTrue(part.read_bytes().endswith(b"\n"))
+        self.assertEqual(
+            self.committed_text("audit.ndjson"), (self.data_dir / "board" / "audit.ndjson").read_text()
+        )
+
     def test_a_flat_checkpoint_is_converted_to_the_split_layout(self):
         """The first checkpoint after the upgrade replaces the committed flat files."""
         flat = self.instance_dir / "state" / "board"

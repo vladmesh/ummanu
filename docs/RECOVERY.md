@@ -226,9 +226,10 @@ split, so a checkpoint's Git cost follows what changed instead of the size of th
   in line order. Changing one card rewrites one small blob and the two trees above it; a checkpoint
   over an unchanged board writes no file and so creates no Git object.
 - `audit.ndjson` and `events.ndjson` only grow, so they are stored as immutable segments. A
-  checkpoint whose log extends the committed one adds one segment holding the appended bytes. A log
+  checkpoint whose log extends the committed one adds segments holding the appended bytes. A log
   that does not extend the committed one (the first split checkpoint after a flat one, or rewritten
-  history) is replaced by a single segment.
+  history) is replaced from its first segment. Segments are cut at line ends and hold at most 32 MiB
+  unless one line is longer, so no blob reaches the 100 MB file limit of the GitHub remote.
 - A logical file's bytes are the concatenation of its parts in index order; a gap in the sequence or
   an unexpected entry is a broken checkpoint, not a shorter one.
 
