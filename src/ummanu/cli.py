@@ -616,8 +616,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"memory model cache: {cache_dir}")
     if _is_temporary_directory(cache_dir):
         print("warning: memory model cache is in a temporary directory and can be cleaned unexpectedly")
-    for line in _codex_home_lines(_codex_home_status(report)):
+    codex_home_status = _codex_home_status(report)
+    for line in _codex_home_lines(codex_home_status):
         print(line)
+    print(_po_codex_home_line(_po_codex_home_status(report, codex_home_status)))
     if report.data_dir is not None:
         print(interactive_workspace.status_line(interactive_workspace.describe(report.data_dir)))
     if report.warnings:
@@ -704,6 +706,26 @@ def _codex_home_status(report) -> dict[str, object]:
         "login_missing": "",
         "codex_required": required,
     }
+
+
+def _po_codex_home_status(report, codex_home: dict[str, object]) -> dict[str, object]:
+    """The CODEX_HOME the PO service runs codex sessions on: the heads' (`PoRunner.codex_home`).
+
+    `offered` says whether `po.models` offers codex; with no login a codex session is refused at create.
+    """
+    from ummanu.po.models import models_from_instance
+
+    offered = bool(models_from_instance(report.instance).get("codex"))
+    return {"offered": offered, "path": codex_home["path"], "login_missing": codex_home["login_missing"]}
+
+
+def _po_codex_home_line(status: dict[str, object]) -> str:
+    """Doctor's line for the PO service's codex sessions."""
+    if not status["offered"]:
+        return "po codex home: po.models offers no codex model"
+    if status["login_missing"]:
+        return f"warning: po codex home: none, codex PO sessions are refused at create ({status['login_missing']})"
+    return f"po codex home: {status['path']}"
 
 
 def _codex_required(instance_dir: Path) -> bool:
@@ -894,13 +916,15 @@ def run_doctor_json(args: argparse.Namespace, report) -> int:
         # Sprints are read from the live board store: `--offline` and `--host-fixture` read none.
         sprints=not (args.offline or args.host_fixture),
     )
+    codex_home_status = _codex_home_status(report)
     payload = {
         "schema_version": 1,
         "ok": not active_findings(inspection.findings),
         "findings": inspection.findings,
         "board_schema": inspection.board_schema,
         "status": snapshot,
-        "codex_home": _codex_home_status(report),
+        "codex_home": codex_home_status,
+        "po_codex_home": _po_codex_home_status(report, codex_home_status),
     }
     print(json.dumps(payload, sort_keys=True))
     if inspection.unavailable:

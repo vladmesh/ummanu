@@ -397,14 +397,16 @@ so the CLI runs with its own configured effort, and the pages say their effort i
 e.g. `claude-opus-5-5` for `opus`. Claude: the first key of `modelUsage` in its JSON result — the
 session's own model; subagent models follow it (`claude-opus-5-5[1m]` is the long-context variant, kept
 as reported). Codex: its `--json` event stream names no model, so it is the `model` of the last
-`turn_context` in the thread's rollout, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-THREAD_ID.jsonl`
-(`CODEX_HOME` of the turn environment, else `~/.codex`). A turn that reported nothing (no result object,
+`turn_context` in the thread's rollout, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-THREAD_ID.jsonl`. A turn that reported nothing (no result object,
 no rollout) keeps `null`; the session reads show the latest turn's non-null value.
 **Environment.** A turn gets the `po-serve` environment (HOME, auth, `UMMANU_*`, `TA_*` kept) with
 the directory of the interpreter running `po-serve` (the product runtime, `/home/dev/ummanu/.venv/bin`
 on prod) first on `PATH` and the product source it imports first on `PYTHONPATH`. So `python3 -P -m
 ummanu ...` and `ummanu ...` from the PO workspace run the product, not the system Python.
 `PoRunner.turn_environment()` computes it for every turn and re-run; an explicit `env=` replaces it.
+A codex turn runs with `CODEX_HOME` set to the pipeline heads' home (`resolve_codex_home` over the data
+dir, normally `DATA_DIR/codex-home`), whatever the service environment says. Without a login there a
+codex session is refused at create; `ummanu doctor` prints the PO service's codex home (`po codex home:`).
 Check, as the runtime user from `DATA_DIR/po` (prints the service interpreter, then `ok`):
 
 ```bash
@@ -830,6 +832,8 @@ What each kind means:
 | `observer_dead` | notice | a sprint's observer head is dead and the tick did not relaunch it (backoff, drain, a failed bring-up) | `ummanu status`; the dispatcher retries after the backoff |
 | `head_dead` | notice | a worker or reviewer head died or stalled again after its one respawn, or its respawn failed; the card is Blocked | read the card's Blocked reason |
 | `po_turn_failed` | notice | a PO turn ended `failed` (its subject is the card a dispatcher input was about, else `po-session:<id>`) | read the turn on `/po`; for a handed-over card, a new owner comment sends the answer again |
+| `po_session_moved_account` | needs the owner | a PO session's provider refused its account (auth, plan or quota) and the session moved to the other CLI; the text names the picked and running heads and the turn | fix the login or the subscription; the session stays on the other CLI |
+| `po_session_moved` | notice | a PO session moved to the other CLI after any other provider refusal | read the session on `/po` |
 | `provider_red` | notice | doctor found a provider's key expired or login missing, its quota spent, its provider down, or its probe broken | fix the login or wait for the quota |
 
 A notice is marked read by its button or by "Mark all notices read"; an event that needs the owner is

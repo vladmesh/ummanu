@@ -93,10 +93,13 @@ from ummanu.po.store import (
 )
 from ummanu.runtime.cli_composition import add_command_parser
 from ummanu.runtime.paths import add_instance_argument, instance_file
+from ummanu.runtime.provider_errors import KIND_AUTH, KIND_PLAN, KIND_QUOTA, ProviderError
 
 # How often the service looks at its queue, its restart marker and a recovery that did not run yet,
 # besides being woken by a submit or a settled turn.
 TICK_SECONDS = 1.0
+# Provider refusals of the account itself: a session moved for one of these needs the owner.
+ACCOUNT_FAILURE_KINDS = frozenset({KIND_AUTH, KIND_PLAN, KIND_QUOTA})
 # The longest wait between two recovery passes while a `running` row has no process here.
 RECOVERY_MAX_DELAY_SECONDS = 30.0
 # The longest `sun_path` Linux takes, with its terminating NUL.
@@ -148,6 +151,7 @@ class PoService:
         self.marker = restart_marker_path(self.data_dir)
         runner.on_settled = self._settled
         runner.on_failed = self._turn_failed
+        runner.on_fallback = self._turn_moved
         if runner.fallback_choice is None:
             runner.fallback_choice = self.fallback_choice
         self._lock = threading.RLock()
@@ -285,6 +289,25 @@ class PoService:
             card_ref or owner_events.po_session_subject(session_id),
             f"PO turn {session_id}/{seq} failed{on if card_ref else ''}: {reason}",
             f"{owner_events.PO_TURN_FAILED}:{session_id}:{seq}",
+            to=self.owner_events,
+        )
+
+    def _turn_moved(self, picked: Session, running: Session, seq: int, failure: ProviderError) -> None:
+        """A turn moved to the other CLI family: one event per session and turn on `po-session:<id>`.
+
+        An auth, plan or quota refusal needs the owner (`po_session_moved_account`); any other is a notice.
+        """
+        kind = (
+            owner_events.PO_SESSION_MOVED_ACCOUNT
+            if failure.kind in ACCOUNT_FAILURE_KINDS
+            else owner_events.PO_SESSION_MOVED
+        )
+        owner_events.record(
+            kind,
+            owner_events.po_session_subject(picked.session_id),
+            f"PO session {picked.session_id} turn {seq}: picked {picked.cli}/{picked.model}, now running "
+            f"{running.cli}/{running.model}; {picked.cli} refused it ({failure.kind}): {failure.summary}",
+            f"{kind}:{picked.session_id}:{seq}",
             to=self.owner_events,
         )
 

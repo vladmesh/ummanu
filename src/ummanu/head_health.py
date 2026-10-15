@@ -16,6 +16,7 @@ from ummanu import _proc
 from ummanu._fsutil import write_json
 from ummanu.dispatch.types import HostError
 from ummanu.runtime.provider_errors import (
+    KIND_AUTH,
     KIND_PLAN,
     KIND_QUOTA,
     KIND_RECONNECT,
@@ -138,8 +139,11 @@ class HeadReadiness:
 
 
 def failure_status(kind: str) -> str:
-    """The resource status a head's provider error records: a spent quota is `exhausted`."""
-    return "exhausted" if kind == KIND_QUOTA else "unavailable"
+    """The resource status a head's provider error records: a spent quota is `exhausted`, a 401/403
+    `unauthenticated`, anything else `unavailable`."""
+    if kind == KIND_QUOTA:
+        return "exhausted"
+    return "unauthenticated" if kind == KIND_AUTH else "unavailable"
 
 
 def failure_until(kind: str, reset_at: float, now: float) -> float:

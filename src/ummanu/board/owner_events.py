@@ -66,14 +66,19 @@ E2E_BUDGET_SPENT = "e2e_budget_spent"
 E2E_AFTER_MERGE = "e2e_after_merge"
 CARD_WAITS_FOR_PERSON = "card_waits_for_person"
 PO_CARD_ESCALATED = "po_card_escalated"
+PO_SESSION_MOVED = "po_session_moved"
+PO_SESSION_MOVED_ACCOUNT = "po_session_moved_account"
 
 #: Every kind and the class it belongs to: the CHECKs `owner_event_kind_in_vocabulary` and
-#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021, 0023 and 0024) are these two lists. A
-#: new kind joins it here and in a migration together.
+#: `owner_event_class_follows_kind` (board/schema.py, 0018, restated by 0021, 0023, 0024, 0028 and
+#: 0033) are these two lists. A new kind joins it here and in a migration together.
 KIND_CLASS: dict[str, str] = {
     CARD_WAITS_FOR_PERSON: NOTICE,
     CARD_HANDED_TO_OWNER: NEEDS_OWNER,
     PO_CARD_ESCALATED: NEEDS_OWNER,
+    # A PO session moved to the other CLI family because its provider refused the account (auth, plan,
+    # quota): only the owner can repair the login or the subscription.
+    PO_SESSION_MOVED_ACCOUNT: NEEDS_OWNER,
     STEWARD_NEEDS_HUMAN: NEEDS_OWNER,
     # Released direct e2e notifications remain visible without claiming owner authority.
     E2E_BUDGET_SPENT: NOTICE,
@@ -86,6 +91,7 @@ KIND_CLASS: dict[str, str] = {
     HEAD_DEAD: NOTICE,
     PO_TURN_FAILED: NOTICE,
     PROVIDER_RED: NOTICE,
+    PO_SESSION_MOVED: NOTICE,
     # A card a PO session delegated settled and its result went back to that session (0021).
     DELEGATED_CARD_SETTLED: NOTICE,
 }
@@ -581,6 +587,8 @@ __all__ = [
     "NOT_APPLICABLE",
     "OBSERVER_DEAD",
     "PO_CARD_ESCALATED",
+    "PO_SESSION_MOVED",
+    "PO_SESSION_MOVED_ACCOUNT",
     "PO_TURN_FAILED",
     "PROVIDER_RED",
     "SPRINT_CLOSED",

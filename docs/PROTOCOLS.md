@@ -797,6 +797,8 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 | `observer_dead` | `notice` | the dispatcher's observer reconcile: a head positively dead at the start of the tick that the tick did not relaunch (backoff, drain, a failed bring-up) | the sprint | `observer_dead:<sprint>:<launch count>` |
 | `head_dead` | `notice` | the dispatcher's wait watchdog: a worker or reviewer head dead or stalled again after its one respawn, the card Blocked for the operator; or a worker respawn that failed | the card | `head_dead:<blocking request id>` |
 | `po_turn_failed` | `notice` | the PO service, when its runner settles a turn `failed` (`PoRunner._finish`); a stop by the owner is `interrupted` and writes nothing | the card when a dispatcher input started the turn, else `po-session:<id>` | `po_turn_failed:<session>:<seq>` |
+| `po_session_moved_account` | `needs_owner` | the PO service, when its runner moved a turn to the other CLI family after an auth, plan or quota refusal (`PoRunner._fall_over`) | `po-session:<id>` | `po_session_moved_account:<session>:<seq>` |
+| `po_session_moved` | `notice` | the same, for any other provider refusal (429, 5xx, reconnect exhaustion) | `po-session:<id>` | `po_session_moved:<session>:<seq>` |
 | `provider_red` | `notice` | `ummanu doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable`, `timed_out` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
 | `delegated_card_settled` | `notice` | the dispatcher's result return ([PO delegation](#po-delegation)), after the origin session (or its successor) took a delegated card's result, through `record_strict`: a failed write is repeated next tick and the return is not recorded until it lands; its text names the card, its terminal state and the origin session, and the successor that took it | the card | `delegated_card_settled:<card>:<transition event id>` |
 
@@ -1189,7 +1191,8 @@ or ceiling; a standing automation at the start of its next tick.
 **On detection, in this order:**
 
 1. The head's resource is recorded red in `<data>/dispatcher/resource_health.json`
-   (`HeadHealth.record`): `exhausted` for a spent quota, `unavailable` otherwise, with `until` = the
+   (`HeadHealth.record`): `exhausted` for a spent quota, `unauthenticated` for a 401/403, `unavailable`
+   otherwise, with `until` = the
    reset the provider named, else a bounded backoff (`QUOTA_BACKOFF_SECONDS`, 1 h;
    `PROVIDER_FAILURE_BACKOFF_SECONDS`, 15 min). Until then no probe runs over it: a cheap `ping` is no
    proof there is quota for real work. Past it, a fresh probe decides. The `openai-sub` and `claude-sub`
@@ -1202,10 +1205,13 @@ or ceiling; a standing automation at the start of its next tick.
    (`fallback_head` on its record names the profile running in place of the declared one); a standing
    automation resumes from its watermark; a PO session moves to the other CLI's first model in
    `po.models` (same effort when offered) and the same turn is given again with the session's recent feed.
+   The summary is the CLI's final error, not a retry notice before it.
 4. One card comment and the tick outcome (`worker-provider-fallback` / `review-provider-fallback`) name
    the head, the resource, the error summary (secrets and request identifiers removed), when the resource
    comes back and the head switched to (`switched_to`). A fallback that puts the reviewer in the worker's
-   own family says so on the card: allowed, recorded, not a defect.
+   own family says so on the card: allowed, recorded, not a defect. A moved PO session writes one owner
+   event on `po-session:<id>` naming the picked head, the running head, the turn and the error class
+   (`po_session_moved_account` for auth, plan or quota, else `po_session_moved`).
 
 None of this charges a round, a respawn, the red-review counter or the sprint budget. New launches walk
 from the preferred head, so they return to the primary once its resource is green again
@@ -1231,8 +1237,8 @@ walk launch only on `ready` or `unknown`; every other status walks the fallback 
 | `ready` | the probe succeeded | yes |
 | `unknown` | the probe answered with something nobody could classify, or has no probe command | yes |
 | `timed_out` | the provider gave the probe no answer in time (outer command killed, or the inner probe's own `status=timeout`) | no |
-| `unavailable` | the provider failed: 5xx, reconnect exhaustion, a 429 rate limit, or a head's provider error recorded by the dispatcher (held to its `until`) | no |
-| `unauthenticated` | the account was refused: a missing login, an expired key, a 401/403 for the account | no |
+| `unavailable` | the provider failed: 5xx, reconnect exhaustion, a 429 rate limit, or another provider error of a head's turn (held to its `until`) | no |
+| `unauthenticated` | the account was refused: a missing login, an expired key, a 401/403 for the account, or a 401/403 of a head's turn (held to its `until`) | no |
 | `exhausted` | the quota is spent; held to the reset the provider named (`until`) | no |
 | `probe_broken` | the probe command could not be launched | no |
 | `missing` | a chain entry the registry does not describe | no |

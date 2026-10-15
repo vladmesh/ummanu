@@ -284,7 +284,7 @@ class ExpiryTests(unittest.TestCase):
         self.assertEqual(failure_until(KIND_QUOTA, NOW + 10, NOW), NOW + 10)
         self.assertLess(failure_until(KIND_AUTH, 0.0, NOW), NOW + QUOTA_BACKOFF_SECONDS)
         self.assertEqual(failure_until(KIND_PLAN, 0.0, NOW), NOW + QUOTA_BACKOFF_SECONDS)
-        self.assertEqual((failure_status(KIND_QUOTA), failure_status(KIND_AUTH)), ("exhausted", "unavailable"))
+        self.assertEqual((failure_status(KIND_QUOTA), failure_status(KIND_AUTH)), ("exhausted", "unauthenticated"))
 
     def test_red_resources_lists_only_unexpired_verdicts(self) -> None:
         self.health.record("openai-sub", "exhausted", "spent", now=NOW, until=NOW + 60)

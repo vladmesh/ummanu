@@ -43,6 +43,7 @@ from ummanu.po.store import (
     Turn,
 )
 from ummanu.po.workspace import workspace_dir
+from ummanu.runtime.codex_preflight import CodexHomeLoginMissing, resolve_codex_home
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.client import HeadHandle, spawn_head
 from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, read_events
@@ -311,11 +312,14 @@ class PoRunner:
         turn_launcher: Callable[..., Any] | None = None,
         scope_owner_unit: str = "ummanu-po.service",
         fallback_choice: Callable[[Session], tuple[str, str, str] | None] | None = None,
+        on_fallback: Callable[[Session, Session, int, ProviderError], None] | None = None,
     ) -> None:
         self.store = store
         # The CLI, model and effort a session falls over to when its own provider refuses a turn
         # (ummanu-108): the PO service answers from `po.models`; None keeps the turn failed.
         self.fallback_choice = fallback_choice
+        # Told (picked session, running session, seq, provider error) once a turn moved to the other CLI.
+        self.on_fallback = on_fallback
         # What a new session's effort is checked against unless its create passes its own list.
         self.efforts: Mapping[str, tuple[str, ...]] = (
             dict(efforts) if efforts is not None else DEFAULT_EFFORTS
@@ -533,6 +537,11 @@ class PoRunner:
             effort = require_explicit_effort(cli, effort, self.efforts if efforts is None else efforts)
         except EffortRefused as exc:
             raise RunnerError(str(exc)) from None
+        if cli == "codex":
+            try:
+                self.codex_home()
+            except CodexHomeLoginMissing as exc:
+                raise RunnerError(f"a codex PO session cannot start: {exc}") from None
         return self.store.claim_session(
             session_id=str(uuid.uuid4()),
             cli=cli,
@@ -740,10 +749,13 @@ class PoRunner:
         """Name session and, when available, input request id in every launch environment.
 
         New turns, recovery and conversation relaunch share this path. Missing request/store data
-        leaves PO_REQUEST_ENV unset; recovery otherwise preserves the request id.
+        leaves PO_REQUEST_ENV unset; recovery otherwise preserves the request id. A codex turn runs
+        on `codex_home()`; with no login there the launch fails with `CodexHomeLoginMissing`.
         """
         environment = {key: value for key, value in self.env.items() if key != PO_REQUEST_ENV}
         environment[PO_SESSION_ENV] = session.session_id
+        if session.cli == "codex":
+            environment["CODEX_HOME"] = str(self.codex_home())
         if seq is not None:
             try:
                 request_id = self.store.turn_request_id(session.session_id, seq)
@@ -1157,6 +1169,12 @@ class PoRunner:
             f"the session continues on {cli}/{model}",
             file=sys.stderr,
         )
+        if self.on_fallback is not None:
+            try:
+                self.on_fallback(session, moved, seq, failure)
+            except Exception as exc:  # noqa: BLE001 - a listener never fails the replacement turn
+                print(f"ummanu po: after moving turn {session.session_id}/{seq}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
         return moved, process, offset
 
     def _fallback_prompt(
@@ -1185,11 +1203,9 @@ class PoRunner:
         )
 
     def codex_home(self) -> Path:
-        """The Codex home a turn runs with: `$CODEX_HOME` of the turn environment, else `~/.codex`."""
-        configured = self.env.get("CODEX_HOME")
-        if configured:
-            return Path(configured)
-        return Path(self.env.get("HOME") or Path.home()) / ".codex"
+        """The CODEX_HOME codex turns run with and rollouts are read from: the pipeline heads' resolver
+        over this data dir. Raises `CodexHomeLoginMissing` when it holds no login."""
+        return Path(resolve_codex_home({}, data_dir=self.data_dir).path)
 
     @staticmethod
     def _codex_final_answer(files: TurnFiles) -> tuple[str | None, str | None]:
@@ -1222,30 +1238,33 @@ class PoRunner:
 
 
 def po_provider_error(cli: str, stdout: str, stderr: str) -> ProviderError | None:
-    """Read refusal from Claude error results, Codex error/turn.failed events, then stderr.
+    """Read refusal from the last classifiable Claude error result or Codex error/turn.failed event,
+    else from stderr: the CLI's final error, not a retry notice before it.
 
     Return None when absent; never interpret answer text as an error record.
     """
-    texts: list[str] = []
+    found: ProviderError | None = None
     for document in _json_documents(stdout, whole=cli == "claude"):
         if not isinstance(document, dict):
             continue
+        text = ""
         if cli == "claude" and document.get("type", "result") == "result" and document.get("is_error"):
-            texts.append(str(document.get("result") or document.get("subtype") or ""))
+            text = str(document.get("result") or document.get("subtype") or "")
         elif cli == "codex" and document.get("type") in ("error", "turn.failed"):
             error = document.get("error")
             message = error.get("message") if isinstance(error, dict) else document.get("message")
             info = error.get("codex_error_info") if isinstance(error, dict) else None
             if str(info or "") in CODEX_QUOTA_ERROR_INFOS:
                 text = str(message or info)
-                return ProviderError(KIND_QUOTA, None, summarize_provider_error(text), reset_at=reset_time(text))
-            texts.append(str(message or ""))
-    texts.append(stderr or "")
-    for text in texts:
-        found = classify_provider_error(text) if text.strip() else None
-        if found is not None:
-            return found
-    return None
+                found = ProviderError(KIND_QUOTA, None, summarize_provider_error(text), reset_at=reset_time(text))
+                continue
+            text = str(message or "")
+        classified = classify_provider_error(text) if text.strip() else None
+        if classified is not None:
+            found = classified
+    if found is None and (stderr or "").strip():
+        found = classify_provider_error(stderr)
+    return found
 
 
 __all__ = [

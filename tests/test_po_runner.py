@@ -119,20 +119,19 @@ class PoRunnerTests(unittest.TestCase):
         self.addCleanup(self.stop_everything)
 
     def make_runner(self) -> PoRunner:
-        # A Codex home of the test's own: the fake writes its rollouts there, and the runner reads
-        # a turn's model from there, never from the one on this host.
-        codex_home = str(self.root / "codex-home")
+        # The managed Codex home of the test's data dir, logged in: the fake writes its rollouts
+        # there, and the runner reads a turn's model from there, never from the one on this host.
+        codex_home = self.data / "codex-home"
+        codex_home.mkdir(exist_ok=True)
+        (codex_home / "auth.json").write_text('{"tokens": "fixture"}\n', encoding="utf-8")
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop("UMMANU_CODEX_HOME", None)
         return PoRunner(
             self.store,
             self.data,
             executables=self.executables,
             turn_launcher=unscoped_test_launch,
-            env={
-                **os.environ,
-                "FAKE_LOG": str(self.log),
-                "CODEX_HOME": codex_home,
-                "FAKE_CODEX_HOME": codex_home,
-            },
+            env={**os.environ, "FAKE_LOG": str(self.log), "FAKE_CODEX_HOME": str(codex_home)},
         )
 
     def stop_everything(self) -> None:

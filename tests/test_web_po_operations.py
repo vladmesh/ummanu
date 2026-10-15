@@ -74,7 +74,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.addCleanup(BOARD.drop_database, config.dbname)
         self.store = PoStore(config.for_role("app"))
         # The Codex home is the test's own, so no turn reads a rollout of this host's.
-        env = {**os.environ, "FAKE_LOG": str(self.log), "CODEX_HOME": str(self.root / "codex-home")}
+        env = {**os.environ, "FAKE_LOG": str(self.log)}
         self.runner = PoRunner(self.store, self.data, executables=executables, env=env,
                                turn_launcher=unscoped_test_launch)
         self.addCleanup(self.stop_everything)

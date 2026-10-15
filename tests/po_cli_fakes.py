@@ -8,6 +8,8 @@ file `$FAKE_LOG.gate` exists, `FAIL` exits non-zero, `SILENT` exits zero without
 `NOPERSIST` makes Claude save no conversation. While the file `$FAKE_LOG.quota-<cli>` exists, that
 CLI refuses every turn with its provider's own spent-usage-limit message, as the real one does; Codex's
 names a reset (`codex_quota_wall`) three days after the refusal, so it never expires with the calendar.
+While the file `$FAKE_LOG.refuse-codex` exists, Codex prints each of its lines as an `error` event and
+fails the turn on the last one, as the real CLI does after its own retries; it also logs `$CODEX_HOME`.
 
 Each also says which model it ran the way the real CLI does: Claude's result object keys `modelUsage`
 by the full id (`FAKE_CLAUDE_RESOLVED` of the alias it was given, the session's own model first and a
@@ -115,7 +117,8 @@ log = os.environ["FAKE_LOG"]
 with open(log, "a") as handle:
     handle.write(json.dumps({"cli": "codex", "argv": argv, "cwd": os.getcwd(), "prompt": prompt,
                              "po_session": os.environ.get("UMMANU_PO_SESSION"),
-                             "po_request": os.environ.get("UMMANU_PO_REQUEST")}) + "\n")
+                             "po_request": os.environ.get("UMMANU_PO_REQUEST"),
+                             "codex_home": os.environ.get("CODEX_HOME")}) + "\n")
 resume = argv[:2] == ["exec", "resume"]
 thread = argv[-2] if resume else "019a-fake-thread"
 out = argv[argv.index("-o") + 1]
@@ -124,6 +127,12 @@ if os.path.exists(log + ".quota-codex"):
     message = codex_quota_message(time.time())
     print(json.dumps({"type": "error", "message": message}), flush=True)
     print(json.dumps({"type": "turn.failed", "error": {"message": message}}), flush=True)
+    sys.exit(1)
+if os.path.exists(log + ".refuse-codex"):
+    lines = open(log + ".refuse-codex").read().splitlines()
+    for line in lines:
+        print(json.dumps({"type": "error", "message": line}), flush=True)
+    print(json.dumps({"type": "turn.failed", "error": {"message": lines[-1]}}), flush=True)
     sys.exit(1)
 home = os.environ.get("FAKE_CODEX_HOME")
 if home:
