@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -54,6 +55,7 @@ from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import new_attempt_id
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.wait_cards import advance_wait_card, delivery_request_id, pending_wait_blockers
+from ummanu.kernel.capacity_policy import DEFAULT_CODE_CONCURRENCY
 from ummanu.po import store as po_store
 from ummanu.po.client import ServiceUnavailable
 from ummanu.po.store import RequestConflict, SessionClosed, SessionNotFound
@@ -623,6 +625,8 @@ class CreateValidationTests(unittest.TestCase):
             mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
+            (Path(tmp) / "projects").mkdir()
+            (Path(tmp) / "projects" / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
             created = main(
                 [
                     "task",
@@ -1355,7 +1359,9 @@ class DependentsTests(DispatcherCase):
             return {"status": "ok", "action": "claimed", "pilot_ref": task["ref"]}
 
         runtime = SimpleNamespace(
-            reader=board, sprints=SimpleNamespace(show=lambda ref, **_: {"ref": ref, "status": "open"})
+            reader=board,
+            sprints=SimpleNamespace(show=lambda ref, **_: {"ref": ref, "status": "open"}),
+            catalog=SimpleNamespace(code_concurrency=lambda project: DEFAULT_CODE_CONCURRENCY),
         )
         with mock.patch("ummanu.dispatch.production.claim_ready_task", side_effect=claim):
             outcome = _production_claim_ready(runtime, {}, {})
