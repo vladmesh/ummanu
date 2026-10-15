@@ -80,6 +80,21 @@ class ReadRoundWorkspaceTests(unittest.TestCase):
         self.assertEqual((reading.files_changed, reading.lines_added, reading.lines_removed), (2, 3, 1))
         self.assertEqual(reading.newest_file_at, 1700001000.0)
 
+    def test_a_linked_worktree_root_git_file_is_not_a_change(self) -> None:
+        worktree = self.root / "linked"
+        self.git("worktree", "add", "-q", "-b", "card", str(worktree))
+        (worktree / "kept.txt").write_text("one\n", encoding="utf-8")
+        os.utime(worktree / "kept.txt", (1700001000, 1700001000))
+        (worktree / ".ummanu-task-env").write_text("", encoding="utf-8")
+        for name in (".git", ".ummanu-task-env"):
+            self.assertTrue((worktree / name).is_file())
+            os.utime(worktree / name, (1800000000, 1800000000))
+
+        reading = read_round_workspace(_run, str(worktree), "origin/main")
+
+        self.assertEqual(reading.unknown, "")
+        self.assertEqual(reading.newest_file_at, 1700001000.0)
+
     def test_an_unreadable_workspace_is_unknown_with_its_reason(self) -> None:
         reading = read_round_workspace(_run, str(self.root / "missing"), "origin/main")
 

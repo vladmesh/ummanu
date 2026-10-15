@@ -1,7 +1,7 @@
 """The worker wait tick records a stale round once, as one `Stale round:` dispatcher comment.
 
-The wait tick reads one fake clock that each test advances; the round starts at the launch's own
-`worker_started_at` and every workspace timestamp is a reading of the same clock.
+The wait tick and the rework round opening read one fake clock that each test advances; the round
+starts at its own `worker_started_at` and every workspace timestamp is a reading of the same clock.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from unittest import mock
 
 from tests.dispatcher_fixtures import CARD_REF, STOPPED_STATUS, DispatcherRuntimeFixture
 from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
-from ummanu.dispatch import wait_vitality
+from ummanu.dispatch import wait_vitality, worker_continuation
 from ummanu.dispatch.stale_round import DEFAULT_QUIET_MINUTES, ESTIMATE_FACTOR, WorkspaceReading
 
 ESTIMATE_SECONDS = ESTIMATE_FACTOR * DEFAULT_ESTIMATE_MINUTES * 60
@@ -34,9 +34,10 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.now = self.start
         fake_time = mock.Mock(wraps=time)
         fake_time.time = lambda: self.now
-        clock = mock.patch.object(wait_vitality, "time", fake_time)
-        clock.start()
-        self.addCleanup(clock.stop)
+        for module in (wait_vitality, worker_continuation):
+            clock = mock.patch.object(module, "time", fake_time)
+            clock.start()
+            self.addCleanup(clock.stop)
         self.turns = 0
         self.assertEqual(self._tick_at(self.start, busy=True)["action"], "waiting-worker-report")
         self.assertEqual(self._pilot_record()["worker_stale_round"]["started_at"], self.start)
@@ -148,11 +149,13 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["to"], "validate")
         self.tick()
         self._review_red()
+        reopened = self.now + 1
+        self.now = reopened
         self._park_and_decide("rework")
         self._assert_one_generation(2)
-        reopened = self.now + 1
         self._tick_at(reopened, busy=True)
-        self.assertEqual(self._pilot_record()["worker_stale_round"]["generation"], 2)
+        marker = self._pilot_record()["worker_stale_round"]
+        self.assertEqual((marker["generation"], marker["started_at"]), (2, reopened))
         self.assertEqual(len(self._stale_comments()), 1, "a fresh round is not stale")
 
         self._tick_at(reopened + QUIET_SECONDS - 1, busy=False)
@@ -161,8 +164,16 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         comments = self._stale_comments()
         self.assertEqual(len(comments), 2, comments)
-        self.assertIn("rule quiet", comments[1])
-        self.assertIn("report generation 2", comments[1])
+        self.assertEqual(
+            comments[1],
+            (
+                "Stale round: rule quiet (no commit or file change for"
+                f" {DEFAULT_QUIET_MINUTES} min while the head is alive), report generation 2."
+                f" Elapsed {DEFAULT_QUIET_MINUTES} min; estimate {DEFAULT_ESTIMATE_MINUTES} min (default)."
+                " Commits since base: 0. Diff against base: 0 files, +0/-0 lines."
+                f" Last change: {_utc(reopened)}, {DEFAULT_QUIET_MINUTES} min ago. {RECORDED_ONLY}"
+            ),
+        )
 
 
 if __name__ == "__main__":

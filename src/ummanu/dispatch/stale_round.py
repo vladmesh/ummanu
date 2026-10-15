@@ -31,7 +31,8 @@ RULE_QUIET = "quiet"
 ALIVE_VERDICTS = frozenset(
     {VitalityVerdict.HEALTHY_ACTIVE, VitalityVerdict.HEALTHY_QUIET, VitalityVerdict.SUSPECTED_STALL}
 )
-_SKIPPED_DIRS = frozenset({".git", WORKSPACE_NAMESPACE})
+# A linked worktree has a `.git` file, not a directory, at its root.
+_SKIPPED_NAMES = frozenset({".git", WORKSPACE_NAMESPACE})
 
 
 @dataclass(frozen=True)
@@ -140,7 +141,9 @@ def _newest_mtime(workspace: str) -> float:
 
     newest = 0.0
     for root, dirs, files in os.walk(workspace, onerror=raise_error):
-        dirs[:] = [name for name in dirs if not (root == workspace and name in _SKIPPED_DIRS)]
+        if root == workspace:
+            dirs[:] = [name for name in dirs if name not in _SKIPPED_NAMES]
+            files = [name for name in files if name not in _SKIPPED_NAMES]
         for name in files:
             newest = max(newest, os.lstat(os.path.join(root, name)).st_mtime)
     return newest
