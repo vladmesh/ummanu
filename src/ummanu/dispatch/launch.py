@@ -612,6 +612,8 @@ def pane_state_label(readiness: str) -> str:
 # Classify shared worker/reviewer bring-up failures as infrastructure unless the card contract failed.
 FAILURE_CLASS_INFRASTRUCTURE = "infrastructure"
 FAILURE_CLASS_TASK = "task"
+# Refused before any bring-up: no host failed and no attempt ran.
+FAILURE_CLASS_ADMISSION = "admission"
 
 CAUSE_LAUNCH_ABORTED = "launch_aborted"
 CAUSE_HOST_UNAVAILABLE = "host_unavailable"
@@ -619,11 +621,13 @@ CAUSE_WORKSPACE_CONTRACT = "workspace_contract"
 # The card names an integration base this project cannot integrate into (secretary-1541). Nothing
 # about the code was judged, but no host repairs it either: it is the card's own contract.
 CAUSE_BASE_BRANCH_CONTRACT = "base_branch_contract"
+CAUSE_ADMISSION_REFUSED = "admission_refused"
 BRING_UP_CAUSE_CLASSES = {
     CAUSE_LAUNCH_ABORTED: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_HOST_UNAVAILABLE: FAILURE_CLASS_INFRASTRUCTURE,
     CAUSE_WORKSPACE_CONTRACT: FAILURE_CLASS_TASK,
     CAUSE_BASE_BRANCH_CONTRACT: FAILURE_CLASS_TASK,
+    CAUSE_ADMISSION_REFUSED: FAILURE_CLASS_ADMISSION,
 }
 STAGE_CLAIM = "claim"
 STAGE_RESPAWN = "respawn"
@@ -693,6 +697,12 @@ class BringUpFailure:
 
     def clause(self) -> str:
         """The one sentence that names the class on the card, in the tick, and nowhere differently."""
+        if self.failure_class == FAILURE_CLASS_ADMISSION:
+            return (
+                f"[admission outcome: class={self.failure_class}, cause={self.cause}, "
+                f"stage={self.stage}, head={role_label(self.role)}] no head was started, "
+                "so this is not a host failure."
+            )
         verdict = (
             f"the {role_label(self.role)} head never came up, so this is not a verdict about the card"
             if self.infrastructure

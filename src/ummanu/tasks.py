@@ -2289,6 +2289,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
         wait_outcome: str | None = None,
+        release_claim: bool = False,
     ) -> dict[str, Any]:
         role = self._role(role, BOARD_ROLES, actor=actor)
         reason = self._redact_for_board(reason)
@@ -2302,6 +2303,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             not isinstance(release_merge, dict) or role != "dispatcher" or target != "done"
         ):
             raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
+        if release_claim and (role != "dispatcher" or target != "blocked"):
+            raise TaskError("validation", "a claim release belongs on a dispatcher Blocked", 2)
         task = self.reader.show(reference)
         if role == "observer" and task.get("record_type") in _TYPED_RECORD_TYPES:
             # The observer files issues and never promotes, moves or closes one.
@@ -2382,6 +2385,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     target=target,
                     reason="",
                     role=role,
+                    release_claim=release_claim,
                 ),
             )
             replay = {
@@ -2446,6 +2450,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 target=target,
                 reason=reason,
                 role=role,
+                release_claim=release_claim,
             ),
         )
         moved = {
@@ -2581,6 +2586,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         target: str,
         reason: str,
         role: str,
+        release_claim: bool = False,
     ) -> Callable[[Any], None]:
         """The board work a migrated Card state edge still owes once its column effect
         lands. Handed to the adapter so it runs inside the transition's transaction: it
@@ -2590,7 +2596,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         """
 
         def finish(_entity: Any) -> None:
-            self._reset_transition_metadata(task, source=source, target=target)
+            self._reset_transition_metadata(task, source=source, target=target, release_claim=release_claim)
             if reason.strip():
                 self.client.call(
                     "createComment",
@@ -2601,7 +2607,9 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
 
         return finish
 
-    def _reset_transition_metadata(self, task: dict[str, Any], *, source: str, target: str) -> None:
+    def _reset_transition_metadata(
+        self, task: dict[str, Any], *, source: str, target: str, release_claim: bool = False
+    ) -> None:
         """Apply the board metadata a Card state edge resets.
 
         Kept idempotent on purpose: a retry or :meth:`reconcile` may repeat it after the column effect
@@ -2616,7 +2624,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             clear_mark = {**clear_mark, OWNER_ANSWER: ""}
         if clear_mark:
             owner_events.settle_required_wait(str(task.get("ref") or ""), to=self.client)
-        if target in {"ready", "done"}:
+        if target in {"ready", "done"} or release_claim:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={**_READY_RESET_METADATA, **clear_mark}
             )
