@@ -33,7 +33,7 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
         return [
             str(comment.get("body") or "")
             for comment in self.reader.show(CARD_REF)["comments"]
-            if str(comment.get("body") or "").startswith("Stale round:")
+            if "Stale round:" in str(comment.get("body") or "")
         ]
 
     def test_a_round_past_twice_its_estimate_is_recorded_and_nothing_else_changes(self) -> None:
