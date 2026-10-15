@@ -47,6 +47,8 @@ SINGLE_FILES = ("export.json",)
 
 # Parts are grouped a thousand to a directory so no single Git tree grows with the board.
 _PER_DIRECTORY = 1000
+#: Largest segment written, kept well under the 100 MB file limit of the instance remote.
+MAX_SEGMENT_BYTES = 32 * 1024 * 1024
 _CHUNK = re.compile(r"[0-9]{4}")
 
 
@@ -255,16 +257,30 @@ def _sync_records(payload: bytes, root: Path, suffix: str) -> None:
 def _sync_segments(payload: bytes, committed: bytes | None, root: Path, suffix: str) -> None:
     if committed is not None and payload.startswith(committed):
         count = len(_parts(root, suffix))
-        appended = payload[len(committed) :]
-        if appended:
-            _write_bytes_if_changed(root / part_name(count, suffix), appended)
+        appended = segment_chunks(payload[len(committed) :], MAX_SEGMENT_BYTES)
+        for index, segment in enumerate(appended, start=count):
+            _write_bytes_if_changed(root / part_name(index, suffix), segment)
         return
-    # History that does not extend the committed log is not appended to: the log is rewritten as
-    # one segment, which costs one full blob and is expected only on the first split checkpoint.
+    # History that does not extend the committed log is not appended to: the log is rewritten from
+    # the first segment, which costs its full blobs and is expected only after rewritten history.
     if root.exists():
         _remove(root)
-    if payload:
-        _write_bytes_if_changed(root / part_name(0, suffix), payload)
+    for index, segment in enumerate(segment_chunks(payload, MAX_SEGMENT_BYTES)):
+        _write_bytes_if_changed(root / part_name(index, suffix), segment)
+
+
+def segment_chunks(payload: bytes, limit: int) -> list[bytes]:
+    """Cut NDJSON bytes at line ends into segments of at most `limit` bytes, unless one line is longer."""
+    segments: list[bytes] = []
+    current = bytearray()
+    for record in split_records(payload):
+        if current and len(current) + len(record) > limit:
+            segments.append(bytes(current))
+            current.clear()
+        current += record
+    if current:
+        segments.append(bytes(current))
+    return segments
 
 
 def _prune(root: Path, suffix: str, *, keep: int) -> None:
