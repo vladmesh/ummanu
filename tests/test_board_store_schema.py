@@ -462,7 +462,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "delivery positions"):
             command.downgrade(config, "0029_po_channel")
         connection.rollback()
-        self.assertEqual(migrate.current_revision(connection), "0031_sprint_dod_items")
+        # 0031 holds no items, so its own downgrade transaction commits before 0030 refuses.
+        self.assertEqual(migrate.current_revision(connection), "0030_po_input_context")
 
     def test_0029_preserves_released_resume_and_cursor_and_refuses_lossy_downgrade(self) -> None:
         from alembic import command
@@ -1730,7 +1731,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs", "0027_sprint_owner_decisions", "0028_owner_turns", "0029_po_channel", "0030_po_input_context", "0031_sprint_dod_items"))
 
-        # Every old column loads unchanged; 0023 adds budget (3 and 0), 0026 no exceptions, 0027 no quotes.
+        # Every old column loads unchanged; 0023 adds budget (3 and 0), 0026 no exceptions, 0027 no quotes,
+        # 0031 no DoD items.
         sprints = connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall()
         self.assertEqual(
             (
@@ -1739,7 +1741,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             ),
             before,
         )
-        self.assertEqual([tuple(row[len(before[0][0]) :]) for row in sprints], [(3, 0, [], [])])
+        self.assertEqual([tuple(row[len(before[0][0]) :]) for row in sprints], [(3, 0, [], [], None)])
         # 0025 backfills the existing In progress decision; 0028 retains it as a notice.
         [backfill] = store.events()
         self.assertEqual((backfill.kind, backfill.event_class, backfill.subject_ref, backfill.dedup_key),
