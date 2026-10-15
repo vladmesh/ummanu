@@ -14,6 +14,7 @@ from ummanu.board.backend import card_client
 from ummanu.board.models import CardState
 from ummanu.board.owner_handover import OWNER, OWNER_ROLE
 from ummanu.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
+from ummanu.board.task_protocol.rows import admit_role
 from ummanu.board.task_routing import (
     PO_EXECUTED_TYPES,
     BlockClassification,
@@ -555,6 +556,7 @@ def run_task_create(args: argparse.Namespace) -> int:
     from ummanu.tasks import TaskWriter
 
     def command() -> object:
+        admit_role(args.role, args.actor or args.role, CREATE_ROLES)
         _validate_codex_mode_for_create(args)
         _refuse_unrunnable_project(Path(_instance(args)), args.project, args.type)
         description = _read_body(args.body_file) if args.body_file else args.description
