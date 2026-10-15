@@ -37,6 +37,7 @@ from ummanu.dispatch.worker_comments import (
 )
 from ummanu.dispatch.worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head.runtime import HEAD_BUSY, DeliverReceipt
 from ummanu.tasks import _digest
 
 REF = "ummanu-1768"
@@ -383,6 +384,27 @@ class MidRoundContinuationTests(HostCase):
         self.assertEqual(outcome["comments"], ["evt_two"])
         self.assertEqual(len(self.host.backend.deliveries), 2)
         self.assertEqual(record.worker_comment_deliveries, ("evt_one", "evt_two"))
+
+    def test_a_head_busy_refusal_defers_the_pointer_to_the_next_tick_without_degrading(self) -> None:
+        record = self.live_worker()
+        self.card.comment("po", "Mid-turn.", at="2026-09-26T14:00:00Z", event_id="evt_busy")
+        self.host.backend.deliver_refusal = DeliverReceipt(
+            status=HEAD_BUSY, reason="one head runs one turn, and this delivery is not queued behind it"
+        )
+
+        deferred = self.tick(record)
+
+        self.assertEqual((deferred["status"], deferred["action"]), ("ok", "worker-comments-deferred"))
+        self.assertEqual(record.worker_comment_deliveries, ())
+        self.assertEqual(self.host.backend.deliveries, [])
+
+        self.host.backend.deliver_refusal = None
+        delivered = self.tick(record)
+        self.assertIsNone(self.tick(record))
+
+        self.assertEqual(delivered["action"], "worker-comments-delivered")
+        self.assertEqual(delivered["comments"], ["evt_busy"])
+        self.assertEqual(len(self.host.backend.deliveries), 1)
 
     def test_a_parked_suspended_or_paused_worker_is_sent_nothing_and_the_next_round_carries_it(self) -> None:
         self.card.comment("po", "While parked.", at="2026-09-26T14:00:00Z", event_id="evt_parked")

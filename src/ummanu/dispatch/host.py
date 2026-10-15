@@ -87,6 +87,7 @@ from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvena
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.tui import (
+    READINESS_BUSY,
     TuiDeliveryError,
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
@@ -1986,6 +1987,9 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         if not receipt.ok:
             failure = HostError(f"{what} was not delivered: {receipt.reason}")
             failure.evidence = receipt.evidence
+            if receipt.status == head_ops.HEAD_BUSY:
+                # The head is in a turn and nothing was typed: a delivery to make once it ends.
+                failure.evidence = {"readiness_state": READINESS_BUSY, "reason": receipt.reason}
             raise failure from None
         record.worker_head_run = receipt.run.to_json()
         evidence = _delivery_evidence_json(receipt.delivery, subject)

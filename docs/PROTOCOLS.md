@@ -3174,7 +3174,9 @@ record's `worker_comment_deliveries` points the worker at it once: the keys are 
 saved, `TASK.md` is re-rendered for the same generation and decision, and only then the pointer, "re-read
 its comments section", goes out through the same worker delivery as the report prompt. A tick repeat or
 a restarted dispatcher sends nothing again; a failed send is recorded as delivery evidence and not
-retried, and the next round's `TASK.md` carries the comment either way. A worker that is parked in Assessment,
+retried, and the next round's `TASK.md` carries the comment either way. A send the head refuses because
+it is mid-turn is not a failure: its keys move to `worker_comments_owed` and a later tick points the
+worker at them once the turn ends. A worker that is parked in Assessment,
 held for validation, paused or between rounds is sent nothing and nothing is recorded; the next round's
 `TASK.md` carries the comment. `decision` and `operation` cards have no worker and are unaffected.
 
