@@ -148,6 +148,8 @@ WORKSPACE_TOOL_CACHES = {
     "RUFF_CACHE_DIR": "ruff-cache",
     "MYPY_CACHE_DIR": "mypy-cache",
 }
+# The head's temporary directory (agent CLI scratch, pytest basetemp), removed with the namespace.
+WORKSPACE_TMPDIR = "tmp"
 # A venv startup file setting the same bytecode prefix for every interpreter of that venv, including
 # a child started with a scratch environment. An explicit prefix wins; the name sorts first so other
 # startup files' imports are redirected too.
@@ -347,6 +349,9 @@ def runtime_env(
             env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
             env["VIRTUAL_ENV"] = str(environment)
             env.update(workspace_tool_cache_env(workspace))
+            tmpdir = environment.parent / WORKSPACE_TMPDIR
+            tmpdir.mkdir(mode=0o700, exist_ok=True)
+            env["TMPDIR"] = str(tmpdir)
         # PYTHONPATH served only the wrapper's own import; it is not authority for the head's commands.
         env.pop("PYTHONPATH", None)
         if workspace is not None:
