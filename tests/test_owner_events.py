@@ -65,10 +65,10 @@ class EntityTests(unittest.TestCase):
             {kind for kind in KINDS if class_of(kind) == NEEDS_OWNER},
             # `e2e_budget_spent` since 0023 (secretary-1796): a card whose e2e cap only the owner can raise;
             # `e2e_after_merge` since 0024 (secretary-1807): an after-merge e2e run that needs the owner.
-            {"card_handed_to_owner", "steward_needs_human", "po_card_escalated"},
+            {"card_handed_to_owner", "steward_needs_human", "po_card_escalated", "po_session_moved_account"},
         )
         for kind in ("sprint_closed", "sprint_stopped", "budget_signal", "observer_dead", "head_dead",
-                     "po_turn_failed", "provider_red", "delegated_card_settled"):
+                     "po_turn_failed", "provider_red", "delegated_card_settled", "po_session_moved"):
             self.assertEqual(class_of(kind), NOTICE, kind)
         with self.assertRaises(ValueError):
             class_of("card_moved")
@@ -95,7 +95,7 @@ class EntityTests(unittest.TestCase):
         # it and the class rule with `e2e_budget_spent`, a `needs_owner` kind (secretary-1796); 0024 restates
         # both again with `e2e_after_merge`, a `needs_owner` kind (secretary-1807). The class vocabulary is
         # still the one 0018 created.
-        restated = importlib.import_module("ummanu.board.migrations.versions.0028_owner_turns")
+        restated = importlib.import_module("ummanu.board.migrations.versions.0033_po_session_moved")
         restated_source = Path(restated.__file__).read_text(encoding="utf-8")
         restated_names = {"owner_event_kind_in_vocabulary", "owner_event_class_follows_kind"}
         for name, text in checks.items():
@@ -106,7 +106,7 @@ class EntityTests(unittest.TestCase):
                 name,
             )
         self.assertEqual(revision.down_revision, "0017_po_card_kinds")
-        self.assertEqual(restated.down_revision, "0027_sprint_owner_decisions")
+        self.assertEqual(restated.down_revision, "0032_accept_decision")
 
     def test_the_fake_store_refuses_what_the_checks_refuse(self) -> None:
         store = FakeOwnerEvents()

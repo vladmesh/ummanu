@@ -225,6 +225,7 @@ unit tests/test_interactive_workspace.py
 integration-heads tests/test_po_service.py
 integration-heads tests/test_po_cards.py
 unit tests/test_po_delegation.py
+unit tests/test_po_codex_home.py
 unit tests/test_owner_events.py
 runtime-component tests/test_doctor_record.py
 integration-heads tests/test_po_handover.py

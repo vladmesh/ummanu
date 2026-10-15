@@ -50,6 +50,7 @@ OWED = (
     "0030_po_input_context",
     "0031_sprint_dod_items",
     "0032_accept_decision",
+    "0033_po_session_moved",
 )
 
 

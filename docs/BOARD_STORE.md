@@ -689,11 +689,12 @@ include later revisions. Current types, nullability, keys and constraints are in
 - `owner_events`: `id` (bigint identity primary key), `kind`, `class`, `subject_ref`, `text`,
   `created_at`, `read_at`, `dedup_key` (unique).
   [`0018`](../src/ummanu/board/migrations/versions/0018_owner_events.py) creates it;
-  revisions `0021`, `0023`, `0024`, `0025` and
-  [`0028`](../src/ummanu/board/migrations/versions/0028_owner_turns.py) extend or reclassify kinds
+  revisions `0021`, `0023`, `0024`, `0025`,
+  [`0028`](../src/ummanu/board/migrations/versions/0028_owner_turns.py) and
+  [`0033`](../src/ummanu/board/migrations/versions/0033_po_session_moved.py) extend or reclassify kinds
   (§3.12, §3.13). `owner_events_by_subject` indexes `subject_ref`. Only
-  `card_handed_to_owner`, `steward_needs_human` and `po_card_escalated` have class `needs_owner`;
-  all other kinds are `notice`.
+  `card_handed_to_owner`, `steward_needs_human`, `po_card_escalated` and `po_session_moved_account`
+  have class `needs_owner`; all other kinds are `notice`.
 - `origin_returns`: `id` (bigint identity primary key), `task_ref`, `event_id` (unique), `request_id`,
   `target_state`, `created_at`, `delivered_at`, `status`, `notice`, `session`, `po_request_id`.
   [`0022`](../src/ummanu/board/migrations/versions/0022_origin_returns.py) creates it.
@@ -760,7 +761,7 @@ an Alembic revision shipped with the code that emits the new value.
 | `board_events.kind` | the 23 `EventKind` values (§3.9) | `board/models.py:EventKind` |
 | `board_events.entity_kind`, `requests.entity_kind` | `product`, `issue`, `sprint`, `card` | `EntityKind` |
 | `repositories.role` | `primary`, `curator_root` | this schema (§3.1) |
-| `owner_events.kind` | the 14 owner event kinds | `board.owner_events.KINDS` |
+| `owner_events.kind` | the 16 owner event kinds | `board.owner_events.KINDS` |
 | `owner_events.class` | `needs_owner`, `notice`, derived from the kind (`owner_event_class_follows_kind`) | `board.owner_events.KIND_CLASS` |
 
 A retired `codex_launch_mode` reads as NULL (`board/task_protocol/rows.py`); an audit record whose kind is not an
@@ -817,6 +818,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0030_po_input_context` | nullable object metadata on `po_feed`; accepted queue context is copied with turn claim; historical bytes are unchanged; downgrade refuses to lose recorded delivery positions |
 | `0031_sprint_dod_items` | nullable DoD item array on `sprints`, array CHECK; every existing sprint stays NULL (free-text DoD, unstructured); downgrade refuses while any sprint has items |
 | `0032_accept_decision` | data only, `release_safety = "destructive"`: the observer's Assessment decision value `release` becomes `accept` in `task_comments.marker` (`decision:accept`) and, at any depth of `board_events.data` and `requests.intent`, under the keys `decision` and `disposition` and in a `decision:` `marker`; no column; the downgrade writes `release` back the same way |
+| `0033_po_session_moved` | additive: `po_session_moved` (notice) and `po_session_moved_account` (`needs_owner`) in `owner_event_kind_in_vocabulary` and `owner_event_class_follows_kind`, both restated; no column; the downgrade restores `0028`'s two constraints and fails while either kind exists |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -1210,7 +1212,7 @@ and restore reads stay outside latency-sensitive paths.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0032_accept_decision`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0033_po_session_moved`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

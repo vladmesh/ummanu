@@ -217,7 +217,7 @@ class ProviderFailureFallbackTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(record.report_generation, 1)
         self.assertEqual(self._budget_types(), [])
         health = self._resource_health()["openai-sub"]
-        self.assertEqual(health["status"], "unavailable")
+        self.assertEqual(health["status"], "unauthenticated")
         self.assertIn("codex-reviewer", health["reason"])
         self.assertNotIn("sk-svcac", health["reason"])
         card = self.reader.show(REF)
@@ -257,7 +257,7 @@ class ProviderFailureFallbackTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(record.report_generation, 1)
         self.assertIn("restart_worker", self.host.calls)
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
-        self.assertEqual(self._resource_health()["openai-sub"]["status"], "unavailable")
+        self.assertEqual(self._resource_health()["openai-sub"]["status"], "unauthenticated")
         self.assertEqual(self._budget_types(), [])
         self.assertIn("relaunched on claude-opus", self._comments()[-1])
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
@@ -276,7 +276,7 @@ class ProviderFailureFallbackTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(blocked["action"], "worker-provider-blocked")
         self.assertEqual(blocked["to"], "blocked")
-        self.assertIn("openai-sub unavailable until", blocked["reason"])
+        self.assertIn("openai-sub unauthenticated until", blocked["reason"])
         self.assertEqual(self.reader.show(REF)["state"], "blocked")
         self._assert_no_stall_path([blocked])
         moves = [event for event in self.writer.audit.events(REF) if "provider-blocked" in str(event.get("request_id"))]
@@ -315,7 +315,7 @@ class ProviderFailureFallbackTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(fell_back["resource"], "claude-sub")
         self.assertEqual(fell_back["switched_to"], "codex")
         self.assertEqual(self._record().head, "codex")
-        self.assertEqual(self._resource_health()["claude-sub"]["status"], "unavailable")
+        self.assertEqual(self._resource_health()["claude-sub"]["status"], "unauthenticated")
         self.assertNotEqual(self.reader.show(REF)["state"], "blocked")
 
     def test_claude_reviewer_auth_error_falls_back_to_the_codex_chain_head(self) -> None:
@@ -333,7 +333,7 @@ class ProviderFailureFallbackTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(fell_back["action"], "review-provider-fallback")
         self.assertEqual(fell_back["switched_to"], "codex-reviewer")
         self.assertEqual(self._record().review_head, "codex-reviewer")
-        self.assertEqual(self._resource_health()["claude-sub"]["status"], "unavailable")
+        self.assertEqual(self._resource_health()["claude-sub"]["status"], "unauthenticated")
 
     # ---- AC5: the reviewer's empty chain ------------------------------------------------------
 
