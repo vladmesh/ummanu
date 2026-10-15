@@ -226,7 +226,11 @@ class ScopeBackendTests(unittest.TestCase):
         self.assertEqual(process.wait(timeout=15), 0)
         actual = json.loads(result.read_text())
         for key, value in environment.items():
-            self.assertEqual(actual["environment"][key], value, key)
+            if key != "CODEX_HOME":
+                self.assertEqual(actual["environment"][key], value, key)
+        # A codex turn runs on the installation's managed home, not the service environment's.
+        self.assertEqual(actual["environment"]["CODEX_HOME"], str(runner.codex_home()))
+        self.assertNotEqual(actual["environment"]["CODEX_HOME"], environment["CODEX_HOME"])
         self.assertEqual(actual["environment"][PO_SESSION_ENV], session.session_id)
         self.assertEqual(actual["environment"][PO_REQUEST_ENV], "disposable-request")
         self.assertNotIn("FOREIGN_INSTALLATION", actual["environment"])
