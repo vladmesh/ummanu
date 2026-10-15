@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import time
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 
 from tests.dispatcher_fixtures import CARD_REF, STOPPED_STATUS, DispatcherRuntimeFixture
@@ -33,7 +32,9 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.tick()  # claim + launch
         self.start = float(self._pilot_record()["worker_started_at"])
         self.now = self.start
-        clock = mock.patch.object(wait_vitality, "time", SimpleNamespace(time=lambda: self.now))
+        fake_time = mock.Mock(wraps=time)
+        fake_time.time = lambda: self.now
+        clock = mock.patch.object(wait_vitality, "time", fake_time)
         clock.start()
         self.addCleanup(clock.stop)
         self.turns = 0
