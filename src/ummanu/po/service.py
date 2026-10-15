@@ -34,6 +34,7 @@ from ummanu.board.production_rights import (
     rights_line,
     rights_note,
 )
+from ummanu.po.attachments import AttachmentRefused, attachment_path
 from ummanu.po.client import (
     LOCK_NAME,
     MAX_MESSAGE_BYTES,
@@ -385,11 +386,13 @@ class PoService:
         request_id: str,
         source: str = "web",
         card: dict[str, Any] | None = None,
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Queue durably before answering; replay identical id/session/text/card facts, reject conflicts.
 
         Unknown/closed sessions write nothing. Operation inputs carry the production-rights note;
-        idle sessions hand over immediately, and the answer records whether they did.
+        idle sessions hand over immediately, and the answer records whether they did. `attachments`
+        names images the session holds (`ummanu.po.attachments`); the text carries their paths.
         """
         request_id = _required(request_id, "request_id")
         session_id = _required(session_id, "session_id")
@@ -401,6 +404,8 @@ class PoService:
             raise Refused("validation", f"only a {DISPATCHER_SOURCE} input carries card facts")
         if card is not None and not isinstance(card, dict):
             raise Refused("validation", "card facts are a JSON object")
+        if attachments is not None:
+            self._check_attachments(session_id, text, attachments, source)
         with self._lock:
             known = self._reserve(
                 request_id,
@@ -421,6 +426,8 @@ class PoService:
             if source == DISPATCHER_SOURCE:
                 metadata, comments = self._input_context(session_id, card)
                 note = "\n\n".join(part for part in (comments, note) if part) or None
+            elif attachments:
+                metadata = {"attachments": list(attachments)}
             self._accepting()
             self.queue.put(
                 session_id=session_id, text=text, request_id=request_id, source=source, card=card,
@@ -432,6 +439,20 @@ class PoService:
             # Best effort from here: the answer above stands if the hand-over or the lookup fails.
             self.pump()
             return {**self._sent(session_id, request_id), "repeated": False}
+
+    def _check_attachments(self, session_id: str, text: str, attachments: Any, source: str) -> None:
+        """Each name is an image this session holds, and the text names its path for the head."""
+        if source == DISPATCHER_SOURCE:
+            raise Refused("validation", f"a {DISPATCHER_SOURCE} input carries no attachments")
+        if not isinstance(attachments, list) or not all(isinstance(name, str) for name in attachments):
+            raise Refused("validation", "attachments are a list of attachment names")
+        for name in attachments:
+            try:
+                path = attachment_path(self.data_dir, session_id, name)
+            except AttachmentRefused as exc:
+                raise Refused("validation", str(exc)) from None
+            if str(path) not in text:
+                raise Refused("validation", f"the message text does not name the attachment {path}")
 
     def _input_context(self, session_id: str, card: dict[str, Any]) -> tuple[dict[str, Any], str]:
         """Freeze the selected delta under the submit lock before acceptance.

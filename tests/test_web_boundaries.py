@@ -12,10 +12,12 @@ from pathlib import Path
 from threading import Thread
 from unittest import mock
 
+from tests.web_fakes import Recording
 from ummanu.web import page_shell
-from ummanu.web.app import MAX_BODY_BYTES, Response
+from ummanu.web.app import MAX_BODY_BYTES, Response, WebApp
 from ummanu.web.server import build_server
 from ummanu.webproto import command_reads, pause_reads
+from ummanu.webproto.po_ops import MAX_ATTACHMENT_BYTES
 from ummanu.webproto.reads import ReadLayer
 from ummanu.webproto.section import read_source
 from ummanu.webproto.sprint_reads import SprintReadLayer
@@ -25,6 +27,7 @@ class BodyFramingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = mock.Mock()
         self.app.handle.return_value = Response(200, b"handled", "text/plain")
+        self.app.body_limit.return_value = MAX_BODY_BYTES
         self.enterContext(mock.patch("sys.stderr", io.StringIO()))
         self.server = build_server(self.app, port=0)
         self.addCleanup(self.server.server_close)
@@ -101,6 +104,15 @@ class BodyFramingTests(unittest.TestCase):
         self.assertEqual(response.read(), b"")
         self.assertEqual(sock.recv(1), b"")
         self.app.handle.assert_not_called()
+
+
+class BodyLimitTests(unittest.TestCase):
+    def test_only_the_image_upload_route_reads_a_body_larger_than_a_form(self) -> None:
+        app = WebApp(*(Recording() for _ in range(8)))
+        self.assertEqual(app.body_limit("POST", "/po/sessions/s-1/attachments"), MAX_ATTACHMENT_BYTES)
+        for method, path in (("POST", "/po/sessions/s-1/messages"), ("POST", "/api/pause/drain"), ("POST", "/nowhere")):
+            with self.subTest(path=path):
+                self.assertEqual(app.body_limit(method, path), MAX_BODY_BYTES)
 
 
 class SourceBoundaryTests(unittest.TestCase):

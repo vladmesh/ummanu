@@ -18,7 +18,7 @@ from tests.web_fakes import Recording, system_snapshot
 from ummanu.config import validate
 from ummanu.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS, efforts_from_instance, models_from_instance
 from ummanu.web import page_assets, page_po, pages
-from ummanu.web.app import PO_FORM_FIELDS, ROUTES, WebApp
+from ummanu.web.app import FORM_BODY, PO_FORM_FIELDS, ROUTES, WebApp
 from ummanu.webproto.errors import InstallationUnavailable, RuntimeUnavailable
 
 
@@ -29,7 +29,7 @@ class ServiceInputDisplayTests(unittest.TestCase):
         for render in (page_po._po_entry, page_po._po_queued_entry):
             for source in ("dispatcher", "po-service"):
                 entry["metadata"]["source"] = source
-                shown = render(entry)
+                shown = render(entry, "/po/sessions/s-1")
                 self.assertIn('<details class="po-service-input">', shown)
                 self.assertNotIn(" open", shown)
                 self.assertLess(shown.index("Question &lt;one&gt;"), shown.index("<details"))
@@ -43,13 +43,13 @@ class ServiceInputDisplayTests(unittest.TestCase):
         for render in (page_po._po_entry, page_po._po_queued_entry):
             for metadata in (None, {"source": "web"}):
                 entry["metadata"] = metadata
-                shown = render(entry)
+                shown = render(entry, "/po/sessions/s-1")
                 self.assertNotIn("<details", shown)
                 self.assertIn(entry["text"], shown)
                 self.assertIn("owner ·", shown)
         entry.update(role="agent", text="## Answer\nYes", metadata={"source": "dispatcher"})
-        self.assertIn('<div class="md">', page_po._po_entry(entry))
-        self.assertNotIn("<details", page_po._po_entry(entry))
+        self.assertIn('<div class="md">', page_po._po_entry(entry, "/po/sessions/s-1"))
+        self.assertNotIn("<details", page_po._po_entry(entry, "/po/sessions/s-1"))
 
 
 def concrete(pattern: str) -> str:
@@ -131,7 +131,8 @@ class PoRequestIdCoverageTests(PoGateFixture):
         posts = {
             route.handler: route
             for route in ROUTES
-            if route.method == "POST" and (route.pattern == "/po" or route.pattern.startswith("/po/"))
+            if route.method == "POST" and route.body == FORM_BODY
+            and (route.pattern == "/po" or route.pattern.startswith("/po/"))
         }
         self.assertEqual(set(posts), set(PO_FORM_FIELDS))
         carrying = {

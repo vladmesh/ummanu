@@ -325,11 +325,14 @@ def po_session(
     *,
     request_id: str,
     draft: str = "",
+    attachments: list[str] | tuple[str, ...] = (),
     refusal: dict[str, Any] | None = None,
     refused: str = "send",
     title_draft: str | None = None,
 ) -> str:
     """One session: newest-first feed, message box, turn state and controls.
+
+    `attachments` are stored image names a refused send carried; the composer keeps them attached.
 
     The control row above the feed holds `send`, `stop turn` or `close`, and `new session`. A title
     heads the page with a rename form (`title_draft` keeps a refused rename). A closed session stays
@@ -344,9 +347,10 @@ def po_session(
         by_turn.setdefault(entry.get("turn_seq"), []).append(entry)
     queued = document.get("queued") or []
     # Messages queued until the running turn ends; newest first, above the turns.
-    items: list[str] = [_po_queued_entry(entry) for entry in reversed(queued)]
+    base = f"/po/sessions/{quote(session_id)}"
+    items: list[str] = [_po_queued_entry(entry, base) for entry in reversed(queued)]
     for turn in reversed(turns):
-        items.extend(_po_entry(entry) for entry in reversed(by_turn.get(turn.get("seq"), [])))
+        items.extend(_po_entry(entry, base) for entry in reversed(by_turn.get(turn.get("seq"), [])))
         items.append(_po_turn_mark(turn))
     # The blocks a turn's end changes each carry a stable id, and the session script swaps exactly those
     # (PO_SESSION_BLOCKS) for the ones of a freshly read page; the composer is in none of them.
@@ -361,7 +365,6 @@ def po_session(
                 f'{escape(str(budget.get("threshold_bytes")))} {escape(str(budget.get("metric")))}. '
                 'Deterministic proxy; checked on sprint resolution at idle.</p>' + feed)
     running = bool(document.get("running"))
-    base = f"/po/sessions/{quote(session_id)}"
     stop = (
         f'<form method="post" action="{base}/stop">'
         f'<input type="hidden" name="seq" value="{escape(str(document.get("running_seq") or ""))}">'
@@ -388,8 +391,12 @@ def po_session(
             f'<form class="sprint" id="po-send" method="post" action="{base}/messages">',
             f'<input type="hidden" name="request_id" value="{escape(request_id)}">',
             '<div class="field"><label for="po-text">message</label>',
-            f'<textarea id="po-text" name="text" required>{escape(draft)}</textarea>',
+            f'<textarea id="po-text" name="text">{escape(draft)}</textarea>',
             f'<p class="hint">{escape(PO_SEND_HINT)}</p></div>',
+            '<div class="field"><label for="po-image">images</label>',
+            '<input type="file" id="po-image" accept="image/png,image/jpeg,image/webp" multiple>',
+            f'<ul class="po-attachments" id="po-attached">{"".join(_po_attached(base, name) for name in attachments)}</ul>',
+            "</div>",
             "</form>",
         ]
     )
@@ -532,7 +539,29 @@ def _po_delegated_details(summary: str, body: str) -> str:
     )
 
 
-def _po_entry(entry: dict[str, Any]) -> str:
+def _po_attached(base: str, name: str) -> str:
+    """One image the composer carries: its thumbnail and the field that sends its name."""
+    return (
+        f'<li><input type="hidden" name="attachment" value="{escape(name)}">'
+        f"{_po_thumbnail(base, name)}</li>"
+    )
+
+
+def _po_thumbnail(base: str, name: str) -> str:
+    source = f"{base}/attachments/{quote(name)}"
+    return f'<a href="{source}"><img class="po-thumb" src="{source}" alt="attached image"></a>'
+
+
+def _po_images(entry: dict[str, Any], base: str) -> str:
+    """Thumbnails of the images a message carried, named by its native metadata only."""
+    metadata = entry.get("metadata")
+    names = metadata.get("attachments") if isinstance(metadata, dict) else None
+    if not isinstance(names, list) or not names:
+        return ""
+    return '<div class="po-images">' + "".join(_po_thumbnail(base, str(name)) for name in names) + "</div>"
+
+
+def _po_entry(entry: dict[str, Any], base: str) -> str:
     """One feed item: the PO head's answer as the safe Markdown subset, the owner's text as typed."""
     role = "agent" if entry.get("role") == "agent" else "owner"
     who = "PO head" if role == "agent" else "owner"
@@ -548,7 +577,7 @@ def _po_entry(entry: dict[str, Any]) -> str:
     )
     return (
         f'<li class="po-entry po-{role}"><div class="who">{who} · turn {escape(str(entry.get("turn_seq")))}'
-        f" · {escape(str(entry.get('created_at') or ''))}</div>{shown}</li>"
+        f" · {escape(str(entry.get('created_at') or ''))}</div>{shown}{_po_images(entry, base)}</li>"
     )
 
 
@@ -569,7 +598,7 @@ def _po_queue_hold(hold: dict[str, Any] | None) -> str:
     )
 
 
-def _po_queued_entry(entry: dict[str, Any]) -> str:
+def _po_queued_entry(entry: dict[str, Any], base: str) -> str:
     """A message in the PO service's queue, waiting for the running turn to end."""
     metadata = entry.get("metadata") or {}
     source = metadata.get("source") if isinstance(metadata, dict) else None
@@ -577,7 +606,7 @@ def _po_queued_entry(entry: dict[str, Any]) -> str:
     return (
         f'<li class="po-entry po-owner" data-state="queued"><div class="who">{who} · '
         f"{_chip('queued', 'accent')} · {escape(str(entry.get('queued_at') or ''))}</div>"
-        f'{_po_input_text(entry)}</li>'
+        f"{_po_input_text(entry)}{_po_images(entry, base)}</li>"
     )
 
 

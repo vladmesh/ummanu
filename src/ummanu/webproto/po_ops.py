@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
+from ummanu.po.attachments import (
+    MAX_ATTACHMENT_BYTES,
+    AttachmentRefused,
+    attachment_path,
+    media_type,
+    store_image,
+)
 from ummanu.po.client import (
     OutcomeUnknown,
     PoServiceClient,
@@ -255,18 +262,49 @@ class PoLayer(ProtocolBoundary):
             "repeated": bool(created["repeated"]),
         }
 
-    def po_send(self, *, request_id: str, session_id: str, text: str) -> dict[str, Any]:
+    def po_attach(self, *, session_id: str, data: bytes) -> dict[str, Any]:
+        """Keep one image in an open session's attachments; the same bytes answer the same name."""
+        store = self._store_or_refuse()
+        session = self._store(lambda: store.session(session_id))
+        if session.state == SESSION_CLOSED:
+            raise PoSessionClosed(f"PO session {session_id} is closed; open a new session to continue",
+                                  data=NOTHING_WRITTEN)
+        try:
+            path = store_image(self._resolved_data_dir(), session_id, data)
+        except AttachmentRefused as exc:
+            raise ValidationRefused(str(exc), data=NOTHING_WRITTEN) from None
+        return {"kind": "po_attachment", "session_id": session_id, "name": path.name, "path": str(path)}
+
+    def po_attachment(self, *, session_id: str, name: str) -> dict[str, Any]:
+        """One stored image of the session: its bytes and media type; a name it does not hold is not found."""
+        try:
+            path = attachment_path(self._resolved_data_dir(), session_id, name)
+        except AttachmentRefused as exc:
+            raise PoSessionNotFound(str(exc)) from None
+        return {"kind": "po_attachment_bytes", "media_type": media_type(name), "data": path.read_bytes()}
+
+    def po_send(
+        self, *, request_id: str, session_id: str, text: str, attachments: Iterable[str] = ()
+    ) -> dict[str, Any]:
         """One message into the PO service's queue per request id, bound to this session and this exact text.
 
-        Answers `queued`, or the turn it became (`seq`, `state`). A repeat answers what the first
-        submission made and starts nothing; the id reused for anything else is refused.
+        Attached images are named by their stored names; the text the head receives ends with their
+        absolute paths. Answers `queued`, or the turn it became (`seq`, `state`). A repeat answers
+        what the first submission made and starts nothing; the id reused for anything else is refused.
         """
         request_id = _required(request_id, "request_id")
-        if not str(text or "").strip():
+        names = list(dict.fromkeys(str(name) for name in attachments if name))
+        if not str(text or "").strip() and not names:
             raise ValidationRefused("an empty message starts no turn", data=NOTHING_WRITTEN)
+        if names:
+            try:
+                paths = [attachment_path(self._resolved_data_dir(), session_id, name) for name in names]
+            except AttachmentRefused as exc:
+                raise ValidationRefused(str(exc), data=NOTHING_WRITTEN) from None
+            text = _attachment_text(text, paths)
         client = self._client_or_refuse()
         sent = self._store(
-            lambda: client.submit(session_id=session_id, text=text, request_id=request_id),
+            lambda: client.submit(session_id=session_id, text=text, request_id=request_id, attachments=names),
             unknown="the PO service may have accepted this message; sending again with the same form is safe",
         )
         return {
@@ -399,6 +437,13 @@ class PoLayer(ProtocolBoundary):
             raise RuntimeUnavailable(f"the PO session store is not available: {exc}") from None
 
 
+def _attachment_text(text: str, paths: Iterable[Path]) -> str:
+    """The message as the head reads it: the owner's text, then one absolute path per attached image."""
+    listed = "\n".join(f"- {path}" for path in paths)
+    block = f"Attached images (read each file by its path):\n{listed}"
+    return f"{text.rstrip()}\n\n{block}" if str(text or "").strip() else block
+
+
 def _required(value: str, name: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -454,4 +499,4 @@ def _entry(entry: FeedEntry) -> dict[str, Any]:
     }
 
 
-__all__ = ["PoLayer"]
+__all__ = ["MAX_ATTACHMENT_BYTES", "PoLayer"]

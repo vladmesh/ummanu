@@ -437,7 +437,7 @@ class CommentDeliveryTests(ServiceFixture):
         self.assertEqual(pending[0]["metadata"], first.metadata)
         self.assertIn("comment-049", pending[0]["text"])
         self.assertIn('<details class="po-service-input">',
-                      page_po._po_queued_entry(pending[0]))
+                      page_po._po_queued_entry(pending[0], f"/po/sessions/{session}"))
         replay = service.submit(session_id=session, text="First", request_id="accepted", source="dispatcher",
                                 card=self.facts(52))
         self.assertTrue(replay["repeated"])

@@ -23,6 +23,7 @@ from ummanu.web.statuses import status_for
 from ummanu.webproto.errors import OperationPending, ReadError, RuntimeUnavailable, ValidationRefused
 from ummanu.webproto.journal import DEFAULT_LIMIT, MAX_LIMIT
 from ummanu.webproto.owner_events import OwnerEventLayer
+from ummanu.webproto.po_ops import MAX_ATTACHMENT_BYTES
 from ummanu.webproto.reads import TASK_SNAPSHOT_EVENTS
 from ummanu.webproto.sprint_reads import NONE_SPELLING
 
@@ -37,6 +38,8 @@ FORM_TYPE = "application/x-www-form-urlencoded"
 #: request id lives in the markup, so a double click or retry is one sprint).
 JSON_BODY = "json"
 FORM_BODY = "form"
+#: The raw bytes of one image, up to `MAX_ATTACHMENT_BYTES`.
+IMAGE_BODY = "image"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +61,8 @@ class Route:
     handler: str
     #: The layer call this route is a transport for, named so the table reads as the contract it is.
     operation: str
-    #: JSON object or HTML form; both decode to the same shape under the same closed field list.
+    #: JSON object or HTML form, which decode to the same shape under the same closed field list, or
+    #: the bytes of one image.
     body: str = JSON_BODY
     #: Page routes render a refusal as a page with the same status.
     page: bool = False
@@ -113,6 +117,9 @@ ROUTES: tuple[Route, ...] = (
     Route("POST", "/po/sessions", "po_create", "po.po_create_session", body=FORM_BODY, page=True),
     Route("GET", "/po/sessions/{session}", "po_session_page", "po.po_session", page=True),
     Route("POST", "/po/sessions/{session}/messages", "po_send", "po.po_send", body=FORM_BODY, page=True),
+    # The composer's script uploads a pasted or picked image here before the message names it.
+    Route("POST", "/po/sessions/{session}/attachments", "po_attach", "po.po_attach", body=IMAGE_BODY),
+    Route("GET", "/po/sessions/{session}/attachments/{name}", "po_attachment", "po.po_attachment"),
     Route("POST", "/po/sessions/{session}/stop", "po_stop", "po.po_stop", body=FORM_BODY, page=True),
     Route("POST", "/po/sessions/{session}/close", "po_close", "po.po_close", body=FORM_BODY, page=True),
     Route("POST", "/po/sessions/{session}/title", "po_rename", "po.po_rename", body=FORM_BODY, page=True),
@@ -140,7 +147,7 @@ ROUTES: tuple[Route, ...] = (
 #: Every route under this prefix needs the PO layer.
 PO_PREFIX = "/po"
 PO_CREATE_FIELDS = frozenset({"request_id", "cli", "model", "effort"})
-PO_SEND_FIELDS = frozenset({"request_id", "text"})
+PO_SEND_FIELDS = frozenset({"request_id", "text", "attachment"})
 PO_STOP_FIELDS = frozenset({"seq"})
 PO_CLOSE_FIELDS: frozenset[str] = frozenset()
 PO_RENAME_FIELDS = frozenset({"title"})
@@ -333,6 +340,11 @@ class WebApp:
             "code": "not_found",
             "message": "this service answers only the named routes it publishes; there is no route here",
         }
+
+    def body_limit(self, method: str, path: str) -> int:
+        """The most bytes the body of this request may carry: an image route's, else a form's."""
+        route, _ = self.match(method, path)
+        return MAX_ATTACHMENT_BYTES if route is not None and route.body == IMAGE_BODY else MAX_BODY_BYTES
 
     # -- read routes -----------------------------------------------------------------------
 
@@ -808,8 +820,9 @@ class WebApp:
         _fields(body, PO_SEND_FIELDS, "PO message")
         session_id = params["session"]
         request_id, text = _first(body, "request_id"), _first(body, "text")
+        attachments = _all(body, "attachment")
         try:
-            self.po.po_send(request_id=request_id, session_id=session_id, text=text)
+            self.po.po_send(request_id=request_id, session_id=session_id, text=text, attachments=attachments)
         except Exception as caught:  # noqa: BLE001 - any refusal re-renders the form, its id kept unless definite
             exc = _as_refusal(caught)
             if exc.code == "not_found":
@@ -820,10 +833,18 @@ class WebApp:
                     self._po_session_document(session_id),
                     request_id=request_id if _keeps_request_id(exc) else _po_request_id(),
                     draft=text,
+                    attachments=attachments,
                     refusal=exc.to_json(),
                 ),
             )
         return _redirect(f"/po/sessions/{quote(session_id)}", what="the message is sent")
+
+    def _po_attach(self, params, _query, body) -> Response:
+        return _json(200, self.po.po_attach(session_id=params["session"], data=body["data"]))
+
+    def _po_attachment(self, params, _query, _body) -> Response:
+        stored = self.po.po_attachment(session_id=params["session"], name=params["name"])
+        return Response(200, stored["data"], stored["media_type"])
 
     def _po_stop(self, params, _query, body) -> Response:
         _fields(body, PO_STOP_FIELDS, "PO stop")
@@ -943,6 +964,10 @@ def _payload(route: Route, raw: bytes) -> dict[str, Any]:
     """The body of this request, decoded the way this route says its clients send one."""
     if route.method != "POST":
         return {}
+    if route.body == IMAGE_BODY:
+        if len(raw) > MAX_ATTACHMENT_BYTES:
+            raise ValidationRefused(f"an attachment is at most {MAX_ATTACHMENT_BYTES} bytes")
+        return {"data": raw}
     return _form(raw) if route.body == FORM_BODY else _body(raw)
 
 

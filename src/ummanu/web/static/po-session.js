@@ -25,11 +25,55 @@ if (form && draft) {
     if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey) return;
     if (event.isComposing || event.keyCode === 229) return;
     event.preventDefault();
-    if (submitted || !draft.value.trim()) return;
+    if (submitted || (!draft.value.trim() && !attachedCount())) return;
     form.requestSubmit();
   });
 }
 function say(text) { if (status) status.textContent = text; }
+// A picked or pasted image is uploaded at once; the service answers its stored name, and the form sends
+// that name beside the text. Only the name travels with the message, never the bytes.
+const attached = document.getElementById('po-attached');
+const picker = document.getElementById('po-image');
+function attachedCount() { return attached ? attached.querySelectorAll('input[name="attachment"]').length : 0; }
+async function attach(file) {
+  if (!attached || !file || !file.type.startsWith('image/')) return;
+  say('uploading ' + (file.name || 'image') + '...');
+  let answer;
+  try {
+    const response = await fetch('/po/sessions/' + encodeURIComponent(SESSION) + '/attachments', {
+      method: 'POST', body: file, headers: { 'Content-Type': file.type },
+    });
+    answer = await response.json();
+    if (!response.ok) { say('the image was not attached: ' + ((answer.error && answer.error.message) || response.status)); return; }
+  } catch (error) { say('the image was not attached: ' + ((error && error.message) || 'network error')); return; }
+  if (attached.querySelector('input[value="' + answer.name + '"]')) { say('this image is already attached'); return; }
+  const source = '/po/sessions/' + encodeURIComponent(SESSION) + '/attachments/' + encodeURIComponent(answer.name);
+  const item = document.createElement('li');
+  const field = document.createElement('input');
+  field.type = 'hidden'; field.name = 'attachment'; field.value = answer.name;
+  const image = document.createElement('img');
+  image.className = 'po-thumb'; image.src = source; image.alt = 'attached image';
+  const remove = document.createElement('button');
+  remove.type = 'button'; remove.className = 'quiet'; remove.textContent = 'remove';
+  remove.addEventListener('click', () => item.remove());
+  item.append(field, image, remove);
+  attached.append(item);
+  say('image attached');
+}
+if (picker) {
+  picker.addEventListener('change', async () => {
+    for (const file of [...picker.files]) await attach(file);
+    picker.value = '';
+  });
+}
+if (draft) {
+  draft.addEventListener('paste', async (event) => {
+    const files = [...((event.clipboardData && event.clipboardData.files) || [])].filter((file) => file.type.startsWith('image/'));
+    if (!files.length) return;
+    event.preventDefault();
+    for (const file of files) await attach(file);
+  });
+}
 // The polling baseline is what a page shows, carried by its #po-turn-state: the turn count, the last
 // turn's state, the queue length and whether a turn runs. Null when the page does not carry it whole.
 function shown(page) {

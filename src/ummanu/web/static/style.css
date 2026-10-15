@@ -443,3 +443,7 @@ body { padding-bottom: var(--bar-height); }
 .statusbar .bar-refresh input { margin: 0; }
 @media (max-width: 600px) { .statusbar .row { padding: 0 12px; gap: .8rem; } }
 @media (prefers-reduced-motion: no-preference) { .light::before { transition: background .2s; } }
+.po-attachments { list-style:none; padding:0; margin:.3rem 0 0; display:flex; flex-wrap:wrap; gap:.5rem; }
+.po-attachments li { display:flex; flex-direction:column; align-items:flex-start; gap:.2rem; }
+.po-images { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.35rem; }
+.po-thumb { max-width:12rem; max-height:8rem; border:1px solid var(--line-strong); border-radius:4px; }
