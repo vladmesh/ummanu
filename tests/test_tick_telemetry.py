@@ -564,7 +564,7 @@ class TickReaderTests(unittest.TestCase):
             production.ProductionState(root).save(state_with([{"duration_ms": 300001}] * 20))
             for name in (
                 "_restore_findings",
-                "automation_busy_findings",
+                "automation_run_findings",
                 "doctor_live_root_findings",
                 "checkpoint_rpo_findings",
                 "snapshot_foreign_commit_findings",

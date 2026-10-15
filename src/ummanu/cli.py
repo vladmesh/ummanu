@@ -631,6 +631,8 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"root filesystem: {finding['message']}")
         elif finding["code"] == "automation_busy_without_advance":
             print(f"{finding['agent']}: {finding['message']}")
+        elif finding["code"] == "automation_lock_refused":
+            print(f"red: {finding['code']}: {finding['agent']}: {finding['message']}")
         elif finding["code"] == "head_fallback":
             print(f"error: head fallback: {finding['message']}")
         elif finding["code"] == "dispatcher_tick_p95_slow":
@@ -906,7 +908,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
             disk_unavailable = disk_finding["code"] == "root_disk_unavailable"
     restore = _restore_findings(report)
     findings.extend({"code": "restore_problem", "message": finding} for finding in restore)
-    findings.extend(automation_busy_findings(report.data_dir))
+    findings.extend(automation_run_findings(report.data_dir))
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     findings.extend(doctor_live_root_findings(report, args, inspect_host=inspect_host))
     collected: CollectResult | None = None
@@ -1037,17 +1039,24 @@ def doctor_live_root_findings(report, args: argparse.Namespace, *, inspect_host:
     return live_root_findings(live_root, unit_dirs=unit_dirs, home=home)
 
 
-def automation_busy_findings(data_dir: Path | None) -> list[dict[str, object]]:
-    """A curator head busy past its threshold with no advance or memory write (issue:db32299c8).
-
-    Read from the data directory's `automation-state`, where the packaged units' `AgentState` writes.
-    """
-    from ummanu.automations.agents.curator.busy import busy_without_advance
+def automation_run_findings(data_dir: Path | None) -> list[dict[str, object]]:
+    """Each standing agent's findings from its `runs.jsonl` under the data directory's `automation-state`."""
+    from ummanu.automations.runtime.run_findings import (
+        STANDING_AGENTS,
+        busy_without_advance,
+        lock_refused,
+        read_runs,
+    )
 
     if data_dir is None:
         return []
-    finding = busy_without_advance(data_dir / "automation-state" / "curator" / "runs.jsonl")
-    return [finding] if finding is not None else []
+    findings: list[dict[str, object]] = []
+    for agent in STANDING_AGENTS:
+        records = read_runs(data_dir / "automation-state" / agent / "runs.jsonl")
+        findings.extend(busy_without_advance(agent, records))
+        if (refused := lock_refused(agent, records)) is not None:
+            findings.append(refused)
+    return findings
 
 
 def root_disk_finding(data_dir: Path) -> dict[str, object] | None:

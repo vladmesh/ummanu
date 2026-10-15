@@ -68,7 +68,6 @@ class StatusCliTests(unittest.TestCase):
             )
             (data_dir / "memory" / "index.sqlite").write_text("index", encoding="utf-8")
             (data_dir / "board").mkdir()
-            (data_dir / "board" / "cards.ndjson").write_text('{"ref":"ummanu-727"}\n', encoding="utf-8")
             (data_dir / "dispatcher" / "pause.json").write_text(
                 json.dumps({"mode": "freeze", "actor": "ummanu", "since": "2999-01-01T00:00:00Z"}),
                 encoding="utf-8",
@@ -193,7 +192,7 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(payload["host"]["units"][0]["enabled"], "enabled")
         self.assertEqual(payload["installation"]["projects"], 1)
         self.assertEqual(payload["installation"]["heads"][0]["role"], "worker")
-        self.assertEqual(payload["installation"]["cards"]["total"], 1)
+        self.assertIsNone(payload["installation"]["cards"]["total"], "this installation has no board store")
         self.assertIsNotNone(payload["host"]["resources"]["disk_free_bytes"])
         self.assertEqual(len(payload["host"]["resources"]["load_average"]), 3)
         self.assertEqual(payload["checkpoint"]["last_commit"], "abc123")
@@ -346,6 +345,7 @@ class StatusCliTests(unittest.TestCase):
                 snapshot = collect_status(report, offline=True, sprint_client=board)
 
         self.assertEqual(validate(snapshot, "status", "status.json"), [])
+        self.assertEqual(snapshot["installation"]["cards"]["total"], board.card_count())
         sprint = snapshot["installation"]["sprints"]["items"][0]
         self.assertEqual(sprint["status"], "stopped")
         self.assertEqual(sprint["stop_reason"], "budget_hard_limit")

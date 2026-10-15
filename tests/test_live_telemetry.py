@@ -1209,6 +1209,30 @@ class HealthAgentStateTests(unittest.TestCase):
         self.assertTrue(problems)
         self.assertIn("last healthy tick", problems[0])
 
+    def test_a_role_whose_last_dispatches_were_all_busy_skips_is_red(self) -> None:
+        skip = {"event": "dispatch", "action": "supervised-busy-skip"}
+        self.write_runs(
+            "retro",
+            [{"ts": _ts(5), "event": "dispatch", "action": "supervised-started"}]
+            + [{"ts": _ts(minutes), **skip} for minutes in (4, 3, 2)],
+        )
+
+        problems, _ = health._runs_status("retro")
+
+        self.assertEqual(problems, ["last 3 head dispatches were busy skips: a standing head holds the role"])
+
+    def test_a_fresh_head_after_busy_skips_clears_the_streak(self) -> None:
+        skip = {"event": "dispatch", "action": "supervised-busy-skip"}
+        self.write_runs(
+            "retro",
+            [{"ts": _ts(minutes), **skip} for minutes in (5, 4, 3)]
+            + [{"ts": _ts(2), "event": "dispatch", "action": "supervised-started"}],
+        )
+
+        problems, _ = health._runs_status("retro")
+
+        self.assertEqual(problems, [])
+
 
 class HealthExpectedStateTests(unittest.TestCase):
     """Scheduled-role intent comes from the process's installation, not this checkout."""

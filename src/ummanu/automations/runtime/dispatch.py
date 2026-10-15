@@ -31,6 +31,7 @@ from ummanu.runtime.codex_preflight import (
 from ummanu.runtime.head import (
     HEAD_ALIVE,
     HEAD_BUSY,
+    HEAD_GONE,
     STANDING_BINDING,
     HeadRun,
     HeadSpec,
@@ -485,6 +486,11 @@ class _TickReports:
                      action="dispatch-release", report_board=self.report_board)
         self.settled = True
 
+    def busy_stale(self, cmd: DispatchCommand, note: str) -> None:
+        _move_report(self.state, self.event, cmd.card_ref, target="blocked", reason=note,
+                     action="dispatch-busy-escalation", report_board=self.report_board)
+        self.settled = True
+
     def failed(self, cmd: DispatchCommand, failure: BaseException) -> None:
         _move_report(
             self.state, self.event, cmd.card_ref, target="done",
@@ -582,6 +588,13 @@ SUPERVISED_PROVIDER_FAILURE = "supervised-provider-failure"
 #: later tick is a busy-skip over a head that has nothing left to do. The grace keeps a head that
 #: only paused inside its turn from being taken for finished.
 IDLE_HEAD_GRACE_SECONDS = 600.0
+#: How long after its launch a head may keep refusing ticks as busy before the tick's report card
+#: goes Blocked instead of Done: two periods of the steward's three-hourly sweep. An idle head is
+#: retired after IDLE_HEAD_GRACE_SECONDS, so a head this old is stuck inside its turn.
+STALE_BUSY_HEAD_SECONDS = 6 * 3600
+#: How long a tick watches a head launched with its prompt for an exit before reporting it raised.
+LAUNCH_CONFIRM_SECONDS = 10.0
+LAUNCH_CONFIRM_POLL_SECONDS = 0.2
 #: How long the tick waits for a retired head's supervisor to release its socket.
 IDLE_STOP_SUPERVISOR_EXIT_SECONDS = 10.0
 #: The launch identity a supervised head writes beside its socket in its run directory (the
@@ -751,6 +764,29 @@ def _retire_refused_head(
     )
 
 
+def _launch_death(runtime: Any, run: HeadRun) -> str | None:
+    """Why a head given its prompt on its command line is not alive LAUNCH_CONFIRM_SECONDS after launch.
+
+    Output does not end the wait: a launch that fails prints its own error before it exits.
+    """
+    deadline = time.monotonic() + LAUNCH_CONFIRM_SECONDS
+    while True:
+        seen = runtime.observe(run)
+        if seen.status == HEAD_GONE:
+            return f"the head {run.run_id} exited at launch ({seen.reason}: {seen.evidence})"
+        if time.monotonic() >= deadline:
+            return None if seen.ok else f"the head {run.run_id} could not be observed after launch ({seen.reason})"
+        time.sleep(LAUNCH_CONFIRM_POLL_SECONDS)
+
+
+def _head_launched_at(state: AgentState) -> float | None:
+    """When this role's recorded head was launched (its head_run record's write), or None without one."""
+    try:
+        return state.head_run_file.stat().st_mtime
+    except FileNotFoundError:
+        return None
+
+
 def _supervised_bring_up(
     agent: str,
     ws: str,
@@ -808,28 +844,46 @@ def _supervised_bring_up(
         # report card this tick made is closed, because no head will ever write it; the report the
         # working head is writing is untouched, because that head is untouched.
         refusal = str((receipt.evidence or {}).get("refusal") or "busy")
-        reports.undispatched(
-            cmd,
-            "the head of this role is still working, so this tick raised none and delivered "
-            f"nothing.\n\nrefusal: {refusal}\n{receipt.reason}",
+        launched = _head_launched_at(state)
+        stale = launched is None or time.time() - launched > STALE_BUSY_HEAD_SECONDS
+        if stale:
+            launch_text = "unrecorded" if launched is None else datetime.fromtimestamp(launched, UTC).isoformat()
+            reports.busy_stale(
+                cmd,
+                f"the head of this role has been working since its launch longer than "
+                f"{STALE_BUSY_HEAD_SECONDS // 3600}h, so this tick raised none and delivered nothing; the "
+                f"head may be stuck mid-turn.\n\nrun: {run_id}\nlaunched: {launch_text}\n"
+                f"refusal: {refusal}\n{receipt.reason}",
+            )
+        else:
+            reports.undispatched(
+                cmd,
+                "the head of this role is still working, so this tick raised none and delivered "
+                f"nothing.\n\nrefusal: {refusal}\n{receipt.reason}",
+            )
+        state.log_run(
+            event, action="supervised-busy-skip", reference=cmd.card_ref, error=refusal, stale=stale
         )
-        state.log_run(event, action="supervised-busy-skip", reference=cmd.card_ref, error=refusal)
         print(f"dispatch[{agent}]: head {run_id} is still up ({refusal}) — no dispatch")
         return 0
     if not receipt.ok:
-        # Nothing of a failed bring-up is recorded as this role's head. A prompt that was typed and
-        # never started a turn has already been stopped by `start`; a head its stop would not
-        # confirm is asked once more here, because an unrecorded live head is one no later tick
-        # would ever end. Either way the tick fails, and the unit records it.
+        # A failed bring-up is recorded as this role's head only while it may still be alive. A
+        # prompt that was typed and never started a turn has already been stopped by `start`; a
+        # head its stop would not confirm is asked once more here. If that stop is not confirmed
+        # either, the run is kept as this role's head marked `stop_unconfirmed`, so the next tick
+        # reuses its run id and is refused busy instead of raising a second head beside it.
+        # Either way the tick fails, and the unit records it.
         if receipt.status == HEAD_ALIVE and receipt.run is not None:
             stopped = runtime.stop(
                 receipt.run,
                 StopInitiator(actor=HANDOVER_INITIATOR, reason=FAILED_BRING_UP_REASON),
             )
             if not stopped.ok:
+                state.save_head_run({**receipt.run.to_json(), "stop_unconfirmed": True})
                 print(
                     f"dispatch[{agent}]: the head {receipt.run.run_id} this tick failed to point at "
-                    f"its skill would not confirm it stopped ({stopped.reason or stopped.status})"
+                    f"its skill would not confirm it stopped ({stopped.reason or stopped.status}); "
+                    "it stays recorded as this role's head"
                 )
         failure = LocalPtyDispatchError(receipt.reason or receipt.status)
         reports.failed(cmd, failure)
@@ -842,6 +896,15 @@ def _supervised_bring_up(
         )
         raise failure
     live = receipt.run
+    if pointer is None:
+        died = _launch_death(runtime, live)
+        if died is not None:
+            failure = LocalPtyDispatchError(died)
+            reports.failed(cmd, failure)
+            state.log_run(
+                event, action="supervised-start-failed", result="error", reference=cmd.card_ref, error=died
+            )
+            raise failure
     state.save_head_run(live.to_json())
     reports.taken(cmd, live.handle)
     state.log_run(event, action="supervised-started", reference=cmd.card_ref)

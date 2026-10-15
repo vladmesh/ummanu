@@ -53,6 +53,9 @@ class RecordingRuntime:
         run.to_json.return_value = {"run_id": "run-1"}
         return mock.Mock(status=dispatch.HEAD_ALIVE, ok=True, run=run, evidence={}, reason="")
 
+    def observe(self, run):
+        return mock.Mock(status=dispatch.HEAD_ALIVE, ok=True, last_output_at=time.time())
+
 
 class TriggeredDispatchTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -347,9 +350,12 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         self.command = dispatch.DispatchCommand(
             "/retro", "codex", "codex", None, prompt_after_start=True, head_profile=self.profile
         )
-        data_dir = mock.patch.object(dispatch, "_installation_data_dir", return_value=self.root / "data")
-        data_dir.start()
-        self.addCleanup(data_dir.stop)
+        for patcher in (
+            mock.patch.object(dispatch, "_installation_data_dir", return_value=self.root / "data"),
+            mock.patch.object(dispatch, "LAUNCH_CONFIRM_SECONDS", 0.0),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _trusted(self) -> dict:
         import tomllib
@@ -513,6 +519,109 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
             dispatcher_launcher._preflight_codex_workspace, codex_preflight.ensure_codex_workspace_trusted
         )
 
+
+
+class _UnstoppableRuntime:
+    """A backend whose bring-up leaves a live head that no stop will confirm, then refuses it busy."""
+
+    def __init__(self) -> None:
+        self.starts: list[str] = []
+
+    def observe(self, run):
+        return mock.Mock(ok=False)
+
+    def start(self, spec, workspace, task_ref, *, run_id, run, **kwargs):
+        self.starts.append(run_id)
+        if len(self.starts) == 1:
+            return mock.Mock(status=dispatch.HEAD_ALIVE, ok=False, run=run, evidence={}, reason="turn not started")
+        return mock.Mock(status=dispatch.HEAD_BUSY, ok=False, run=run, evidence={"refusal": "head_already_up"}, reason="")
+
+    def stop(self, run, initiator):
+        return mock.Mock(ok=False, status=dispatch.HEAD_ALIVE, reason="stop not confirmed")
+
+
+class UnconfirmedStopTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.workspace = str(self.root / "workspace")
+        Path(self.workspace).mkdir()
+        for patcher in (
+            mock.patch.object(dispatch, "_installation_data_dir", return_value=self.root / "data"),
+            mock.patch.object(dispatch, "_ensure_claude_ready"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.command = dispatch.DispatchCommand(
+            "/retro", "claude '/retro'", "claude-opus", None,
+            head_profile={"adapter": "claude", "runtime": LOCAL_PTY_RUNTIME},
+        )
+
+    def test_a_head_whose_stop_is_never_confirmed_fences_the_next_tick(self) -> None:
+        state = runtime_state.AgentState("retro", state_dir=self.root / "state")
+        runtime = _UnstoppableRuntime()
+
+        with (
+            mock.patch.object(dispatch, "_local_pty_runtime", return_value=runtime),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(dispatch.LocalPtyDispatchError):
+                dispatch._supervised_bring_up("retro", self.workspace, state, "dispatch", self.command)
+            record = state.load_head_run()
+            self.assertTrue(record["stop_unconfirmed"])
+            self.assertEqual(
+                dispatch._supervised_bring_up("retro", self.workspace, state, "dispatch", self.command), 0
+            )
+
+        self.assertEqual(runtime.starts, [record["run_id"], record["run_id"]])
+        actions = [json.loads(line).get("action") for line in (state.dir / "runs.jsonl").read_text().splitlines()]
+        self.assertEqual(actions, ["supervised-start-failed", "supervised-busy-skip"])
+
+
+class _DeadAtLaunchRuntime(RecordingRuntime):
+    """A head whose command exits 127 the moment it is spawned."""
+
+    def observe(self, run):
+        return mock.Mock(status=dispatch.HEAD_GONE, ok=False, reason="head-exited", evidence={"exit_code": 127})
+
+
+class LaunchDeathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.workspace = str(self.root / "workspace")
+        Path(self.workspace).mkdir()
+        for patcher in (
+            mock.patch.object(dispatch, "_installation_data_dir", return_value=self.root / "data"),
+            mock.patch.object(dispatch, "_ensure_claude_ready"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_standing_head_that_exits_at_launch_fails_the_tick_and_its_report(self) -> None:
+        state = runtime_state.AgentState("steward", state_dir=self.root / "state")
+        reports = RecordingReports()
+        command = dispatch.DispatchCommand(
+            "/steward --card ummanu-report-1", "claude '/steward'", "claude-opus", "ummanu-report-1",
+            head_profile={"adapter": "claude", "runtime": LOCAL_PTY_RUNTIME},
+        )
+
+        with (
+            mock.patch.object(dispatch, "_local_pty_runtime", return_value=_DeadAtLaunchRuntime()),
+            self.assertRaises(dispatch.LocalPtyDispatchError) as raised,
+        ):
+            dispatch._supervised_bring_up(
+                "steward", self.workspace, state, "dispatch", command,
+                reports=dispatch._TickReports("steward", state, "dispatch", report_board=reports),
+            )
+
+        self.assertIn("exited at launch", str(raised.exception))
+        self.assertIsNone(state.load_head_run())
+        self.assertIn("exited at launch", reports.moves[0][2])
+        actions = [json.loads(line).get("action") for line in (state.dir / "runs.jsonl").read_text().splitlines()]
+        self.assertEqual(actions[-1], "supervised-start-failed")
 
 if __name__ == "__main__":
     unittest.main()

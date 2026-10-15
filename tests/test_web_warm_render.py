@@ -88,8 +88,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         self.data_dir = self.tmp / "data"
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "dispatcher").mkdir(parents=True)
-        # An older card projection is still on disk: the cold render's health collection
-        # counts it, which is what shows the counter below sees the path it is asserting about.
+        # An older card projection is still on disk; no render may open it.
         (self.data_dir / "board" / "cards.ndjson").write_text(
             json.dumps({"ref": "ummanu-468"}) + "\n", encoding="utf-8"
         )
@@ -196,7 +195,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         warm_page, warm, warm_statements = self.counted(app)
 
         self.assertTrue(cold["processes"], "the cold render collects health, and the counter sees it")
-        self.assertTrue(cold["ndjson"], "the cold render reads the card projection, and the counter sees it")
+        self.assertEqual(cold["ndjson"], [], "the card total comes from the store, not the projection")
         self.assertGreater(cold_statements, 0)
 
         self.assertEqual(warm["processes"], [], "a warm render starts no subprocess")

@@ -25,7 +25,6 @@ Both sources here are the live data plane, not a checkout (secretary-833):
 from __future__ import annotations
 
 import datetime
-import json
 import os
 import subprocess
 import tomllib
@@ -36,6 +35,7 @@ from ummanu.runtime.paths import component_enabled, configured_product_root, env
 from ummanu.runtime.state import AgentState
 
 from . import production_telemetry
+from .run_findings import read_runs, trailing_busy_skips
 
 _ENV_MAX_AGE_NAME = "UMMANU_HEALTH_MAX_AGE_S" if os.environ.get("UMMANU_HEALTH_MAX_AGE_S") else "TA_HEALTH_MAX_AGE_S"
 _ENV_MAX_AGE = env_value("UMMANU_HEALTH_MAX_AGE_S", nonempty=True)  # global override, wins for every agent
@@ -170,16 +170,7 @@ def _timer_active(agent: str, unit_prefix: str | None = None) -> bool:
 
 
 def _runs(agent: str) -> list[dict]:
-    path = AgentState(agent).dir / "runs.jsonl"
-    if not path.is_file():
-        return []
-    out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
+    return read_runs(AgentState(agent).dir / "runs.jsonl")
 
 
 def _age_s(ts: str) -> float:
@@ -202,6 +193,9 @@ def _stale(ts: str, agent: str, max_age_s: int | None = None) -> str | None:
     return None
 
 
+#: How many head dispatches in a row may be busy skips before health names the agent.
+BUSY_SKIP_STREAK = 3
+
 #: Results that record a tick which never got an answer: the agent broke ("error"), or the board
 #: refused the connection for every attempt the gate made ("board-unreachable"). Neither proves the
 #: agent is alive, so neither may set the freshness clock.
@@ -223,6 +217,9 @@ def _runs_status(agent: str, max_age_s: int | None = None) -> tuple[list[str], s
         stale = _stale(str(last_tick.get("ts") or ""), agent, max_age_s)
         if stale:
             problems.append(stale)
+    skips = trailing_busy_skips(runs)
+    if skips >= BUSY_SKIP_STREAK:
+        problems.append(f"last {skips} head dispatches were busy skips: a standing head holds the role")
     last_advance = next((r for r in reversed(runs) if r.get("event") == "advance"), None)
     tick = last_tick.get("ts", "-")
     adv = last_advance["ts"] if last_advance else "-"

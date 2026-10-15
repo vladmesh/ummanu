@@ -641,10 +641,6 @@ class CardStoreClient(SqlCardClient):
             raise KeyError(reference)
         return int(rows[0][0])
 
-    def card_count(self) -> int:
-        """How many cards the store holds, live and archived."""
-        return int(self._query("SELECT count(*) FROM tasks")[0][0])
-
     def state(self, key: int) -> str:
         from ummanu.board.sql_cards import _STATE_BY_COLUMN_ID
 
