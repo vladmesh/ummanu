@@ -594,9 +594,12 @@ def run_task_create(args: argparse.Namespace) -> int:
 
 
 def _refuse_unrunnable_project(instance: Path, project: str, task_type: str) -> None:
-    """A new card names a registered project, and one a head runs needs it enabled."""
+    """A new card names a registered project; one a head runs needs it enabled, and a code card
+    needs a broad check whose receipt can attest the candidate.
+    """
     from ummanu.board.completion_evidence import is_headless
     from ummanu.product_issues import registered_bindings
+    from ummanu.projects.contract import candidate_receipt_refusal
 
     binding = registered_bindings(instance).get(project.strip())
     if binding is None:
@@ -609,6 +612,8 @@ def _refuse_unrunnable_project(instance: Path, project: str, task_type: str) -> 
             f"project {project!r} is registered but not enabled for workloads, so no head would run this card",
             2,
         )
+    if task_type.strip() == "code" and (refusal := candidate_receipt_refusal(binding, instance=instance)):
+        raise TaskError("broad_check_not_attestable", f"{refusal}; cut research or change the adapter", 2)
 
 
 def _po_turn_session() -> str:

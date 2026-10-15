@@ -558,6 +558,8 @@ class TaskCliTests(CardStoreCase):
             ("ghost", "research", "project_not_registered"),
             ("paused", "infra", "project_not_enabled"),
             ("paused", "decision", None),
+            ("docs", "code", "broad_check_not_attestable"),
+            ("docs", "research", None),
             ("live", "code", None),
         )
         for project, kind, refusal in cases:
