@@ -1114,6 +1114,24 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(self.run_of(operation["po_execution"]["sources"][0]).disposition, operation["ref"])
         self.assertFalse(any(e.event_class == "needs_owner" for e in OwnerEventStore(self.board.credentials).events()))
 
+    def test_a_settled_red_run_rewrites_no_covered_card_on_later_passes(self) -> None:
+        cards, _run = self.run_to("failure")
+        [hotfix] = self.hotfixes()
+
+        def updated() -> list[Any]:
+            return [
+                self.board._query("SELECT updated_at FROM tasks WHERE task_ref=%s", (ref,))
+                for ref in cards
+            ]
+
+        before = updated()
+        self.am_tick()
+        self.am_tick()
+
+        self.assertEqual(updated(), before)
+        for card in cards:
+            self.assertEqual(self.mark(card)["state"], f"red -> {hotfix['ref']}")
+
     def test_a_replayed_red_outcome_cuts_no_second_hotfix(self) -> None:
         cards, run = self.run_to("failure")
         [hotfix] = self.hotfixes()

@@ -430,7 +430,7 @@ def _reconcile_disposition(runtime: Any, payload: dict[str, Any], records: dict[
                                     "repo": run.repo, "ref": run.git_ref})
             runtime.save_records(payload, records)
     if not run.disposition:
-        if run.resolution == AM_RED and run.hotfix:
+        if run.resolution == AM_RED and run.hotfix and not _red_marked(runtime, run):
             _red(runtime, project, carrier_ref, state, run)
         elif (run.acted or run.closing or run.result) and run.resolution in {AM_REQUEUED, AM_BLOCKED} and not _safe_retry(run):
             run.disposition = _disposition(runtime, project, carrier_ref, run,
@@ -1120,6 +1120,15 @@ def _red(runtime: Any, project: str, carrier_ref: str, state: E2eState, run: E2e
             runtime, item["ref"], carrier_ref, state, run=run, state=AM_RED, hotfix=run.hotfix,
             decision=run.disposition, run_url=run.run_url
         )
+
+
+def _red_marked(runtime: Any, run: E2eRun) -> bool:
+    """Whether every covered card already names this run's hotfix with the red mark."""
+    for item in run.covered:
+        mark = e2e_record.e2e_state(runtime.reader.show(item["ref"])).after_merge
+        if mark is None or mark.state != AM_RED or mark.hotfix != run.hotfix:
+            return False
+    return True
 
 
 def _hotfix(runtime: Any, project: str, carrier_ref: str, run: E2eRun) -> str:
