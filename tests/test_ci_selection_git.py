@@ -117,6 +117,19 @@ class SelectionGitTests(unittest.TestCase):
                 plan = self.plan(root, base, candidate)
                 self.assertEqual(plan["mode"], "affected" if action == "mixed" else "full")
 
+    def test_manifest_only_edit_plans_the_moved_test_file_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manifest = root / "tests/ci-shards.txt"
+            self.fixture(root)
+            (root / "tests/test_extra.py").write_text("import unittest\n")
+            manifest.write_text(manifest.read_text() + f"{SUITES[1]} tests/test_extra.py\n")
+            base = self.commit(root)
+            manifest.write_text(manifest.read_text().replace(f"{SUITES[1]} tests/test_extra.py",
+                                                             f"{SUITES[2]} tests/test_extra.py"))
+            plan = self.plan(root, base, self.commit(root))
+            self.assertEqual((plan["mode"], plan["selected"]), ("affected", {SUITES[2]: ["tests/test_extra.py"]}))
+
     def test_exact_plan_regeneration_rejects_foreign_membership_event_base_and_schema(self):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as artifacts:
             root = Path(tmp)
