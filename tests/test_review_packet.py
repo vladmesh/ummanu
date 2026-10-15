@@ -744,7 +744,7 @@ class PacketHeaderTests(unittest.TestCase):
                 )
                 style = worker.split("\n## Code style\n", 1)[1].split("\n## ", 1)[0]
                 self.assertLessEqual(len(style), 2500)
-                self.assertEqual(re.findall(r"^(\d+)\. ", style, re.MULTILINE), [str(n) for n in range(1, 14)])
+                self.assertEqual(re.findall(r"^(\d+)\. ", style, re.MULTILINE), [str(n) for n in range(1, 15)])
                 self.assertLess(worker.index("## Code style"), worker.index("## Prior blocker dispositions"))
                 reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=self.record())
                 code = kind == "code"

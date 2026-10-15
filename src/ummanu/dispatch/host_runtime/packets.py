@@ -64,6 +64,7 @@ from ummanu.runtime.launch_prefix import pythonpath_prefix
 from ummanu.runtime.prompt_document import (
     PromptDocumentError,
     nudge_for as _nudge_for,
+    worker_style,
     write_prompt_document as _write_prompt_document,
 )
 from ummanu.runtime.role_env import WORKSPACE_ENV_DIR
@@ -97,14 +98,6 @@ def _gate_attestation_for_prompt(
     if receipt is not None:
         return receipt.as_dict() if receipt.validated_sha == current_sha else {}
     return _accepted_gate_receipt(source, current_sha)
-
-WORKER_STYLE = Path(__file__).resolve().parents[4] / "packaging" / "worker-style.md"
-
-
-def _worker_style() -> str:
-    """The code style every worker is given, from the checkout this dispatcher runs."""
-    return WORKER_STYLE.read_text(encoding="utf-8").strip()
-
 
 def _body_file_path(data_dir: Path, kind: str, reference: str, review_round: int) -> str:
     """Where a head writes its report/verdict body: a directory private to this user, never the
@@ -722,7 +715,7 @@ class PromptPacketMixin:
         check_contract = self._packet_check_contract(str(task.get("project") or ""))
         broad_command, show_command = self._broad_check_commands(check_contract)
         sections += self._local_run_section(task, local_run_policy=local_run_policy)
-        sections += ["## Code style", "", _worker_style(), ""]
+        sections += ["## Code style", "", worker_style(), ""]
         sections += [
             "## Prior blocker dispositions in the worker report",
             "",
