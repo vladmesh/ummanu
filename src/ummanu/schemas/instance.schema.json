@@ -67,6 +67,11 @@
         "hard": {"type": "integer", "minimum": 1}
       }
     },
+    "head_capacity": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How many cards with a head (code, research, infra) this installation runs at once, across all projects. Absent means 3. A project's policy.code_concurrency bounds its own code cards inside it."
+    },
     "open_sprint_limit": {
       "type": "integer",
       "enum": [1, 2, 3],

@@ -21,6 +21,7 @@ from ummanu.dispatch.launcher import (
 from ummanu.dispatch.observer import OBSERVER_ROLE
 from ummanu.dispatch.types import DispatcherError, HostError
 from ummanu.head_registry import HeadRegistryConfigError, installed_heads
+from ummanu.kernel.capacity_policy import code_concurrency, head_capacity
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.projects.contract import ContractVerdict, decide as _decide_broad_check_contract
 from ummanu.projects.integration_base import IntegrationBaseError, resolve_integration_base, seed_ref_refusal
@@ -104,6 +105,18 @@ class InstanceCatalog:
         if not isinstance(repo, str) or not repo:
             raise HostError(f"project {project!r} has no repo path")
         return binding
+
+    def head_capacity(self) -> int:
+        """How many cards with a head the installation runs at once (`head_capacity`)."""
+        return head_capacity(self.instance)
+
+    def code_concurrency(self, project: str) -> int:
+        """How many code cards of `project` may be active at once (`policy.code_concurrency`).
+
+        A project with no registered binding declares no policy and has the default; the claim's
+        contract preflight refuses its card anyway.
+        """
+        return code_concurrency(self.registered_bindings.get(project) or {})
 
     def project_availability(self, project: str) -> ProjectAvailability:
         """Inspect one enabled binding using the recovery checkout rule."""

@@ -146,6 +146,66 @@ class ProgressFoldTests(unittest.TestCase):
             self.assertLessEqual(len(self._progress()) - before, 1)
 
 
+class SelfStartedTurnTests(unittest.TestCase):
+    """Output between turns that puts new lines on the screen is a turn the head started itself."""
+
+    def setUp(self) -> None:
+        self.supervisor = module.Supervisor(
+            run_dir=Path("/tmp"), run_id="unit", role="worker", task="unit", command="true"
+        )
+        self.addCleanup(self.supervisor._selector.close)
+        self.events: list[tuple[str, dict]] = []
+        self.supervisor._append = lambda kind, **fields: self.events.append((kind, fields))  # type: ignore[method-assign]
+
+    def _idle_window(self, data: bytes) -> None:
+        self.supervisor._record_output(data)
+        self.supervisor._idle_at = time.monotonic() - module.PROGRESS_COALESCE_SECONDS
+        self.supervisor._tick()
+
+    def _close_quietly(self) -> None:
+        self.supervisor._last_output_at = time.monotonic() - 3
+        self.supervisor._tick()
+
+    def _kinds(self) -> list[str]:
+        return [kind for kind, _fields in self.events]
+
+    def test_new_lines_after_a_quiet_close_open_a_self_turn_that_closes_quietly(self) -> None:
+        _start_turn(self.supervisor)
+        self.supervisor._record_output(b"\x1b[1;1H\x1b[2KWaiting for the background suite")
+        self._close_quietly()
+        self.events.clear()
+
+        self._idle_window(b"\x1b[2;1H\x1b[2KBackground suite finished; running the next subset")
+        self._close_quietly()
+
+        self.assertEqual(
+            self._kinds(), [module.TURN_STARTED, module.PROVIDER_PROGRESSED, module.TURN_FINISHED]
+        )
+        started = self.events[0][1]
+        self.assertEqual((started["turn"], started["subject"]), (2, module.SELF_TURN_SUBJECT))
+        self.assertGreater(self.events[2][1]["output_bytes"], 0)
+
+    def test_a_recorded_redraw_of_the_last_screen_opens_no_turn(self) -> None:
+        frames = _frames("claude_93d44d57")
+        for frame in frames:
+            self.supervisor._screen.feed(frame)
+        _start_turn(self.supervisor)
+        for frame in frames:
+            self.supervisor._record_output(frame)
+            self.supervisor._flush_progress()
+        self._close_quietly()
+        self.events.clear()
+
+        self._idle_window(frames[-1])
+
+        self.assertEqual(self._kinds(), [])
+
+    def test_start_up_output_before_the_first_turn_is_not_a_turn(self) -> None:
+        self._idle_window(b"\x1b[1;1H\x1b[2KWelcome banner")
+
+        self.assertEqual(self._kinds(), [])
+
+
 class RecordedSpinnerReplayTests(unittest.TestCase):
     def test_recorded_fixtures_have_no_credentials_paths_or_conversation(self) -> None:
         for name, _frames_expected, _rate in RECORDED + FULL_RECORDED:

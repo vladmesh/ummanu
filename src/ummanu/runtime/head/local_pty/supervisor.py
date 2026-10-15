@@ -77,6 +77,9 @@ from .screen import ScreenModel
 TURN_QUIET_SECONDS = 2.0
 #: Output is considered for progress at this interval; repeated screen content is folded.
 PROGRESS_COALESCE_SECONDS = 0.5
+#: The subject of a turn the head started on its own, with no delivery (a background task's
+#: notification resuming it): output between turns that puts new lines on its screen.
+SELF_TURN_SUBJECT = "self"
 #: Maximum distinct normalized lines remembered during one turn.
 PROGRESS_SEEN_LINES_MAX = 4096
 #: How long a stopping head is given before the signal is escalated.
@@ -246,6 +249,9 @@ class Supervisor:
         self._progress_seen: dict[bytes, None] = {}
         self._progress_visible: set[bytes] = set()
         self._folded_windows = 0
+        # Output while no turn is open, waiting to be read as either a redraw or a self-started turn.
+        self._idle_bytes = 0
+        self._idle_at = 0.0
 
         self._delivery: _Delivery | None = None
         self._delivery_seq = 0
@@ -579,6 +585,8 @@ class Supervisor:
             and now - self._progress_at >= PROGRESS_COALESCE_SECONDS
         ):
             self._flush_progress()
+        elif not self._turn_open and self._idle_bytes and now - self._idle_at >= PROGRESS_COALESCE_SECONDS:
+            self._read_idle_output()
         # A terminal that never becomes writable raises no event, so the tick enforces the bound.
         self._expire_delivery()
         if self._stopping and self._stop_deadline and now >= self._stop_deadline:
@@ -650,9 +658,51 @@ class Supervisor:
             self._progress_window_bytes += len(chunk)
             if not self._progress_at:
                 self._progress_at = self._last_output_at
+        elif self._turn_id and not self._stopping:
+            # Only after a first turn: a head's start-up banner is not a turn it started.
+            self._idle_bytes += len(chunk)
+            if not self._idle_at:
+                self._idle_at = self._last_output_at
         for client in list(self._clients.values()):
             if client.attached:
                 self._push_output(client, chunk)
+
+    def _read_idle_output(self) -> None:
+        """Open a self-started turn when output between turns put new lines on the screen.
+
+        A redraw of what the screen already showed (a resize, a spinner, a clock) is folded like a
+        repeated progress window; the next quiet window closes a self-started turn as any other.
+        """
+        idle_bytes = self._idle_bytes
+        self._idle_bytes = 0
+        self._idle_at = 0.0
+        visible = {
+            hashlib.blake2b(line.encode("utf-8"), digest_size=16).digest()
+            for line in _progress_lines(self._screen.lines())
+        }
+        if all(digest in self._progress_seen or digest in self._progress_visible for digest in visible):
+            self._progress_visible = visible
+            return
+        self._open_turn(SELF_TURN_SUBJECT)
+        self._turn_bytes = idle_bytes
+        self._progress_bytes = idle_bytes
+        self._progress_window_bytes = idle_bytes
+        self._flush_progress()
+
+    def _open_turn(self, subject: str) -> None:
+        self._turn_id += 1
+        self._turn_open = True
+        self._turn_bytes = 0
+        self._last_output_at = time.monotonic()
+        self._progress_bytes = 0
+        self._progress_window_bytes = 0
+        self._progress_at = 0.0
+        self._progress_seen.clear()
+        self._progress_visible.clear()
+        self._folded_windows = 0
+        self._idle_bytes = 0
+        self._idle_at = 0.0
+        self._append(TURN_STARTED, turn=self._turn_id, subject=subject)
 
     def _flush_progress(self) -> None:
         if not self._progress_window_bytes:
@@ -777,17 +827,7 @@ class Supervisor:
             detail=protocol.delivery_detail(state, delivery.size, delivery.written, why, delivery.seconds),
         )
         if delivery.written and not self._turn_open:
-            self._turn_id += 1
-            self._turn_open = True
-            self._turn_bytes = 0
-            self._last_output_at = time.monotonic()
-            self._progress_bytes = 0
-            self._progress_window_bytes = 0
-            self._progress_at = 0.0
-            self._progress_seen.clear()
-            self._progress_visible.clear()
-            self._folded_windows = 0
-            self._append(TURN_STARTED, turn=self._turn_id, subject=delivery.subject)
+            self._open_turn(delivery.subject)
 
     def _delivery_view(self) -> dict[str, Any] | None:
         return self._delivery.view() if self._delivery is not None else None

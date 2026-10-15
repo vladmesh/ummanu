@@ -408,6 +408,7 @@ def _resource_signals(mark: dict) -> tuple[dict, dict]:
     """(resources whose status differs from the watermark — a red->green recovery counts the same as a
     fresh red — current status map for every resource). A resource with no prior entry is a new
     baseline, not a flip, so a cold-start scan does not "flip" every currently-green resource.
+    Each flip is `{status, last_transition}`, the dispatcher's record of the change and its reasons.
 
     Reads the resource_health.json cache the PRODUCTION dispatcher writes next to its own state
     instead of running a fresh probe: refresh() executes real probes that cost tokens on a TTL, and a
@@ -418,12 +419,25 @@ def _resource_signals(mark: dict) -> tuple[dict, dict]:
     A missing, unreadable or malformed cache keeps the PREVIOUS baseline rather than resetting to {},
     which would silently erase whatever flip happened on the very next real read.
     """
-    current = production_telemetry.read_resource_status()
-    if current is None:
-        current = dict(mark["resource_status"])
+    health = production_telemetry.read_resource_health()
+    if health is None:
+        return {}, dict(mark["resource_status"])
     prev = mark["resource_status"]
-    changed = {r: s for r, s in current.items() if r in prev and prev[r] != s}
+    current = {r: entry["status"] for r, entry in health.items()}
+    changed = {r: health[r] for r, s in current.items() if r in prev and prev[r] != s}
     return changed, current
+
+
+def _transition_text(flip: dict) -> str:
+    """One markdown line for a resource flip: the new status and, when recorded, the change's reasons."""
+    move = flip["last_transition"]
+    if not move:
+        return f"-> {flip['status']}"
+    at = datetime.fromtimestamp(float(move["at"]), tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        f"{move['from']} -> {move['to']} at {at}: {move['reason']}"
+        + (f" (was: {move['from_reason']})" if move["from_reason"] else "")
+    )
 
 
 def _active_card_prefixes(project: str, reader: StewardSignalReader | None = None) -> set[str]:
@@ -527,7 +541,7 @@ def render_markdown(batch: dict) -> str:
         lines.append("")
     if s["resource_flip"]:
         lines.append(f"## Resource health flip ({len(s['resource_flip'])})")
-        lines += [f"- {r}: -> {status}" for r, status in s["resource_flip"].items()]
+        lines += [f"- {r}: {_transition_text(flip)}" for r, flip in s["resource_flip"].items()]
         lines.append("")
     if s["new_orphan_workspaces"]:
         lines.append(f"## Workspace with no card in flight ({len(s['new_orphan_workspaces'])})")

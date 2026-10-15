@@ -67,7 +67,8 @@
       "properties": {
         "code_concurrency": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "How many of this project's code cards may be active at once. Absent means 1; 0 claims none."
         }
       }
     }

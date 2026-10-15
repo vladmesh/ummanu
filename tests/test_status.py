@@ -244,7 +244,7 @@ class StatusCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\nname: test\ndata_dir: " + str(data_dir) + "\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-                "host:\n  unit_prefix: ummanu-\n",
+                "host:\n  unit_prefix: ummanu-\nhead_capacity: 5\n",
                 encoding="utf-8",
             )
             output = io.StringIO()
@@ -270,6 +270,8 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Ummanu status:", output.getvalue())
         self.assertTrue(snapshot["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["panel"]["live"])
+        self.assertIn("capacity: 5 cards with a head at once; code cards per project: none", output.getvalue())
+        self.assertEqual(snapshot["installation"]["capacity"], {"head_capacity": 5, "code_concurrency": {}})
 
     def test_status_json_includes_stopped_sprint_and_its_frozen_resume(self):
         """A stopped sprint reports the freshness of its own record, not of later events."""

@@ -117,11 +117,12 @@ def resource_health_path() -> Path:
     return Path(configured) if configured else _resource_health_path(data_dir())
 
 
-def read_resource_status() -> dict[str, str] | None:
-    """{resource: status} from the dispatcher's cache, or None when it cannot be read.
+def read_resource_health() -> dict[str, dict] | None:
+    """{resource: {status, last_transition}} from the dispatcher's cache, or None when it cannot be read.
 
     None is "nothing was measured", distinct from an empty cache: the caller keeps its previous
     baseline rather than resetting it, so a transient unreadable file cannot erase a flip.
+    `last_transition` is the entry's own (`head_health._cache_entry`), {} when it has none yet.
     """
     try:
         cache = json.loads(resource_health_path().read_text(encoding="utf-8"))
@@ -130,8 +131,14 @@ def read_resource_status() -> dict[str, str] | None:
     if not isinstance(cache, dict):
         return None
     try:
-        return {str(rid): str(entry["status"]) for rid, entry in cache.items()}
-    except (KeyError, TypeError):
+        return {
+            str(rid): {
+                "status": str(entry["status"]),
+                "last_transition": entry.get("last_transition") or {},
+            }
+            for rid, entry in cache.items()
+        }
+    except (KeyError, TypeError, AttributeError):
         return None
 
 

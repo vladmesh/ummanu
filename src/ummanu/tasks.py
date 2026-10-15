@@ -106,6 +106,12 @@ from ummanu.dispatch.ownership import (
     capacity_serialized,
     reference_lock as reference_lock,
 )
+from ummanu.kernel.capacity_policy import (
+    DEFAULT_CODE_CONCURRENCY,
+    DEFAULT_HEAD_CAPACITY,
+    code_slot_wait,
+    head_slot_wait,
+)
 from ummanu.kernel.errors import TaskError as TaskError
 from ummanu.kernel.identifiers import is_machine_id, machine_id_refusal
 from ummanu.projects.integration_base import integration_base_refusal, seed_ref_refusal
@@ -2150,15 +2156,16 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         resolved_review_head: str = "",
         slug: str = "",
         base_branch: str = "",
-        cap: int = 3,
+        cap: int = DEFAULT_HEAD_CAPACITY,
+        code_cap: int = DEFAULT_CODE_CONCURRENCY,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         role = self._role(role, {Role.DISPATCHER}, actor=actor)
         worker = worker.strip()
         if not worker:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
-        if cap < 1:
-            raise TaskError("validation", "claim cap must be positive", 2)
+        if cap < 1 or code_cap < 0:
+            raise TaskError("validation", "claim cap must be positive and code cap non-negative", 2)
         request_id = request_id or str(uuid.uuid4())
         if self._legacy_record(request_id) is not None:
             # Legacy generic claims retain their replay path and cannot move non-Cards.
@@ -2212,17 +2219,15 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 if (active := self.reader.show(selected["ref"]))["state"] in ACTIVE_STATES
                 and active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
             ]
-            for active in headed:
-                if (
-                    active["type"] == "code"
-                    and task["type"] == "code"
-                    and active["project"] == task["project"]
-                ):
-                    raise TaskError(
-                        "capacity_reached", "one active code task per project is already claimed", 3
-                    )
+            code_peers = [
+                active["ref"]
+                for active in headed
+                if active["type"] == "code" and active["project"] == task["project"]
+            ]
+            if task["type"] == "code" and len(code_peers) >= code_cap:
+                raise TaskError("capacity_reached", code_slot_wait(task["project"], code_cap, code_peers), 3)
             if len(headed) >= cap and not is_headless(task):
-                raise TaskError("capacity_reached", "active task capacity is reached", 3)
+                raise TaskError("capacity_reached", head_slot_wait(cap, [active["ref"] for active in headed]), 3)
 
         values = {
             "claim": worker,

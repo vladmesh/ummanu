@@ -3499,8 +3499,19 @@ reason under `skipped_ready`, and the scan continues with the next card.
 - `unauthenticated`: re-authenticate that runtime's CLI in the profile's runtime home, then wait for the TTL.
 - `unavailable`: do not restart cards; check provider status and re-read after the TTL.
 - `exhausted`: wait for the quota; cards with a fallback already moved.
+- A red verdict with an expiry is probed again every hour and a ready probe ends it early.
+  `ummanu dispatcher resource-reprobe --instance <dir> --resource <id>` probes now and records the
+  answer, replacing a held verdict.
 - `probe_broken`: run the registry's probe string by hand under the dispatcher's environment and repair
   what it names; `doctor` prints the failing line.
+
+### Claim capacity
+
+`head_capacity` in `instance.yaml` (default 3) bounds the cards with a head (code, research, infra)
+active at once across the installation; decision, operation and wait cards take no slot. A project's
+`policy.code_concurrency` (default 1, 0 claims none) bounds its own active code cards inside that.
+`ummanu status` prints both. A card the limits keep in Ready is skipped with the reason `waiting for a
+slot` and the cards holding the slots.
 
 ### Head status in a live workspace
 

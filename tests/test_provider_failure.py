@@ -24,12 +24,14 @@ from ummanu.runtime.claude_sessions import claude_project_dir_name
 from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
 from ummanu.runtime.provider_errors import (
     KIND_AUTH,
+    KIND_PLAN,
     KIND_RATE_LIMIT,
     KIND_RECONNECT,
     KIND_SERVER,
     classify_provider_error,
     claude_first_turn_failure,
     codex_first_turn_failure,
+    codex_turn_failure,
     screen_turn_failure,
     summarize_provider_error,
 )
@@ -193,6 +195,29 @@ class ClaudeFirstTurnTests(unittest.TestCase):
     def test_meta_records_do_not_hide_the_error(self) -> None:
         records = [claude_user(), claude_error(), {"type": "system", "subtype": "turn_duration"}]
         self.assertIsNotNone(claude_first_turn_failure(records))
+
+
+CODEX_PLAN_400 = (
+    "unexpected status 400 Bad Request: The 'gpt-6.1-sol' model is not supported when using Codex "
+    "with a ChatGPT account."
+)
+
+
+class PlanRefusalTests(unittest.TestCase):
+    def test_a_turn_refused_for_the_accounts_plan_is_a_plan_failure(self) -> None:
+        found = codex_turn_failure([started(), completed(CODEX_PLAN_400)])
+        assert found is not None
+        self.assertEqual((found.kind, found.status), (KIND_PLAN, 400))
+        self.assertIn("model is not supported when using Codex", found.summary)
+
+    def test_the_refusal_at_the_bottom_of_a_codex_screen_is_read(self) -> None:
+        found = screen_turn_failure(["› review the card", "", f"■ {CODEX_PLAN_400}", "", "› "])
+        assert found is not None
+        self.assertEqual(found.kind, KIND_PLAN)
+
+    def test_prose_that_quotes_the_refusal_is_not_read_from_the_screen(self) -> None:
+        line = "• Codex said the model is not supported when using Codex with a ChatGPT account"
+        self.assertIsNone(screen_turn_failure([line, "› "]))
 
 
 class ScreenTests(unittest.TestCase):

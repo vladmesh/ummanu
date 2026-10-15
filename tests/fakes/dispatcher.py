@@ -35,6 +35,7 @@ from ummanu.dispatch.types import (
 from ummanu.dispatch.watchdog import head_run_process_status as _head_run_process_status, pid_file_path
 from ummanu.dispatch.worker_comments import worker_comments_note
 from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.kernel.capacity_policy import DEFAULT_CODE_CONCURRENCY, DEFAULT_HEAD_CAPACITY
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.projects.contract import (
     ContractVerdict,
@@ -403,6 +404,15 @@ class FakeCatalog:
         # to watch the moment the preflight asks.
         self.broad_check_state: ContractVerdict | None = None
         self.broad_check_probe: Callable[[str], None] | None = None
+        # The installation's `head_capacity` and each project's `policy.code_concurrency`.
+        self.capacity = DEFAULT_HEAD_CAPACITY
+        self.code_caps: dict[str, int] = {}
+
+    def head_capacity(self) -> int:
+        return self.capacity
+
+    def code_concurrency(self, project: str) -> int:
+        return self.code_caps.get(project, DEFAULT_CODE_CONCURRENCY)
 
     def project_default_branch(self, project: str) -> str:
         return str(self.binding(project).get("default_branch") or "main")

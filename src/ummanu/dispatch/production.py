@@ -47,6 +47,7 @@ from ummanu.dispatch.pause_ops import auto_resume_expired_freeze
 from ummanu.dispatch.po_cards import completion_state
 from ummanu.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
 from ummanu.dispatch.provider_failure import is_provider_unavailable_return
+from ummanu.dispatch.ready_skips import notice_long_ready_skips, skip_until
 from ummanu.dispatch.runtime_preflight import record_incident
 from ummanu.dispatch.state import (
     DispatcherRecord,
@@ -73,6 +74,7 @@ from ummanu.dispatch.tick_telemetry import (
 from ummanu.dispatch.types import STOPPED_BY_RECONCILIATION, HostError
 from ummanu.dispatch.wait_cards import pending_wait_blockers
 from ummanu.infra.checkpoint_run import load_checkpoint_state
+from ummanu.kernel.capacity_policy import code_slot_wait
 from ummanu.kernel.errors import TaskError
 from ummanu.runtime.head.handoff import (
     active_budget,
@@ -626,6 +628,10 @@ def _production_tick_with_snapshot(
             else:
                 if ready_outcome is not None:
                     outcomes.append(ready_outcome)
+                try:
+                    outcomes += notice_long_ready_skips(runtime, payload, ready_outcome)
+                except Exception as exc:  # noqa: BLE001 - a notice that cannot be written must not stop the tick
+                    errors.append(_unexpected_error("", exc))
     # Last, after every move this tick made (a claim can Block a decision/operation card): every
     # return the origin-return outbox holds undelivered goes to the PO session that cut its card.
     try:
@@ -1466,12 +1472,11 @@ def _production_claim_ready(
     fence = fence or {"sprints": set(), "projects": set(), "refs": set()}
     blocked_sprints = set((blocked_scopes or {}).get("sprints") or ())
     blocked_projects = set((blocked_scopes or {}).get("projects") or ())
-    active_code_projects = {
-        str(task.get("project") or "")
-        for task in _production_tasks(runtime, set(ACTIVE_STATES))
-        if task.get("type") == "code" and task.get("project") and not is_steward_report(task)
-    }
-    skipped: list[dict[str, str]] = []
+    active_code: dict[str, list[str]] = {}
+    for active in _production_tasks(runtime, set(ACTIVE_STATES)):
+        if active.get("type") == "code" and active.get("project") and not is_steward_report(active):
+            active_code.setdefault(str(active["project"]), []).append(str(active["ref"]))
+    skipped: list[dict[str, Any]] = []
     sprint_cache: dict[str, dict[str, Any]] = {}
     sprint_errors: dict[str, str] = {}
     blockers: dict[str, Any] = {}
@@ -1536,14 +1541,12 @@ def _production_claim_ready(
             if sprint.get("status") != "open":
                 skipped.append({"ref": task["ref"], "reason": "linked sprint is stopped or closed"})
                 continue
-        if task.get("type") == "code" and task.get("project") in active_code_projects:
-            skipped.append(
-                {
-                    "ref": task["ref"],
-                    "reason": "project has an active code task",
-                }
-            )
-            continue
+        if task.get("type") == "code" and project:
+            code_cap = runtime.catalog.code_concurrency(project)
+            holders = active_code.get(project, [])
+            if len(holders) >= code_cap:
+                skipped.append({"ref": task["ref"], "reason": code_slot_wait(project, code_cap, holders)})
+                continue
         attempt_id = new_attempt_id()
         resume_workspaces = payload.get("resume_workspaces")
         resume_workspace = isinstance(resume_workspaces, dict) and task["ref"] in resume_workspaces
@@ -1567,12 +1570,11 @@ def _production_claim_ready(
         # below and ends the pass, which stops cards that had somewhere to go — see
         # CLAIM_SKIP_ACTIONS for the registry a new skip has to join.
         if is_claim_skip(outcome):
-            skipped.append(
-                {
-                    "ref": task["ref"],
-                    "reason": str(outcome.get("reason") or "head resource is not ready"),
-                }
-            )
+            reason = str(outcome.get("reason") or "head resource is not ready")
+            skip: dict[str, Any] = {"ref": task["ref"], "reason": reason}
+            if until := skip_until(outcome):
+                skip["until"] = until
+            skipped.append(skip)
             continue
         if skipped:
             outcome["skipped_ready"] = skipped

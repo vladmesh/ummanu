@@ -5,8 +5,10 @@ Every provider call is a fake: no test here spends a token or touches a network.
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -18,9 +20,11 @@ from unittest import mock
 from ummanu import head_health
 from ummanu.head_health import HeadHealth
 from ummanu.runtime import codex_preflight, heads, resource_probe
+from ummanu.runtime.codex_preflight import CodexHome
 from ummanu.runtime.resource_probe import ProbeResult
 
 ROOT = Path(__file__).resolve().parents[1]
+NOW = 1791374400.0
 
 
 def _main(resource: str) -> tuple[int, str]:
@@ -167,6 +171,61 @@ class ProviderFakeTests(unittest.TestCase):
         line = resource_probe.format_probe_failure("claude-sub", noisy)
         self.assertNotIn(secret, line)
         self.assertIn("...[truncated]", line)
+
+
+def _codex_login(home: Path, claims: dict) -> None:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"https://api.openai.com/auth": claims}).encode()
+    ).decode().rstrip("=")
+    auth = {"auth_mode": "chatgpt", "tokens": {"id_token": f"h.{payload}.s"}}
+    (home / "auth.json").write_text(json.dumps(auth), encoding="utf-8")
+
+
+class CodexPlanWarningTests(unittest.TestCase):
+    """A healthy openai-sub probe names a free plan or a subscription about to end."""
+
+    def probe(self, claims: dict, now: float) -> ProbeResult:
+        home = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        _codex_login(home, claims)
+        ok = subprocess.CompletedProcess([], 0, "pong", "")
+        with (
+            mock.patch.object(
+                resource_probe, "installation_codex_home", return_value=CodexHome(str(home), "data-dir")
+            ),
+            mock.patch.object(resource_probe.subprocess, "run", return_value=ok),
+            mock.patch.object(resource_probe.time, "time", return_value=now),
+        ):
+            return resource_probe.probe_openai_sub()
+
+    def test_a_free_plan_is_a_warning_on_a_healthy_probe(self) -> None:
+        result = self.probe({"chatgpt_plan_type": "free"}, NOW)
+        self.assertTrue(result.ok)
+        self.assertIn("ChatGPT plan is free", result.warning)
+
+    def test_a_subscription_ending_within_three_days_is_a_warning(self) -> None:
+        claims = {"chatgpt_plan_type": "pro", "chatgpt_subscription_active_until": "2026-10-08T15:20:12+00:00"}
+        result = self.probe(claims, NOW)
+        self.assertEqual(result.warning, "ChatGPT subscription (pro) ends 2026-10-08T15:20Z")
+
+    def test_a_far_or_already_past_end_says_nothing(self) -> None:
+        for until in ("2026-12-08T15:20:12+00:00", "2026-09-08T15:20:12+00:00"):
+            with self.subTest(until):
+                claims = {"chatgpt_plan_type": "pro", "chatgpt_subscription_active_until": until}
+                self.assertEqual(self.probe(claims, NOW).warning, "")
+
+    def test_the_warning_reaches_the_ready_verdict(self) -> None:
+        warned = ProbeResult(True, "builtin:openai-sub", warning="ChatGPT plan is free: x")
+        with mock.patch.dict(resource_probe.BUILTIN_PROBES, {"openai-sub": lambda: warned}):
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                code = resource_probe.main(["--resource", "openai-sub"])
+        completed = subprocess.CompletedProcess("probe", code, stdout.getvalue(), "")
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(head_health._proc, "run_isolated", return_value=completed),
+        ):
+            verdict = HeadHealth(_Catalog(), Path(tmp)).check("openai-sub")
+        self.assertEqual((verdict.status, verdict.reason), ("ready", "probe succeeded; ChatGPT plan is free: x"))
 
 
 class HeadHealthReadsTheEntryTests(unittest.TestCase):

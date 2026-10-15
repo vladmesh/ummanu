@@ -35,6 +35,7 @@ from ummanu.host import (
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from ummanu.infra.checkpoint_run import load_checkpoint_state
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
+from ummanu.kernel.capacity_policy import code_concurrency, head_capacity
 from ummanu.kernel.errors import TaskError
 from ummanu.runtime import interactive_workspace
 from ummanu.secret_store import store_health
@@ -124,6 +125,7 @@ def collect_status(
                 "total": card_total,
                 "active_attempts": len(_attempts(production, probe_panels=False)),
             },
+            "capacity": _capacity(report.instance, report.bindings),
             "sprints": sprint_section,
         },
         "host": {
@@ -223,6 +225,18 @@ def _board(instance_dir: Path, client: SqlCardClient | None) -> tuple[SqlCardCli
     except TaskError as exc:
         return exc, None
     return owned, owned
+
+
+def _capacity(instance: dict[str, Any], bindings: list[dict[str, Any]]) -> dict[str, Any]:
+    """The claim limits the dispatcher applies: installation-wide, and per enabled project for code."""
+    return {
+        "head_capacity": head_capacity(instance),
+        "code_concurrency": {
+            str(binding["id"]): code_concurrency(binding)
+            for binding in bindings
+            if binding.get("enabled") is True and isinstance(binding.get("id"), str)
+        },
+    }
 
 
 def _sprints(

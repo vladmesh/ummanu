@@ -675,6 +675,8 @@ def _prepare_claim(
         resolved_review_head=review_head,
         slug=task.get("workspace", {}).get("slug") or "",
         base_branch=task.get("workspace", {}).get("base_branch") or "",
+        cap=runtime.catalog.head_capacity(),
+        code_cap=runtime.catalog.code_concurrency(str(task.get("project") or "")),
         request_id=claim_request_id,
     )
     if sprint_refusal is not None:
