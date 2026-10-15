@@ -16,6 +16,7 @@ from ummanu import _proc
 from ummanu._fsutil import write_json
 from ummanu.dispatch.types import HostError
 from ummanu.runtime.provider_errors import (
+    KIND_PLAN,
     KIND_QUOTA,
     KIND_RECONNECT,
     KIND_SERVER,
@@ -63,6 +64,8 @@ LAUNCH_ALLOWED_STATUSES = frozenset({"ready", "unknown"})
 INNER_TIMEOUT_MARKER = "status=timeout"
 INNER_PROVIDER_UNAVAILABLE_MARKER = "status=provider-unavailable"
 INNER_EXHAUSTED_MARKER = "status=exhausted"
+# A healthy inner probe's warning line (`resource_probe.main`): kept in the ready verdict's reason.
+PROBE_WARNING_PREFIX = "warning="
 # What a failed *launch* of the probe looks like in the output the shell hands back. None of these
 # is something a reachable provider says about an account, so they are read only after the
 # provider-failure markers below have had their say.
@@ -140,7 +143,8 @@ def failure_until(kind: str, reset_at: float, now: float) -> float:
     """When a resource a head's turn found red comes back: the provider's reset, else a backoff."""
     if reset_at > now:
         return reset_at
-    return now + (QUOTA_BACKOFF_SECONDS if kind == KIND_QUOTA else PROVIDER_FAILURE_BACKOFF_SECONDS)
+    long_hold = kind in (KIND_QUOTA, KIND_PLAN)
+    return now + (QUOTA_BACKOFF_SECONDS if long_hold else PROVIDER_FAILURE_BACKOFF_SECONDS)
 
 
 def until_text(until: float) -> str:
@@ -181,7 +185,12 @@ def run_probe(resource: str, probe: str, now: float, *, timeout: float | None = 
     except Exception as exc:  # a broken probe must not turn into a false resource outage  # noqa: BLE001 - a broken probe must not turn into a false outage
         return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
     if completed.returncode == 0:
-        return HeadReadiness(resource, "ready", "probe succeeded", now)
+        warnings = [
+            line.strip()[len(PROBE_WARNING_PREFIX):]
+            for line in (completed.stdout or "").splitlines()
+            if line.strip().startswith(PROBE_WARNING_PREFIX)
+        ]
+        return HeadReadiness(resource, "ready", "; ".join(["probe succeeded", *warnings]), now)
     raw = " ".join((completed.stdout or "", completed.stderr or ""))
     text = raw.lower()
     if INNER_TIMEOUT_MARKER in text:
