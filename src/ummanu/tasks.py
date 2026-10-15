@@ -1401,11 +1401,31 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         actor `owner`. The owner is not a board role (it moves nothing and creates
         nothing); its comment is how it answers a card the PO handed to it
         (`handover`), and the dispatcher reads it back by its `owner` marker.
+        On a sprint-reserved project, roles other than po, observer, dispatcher and
+        owner comment only on their own card: an executor on a card of the holding
+        sprint, the steward on its report.
         """
         if str(role) == OWNER_ROLE:
             role, actor = OWNER_ROLE, OWNER_ROLE
         else:
             role = self._role(role, COMMENT_ROLES, actor=actor)
+        # Fix the request identity before staging so the answer can name its own audit event.
+        request_id = request_id or str(uuid.uuid4())
+        if role not in {OWNER_ROLE, "po", "observer", "dispatcher"} and self.audit.committed_event(request_id) is None:
+            task = self.reader.show(reference)
+            self._guard_sprint_write(
+                role=role,
+                actor=actor,
+                project=task["project"],
+                card_sprint=str(task.get("sprint") or ""),
+                linked_sprint=None,
+                sprint_override=False,
+                sprint_override_reason="",
+                request_id=request_id,
+                reference=reference,
+                steward_report=_is_steward_report_card(task),
+                card_executor=role in {"worker", "reviewer"},
+            )
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
 
@@ -1418,8 +1438,6 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 occurrence = self.audit.pending_event(request_id)
                 self._store_owner_answer(task, handover, body, occurrence)
 
-        # Fix the request identity before staging so the answer can name its own audit event.
-        request_id = request_id or str(uuid.uuid4())
         return self._write(
             "commented",
             role,

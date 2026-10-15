@@ -199,12 +199,13 @@ class SprintGuardMixin:
         reference: str,
         steward_report: bool = False,
         po_card: bool = False,
+        card_executor: bool = False,
     ) -> dict[str, str]:
         """Authorize a create/move/edit by first verifying the observer's launch-bound
         sprint identity, then the live project reservation. An unbound/mismatched
         observer fails closed. Verified exceptions: unsprinted PO cards, steward
-        reports and PO-created delegated decision/operation cards; normal dispatcher
-        admission remains separate.
+        reports, PO-created delegated decision/operation cards and a `card_executor`
+        writing a card of the holding sprint; normal dispatcher admission remains separate.
         """
         self._guard_observer_identity(
             role=role,
@@ -281,6 +282,8 @@ class SprintGuardMixin:
         if role == "observer" and card_sprint in held:
             return {}
         if role == "dispatcher":
+            return {}
+        if card_executor and card_sprint in held:
             return {}
         self._deny_sprint_write(
             code="sprint_write_forbidden",
