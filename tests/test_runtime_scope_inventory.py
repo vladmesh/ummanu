@@ -405,20 +405,49 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         directory.symlink_to(original, target_is_directory=True)
         self.assertTrue(self.collect(unit).errors)
 
-    def test_duplicate_malformed_and_unreadable_owner_inventory_is_not_empty_success(self):
+    def test_a_malformed_or_unreadable_owner_degrades_only_its_own_run_dir(self):
         _, directory, unit = self.owner()
-        original = (directory / "scope-owner.json").read_bytes()
-        for content in (b"not json", b"[]", original.replace(b'"generation":', b'"generation":null,"duplicate":')):
-            (directory / "scope-owner.json").write_bytes(content)
-            self.assertTrue(self.collect(unit).errors)
-        (directory / "scope-owner.json").write_bytes(original)
-        with mock.patch.object(reader, "_json", side_effect=PermissionError):
-            collected = self.collect(unit)
-        self.assertIn("units", collected.errors)
+        _, _, other = self.owner("worker", "other-run", "heads")
+        owner_file = directory / "scope-owner.json"
+        original = owner_file.read_bytes()
+        damage = (
+            lambda: owner_file.write_bytes(b"not json"),
+            lambda: owner_file.write_bytes(b"[]"),
+            lambda: owner_file.write_bytes(original.replace(b'"generation":', b'"generation":null,"duplicate":')),
+            lambda: owner_file.chmod(0o664),
+            lambda: owner_file.chmod(0o000),
+        )
+        for index, apply_damage in enumerate(damage):
+            with self.subTest(case=index):
+                owner_file.unlink()
+                owner_file.write_bytes(original)
+                owner_file.chmod(0o644)
+                apply_damage()
+                collected = self.collect(unit, other)
+                self.assertFalse(collected.errors)
+                self.assertEqual(list(collected.inventory.runtime_scopes.degraded), [str(directory)])
+                self.assertEqual(list(collected.inventory.runtime_scopes.scopes), [other])
+                # The unit whose owner cannot be read stays unclaimed, never preserved or empty.
+                self.assertEqual(inventory(self.expected, collected.inventory)["units"].unmanaged_on_host, [unit])
+        owner_file.chmod(0o644)
+        owner_file.write_bytes(original)
+
+    def test_duplicate_owners_of_one_unit_leave_the_inventory_unavailable(self):
+        _, directory, unit = self.owner()
         duplicate = self.data / "heads" / directory.name
         duplicate.mkdir(parents=True)
-        (duplicate / "scope-owner.json").write_bytes(original)
-        self.assertTrue(self.collect(unit).errors)
+        (duplicate / "scope-owner.json").write_bytes((directory / "scope-owner.json").read_bytes())
+        self.assertIn("units", self.collect(unit).errors)
+
+    def test_an_owner_record_is_written_without_group_write_whatever_the_umask(self):
+        owner, directory, unit = self.owner()
+        previous = os.umask(0o002)
+        try:
+            owner.update_owner(directory, owner.read_owner(directory))
+        finally:
+            os.umask(previous)
+        self.assertEqual((directory / "scope-owner.json").stat().st_mode & 0o777, 0o644)
+        self.assertIn(unit, self.collect(unit).inventory.runtime_scopes.scopes)
 
     def test_completed_cleanup_claim_and_reused_native_incarnation_are_refused(self):
         owner, directory, unit = self.owner()
@@ -755,7 +784,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                              ("workspace", "relative"), ("launch_identity", "other-boot:100")):
             record = {**original, field: value}
             owner.update_owner(directory, record)
-            self.assertTrue(self.collect(unit).errors, (field, value))
+            self.assert_unclaimed(unit, (field, value))
         owner.update_owner(directory, original)
         heartbeat = directory / protocol.PID_FILE_NAME
         original_heartbeat = heartbeat.read_bytes()
@@ -767,7 +796,14 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         saved = directory / "saved-owner"
         owner_file.rename(saved)
         owner_file.symlink_to(saved)
-        self.assertTrue(self.collect(unit).errors)
+        self.assert_unclaimed(unit)
+
+    def assert_unclaimed(self, unit, message=None):
+        """Either the whole inventory is unavailable or this unit's run dir is degraded; never preserved."""
+        collected = self.collect(unit)
+        scopes = collected.inventory.runtime_scopes
+        self.assertTrue(collected.errors or scopes.degraded, message)
+        self.assertNotIn(unit, scopes.scopes, message)
 
     def test_native_replacement_during_observation_and_cgroup_inode_reuse_refused(self):
         _, _, unit = self.owner()

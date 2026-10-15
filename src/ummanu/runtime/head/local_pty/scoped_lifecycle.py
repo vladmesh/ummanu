@@ -262,7 +262,10 @@ class ScopedHeadLifecycle:
     def update_owner(run_dir: Path, record: dict[str, Any]) -> None:
         path = run_dir / "scope-owner.json"
         temporary = path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8") as stream:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            # The inventory refuses a group- or other-writable owner; the caller's umask must not decide.
+            os.fchmod(stream.fileno(), 0o644)
             json.dump(record, stream)
             stream.flush()
             os.fsync(stream.fileno())

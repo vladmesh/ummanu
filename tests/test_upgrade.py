@@ -956,6 +956,19 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(result.status, "changed")
         self.assertIn("aaaaaaaaaaaa -> bbbbbbbbbbbb", result.detail)
 
+    def test_a_dirty_checkout_refusal_names_its_first_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            product = Path(temporary)
+            subprocess.run(["git", "init", "--quiet", product], check=True)
+            for name in ("draft.md", "resume.json", "a", "b", "c", "d", "e"):
+                (product / name).write_text("scratch\n", encoding="utf-8")
+            result = upgrade_checkout.step_pull(self.context(FakeUnitInstaller(), product_root=product))
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(
+            result.detail, "product checkout has uncommitted changes: a, b, c, d, draft.md (+2 more)"
+        )
+
     def test_handoff_process_verifies_exact_head_and_runs_the_current_schedule_once(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

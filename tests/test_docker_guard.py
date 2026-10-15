@@ -20,8 +20,7 @@ from tests.support.managed_venv import guarded_product_env
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
 from ummanu.runtime import docker_guard, role_env
 from ummanu.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
-from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
-from ummanu.runtime.head import command as head_command
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef, command as head_command
 from ummanu.runtime.head.command import wrap_role_command
 
 SAFE_ID = "a" * 64
@@ -970,6 +969,22 @@ class DockerGuardTests(unittest.TestCase):
                 if expected_status:
                     self.assertEqual(result.stdout, "native stdout\n")
                     self.assertEqual(result.stderr, "native stderr\n")
+
+    def test_a_harness_that_scrubs_the_launch_bindings_still_reaches_the_product_guard(self) -> None:
+        env = self.environment()
+        scrubbed = {name: env[name] for name in ("PATH", "GUARD_CASE", "GUARD_TRANSCRIPT")}
+        result = self.run_guard("compose", "config", env=scrubbed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([call["args"] for call in self.calls()], [["compose", "config"]])
+        self.assert_refused(self.run_guard("run", "image", env=scrubbed))
+        loose = self.root / "loose"
+        loose.mkdir()
+        (loose / "docker").write_bytes((role_env_path(self.product) / "docker").read_bytes())
+        (loose / "docker").chmod(0o755)
+        outside = self.run_guard("ps", env={**scrubbed, "PATH": str(loose) + os.pathsep + scrubbed["PATH"]})
+        self.assertEqual(outside.returncode, 125)
+        self.assertIn("product runtime unavailable", outside.stderr)
+        self.assertEqual(len(self.calls()), 1)
 
     def test_image_selector_expansion_is_refused_as_a_batch(self) -> None:
         result = self.run_shell("docker rm -f $(docker ps -aq --filter ancestor=postgres:16)")

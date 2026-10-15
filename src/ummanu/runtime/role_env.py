@@ -119,6 +119,9 @@ UNIT_BOUND_ENV = (
 )
 # Launcher-supplied identity only: runtime.env must never let a head claim another sprint or name.
 LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV)
+# Bearer values: they reach a head through its launch environment, never a command line that sudo
+# logs and every same-user process can read.
+LAUNCH_SECRET_ENV = (MEMORY_ACCESS_TOKEN_ENV,)
 # What a launched process has to be told about the installation it belongs to.
 LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV, "UMMANU_INSTANCE", "UMMANU_REPO")
 
@@ -145,6 +148,8 @@ WORKSPACE_TOOL_CACHES = {
     "RUFF_CACHE_DIR": "ruff-cache",
     "MYPY_CACHE_DIR": "mypy-cache",
 }
+# The head's temporary directory (agent CLI scratch, pytest basetemp), removed with the namespace.
+WORKSPACE_TMPDIR = "tmp"
 # A venv startup file setting the same bytecode prefix for every interpreter of that venv, including
 # a child started with a scratch environment. An explicit prefix wins; the name sorts first so other
 # startup files' imports are redirected too.
@@ -217,21 +222,12 @@ def docker_guard_dir() -> Path:
 
 
 def _docker_bindings(env: dict[str, str]) -> dict[str, str]:
-    """Resolve native Docker before adding the guard, skipping previous guard PATH entries."""
-    for directory in env.get("PATH", "").split(os.pathsep):
-        if not directory or not Path(directory).is_absolute():
-            continue
-        candidate = Path(directory) / "docker"
-        if candidate.resolve().parent.name == "docker-bin":
-            continue
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            backend = str(candidate.resolve())
-            break
-    else:
-        # Still bind the guard when Docker is absent. Executing it refuses, never falls through.
-        backend = ""
+    """Resolve native Docker before adding the guard, skipping previous guard PATH entries.
+
+    An absent Docker is still bound, as an empty backend the guard refuses.
+    """
     return {
-        docker_guard.BACKEND_ENV: backend,
+        docker_guard.BACKEND_ENV: docker_guard.native_backend(env.get("PATH", "")),
         docker_guard.PYTHON_ENV: str(managed_venv_bin() / "python3"),
         docker_guard.SOURCE_ENV: runtime_pythonpath(),
     }
@@ -344,6 +340,9 @@ def runtime_env(
             env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
             env["VIRTUAL_ENV"] = str(environment)
             env.update(workspace_tool_cache_env(workspace))
+            tmpdir = environment.parent / WORKSPACE_TMPDIR
+            tmpdir.mkdir(mode=0o700, exist_ok=True)
+            env["TMPDIR"] = str(tmpdir)
         # PYTHONPATH served only the wrapper's own import; it is not authority for the head's commands.
         env.pop("PYTHONPATH", None)
         if workspace is not None:

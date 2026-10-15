@@ -9,9 +9,9 @@ Package/CLI `ummanu`, `UMMANU_*`, units `ummanu-*` and current paths have no old
 
 The old name remains only under explicit H (Hermes agent), I (instance repository), R (historical
 records) and G (guard/policy source and negative fixtures) rows. A class grants no blanket
-exemption. `tests/test_old_name_guard.py` checks every tracked path and text file for
-`(?i)secretary`; binary files still have their paths checked. It runs in unit, declared local broad
-and CI. Its product allowlist is exactly:
+exemption. No test scans the product tree for the name; review holds a new mention to this
+table, and `ummanu config check` guards the live root ([Live-root scope](#live-root-scope)). The
+product allowlist is exactly:
 
 | Class | Pattern/scope | Paths |
 |---|---|---|
@@ -24,7 +24,7 @@ and CI. Its product allowlist is exactly:
 | R | Only exact lines `_OLD_PRODUCT = "secretary"` and `_OLD_DATA = "secretary-data"` | `src/ummanu/automations/agents/curator/move_paths.py` |
 | G | Exact quoted old env/package negative values in the implemented regex | `tests/test_env_prefix.py` |
 | G | Exact quoted removed-verb/script/test inventory negative values in the implemented regex | `tests/test_installation_retirement.py` |
-| G | Whole policy/guard source | This document, `tests/test_old_name_guard.py`, `src/ummanu/infra/old_name_guard.py` |
+| G | Whole policy/guard source | This document, `src/ummanu/infra/old_name_guard.py` |
 
 The I matcher excludes the product maintenance unit; the R card matcher excludes version names
 such as `secretary-0.1.0.dist-info`. Historical instance repository and remote/card references are
@@ -50,7 +50,7 @@ exemption. No live records or historical fixture bytes are translated by this po
 ## Live-root scope
 
 `ummanu config check --instance LIVE_ROOT` uses `infra.old_name_guard.LIVE_ROOT_ALLOWLIST` over
-the live root's exported files, without Git. The product guard shares its matcher. The live-root
+the live root's exported files, without Git. The live-root
 table has H spellings and I/R card spellings in any path, R references matching
 `\bprojects/secretary/` only in `state/knowledge/*`. Whole-file R rows are exactly `state/board/*`,
 `state/knowledge/*`, `state/runs/*` and `state/memory/facts/*` (curated facts quote their sources

@@ -24,8 +24,7 @@ from tests.dispatcher_fixtures import FakeCatalog
 from tests.support.managed_venv import guarded_product_env
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
 from ummanu.runtime import role_env
-from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from ummanu.runtime.head import command as head_command
+from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef, command as head_command
 
 TOKEN = "grant-id.not-a-real-secret-0123456789"
 TOKEN_ENV = role_env.MEMORY_ACCESS_TOKEN_ENV
@@ -117,6 +116,14 @@ class WorkerLaunchTests(unittest.TestCase):
                 self.assertEqual(launched["seen"].returncode, 0, launched["seen"].stderr)
                 # The head still gets the bearer, and the board actor still comes from the command.
                 self.assertEqual(launched["seen"].stdout.split(), [TOKEN, "fake-head"])
+
+
+class RenderedCommandTests(unittest.TestCase):
+    def test_no_role_command_renders_a_launch_secret(self) -> None:
+        for role, allowed in role_env.ROLE_ALLOWLIST.items():
+            for name in set(allowed) & set(role_env.LAUNCH_SECRET_ENV):
+                with self.subTest(role=role, name=name), self.assertRaises(head_command.HeadCommandError):
+                    head_command.wrap_role_command(role, "true", identity={name: TOKEN})
 
 
 class ObserverLaunchTests(unittest.TestCase):

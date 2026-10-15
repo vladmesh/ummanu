@@ -1,13 +1,7 @@
-"""The old product name guard: one matcher, two allowlists.
+"""The live root's old product name guard, run by `ummanu config check`.
 
-docs/RENAME.md, "Guard". A path or a line naming `secretary` in any case passes only when a row of the
-caller's allowlist covers the match. The product's tree is guarded by `tests/test_old_name_guard.py`
-with its own table; the live root is guarded by `ummanu config check` with `LIVE_ROOT_ALLOWLIST`
-below, ported from the instance repository's retired `tests/test_old_name_guard.py`: every row
-verbatim except the receipt rows the comment at its end names.
-
-This module names the old name on purpose: it is the guard's own source, the one self-exemption of
-the product guard's table.
+docs/RENAME.md, "Live-root scope". A path or a line naming `secretary` in any case passes only when
+a row of `LIVE_ROOT_ALLOWLIST` covers the match. This module names the old name on purpose.
 """
 
 from __future__ import annotations

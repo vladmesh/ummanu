@@ -133,6 +133,17 @@ def record_change_plan(context: UpgradeContext, changed: tuple[str, ...]) -> Non
     context.schemas_changed = _touches(changed, SCHEMA_PATHS)
 
 
+DIRTY_PATHS_SHOWN = 5
+
+
+def _dirty_paths(porcelain: str) -> str:
+    """The first `DIRTY_PATHS_SHOWN` paths of `git status --porcelain` output, and how many more."""
+    paths = [line.split(None, 1)[-1] for line in porcelain.splitlines() if line.strip()]
+    shown = ", ".join(paths[:DIRTY_PATHS_SHOWN])
+    hidden = len(paths) - DIRTY_PATHS_SHOWN
+    return f"{shown} (+{hidden} more)" if hidden > 0 else shown
+
+
 def step_pull(context: UpgradeContext) -> StepResult:
     if context.pull_result is not None:
         return context.pull_result
@@ -147,7 +158,7 @@ def step_pull(context: UpgradeContext) -> StepResult:
     try:
         dirty = _git(context.product_root, ["status", "--porcelain"])
         if dirty:
-            return StepResult("pull", "failed", "product checkout has uncommitted changes")
+            return StepResult("pull", "failed", f"product checkout has uncommitted changes: {_dirty_paths(dirty)}")
         if context.dry_run:
             # Plan against the target revision and write nothing: `fetch` and `diff` read, and the
             # checkout is left exactly where it was. This is what makes every later step's

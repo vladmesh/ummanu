@@ -452,6 +452,13 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     _add_instance(memory_verify, data_dir=True)
     memory_verify.set_defaults(handler=run_memory_verify)
 
+    memory_revoke = memory_subcommands.add_parser(
+        "revoke", help="revoke one launch-bound memory access grant by its id"
+    )
+    _add_instance(memory_revoke, data_dir=True)
+    memory_revoke.add_argument("--grant", required=True, help="the grant id, the part of the bearer before '.'")
+    memory_revoke.set_defaults(handler=run_memory_revoke)
+
     memory_reindex = memory_subcommands.add_parser(
         "reindex", help="rebuild the derived memory index from the local journal"
     )
@@ -930,6 +937,11 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         expected, collected, diffs = collect_host_inventory(report, args)
         for kind, reason in collected.errors.items():
             findings.append({"code": "host_inventory_unavailable", "kind": kind, "message": reason})
+        if collected.inventory.runtime_scopes is not None:
+            findings.extend(
+                {"code": "runtime_scope_owner_unreadable", "run_dir": run_dir, "message": reason}
+                for run_dir, reason in sorted(collected.inventory.runtime_scopes.degraded.items())
+            )
         unavailable = unavailable or bool(collected.errors)
         for kind, diff in diffs.items():
             if kind in collected.errors:
@@ -1867,6 +1879,21 @@ def run_export_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_memory_revoke(args: argparse.Namespace) -> int:
+    from ummanu.memory import access
+
+    data_dir = _data_dir_from_args(args, validate_tree=False)
+    if data_dir is None:
+        return 1
+    try:
+        path = access.revoke_grant(args.grant, data_dir=data_dir)
+    except access.MemoryAccessError as exc:
+        print(f"ummanu memory revoke: {exc}")
+        return 1
+    print(f"revoked: {path}")
+    return 0
+
+
 def run_memory_verify(args: argparse.Namespace) -> int:
     from ummanu.memory_journal import verify_memory_journal
 
@@ -2371,6 +2398,8 @@ def print_host_inventory(
     if collected.inventory.runtime_scopes is not None:
         for unit, scope in sorted(collected.inventory.runtime_scopes.scopes.items()):
             print(f"runtime scope: {unit} preserved by {scope['role']} lifecycle ({scope['generation']})")
+        for run_dir, reason in sorted(collected.inventory.runtime_scopes.degraded.items()):
+            print(f"runtime scope owner unreadable: {run_dir}: {reason}")
     for kind in KINDS:
         reason = collected.errors.get(kind)
         if reason:
