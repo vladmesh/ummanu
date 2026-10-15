@@ -274,8 +274,10 @@ def no_candidate_report_contract(kind: str) -> list[str]:
             "After the report is accepted and any review is done, the dispatcher copies the report and",
             f"its small text attachments to `{research_report_path('<card ref>')}` in the instance",
             "repository and links it on the card; that link is the completion evidence. Only `.md`, `.txt`",
-            f"and `.csv` files of at most {RESEARCH_TRANSFER_FILE_CAP_BYTES // 1024} KiB each, "
-            f"{RESEARCH_TRANSFER_TOTAL_CAP_BYTES // (1024 * 1024)} MiB in all, are copied;",
+            (
+                f"and `.csv` files of at most {RESEARCH_TRANSFER_FILE_CAP_BYTES // 1024} KiB each, "
+                f"{RESEARCH_TRANSFER_TOTAL_CAP_BYTES // (1024 * 1024)} MiB in all, are copied;"
+            ),
             "data dumps, logs, scripts and caches stay in this workspace, and the copied report lists",
             "them with their path. A secret in a copied text file refuses the copy and Blocks the card.",
             "A rework round's next report replaces the directory.",

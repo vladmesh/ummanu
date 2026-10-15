@@ -22,8 +22,7 @@ from tests.e2e_stage_fixtures import REPO, E2eGitHubHost, E2eStageFixture, Simul
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
 from ummanu._fsutil import file_lock
-from ummanu.board import po_origin as origin_field
-from ummanu.board import po_execution
+from ummanu.board import po_execution, po_origin as origin_field
 from ummanu.board.e2e_disposition import completion_identity
 from ummanu.board.e2e_record import AfterMergeMark, e2e_state
 from ummanu.board.owner_events import OwnerEventStore
@@ -33,9 +32,9 @@ from ummanu.dispatch.post_merge import reconcile_post_merge_watches, watches
 from ummanu.dispatch.runtime import DispatcherRuntime
 from ummanu.dispatch.state import new_attempt_id, now_rfc3339
 from ummanu.dispatch.types import HostError
+from ummanu.po.store import PoStore
 from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.tasks import TaskError, is_significant_card_event
-from ummanu.po.store import PoStore
 from ummanu.webproto.sprint_reads import card_waits
 
 SPRINT = "sprint:1031"

@@ -54,8 +54,7 @@ from ummanu.runtime.head.identity import publish_heartbeat
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.local_pty.journal import RUN_STARTED, read_events
 from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from ummanu.runtime.tui_delivery import READINESS_BUSY
-from ummanu.runtime.tui_delivery import delivery_readiness_state as _delivery_readiness_state
+from ummanu.runtime.tui_delivery import READINESS_BUSY, delivery_readiness_state as _delivery_readiness_state
 
 PROFILE = "claude-local-pty"
 #: The stand-in head: it writes down which process it is and what it was run with, then stays up.
