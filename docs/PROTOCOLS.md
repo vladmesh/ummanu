@@ -3182,6 +3182,14 @@ retried, and the next round's `TASK.md` carries the comment either way. A worker
 held for validation, paused or between rounds is sent nothing and nothing is recorded; the next round's
 `TASK.md` carries the comment. `decision` and `operation` cards have no worker and are unaffected.
 
+### The round summary at the top of a worker TASK.md
+
+Every worker `TASK.md` opens with `## This round`: the report generation and, measured against the
+`TASK.md` the checkout already holds, which round-bound sections are new (observer decision, protocol
+prerequisites, reviewer findings, mechanical gate failure) and how many comments arrived, plus the
+previous submission's SHA and outcome. A checkout without a `TASK.md` gets "read it whole". The full
+document below it is unchanged and stays authoritative.
+
 ### Code style in the worker and review packets
 
 Every worker `TASK.md`, for any project, card kind and head family, carries `## Code style`: the text of

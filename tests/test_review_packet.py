@@ -583,8 +583,10 @@ class PacketHeaderTests(unittest.TestCase):
         self.assertIn("current_sha: " + "a" * 40, reviewer)
         self.assertIn("src/ummanu/dispatch/review_packet.py", reviewer)
         self.assertEqual(host.run_capture.call_args_list[0].args[0][-1], "b" * 40 + ".." + "a" * 40)
+        self.assertTrue(worker.startswith("## This round\n"))
+        self.assertTrue(reviewer.startswith("## Declared local checks"))
         for packet in (worker, reviewer):
-            self.assertTrue(packet.startswith("## Declared local checks"))
+            self.assertLess(packet.index("## Declared local checks"), packet.index(fixture.task["description"]))
             self.assertIn("source_event: " + fixture.events[1]["event_id"], packet)
             self.assertIn("source_event: observer-decision-1", packet)
             self.assertIn("source_event: " + fixture.events[-1]["event_id"], packet)
@@ -703,14 +705,34 @@ class PacketHeaderTests(unittest.TestCase):
             self.assertEqual(move.call_args_list[0].kwargs["request_id"], move.call_args_list[1].kwargs["request_id"])
             self.assertEqual(move.call_args.kwargs["verdict"], "green")
 
+    def test_the_worker_document_opens_with_what_changed_since_the_one_it_holds(self):
+        fixture = PacketFixture()
+        host = self.host(fixture)
+        record = self.record()
+        record.workspace = self.enterContext(tempfile.TemporaryDirectory())
+        task_md = Path(record.workspace) / "TASK.md"
+
+        def summary(generation):
+            text = host._worker_task_doc(fixture.task, "main", "attempt-1", generation, fixture.decision, record=record)
+            task_md.write_text(text, encoding="utf-8")
+            return text.split("\n## Declared local checks", 1)[0]
+
+        self.assertIn("First TASK.md of this attempt", summary(2))
+        rework = summary(3)
+        self.assertIn("Report generation 3.", rework)
+        self.assertIn("Previous submission `" + "b" * 12 + "` was RED in review.", rework)
+        self.assertIn("the observer decision, the reviewer findings", rework)
+        self.assertIn("Nothing new for this round", summary(3))
+
     def test_actual_builders_put_header_before_task_text_and_keep_round_markers(self):
         fixture = PacketFixture()
         host = self.host(fixture)
         record = self.record()
         worker = host._worker_task_doc(fixture.task, "main", "attempt-1", 3, fixture.decision, record=record)
         reviewer = host._review_prompt(fixture.task, "attempt-1", 4, record=record)
-        for text in (worker, reviewer):
-            self.assertTrue(text.startswith("## Declared local checks and CI evidence boundary\n"))
+        self.assertTrue(reviewer.startswith("## Declared local checks and CI evidence boundary\n"))
+        self.assertTrue(worker.startswith("## This round\n"))
+        self.assertLess(worker.index("## Declared local checks"), worker.index(fixture.task["description"]))
         for text in (worker,):
             self.assertLess(
                 text.index("Matching full receipt readback"), text.index(fixture.task["description"])

@@ -33,6 +33,7 @@ from ummanu.dispatch.helpers import (
     _round_record_line,
     _round_report_ids,
     _round_worker_check,
+    _task_doc_report_generation,
     safe_one_line as _safe_one_line,
 )
 from ummanu.dispatch.launch import REVIEW_ROLE, WORKER_ROLE
@@ -55,6 +56,7 @@ from ummanu.dispatch.worker_comments import (
     WORKER_COMMENT_ROLES,
     WorkerComment,
     select_worker_comments,
+    task_doc_comment_keys,
     worker_comments_record_line,
     worker_comments_section,
 )
@@ -139,6 +141,38 @@ def _no_candidate_review_subject(task: dict[str, Any]) -> list[str]:
         "`## How to verify` section, a command or observation you can repeat.",
         "",
     ]
+
+def _round_section(
+    record: DispatcherRecord | None,
+    generation: int,
+    comments: tuple[WorkerComment, ...],
+    round_owes: list[str],
+    previous: tuple[str, str],
+) -> list[str]:
+    """The operative summary a worker reads first: this generation, what it owes, what is new.
+
+    New is judged against the TASK.md this checkout already holds, which is the one the worker read.
+    """
+    workspace = record.workspace if record else ""
+    if not workspace or not (Path(workspace) / "TASK.md").is_file():
+        return ["## This round", "", f"Report generation {generation}. First TASK.md of this attempt: read it whole.", ""]
+    same_round = _task_doc_report_generation(workspace) == generation
+    known = task_doc_comment_keys(workspace)
+    news = [] if same_round else list(round_owes)
+    fresh = sum(1 for comment in comments if comment.key not in known)
+    if fresh:
+        news.append(f"{fresh} new comment{'s' if fresh > 1 else ''}")
+    sha, outcome = previous
+    lines = ["## This round", "", f"Report generation {generation}" + (", the same round as before." if same_round else ".")]
+    if sha and not same_round:
+        lines.append(f"Previous submission `{_safe_one_line(sha, limit=12)}` {outcome}.")
+    lines.append(
+        f"New since your last TASK.md: {', '.join(news)}. Read those sections first; the rest is the standing contract."
+        if news
+        else "Nothing new for this round since your last TASK.md beyond the generation number."
+    )
+    return [*lines, ""]
+
 
 def _body_file_instructions(body_file: str) -> list[str]:
     """Spell out the delivery path: file first with a normal editing tool, then one plain command.
@@ -712,6 +746,23 @@ class PromptPacketMixin:
                 gate_red,
                 "",
             ]
+        owes = [
+            label
+            for label, present in (
+                ("the observer decision", bool(decision)),
+                ("protocol prerequisites", bool(prerequisites)),
+                ("the reviewer findings", bool(review_red) and (bool(decision) or feedback.verdict == "red")),
+                ("the mechanical gate failure", bool(gate_red)),
+            )
+            if present
+        ]
+        if gate_red:
+            previous = (record.rejected_sha, "was bounced by the mechanical gate")
+        elif "the reviewer findings" in owes and record is not None:
+            previous = (record.previous_reviewed_sha, f"was {feedback.verdict.upper()} in review")
+        else:
+            previous = ("", "")
+        round_summary = _round_section(record, generation, comments, owes, previous)
         check_contract = self._packet_check_contract(str(task.get("project") or ""))
         broad_command, show_command = self._broad_check_commands(check_contract)
         sections += self._local_run_section(task, local_run_policy=local_run_policy)
@@ -892,7 +943,7 @@ class PromptPacketMixin:
             worker_comments_record_line(comments),
             "",
         ]
-        return "\n".join([*self._render_check_header(check_contract), *sections])
+        return "\n".join([*round_summary, *self._render_check_header(check_contract), *sections])
 
     def worker_comments(self, task: dict[str, Any]) -> tuple[WorkerComment, ...]:
         """The PO, owner and observer comments this card's worker is handed, oldest first."""
