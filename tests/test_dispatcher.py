@@ -13759,16 +13759,21 @@ class DispatcherGateTests(unittest.TestCase):
                 pr_open=False,
                 check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
             )
-            host.gate_check(self._described_task(), self._record(ws))
+            task = self._described_task()
+            task["comments"][-1]["body"] = (
+                "[report:done]\nПереписал `_ensure_pr` по issue:abc123, лог в /home/dev/run.log.\n\n"
+                "## Checks\n\nunit green"
+            )
+            host.gate_check(task, self._record(ws))
+            head = git(ws, "rev-parse", "HEAD")
         body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
-        self.assertIn("ummanu-633", body)
-        self.assertIn("МР открывается с фиксированной заглушкой", body)
-        self.assertIn("`pipeline/ummanu-633` → `main`", body)
-        self.assertIn("Пул-реквест должен нести описание задачи, а не литерал.", body)
-        self.assertIn("Second line.", body)
-        self.assertIn("Переписал `_ensure_pr`", body)
-        self.assertNotIn("[report:done]", body, "the marker line is not part of the story")
-        self.assertNotIn("Automatic PR for worker branch", body)
+        self.assertEqual(
+            body,
+            "## What\n\nПереписал `_ensure_pr` по (internal ref), лог в <path>\n\n"
+            "## Why\n\nПул-реквест должен нести описание задачи, а не литерал.\n\n"
+            f"## How verified\n\nCI runs every check of the `pull_request` workflow on `{head[:12]}`; "
+            "the merge waits for them to pass.\n\nCard: `ummanu-633`",
+        )
 
     def test_pr_body_omits_sources_that_do_not_exist_yet(self) -> None:
         """The gate also runs before any report exists, and a bare card is not a gate failure."""
@@ -13790,12 +13795,10 @@ class DispatcherGateTests(unittest.TestCase):
             bare_result = bare.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "green")
         body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
-        self.assertIn("What the card asks for", body)
-        self.assertNotIn("What the worker reports", body)
+        self.assertIn("## What\n\nМР открывается с фиксированной заглушкой вместо описания задачи\n", body)
         self.assertEqual(bare_result.status, "green", "a card with no title or statement still gates")
         bare_body = self._pr_argument(self._pr_calls(bare, "create")[0], "--body")
-        self.assertNotIn("What the card asks for", bare_body)
-        self.assertNotIn("What the worker reports", bare_body)
+        self.assertIn("## What\n\nummanu-633\n\n## Why\n\n(the card carries no statement)\n", bare_body)
         self.assertEqual(self._pr_argument(self._pr_calls(bare, "create")[0], "--title"), "ummanu-633")
 
     def test_the_pr_the_gate_opens_is_recorded_as_its_own(self) -> None:
@@ -14252,8 +14255,8 @@ class DispatcherGateTests(unittest.TestCase):
             host.gate_check(task, self._record(ws))
         body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
         self.assertIn("truncated", body)
-        self.assertLess(len(body), 2 * PR_BODY_SECTION_CHARS)
-        self.assertIn("What the worker reports", body, "a long statement must not eat the report")
+        self.assertLess(len(body), 3 * PR_BODY_SECTION_CHARS)
+        self.assertIn("Переписал `_ensure_pr`", body, "a long statement must not eat the report")
 
     def test_github_gate_red_on_failed_pr_ci(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

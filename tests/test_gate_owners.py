@@ -119,10 +119,9 @@ class GateOwnerTests(unittest.TestCase):
     def test_pr_rendered_bytes_and_failure_fingerprint(self):
         task = {"ref": "p-1", "title": "Gate"}
         self.assertEqual(gate_pr._pr_title(task, "pipeline/p-1"), "p-1: Gate")
-        self.assertEqual(gate_pr._pr_body(task, "pipeline/p-1", "main"),
-            "**Card:** `p-1` — Gate\n**Branch:** `pipeline/p-1` → `main`\n\n---\n\n"
-            "Opened by the ummanu CI gate so that the `pull_request` workflow runs. "
-            "Title and body are built from the card and the worker's done report.")
+        self.assertEqual(gate_pr._pr_body(task, "pipeline/p-1", "a" * 40, ["tests"]),
+            "## What\n\nGate\n\n## Why\n\nGate\n\n## How verified\n\n"
+            "CI runs `tests` on `aaaaaaaaaaaa`; the merge waits for them to pass.\n\nCard: `p-1`")
         self.assertEqual(gate_types._fingerprint("github", "tests", "Run tests", "##[error]assert False"), "09dd46dc3f1a9638")
 
     def test_core_base_fetch_and_project_credential_refusal_use_shared_backend(self):

@@ -226,7 +226,7 @@ def _github_gate(
     refused = gate_pr._publish_branch(host, record, workspace, branch, sha, task["project"])
     if refused is not None:
         return refused
-    gate_pr._ensure_pr(host, workspace, task, record, branch, base)
+    gate_pr._ensure_pr(host, workspace, task, record, branch, base, sha, required or [])
     repo = github_ci._name_with_owner(host, workspace)
     rerun_run_id = str(getattr(record, "gate_infrastructure_rerun_run_id", "") or "")
     rerun_sha = str(getattr(record, "gate_infrastructure_reruns_sha", "") or "")

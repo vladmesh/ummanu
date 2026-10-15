@@ -19,10 +19,9 @@ from ummanu.dispatch.helpers import _last_marker_body, _tail, safe_one_line, scr
 from ummanu.dispatch.state import GatePrAuthorship, GatePublishedRef
 from ummanu.dispatch.types import GateTransportError, HostError
 
-_PR_BODY_FOOTER = (
-    "Opened by the ummanu CI gate so that the `pull_request` workflow runs. "
-    "Title and body are built from the card and the worker's done report."
-)
+# Board references and host paths mean nothing outside this installation and can name its users.
+_INTERNAL_REF_RE = re.compile(r"\b(?:issue|sprint|task|research):[A-Za-z0-9][\w.-]*")
+_HOST_PATH_RE = re.compile(r"(?<![\w.])/(?:home|tmp|var|srv|opt|root|run|mnt|etc)/\S*")
 
 
 # A ref update the remote refused because the branch is not where the push expected it to be.
@@ -172,11 +171,20 @@ def _pr_title(task: dict, branch: str) -> str:
 
 
 def _pr_section(text: object) -> str:
-    """One board-sourced block on its way into a PR body: scrubbed and bounded, or empty."""
-    cleaned = scrub_host_output(str(text or "")).replace("\r\n", "\n").strip()
-    if len(cleaned) <= PR_BODY_SECTION_CHARS:
-        return cleaned
-    return cleaned[:PR_BODY_SECTION_CHARS].rstrip() + "\n\n… (truncated; the full text is on the card)"
+    """The first prose paragraph of a board text, scrubbed of secrets, board refs and host paths, bounded."""
+    cleaned = scrub_host_output(str(text or "")).replace("\r\n", "\n")
+    cleaned = _HOST_PATH_RE.sub("<path>", _INTERNAL_REF_RE.sub("(internal ref)", cleaned))
+    paragraph = next(
+        (
+            block.strip()
+            for block in re.split(r"\n\s*\n", cleaned)
+            if block.strip() and not block.lstrip().startswith(("#", "```", "<!--"))
+        ),
+        "",
+    )
+    if len(paragraph) <= PR_BODY_SECTION_CHARS:
+        return paragraph
+    return paragraph[:PR_BODY_SECTION_CHARS].rstrip() + "\n\n… (truncated; the full text is on the card)"
 
 
 def _pr_digest(title: str, body: str) -> str:
@@ -189,26 +197,19 @@ read-back identity and must detect human edits.
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _pr_body(task: dict, branch: str, base: str) -> str:
-    """The PR description, built deterministically from the card and the worker's own report.
+def _pr_body(task: dict, branch: str, sha: str, required: list[str]) -> str:
+    """The PR description: What, Why and How verified, then the card ref, built only from board text.
 
-    Every source is optional and a missing one is omitted; no model is asked anything, so the same
-    inputs always render the same body and `_refresh_pr` can compare its way to a no-op. Nothing
-    marks the text as the gate's: a marker in a body proves nothing about who wrote the body
-    around it, so authorship is kept outside the pull request, in `record.gate_pr_authorship`.
+    Deterministic, so `_refresh_pr` can compare its way to a no-op. Authorship is kept outside the
+    pull request, in `record.gate_pr_authorship`, never marked in the text.
     """
     ref = safe_one_line(task.get("ref") or "", limit=80) or branch
-    card_title = safe_one_line(task.get("title") or "", limit=180)
-    heading = f"**Card:** `{ref}`" + (f" — {card_title}" if card_title else "")
-    parts = [heading, f"**Branch:** `{branch}` → `{base}`"]
-    statement = _pr_section(task.get("description"))
-    if statement:
-        parts += ["", "## What the card asks for", "", statement]
-    report = _pr_section(_last_marker_body(task, "report:done") or "")
-    if report:
-        parts += ["", "## What the worker reports", "", report]
-    parts += ["", "---", "", _PR_BODY_FOOTER]
-    return "\n".join(parts)
+    card_title = _pr_section(safe_one_line(task.get("title") or "", limit=180))
+    what = _pr_section(_last_marker_body(task, "report:done") or "") or card_title or ref
+    why = _pr_section(task.get("description")) or card_title or "(the card carries no statement)"
+    checks = ", ".join(f"`{safe_one_line(name, limit=120)}`" for name in required) or "every check of the `pull_request` workflow"
+    verified = f"CI runs {checks} on `{sha[:12]}`; the merge waits for them to pass."
+    return "\n".join(["## What", "", what, "", "## Why", "", why, "", "## How verified", "", verified, "", f"Card: `{ref}`"])
 
 
 def _pr_authorship(record) -> GatePrAuthorship | None:
@@ -311,14 +312,16 @@ def _edit_pr(host, workspace: str, number: int, fields: list[str]) -> bool:
     return completed.returncode == 0
 
 
-def _ensure_pr(host, workspace: str, task: dict, record, branch: str, base: str) -> None:
+def _ensure_pr(
+    host, workspace: str, task: dict, record, branch: str, base: str, sha: str, required: list[str]
+) -> None:
     """Ensure an open candidate PR into the project integration base.
 
 Its pull_request CI needs an open PR, not merely a feature-branch push.
 Never treat a failed creation as a successful validation launch.
     """
     title = _pr_title(task, branch)
-    body = _pr_body(task, branch, base)
+    body = _pr_body(task, branch, sha, required)
     open_pr = _open_pr(host, workspace, branch)
     if open_pr is not None:
         number = int(open_pr["number"])
