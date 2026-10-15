@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Self
 
 from ummanu.dispatch.types import DispatcherError
 from ummanu.dispatch.worker_lifecycle import (
+    StaleRound,
     WorkerContinuation,
     WorkerContinuationLiveness,
     WorkerReportNudge,
@@ -862,6 +863,8 @@ class DispatcherRecord:
     # before the watchdog stops or replaces it. Durable and keyed on the report generation, so the
     # bound survives a restart and belongs to the round rather than to a tick.
     worker_report_nudge: WorkerReportNudge = field(default_factory=WorkerReportNudge)
+    # The waited worker round's start and its one stale-round record (`dispatch.stale_round`).
+    worker_stale_round: StaleRound = field(default_factory=StaleRound)
     # The PO, owner and observer comments this card's live worker was pointed at mid-round
     # (secretary-1768), by the key `worker_comments.comment_key` gives each: its audit event id.
     # Written before the pointer is sent, so a tick repeat or a restarted dispatcher never sends the
@@ -1094,6 +1097,12 @@ class DispatcherRecord:
             "workspace_settled": self.workspace_settled,
             # Only on a PO-executed card's record, so every other record keeps its released shape.
             **({"po_submission": self.po_submission.to_json()} if self.po_submission else {}),
+            # Only once a worker wait has observed a round, so other records keep their released shape.
+            **(
+                {"worker_stale_round": self.worker_stale_round.to_json()}
+                if self.worker_stale_round.generation
+                else {}
+            ),
         }
 
     @classmethod
@@ -1212,6 +1221,7 @@ class DispatcherRecord:
             # Absent on every record written before the prompt existed, which is exactly a round
             # that has not spent one: the empty value opens the same single prompt for it.
             worker_report_nudge=WorkerReportNudge.from_json(payload.get("worker_report_nudge")),
+            worker_stale_round=StaleRound.from_json(payload.get("worker_stale_round")),
             worker_comment_deliveries=tuple(
                 item
                 for item in payload.get("worker_comment_deliveries") or ()
