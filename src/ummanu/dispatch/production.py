@@ -47,6 +47,7 @@ from ummanu.dispatch.pause_ops import auto_resume_expired_freeze
 from ummanu.dispatch.po_cards import completion_state
 from ummanu.dispatch.post_merge import WATCHES_KEY, reconcile_post_merge_watches
 from ummanu.dispatch.provider_failure import is_provider_unavailable_return
+from ummanu.dispatch.ready_skips import notice_long_ready_skips, skip_until
 from ummanu.dispatch.runtime_preflight import record_incident
 from ummanu.dispatch.state import (
     DispatcherRecord,
@@ -627,6 +628,10 @@ def _production_tick_with_snapshot(
             else:
                 if ready_outcome is not None:
                     outcomes.append(ready_outcome)
+                try:
+                    outcomes += notice_long_ready_skips(runtime, payload, ready_outcome)
+                except Exception as exc:  # noqa: BLE001 - a notice that cannot be written must not stop the tick
+                    errors.append(_unexpected_error("", exc))
     # Last, after every move this tick made (a claim can Block a decision/operation card): every
     # return the origin-return outbox holds undelivered goes to the PO session that cut its card.
     try:
@@ -1569,6 +1574,7 @@ def _production_claim_ready(
                 {
                     "ref": task["ref"],
                     "reason": str(outcome.get("reason") or "head resource is not ready"),
+                    "until": skip_until(outcome),
                 }
             )
             continue
