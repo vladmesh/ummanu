@@ -3179,6 +3179,20 @@ retried, and the next round's `TASK.md` carries the comment either way. A worker
 held for validation, paused or between rounds is sent nothing and nothing is recorded; the next round's
 `TASK.md` carries the comment. `decision` and `operation` cards have no worker and are unaffected.
 
+### Code style in the worker and review packets
+
+Every worker `TASK.md`, for any project, card kind and head family, carries `## Code style`: the text of
+`packaging/worker-style.md`, before the report dispositions. The dispatcher reads the file from the
+checkout it runs from, like the other `packaging/` assets. A project's `AGENTS.md` wins on conflict.
+
+A code card's `REVIEW.md` carries the style checklist S1-S7 for the lines the diff adds. It is the one
+exception to the rule that a RED blocker states a concrete reachable scenario: a violation of S1-S4 (a
+test of absence or of doc or source text; an alias or `X as X` re-export that no released public API
+needs; a card, sprint, issue or PR id or a date in code, a comment, a docstring or a test name; a new
+private helper that duplicates an existing one) is a RED blocker `BLOCKER-style-S<n>` with file:line and
+no scenario. S5-S7 are observations unless the card says otherwise. The gate's mechanical checks and
+their warnings are in [Testing](TESTING.md#style-of-added-lines).
+
 ### Head heartbeat identity
 
 Every dispatcher-launched worker, reviewer and observer writes one atomically replaced version-1 JSON

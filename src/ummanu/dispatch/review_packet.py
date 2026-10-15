@@ -335,3 +335,26 @@ def render_review_evidence(evidence: ReviewEvidence) -> list[str]:
         lines += [f"### {label}", f"source_event: {identity or 'unknown/unresolved'}", ""]
         lines += data_block(body) if body else ["unknown/unresolved: evidence unavailable", ""]
     return lines
+
+
+def style_checklist() -> list[str]:
+    """The style rules a reviewer applies to the lines a candidate diff adds."""
+    return [
+        "## Style checklist (lines this diff adds)",
+        "",
+        "A violation of S1-S4 is a RED blocker `BLOCKER-style-S<n>` with file:line; it needs no runtime",
+        "scenario. Only lines the diff adds count. S5-S7 are observations unless the card says otherwise.",
+        "S1. A new test asserts absence of a removed name/file/wording, reads docs/prompt/Markdown text,",
+        "    or reads product source as text.",
+        "S2. A renamed or moved name keeps an alias, `X as X` re-export or facade that no released public API needs.",
+        "S3. A card, sprint, issue or PR id or a date in code, a comment, a docstring or a test name.",
+        "S4. A new private helper duplicates an existing one (name the original).",
+        "S5. A docstring longer than its contract, or a comment that restates code or tells history.",
+        "S6. A silent default, broad except or getattr probe on a required value.",
+        "S7. Code the change made dead and left in place.",
+        "",
+        "When the gate's lint check carries style warnings (prose share, a copied private helper, a likely",
+        "absence test), they are warning annotations on that check in the gate receipt: weigh them for",
+        "S1, S4 and S5.",
+        "",
+    ]

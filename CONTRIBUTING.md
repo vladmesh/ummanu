@@ -40,6 +40,9 @@ endpoint, never in a `test_*` module the default run discovers.
   current behaviour.
 - Prefer the standard library; justify a new runtime dependency.
 - Write commit messages and code comments in English.
+- Follow [packaging/worker-style.md](packaging/worker-style.md), the one source of code style for
+  people and heads alike; CI checks the countable rules
+  ([Testing](docs/TESTING.md#style-of-added-lines)).
 
 ## Before a pull request
 

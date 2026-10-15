@@ -42,6 +42,7 @@ from ummanu.dispatch.review_packet import (
     data_block,
     render_review_evidence,
     resolve_review_evidence,
+    style_checklist,
 )
 from ummanu.dispatch.state import (
     REVIEW_REJECTION_REASON,
@@ -96,6 +97,14 @@ def _gate_attestation_for_prompt(
     if receipt is not None:
         return receipt.as_dict() if receipt.validated_sha == current_sha else {}
     return _accepted_gate_receipt(source, current_sha)
+
+WORKER_STYLE = Path(__file__).resolve().parents[4] / "packaging" / "worker-style.md"
+
+
+def _worker_style() -> str:
+    """The code style every worker is given, from the checkout this dispatcher runs."""
+    return WORKER_STYLE.read_text(encoding="utf-8").strip()
+
 
 def _body_file_path(data_dir: Path, kind: str, reference: str, review_round: int) -> str:
     """Where a head writes its report/verdict body: a directory private to this user, never the
@@ -713,6 +722,7 @@ class PromptPacketMixin:
         check_contract = self._packet_check_contract(str(task.get("project") or ""))
         broad_command, show_command = self._broad_check_commands(check_contract)
         sections += self._local_run_section(task, local_run_policy=local_run_policy)
+        sections += ["## Code style", "", _worker_style(), ""]
         sections += [
             "## Prior blocker dispositions in the worker report",
             "",
@@ -979,12 +989,13 @@ class PromptPacketMixin:
             "перенести в интеграционный шард. Distinguish that code defect from an earlier head's",
             "excessive local run, which remains a non-blocking observation with evidence excluded.",
             "",
-            "For every RED blocker, state the concrete reachable scenario, the violated acceptance",
-            "criterion or operational invariant, material assumptions, whether this branch introduced",
-            "the defect or it was pre-existing, and whether the repair appears local or would change",
-            "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
-            "evidence; do not silently widen the supported boundary or decide sprint scope.",
+            "For every RED blocker other than a style blocker S1-S4, state the concrete reachable scenario,",
+            "the violated acceptance criterion or operational invariant, material assumptions, whether this",
+            "branch introduced the defect or it was pre-existing, and whether the repair appears local or",
+            "would change architecture, a compatibility promise, a product contract, or a trust boundary.",
+            "Report evidence; do not silently widen the supported boundary or decide sprint scope.",
             "",
+            *(style_checklist() if has_candidate(task) else []),
             *(
                 [
                     # Deliberately duplicates the gate's own deterministic preflight: a check that only

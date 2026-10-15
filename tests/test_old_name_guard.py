@@ -48,6 +48,8 @@ ALLOWLIST: tuple[tuple[str, re.Pattern[str] | None, tuple[str, ...]], ...] = (
     # Removal regression's former verb and exact removed script/test inventory, only here.
     ("G", re.compile(r'"(?:from-secretary|scripts/(?:rename_to_ummanu\.py|transition-from-secretary\.sh)|tests/test_transition_from_secretary\.py)"'),
      ("tests/test_installation_retirement.py",)),
+    # The style check matches old card ids in the prose a diff adds.
+    ("G", re.compile(r"\(\?:secretary\|ummanu\|codegen"), ("scripts/check_style.py",)),
     ("G", None, ("docs/RENAME.md", "tests/test_old_name_guard.py", "src/ummanu/infra/old_name_guard.py")),
 )
 
