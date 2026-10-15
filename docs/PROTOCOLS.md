@@ -2258,6 +2258,24 @@ A close is not a completed Definition of Done. The closeout carries that sentenc
 carries `definition_of_done` with `satisfied: false` only. Closing a sprint states what became of its
 work; it is not a statement that the sprint's Definition of Done was reached.
 
+#### Definition of Done items
+
+A sprint created with `--dod-item` (repeated, in order) carries addressable items `d1`, `d2`, ...: wording,
+state `open` or `met`, a weight and, once met, its evidence and who met it. `sprint show`, `sprint list`
+and the sprint read layer return them as `dod` with `progress`, the met weight over all weight; until every
+item is weighed each counts 1 and `estimated` is false. A sprint without items (every sprint opened before
+them) reads `structured: false` with no items and no progress; nothing is parsed out of its text.
+
+`sprint dod set-weight` (observer or PO) sets an item's weight, 1, 2, 3, 5, 8 or 13, with a reason; a
+repeat re-estimates it, and each call is its own `dod_item_weighed` history event. `sprint dod meet` needs
+`--evidence`; `sprint dod reopen` takes a met item back with a reason. `sprint dod add` (PO only) appends
+items with a reason, which is also how a free-text sprint becomes addressable.
+
+A close of a sprint with items needs every item met. The observer's close is refused with
+`close_plan_forbidden` while one is open. The PO's close goes through and files each unmet item as a new
+issue of the sprint's product, reason "sprint closed early by owner, item not met", naming the sprint and
+the item's weight; `sprint close-result` lists them as `close.dod_issues`.
+
 A close made with no closeout writes none. The protocol operation requires one
 ([Closing one](#closing-one)); the writer takes it as an option for recovery and internal callers.
 

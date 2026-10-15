@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ummanu._fsutil import held_lock
-from ummanu.board import owner_events
+from ummanu.board import owner_events, sprint_dod
 from ummanu.board.card_transitions import CardTransitionForbidden, card_transition
 from ummanu.board.roles import Role
 from ummanu.board.sprint_close import (
@@ -127,6 +127,7 @@ class SprintLifecycleMixin:
                 self._check_close_decisions_are_writable(
                     plan, role=role, states=targets.remaining_state_map
                 )
+                dod_unmet = self._unmet_dod_at_close(sprint_document, role=role)
                 closeout_plan = self._plan_closeout(
                     sprint, plan, actor=actor, reason=reason, closeout=closeout
                 )
@@ -148,6 +149,8 @@ class SprintLifecycleMixin:
                         "moved_tasks": [],
                         "disposed_tasks": [],
                         "conflicts": [],
+                        "dod_unmet": dod_unmet,
+                        "dod_issues": [],
                     },
                     sprint_document,
                 )
@@ -510,6 +513,7 @@ class SprintLifecycleMixin:
             raise TaskError("audit_pending", "sprint close transaction has invalid archival progress", 4)
         try:
             self._close_declared_issues(document, event, payload, decisions)
+            self._file_unmet_dod_items(document, event, payload)
             writer = TaskWriter(self.client, data_dir=self.data_dir) if archive else None
             for task_ref in archive:
                 step_request_id = _close_archive_request_id(str(document["request_id"]), task_ref)
@@ -620,6 +624,69 @@ class SprintLifecycleMixin:
                 )
                 self._require_close_step_settled(step_request_id)
             closed.append(reference)
+            self.transactions.save(document)
+
+    def _unmet_dod_at_close(self, sprint_document: dict[str, Any], *, role: str) -> list[dict[str, Any]]:
+        """The DoD items an owner close files as issues; any other close needs every item met.
+
+        A free-text DoD has no items and guards nothing.
+        """
+        unmet = sprint_dod.unmet(sprint_dod.items_of(sprint_document["dod"]))
+        if not unmet:
+            return []
+        names = ", ".join(item["id"] for item in unmet)
+        if role != Role.PO.value:
+            raise TaskError(
+                "close_plan_forbidden",
+                f"Definition of Done item(s) {names} are not met; mark each met with its evidence "
+                "(`sprint dod meet`). Only the PO closes a sprint early",
+                3,
+            )
+        if self.instance is None or not sprint_document.get("product"):
+            raise TaskError(
+                "validation",
+                f"closing with unmet Definition of Done item(s) {names} files each as an issue of the "
+                "sprint's product; it needs the instance directory and a sprint product",
+                2,
+            )
+        return [{"id": item["id"], "text": item["text"], "weight": item["weight"]} for item in unmet]
+
+    def _file_unmet_dod_items(
+        self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any]
+    ) -> None:
+        """File every unmet item of an owner close as a new issue of the sprint's product, once."""
+        from ummanu.product_issues import issue_reference
+
+        unmet = payload.get("dod_unmet") or []
+        filed = payload.setdefault("dod_issues", [])
+        if not isinstance(unmet, list) or not isinstance(filed, list):
+            raise TaskError("audit_pending", "sprint close transaction has invalid DoD progress", 4)
+        reference = str(event["ref"])
+        pending = [item for item in unmet if item["id"] not in {entry["item"] for entry in filed}]
+        if not pending:
+            return
+        store = self._issue_store()
+        product = str(self.reader.show(reference, include_cards=False)["product"])
+        for item in pending:
+            step_request_id = _close_step_request_id(str(document["request_id"]), "dod-issue", item["id"])
+            if self._close_step_status(step_request_id) != "done":
+                weight = item["weight"] if item["weight"] is not None else "not weighed"
+                store.create_issue(
+                    product=product,
+                    issue_kind="improvement",
+                    priority="P2",
+                    title=f"{reference} {item['id']} not met: {item['text']}",
+                    description=(
+                        f"Reason: {sprint_dod.OWNER_CLOSE_REASON}\n\nSprint: {reference}\n"
+                        f"DoD item: {item['id']}, weight {weight}\n\n{item['text']}\n"
+                    ),
+                    actor=str(document["intent"]["actor"]),
+                    request_id=step_request_id,
+                    role=str(document["intent"]["role"]),
+                    sprint_close=reference,
+                )
+                self._require_close_step_settled(step_request_id)
+            filed.append({"item": item["id"], "issue": issue_reference(step_request_id), "weight": item["weight"]})
             self.transactions.save(document)
 
     def _dispose_remaining_cards(

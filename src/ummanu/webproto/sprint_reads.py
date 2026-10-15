@@ -924,6 +924,7 @@ class SprintSections(SectionSet):
                 "card_dispositions": list(decisions.get("cards") or []),
                 "archived_tasks": list(payload.get("archived_tasks") or []),
                 "disposed_tasks": list(payload.get("disposed_tasks") or []),
+                "dod_issues": list(payload.get("dod_issues") or []),
                 "closeout": _closeout_of(payload.get("closeout")),
                 "reason": f"the committed audit holds this close of {reference}",
             }
@@ -2020,6 +2021,7 @@ _CLOSE_BLANK: dict[str, Any] = {
     "card_dispositions": None,
     "archived_tasks": None,
     "disposed_tasks": None,
+    "dod_issues": None,
     "closeout": None,
     "reason": None,
 }

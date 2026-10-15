@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from tests.fakes.sprints import SprintFixture
+from tests.fakes.sprints import KEEP_THE_ISSUE_OPEN, SprintFixture
+from ummanu.board import sprint_dod
 from ummanu.tasks import TaskError
 
 
@@ -65,6 +66,45 @@ class SprintDodTests(SprintFixture):
                                   reason="the owner made the DoD addressable")
 
         self.assertEqual([item["id"] for item in self.sprint(ref)["dod"]["items"]], ["d1"])
+
+    def test_the_observer_cannot_close_with_an_unmet_item(self) -> None:
+        ref = self._open("first", "second")
+        self.writer.meet_dod_item(role="observer", actor="observer", reference=ref, item="d1", evidence="PR 1")
+
+        with self.assertRaises(TaskError) as refused:
+            self.writer.close(role="observer", actor="observer", reference=ref, decisions=KEEP_THE_ISSUE_OPEN,
+                              reason="looks done")
+
+        self.assertEqual(refused.exception.code, "close_plan_forbidden")
+        self.assertIn("d2", refused.exception.message)
+        self.assertEqual(self.sprint(ref)["status"], "open")
+        self.writer.meet_dod_item(role="observer", actor="observer", reference=ref, item="d2", evidence="PR 2")
+        self.writer.close(role="observer", actor="observer", reference=ref, decisions=KEEP_THE_ISSUE_OPEN,
+                          reason="every item is met")
+        self.assertEqual(self.sprint(ref)["status"], "closed")
+
+    def test_an_owner_close_files_each_unmet_item_as_an_issue_with_its_weight(self) -> None:
+        ref = self._open("landed", "the owner accepts it live")
+        self.writer.set_dod_weight(role="po", actor="operator", reference=ref, item="d2", weight=5,
+                                   reason="a live session")
+        self.writer.meet_dod_item(role="po", actor="operator", reference=ref, item="d1", evidence="PR 1")
+
+        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN,
+                          reason="the owner stops here", request_id="owner-close")
+        self.writer.close(role="po", actor="operator", reference=ref, decisions=KEEP_THE_ISSUE_OPEN,
+                          reason="the owner stops here", request_id="owner-close")
+
+        filed = [
+            issue for issue in self.product_issue_store().list_issues(product="ummanu")
+            if "the owner accepts it live" in issue["title"]
+        ]
+        self.assertEqual(len(filed), 1)
+        self.assertIn(sprint_dod.OWNER_CLOSE_REASON, filed[0]["description"])
+        self.assertIn(ref, filed[0]["description"])
+        self.assertIn("weight 5", filed[0]["description"])
+        self.assertFalse(any("landed" in issue["title"] and ref in issue["title"]
+                             for issue in self.product_issue_store().list_issues(product="ummanu")))
+        self.assertEqual(self.sprint(ref)["status"], "closed")
 
 
 if __name__ == "__main__":

@@ -1769,6 +1769,16 @@
                 "string",
                 "null"
               ]
+            },
+            "dod_issues": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "description": "The issue an owner close filed for each unmet Definition of Done item: `{item, issue, weight}`.",
+              "items": {
+                "type": "object"
+              }
             }
           }
         },
