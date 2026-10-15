@@ -16,7 +16,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
     __package__ = "ummanu.runtime.head.local_pty"
 
-from ..memory import OOM_STREAM_ENV, open_oom_stream, own_cgroup
+from ..memory import HEAD_SCOPE_PREFIX, OOM_STREAM_ENV, open_oom_stream, own_cgroup
 from .scope_environment import EnvironmentTransferError, read_environment
 
 
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     divider = args.index("--")
     privileges, command = args[:divider], args[divider + 1 :]
     cgroup = own_cgroup()
-    if cgroup is None or not cgroup.name.startswith("ummanu-head-"):
+    if cgroup is None or not cgroup.name.startswith(HEAD_SCOPE_PREFIX):
         raise RuntimeError("scope bootstrap is outside a ummanu head scope")
     install_oom_contract(cgroup)
     oom_stream = open_oom_stream()

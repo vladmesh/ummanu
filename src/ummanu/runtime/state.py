@@ -9,6 +9,7 @@ is `UMMANU_STATE` or `~/ummanu-data/automation-state`, then `/<agent>`.
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import os
 import sys
@@ -214,7 +215,7 @@ class AgentState:
 
     def log_run(self, event: str, **fields: object) -> None:
         """Append one run-telemetry record to runs.jsonl through the journal appender; a failure raises."""
-        rec = {"ts": datetime.now(UTC).isoformat(), "event": event, **fields}
+        rec = {"ts": datetime.now(UTC).isoformat(), "event": event, "source": run_source(), **fields}
         append_line_durable(self.dir / "runs.jsonl", json.dumps(rec, ensure_ascii=False))
 
     @contextmanager
@@ -357,6 +358,25 @@ def _process_started_at(start: int | None) -> float | None:
     except (OSError, ValueError):
         return None
     return None
+
+
+@functools.cache
+def run_source() -> str:
+    """Who launched this process: `unit:<service>`, `automation:<head scope>` or `manual`.
+
+    Read from the process's own cgroup, which systemd names after the unit or head scope it runs in.
+    """
+    # Imported here: the head package is heavy, and most state readers never log a run.
+    from ummanu.runtime.head.memory import HEAD_SCOPE_PREFIX, own_cgroup
+
+    cgroup = own_cgroup()
+    if cgroup is None:
+        return "unknown"
+    if cgroup.name.endswith(".service"):
+        return f"unit:{cgroup.name}"
+    if cgroup.name.startswith(HEAD_SCOPE_PREFIX) and cgroup.name.endswith(".scope"):
+        return f"automation:{cgroup.name}"
+    return "manual"
 
 
 def _lock_source() -> str:
