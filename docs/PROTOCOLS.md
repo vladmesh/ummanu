@@ -104,7 +104,8 @@ Board columns, in order: `Issues, Ready, In progress, Validate, Assessment, Bloc
 
 `assessment` is a durable wait for a decision. A substantive reviewer verdict, green or red, parks
 the card there: the reviewer is stopped, the round's worker stays suspended with its workspace, and
-nothing merges or reworks until a decision. Mechanical gate outcomes (CI, stand run, pre-merge
+nothing merges or reworks until a decision. A worker's partial report parks it from In progress the
+same way, with no review (see `report --kind partial`). Mechanical gate outcomes (CI, stand run, pre-merge
 re-check) resolve in Validate and never pass through Assessment. The steward may move a card from
 Assessment to Blocked with a reason; workers and reviewers move nothing. A card left in Assessment
 past the steward's stale threshold is reported like any other stuck card.
@@ -2818,8 +2819,15 @@ cannot get working) and `## Propose to extract` (what should become a separate c
 empty one is refused with a `validation` error naming it, and nothing is written. On a card with a
 candidate (`code`) it refuses an uncommitted workspace as `done` does, needs no broad-check receipt,
 and records the checkout's HEAD as a full 40-character `partial_commit` in the `reported` event data,
-the seed for a later reslice. A `research` or `infra` partial report records no commit. The dispatcher
-treats it as neither a done nor a blocked report.
+the seed for a later reslice. A `research` or `infra` partial report records no commit. The worker's
+`TASK.md` carries the partial command beside the done and blocked ones. The dispatcher consumes the
+round's partial report like the others: it records the worker phase's usage, retains the worker's
+conversation (or stops it confirmed when retention fails) and moves the card In progress ->
+Assessment once, under a request id keyed on the park's comment baseline, so a crash between the
+park intent and the move moves it once. No review runs; the report body is the Assessment evidence.
+On a visit opened by a partial report (the last report before the park is `report:partial`), `task
+decide --kind accept` is refused with a `validation` error; `rework` resumes the retained worker with
+the decision as its next input, and `reslice` ends the attempt Blocked, as for a review park.
 
 ### Rejected SHAs and gate infrastructure reruns
 

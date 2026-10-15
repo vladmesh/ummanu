@@ -28,7 +28,7 @@ import time
 from typing import Any
 
 from ummanu._fsutil import file_lock
-from ummanu.dispatch.helpers import _last_marker
+from ummanu.dispatch.helpers import WORKER_REPORT_MARKERS, _last_marker
 from ummanu.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -66,7 +66,6 @@ from ummanu.dispatch.types import (
 )
 from ummanu.kernel.errors import TaskError
 
-WORKER_MARKERS = {"report:done", "report:blocked"}
 REVIEW_MARKERS = {"review:green", "review:red"}
 
 
@@ -535,7 +534,7 @@ def _resume_heads(
             # worker was already frozen for review. Either way the tick owns it from here.
             parked.append(f"{ref}:worker")
             continue
-        if _last_marker(task, record.comment_baseline, WORKER_MARKERS):
+        if _last_marker(task, record.comment_baseline, WORKER_REPORT_MARKERS):
             parked.append(f"{ref}:worker")
             continue
         # Same durable launch contour as the tick's own bring-ups: the intent is on disk before

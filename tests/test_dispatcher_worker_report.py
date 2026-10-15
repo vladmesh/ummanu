@@ -57,7 +57,7 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.assertEqual(self.record.state, "claimed")
 
     def test_terminal_path_is_saved_before_a_failing_source_handoff(self) -> None:
-        for marker in ("report:done", "report:blocked"):
+        for marker in ("report:done", "report:blocked", "report:partial"):
             with self.subTest(marker=marker):
                 events = []
                 self.record.outcome_terminal_path = OutcomeTerminalPath.NO_ACCEPTED_REPORT
@@ -144,6 +144,51 @@ class WorkerReportBoundaryTests(unittest.TestCase):
         self.accounting.terminal_effect.assert_not_called()
         self.runtime.writer.move.assert_not_called()
         self.assertIs(self.records["sample-1"], self.record)
+
+    def test_partial_report_saves_its_park_before_the_move_and_replays_one_move(self) -> None:
+        saved_stages = []
+        self.runtime.save_records.side_effect = lambda *_: saved_stages.append(
+            self.record.worker_continuation.stage.value
+        )
+        self.runtime.writer.move.side_effect = [RuntimeError("interrupted move"), None]
+        self.task["comments"] = [{"marker": "report:partial", "body": "[report:partial]\n## Done"}]
+        with self.assertRaisesRegex(RuntimeError, "interrupted move"):
+            self.handle("report:partial")
+        self.assertEqual(saved_stages, ["assessment_pending"])
+        first = self.runtime.writer.move.call_args.kwargs
+        self.assertEqual(first["target"], "assessment")
+        self.assertIn("report:partial", first["reason"])
+
+        outcome = self.handle("report:partial")
+
+        self.assertEqual(outcome["to"], "assessment")
+        self.assertEqual(self.record.state, "assessment")
+        self.assertTrue(self.record.worker_continuation.retained)
+        self.assertEqual(self.runtime.writer.move.call_args.kwargs["request_id"], first["request_id"])
+        self.runtime.host.retain_worker.assert_called_once()
+        self.runtime.host.verify_worker_result.assert_not_called()
+        self.runtime._stop_worker_confirmed.assert_not_called()
+        self.assertEqual(self.accounting.record_attempt_usage.call_count, 2)
+
+    def test_partial_report_without_retention_parks_after_a_confirmed_stop(self) -> None:
+        from ummanu.dispatch.types import HostError
+
+        self.runtime.host.retain_worker.side_effect = HostError("no pane to retain")
+        outcome = self.handle("report:partial")
+        self.assertEqual(outcome["to"], "assessment")
+        self.runtime._stop_worker_confirmed.assert_called_once()
+        self.assertFalse(self.record.worker_continuation.session_held)
+        self.assertTrue(self.record.worker_continuation.parked)
+
+    def test_partial_report_with_an_unconfirmed_stop_moves_nothing(self) -> None:
+        from ummanu.dispatch.types import HostError
+
+        refused = {"status": "degraded", "action": "head-stop-unconfirmed"}
+        self.runtime.host.retain_worker.side_effect = HostError("no pane to retain")
+        self.runtime._stop_worker_confirmed.return_value = refused
+        self.assertIs(self.handle("report:partial"), refused)
+        self.runtime.writer.move.assert_not_called()
+        self.assertFalse(self.record.worker_continuation.parked)
 
     def test_nudge_is_saved_before_delivery_and_spent_before_a_failed_comment(self) -> None:
         events = []

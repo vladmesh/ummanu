@@ -41,6 +41,8 @@ CARD_TRANSITIONS: dict[Role, frozenset[CardTransitionKey]] = {
             (CardState.IN_PROGRESS, CardState.VALIDATE),
             (CardState.IN_PROGRESS, CardState.BLOCKED),
             (CardState.IN_PROGRESS, CardState.READY),
+            # A worker's partial report parks the card for the observer's decision.
+            (CardState.IN_PROGRESS, CardState.ASSESSMENT),
             (CardState.VALIDATE, CardState.IN_PROGRESS),
             (CardState.VALIDATE, CardState.BLOCKED),
             (CardState.VALIDATE, CardState.DONE),

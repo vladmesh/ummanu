@@ -599,6 +599,7 @@ class PromptPacketMixin:
         # The generation keeps the report request-id distinct per round: a rework reuses the same
         # attempt_id, so without it the second done-report is deduped and the dispatcher waits on.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(generation))
+        partial_request = _attempt_request_id(attempt_id, "worker-report-partial", task["ref"], str(generation))
         # One id per classification: a worker restating a block under the other classification is
         # filing a different report, and a shared id would answer the second call with `validation`.
         blocked_requests = {
@@ -621,6 +622,20 @@ class PromptPacketMixin:
                 "done",
                 "--request-id",
                 request,
+                "--body-file",
+                body_file,
+            ),
+            "partial": self._control_plane_command(
+                "task",
+                "report",
+                "--ref",
+                task["ref"],
+                "--role",
+                "worker",
+                "--kind",
+                "partial",
+                "--request-id",
+                partial_request,
                 "--body-file",
                 body_file,
             ),
@@ -856,6 +871,10 @@ class PromptPacketMixin:
             "boundary. Difficulty or size alone is not a reason to stop. In a blocked report, name the",
             "conflict and the observer decision needed. Do not silently expand the supported boundary.",
             "",
+            "A correctly cut card you cannot finish ends with `report:partial`, not done or blocked:",
+            "its body needs `## Done`, `## Not working` and `## Propose to extract`. A code card",
+            "commits its work first. The card parks for the observer to rework or reslice it.",
+            "",
             "A blocked report has to say which kind of blocker it is, and the two are repaired",
             "differently: `--classification external_fact` when the blocker is a fact outside this",
             "card that somebody has to change first, for example missing access, a broken dependency",
@@ -922,6 +941,7 @@ class PromptPacketMixin:
             "earlier turn of this conversation.",
             *_body_file_instructions(body_file),
             report_commands["done"],
+            report_commands["partial"],
             report_commands["external_fact"],
             report_commands["wrong_task_definition"],
             "",
@@ -937,7 +957,7 @@ class PromptPacketMixin:
             _protocol_prerequisites_record_line(generation, (artifact.name for artifact in prerequisites)),
             # And the round's own ids, on the same terms: the report commands above are prose in a
             # document that also renders the card description, so they cannot be the authority.
-            _round_record_line(generation, [request, *blocked_requests.values()]),
+            _round_record_line(generation, [request, partial_request, *blocked_requests.values()]),
             # Which comments this document carries, so the mid-round arm points the live worker
             # only at the ones it has not been handed.
             worker_comments_record_line(comments),

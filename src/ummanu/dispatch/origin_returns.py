@@ -55,7 +55,7 @@ SUCCESSOR_ACTION = "origin-successor"
 #: The longest result an input quotes; the rest is on the card.
 RESULT_LIMIT = 6000
 _LINK_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/(?:pull/\d+|actions/runs/\d+(?:/job/\d+)?)")
-_REPORT_MARKERS = ("report:done", "report:blocked")
+_REPORT_MARKERS = ("report:done", "report:blocked", "report:partial")
 
 
 def return_request_id(reference: str, event_id: str) -> str:
@@ -292,8 +292,9 @@ def _result_lines(events: list[dict[str, Any]], index: int) -> list[str]:
     lines = ["## Why it is Blocked", "", _bounded(reason) or "(the Blocked move carries no reason)", ""]
     lines.append(f"Classification: {classification}")
     body = str(report.get("body") or "").strip() if report is not None else ""
-    if report is not None and report.get("marker") == "report:blocked" and body and body != reason:
-        lines += ["", "## The worker's blocked report", "", _bounded(body)]
+    kind = str(report.get("marker") or "").removeprefix("report:") if report is not None else ""
+    if kind in {"blocked", "partial"} and body and body != reason:
+        lines += ["", f"## The worker's {kind} report", "", _bounded(body)]
     return lines
 
 

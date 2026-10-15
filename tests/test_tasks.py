@@ -3359,6 +3359,8 @@ class AssessmentStateTests(CardStoreCase):
                 (CardState.IN_PROGRESS, CardState.VALIDATE),
                 (CardState.IN_PROGRESS, CardState.BLOCKED),
                 (CardState.IN_PROGRESS, CardState.READY),
+                # A worker's partial report parks the card for a decision.
+                (CardState.IN_PROGRESS, CardState.ASSESSMENT),
                 (CardState.VALIDATE, CardState.IN_PROGRESS),
                 (CardState.VALIDATE, CardState.BLOCKED),
                 (CardState.VALIDATE, CardState.DONE),
@@ -3395,6 +3397,7 @@ class AssessmentStateTests(CardStoreCase):
             ("in_progress", "validate"),
             ("in_progress", "blocked"),
             ("in_progress", "ready"),
+            ("in_progress", "assessment"),
             ("validate", "in_progress"),
             ("validate", "blocked"),
             ("validate", "done"),

@@ -72,6 +72,7 @@ DISPATCH_FLOW_MODULES = (
     "gate_lifecycle",
     "review_verdict",
     "assessment_decision",
+    "assessment_park",
     "release_lifecycle",
     "attempt_accounting",
     "wait_vitality",

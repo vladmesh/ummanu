@@ -195,6 +195,7 @@ from ummanu.board.task_protocol.rows import (
     is_significant_card_event as is_significant_card_event,
     is_significant_observer_event as is_significant_observer_event,
     next_project_reference as next_project_reference,
+    partial_report_park,
     post_merge_ci_fact as post_merge_ci_fact,
     project_card_by_id as project_card_by_id,
     project_card_by_reference as project_card_by_reference,
@@ -2160,6 +2161,10 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             if current["state"] != "assessment":
                 raise TaskError(
                     "transition_forbidden", "a decision is only recorded on a card in Assessment", 3
+                )
+            if decision_kind is TaskDecision.ACCEPT and partial_report_park(committed_events):
+                raise TaskError(
+                    "validation", "a partial report needs rework or reslice; accept is refused", 2
                 )
             if existing is not None:
                 existing_payload = _event_payload(existing)

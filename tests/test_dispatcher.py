@@ -4841,6 +4841,145 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             WorkerContinuationStage.ASSESSMENT_PARKED.value,
         )
 
+    PARTIAL_REPORT = "## Done\nThe parser.\n\n## Not working\nThe writer.\n\n## Propose to extract\nThe writer.\n"
+
+    def _report_partial(self) -> None:
+        """A partial report from a committed checkout, through the command the worker holds."""
+        checkout = self.data_dir / "partial-checkout"
+        git = ["git", "-C", str(checkout), "-c", "user.name=worker", "-c", "user.email=worker@example.invalid"]
+        if not checkout.exists():
+            checkout.mkdir()
+            subprocess.run([*git, "init", "-q"], check=True, capture_output=True)
+            subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "partial"], check=True, capture_output=True)
+        self.writer.workspace = checkout
+        try:
+            self.writer.report(
+                role="worker",
+                actor="worker",
+                reference="ummanu-510",
+                kind="partial",
+                body=self.PARTIAL_REPORT,
+                request_id=self._worker_report_request_id("partial"),
+            )
+        finally:
+            self.writer.workspace = self.data_dir
+
+    def _partial_park_moves(self) -> int:
+        return sum(
+            "worker report:partial" in (comment.get("body") or "")
+            for comment in self.reader.show("ummanu-510")["comments"]
+        )
+
+    def test_a_partial_report_parks_in_assessment_without_a_review(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self._report_partial()
+
+        parked = self.tick()
+
+        self.assertEqual(parked["to"], "assessment")
+        card = self.reader.show("ummanu-510")
+        self.assertEqual(card["state"], "assessment")
+        self.assertEqual(self._partial_park_moves(), 1)
+        self.assertIn(
+            self.PARTIAL_REPORT.strip(),
+            next(c["body"] for c in card["comments"] if c.get("marker") == "report:partial"),
+        )
+        record = self._parked_record()
+        self.assertEqual(
+            record["worker_continuation"]["stage"], WorkerContinuationStage.ASSESSMENT_PARKED.value
+        )
+        self.assertTrue(record["worker_continuation"]["session_held"])
+        self.assertEqual(len(self.host.retained_workers), 1)
+        self.assertEqual(self.host.stopped, [])
+        self.assertEqual(self.host.reviews, [], "no review is launched")
+        self.assertEqual(self.host.gate_calls, [])
+
+        waiting = self.tick()
+
+        self.assertEqual(waiting["action"], "waiting-observer-decision")
+        self.assertEqual(self.host.reviews, [])
+
+    def test_a_partial_park_refuses_accept_and_reworks_the_held_worker(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        self._report_partial()
+        self.assertEqual(self.tick()["to"], "assessment")
+        generation = self._parked_record()["report_generation"]
+
+        with self.assertRaises(TaskError) as refused:
+            self._decide("accept")
+
+        self.assertEqual(refused.exception.code, "validation")
+        self.assertIn("rework or reslice", refused.exception.message)
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "assessment")
+
+        reason = "Rework: finish the parser only; the writer becomes its own card."
+        self._decide("rework", reason=reason)
+        reworked = self.tick()
+
+        self.assertEqual(reworked["action"], "review-red-reused-worker")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
+        self.assertEqual(len(self.host.resumed_workers), 1)
+        self.assertEqual(self._parked_record()["report_decision"], reason)
+        self.assertIn(reason, self._task_document())
+        self._assert_one_generation(generation + 1)
+        self.assertEqual(self.host.reviews, [])
+
+    def test_a_partial_park_reslices_to_blocked(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self._report_partial()
+
+        resliced = self._park_and_decide("reslice")
+
+        self.assertEqual((resliced["to"], resliced["decision"]), ("blocked", "reslice"))
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertEqual(self.host.reviews, [])
+
+    def _crash_at_the_partial_park_then_recover(self, *, landed: bool) -> None:
+        """A tick dies at the park's board move, before or after it commits; the next one parks once."""
+        self.start_dispatcher()
+        self.tick()
+        self._report_partial()
+        real_move = self.writer.move
+
+        def die_at_the_park(**kwargs):
+            if kwargs.get("target") != "assessment":
+                return real_move(**kwargs)
+            if landed:
+                real_move(**kwargs)
+            raise OSError("dispatcher died at the park's board move")
+
+        with mock.patch.object(self.writer, "move", die_at_the_park), self.assertRaises(OSError):
+            self.tick()
+
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PENDING.value,
+        )
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "assessment" if landed else "in_progress")
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["to"], "assessment")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "assessment")
+        self.assertEqual(self._partial_park_moves(), 1)
+        self.assertEqual(
+            self._parked_record()["worker_continuation"]["stage"],
+            WorkerContinuationStage.ASSESSMENT_PARKED.value,
+        )
+        self.assertEqual(len(self.host.retained_workers), 1)
+        self.assertEqual(self.host.reviews, [])
+
+    def test_a_crash_before_the_partial_park_move_moves_the_card_once(self) -> None:
+        self._crash_at_the_partial_park_then_recover(landed=False)
+
+    def test_a_crash_after_the_partial_park_move_moves_the_card_once(self) -> None:
+        self._crash_at_the_partial_park_then_recover(landed=True)
+
     def test_a_crash_between_the_park_and_the_release_resumes_parked(self) -> None:
         """Boundary two. The card is on the board in Assessment and the record died before its
         checkpoint: the single well-defined state is parked, with the decision re-read from the
@@ -10245,9 +10384,9 @@ class HeadPromptTests(unittest.TestCase):
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
         commands = self._command_lines(doc)
 
-        # One done, and one blocked line per classification: a blocked report needs a
+        # One done, one partial, and one blocked line per classification: a blocked report needs a
         # classification, and the worker copies the line rather than editing a placeholder.
-        self.assertEqual(len(commands), 3, "one done and one blocked command per classification")
+        self.assertEqual(len(commands), 4, "one done, one partial and one blocked command per classification")
         for command in commands:
             self.assertIn(f"--body-file {self.bodies}/ummanu-report-ummanu-510-0.md", command)
             self.assertNotIn("<file>", command)
@@ -10257,6 +10396,7 @@ class HeadPromptTests(unittest.TestCase):
             ["external_fact", "wrong_task_definition"],
         )
         self.assertNotIn("--classification", commands[0])
+        self.assertNotIn("--classification", commands[1])
 
     def test_body_files_live_in_a_private_directory_not_the_shared_tmp(self) -> None:
         """ummanu-241: `/tmp/ummanu-<kind>-<ref>-<round>.md` was a name any account on the host could
