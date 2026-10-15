@@ -223,6 +223,17 @@ DoD stays a sprint-close condition and never becomes a card's Acceptance criteri
 Every `code`, `research` and `infra` card carries `--estimate-minutes <N>`, your expected worker time:
 a reference point for the stale-round signal, not a ceiling.
 
+A card is one independently mergeable increment; a dark or unwired path is allowed. Size counts
+substantive decisions, not diff lines; the reference points are a worker turn of about 1 h, which
+`--estimate-minutes` records, and at most two review rounds. Cut along the seams when a spec has more
+than about 5 AC, touches more than two subsystems or layers, or combines any two of: a contract or
+persistence change, a new executor, a new CI lane. A card that cannot be cut says why in its spec.
+Example: a feature that pins a kit, adds a typed task with a migration and API, changes planning,
+exempts the task from paid admission, runs it in a new executor with a PR/CI handoff and ships a new
+CI lane becomes five cards, each mergeable alone: (a) pin the kit and regenerate derivatives; (b) the
+typed task with persistence and the admission exemption; (c) planning; (d) the executor and handoff;
+(e) the CI lane with a real release.
+
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type code --title "<short title>" \
