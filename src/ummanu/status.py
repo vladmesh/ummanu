@@ -101,7 +101,12 @@ def collect_status(
     recovery = recovery or collect_recovery_inventory(report, inspect_live=False, checkpoint=checkpoint)
     if probe_panels is None:
         probe_panels = not offline and host_fixture is None
-    board, owned = _board(report.instance_path.parent, sprint_client)
+    if sprints or sprint_client is not None:
+        board, owned = _board(report.instance_path.parent, sprint_client)
+    else:
+        # A call that reads no sprints and lends no client opens no board connection: doctor's
+        # `--offline` and `--host-fixture` runs promise the store is never contacted.
+        board, owned = TaskError("board_not_read", "the board store is not read on this call", 2), None
     try:
         card_total = _card_count(board)
         sprint_section = (
