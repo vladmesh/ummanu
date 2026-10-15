@@ -455,7 +455,7 @@ class HeadHealth:
         verdict = self._run(resource, probe, now)
         if held is not None and verdict.status != "ready":
             verdict = held
-        cache[resource] = verdict.to_json()
+        cache[resource] = _cache_entry(cache.get(resource), verdict)
         try:
             self._save(cache)
         except RuntimeError:
@@ -477,7 +477,7 @@ class HeadHealth:
         """
         verdict = HeadReadiness(resource, status, reason, time.time() if now is None else now, until=until)
         cache = self._load()
-        cache[resource] = verdict.to_json()
+        cache[resource] = _cache_entry(cache.get(resource), verdict)
         self._save(cache)
         return verdict
 
@@ -523,6 +523,28 @@ class HeadHealth:
 
     def _save(self, cache: dict[str, Any]) -> None:
         write_json(self.path, cache)
+
+
+def _cache_entry(previous: Any, verdict: HeadReadiness) -> dict[str, Any]:
+    """`verdict` as a cache entry carrying the resource's last status change.
+
+    `last_transition` is `{from, to, from_reason, reason, at}`, kept across verdicts of the same
+    status so a recovery still names the red reason it ended.
+    """
+    value = verdict.to_json()
+    before = previous if isinstance(previous, dict) else {}
+    old_status = str(before.get("status") or "")
+    if old_status and old_status != verdict.status:
+        value["last_transition"] = {
+            "from": old_status,
+            "to": verdict.status,
+            "from_reason": str(before.get("reason") or ""),
+            "reason": verdict.reason,
+            "at": verdict.checked_at,
+        }
+    elif isinstance(before.get("last_transition"), dict):
+        value["last_transition"] = before["last_transition"]
+    return value
 
 
 def _float(value: Any) -> float:

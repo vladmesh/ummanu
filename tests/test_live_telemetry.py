@@ -1099,8 +1099,51 @@ class StewardResourceSignalTests(unittest.TestCase):
 
         changed, current = steward_signals._resource_signals({"resource_status": {"claude": "ready"}})
 
-        self.assertEqual(changed, {"claude": "unauthenticated"})
+        self.assertEqual(changed, {"claude": {"status": "unauthenticated", "last_transition": {}}})
         self.assertEqual(current, {"claude": "unauthenticated"})
+
+    def test_a_recovery_names_the_red_reason_it_ended(self) -> None:
+        for red in ("unknown", "unavailable"):
+            with self.subTest(red):
+                health = HeadHealth(None, self.data_dir)
+                health.record("openai-sub", red, f"{red}: provider said no", now=100.0)
+                health.record("openai-sub", "ready", "probe succeeded", now=200.0)
+
+                changed, _ = steward_signals._resource_signals({"resource_status": {"openai-sub": red}})
+
+                self.assertEqual(
+                    changed["openai-sub"]["last_transition"],
+                    {
+                        "from": red,
+                        "to": "ready",
+                        "from_reason": f"{red}: provider said no",
+                        "reason": "probe succeeded",
+                        "at": 200.0,
+                    },
+                )
+                batch = {
+                    "signals": {
+                        "pipeline_ticks": [],
+                        "new_blocked": [],
+                        "stale": [],
+                        "resource_flip": changed,
+                        "new_orphan_workspaces": [],
+                    }
+                }
+                self.assertIn(
+                    f"- openai-sub: {red} -> ready at 1970-01-01 00:03 UTC: probe succeeded "
+                    f"(was: {red}: provider said no)",
+                    steward_signals.render_markdown(batch),
+                )
+
+    def test_a_same_status_verdict_keeps_the_last_transition(self) -> None:
+        health = HeadHealth(None, self.data_dir)
+        health.record("openai-sub", "unavailable", "503", now=100.0)
+        health.record("openai-sub", "ready", "probe succeeded", now=200.0)
+        health.record("openai-sub", "ready", "probe succeeded", now=500.0)
+
+        transition = health.snapshot()["openai-sub"]["last_transition"]
+        self.assertEqual((transition["from"], transition["at"]), ("unavailable", 200.0))
 
     def test_a_stale_worktree_copy_cannot_flip_the_production_status(self) -> None:
         self.write_production({"claude": "ready"})

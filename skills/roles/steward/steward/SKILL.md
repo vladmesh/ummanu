@@ -71,7 +71,8 @@ Run it from your workspace (your starting directory). It returns five kinds of s
   observer's release / rework / reslice decision. Your only move there is the escalation `task move --to
   blocked` with a reason file; the decision itself belongs to the observer.
 - `resource_flip`: a resource's health changed since the previous run, to red or back to green, read from
-  the verdict cache the production dispatcher writes. The steward runs no probes of its own.
+  the verdict cache the production dispatcher writes. Each carries `last_transition` (from, to, both
+  reasons, at), so a recovery still names the red reason it ended. The steward runs no probes of its own.
 - `new_orphan_workspaces`: a workspace on disk matching no active card of its project in any column of the
   board. A Blocked card's workspace kept for investigation is not an orphan.
 
