@@ -26,6 +26,7 @@ from ummanu import tasks
 from ummanu.board.card_transitions import CARD_TRANSITIONS
 from ummanu.board.completion_evidence import po_completion_record
 from ummanu.board.done_retention import close_old_done
+from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
 from ummanu.board.host import TransitionRequest
 from ummanu.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
 from ummanu.board.sql_audit import SqlTaskAudit
@@ -1694,6 +1695,55 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                 for card in [restored.show(reference)]
             },
             expected,
+        )
+
+    def test_a_worker_card_shows_its_estimate_or_the_default_and_a_refused_one_writes_nothing(self) -> None:
+        created = self.create_kind("ummanu-553", "code", estimate_minutes="90")
+        self.create_kind("ummanu-554", "research", estimate_minutes="45")
+        self.create_kind("ummanu-555", "infra")
+        self.create_kind("ummanu-556", "decision")
+        default = {"minutes": DEFAULT_ESTIMATE_MINUTES, "source": "default"}
+
+        self.assertEqual(created["task"]["estimate"], {"minutes": 90, "source": "card"})
+        self.assertEqual(self.card("ummanu-554")["estimate"], {"minutes": 45, "source": "card"})
+        self.assertEqual(self.card("ummanu-555")["estimate"], default)
+        # A card that existed before the field reads the default too.
+        self.assertEqual(self.card("ummanu-468")["estimate"], default)
+        self.assertNotIn("estimate", self.card("ummanu-556"))
+        listed = {row["ref"]: row.get("estimate") for row in self.writer.reader.list(states={"ready"})}
+        self.assertEqual(listed["ummanu-553"], {"minutes": 90, "source": "card"})
+
+        before = self.board_snapshot()
+        for number, (kind, value) in enumerate((("code", "0"), ("infra", "-3"), ("research", "1.5"),
+                                                 ("decision", "30")), start=557):
+            with self.subTest(kind=kind, value=value), self.assertRaises(TaskError) as raised:
+                self.create_kind(f"ummanu-{number}", kind, estimate_minutes=value)
+            self.assertEqual(raised.exception.code, "validation")
+        # The estimate is part of the create's identity: the same request id with another one is refused.
+        with self.assertRaises(TaskError):
+            self.create_kind("ummanu-553", "code", estimate_minutes="60")
+        self.assertBoardUnchanged(before)
+
+    def test_an_estimate_survives_export_and_restore(self) -> None:
+        self.create_kind("ummanu-553", "code", estimate_minutes="90")
+        self.create_kind("ummanu-555", "infra")
+        self.set_card_metadata("ummanu-468", record_type="task")
+        self.set_card_metadata("old-1", record_type="task", project="ummanu", task_type="research")
+        data_dir = Path(self.tmpdir.name) / "round-trip"
+        init_layout(data_dir)
+        export_board(
+            data_dir,
+            instance_dir=Path(self.tmpdir.name),
+            reader=self.writer.reader,
+            sprint_client=self.card_store(empty_seed()),
+        )
+
+        destination = self.restore_destination()
+        import_normalized_board(data_dir, client=destination)
+        restored = TaskReader(destination)
+        self.assertEqual(restored.show("ummanu-553")["estimate"], {"minutes": 90, "source": "card"})
+        self.assertEqual(
+            restored.show("ummanu-555")["estimate"], {"minutes": DEFAULT_ESTIMATE_MINUTES, "source": "default"}
         )
 
     def test_edit_refuses_a_reviewer_head_on_a_skipped_card(self) -> None:

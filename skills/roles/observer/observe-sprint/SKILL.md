@@ -220,13 +220,15 @@ A card is fresh, self-sufficient for a head without your context, in one of the 
 checkable Acceptance criteria, Out of scope. Work that pulls changes beyond its repository is a chain
 with `--blocked-by`. CI, the pull request and the exact-SHA gate are machinery-owned: a CI item of the
 DoD stays a sprint-close condition and never becomes a card's Acceptance criterion.
+Every `code`, `research` and `infra` card carries `--estimate-minutes <N>`, your expected worker time:
+a reference point for the stale-round signal, not a ceiling.
 
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type code --title "<short title>" \
   --state ready --sprint <sprint-ref> \
   --head <worker-profile> --review-head <reviewer-profile> \
-  --slug <2-4-words> --body-file <spec.md>
+  --slug <2-4-words> --estimate-minutes <N> --body-file <spec.md>
 python3 -P -m ummanu sprint current-task --ref <sprint-ref> --role observer --actor observer --task <card-ref>
 ```
 

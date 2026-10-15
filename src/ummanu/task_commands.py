@@ -11,6 +11,7 @@ from stat import S_ISREG
 from typing import TYPE_CHECKING
 
 from ummanu.board.backend import card_client
+from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
 from ummanu.board.models import CardState
 from ummanu.board.owner_handover import OWNER, OWNER_ROLE
 from ummanu.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
@@ -154,6 +155,13 @@ def add_task_subcommands(subparsers) -> None:
         metavar="PROJECT|none",
         help="operation only, and required there: the registered project whose production the card "
         "touches, or none; the PO service runs it only when the sprint allows that production",
+    )
+    task_create.add_argument(
+        "--estimate-minutes",
+        default="",
+        metavar="N",
+        help="code, research and infra only: the expected worker time in minutes, a positive integer; "
+        f"a reference point, not a ceiling (default {DEFAULT_ESTIMATE_MINUTES})",
     )
     _add_wait_create_args(task_create)
     task_create.add_argument("--slug", default="")
@@ -588,6 +596,7 @@ def run_task_create(args: argparse.Namespace) -> int:
             review=args.review,
             live_impact=args.live_impact,
             touches_production=args.touches_production,
+            estimate_minutes=args.estimate_minutes,
             wait=_wait_args(args),
             origin=_po_turn_origin(args.role),
             request_id=args.request_id,
