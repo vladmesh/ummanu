@@ -113,6 +113,12 @@ details.drain[open] > summary { display: none; }
 .budget-line.hard .fill { background: var(--bad); }
 .budget-line .mark { position: absolute; top: -3px; width: 1px; height: 10px; background: var(--warn); }
 .budget-line .mono { font-size: .72rem; white-space: nowrap; }
+.dod-scale { display: flex; align-items: center; gap: .6rem; font-size: .8rem; color: var(--muted); }
+.dod-scale .track { display: flex; gap: 2px; flex-grow: 1; height: 8px; border-radius: 999px; overflow: hidden; background: var(--raised); }
+.dod-scale .seg { display: block; height: 100%; background: var(--raised); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.dod-scale .seg.met { background: var(--ok); box-shadow: none; }
+.dod-scale .mono { font-size: .75rem; white-space: nowrap; }
+.dod-scale.none .muted { font-size: .75rem; }
 .po-feed { list-style:none; padding:0; margin:0; display:grid; gap:.6rem; min-width:0; max-width:100%; }
 .po-entry { border-left: 3px solid var(--line-strong); padding:.35rem .7rem; min-width:0; max-width:100%; }
 .po-entry.po-agent { border-left-color: var(--accent); background: var(--raised); }
@@ -246,10 +252,6 @@ table.kv tr + tr th { border-top: 1px solid var(--line); }
 .sprint-card > header h3 a { color: var(--ink); font-family: var(--mono); font-size: .95rem; }
 .sprint-card > .body { padding: .6rem .9rem .75rem; }
 .sprint-card .goal { margin: 0 0 .6rem; max-width: 65ch; }
-.budget { display: inline-block; width: 7rem; height: .45rem; border: 1px solid var(--line-strong); border-radius: 999px; vertical-align: middle; overflow: hidden; background: var(--raised); }
-.budget i { display: block; height: 100%; background: var(--ok); }
-.budget.signal i { background: var(--warn); }
-.budget.hard i { background: var(--bad); }
 .hero { display: flex; align-items: flex-start; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
 .hero h1 { font-family: var(--mono); font-weight: 600; }
 .hero .title { font-size: 1.05rem; color: var(--ink); flex-basis: 100%; max-width: 70ch; }

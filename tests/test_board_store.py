@@ -566,7 +566,7 @@ class SchemaModelTests(unittest.TestCase):
         self.assertNotIn("alembic_version", schema.metadata.tables)
 
     def test_jsonb_is_exactly_the_columns_section_3_10_names(self) -> None:
-        """Eleven with native PO input metadata (J11)."""
+        """Twelve with the sprint's DoD items (J12)."""
         from sqlalchemy.dialects.postgresql import JSONB
 
         found = {
@@ -592,8 +592,8 @@ class SchemaModelTests(unittest.TestCase):
         # 56 since `0022` added `origin_returns` with three (secretary-1792); 57 since `0023` added the
         # sprint's e2e counts (secretary-1796); 58 since `0026` added the local-run array shape;
         # 59 since `0027` added quoted decisions; 60 with `0029`'s typed PO wait shape;
-        # 61 with `0030`'s PO input metadata object.
-        self.assertEqual(len(checks), 61, "§3.13 counts 61 CHECK constraints at the head revision")
+        # 61 with `0030`'s PO input metadata object; 62 with `0031`'s DoD item array.
+        self.assertEqual(len(checks), 62, "§3.13 counts 62 CHECK constraints at the head revision")
         for vocabulary in (
             "state IN ('active','archived')",
             "priority IN ('P0','P1','P2','P3')",
@@ -719,6 +719,7 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(
             revisions,
             [
+                "0031_sprint_dod_items",
                 "0030_po_input_context",
                 "0029_po_channel",
                 "0028_owner_turns",

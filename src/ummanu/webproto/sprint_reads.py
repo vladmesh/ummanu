@@ -924,6 +924,7 @@ class SprintSections(SectionSet):
                 "card_dispositions": list(decisions.get("cards") or []),
                 "archived_tasks": list(payload.get("archived_tasks") or []),
                 "disposed_tasks": list(payload.get("disposed_tasks") or []),
+                "dod_issues": list(payload.get("dod_issues") or []),
                 "closeout": _closeout_of(payload.get("closeout")),
                 "reason": f"the committed audit holds this close of {reference}",
             }
@@ -1716,6 +1717,7 @@ def _identity(row: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
         "allowed_productions": list(view.get("allowed_productions") or []),
         "owner_decisions": list(view.get("owner_decisions") or []),
         "local_run_exceptions": view.get("local_run_exceptions", []),
+        "dod": row["dod"],
         "budget": view.get("budget"),
     }
 
@@ -2019,6 +2021,7 @@ _CLOSE_BLANK: dict[str, Any] = {
     "card_dispositions": None,
     "archived_tasks": None,
     "disposed_tasks": None,
+    "dod_issues": None,
     "closeout": None,
     "reason": None,
 }
@@ -2284,6 +2287,8 @@ def _sprint_value(sprint: dict[str, Any] | None) -> dict[str, Any] | None:
         "ref": str(sprint.get("ref") or ""),
         "goal": str(sprint.get("goal") or ""),
         "definition_of_done": str(sprint.get("definition_of_done") or ""),
+        # Items, weights and progress, decided by the reader; a client draws them, never recounts.
+        "dod": sprint["dod"],
         "status": status,
         "product": sprint.get("product"),
         "issues": sprint.get("issues"),

@@ -392,6 +392,11 @@ class ProductIssueTransaction:
         return document
 
 
+def issue_reference(request_id: str) -> str:
+    """The reference the Issue created under this request id carries."""
+    return "issue:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
+
+
 def ensure_swimlane(client: SqlCardClient, board_id: int, name: str) -> int:
     """The id of the board's active swimlane called ``name``, created when the board has none.
 
@@ -1252,16 +1257,18 @@ class ProductIssueStore:
         actor: str,
         request_id: str | None = None,
         role: str = "po",
+        sprint_close: str = "",
     ) -> dict[str, Any]:
         """File one Issue: the PO for any product, the observer for the product of its own sprint.
 
         An observer's Issue carries the product of the sprint the head was launched for, proven by
         the sprint writer's identity guard, and names that sprint among its related refs, so the
         `entity.created` event says which sprint filed it as well as who and in what role.
+        `sprint_close` names the sprint whose owner close files this Issue, as a related ref.
         """
         admit_role(role, actor, {"po", "observer"})
         request_id = request_id or str(uuid.uuid4())
-        related: tuple[str, ...] = ()
+        related: tuple[str, ...] = (sprint_close,) if sprint_close else ()
         if role == "observer":
             sprint = self._observer_sprint(role=role, actor=actor, request_id=request_id)
             sprint_product = str(sprint.get("product") or "").removeprefix("product:")
@@ -1286,8 +1293,7 @@ class ProductIssueStore:
                 "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)",
                 2,
             )
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
-        reference = f"issue:{digest}"
+        reference = issue_reference(request_id)
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)

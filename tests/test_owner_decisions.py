@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from ummanu.board import e2e_record, owner_decisions, owner_events
+from ummanu.board import e2e_record, owner_decisions, owner_events, sprint_dod
 from ummanu.board.production_rights import rights_note
 from ummanu.board.sprint_write import SprintCreateIntent
 from ummanu.data import normalize_sprint_entity
@@ -144,7 +144,7 @@ class DecisionTests(unittest.TestCase):
         from ummanu.web.page_sprint import _sprint_tabs
         from ummanu.webproto.sprint_reads import _sprint_value
         entry = recorded(dict(answer(), quotation="<script>quoted</script>"))
-        value = _sprint_value({"owner_decisions": [entry]})
+        value = _sprint_value({"owner_decisions": [entry], "dod": sprint_dod.section(None)})
         rendered = _sprint_tabs("sprint:7", value, {})
         self.assertIn("stop-1", rendered)
         self.assertIn("evt_1", rendered)

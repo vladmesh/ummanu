@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import unittest
 
+from ummanu.board import sprint_dod
 from ummanu.web import page_assets, page_overview, page_parts, page_po
 
 
@@ -160,6 +161,31 @@ class BudgetLineTests(unittest.TestCase):
             'class="budget-line hard"',
             page_parts._budget_line({"total": 30, "thresholds": {"signal": 12, "hard": 30}, "hard_reached": True}),
         )
+
+
+class DodScaleTests(unittest.TestCase):
+    @staticmethod
+    def items(*weights: int) -> list[dict]:
+        items = sprint_dod.new_items([f"fact {index}" for index in range(1, len(weights) + 1)])
+        for index, weight in enumerate(weights, 1):
+            items = sprint_dod.weighed(items, f"d{index}", weight, "beside the others")
+        return items
+
+    def test_the_scale_draws_a_segment_per_item_by_its_share(self) -> None:
+        items = sprint_dod.met(self.items(3, 1), "d2", "PR 5", {"role": "po", "actor": "po", "at": "now"})
+
+        drawn = page_parts._dod_scale(sprint_dod.section(items))
+
+        self.assertIn('class="seg open" style="flex:0.7500 1 0"', drawn)
+        self.assertIn('class="seg met" style="flex:0.2500 1 0"', drawn)
+        self.assertIn("1 of 2 items met · 25%", drawn)
+        self.assertNotIn("not estimated", drawn)
+
+    def test_an_unweighed_scale_says_so_and_a_free_text_dod_draws_none(self) -> None:
+        self.assertIn("not estimated", page_parts._dod_scale(sprint_dod.section(sprint_dod.new_items(["a"]))))
+        drawn = page_parts._dod_scale(sprint_dod.section(None))
+        self.assertNotIn('class="seg', drawn)
+        self.assertIn("free text", drawn)
 
 
 class AttentionTests(unittest.TestCase):

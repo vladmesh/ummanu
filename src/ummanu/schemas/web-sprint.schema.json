@@ -902,6 +902,9 @@
         },
         "owner_decisions": {
           "$ref": "#/$defs/owner_decisions"
+        },
+        "dod": {
+          "$ref": "#/$defs/dod"
         }
       },
       "allOf": [
@@ -1197,6 +1200,9 @@
                 },
                 "owner_decisions": {
                   "$ref": "#/$defs/owner_decisions"
+                },
+                "dod": {
+                  "$ref": "#/$defs/dod"
                 }
               }
             }
@@ -1763,6 +1769,16 @@
                 "string",
                 "null"
               ]
+            },
+            "dod_issues": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "description": "The issue an owner close filed for each unmet Definition of Done item: `{item, issue, weight}`.",
+              "items": {
+                "type": "object"
+              }
             }
           }
         },
@@ -1955,6 +1971,9 @@
                 },
                 "owner_decisions": {
                   "$ref": "#/$defs/owner_decisions"
+                },
+                "dod": {
+                  "$ref": "#/$defs/dod"
                 }
               }
             }
@@ -2290,6 +2309,115 @@
               "minLength": 1
             }
           }
+        }
+      }
+    },
+    "dod": {
+      "type": "object",
+      "description": "The sprint's addressable Definition of Done items and the progress they give, decided by the reader. `structured` false is a free-text DoD: no items and no progress, never items parsed out of prose. Until every item is weighed, every item counts as weight 1 and `estimated` is false.",
+      "additionalProperties": false,
+      "required": [
+        "structured",
+        "reason",
+        "items",
+        "estimated",
+        "met",
+        "total",
+        "progress"
+      ],
+      "properties": {
+        "structured": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "text",
+              "state",
+              "weight",
+              "weight_reason",
+              "evidence",
+              "met_by",
+              "share"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^d[1-9][0-9]*$"
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "state": {
+                "enum": [
+                  "open",
+                  "met"
+                ]
+              },
+              "weight": {
+                "enum": [
+                  1,
+                  2,
+                  3,
+                  5,
+                  8,
+                  13,
+                  null
+                ]
+              },
+              "weight_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "evidence": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "met_by": {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "share": {
+                "type": "number",
+                "description": "This item's part of the scale: its counted weight over the sum."
+              }
+            }
+          }
+        },
+        "estimated": {
+          "type": "boolean"
+        },
+        "met": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "progress": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Met weight over all weight, 0 to 1; null without items."
         }
       }
     }
