@@ -5061,7 +5061,7 @@ class ReportDurabilityGateTests(CardStoreCase):
         self.assertEqual(len(head), 40)
         comment = self.writer.reader.show("ummanu-468")["comments"][-1]
         self.assertEqual(comment["marker"], "report:partial")
-        self.assertIn("## Propose to extract", comment["comment"])
+        self.assertIn("## Propose to extract", comment["body"])
 
         (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(self.workspace), "commit", "-qam", "more"], check=True, capture_output=True)
