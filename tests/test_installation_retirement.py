@@ -130,8 +130,8 @@ class InstallationRetirementTests(unittest.TestCase):
             path = ROOT / name
             if not name or not path.is_file() or path.is_symlink():
                 continue
-            if path == Path(__file__) or path.name == "test_old_name_guard.py":
-                continue  # exact negative guard fixtures, never executable dependencies
+            if path == Path(__file__):
+                continue  # exact negative fixtures, never executable dependencies
             try:
                 source = path.read_text()
             except UnicodeDecodeError:

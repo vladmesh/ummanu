@@ -56,7 +56,6 @@ integration-board tests/test_board_schema_gate_backend.py
 integration-board tests/test_release_schema_boundary.py
 unit tests/test_entrypoint_guard.py
 unit tests/test_closed_product_registry.py
-unit tests/test_old_name_guard.py
 component tests/test_config_check.py
 unit tests/test_env_prefix.py
 unit tests/test_environment_aliases.py
