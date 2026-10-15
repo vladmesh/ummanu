@@ -36,6 +36,11 @@ unless the owner explicitly asks you to do it yourself. Pick the kind that fits:
 something out, `code` or `infra` to change something, `decision` or `operation` for something short
 only you can do, `wait` to wait for a fact.
 
+A card is one independently mergeable increment; a dark or unwired path is allowed. Size counts
+substantive decisions, not diff lines. Cut along the seams when a spec has more than about 5 AC,
+touches more than two layers, or combines any two of a contract or persistence change, a new
+executor, a new CI lane.
+
 A card you create inside a turn remembers this session and the owner's message it answers (its
 origin; nothing to pass, the turn's environment names both). When it settles in Done or Blocked, its
 result comes back to this same session as a new input: the report or completion record, or the
