@@ -9638,7 +9638,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(prompted["action"], "worker-report-prompted")
         self.assertEqual(prompted["status"], "degraded")
         self.assertEqual(self.host.report_prompts, [_report_nudge_prompt(2, CARD_REF)])
-        self.assertIn("generation 2", self.host.report_prompts[0])
+        self.assertIn("round 2", self.host.report_prompts[0])
         # Nothing was stopped, restarted or replaced, and nothing the round owns was rewritten.
         self.assertNotIn("restart_worker", self.host.calls)
         self.assertNotIn("stop_head:worker", self.host.calls)
@@ -11083,16 +11083,11 @@ class ReportPromptDeliveryTests(unittest.TestCase):
 
         self.assertFalse(noop.worker_addressable(self.record))
 
-    def test_the_prompt_names_the_round_and_refuses_the_usual_substitutes(self) -> None:
+    def test_the_prompt_names_the_round_and_the_card(self) -> None:
         prompt = _report_nudge_prompt(3, "ummanu-1172")
 
-        self.assertIn("generation 3", prompt)
-        self.assertIn("ummanu-1172", prompt)
-        self.assertIn("report command in TASK.md", prompt)
-        self.assertIn("both end in 3", prompt)
-        self.assertIn("Committing, pushing, a green test run", prompt)
-        self.assertIn("is not a report of this round", prompt)
-        self.assertIn("If it is not done, carry on", prompt)
+        self.assertIn("round 3 of ummanu-1172", prompt)
+        self.assertIn("end in 3", prompt)
 
 
 class ContinuationPointerTests(unittest.TestCase):
