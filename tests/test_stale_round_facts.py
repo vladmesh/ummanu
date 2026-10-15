@@ -9,16 +9,20 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
 from ummanu.board.task_protocol.rows import is_significant_card_event, stale_round_fact
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.observer import render_observer_wake_context
 from ummanu.dispatch.stale_round import (
+    DEFAULT_QUIET_MINUTES,
     ESTIMATE_FACTOR,
+    QUIET_MINUTES_ENV,
     RULE_ESTIMATE,
     RULE_QUIET,
     WorkspaceReading,
+    quiet_seconds,
     read_round_workspace,
     record_stale_round,
     round_facts,
@@ -130,6 +134,11 @@ class StaleRuleTests(unittest.TestCase):
         unknown = WorkspaceReading(unknown="checkout gone")
         self.assertEqual(self.rule(unknown, elapsed=3600, verdict=alive), "")
 
+
+    def test_a_quiet_minutes_value_that_is_not_a_positive_whole_number_reads_as_the_default(self) -> None:
+        for value in ("0", "-3", "abc", ""):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {QUIET_MINUTES_ENV: value}):
+                self.assertEqual(quiet_seconds(), DEFAULT_QUIET_MINUTES * 60)
 
 class _Writer:
     """The card writer's `stale_round`, idempotent by request id like the audit it stands for."""

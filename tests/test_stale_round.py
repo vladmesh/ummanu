@@ -6,6 +6,7 @@ starts at its own `worker_started_at` and every workspace timestamp is a reading
 
 from __future__ import annotations
 
+import os
 import time
 import unittest
 from unittest import mock
@@ -15,7 +16,12 @@ from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.task_protocol.rows import is_significant_card_event, stale_round_fact
 from ummanu.dispatch import wait_vitality, worker_continuation
-from ummanu.dispatch.stale_round import DEFAULT_QUIET_MINUTES, ESTIMATE_FACTOR, WorkspaceReading
+from ummanu.dispatch.stale_round import (
+    DEFAULT_QUIET_MINUTES,
+    ESTIMATE_FACTOR,
+    QUIET_MINUTES_ENV,
+    WorkspaceReading,
+)
 
 ESTIMATE_SECONDS = ESTIMATE_FACTOR * DEFAULT_ESTIMATE_MINUTES * 60
 QUIET_SECONDS = DEFAULT_QUIET_MINUTES * 60
@@ -122,6 +128,29 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
                     f" Commits since base: 1, newest {_utc(self.start)}."
                     " Diff against base: 2 files, +10/-3 lines."
                     f" Last change: {_utc(self.start)}, {DEFAULT_QUIET_MINUTES} min ago. {RECORDED_ONLY}"
+                )
+            ],
+        )
+
+    def test_the_quiet_threshold_reads_its_minutes_from_the_environment(self) -> None:
+        minutes = DEFAULT_QUIET_MINUTES // 3
+        quiet = minutes * 60
+        self.enterContext(mock.patch.dict(os.environ, {QUIET_MINUTES_ENV: str(minutes)}))
+        self.host.round_workspace_result = WorkspaceReading(newest_file_at=self.start)
+
+        self._walk_to(self.start + quiet - 1, busy=False)
+        self.assertEqual(self._stale_comments(), [])
+        self._tick_at(self.start + quiet, busy=False)
+
+        self.assertEqual(
+            self._stale_comments(),
+            [
+                (
+                    "Stale round: rule quiet (no commit or file change for"
+                    f" {minutes} min while the head is alive), report generation 1."
+                    f" Elapsed {minutes} min; estimate {DEFAULT_ESTIMATE_MINUTES} min (default)."
+                    " Commits since base: 0. Diff against base: 0 files, +0/-0 lines."
+                    f" Last change: {_utc(self.start)}, {minutes} min ago. {RECORDED_ONLY}"
                 )
             ],
         )
