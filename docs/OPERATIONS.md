@@ -3338,6 +3338,9 @@ three-hourly sweep; the first skip for retro and the steward's deep sweep) with 
 inspect and stop it rather than wait. `ummanu automations health` is red for an agent whose last three head
 dispatches were busy skips. A steward tick refused over a head launched more than `STALE_BUSY_HEAD_SECONDS` (6 h)
 ago closes its report card Blocked with the run id, launch time and refusal; a shorter skip closes it Done.
+Doctor reports `automation_lock_refused` (red) when an agent's latest three or more `runs.jsonl` records are all
+`lock-refused`, naming the holder pid and the first refusal; any later record from a tick clears it. Every
+`runs.jsonl` record carries `source`: `unit:<service>`, `automation:<head scope>` or `manual`.
 A head that only finished its turn and sat idle (a Codex TUI keeps its composer open after the turn) is
 not this finding any more: the next tick ends it with `stop_if_quiescent` once its supervisor shows no turn
 open, no delivery in flight and no output for `IDLE_HEAD_GRACE_SECONDS` (10 min), logs

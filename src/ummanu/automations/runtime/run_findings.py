@@ -2,6 +2,8 @@
 
 Busy-without-advance: a supervised head that keeps a role's ticks answered `supervised-busy-skip`
 past the role's threshold while nothing advances is stuck, and doctor names it instead of waiting.
+Lock-refused: ticks that keep losing the run lock with no record from any tick between them mean
+the lock's holder is stuck.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ BUSY_WITHOUT_ADVANCE_HOURS = {
 }
 #: The progress record that answers each dispatch event; `memory_write` with result ok also counts.
 _PROGRESS = {"dispatch": "advance", "deep-sweep": "deep-sweep-advance"}
+#: Consecutive `lock-refused` records that make a red finding.
+LOCK_REFUSED_STREAK = 3
 BUSY_SKIP = "supervised-busy-skip"
 _BUSY = frozenset({BUSY_SKIP, "busy-skip"})
 # A fresh head starts the clock again: its predecessor's stall is no longer what blocks ticks.
@@ -104,3 +108,27 @@ def trailing_busy_skips(records: list[dict]) -> int:
         elif action in _STARTED or action == "supervised-start-failed":
             break
     return count
+
+
+def lock_refused(agent: str, records: list[dict]) -> dict[str, object] | None:
+    """The finding when the latest LOCK_REFUSED_STREAK or more records of `agent` are all lock refusals."""
+    streak: list[dict] = []
+    for record in reversed(records):
+        if record.get("event") != "lock-refused":
+            break
+        streak.append(record)
+    if len(streak) < LOCK_REFUSED_STREAK:
+        return None
+    first = streak[-1]
+    holder = streak[0].get("holder_pid")
+    return {
+        "code": "automation_lock_refused",
+        "agent": agent,
+        "holder_pid": holder,
+        "refused_since": first.get("ts"),
+        "refusals": len(streak),
+        "message": (
+            f"{len(streak)} ticks in a row refused the run lock since {first.get('ts')}; "
+            f"holder pid {holder}"
+        ),
+    }

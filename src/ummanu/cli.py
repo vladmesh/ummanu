@@ -631,6 +631,8 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"root filesystem: {finding['message']}")
         elif finding["code"] == "automation_busy_without_advance":
             print(f"{finding['agent']}: {finding['message']}")
+        elif finding["code"] == "automation_lock_refused":
+            print(f"red: {finding['code']}: {finding['agent']}: {finding['message']}")
         elif finding["code"] == "head_fallback":
             print(f"error: head fallback: {finding['message']}")
         elif finding["code"] == "dispatcher_tick_p95_slow":
@@ -1039,7 +1041,12 @@ def doctor_live_root_findings(report, args: argparse.Namespace, *, inspect_host:
 
 def automation_run_findings(data_dir: Path | None) -> list[dict[str, object]]:
     """Each standing agent's findings from its `runs.jsonl` under the data directory's `automation-state`."""
-    from ummanu.automations.runtime.run_findings import STANDING_AGENTS, busy_without_advance, read_runs
+    from ummanu.automations.runtime.run_findings import (
+        STANDING_AGENTS,
+        busy_without_advance,
+        lock_refused,
+        read_runs,
+    )
 
     if data_dir is None:
         return []
@@ -1047,6 +1054,8 @@ def automation_run_findings(data_dir: Path | None) -> list[dict[str, object]]:
     for agent in STANDING_AGENTS:
         records = read_runs(data_dir / "automation-state" / agent / "runs.jsonl")
         findings.extend(busy_without_advance(agent, records))
+        if (refused := lock_refused(agent, records)) is not None:
+            findings.append(refused)
     return findings
 
 

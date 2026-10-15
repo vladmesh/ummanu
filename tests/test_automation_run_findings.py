@@ -92,6 +92,25 @@ class RunFindingsTests(unittest.TestCase):
         self.assertEqual(product_cli.automation_run_findings(self.data / "missing"), [])
         self.assertEqual(product_cli.automation_run_findings(None), [])
 
+    def test_three_lock_refusals_in_a_row_are_a_red_finding_naming_the_holder(self) -> None:
+        refused = {"event": "lock-refused", "holder_pid": 4242}
+        self._log("curator", *[(timedelta(minutes=minutes), refused) for minutes in (180, 120, 60)])
+        [finding] = product_cli.automation_run_findings(self.data)
+        self.assertEqual(finding["code"], "automation_lock_refused")
+        self.assertEqual((finding["agent"], finding["holder_pid"]), ("curator", 4242))
+        self.assertEqual(finding["refused_since"], (self.now - timedelta(minutes=180)).isoformat())
+
+    def test_a_successful_tick_clears_the_lock_refusal_streak(self) -> None:
+        refused = {"event": "lock-refused", "holder_pid": 4242}
+        self._log(
+            "curator",
+            *[(timedelta(minutes=minutes), refused) for minutes in (180, 120, 60)],
+            (timedelta(minutes=5), {"event": "precheck", "result": "no-change"}),
+        )
+        self.assertEqual(product_cli.automation_run_findings(self.data), [])
+        self._log("curator", *[(timedelta(minutes=minutes), refused) for minutes in (120, 60)])
+        self.assertEqual(product_cli.automation_run_findings(self.data), [])
+
 
 if __name__ == "__main__":
     unittest.main()
