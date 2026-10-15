@@ -381,7 +381,7 @@ def read_release_gate(
             attempt_id,
             step="assessment",
             action="release-gate-transport-blocked",
-            prefix="Observer decision: release. ",
+            prefix="Observer decision: accept. ",
         ), None
     if kind != "drift":
         # Only a result handed back to this path clears the transport retry budget.
@@ -423,7 +423,7 @@ def read_release_gate(
             attempt_id,
             blocked_reason="implementation" if kind == "drift" else "gate",
             action=f"release-{kind}-blocked",
-            reason=f"Observer decision: release. {summary}",
+            reason=f"Observer decision: accept. {summary}",
             step="assessment",
             outcome=f"release {kind}",
         ), None

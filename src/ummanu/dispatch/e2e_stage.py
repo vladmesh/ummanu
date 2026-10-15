@@ -570,7 +570,7 @@ def _act(
             # An accept decision opens no rework round: the card stops with the evidence on it.
             _close(
                 run,
-                f"Observer decision: release. The e2e stage is red: {summary}. The card is Blocked "
+                f"Observer decision: accept. The e2e stage is red: {summary}. The card is Blocked "
                 f"rather than released.\nTail:\n```\n{log}\n```",
             )
             _persist(runtime, ref, state)
