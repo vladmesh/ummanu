@@ -452,6 +452,13 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     _add_instance(memory_verify, data_dir=True)
     memory_verify.set_defaults(handler=run_memory_verify)
 
+    memory_revoke = memory_subcommands.add_parser(
+        "revoke", help="revoke one launch-bound memory access grant by its id"
+    )
+    _add_instance(memory_revoke, data_dir=True)
+    memory_revoke.add_argument("--grant", required=True, help="the grant id, the part of the bearer before '.'")
+    memory_revoke.set_defaults(handler=run_memory_revoke)
+
     memory_reindex = memory_subcommands.add_parser(
         "reindex", help="rebuild the derived memory index from the local journal"
     )
@@ -1844,6 +1851,21 @@ def run_export_memory(args: argparse.Namespace) -> int:
     print(f"memory facts: {result.count}")
     print(f"export: {result.path}")
     print("status: ok")
+    return 0
+
+
+def run_memory_revoke(args: argparse.Namespace) -> int:
+    from ummanu.memory import access
+
+    data_dir = _data_dir_from_args(args, validate_tree=False)
+    if data_dir is None:
+        return 1
+    try:
+        path = access.revoke_grant(args.grant, data_dir=data_dir)
+    except access.MemoryAccessError as exc:
+        print(f"ummanu memory revoke: {exc}")
+        return 1
+    print(f"revoked: {path}")
     return 0
 
 

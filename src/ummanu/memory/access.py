@@ -208,6 +208,18 @@ def issue_grant(
     return MemoryAccessGrant(grant_id, token, identity)
 
 
+def revoke_grant(grant_id: str, *, data_dir: str | Path | None = None) -> Path:
+    """Remove one stored grant so its bearer resolves to `runtime_identity_unknown`; return its path."""
+    if not re.fullmatch(r"[0-9a-f]{32}", grant_id):
+        raise MemoryAccessError(f"memory grant id {grant_id!r} is not 32 lowercase hex digits")
+    path = bindings_dir(data_dir) / f"{grant_id}.json"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        raise MemoryAccessError(f"memory grant {grant_id} does not exist") from None
+    return path
+
+
 def resolve_token(
     token: object, *, data_dir: str | Path | None = None, now: float | None = None
 ) -> MemoryReadIdentity | MemoryAccessDenial:

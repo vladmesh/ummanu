@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import contextlib
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from ummanu.memory import access as memory_access
-from ummanu.memory import grant_env
+from ummanu.memory import access as memory_access, grant_env
 from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
 
 
@@ -148,6 +147,20 @@ class MemoryAccessTests(unittest.TestCase):
                 memory_access.standing_subject("other"),
                 data_dir=self.data_dir,
             )
+
+    def test_a_revoked_grant_no_longer_resolves(self) -> None:
+        grant = memory_access.issue_grant(
+            self.head_run("worker", TaskRef.card("card-1")),
+            memory_access.card_subject("card-1", "ummanu"),
+            data_dir=self.data_dir,
+            now=100,
+        )
+        memory_access.revoke_grant(grant.grant_id, data_dir=self.data_dir)
+        for grant_id in (grant.grant_id, "../escape"):
+            with self.subTest(grant_id=grant_id), self.assertRaises(memory_access.MemoryAccessError):
+                memory_access.revoke_grant(grant_id, data_dir=self.data_dir)
+
+        self.assertEqual(self.resolve(grant), memory_access.MemoryAccessDenial("runtime_identity_unknown"))
 
     def test_scheduled_roles_have_explicit_scopes(self) -> None:
         curator = memory_access.issue_grant(

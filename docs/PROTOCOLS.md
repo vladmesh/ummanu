@@ -3699,7 +3699,9 @@ The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is
 writes a digest-only access grant bound to that exact `HeadRun` and puts the opaque bearer in the
 launched process, not in `runtime.env`. The service resolves the grant and rechecks the HeadRun
 heartbeat on every read. Missing, expired, malformed, foreign or stopped bindings return a typed
-data-free denial. `caller`, `scope` and other tool arguments are never authority.
+data-free denial. `caller`, `scope` and other tool arguments are never authority. The bearer never
+goes on a launch command line, which sudo logs. `ummanu memory revoke --grant <id>` (the bearer part
+before `.`) deletes one grant so its bearer resolves as unknown.
 
 Resolved read policy: an interactive PO has installation-wide read; a worker or reviewer has exactly its
 card's `project:<id>` plus `product:ummanu` (also when the project is `ummanu`); an observer has

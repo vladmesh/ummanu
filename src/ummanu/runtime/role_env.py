@@ -119,6 +119,9 @@ UNIT_BOUND_ENV = (
 )
 # Launcher-supplied identity only: runtime.env must never let a head claim another sprint or name.
 LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV, BOARD_ACTOR_ENV)
+# Bearer values: they reach a head through its launch environment, never a command line that sudo
+# logs and every same-user process can read.
+LAUNCH_SECRET_ENV = (MEMORY_ACCESS_TOKEN_ENV,)
 # What a launched process has to be told about the installation it belongs to.
 LAUNCH_BOUND_ENV = (RUNTIME_ENV_FILE_ENV, RUNTIME_PYTHONPATH_ENV, "UMMANU_INSTANCE", "UMMANU_REPO")
 
