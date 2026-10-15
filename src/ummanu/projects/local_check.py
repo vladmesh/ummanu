@@ -43,9 +43,59 @@ _PYTEST_FLAGS = frozenset({
 
 def _relative_path(value: str) -> Path:
     path = Path(value.partition("::")[0])
-    if not value.partition("::")[0] or not str(path) or value.startswith("-") or path.is_absolute() or ".." in path.parts:
-        raise ValueError("expected a relative collection path without '..' or a leading '-'")
+    # pytest expands a leading '@' into an argfile's contents, which can carry any path or option.
+    if (
+        not value.partition("::")[0]
+        or not str(path)
+        or value.startswith(("-", "@"))
+        or path.is_absolute()
+        or ".." in path.parts
+    ):
+        raise ValueError("expected a relative collection path without '..' or a leading '-' or '@'")
     return path
+
+
+def _ambiguous(reason: str) -> BroadCheckError:
+    return BroadCheckError(
+        "ambiguous_pytest_declaration",
+        f"{reason}; declare broad_check.collection_roots explicitly; execution only in CI",
+    )
+
+
+def _positional_positions(args: tuple[str, ...], *, strict: bool) -> list[int]:
+    """Indexes of the positional collection roots in a pytest argv.
+
+    Strict refuses an option whose arity is unknown; lenient treats the token after it as a
+    possible value and returns only the roots that are positional for certain.
+    """
+    positions = []
+    index = 0
+    positional_only = False
+    while index < len(args):
+        arg = args[index]
+        if positional_only or not arg.startswith("-"):
+            positions.append(index)
+        elif arg == "--":
+            positional_only = True
+        elif "=" in arg:
+            pass
+        elif arg in _PYTEST_VALUES:
+            has_value = index + 1 < len(args) and not args[index + 1].startswith("-")
+            if has_value:
+                index += 1
+            elif strict and arg not in _PYTEST_OPTIONAL_VALUES:
+                raise _ambiguous(f"option {arg!r} lacks an unambiguous separate value")
+        elif arg in _PYTEST_FLAGS or re.fullmatch(r"-[vq]+", arg):
+            pass
+        elif any(arg.startswith(option) and len(arg) > len(option)
+                 for option in ("-m", "-k", "-p", "-c", "-o", "-W", "-r")):
+            pass
+        elif strict:
+            raise _ambiguous(f"unknown option {arg!r}")
+        elif index + 1 < len(args) and not args[index + 1].startswith("-"):
+            index += 1
+        index += 1
+    return positions
 
 
 @dataclass(frozen=True)
@@ -62,60 +112,33 @@ class PytestSelection:
 
     @classmethod
     def resolve(cls, args: tuple[str, ...], explicit: tuple[str, ...] | None = None) -> PytestSelection:
-        def ambiguous(reason: str) -> BroadCheckError:
-            return BroadCheckError(
-                "ambiguous_pytest_declaration",
-                f"{reason}; declare broad_check.collection_roots explicitly; execution only in CI",
-            )
-
         if explicit is not None:
             if not explicit or len(set(explicit)) != len(explicit):
-                raise ambiguous("collection_roots must be nonempty and unique")
+                raise _ambiguous("collection_roots must be nonempty and unique")
             positions = []
             for entry in explicit:
                 if args.count(entry) != 1:
-                    raise ambiguous(f"collection root {entry!r} must occur exactly once in broad_check.args")
+                    raise _ambiguous(f"collection root {entry!r} must occur exactly once in broad_check.args")
                 position = args.index(entry)
                 if position and args[position - 1] in _PYTEST_VALUES:
-                    raise ambiguous(f"collection root {entry!r} is an option value")
+                    raise _ambiguous(f"collection root {entry!r} is an option value")
                 positions.append(position)
             positions.sort()
+            unlisted = [args[index] for index in _positional_positions(args, strict=False) if index not in positions]
+            if unlisted:
+                raise _ambiguous(f"collection_roots must list every positional root; missing {unlisted!r}")
         else:
-            positions = []
-            index = 0
-            positional_only = False
-            while index < len(args):
-                arg = args[index]
-                if positional_only or not arg.startswith("-"):
-                    positions.append(index)
-                elif arg == "--":
-                    positional_only = True
-                elif "=" in arg:
-                    pass
-                elif arg in _PYTEST_VALUES:
-                    has_value = index + 1 < len(args) and not args[index + 1].startswith("-")
-                    if has_value:
-                        index += 1
-                    elif arg not in _PYTEST_OPTIONAL_VALUES:
-                        raise ambiguous(f"option {arg!r} lacks an unambiguous separate value")
-                elif arg in _PYTEST_FLAGS or re.fullmatch(r"-[vq]+", arg):
-                    pass
-                elif any(arg.startswith(option) and len(arg) > len(option)
-                         for option in ("-m", "-k", "-p", "-c", "-o", "-W", "-r")):
-                    pass
-                else:
-                    raise ambiguous(f"unknown option {arg!r}")
-                index += 1
+            positions = _positional_positions(args, strict=True)
         roots = tuple(args[position] for position in positions)
         if not roots:
-            raise ambiguous("pytest declaration has no positional collection roots")
+            raise _ambiguous("pytest declaration has no positional collection roots")
         try:
             for entry in roots:
                 _relative_path(entry)
                 if "::" in entry:
                     raise ValueError("collection roots cannot contain node-ids")
         except ValueError as exc:
-            raise ambiguous(f"invalid collection_roots: {exc}") from exc
+            raise _ambiguous(f"invalid collection_roots: {exc}") from exc
         return cls(args, roots, tuple(positions))
 
     def select(self, checkout: Path, selectors: tuple[str, ...]) -> tuple[str, ...]:

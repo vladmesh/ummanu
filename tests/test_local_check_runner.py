@@ -284,9 +284,21 @@ class RunnerOwnedSelectorTests(LocalCheckFixture, unittest.TestCase):
             (("tests",), ("missing",)), (("tests", "tests"), ("tests",)),
             (("../tests",), ("../tests",)), (("/tests",), ("/tests",)),
             (("--ignore", "tests"), ("tests",)), (("tests::test_x",), ("tests::test_x",)),
+            (("tests/unit", "tests/tooling"), ("tests/unit",)), (("@args.txt",), ("@args.txt",)),
+            (("@args.txt",), None), (("--plugin", "value", "tests", "-q", "more"), ("tests",)),
         ):
-            with self.subTest(args=args), self.assertRaises(broad_check.BroadCheckError):
+            with self.subTest(args=args), self.assertRaises(broad_check.BroadCheckError) as raised:
                 PytestSelection.resolve(args, roots)
+            self.assertEqual(raised.exception.code, "ambiguous_pytest_declaration")
+        complete = PytestSelection.resolve(("tests/unit", "tests/tooling"), ("tests/unit", "tests/tooling"))
+        self.assertEqual(complete.roots, ("tests/unit", "tests/tooling"))
+
+    def test_pytest_argfile_selector_is_refused_before_execution(self) -> None:
+        self.pytest_declaration(["."])
+        status, error, _ = self.invoke("@selectors.txt")
+        self.assertEqual(status, 2)
+        self.assertIn("outside declared pytest roots", error["error"]["message"])
+        self.process.assert_not_called()
 
     def test_pytest_subset_full_reuse_and_show_preserve_receipt_bytes(self) -> None:
         declared = ["tests", "-c", "config.ini", "-m", "not ci_only", "-q"]
