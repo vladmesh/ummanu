@@ -11,6 +11,7 @@ import json
 import re
 from pathlib import Path
 
+from ummanu.candidate_history import without_ai_attribution
 from ummanu.dispatch import github_ci
 from ummanu.dispatch.gate_receipt import is_exact_sha
 from ummanu.dispatch.gate_types import PR_BODY_SECTION_CHARS, GateResult, _fingerprint
@@ -275,34 +276,39 @@ def _pr_view(host, workspace: str, number: int) -> dict | None:
 def _refresh_pr(host, workspace: str, record, number: int, title: str, body: str) -> None:
     """Update an open gate-authored PR's title and body when necessary.
 
-Never read or change an unowned PR. Leave human-edited prose alone when
-its digest differs. Use the sent digest to avoid duplicate updates.
-A failed prose update does not invalidate already-green CI.
+Rewrite an owned PR whose remote text still matches the recorded digest; use
+the sent digest to avoid duplicate updates. In any other PR change only AI
+attribution lines, which are removed. A failed prose update does not
+invalidate already-green CI.
     """
     entry = _pr_authorship(record)
-    if entry is None or entry.number != int(number):
-        return
-    if _pr_digest(title, body) == entry.sent:
+    if entry is not None and entry.number == int(number) and _pr_digest(title, body) == entry.sent:
         return
     current = _pr_view(host, workspace, number)
     if current is None:
         return
-    if not _gate_owns_pr(record, number, str(current.get("title") or ""), str(current.get("body") or "")):
+    current_body = str(current.get("body") or "")
+    if not _gate_owns_pr(record, number, str(current.get("title") or ""), current_body):
+        cleaned = without_ai_attribution(current_body)
+        if cleaned != current_body:
+            _edit_pr(host, workspace, number, ["--body", cleaned])
         return
+    if _edit_pr(host, workspace, number, ["--title", title, "--body", body]):
+        _remember_pr(host, workspace, record, number, title, body)
+
+
+def _edit_pr(host, workspace: str, number: int, fields: list[str]) -> bool:
+    """Whether GitHub accepted the edit; a refusal leaves the record as it is for the next tick."""
     try:
         completed = github_ci._backend_call(
             host,
-            ["gh", "pr", "edit", str(number), "--title", title, "--body", body],
+            ["gh", "pr", "edit", str(number), *fields],
             "gate pr edit",
             cwd=Path(workspace),
         )
     except GateTransportError:
-        return
-    if completed.returncode != 0:
-        # GitHub refused the edit, so the pull request still carries the recorded text and the
-        # record still describes it: the next tick tries again rather than disowning the PR.
-        return
-    _remember_pr(host, workspace, record, number, title, body)
+        return False
+    return completed.returncode == 0
 
 
 def _ensure_pr(host, workspace: str, task: dict, record, branch: str, base: str) -> None:

@@ -93,12 +93,12 @@ class GateOwnerTests(unittest.TestCase):
             result = gate._github_gate(host, task, record, "/fixture", "main", ["tests"])
         self.assertEqual(result.status, "green")
         self.assertEqual([call.args[2] for call in backend.call_args_list], [
-            "gate remote branch sha", "gate publish branch", "gate pr list", "gate repo view",
+            "gate remote branch sha", "gate publish branch", "gate pr list", "gate pr view", "gate repo view",
             "gate gh api", "gate gh api",
         ])
         self.assertEqual(host.events, [
             "gate head sha", "gate remote branch sha", "gate publish branch", "commit publication",
-            "gate pr list", "gate repo view", "gate gh api", "gate gh api", "gate attestation base",
+            "gate pr list", "gate pr view", "gate repo view", "gate gh api", "gate gh api", "gate attestation base",
         ])
         self.assertEqual(host.calls[2], ([
             "git", "-C", "/fixture", "push", "--force-with-lease=refs/heads/pipeline/p-1:",

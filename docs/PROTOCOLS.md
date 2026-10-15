@@ -1026,6 +1026,10 @@ opened before the record existed, and any PR whose card lost its record to a res
 or re-adoption. Text that already matches the record is not re-sent. Anyone who can edit the
 dispatcher's production state can claim any PR; repository write access does not confer that.
 
+The one edit allowed in a PR the gate does not own removes AI attribution: a line crediting an agent
+(a generated-by footer such as a harness writes, or an agent `Co-Authored-By:`) is deleted from the
+body, the rest of the text and the title are kept, and the PR stays unowned.
+
 The description is not a condition on the code: a refused update leaves the PR and the gate verdict
 unchanged. A PR that cannot be opened at all is a gate failure, because the project's CI never runs.
 

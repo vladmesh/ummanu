@@ -49,6 +49,7 @@ def github_fixture():
         "gate remote branch sha": (0, "", ""),
         "gate publish branch": (0, "", ""),
         "gate pr list": (0, '[{"number":7,"baseRefName":"main"}]', ""),
+        "gate pr view": (0, '{"title":"p-1: Gate","body":"A person wrote this."}', ""),
         "gate repo view": (0, "org/repo", ""),
         "gate attestation base": (0, "b" * 40, ""),
     })

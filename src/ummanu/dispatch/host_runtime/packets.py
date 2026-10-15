@@ -824,23 +824,29 @@ class PromptPacketMixin:
             "asserted, and why the new contract is the right one. A silently rewritten assertion is",
             "treated as a defect of this round.",
             "",
-            "Run every check in the foreground and wait for it there. Do not put work in the",
+            "Run every local check in the foreground and wait for it there. Do not put work in the",
             "background and do not write a loop that waits for it: you have nothing to wait with.",
             "A background job reports back only at the start of your next turn, so receiving it",
-            "means ending this one, while any tool call keeps the turn open — including a no-op",
-            "call made to pass the time. A head that spent 23 minutes alternating between `true`",
-            "and announcing it would stop polling, then waited on a loop whose condition could",
-            "never hold, is why this paragraph exists (secretary-1161, 2026-08-06). Run only the",
-            "checks the contract above permits, and run each of them in the foreground.",
+            "means ending this one, while any tool call keeps the turn open, a no-op included.",
+            "Run only the checks the contract above permits.",
             "",
+            *(
+                [
+                    "The gate owns the pull request and CI: after your done report it publishes the",
+                    "branch, opens or updates the PR and runs CI on that exact commit; a red CI comes",
+                    "back to you as a red gate with its log. Do not open a PR and do not wait for CI.",
+                    "",
+                ]
+                if has_candidate(task)
+                else []
+            ),
             # In the packet every worker gets: a home file reaches only one model family.
-            "Do not add AI co-authorship to your commits. No `Co-Authored-By:` trailer naming",
-            "Claude, Codex, an assistant or any model or vendor, and no generated-by attribution",
-            "line: the dispatcher checks every commit message on your branch before it publishes",
-            "anything, and a violation bounces the card back to you as a red gate. Human",
-            "co-authors are fine. If the gate does bounce one, repair the message in this checkout",
-            "with `git commit --amend` or `git rebase -i` and report done again; nothing is",
-            "rewritten or force-pushed for you.",
+            "No AI attribution anywhere, whatever your harness defaults ask for: no `Co-Authored-By:`",
+            "trailer naming Claude, Codex, an assistant or any model or vendor, and no generated-by",
+            "line, in a commit message or a PR body. The gate checks every commit message before",
+            "it publishes anything and bounces a violation as a red gate; repair it in this checkout",
+            "with `git commit --amend` or `git rebase -i` and report done again. Human co-authors",
+            "are fine.",
             "",
             *(
                 [
