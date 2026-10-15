@@ -592,7 +592,8 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
         self.assertEqual(open_sprint_limit(None), 1)
         self.assertEqual(open_sprint_limit({}), 1)
         self.assertEqual(open_sprint_limit({"open_sprint_limit": 2}), 2)
-        for value in (0, 3, -1, 1.5, "", "2", True, False, None, [2], {"limit": 2}):
+        self.assertEqual(open_sprint_limit({"open_sprint_limit": 3}), 3)
+        for value in (0, 4, -1, 1.5, "", "2", True, False, None, [2], {"limit": 2}):
             with self.subTest(value=value):
                 config = {"open_sprint_limit": value}
                 self.assertEqual(open_sprint_limit(config), 1)
@@ -600,6 +601,7 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
         self.assertFalse(open_sprint_limit_invalid({}))
         self.assertFalse(open_sprint_limit_invalid({"open_sprint_limit": 1}))
         self.assertFalse(open_sprint_limit_invalid({"open_sprint_limit": 2}))
+        self.assertFalse(open_sprint_limit_invalid({"open_sprint_limit": 3}))
 
     def test_an_absent_or_singleton_setting_keeps_the_installation_a_singleton(self) -> None:
         """The default and an explicit 1 are the behaviour every installation has today."""
@@ -619,7 +621,7 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
 
     def test_an_invalid_setting_fails_closed_and_is_reported(self) -> None:
         """No unreadable value may widen the limit, and doctor has to name it."""
-        for setting in ("0", "3", "-1", "1.5", '""', "true", "two"):
+        for setting in ("0", "4", "-1", "1.5", '""', "true", "two"):
             with self.subTest(setting=setting):
                 self.setUp()
                 self._limit(setting)
@@ -826,6 +828,15 @@ class TwoOpenSprintAdmissionTests(TwoOpenSprintFixture):
             "installation already holds its limit of 2 open sprints: " + ", ".join(sorted([first, second])),
         )
         self.assertEqual(sorted(self._open_refs()), sorted([first, second]))
+
+    def test_a_third_disjoint_sprint_is_admitted_at_limit_three(self) -> None:
+        self._limit(3)
+        first = self._first()
+        second = self._second()["sprint"]["ref"]
+
+        third = self._third()["sprint"]["ref"]
+
+        self.assertEqual(sorted(self._open_refs()), sorted([first, second, third]))
 
     def test_a_third_sprint_that_collides_is_told_the_resource_not_the_count(self) -> None:
         """At capacity too, the refusal names the holder the caller has to close.

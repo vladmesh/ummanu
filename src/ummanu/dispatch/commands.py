@@ -42,6 +42,7 @@ def add_dispatcher_subcommands(subparsers) -> None:
         ("production-tick", run_dispatcher_production_tick),
         ("production-observe", run_dispatcher_production_observe),
         ("resource-health", run_dispatcher_resource_health),
+        ("resource-reprobe", run_dispatcher_resource_reprobe),
         ("production-run", run_dispatcher_production_run),
     ):
         command = commands.add_parser(name)
@@ -57,6 +58,10 @@ def add_dispatcher_subcommands(subparsers) -> None:
             command.add_argument("--interval-seconds", type=float, default=60.0)
             command.add_argument("--max-interval-seconds", type=float, default=300.0)
             command.add_argument("--max-ticks", type=int)
+        if name == "resource-reprobe":
+            command.add_argument(
+                "--resource", required=True, help="probe this resource now; its answer replaces any held verdict"
+            )
 
     dispatcher.set_defaults(handler=usage_handler("dispatcher subcommand required"))
 
@@ -137,7 +142,7 @@ def add_common(parser: argparse.ArgumentParser) -> None:
 def run_dispatcher_production_tick(args: argparse.Namespace) -> int:
     if getattr(args, "probe", False):
         return _run_production(args, lambda runtime: runtime.production_probe())
-    return _run_production(args, lambda runtime: runtime.production_tick())
+    return _run_production(args, lambda runtime: runtime.production_tick(), completed=_TICK_COMPLETED)
 
 
 def run_dispatcher_production_observe(args: argparse.Namespace) -> int:
@@ -151,6 +156,17 @@ def run_dispatcher_resource_health(args: argparse.Namespace) -> int:
             "status": "ok",
             "step": "resource-health",
             "resources": runtime.head_health.snapshot(),
+        },
+    )
+
+
+def run_dispatcher_resource_reprobe(args: argparse.Namespace) -> int:
+    return _run_production(
+        args,
+        lambda runtime: {
+            "status": "ok",
+            "step": "resource-reprobe",
+            "verdict": runtime.head_health.reprobe(args.resource).to_json(),
         },
     )
 
@@ -240,7 +256,15 @@ def run_head_status(args: argparse.Namespace) -> int:
     return _run_production(args, lambda runtime: head_status(runtime, workspace=args.workspace))
 
 
-def _run_production(args: argparse.Namespace, operation) -> int:
+#: A degraded tick ran to its end and reports the degradation in its JSON and tick telemetry, so the
+#: oneshot unit records success; any other status is a tick that did not finish its work.
+_TICK_COMPLETED = frozenset({"ok", "skipped", "degraded"})
+_OPERATION_COMPLETED = frozenset({"ok", "skipped"})
+
+
+def _run_production(
+    args: argparse.Namespace, operation, *, completed: frozenset[str] = _OPERATION_COMPLETED
+) -> int:
     try:
         runtime = runtime_from_args(args.instance, args.data_dir, host_mode=args.host_mode, owner=args.owner)
         # Every Codex head this operation launches resolves its CODEX_HOME against this data dir.
@@ -253,7 +277,7 @@ def _run_production(args: argparse.Namespace, operation) -> int:
         print_error({"code": "host_error", "message": str(exc)}, compact=True, sort_keys=True)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0 if result.get("status") in {"ok", "skipped"} else 3
+    return 0 if result.get("status") in completed else 3
 
 
 def _read_reason_file(path: str | None) -> str:

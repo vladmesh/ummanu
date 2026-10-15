@@ -1216,8 +1216,10 @@ class ExportTests(unittest.TestCase):
 
 
 def init_instance_repo(path: Path) -> Path:
-    """A private instance repo with one commit, the way `ummanu init` leaves it."""
+    """A private instance repo with one commit and the `ummanu` project registered."""
     path.mkdir(parents=True, exist_ok=True)
+    (path / "projects").mkdir()
+    (path / "projects" / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
     git(path, "init", "--initial-branch=main")
     git(path, "config", "user.name", "Test User")
     git(path, "config", "user.email", "test@example.invalid")

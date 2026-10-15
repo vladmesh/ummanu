@@ -15,7 +15,7 @@ with the gate's own machinery and resolves the watch to exactly one of four resu
 
 `read_merge_ci` is the one place the answers become green or red, and only from a reading that is
 complete and exact: every answer well-formed, every check run and the status naming the full merge
-commit, all check-run pages read up to `total_count`, every required check present. The check runs
+commit, all check-run pages read up to `total_count`. The check runs
 of GitHub-managed `dynamic` workflow runs (Dependabot Updates and the like) are not the merge's CI
 and are left out before anything is judged. Anything else
 (a transport error, an unreadable or malformed `gh` answer, a partial page set, a check for another
@@ -412,12 +412,11 @@ def read_merge_ci(
     - the check runs read across all pages add up to the answer's `total_count`, and so do the
       statuses;
     - the commit's `dynamic` workflow runs answered completely (`total_count` and `workflow_runs`);
-      their check runs are dropped before the checks below;
-    - every declared required check is present.
+      their check runs are dropped before the checks below.
 
     If any one of these fails the whole reading is pending, whatever the other answer says. Only
-    then is the gate's `_rollup` asked, and only here: `SUCCESS` is green, `FAILURE` red, anything
-    else pending.
+    then is the gate's `_rollup` asked, and only here: `SUCCESS` is green, `FAILURE` red (a terminal
+    failure decides even while a required check is not posted), anything else pending.
     """
 
     def pending(reason: str, seen: list[dict[str, Any]] | None = None) -> CiReading:
@@ -481,10 +480,6 @@ def read_merge_ci(
         ):
             return pending("a commit status has no context or state", runs)
     checks = runs + statuses
-    present = {_check_name(item) for item in checks}
-    missing = [name for name in required if name not in present]
-    if missing:
-        return pending("required check(s) not posted: " + ", ".join(missing), checks)
     rollup, _first = _rollup(checks, required)
     selected = _selected_checks(checks, required)
     if rollup == "SUCCESS":
@@ -492,6 +487,10 @@ def read_merge_ci(
     if rollup == "FAILURE":
         failed = [item for item in selected if _check_result(item) == "fail"]
         return CiReading("red", "", tuple(selected), tuple(failed))
+    present = {_check_name(item) for item in checks}
+    missing = [name for name in required if name not in present]
+    if missing:
+        return pending("required check(s) not posted: " + ", ".join(missing), checks)
     return pending(f"{rollup.lower()} ({len(selected)} check(s))", selected)
 
 

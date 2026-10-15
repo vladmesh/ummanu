@@ -452,6 +452,13 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     _add_instance(memory_verify, data_dir=True)
     memory_verify.set_defaults(handler=run_memory_verify)
 
+    memory_revoke = memory_subcommands.add_parser(
+        "revoke", help="revoke one launch-bound memory access grant by its id"
+    )
+    _add_instance(memory_revoke, data_dir=True)
+    memory_revoke.add_argument("--grant", required=True, help="the grant id, the part of the bearer before '.'")
+    memory_revoke.set_defaults(handler=run_memory_revoke)
+
     memory_reindex = memory_subcommands.add_parser(
         "reindex", help="rebuild the derived memory index from the local journal"
     )
@@ -487,6 +494,14 @@ def build_parser(argv: list[str] | None = None) -> argparse.ArgumentParser:
     memory_supersede.add_argument("--tags", default="")
     memory_supersede.add_argument("--pinned", action="store_true")
     memory_supersede.set_defaults(handler=run_memory_supersede)
+
+    memory_move_scope = memory_subcommands.add_parser(
+        "move-scope", help="move every fact of one canon scope directory into a registered scope"
+    )
+    add_memory_write_common(memory_move_scope)
+    memory_move_scope.add_argument("--from", dest="source_dir", required=True, metavar="DIR")
+    memory_move_scope.add_argument("--to", dest="scope", required=True, metavar="SCOPE")
+    memory_move_scope.set_defaults(handler=run_memory_move_scope)
     memory.set_defaults(handler=usage_handler("memory subcommand required"))
 
     knowledge = subparsers.add_parser(
@@ -572,6 +587,7 @@ def run_config_check(args: argparse.Namespace) -> int:
 def run_doctor(args: argparse.Namespace) -> int:
     from ummanu.config import validate_instance
     from ummanu.infra.doctor_findings import accepted, active_findings
+    from ummanu.infra.identifier_findings import MACHINE_ID_INVALID
     from ummanu.runtime import interactive_workspace
 
     instance_path = Path(args.instance)
@@ -631,11 +647,13 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"root filesystem: {finding['message']}")
         elif finding["code"] == "automation_busy_without_advance":
             print(f"{finding['agent']}: {finding['message']}")
+        elif finding["code"] == "automation_lock_refused":
+            print(f"red: {finding['code']}: {finding['agent']}: {finding['message']}")
         elif finding["code"] == "head_fallback":
             print(f"error: head fallback: {finding['message']}")
         elif finding["code"] == "dispatcher_tick_p95_slow":
             print(f"red: {finding['code']}: {finding['message']}")
-        elif str(finding["code"]).startswith("live_root."):
+        elif str(finding["code"]).startswith("live_root.") or finding["code"] == MACHINE_ID_INVALID:
             print(f"{finding['code']}: {finding['message']}")
         if accepted(finding):
             raw = {key: value for key, value in finding.items()
@@ -763,6 +781,9 @@ def run_status(args: argparse.Namespace) -> int:
         return 0
     print(f"Ummanu status: {snapshot['installation']['name'] or 'unnamed'}")
     print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
+    capacity = snapshot["installation"]["capacity"]
+    code = ", ".join(f"{project} {cap}" for project, cap in sorted(capacity["code_concurrency"].items()))
+    print(f"capacity: {capacity['head_capacity']} cards with a head at once; code cards per project: {code or 'none'}")
     canon = snapshot["installation"]["head_registry"]
     if canon["error"]:
         print(f"head registry: {canon['error']}")
@@ -895,6 +916,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     from ummanu.infra.checkpoint_run import load_checkpoint_state
     from ummanu.infra.doctor_findings import apply_acceptance
     from ummanu.infra.fallback import fallback_errors
+    from ummanu.infra.identifier_findings import stored_identifier_findings
     from ummanu.infra.recovery_inventory import collect_recovery_inventory
 
     findings: list[dict[str, object]] = []
@@ -906,9 +928,10 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
             disk_unavailable = disk_finding["code"] == "root_disk_unavailable"
     restore = _restore_findings(report)
     findings.extend({"code": "restore_problem", "message": finding} for finding in restore)
-    findings.extend(automation_busy_findings(report.data_dir))
+    findings.extend(automation_run_findings(report.data_dir))
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     findings.extend(doctor_live_root_findings(report, args, inspect_host=inspect_host))
+    findings.extend(stored_identifier_findings(report.instance_path.parent))
     collected: CollectResult | None = None
     expected = None
     diffs = None
@@ -917,6 +940,11 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         expected, collected, diffs = collect_host_inventory(report, args)
         for kind, reason in collected.errors.items():
             findings.append({"code": "host_inventory_unavailable", "kind": kind, "message": reason})
+        if collected.inventory.runtime_scopes is not None:
+            findings.extend(
+                {"code": "runtime_scope_owner_unreadable", "run_dir": run_dir, "message": reason}
+                for run_dir, reason in sorted(collected.inventory.runtime_scopes.degraded.items())
+            )
         unavailable = unavailable or bool(collected.errors)
         for kind, diff in diffs.items():
             if kind in collected.errors:
@@ -1037,17 +1065,24 @@ def doctor_live_root_findings(report, args: argparse.Namespace, *, inspect_host:
     return live_root_findings(live_root, unit_dirs=unit_dirs, home=home)
 
 
-def automation_busy_findings(data_dir: Path | None) -> list[dict[str, object]]:
-    """A curator head busy past its threshold with no advance or memory write (issue:db32299c8).
-
-    Read from the data directory's `automation-state`, where the packaged units' `AgentState` writes.
-    """
-    from ummanu.automations.agents.curator.busy import busy_without_advance
+def automation_run_findings(data_dir: Path | None) -> list[dict[str, object]]:
+    """Each standing agent's findings from its `runs.jsonl` under the data directory's `automation-state`."""
+    from ummanu.automations.runtime.run_findings import (
+        STANDING_AGENTS,
+        busy_without_advance,
+        lock_refused,
+        read_runs,
+    )
 
     if data_dir is None:
         return []
-    finding = busy_without_advance(data_dir / "automation-state" / "curator" / "runs.jsonl")
-    return [finding] if finding is not None else []
+    findings: list[dict[str, object]] = []
+    for agent in STANDING_AGENTS:
+        records = read_runs(data_dir / "automation-state" / agent / "runs.jsonl")
+        findings.extend(busy_without_advance(agent, records))
+        if (refused := lock_refused(agent, records)) is not None:
+            findings.append(refused)
+    return findings
 
 
 def root_disk_finding(data_dir: Path) -> dict[str, object] | None:
@@ -1847,6 +1882,21 @@ def run_export_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_memory_revoke(args: argparse.Namespace) -> int:
+    from ummanu.memory import access
+
+    data_dir = _data_dir_from_args(args, validate_tree=False)
+    if data_dir is None:
+        return 1
+    try:
+        path = access.revoke_grant(args.grant, data_dir=data_dir)
+    except access.MemoryAccessError as exc:
+        print(f"ummanu memory revoke: {exc}")
+        return 1
+    print(f"revoked: {path}")
+    return 0
+
+
 def run_memory_verify(args: argparse.Namespace) -> int:
     from ummanu.memory_journal import verify_memory_journal
 
@@ -1949,6 +1999,26 @@ def run_memory_supersede(args: argparse.Namespace) -> int:
         )
     except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
         return _print_memory_error("supersede", exc)
+    _print_memory_write_result(result)
+    return 0
+
+
+def run_memory_move_scope(args: argparse.Namespace) -> int:
+    from ummanu.memory_write import move_memory_scope
+
+    data_dir = _data_dir_from_args(args, validate_tree=True)
+    if data_dir is None:
+        return 1
+    try:
+        result = move_memory_scope(
+            data_dir,
+            _instance_dir(args.instance),
+            actor=args.actor,
+            source_dir=args.source_dir,
+            scope=args.scope,
+        )
+    except Exception as exc:  # noqa: BLE001 - the memory service has no narrower error contract
+        return _print_memory_error("move-scope", exc)
     _print_memory_write_result(result)
     return 0
 
@@ -2331,6 +2401,8 @@ def print_host_inventory(
     if collected.inventory.runtime_scopes is not None:
         for unit, scope in sorted(collected.inventory.runtime_scopes.scopes.items()):
             print(f"runtime scope: {unit} preserved by {scope['role']} lifecycle ({scope['generation']})")
+        for run_dir, reason in sorted(collected.inventory.runtime_scopes.degraded.items()):
+            print(f"runtime scope owner unreadable: {run_dir}: {reason}")
     for kind in KINDS:
         reason = collected.errors.get(kind)
         if reason:

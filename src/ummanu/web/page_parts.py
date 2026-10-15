@@ -257,6 +257,7 @@ def _compact_sprint_card(item: dict[str, Any]) -> str:
             _current_card_box(item),
             _waiting_line(item),
             f'<div class="heads-line">{heads}</div>' if heads else "",
+            _dod_scale(item["dod"]) if "dod" in item else "",
             _budget_line(budget) if budget else "",
             "</article>",
         ]
@@ -381,21 +382,33 @@ def _short(text: Any, chars: int) -> str:
     return value if len(value) <= chars else value[: chars - 1].rstrip() + "…"
 
 
-def _budget(budget: dict[str, Any]) -> str:
-    total = int(budget.get("total") or 0)
-    thresholds = budget.get("thresholds") or {}
-    hard = int(thresholds.get("hard") or 0)
-    signal = int(thresholds.get("signal") or 0)
-    ratio = min(1.0, total / hard) if hard else 0.0
-    colour = "hard" if budget.get("hard_reached") else ("signal" if budget.get("signal_reached") else "")
-    by_type = budget.get("by_type") or {}
-    spent = ", ".join(
-        f"{escape(str(kind))} {escape(str(count))}" for kind, count in sorted(by_type.items()) if count
+def _dod_scale(dod: dict[str, Any]) -> str:
+    """The sprint's progress: one segment per DoD item, as wide as the reader's share, met ones filled."""
+    if not dod.get("structured"):
+        return (
+            '<div class="dod-scale none"><span class="label">progress</span>'
+            f'<span class="muted">no scale: {escape(str(dod.get("reason") or ""))}</span></div>'
+        )
+    segments = []
+    for item in _entries(dod.get("items")):
+        weight = item.get("weight") if item.get("weight") is not None else "not weighed"
+        said = f"{item.get('id')} · weight {weight} · {item.get('text')}"
+        if item.get("evidence"):
+            said += f" · evidence: {item['evidence']}"
+        state = "met" if item.get("state") == "met" else "open"
+        segments.append(
+            f'<i class="seg {state}" style="flex:{float(item.get("share") or 0):.4f} 1 0" '
+            f'title="{escape(said)}"></i>'
+        )
+    progress = dod.get("progress")
+    words = f"{dod.get('met')} of {dod.get('total')} items met" + (
+        f" · {float(progress) * 100:.0f}%" if progress is not None else ""
     )
+    unweighed = "" if dod.get("estimated") else _chip("not estimated")
     return (
-        f'<span class="budget {colour}"><i style="width:{ratio * 100:.0f}%"></i></span> '
-        f"{total} of {hard} (signal at {signal})"
-        + (f' <span class="muted">— {spent}</span>' if spent else "")
+        '<div class="dod-scale"><span class="label">progress</span>'
+        f'<span class="track">{"".join(segments)}</span>'
+        f'<span class="mono">{words}</span>{unweighed}</div>'
     )
 
 

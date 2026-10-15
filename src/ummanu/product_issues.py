@@ -6,7 +6,6 @@ import contextlib
 import hashlib
 import json
 import os
-import re
 import tempfile
 import uuid
 from collections.abc import Callable, Iterator
@@ -18,6 +17,7 @@ import yaml
 from ummanu._fsutil import file_lock, held_lock
 from ummanu.board.backend import entity_id
 from ummanu.kernel.errors import TaskError
+from ummanu.kernel.identifiers import is_machine_id, machine_id_refusal
 from ummanu.tasks import (
     BOARD_STORE_KIND,
     _digest,
@@ -44,7 +44,6 @@ META_ISSUE_CLOSED_REASON = "issue_closed_reason"
 ISSUE_KINDS = {"bug", "feature", "question", "improvement"}
 ISSUE_PRIORITIES = {"P0", "P1", "P2", "P3"}
 ISSUE_CLOSE_REASONS = {"resolved", "invalid", "duplicate", "wont_do"}
-_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 # Failure codes a repeat of the same request cannot turn into a success.
 _TERMINAL_CODES = {"validation", "closed", "backend_rejected"}
 _TRANSACTION_KINDS = {"product_created", "issue_created", "issue_priority_changed", "issue_closed"}
@@ -78,7 +77,7 @@ def validate_product_issue_records(
             raise ProductIssueValidationError("Product or Issue record is outside the Issues column")
         if kind == PRODUCT_TYPE:
             product_id = metadata.get(META_PRODUCT_ID, "")
-            if not _ID.fullmatch(product_id):
+            if not _product_id_valid(product_id):
                 raise ProductIssueValidationError("Product has an invalid product_id")
             if record.get("reference") != f"product:{product_id}":
                 raise ProductIssueValidationError("Product reference does not match product_id")
@@ -114,6 +113,10 @@ def validate_product_issue_records(
             raise ProductIssueValidationError("open Issue has a close reason")
 
 
+def _product_id_valid(product_id: object) -> bool:
+    return is_machine_id(product_id) and len(str(product_id)) <= 63
+
+
 def _validated_product_projects(raw: str | None) -> list[str]:
     try:
         projects = json.loads(raw or "")
@@ -122,7 +125,7 @@ def _validated_product_projects(raw: str | None) -> list[str]:
     if (
         not isinstance(projects, list)
         or not projects
-        or any(not isinstance(project, str) or not _ID.fullmatch(project) for project in projects)
+        or any(not is_machine_id(project) for project in projects)
         or len(set(projects)) != len(projects)
     ):
         raise ProductIssueValidationError("Product needs a non-empty unique project set")
@@ -135,13 +138,18 @@ def _comment_was_saved(result: Any) -> bool:
 
 
 def registered_projects(instance: str | Path) -> set[str]:
+    return set(registered_bindings(instance))
+
+
+def registered_bindings(instance: str | Path) -> dict[str, dict[str, Any]]:
+    """Every project registry entry of the instance, by its `id`."""
     root = Path(instance).expanduser()
     if root.name == "instance.yaml":
         root = root.parent
     projects = root / "projects"
     if not projects.is_dir():
         raise TaskError("validation", "project registry is unavailable", 2)
-    result: set[str] = set()
+    result: dict[str, dict[str, Any]] = {}
     for path in projects.glob("*.yaml"):
         try:
             payload = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -149,7 +157,7 @@ def registered_projects(instance: str | Path) -> set[str]:
             raise TaskError("validation", f"cannot read project registry entry {path.name}", 2) from None
         project_id = payload.get("id") if isinstance(payload, dict) else None
         if isinstance(project_id, str) and project_id:
-            result.add(project_id)
+            result[project_id] = payload
     return result
 
 
@@ -390,6 +398,11 @@ class ProductIssueTransaction:
                     4,
                 ) from None
         return document
+
+
+def issue_reference(request_id: str) -> str:
+    """The reference the Issue created under this request id carries."""
+    return "issue:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
 
 
 def ensure_swimlane(client: SqlCardClient, board_id: int, name: str) -> int:
@@ -1142,15 +1155,15 @@ class ProductIssueStore:
         role: str = "po",
     ) -> dict[str, Any]:
         admit_role(role, actor, {"po"})
-        if (
-            not _ID.fullmatch(product_id)
-            or not title.strip()
-            or not projects
-            or len(set(projects)) != len(projects)
-        ):
+        if not _product_id_valid(product_id):
             raise TaskError(
-                "validation", "product needs a valid id, title and non-empty unique project set", 2
+                "validation", machine_id_refusal("product id", product_id) + ", at most 63 characters", 2
             )
+        for project in projects:
+            if not is_machine_id(project):
+                raise TaskError("validation", machine_id_refusal("project id", project), 2)
+        if not title.strip() or not projects or len(set(projects)) != len(projects):
+            raise TaskError("validation", "product needs a title and a non-empty unique project set", 2)
         reference = f"product:{product_id}"
         request_id = request_id or str(uuid.uuid4())
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
@@ -1187,6 +1200,60 @@ class ProductIssueStore:
                 raise self._host_error(exc) from None
             return self.show_product(product_id)
 
+    def edit_product_projects(
+        self,
+        *,
+        product_id: str,
+        add: list[str],
+        remove: list[str],
+        reason: str,
+        actor: str,
+        request_id: str | None = None,
+        role: str = "po",
+    ) -> dict[str, Any]:
+        """Add and remove registered projects of one Product through the native audited replace;
+        PO only. A Product keeps at least one project, and a change to nothing writes nothing.
+        """
+        admit_role(role, actor, {"po"})
+        if not add and not remove:
+            raise TaskError("validation", "product edit needs --add-project, --remove-project or both", 2)
+        if set(add) & set(remove):
+            raise TaskError("validation", "a project is either added or removed, not both", 2)
+        if not reason.strip():
+            raise TaskError("validation", "product edit requires a non-empty reason", 2)
+        reference = f"product:{product_id}"
+        request_id = request_id or str(uuid.uuid4())
+        with self.transactions.reference_lock(reference) as lock, held_lock(lock):
+            self._reject_other_pending_reference_operation(reference, request_id)
+            self._reject_other_pending_typed_operation(reference, request_id)
+            from ummanu.board.host import Replace
+            from ummanu.board.models import Actor, EntityKind, Product
+
+            host = self._host()
+            try:
+                known = host.canon.event(request_id) if host.canon is not None else None
+            except ValueError as exc:
+                raise TaskError("validation", str(exc), 2) from None
+            current = host.read(EntityKind.PRODUCT, reference)
+            if not isinstance(current, Product):
+                raise TaskError("validation", f"{reference} is not a Product", 2)
+            if known is None:
+                unknown = sorted(set(add) - registered_projects(self.instance))
+                if unknown:
+                    raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
+            projects = tuple(sorted((set(current.projects) | set(add)) - set(remove)))
+            if not projects:
+                raise TaskError("validation", f"{reference} would keep no project; a Product needs one", 2)
+            if known is None and projects == current.projects:
+                return self.show_product(product_id)
+            desired = Product(current.ref, current.title, current.state, projects, current.description)
+            try:
+                operation = Replace(desired, Actor(role, actor), reason, request_id=request_id)
+                self._host_mutation(lambda: host.replace(operation))
+            except Exception as exc:  # noqa: BLE001 - normalize the host protocol at this boundary.
+                raise self._host_error(exc) from None
+            return self.show_product(product_id)
+
     def create_issue(
         self,
         *,
@@ -1198,16 +1265,18 @@ class ProductIssueStore:
         actor: str,
         request_id: str | None = None,
         role: str = "po",
+        sprint_close: str = "",
     ) -> dict[str, Any]:
         """File one Issue: the PO for any product, the observer for the product of its own sprint.
 
         An observer's Issue carries the product of the sprint the head was launched for, proven by
         the sprint writer's identity guard, and names that sprint among its related refs, so the
         `entity.created` event says which sprint filed it as well as who and in what role.
+        `sprint_close` names the sprint whose owner close files this Issue, as a related ref.
         """
         admit_role(role, actor, {"po", "observer"})
         request_id = request_id or str(uuid.uuid4())
-        related: tuple[str, ...] = ()
+        related: tuple[str, ...] = (sprint_close,) if sprint_close else ()
         if role == "observer":
             sprint = self._observer_sprint(role=role, actor=actor, request_id=request_id)
             sprint_product = str(sprint.get("product") or "").removeprefix("product:")
@@ -1232,8 +1301,7 @@ class ProductIssueStore:
                 "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)",
                 2,
             )
-        digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
-        reference = f"issue:{digest}"
+        reference = issue_reference(request_id)
         with self.transactions.reference_lock(reference) as lock, held_lock(lock):
             self._reject_other_pending_reference_operation(reference, request_id)
             self._reject_other_pending_typed_operation(reference, request_id)

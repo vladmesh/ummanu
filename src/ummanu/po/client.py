@@ -107,13 +107,17 @@ class PoServiceClient:
         request_id: str,
         source: str = "web",
         card: dict[str, Any] | None = None,
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """One input; a dispatcher's carries its card's facts (`card`), which the service checks first.
 
         The answer is the input queued or the turn it became. An operation card's input is queued with
-        the service's production rights note; the rule itself refuses nothing (secretary-1769).
+        the service's production rights note; the rule itself refuses nothing. `attachments` names
+        images the session holds, whose paths the text carries.
         """
-        fields = {"card": card} if card is not None else {}
+        fields: dict[str, Any] = {"card": card} if card is not None else {}
+        if attachments:
+            fields["attachments"] = list(attachments)
         return self.call("submit", session_id=session_id, text=text, request_id=request_id, source=source, **fields)
 
     def sprint_session(self, *, sprint_ref: str, request_id: str) -> dict[str, Any]:

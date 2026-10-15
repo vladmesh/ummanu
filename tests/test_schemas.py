@@ -210,15 +210,15 @@ class SchemaInvalidTests(unittest.TestCase):
                 report = validate_instance(instance)
                 self.assertTrue(any(error.path == "sprint_budget" for error in report.errors), report.errors)
 
-    def test_open_sprint_limit_accepts_only_one_or_two(self):
-        for limit in (1, 2):
+    def test_open_sprint_limit_accepts_one_to_three(self):
+        for limit in (1, 2, 3):
             data = copy.deepcopy(VALID_INSTANCE)
             data["open_sprint_limit"] = limit
             self.assertEqual(validate(data, "instance", "instance.yaml"), [], limit)
 
     def test_an_invalid_open_sprint_limit_is_reported_with_its_fallback(self):
         """A value nobody can honour has to be visible: it silently keeps the limit at one."""
-        for limit in (0, 3, -1, 1.5, "", "2", True, None):
+        for limit in (0, 4, -1, 1.5, "", "2", True, None):
             with self.subTest(limit=limit), tempfile.TemporaryDirectory() as tmpdir:
                 instance = Path(tmpdir) / "instance.yaml"
                 document = copy.deepcopy(VALID_INSTANCE)
@@ -298,12 +298,14 @@ class SchemaInvalidTests(unittest.TestCase):
         data["host"] = {"units": []}
         self.assertEqual(validate(data, "instance", "instance.yaml"), [])
 
-    def test_binding_bad_id_pattern(self):
-        data = copy.deepcopy(VALID_BINDING)
-        data["id"] = "Bad_Id"
-        errors = validate(data, "project-binding", "b.yaml")
-        self.assertTrue(errors)
-        self.assertTrue(any(e.path == "id" for e in errors), errors)
+    def test_binding_ids_outside_the_machine_id_grammar_name_their_field(self):
+        for field in ("id", "adapter"):
+            for value in ("Bad_Id", "проект", "café", "two words"):
+                with self.subTest(field=field, value=value):
+                    data = copy.deepcopy(VALID_BINDING)
+                    data[field] = value
+                    errors = validate(data, "project-binding", "b.yaml")
+                    self.assertEqual([e.path for e in errors], [field], errors)
 
     def test_binding_wrong_type(self):
         data = copy.deepcopy(VALID_BINDING)

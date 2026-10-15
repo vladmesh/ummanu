@@ -156,6 +156,25 @@ def cap_text(raises: list[dict[str, Any]]) -> str:
     return json.dumps({"raises": raises}, sort_keys=True, separators=(",", ":"))
 
 
+#: The dispatch-id prefix of a run the PO dispatched by hand and charged with `sprint e2e-charge`.
+MANUAL_DISPATCH_PREFIX = "manual-run-"
+_MANUAL_RUN = re.compile(r"(?:https://github\.com/[^/\s]+/[^/\s]+/actions/runs/)?([0-9]+)(?:/[^\s]*)?")
+
+
+def manual_run_id(run: str) -> str:
+    """The workflow run id of a manual dispatch, read from its run URL or given bare."""
+    from ummanu.kernel.errors import TaskError
+
+    matched = _MANUAL_RUN.fullmatch(str(run or "").strip())
+    if matched is None:
+        raise TaskError(
+            "validation",
+            f"--run is a workflow run URL (https://github.com/<owner>/<repo>/actions/runs/<id>) or its id, not {run!r}",
+            2,
+        )
+    return matched.group(1)
+
+
 def _refused(message: str) -> Exception:
     from ummanu.kernel.errors import TaskError
 

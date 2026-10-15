@@ -14,15 +14,14 @@ from unittest import mock
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
-from ummanu.board.sprint_read import BUDGET_UNCHARGED_INFRASTRUCTURE
 from ummanu.board.sql_cards import SPRINT_BOARD_ID
 from ummanu.dispatch.claim import (
     SPRINT_RESERVATION_BLOCKED_ACTION,
     SPRINT_RESERVATION_RESERVED,
     SPRINT_RESERVATION_UNVERIFIABLE,
 )
-from ummanu.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
-from ummanu.dispatch.production import _budget_event_type, _reconcile_sprint_budget
+from ummanu.dispatch.launch import CAUSE_ADMISSION_REFUSED, FAILURE_CLASS_ADMISSION
+from ummanu.dispatch.production import _reconcile_sprint_budget
 from ummanu.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
 from ummanu.sprints import SprintReader
 from ummanu.tasks import TaskError, task_audit_for
@@ -86,7 +85,8 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(blocked["status"], "blocked")
         self.assertEqual(blocked["step"], "sprint-reservation-refused")
-        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
+        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_ADMISSION)
+        self.assertEqual(blocked["failure_cause"], CAUSE_ADMISSION_REFUSED)
         self.assertEqual(blocked["sprint_reservation"]["refusal"], SPRINT_RESERVATION_RESERVED)
         self.assertEqual(blocked["sprint_reservation"]["project"], "ummanu")
         self.assertEqual(blocked["sprint_reservation"]["sprints"], [SPRINT])
@@ -98,9 +98,12 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("project=ummanu", reason)
         self.assertIn(SPRINT, reason)
         self.assertIn("after that sprint closes", reason)
+        self.assertNotIn("host_unavailable", reason)
+        self.assertNotIn(blocked["attempt_id"], reason)
+        self.assertIsNone(task["claim"]["worker"], "the refusal releases the claim it took")
         # The typed action is in the transition the block wrote.
         (transition,) = self._blocked_transitions()
-        self.assertIn(infrastructure_action(SPRINT_RESERVATION_BLOCKED_ACTION), transition["request_id"])
+        self.assertIn(f"-{SPRINT_RESERVATION_BLOCKED_ACTION}-", transition["request_id"])
         self._assert_nothing_spent()
 
         # Not retried: the next tick leaves the card where a person has to move it.
@@ -118,10 +121,7 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.tick()
         charged = _reconcile_sprint_budget(self.runtime)
 
-        self.assertEqual(
-            [_budget_event_type(event) for event in self._blocked_transitions()],
-            [BUDGET_UNCHARGED_INFRASTRUCTURE],
-        )
+        self.assertEqual(len(self._blocked_transitions()), 1)
         self.assertEqual([row for row in charged if row.get("step") == "sprint-budget"], [])
         after = SprintReader(self.board).show(SPRINT, include_cards=False)["budget"]  # type: ignore[arg-type]
         self.assertEqual(after, before)
@@ -175,6 +175,14 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(claimed["step"], "claim")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
         self.assertEqual(self.host.prepared, [CARD_REF])
+
+    def test_the_refused_card_is_archived_by_the_po(self) -> None:
+        self._out_of_sprint("code")
+        self.assertEqual(self.tick()["step"], "sprint-reservation-refused")
+
+        archived = self.writer.archive(role="po", actor="operator", reference=CARD_REF, reason="not needed")
+
+        self.assertTrue(archived["task"]["closed"])
 
     def test_an_unverifiable_index_refuses_code_by_its_own_reason(self) -> None:
         """Refused without a block: the Blocked move would meet the same index at the write guard."""

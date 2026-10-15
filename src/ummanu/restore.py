@@ -28,6 +28,7 @@ from ummanu.backup_policy import (
     should_skip_data_entry,
 )
 from ummanu.backup_verify import _unsafe_member, _verify_plain_tar
+from ummanu.board import sprint_dod
 from ummanu.board.backend import CARD, SPRINT, board_client
 from ummanu.board.extension_bag import EXTENSION_BAG, fold_extension_bags
 from ummanu.board.legacy_codec import (
@@ -512,6 +513,7 @@ SPRINT_PARITY_FIELDS = (
     "allowed_productions",
     "local_run_exceptions",
     "owner_decisions",
+    "dod_items",
     "e2e",
 )
 
@@ -689,6 +691,7 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
         OWNER_DECISIONS_FIELD: json.dumps(
             sprint.get("owner_decisions", []), sort_keys=True, separators=(",", ":")
         ),
+        **({sprint_dod.FIELD: sprint_dod.encode(sprint["dod_items"])} if "dod_items" in sprint else {}),
         # The e2e run budget as exported (secretary-1796); an export without it restores the default.
         **(
             {
@@ -971,6 +974,11 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             stored_decisions(sprint.get("owner_decisions", []))
         except (ValueError, TypeError, KeyError) as exc:
             raise RestoreError(f"normalized sprint export has invalid owner_decisions: {exc}") from None
+        if "dod_items" in sprint:
+            try:
+                sprint_dod.stored_items(sprint["dod_items"])
+            except (ValueError, TypeError, KeyError) as exc:
+                raise RestoreError(f"normalized sprint export has invalid dod_items: {exc}") from None
         e2e = sprint.get("e2e", {"budget": 3, "used": 0, "charges": []})
         if (
             not isinstance(e2e, dict)

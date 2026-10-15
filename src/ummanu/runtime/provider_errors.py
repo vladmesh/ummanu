@@ -2,8 +2,8 @@
 
 Shared by the resource probe (`ummanu.head_health`, `resource_probe`), the dispatcher's turn check
 (`dispatch.provider_failure`) and the PO runner. In scope: a spent subscription (a usage/quota
-limit, with the reset time the provider names), HTTP 401/403, 429, 5xx, and a connection the client
-gave up on after its own retries; anything else is not classified here. Readers are pure and return
+limit, with the reset time the provider names), a model the account's plan does not serve, HTTP
+401/403, 429, 5xx, and a connection the client gave up on after its own retries; anything else is not classified here. Readers are pure and return
 only bounded, secret-free summaries. See docs/PROTOCOLS.md "Provider failure of a head's turn".
 """
 
@@ -20,8 +20,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ummanu.runtime.redact import scrub_secrets
 
 #: `quota` = the subscription's usage limit is spent until a reset (ummanu-108), `auth` = 401/403,
-#: `rate_limit` = 429, `server` = 5xx, `reconnect` = client gave up reconnecting.
+#: `rate_limit` = 429, `server` = 5xx, `reconnect` = client gave up reconnecting, `plan` = the
+#: account's plan no longer serves the head's model.
 KIND_QUOTA = "quota"
+KIND_PLAN = "plan"
 KIND_AUTH = "auth"
 KIND_RATE_LIMIT = "rate_limit"
 KIND_SERVER = "server"
@@ -68,6 +70,9 @@ _QUOTA_HIT_RE = re.compile(
     r"hit your [a-z0-9 -]{0,24}limit|(?:usage|weekly|daily|monthly|session|opus|\d+-hour) limit reached",
     re.IGNORECASE,
 )
+# Codex's 400 for a ChatGPT account whose plan does not include the requested model: "The
+# 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+_PLAN_MARKER = "is not supported when using codex with a chatgpt account"
 #: Codex's typed `codex_error_info` values that mean the subscription is spent.
 CODEX_QUOTA_ERROR_INFOS = frozenset({"usage_limit_exceeded", "insufficient_quota", "quota_exceeded"})
 # Claude Code's own words for an account the API refused, on a line that carries no status code.
@@ -269,9 +274,12 @@ def classify_provider_error(text: str, *, status: int | None = None) -> Provider
             KIND_QUOTA, code if kind_of_status(code) else None, summarize_provider_error(line),
             reset_at=reset_time(text),
         )
+    lowered = (text or "").lower()
+    if _PLAN_MARKER in lowered:
+        line = next((line for line in str(text).splitlines() if _PLAN_MARKER in line.lower()), text)
+        return ProviderError(KIND_PLAN, code, summarize_provider_error(line))
     kind = kind_of_status(code)
     if not kind:
-        lowered = (text or "").lower()
         if reconnect_exhausted(text) or any(marker in lowered for marker in _GAVE_UP_MARKERS):
             kind = KIND_RECONNECT
         elif any(marker in lowered for marker in _CLAUDE_AUTH_MARKERS):
@@ -509,6 +517,7 @@ _SCREEN_REFUSALS = (
         r".*(?:\bresets?\b|\|\d{10})",
         re.IGNORECASE,
     ),
+    re.compile(rf"^(?:unexpected status 400\b.*|the '[^']+' model ){re.escape(_PLAN_MARKER)}", re.IGNORECASE),
     *(re.compile(rf"^{re.escape(marker)}", re.IGNORECASE) for marker in _CLAUDE_AUTH_MARKERS),
 )
 

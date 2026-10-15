@@ -18,8 +18,11 @@ reviewer environments, including after login profiles run. Workspace Python and 
 `.ummanu-task-env/venv`; the guard uses the configured product's managed interpreter and source
 with isolated startup. Candidate code, interpreters and inherited guard bindings cannot select
 its implementation. Native Docker is resolved before that PATH prefix is installed. Missing or
-unexecutable guard, interpreter or native backend refuses launch or command. PO and dispatcher
-Docker paths retain their behavior.
+unexecutable guard, interpreter or native backend refuses launch or command. A product test
+harness that scrubs the launch bindings but keeps PATH still reaches the guard: it takes the
+interpreter and source from the product checkout holding the shim and resolves native Docker from
+PATH, and loses only the heavy-operation exceptions. PO and dispatcher Docker paths retain their
+behavior.
 
 The dispatcher validates the sprint's entire creation-only `local_run_exceptions` field, then
 selects the card's project entries. Each durable launch intent retains one snapshot per head round;

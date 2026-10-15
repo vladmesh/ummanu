@@ -194,6 +194,8 @@ class SqlBoardHost:
         return MutationResult(self.read(entity.kind, entity.ref), event)
 
     def replace(self, operation: Replace) -> MutationResult:
+        if isinstance(operation.entity, Product):
+            return self._replace_product(operation)
         if not isinstance(operation.entity, Issue):
             self._migration_pending("replace", operation.entity.kind)
         self._require_product_issue_configuration()
@@ -284,6 +286,52 @@ class SqlBoardHost:
             effect, confirm=confirm, finish=finish
         )
         return MutationResult(self.read(EntityKind.ISSUE, entity.ref), event)
+
+    def _replace_product(self, operation: Replace) -> MutationResult:
+        """Change only a Product's project set, under one `entity.updated` event."""
+        self._require_product_issue_configuration()
+        entity = operation.entity
+        assert isinstance(entity, Product)
+        if operation.description_append is not None or operation.description_edit is not None:
+            raise BoardProtocolError("Product replace changes only its projects")
+        request_id = self._request_id(operation.request_id, "product-replace")
+        related = self._related(entity, operation.related_refs)
+        existing = self._existing(request_id, entity, operation.actor, operation.reason)
+        if existing is not None and self.canon.committed(request_id) is not None:
+            return MutationResult(self.read(EntityKind.PRODUCT, entity.ref), existing)
+        if existing is None:
+            current = self.read(EntityKind.PRODUCT, entity.ref)
+            if (
+                not isinstance(current, Product)
+                or (entity.title, entity.state, entity.description)
+                != (current.title, current.state, current.description)
+                or not entity.projects
+                or len(set(entity.projects)) != len(entity.projects)
+            ):
+                raise BoardProtocolError("Product replace only supports a non-empty project set change")
+        event = existing or self._entity_event(
+            EventKind.ENTITY_UPDATED, entity, operation.actor, operation.reason, related, request_id
+        )
+
+        def effect() -> None:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("Product was not found")
+            saved = self.client.call("saveTaskMetadata", task_id=self._row_id(row), values=self._metadata_for(entity))
+            if saved is not True:
+                raise BoardProtocolError("board store rejected the Product projects")
+
+        def confirm() -> BoardEntity:
+            row = self._raw_by_ref(entity.ref)
+            confirmed = self._normalized_row(row) if row is not None else None
+            if confirmed != entity:
+                raise BoardProtocolError("Product project change is not proven")
+            return confirmed
+
+        MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
+            effect, confirm=confirm
+        )
+        return MutationResult(self.read(EntityKind.PRODUCT, entity.ref), event)
 
     def _append_description(
         self, entity: Issue, append: DescriptionAppend, event: Event, request_id: str

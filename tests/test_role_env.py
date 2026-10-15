@@ -372,7 +372,7 @@ class ManagedInterpreterTests(unittest.TestCase):
                 )
                 self.assertNotIn(str(self.product / ".venv/bin"), env["PATH"])
 
-    def test_worker_and_reviewer_launches_redirect_tool_caches_into_the_owned_namespace(self) -> None:
+    def test_worker_and_reviewer_launches_redirect_caches_and_temp_files_into_the_owned_namespace(self) -> None:
         """secretary-1920: test and lint caches land where owned cleanup removes them as a whole."""
         workspace = self.root / "workspace"
         (workspace / role_env.WORKSPACE_ENV_DIR).parent.mkdir(parents=True)
@@ -382,6 +382,7 @@ class ManagedInterpreterTests(unittest.TestCase):
             "PYTHONPYCACHEPREFIX": str(namespace / "pycache"),
             "RUFF_CACHE_DIR": str(namespace / "ruff-cache"),
             "MYPY_CACHE_DIR": str(namespace / "mypy-cache"),
+            "TMPDIR": str(namespace / "tmp"),
         }
         probe = "; ".join(f'printf "%s\\n" "${name}"' for name in expected)
         for role in sorted(role_env.RUFF_ROLES):
@@ -398,6 +399,7 @@ class ManagedInterpreterTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(result.stdout.splitlines(), list(expected.values()))
                 self.assertEqual({name: env[name] for name in expected}, expected)
+                self.assertTrue((namespace / "tmp").is_dir())
 
     def test_the_role_env_puts_the_product_venv_first(self) -> None:
         for role in self.ROLES:

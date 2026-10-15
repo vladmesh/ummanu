@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ummanu.kernel.identifiers import is_machine_id
 from ummanu.runtime.head import HeadRun, HeadRunError, TaskRefError
 from ummanu.runtime.head.identity import head_process_status
 
@@ -208,6 +209,18 @@ def issue_grant(
     return MemoryAccessGrant(grant_id, token, identity)
 
 
+def revoke_grant(grant_id: str, *, data_dir: str | Path | None = None) -> Path:
+    """Remove one stored grant so its bearer resolves to `runtime_identity_unknown`; return its path."""
+    if not re.fullmatch(r"[0-9a-f]{32}", grant_id):
+        raise MemoryAccessError(f"memory grant id {grant_id!r} is not 32 lowercase hex digits")
+    path = bindings_dir(data_dir) / f"{grant_id}.json"
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        raise MemoryAccessError(f"memory grant {grant_id} does not exist") from None
+    return path
+
+
 def resolve_token(
     token: object, *, data_dir: str | Path | None = None, now: float | None = None
 ) -> MemoryReadIdentity | MemoryAccessDenial:
@@ -256,10 +269,10 @@ def normalize_scope(scope: str | None) -> str | None:
         return None
     if value in {"global", PRODUCT_UMMANU_SCOPE, PO_REVIEW_SCOPE}:
         return value
-    if value.startswith("project:"):
-        name = value.removeprefix("project:")
-        return f"project:{_name(name, 'scope')}"
-    return f"project:{_name(value, 'scope')}"
+    name = value.removeprefix("project:")
+    if not is_machine_id(name):
+        raise MemoryAccessError("invalid scope")
+    return f"project:{name}"
 
 
 def _read_payload(grant_id: str, data_dir: str | Path | None) -> dict[str, Any] | None:

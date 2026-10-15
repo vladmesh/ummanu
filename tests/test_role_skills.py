@@ -487,6 +487,17 @@ class MalformedManifestTests(OverlayFixture):
         self.assert_bounded(code, output, overlay)
         self.assertIn("roles.ummanu.skills", output)
 
+    def test_a_role_name_outside_the_machine_id_grammar_is_rejected_by_name(self) -> None:
+        for role in ("роль", "café", "under_score", "Upper"):
+            with self.subTest(role=role):
+                overlay = self.write_overlay(f'[roles."{role}"]\nskills = []\n')
+
+                code, output = self.run_command("audit")
+
+                self.assert_bounded(code, output, overlay)
+                self.assertIn("must match [a-z0-9][a-z0-9-]*", output)
+                self.assertFalse(self.shell_root.exists())
+
     def test_a_target_naming_an_unknown_role_is_rejected(self) -> None:
         overlay = self.write_overlay(
             f'[targets.u]\nshell = "codex"\nroot = "{self.root / "u"}"\nroles = ["ghost"]\n'

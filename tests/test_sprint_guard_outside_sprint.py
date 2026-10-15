@@ -160,6 +160,43 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
                     write()
                 self.assertEqual(raised.exception.code, "sprint_guard_unavailable")
 
+    def test_comments_on_a_reserved_project_come_from_the_sprint_roles_and_the_cards_own_executor(
+        self,
+    ) -> None:
+        sprint_card = self.tasks.create(
+            role="observer",
+            actor="observer",
+            project="ummanu",
+            task_type="research",
+            title="owned",
+            sprint=self.ref,
+        )["task"]
+        outside = self.tasks.create(
+            role="po", actor="operator", project="ummanu", task_type="research", title="outside"
+        )["task"]
+        allowed = [
+            ("po", sprint_card),
+            ("observer", sprint_card),
+            ("dispatcher", sprint_card),
+            ("owner", sprint_card),
+            ("worker", sprint_card),
+            ("reviewer", sprint_card),
+            ("po", outside),
+        ]
+        for role, card in allowed:
+            with self.subTest(role=role, card=card["ref"]):
+                self.tasks.comment(role=role, actor=role, reference=card["ref"], body=f"{role} note")
+        refused = [("retro", sprint_card), ("steward", sprint_card), ("worker", outside)]
+        for role, card in refused:
+            with self.subTest(role=role, card=card["ref"]):
+                with self.assertRaisesRegex(TaskError, self.ref) as denied:
+                    self.tasks.comment(role=role, actor=role, reference=card["ref"], body=f"{role} note")
+                self.assertEqual(denied.exception.code, "sprint_write_forbidden")
+        markers = {
+            comment.get("marker") for comment in self.tasks.reader.show(sprint_card["ref"])["comments"]
+        }
+        self.assertEqual(markers, {"po", "observer", "dispatcher", "owner", "worker", "reviewer"})
+
 
 if __name__ == "__main__":
     unittest.main()

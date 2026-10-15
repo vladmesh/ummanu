@@ -9,6 +9,7 @@ is `UMMANU_STATE` or `~/ummanu-data/automation-state`, then `/<agent>`.
 from __future__ import annotations
 
 import fcntl
+import functools
 import json
 import os
 import sys
@@ -47,14 +48,19 @@ PRECHECK_DEFERRED = 102
 def append_line_durable(path: Path, line: str) -> None:
     """Append one line to an append-only journal: `O_APPEND`, one `write()`, then `fsync`.
 
-    Never reads or replaces the file, so concurrent appends survive. A short write raises.
+    Never reads or replaces the file's records, so concurrent appends survive. A torn tail left by an
+    earlier short write is sealed by a leading newline inside the same write, so only that torn line
+    is lost to readers. A short write raises.
     """
     if "\n" in line:
         raise ValueError("a journal line must not contain a newline")
     data = (line + "\n").encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    descriptor = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
     try:
+        size = os.fstat(descriptor).st_size
+        if size and os.pread(descriptor, 1, size - 1) != b"\n":
+            data = b"\n" + data
         written = os.write(descriptor, data)
         if written != len(data):
             raise OSError(f"short append to {path}: {written} of {len(data)} bytes")
@@ -208,14 +214,9 @@ class AgentState:
             pass
 
     def log_run(self, event: str, **fields: object) -> None:
-        """Append a run-telemetry line to runs.jsonl; best effort, errors are swallowed."""
-        try:
-            self.ensure_dir()
-            rec = {"ts": datetime.now(UTC).isoformat(), "event": event, **fields}
-            with (self.dir / "runs.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        except Exception:  # noqa: BLE001, S110 - best-effort telemetry must not fail the tick
-            pass
+        """Append one run-telemetry record to runs.jsonl through the journal appender; a failure raises."""
+        rec = {"ts": datetime.now(UTC).isoformat(), "event": event, "source": run_source(), **fields}
+        append_line_durable(self.dir / "runs.jsonl", json.dumps(rec, ensure_ascii=False))
 
     @contextmanager
     def lock(self) -> Iterator[None]:
@@ -357,6 +358,25 @@ def _process_started_at(start: int | None) -> float | None:
     except (OSError, ValueError):
         return None
     return None
+
+
+@functools.cache
+def run_source() -> str:
+    """Who launched this process: `unit:<service>`, `automation:<head scope>` or `manual`.
+
+    Read from the process's own cgroup, which systemd names after the unit or head scope it runs in.
+    """
+    # Imported here: the head package is heavy, and most state readers never log a run.
+    from ummanu.runtime.head.memory import HEAD_SCOPE_PREFIX, own_cgroup
+
+    cgroup = own_cgroup()
+    if cgroup is None:
+        return "unknown"
+    if cgroup.name.endswith(".service"):
+        return f"unit:{cgroup.name}"
+    if cgroup.name.startswith(HEAD_SCOPE_PREFIX) and cgroup.name.endswith(".scope"):
+        return f"automation:{cgroup.name}"
+    return "manual"
 
 
 def _lock_source() -> str:

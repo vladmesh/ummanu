@@ -687,7 +687,7 @@ empty set succeeds without invoking Ruff. Renames and names containing spaces ar
 checks lint only; local format verification remains scoped to edited code below.
 
 
-The dispatcher-owned `.ummanu-task-env/venv` installs the candidate's `.[dev]` extra when its adapter
+The dispatcher-owned `.ummanu-task-env/venv` installs the candidate's `.[dev,typecheck]` extras when its adapter
 declares `broad_check` without `broad_check.interpreter`, and puts its tools on worker and reviewer
 `PATH`. Without `broad_check` it stays bare. The receipt wrapper and protocol/report/verdict commands
 use the absolute production interpreter; only the inner broad suite uses the candidate venv. An

@@ -3,7 +3,8 @@
 `python3 -P -m ummanu.runtime.resource_probe --resource <id>` makes one provider call for
 `claude-sub`, `openai-sub` or `openrouter`: exit 0 answered, 1 failed (one scrubbed, capped
 `resource <id> probe failed; ...` stderr line), 2 unknown id. No cache, no files; `ummanu.head_health`
-owns the verdict and TTL cache. A probe that cannot run is a failure, never an exception.
+owns the verdict and TTL cache. A healthy probe may print one `warning=<text>` line on stdout
+(the openai-sub login's ChatGPT plan is free, or its subscription ends soon); the exit stays 0. A probe that cannot run is a failure, never an exception.
 `head_health` reads `status=timeout`, `status=provider-unavailable` (provider failed while the
 local login is valid) and `status=exhausted` (the subscription's usage limit is spent; the line
 then carries `provider_error=` with the provider's own words and reset time) by name.
@@ -17,15 +18,19 @@ See docs/PROTOCOLS.md "Resource probe statuses".
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import shlex
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
 from ummanu.runtime.codex_home import installation_codex_home
@@ -52,6 +57,12 @@ STATUS_PROVIDER_UNAVAILABLE = "provider-unavailable"
 # The subscription's usage limit is spent (ummanu-108). Read off the whole output before it is
 # capped: Codex prints its banner first, so the usage-limit line sits past the reason's limit.
 STATUS_EXHAUSTED = "exhausted"
+#: How far ahead of the ChatGPT subscription's end the openai-sub probe warns.
+SUBSCRIPTION_WARNING_SECONDS = 3 * 86400
+# Codex's 400 on a paid model once the plan drops to free; a free plan still answers the probe's
+# default-model ping, so the plan is read off the login instead.
+_FREE_PLAN = "free"
+_AUTH_CLAIMS = "https://api.openai.com/auth"
 
 
 def _env_seconds(name: str) -> int | None:
@@ -96,6 +107,7 @@ class ProbeResult:
     stdout: str | bytes | None = None
     stderr: str | bytes | None = None
     exception: str | BaseException | None = None
+    warning: str = ""
 
 
 def _clean_summary(value: object) -> str | None:
@@ -342,7 +354,42 @@ def probe_openai_sub() -> ProbeResult:
         return replace(result, status=STATUS_EXHAUSTED)
     if result.status == "non-zero-exit" and codex_provider_side_failure(text, Path(home)):
         return replace(result, status=STATUS_PROVIDER_UNAVAILABLE)
+    if result.ok:
+        return replace(result, warning=codex_plan_warning(Path(home), time.time()))
     return result
+
+
+def codex_plan_warning(home: Path, now: float) -> str:
+    """A warning about the ChatGPT plan behind a Codex login, or "" when there is nothing to say.
+
+    Read from the login's id_token claims (`chatgpt_plan_type`, `chatgpt_subscription_active_until`).
+    An end date already past is not read: the claim lags renewals, so it is no evidence.
+    """
+    claims = _codex_auth_claims(home)
+    plan = str(claims.get("chatgpt_plan_type") or "")
+    if plan == _FREE_PLAN:
+        return "ChatGPT plan is free: Codex refuses the heads' paid models"
+    try:
+        until = datetime.fromisoformat(str(claims.get("chatgpt_subscription_active_until") or "")).timestamp()
+    except ValueError:
+        return ""
+    if now < until <= now + SUBSCRIPTION_WARNING_SECONDS:
+        ends = time.strftime("%Y-%m-%dT%H:%MZ", time.gmtime(until))
+        return f"ChatGPT subscription ({plan or 'unknown plan'}) ends {ends}"
+    return ""
+
+
+def _codex_auth_claims(home: Path) -> dict[str, object]:
+    """The OpenAI auth claims of the login's id_token payload; {} when the login carries none."""
+    try:
+        auth = json.loads((home / "auth.json").read_text(encoding="utf-8"))
+        token = str(auth["tokens"]["id_token"])
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (OSError, ValueError, UnicodeError, binascii.Error, KeyError, IndexError, TypeError):
+        return {}
+    value = claims.get(_AUTH_CLAIMS) if isinstance(claims, dict) else None
+    return value if isinstance(value, dict) else {}
 
 
 def _quota_spent(text: str) -> bool:
@@ -408,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
     result = probe()
     if not result.ok:
         print(format_probe_failure(args.resource, result), file=sys.stderr)
+    elif result.warning:
+        print(f"warning={result.warning}")
     return 0 if result.ok else 1
 
 

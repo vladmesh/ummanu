@@ -106,7 +106,14 @@ from ummanu.dispatch.ownership import (
     capacity_serialized,
     reference_lock as reference_lock,
 )
+from ummanu.kernel.capacity_policy import (
+    DEFAULT_CODE_CONCURRENCY,
+    DEFAULT_HEAD_CAPACITY,
+    code_slot_wait,
+    head_slot_wait,
+)
 from ummanu.kernel.errors import TaskError as TaskError
+from ummanu.kernel.identifiers import is_machine_id, machine_id_refusal
 from ummanu.projects.integration_base import integration_base_refusal, seed_ref_refusal
 from ummanu.runtime.redact import redact
 from ummanu.runtime.references import (
@@ -125,7 +132,6 @@ from ummanu.board.task_protocol.rows import (
     _DECISION_BOUND_ROLES as _DECISION_BOUND_ROLES,
     _MARKER_EVENT_ACTIONS as _MARKER_EVENT_ACTIONS,
     _READY_RESET_METADATA as _READY_RESET_METADATA,
-    _SLUG_RE as _SLUG_RE,
     _TYPED_RECORD_TYPES as _TYPED_RECORD_TYPES,
     _WAIT_FIELDS as _WAIT_FIELDS,
     MASQUERADE as MASQUERADE,
@@ -1013,8 +1019,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             raise TaskError("validation", f"codex launch mode must be {known}", 2)
         if priority:
             raise TaskError("validation", "tasks do not accept product priority", 2)
-        if slug and not _SLUG_RE.match(slug):
-            raise TaskError("validation", "slug must match [a-z0-9-]{1,30}", 2)
+        if slug and (not is_machine_id(slug) or len(slug) > 30):
+            raise TaskError("validation", machine_id_refusal("slug", slug) + ", at most 30 characters", 2)
         # Seed and integration base are two different refs (secretary-1541). A restore reproduces
         # cards that were admitted under the older single-field contract, so it carries whatever
         # they hold; the dispatcher refuses such a base fast and typed when it next runs the card.
@@ -1037,6 +1043,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     "a seed requires --supersedes naming the predecessor card it inherits from",
                     2,
                 )
+            if blocked_by:
+                self._refuse_unreleasable_dependency(blocked_by, supersedes)
         linked_sprint: dict[str, Any] | None = None
         if sprint:
             from ummanu.sprints import SprintReader
@@ -1394,6 +1402,23 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     raise _CommittedWriteError() from exc
                 return created_ref
 
+    def _refuse_unreleasable_dependency(self, blocked_by: str, supersedes: str) -> None:
+        """A new card's `blocked_by` must name a card that can still reach Done."""
+        if blocked_by == supersedes:
+            raise TaskError(
+                "dependency_unreleasable",
+                f"blocked_by names {blocked_by}, the card this one supersedes; a successor does not wait for it",
+                2,
+            )
+        dependency = self.reader.show(blocked_by)
+        if dependency["closed"] or dependency["state"] == "blocked":
+            held = "archived" if dependency["closed"] else "Blocked"
+            raise TaskError(
+                "dependency_unreleasable",
+                f"blocked_by names {blocked_by}, which is {held}; nothing would release this card from Ready",
+                2,
+            )
+
     def comment(
         self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
     ) -> dict[str, Any]:
@@ -1401,11 +1426,31 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         actor `owner`. The owner is not a board role (it moves nothing and creates
         nothing); its comment is how it answers a card the PO handed to it
         (`handover`), and the dispatcher reads it back by its `owner` marker.
+        On a sprint-reserved project, roles other than po, observer, dispatcher and
+        owner comment only on their own card: an executor on a card of the holding
+        sprint, the steward on its report.
         """
         if str(role) == OWNER_ROLE:
             role, actor = OWNER_ROLE, OWNER_ROLE
         else:
             role = self._role(role, COMMENT_ROLES, actor=actor)
+        # Fix the request identity before staging so the answer can name its own audit event.
+        request_id = request_id or str(uuid.uuid4())
+        if role not in {OWNER_ROLE, "po", "observer", "dispatcher"} and self.audit.committed_event(request_id) is None:
+            task = self.reader.show(reference)
+            self._guard_sprint_write(
+                role=role,
+                actor=actor,
+                project=task["project"],
+                card_sprint=str(task.get("sprint") or ""),
+                linked_sprint=None,
+                sprint_override=False,
+                sprint_override_reason="",
+                request_id=request_id,
+                reference=reference,
+                steward_report=_is_steward_report_card(task),
+                card_executor=role in {"worker", "reviewer"},
+            )
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
 
@@ -1418,8 +1463,6 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 occurrence = self.audit.pending_event(request_id)
                 self._store_owner_answer(task, handover, body, occurrence)
 
-        # Fix the request identity before staging so the answer can name its own audit event.
-        request_id = request_id or str(uuid.uuid4())
         return self._write(
             "commented",
             role,
@@ -2150,15 +2193,16 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         resolved_review_head: str = "",
         slug: str = "",
         base_branch: str = "",
-        cap: int = 3,
+        cap: int = DEFAULT_HEAD_CAPACITY,
+        code_cap: int = DEFAULT_CODE_CONCURRENCY,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         role = self._role(role, {Role.DISPATCHER}, actor=actor)
         worker = worker.strip()
         if not worker:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
-        if cap < 1:
-            raise TaskError("validation", "claim cap must be positive", 2)
+        if cap < 1 or code_cap < 0:
+            raise TaskError("validation", "claim cap must be positive and code cap non-negative", 2)
         request_id = request_id or str(uuid.uuid4())
         if self._legacy_record(request_id) is not None:
             # Legacy generic claims retain their replay path and cannot move non-Cards.
@@ -2212,17 +2256,15 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 if (active := self.reader.show(selected["ref"]))["state"] in ACTIVE_STATES
                 and active["id"] != task["id"] and not _is_steward_report(active) and not is_headless(active)
             ]
-            for active in headed:
-                if (
-                    active["type"] == "code"
-                    and task["type"] == "code"
-                    and active["project"] == task["project"]
-                ):
-                    raise TaskError(
-                        "capacity_reached", "one active code task per project is already claimed", 3
-                    )
+            code_peers = [
+                active["ref"]
+                for active in headed
+                if active["type"] == "code" and active["project"] == task["project"]
+            ]
+            if task["type"] == "code" and len(code_peers) >= code_cap:
+                raise TaskError("capacity_reached", code_slot_wait(task["project"], code_cap, code_peers), 3)
             if len(headed) >= cap and not is_headless(task):
-                raise TaskError("capacity_reached", "active task capacity is reached", 3)
+                raise TaskError("capacity_reached", head_slot_wait(cap, [active["ref"] for active in headed]), 3)
 
         values = {
             "claim": worker,
@@ -2271,6 +2313,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         terminal_taxonomy: dict[str, Any] | None = None,
         release_merge: dict[str, Any] | None = None,
         wait_outcome: str | None = None,
+        release_claim: bool = False,
     ) -> dict[str, Any]:
         role = self._role(role, BOARD_ROLES, actor=actor)
         reason = self._redact_for_board(reason)
@@ -2284,6 +2327,8 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             not isinstance(release_merge, dict) or role != "dispatcher" or target != "done"
         ):
             raise TaskError("validation", "a release merge marker belongs on a dispatcher Done", 2)
+        if release_claim and (role != "dispatcher" or target != "blocked"):
+            raise TaskError("validation", "a claim release belongs on a dispatcher Blocked", 2)
         task = self.reader.show(reference)
         if role == "observer" and task.get("record_type") in _TYPED_RECORD_TYPES:
             # The observer files issues and never promotes, moves or closes one.
@@ -2364,6 +2409,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     target=target,
                     reason="",
                     role=role,
+                    release_claim=release_claim,
                 ),
             )
             replay = {
@@ -2428,6 +2474,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                 target=target,
                 reason=reason,
                 role=role,
+                release_claim=release_claim,
             ),
         )
         moved = {
@@ -2563,6 +2610,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         target: str,
         reason: str,
         role: str,
+        release_claim: bool = False,
     ) -> Callable[[Any], None]:
         """The board work a migrated Card state edge still owes once its column effect
         lands. Handed to the adapter so it runs inside the transition's transaction: it
@@ -2572,7 +2620,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         """
 
         def finish(_entity: Any) -> None:
-            self._reset_transition_metadata(task, source=source, target=target)
+            self._reset_transition_metadata(task, source=source, target=target, release_claim=release_claim)
             if reason.strip():
                 self.client.call(
                     "createComment",
@@ -2583,7 +2631,9 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
 
         return finish
 
-    def _reset_transition_metadata(self, task: dict[str, Any], *, source: str, target: str) -> None:
+    def _reset_transition_metadata(
+        self, task: dict[str, Any], *, source: str, target: str, release_claim: bool = False
+    ) -> None:
         """Apply the board metadata a Card state edge resets.
 
         Kept idempotent on purpose: a retry or :meth:`reconcile` may repeat it after the column effect
@@ -2598,7 +2648,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             clear_mark = {**clear_mark, OWNER_ANSWER: ""}
         if clear_mark:
             owner_events.settle_required_wait(str(task.get("ref") or ""), to=self.client)
-        if target in {"ready", "done"}:
+        if target in {"ready", "done"} or release_claim:
             self.client.call(
                 "saveTaskMetadata", task_id=_task_number(task), values={**_READY_RESET_METADATA, **clear_mark}
             )

@@ -31,6 +31,8 @@ class RuntimeScopeInventory:
     scopes: dict[str, dict[str, Any]] = field(default_factory=dict)
     disappeared: frozenset[str] = frozenset()
     errors: dict[str, str] = field(default_factory=dict)
+    # Run dir -> why its owner record was unreadable. Only that run dir's unit is unclaimed.
+    degraded: dict[str, str] = field(default_factory=dict)
 
     def revalidate(self) -> RuntimeScopeInventory:
         """Refresh before apply; an old snapshot never blesses a replacement."""
@@ -43,7 +45,7 @@ class RuntimeScopeInventory:
             ):
                 errors[unit] = "runtime scope identity changed since inventory; retry inspection"
         return RuntimeScopeInventory(fresh.data_dir, fresh.observed, fresh.scopes,
-                                     fresh.disappeared, errors)
+                                     fresh.disappeared, errors, fresh.degraded)
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
@@ -216,6 +218,7 @@ def read_runtime_scopes(data_dir: Path, observed: set[str], *,
     wanted = frozenset(name for name in original if name.endswith(".scope"))
     scopes: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
+    degraded: dict[str, str] = {}
     disappeared: set[str] = set()
     owners: dict[str, tuple[Path, dict[str, Any]]] = {}
     if not wanted:
@@ -242,14 +245,19 @@ def read_runtime_scopes(data_dir: Path, observed: set[str], *,
                         continue
                     with ExitStack() as owner_stack:
                         directory = data_dir / relative / name
-                        fd = _open(owner_stack, name, parent=root, directory=True, uid=uid)
                         try:
-                            owner_fd = _open(owner_stack, "scope-owner.json", parent=fd, uid=uid)
-                        except FileNotFoundError:
-                            continue  # genuinely deployed unscoped records are not scope owners
-                        record = ScopedHeadLifecycle.validate_owner(_json(owner_fd))
-                        if protocol.run_dir_for(directory.parent, record["run_id"]) != directory:
-                            raise MemoryScopeError("canonical owner directory does not match its run identity")
+                            fd = _open(owner_stack, name, parent=root, directory=True, uid=uid)
+                            try:
+                                owner_fd = _open(owner_stack, "scope-owner.json", parent=fd, uid=uid)
+                            except FileNotFoundError:
+                                continue  # genuinely deployed unscoped records are not scope owners
+                            record = ScopedHeadLifecycle.validate_owner(_json(owner_fd))
+                            if protocol.run_dir_for(directory.parent, record["run_id"]) != directory:
+                                raise MemoryScopeError("canonical owner directory does not match its run identity")
+                        except (OSError, ValueError, MemoryScopeError) as exc:
+                            # A unit whose owner is unreadable stays unclaimed; other run dirs still count.
+                            degraded[str(directory)] = str(exc)
+                            continue
                         unit = record["unit"]
                         if unit in owners:
                             raise MemoryScopeError("duplicate canonical runtime scope owners")
@@ -324,4 +332,4 @@ def read_runtime_scopes(data_dir: Path, observed: set[str], *,
         errors["runtime_scopes"] = str(exc) if isinstance(exc, MemoryScopeError) else (
             f"{type(exc).__name__} reading canonical runtime ownership or native membership; "
             "check selected data-root permissions and systemd access, then retry inspection")
-    return RuntimeScopeInventory(data_dir, original, scopes, frozenset(disappeared), errors)
+    return RuntimeScopeInventory(data_dir, original, scopes, frozenset(disappeared), errors, degraded)

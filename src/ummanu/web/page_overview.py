@@ -11,9 +11,10 @@ from ummanu.web.doctor import DOCTOR_NOT_BUILT, unreadable as doctor_unreadable
 from ummanu.web.page_assets import _ACTIONS_SCRIPT
 from ummanu.web.page_parts import (
     _beside,
-    _budget,
+    _budget_line,
     _chip,
     _current_card_cell,
+    _dod_scale,
     _feed_table,
     _open_sprints,
     _or_dash,
@@ -507,7 +508,7 @@ def sprints_page(
                     if launch
                     else "—"
                 ),
-                _budget(budget) if budget else "—",
+                (_dod_scale(item["dod"]) if "dod" in item else "") + (_budget_line(budget) if budget else ""),
             ]
         )
     table = _section(
@@ -515,7 +516,7 @@ def sprints_page(
         items,
         what="which sprints exist",
         empty="no sprint matches this filter.",
-        table=_rows(["sprint", "status", "product", "goal", "current card", "observer", "budget"], rows),
+        table=_rows(["sprint", "status", "product", "goal", "current card", "observer", "progress"], rows),
     )
     archive_form = ""
     if view == "archive":

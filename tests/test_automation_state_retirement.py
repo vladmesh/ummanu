@@ -75,6 +75,7 @@ class AutomationStateRetirementTests(unittest.TestCase):
 
         with (
             mock.patch.object(dispatch, "_ensure_head_ready"),
+            mock.patch.object(dispatch, "LAUNCH_CONFIRM_SECONDS", 0.0),
             mock.patch.object(dispatch, "_local_pty_runtime", return_value=runtime),
             mock.patch.object(dispatch, "_retire_idle_head"),
             mock.patch.object(dispatch, "_memory_bound_launch", side_effect=lambda agent, run, cmd: cmd),

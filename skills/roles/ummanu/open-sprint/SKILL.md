@@ -128,11 +128,9 @@ described in one phrase.
 There is no decomposition of the Definition of Done into phases, a task pool or a one-item-per-card
 mapping.
 
-Prepare the Definition of Done text as a file so it goes into the entity whole:
-
-```bash
-# /tmp/dod.md — a bulleted list of checkable items
-```
+Pass each item as its own `--dod-item`, in order; the sprint numbers them `d1`, `d2`, ... and the
+observer weighs them, marks them met with evidence, and cannot close the sprint while one is open. Put
+context that is not an item (boundaries, notes) in the free-text DoD file.
 
 ## 5. Create the entity
 
@@ -141,7 +139,8 @@ The only way is the product command. A sprint is opened by the PO.
 ```bash
 python3 -P -m ummanu sprint create --role po --actor <you> \
   --goal "<one sentence about the end product state>" \
-  --dod-file /tmp/dod.md \
+  --dod-item "<checkable fact 1>" --dod-item "<checkable fact 2>" \
+  [--dod-file /tmp/dod-context.md] \
   --product <product-id> --issue issue:<ID> --project <project-id> \
   --observer <head-profile|none> \
   --repository <repo> --repository <repo> \
@@ -171,6 +170,8 @@ python3 -P -m ummanu sprint create --role po --actor <you> \
 - Do not set `--ref`: the entity gets its own `sprint:<ID>`. If you do set it, the value must start with
   `sprint:` and must clash with neither an existing sprint nor a card.
 - Instead of `--dod-file` there is a `--definition-of-done` string; use the file for multi-line text.
+- Items change after opening only through `sprint dod add --ref <sprint> --role po --text ... --reason
+  ...`, which is also how an open sprint with a free-text DoD gets addressable items.
 
 Read back what you created immediately and check the fields are the ones agreed:
 

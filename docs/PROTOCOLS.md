@@ -211,9 +211,12 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   card refuses, with a `validation` error, a workspace without that file.
 
   After the report is accepted and the review, if required, is done, and before the card parks in
-  Assessment or is released outside a parking sprint, the dispatcher copies `.ummanu-report/` to
-  `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge write
-  --dir`, actor `dispatcher`; files only, no Git), then writes one `[completion:research]` comment
+  Assessment or is released outside a parking sprint, the dispatcher copies `report.md` and the small
+  text attachments of `.ummanu-report/` (`.md`, `.txt` and `.csv` files of at most 256 KiB each, 2 MiB
+  in all) to `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge
+  write --dir`, actor `dispatcher`; files only, no Git). Every other file stays in the workspace and
+  is listed, with that path, under `## Not transferred` at the end of the copied `report.md`; a file
+  left behind never Blocks the card. It then writes one `[completion:research]` comment
   whose request id is keyed on the report generation. The observer therefore decides with the report
   already in knowledge, and a replayed tick writes and comments nothing new. An observer release
   repeats the transfer, a no-op for a card parked green and the transfer itself for a card parked by
@@ -221,9 +224,9 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   fresh link; the checkpoint history keeps the earlier rounds.
 
   If the transfer is refused or fails, the card goes to Blocked with the reason `research report
-  transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `source_missing`,
-  `source_empty`, `special_file` (a symlink, a special file or an entry whose name starts with
-  `.git`), `secret`, `size_cap` or `write_failed` (a filesystem or git error). No link is written, nothing is committed under
+  transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `secret` (in a copied
+  text file), `size_cap` (a `report.md` over the 20 MiB knowledge cap) or `write_failed` (a filesystem
+  or git error). No link is written, nothing is committed under
   `reports/<card ref>/`, and the workspace is kept. The completion evidence check is unchanged and
   still the only check before Done.
 
@@ -1003,10 +1006,13 @@ once, and never as a retried infrastructure failure.
 
 A `github` gate opens the pull request the `pull_request` workflow needs. Title and body are built
 deterministically from the board; no model is involved. The title is `<ref>: <card title>` (it lands
-in the merge commit). The body names the card and the target branch, quotes the card's statement and
-carries the worker's `report:done` account; each source is bounded, redacted like other board
-excerpts, and omitted when not yet present. Every later gate run, and the one before merge, brings
-an already-open PR up to the best description it can build.
+in the merge commit). The body is a fixed English template: `## What` (the first prose paragraph of the
+worker's `report:done`, or the card title before a report exists), `## Why` (the first prose paragraph
+of the card statement), `## How verified` (the required checks CI runs on the candidate's exact SHA)
+and a final `Card: <ref>` line. Each paragraph is bounded by `UMMANU_PR_BODY_SECTION_CHARS` (800),
+redacted like other board excerpts, and stripped of board references (`issue:`, `sprint:`, `task:`,
+`research:`) and host paths. The paragraphs keep the language they were written in. Every later gate
+run, and the one before merge, brings an already-open PR up to the best description it can build.
 
 On every tick an open PR is checked against the card's integration base and retargeted when it
 points elsewhere. The candidate, card state and worker are untouched. Because `pull_request`
@@ -1025,6 +1031,10 @@ a PR a person opened (including one with an empty body), one edited after the ga
 opened before the record existed, and any PR whose card lost its record to a restore, reinstallation
 or re-adoption. Text that already matches the record is not re-sent. Anyone who can edit the
 dispatcher's production state can claim any PR; repository write access does not confer that.
+
+The one edit allowed in a PR the gate does not own removes AI attribution: a line crediting an agent
+(a generated-by footer such as a harness writes, or an agent `Co-Authored-By:`) is deleted from the
+body, the rest of the text and the title are kept, and the PR stays unowned.
 
 The description is not a condition on the code: a refused update leaves the PR and the gate verdict
 unchanged. A PR that cannot be opened at all is a gate failure, because the project's CI never runs.
@@ -1356,7 +1366,7 @@ packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA 
 delta.
 
 Worker and reviewer shells run with `workspace/.ummanu-task-env/venv/bin` first. When an adapter
-declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev]` install supplies the
+declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev,typecheck]` install supplies the
 project runtime there. Adapter setup runs outside both virtualenvs, and an explicit relative
 broad-check interpreter may select the adapter's own `.venv`. The role environment removes the
 launcher's production `PYTHONPATH` and binds only the workspace-owned test-guard startup directory
@@ -1720,6 +1730,20 @@ payload names `add` (the owner's N), `authorized_by` (the comment's event id) an
 or stopped sprint refuses it. The waiting
 cards dispatch on the next tick, and the PO completes the decision card as usual.
 
+**A run dispatched by hand.** A stand run the PO starts itself (`workflow_dispatch`) is charged before
+the run:
+
+```bash
+python3 -P -m ummanu sprint e2e-charge --ref <sprint> --role po --run <run URL or id> --card <card> [--request-id ID]
+```
+
+`--role po` only, `--card` a card of that sprint, `--run` a GitHub Actions run URL or its numeric id.
+The charge is the dispatcher's conditional charge with dispatch id `manual-run-<run id>`, recorded with
+one `e2e_charged` audit event (`run`, `card`, `dispatch_id`); the default request id is
+`e2e-charge-<run id>`. A run already charged answers `already_charged` and charges nothing. A spent
+budget or a standing `e2e_refusal` refuses it (`e2e_budget_spent`, exit status 3) and nothing is
+written; a sprint that is not open is refused (`closed`).
+
 **Budget spent, a card outside every sprint.** At its cap the stage dispatches nothing:
 
 - a card with a PO origin ([PO delegation](#po-delegation)) gets the same decision card, cut with that
@@ -1883,6 +1907,7 @@ board export, checkpoint and restore carry their metadata and comments.
 
 ```bash
 python3 -P -m ummanu product create --role po --id ummanu --project ummanu --title Ummanu
+python3 -P -m ummanu product edit --role po --id ummanu --add-project PROJECT --remove-project PROJECT --reason REASON
 python3 -P -m ummanu issue create --role po --product ummanu --kind feature --priority P2 --title TITLE
 python3 -P -m ummanu issue create --role observer --kind improvement --priority P3 --title TITLE
 python3 -P -m ummanu issue list --product ummanu
@@ -1899,7 +1924,7 @@ Who writes what:
 
 | Verb | `po` | `observer` |
 | --- | --- | --- |
-| `product create` | yes | not offered |
+| `product create`, `product edit` | yes | not offered |
 | `issue create` | yes, any product (`--product` required) | yes, under the [identity guard](#the-sprint-guard), for its sprint's product |
 | `issue update-priority`, `issue append`, `issue edit` | yes | `role_forbidden` |
 | `issue close` | yes | `role_forbidden` (an observer's `sprint close` closes its sprint's declared issues on its verdicts, in its name) |
@@ -1918,7 +1943,10 @@ role, a worker or reviewer head the profile the dispatcher launched), and a PO s
 exit 2, before anything is read.
 
 A Product id is stable and unique; its non-empty project set may contain only ids registered under
-the instance `projects/` directory. Every new issue requires its Product, one kind (`bug`, `feature`,
+the instance `projects/` directory. `product edit` adds and removes projects of that set (each option
+repeatable, an added one must be registered, the set never becomes empty) with a non-empty reason, as
+one `entity.updated` audit event; a repeat of the request id replays, the same request id with another
+change is `validation`, and a change that leaves the set as it is writes nothing. Every new issue requires its Product, one kind (`bug`, `feature`,
 `question`, `improvement`) and one priority (`P0`–`P3`). A priority change requires a non-empty
 reason, adds an `[issue:priority]` board comment and a durable audit event. Only the PO closes an
 issue with `issue close`, with exactly one of `resolved`, `invalid`, `duplicate` or `wont_do`; closure
@@ -2258,6 +2286,24 @@ A close is not a completed Definition of Done. The closeout carries that sentenc
 carries `definition_of_done` with `satisfied: false` only. Closing a sprint states what became of its
 work; it is not a statement that the sprint's Definition of Done was reached.
 
+#### Definition of Done items
+
+A sprint created with `--dod-item` (repeated, in order) carries addressable items `d1`, `d2`, ...: wording,
+state `open` or `met`, a weight and, once met, its evidence and who met it. `sprint show`, `sprint list`
+and the sprint read layer return them as `dod` with `progress`, the met weight over all weight; until every
+item is weighed each counts 1 and `estimated` is false. A sprint without items (every sprint opened before
+them) reads `structured: false` with no items and no progress; nothing is parsed out of its text.
+
+`sprint dod set-weight` (observer or PO) sets an item's weight, 1, 2, 3, 5, 8 or 13, with a reason; a
+repeat re-estimates it, and each call is its own `dod_item_weighed` history event. `sprint dod meet` needs
+`--evidence`; `sprint dod reopen` takes a met item back with a reason. `sprint dod add` (PO only) appends
+items with a reason, which is also how a free-text sprint becomes addressable.
+
+A close of a sprint with items needs every item met. The observer's close is refused with
+`close_plan_forbidden` while one is open. The PO's close goes through and files each unmet item as a new
+issue of the sprint's product, reason "sprint closed early by owner, item not met", naming the sprint and
+the item's weight; `sprint close-result` lists them as `close.dod_issues`.
+
 A close made with no closeout writes none. The protocol operation requires one
 ([Closing one](#closing-one)); the writer takes it as an option for recovery and internal callers.
 
@@ -2276,7 +2322,13 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 | `budget_recorded` | `accepted` |
 | `commented` | `accepted` |
 | `current_task_set` | `refused` — `closed`, exit status `3` |
+| `dod_item_met` | `refused` — `closed`, exit status `3` |
+| `dod_item_reopened` | `refused` — `closed`, exit status `3` |
+| `dod_item_weighed` | `refused` — `closed`, exit status `3` |
+| `dod_items_added` | `refused` — `closed`, exit status `3` |
 | `e2e_budget_raised` | `refused` — `closed`, exit status `3` |
+| `e2e_charged` | `refused` — `closed`, exit status `3` |
+| `executors_set` | `refused` — `closed`, exit status `3` |
 | `po_session_set` | `accepted` |
 | `production_allowed` | `refused` — `closed`, exit status `3` |
 | `owner_decisions_recorded` | `refused` — `closed`, exit status `3` |
@@ -2285,9 +2337,9 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 
 A late budget charge updates the totals `show` reports but cannot stop the sprint again or change its
 status (the hard-limit edge is taken only from `open`). A restore rebuilds fields from a backup and is
-accepted on any status. `po_session_set` is written only by the PO service's resolver, which refuses to
-start a re-seed on a sprint that is not open; a repeat that finishes one begun while the sprint was open
-still records its session.
+accepted on any status. `po_session_set` is written by the PO service's resolver, which refuses to
+start a re-seed on a sprint that is not open (a repeat that finishes one begun while the sprint was open
+still records its session), and by `sprint set-po-session`, which refuses a sprint that is not open.
 
 ### Budget
 
@@ -2385,7 +2437,7 @@ state read, visit resolution, staged board/audit write) is serialized per card.
 
 ### The open-sprint limit
 
-The instance setting `open_sprint_limit` is `1` or `2`; absent means `1`. A value the schema refuses
+The instance setting `open_sprint_limit` is an integer from `1` to `3`; absent means `1`. A value the schema refuses
 fails closed to `1` (never widening the limit or stopping admission), and `validate_instance` reports
 an `open_sprint_limit` finding. The limit is read from installation config at admission time, so
 changes need no restart; an unreadable config answers `1`.
@@ -2395,10 +2447,10 @@ first board write, in this order:
 
 1. **disjoint project reservations**, at either limit: a project another open sprint reserves is
    refused, naming the project and holder;
-2. **a different product**, at limit 2 only: two open sprints may not share the owning Product. A
+2. **a different product**, at a limit above 1 only: two open sprints may not share the owning Product. A
    sprint with no product cannot be proven disjoint and is refused, whichever side it is on (the
    candidate is judged on its own value first);
-3. **non-overlapping canonical repository roots**, at limit 2 only, compared as absolute resolved
+3. **non-overlapping canonical repository roots**, at a limit above 1 only, compared as absolute resolved
    paths; nesting counts as overlap. A stored root that is not absolute is refused on either side, not
    resolved at check time. The candidate's own roots are judged before any pairwise comparison, whether
    or not another sprint is open;
@@ -2464,6 +2516,19 @@ option. A named profile is resolved against the head registry at `sprint create`
 field or audit event; an unknown profile or unreadable registry is refused. `sprint reopen` does not
 restate pins; they survive a close.
 
+The PO re-pins an open sprint with
+
+```bash
+python3 -P -m ummanu sprint executors --ref <sprint> --role po [--worker HEAD] [--reviewer HEAD] [--request-id ID]
+```
+
+At least one option; a role left out keeps its pin. The profiles are checked as at create, the write
+holds the admission lock and records one `executors_set` audit event (`pins`, `previous`). Cards cut
+after it run on the new pins; a card already cut keeps the profiles it was written with until a
+`task edit` restates them. A repeat of the request id replays, the same request id with other pins is
+`validation`, pins equal to the stored ones answer `already_set` with no event, and a sprint that is not
+open is refused (`closed`).
+
 The observer launch document prints both roles in an `## Executors` section: the pinned profile, or
 that the owner fixed none and the observer chooses per card.
 
@@ -2505,7 +2570,8 @@ session id or `null`) and `allowed_productions` (a list); a sprint opened before
 `[]`. The observer launch document prints both, as `## PO session` and `## Allowed productions`. The
 checkpoint export carries each only where set, restore writes it back, and sprint parity compares both.
 Neither is changed after create except `po_session` by the PO service's resolver below (the audit kind
-of that write is `po_session_set`, role `po`, actor `po-service`), and `allowed_productions`, which the
+of that write is `po_session_set`, role `po`, actor `po-service`) and by the PO's switch below, and
+`allowed_productions`, which the
 PO only extends with `sprint allow-production` ([Production rights](#production-rights), audit kind
 `production_allowed`).
 
@@ -2528,6 +2594,19 @@ answers `{session_id, created, repeated}`:
   none> no longer exists; opened <new> seeded with <why-doc path | no why-document found> and NOTES.md`,
   and then records the new session as its `po_session`. Closed replacements say `is closed`;
   missing replacements say `no longer exists`.
+
+**The switch.** The PO points an open sprint at another open PO session:
+
+```bash
+python3 -P -m ummanu sprint set-po-session --ref <sprint> --role po --session <session id> --request-id <ID>
+```
+
+The session has to exist and be open, else `validation`. The write records `po_session_set` (role `po`,
+the caller's actor, payload `po_session` and `previous`) and a sprint comment (role `po`, actor
+`po-service`): `the PO session of <sprint> switched from <old or none> to <new> by <actor>`. A repeat of
+the request id replays; the same request id with another session is `validation`; a session equal to
+the recorded one answers `already_set` with nothing written; a sprint that is not open is refused
+(`closed`). The switch seeds nothing: the session is already one the owner works in.
 
 `po.context_budget_bytes` in `instance.yaml` declares the sprint session budget, default `262144`.
 It must be a positive integer; malformed or unreadable configuration refuses before writes.
@@ -3174,15 +3253,26 @@ record's `worker_comment_deliveries` points the worker at it once: the keys are 
 saved, `TASK.md` is re-rendered for the same generation and decision, and only then the pointer, "re-read
 its comments section", goes out through the same worker delivery as the report prompt. A tick repeat or
 a restarted dispatcher sends nothing again; a failed send is recorded as delivery evidence and not
-retried, and the next round's `TASK.md` carries the comment either way. A worker that is parked in Assessment,
+retried, and the next round's `TASK.md` carries the comment either way. A send the head refuses because
+it is mid-turn is not a failure: its keys move to `worker_comments_owed` and a later tick points the
+worker at them once the turn ends. A worker that is parked in Assessment,
 held for validation, paused or between rounds is sent nothing and nothing is recorded; the next round's
 `TASK.md` carries the comment. `decision` and `operation` cards have no worker and are unaffected.
+
+### The round summary at the top of a worker TASK.md
+
+Every worker `TASK.md` opens with `## This round`: the report generation and, measured against the
+`TASK.md` the checkout already holds, which round-bound sections are new (observer decision, protocol
+prerequisites, reviewer findings, mechanical gate failure) and how many comments arrived, plus the
+previous submission's SHA and outcome. A checkout without a `TASK.md` gets "read it whole". The full
+document below it is unchanged and stays authoritative.
 
 ### Code style in the worker and review packets
 
 Every worker `TASK.md`, for any project, card kind and head family, carries `## Code style`: the text of
-`packaging/worker-style.md`, before the report dispositions. The dispatcher reads the file from the
-checkout it runs from, like the other `packaging/` assets. A project's `AGENTS.md` wins on conflict.
+`packaging/worker-style.md`, with its code and docs rules, before the report dispositions. A product
+run's `TASK.md` carries the same section last. Both read the file from the checkout the process runs
+from, like the other `packaging/` assets. A project's `AGENTS.md` wins on conflict.
 
 A code card's `REVIEW.md` carries the style checklist S1-S7 for the lines the diff adds. It is the one
 exception to the rule that a RED blocker states a concrete reachable scenario: a violation of S1-S4 (a
@@ -3587,7 +3677,7 @@ Diagnosis, stale draft recovery, re-onboarding and verification:
 
 ## Memory
 
-Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<project-dir>/<slug>.md`, one
+Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<project-id>/<slug>.md`, one
 distilled markdown record per fact. The curator is the writer role; other agents read through
 `memory_search`, `memory_get` and `memory_list`.
 
@@ -3598,8 +3688,15 @@ python3 -P -m ummanu memory propose --instance INSTANCE --actor ACTOR \
 python3 -P -m ummanu memory commit --instance INSTANCE --actor ACTOR --propose-id ID
 python3 -P -m ummanu memory supersede --instance INSTANCE --actor ACTOR \
   --scope SCOPE --slug SLUG --file FACT.md --supersedes OLD-ID
+python3 -P -m ummanu memory move-scope --instance INSTANCE --actor ACTOR --from DIR --to SCOPE
 python3 -P -m ummanu memory reindex --instance INSTANCE
 ```
+
+A project scope is `project:<id>` with the id of a registered project binding, in the machine
+identifier grammar `[a-z0-9][a-z0-9-]*`; `propose` refuses any other spelling and `commit`, `supersede`
+and `move-scope` also refuse an id the registry does not hold. `move-scope` moves every fact under one
+canon directory into such a scope with its bytes unchanged, all or nothing, and refuses when a fact id
+already exists in the target; `ummanu doctor` names each stored scope directory outside the grammar.
 
 Write authority is split. `propose` stages a fact in the curator inbox
 (`<data_dir>/memory/.staging/<propose-id>`) and touches no canon; `commit` and `supersede` write
@@ -3618,7 +3715,7 @@ Facts whose owner needs product-owner judgment use the `review:po` scope
 (`state/memory/facts/po-review`): a triage basket, not operational truth. Entries carry the
 `pending-review` tag, their source sprint/session and candidate project scopes. Interactive PO, curator
 and retro identities may read it; worker, reviewer, observer and steward grants never do. The PO reads it
-with `scope=review:po` and publishes the resolved fact into `global` or `project:<dir>` with
+with `scope=review:po` and publishes the resolved fact into `global` or `project:<id>` with
 `supersede`, atomically removing the review entry.
 
 Curator input is a bounded, two-phase batch protocol. Each source is routed from the selected
@@ -3699,7 +3796,9 @@ The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is
 writes a digest-only access grant bound to that exact `HeadRun` and puts the opaque bearer in the
 launched process, not in `runtime.env`. The service resolves the grant and rechecks the HeadRun
 heartbeat on every read. Missing, expired, malformed, foreign or stopped bindings return a typed
-data-free denial. `caller`, `scope` and other tool arguments are never authority.
+data-free denial. `caller`, `scope` and other tool arguments are never authority. The bearer never
+goes on a launch command line, which sudo logs. `ummanu memory revoke --grant <id>` (the bearer part
+before `.`) deletes one grant so its bearer resolves as unknown.
 
 Resolved read policy: an interactive PO has installation-wide read; a worker or reviewer has exactly its
 card's `project:<id>` plus `product:ummanu` (also when the project is `ummanu`); an observer has
@@ -4619,7 +4718,9 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | GET | `/po` | `po.po_overview` | open PO sessions (with `?closed=1` the closed ones, with `closed_at` and a link back; the open list links to them with `closed_count`), newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by its `title` when set (then the start of its first message on a line of its own), else by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one), with last activity, CLI, model, state, running turn, short id and a `close` form; and the new-session form (CLI and model from `po.models`) |
 | POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
 | GET | `/po/sessions/{session}` | `po.po_session` (+ `reads.po_delegated`) | one PO session: its title heading the page when set and a rename form beside the header, feed, turn states, message box, stop while a turn runs, close while none does; a closed one shows `closed_at`/`closed_by` and no message box or close; and the **Delegated cards** it delegated or inherited as a successor, each with its ref linked, title, kind, column and last return state, from one board listing (a board that refused is said as itself) |
-| POST | `/po/sessions/{session}/messages` | `po.po_send` | queue one message with the PO service; form `request_id, text`; 303 to the session once it is on disk, where it runs at once or waits for the running turn; a closed session is refused (409 `session_closed`) and a stopped service (503 `backend_unavailable`, `the PO service is not running`), nothing written |
+| POST | `/po/sessions/{session}/messages` | `po.po_send` | queue one message with the PO service; form `request_id, text, attachment*` (each `attachment` a stored image name; the text the head reads ends with their absolute paths and the feed shows their thumbnails); 303 to the session once it is on disk, where it runs at once or waits for the running turn; a closed session is refused (409 `session_closed`) and a stopped service (503 `backend_unavailable`, `the PO service is not running`), nothing written |
+| POST | `/po/sessions/{session}/attachments` | `po.po_attach` | store one image for an open session; the body is the raw bytes of a PNG, JPEG or WebP image (recognised by its signature), at most 10 MiB; answers `{kind: po_attachment, name, path}`, where `name` is `<sha256>.<ext>` and `path` its absolute place under `<data>/po/sessions/<session>/attachments`; other bytes 400 `validation`, a closed session 409 `session_closed`, nothing written |
+| GET | `/po/sessions/{session}/attachments/{name}` | `po.po_attachment` | one stored image of the session with its media type; a name it does not hold 404 |
 | POST | `/po/sessions/{session}/stop` | `po.po_stop` | stop turn `seq` if it is the running one; form `seq` |
 | POST | `/po/sessions/{session}/close` | `po.po_close` | close the session as actor `owner`; empty form, no request id; 303 to `/po`, also when already closed (first `closed_at`/`closed_by` kept); a running turn or a queued message renders the session refused (409 `owner_conflict`), nothing written; unknown session 404 |
 | POST | `/po/sessions/{session}/title` | `po.po_rename` | set the session's title, open or closed; form `title`, no request id (a repeat sets the same value); trimmed, one line, at most 120 characters, empty clears it; 303 to the session, or the session rendered with the refusal and the text kept (400 `validation`); unknown session 404 |

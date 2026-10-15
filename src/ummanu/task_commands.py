@@ -14,6 +14,7 @@ from ummanu.board.backend import card_client
 from ummanu.board.models import CardState
 from ummanu.board.owner_handover import OWNER, OWNER_ROLE
 from ummanu.board.roles import BOARD_ROLES, CREATE_ROLES, EDIT_ROLES, Role
+from ummanu.board.task_protocol.rows import admit_role
 from ummanu.board.task_routing import (
     PO_EXECUTED_TYPES,
     BlockClassification,
@@ -26,6 +27,7 @@ from ummanu.board.task_routing import (
 from ummanu.cli_output import print_error, print_json, usage_handler
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
 from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missing_snapshot
+from ummanu.kernel.capacity_policy import DEFAULT_HEAD_CAPACITY
 from ummanu.kernel.errors import TaskError
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.runtime.cli_composition import add_command_parser
@@ -345,7 +347,7 @@ def add_task_subcommands(subparsers) -> None:
     task_claim.add_argument("--resolved-review-head", default="")
     task_claim.add_argument("--slug", default="")
     task_claim.add_argument("--base-branch", default="")
-    task_claim.add_argument("--cap", type=int, default=3)
+    task_claim.add_argument("--cap", type=int, default=DEFAULT_HEAD_CAPACITY)
     task_claim.set_defaults(handler=run_task_claim)
     reconcile_audit = task_subcommands.add_parser("reconcile-audit")
     _add_data_dir_args(reconcile_audit)
@@ -554,7 +556,9 @@ def run_task_create(args: argparse.Namespace) -> int:
     from ummanu.tasks import TaskWriter
 
     def command() -> object:
+        admit_role(args.role, args.actor or args.role, CREATE_ROLES)
         _validate_codex_mode_for_create(args)
+        _refuse_unrunnable_project(Path(_instance(args)), args.project, args.type)
         description = _read_body(args.body_file) if args.body_file else args.description
         writer = TaskWriter(card_client(_instance(args)), data_dir=resolve_data_dir(args))
         return writer.create(
@@ -590,6 +594,29 @@ def run_task_create(args: argparse.Namespace) -> int:
         )
 
     return run_task_command(command)
+
+
+def _refuse_unrunnable_project(instance: Path, project: str, task_type: str) -> None:
+    """A new card names a registered project; one a head runs needs it enabled, and a code card
+    needs a broad check whose receipt can attest the candidate.
+    """
+    from ummanu.board.completion_evidence import is_headless
+    from ummanu.product_issues import registered_bindings
+    from ummanu.projects.contract import candidate_receipt_refusal
+
+    binding = registered_bindings(instance).get(project.strip())
+    if binding is None:
+        raise TaskError("project_not_registered", f"project {project!r} is not in the instance project registry", 2)
+    if is_headless({"type": task_type.strip()}):
+        return
+    if binding.get("enabled") is not True:
+        raise TaskError(
+            "project_not_enabled",
+            f"project {project!r} is registered but not enabled for workloads, so no head would run this card",
+            2,
+        )
+    if task_type.strip() == "code" and (refusal := candidate_receipt_refusal(binding, instance=instance)):
+        raise TaskError("broad_check_not_attestable", f"{refusal}; cut research or change the adapter", 2)
 
 
 def _po_turn_session() -> str:

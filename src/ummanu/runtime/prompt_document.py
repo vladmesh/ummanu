@@ -25,10 +25,16 @@ NUDGE_FILE_MODE = "nudge-file"
 _NUDGE_TEMPLATE = "Read {path} and do its task."
 _DOCUMENT_MODE = 0o600
 _DOCUMENT_DIR_MODE = 0o700
+WORKER_STYLE = Path(__file__).resolve().parents[3] / "packaging" / "worker-style.md"
 
 
 class PromptDocumentError(RuntimeError):
     """A document or nudge that would break the module's guarantees."""
+
+
+def worker_style() -> str:
+    """The code and docs style every worker document carries, from the checkout this process runs."""
+    return WORKER_STYLE.read_text(encoding="utf-8").strip()
 
 
 def nudge_for(path: str | Path, note: str = "") -> str:

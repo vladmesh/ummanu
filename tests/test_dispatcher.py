@@ -1764,6 +1764,21 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.reader.show("ummanu-511")["state"], "ready")
         self.assertEqual(self.reader.show("other-1")["state"], "in_progress")
         self.assertEqual(claimed["skipped_ready"][0]["ref"], "ummanu-511")
+        self.assertEqual(
+            claimed["skipped_ready"][0]["reason"],
+            "waiting for a code slot of project ummanu (code_concurrency 1): ummanu-510",
+        )
+
+    def test_a_project_code_concurrency_of_two_claims_a_second_code_card(self) -> None:
+        self.board.move(12, "in_progress")
+        self.board.save_metadata(12, {"claim": "ummanu-510-pilot", "resolved_head": "codex"})
+        self.runtime.catalog.code_caps["ummanu"] = 2
+
+        result = self.runtime.production_tick()
+
+        claimed = next(action for action in result["actions"] if action.get("step") == "claim")
+        self.assertEqual(claimed["pilot_ref"], "ummanu-511")
+        self.assertEqual(self.reader.show("ummanu-511")["state"], "in_progress")
 
     # A blocked card suppresses claims in its own sprint and its own project, and nowhere else
     # (secretary-1047). The helpers below build the two-open-sprint installation the pilot setting
@@ -12765,6 +12780,7 @@ class GithubGateHost(CommandHostRuntime):
         pr_open: bool,
         check_runs: list,
         statuses: list | None = None,
+        workflow_runs: list | None = None,
         run_log: str = "",
         run_log_error: bool = False,
         api_error: str = "",
@@ -12786,6 +12802,7 @@ class GithubGateHost(CommandHostRuntime):
         self.pr_closed_reopened = 0
         self._check_runs = check_runs
         self._statuses = statuses or []
+        self._workflow_runs = workflow_runs or []
         self._run_log = run_log
         self._run_log_error = run_log_error
         self.rerun_status = {"status": "IN_PROGRESS", "conclusion": ""}
@@ -12830,7 +12847,8 @@ class GithubGateHost(CommandHostRuntime):
             if "--base" in args:
                 self.pr_base = args[args.index("--base") + 1]
                 return done("https://github.com/example-org/sample/pull/42\n")
-            self.pr_title = args[args.index("--title") + 1]
+            if "--title" in args:
+                self.pr_title = args[args.index("--title") + 1]
             self.pr_body = args[args.index("--body") + 1]
             return done("https://github.com/example-org/sample/pull/42\n")
         if args[1:3] in (["pr", "close"], ["pr", "reopen"]):
@@ -12850,9 +12868,12 @@ class GithubGateHost(CommandHostRuntime):
                 return subprocess.CompletedProcess(args, 1, "", self._api_error)
             path = args[2]
             if path.endswith("/check-runs"):
-                return done(json.dumps(self._check_runs))
+                return done(json.dumps({"total_count": len(self._check_runs), "check_runs": self._check_runs}))
             if path.endswith("/status"):
-                return done(json.dumps(self._statuses))
+                return done(json.dumps({"total_count": len(self._statuses), "statuses": self._statuses}))
+            if "/actions/runs?head_sha=" in path:
+                runs = self._workflow_runs
+                return done(json.dumps({"total_count": len(runs), "workflow_runs": runs}))
         return done("[]")
 
     def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
@@ -13758,16 +13779,21 @@ class DispatcherGateTests(unittest.TestCase):
                 pr_open=False,
                 check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
             )
-            host.gate_check(self._described_task(), self._record(ws))
+            task = self._described_task()
+            task["comments"][-1]["body"] = (
+                "[report:done]\nПереписал `_ensure_pr` по issue:abc123, лог в /home/dev/run.log.\n\n"
+                "## Checks\n\nunit green"
+            )
+            host.gate_check(task, self._record(ws))
+            head = git(ws, "rev-parse", "HEAD")
         body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
-        self.assertIn("ummanu-633", body)
-        self.assertIn("МР открывается с фиксированной заглушкой", body)
-        self.assertIn("`pipeline/ummanu-633` → `main`", body)
-        self.assertIn("Пул-реквест должен нести описание задачи, а не литерал.", body)
-        self.assertIn("Second line.", body)
-        self.assertIn("Переписал `_ensure_pr`", body)
-        self.assertNotIn("[report:done]", body, "the marker line is not part of the story")
-        self.assertNotIn("Automatic PR for worker branch", body)
+        self.assertEqual(
+            body,
+            "## What\n\nПереписал `_ensure_pr` по (internal ref), лог в <path>\n\n"
+            "## Why\n\nПул-реквест должен нести описание задачи, а не литерал.\n\n"
+            f"## How verified\n\nCI runs every check of the `pull_request` workflow on `{head[:12]}`; "
+            "the merge waits for them to pass.\n\nCard: `ummanu-633`",
+        )
 
     def test_pr_body_omits_sources_that_do_not_exist_yet(self) -> None:
         """The gate also runs before any report exists, and a bare card is not a gate failure."""
@@ -13789,12 +13815,10 @@ class DispatcherGateTests(unittest.TestCase):
             bare_result = bare.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "green")
         body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
-        self.assertIn("What the card asks for", body)
-        self.assertNotIn("What the worker reports", body)
+        self.assertIn("## What\n\nМР открывается с фиксированной заглушкой вместо описания задачи\n", body)
         self.assertEqual(bare_result.status, "green", "a card with no title or statement still gates")
         bare_body = self._pr_argument(self._pr_calls(bare, "create")[0], "--body")
-        self.assertNotIn("What the card asks for", bare_body)
-        self.assertNotIn("What the worker reports", bare_body)
+        self.assertIn("## What\n\nummanu-633\n\n## Why\n\n(the card carries no statement)\n", bare_body)
         self.assertEqual(self._pr_argument(self._pr_calls(bare, "create")[0], "--title"), "ummanu-633")
 
     def test_the_pr_the_gate_opens_is_recorded_as_its_own(self) -> None:
@@ -14028,7 +14052,6 @@ class DispatcherGateTests(unittest.TestCase):
                     result = host.gate_check(self._described_task(), self._record(ws))
                 self.assertEqual(result.status, "green")
                 self.assertEqual(self._pr_calls(host, "edit"), [])
-                self.assertEqual(self._pr_calls(host, "view"), [], "an unowned PR is not even read")
                 self.assertEqual(host.pr_body, body)
 
     def test_a_pull_request_opened_before_this_change_keeps_its_stub_by_decision(self) -> None:
@@ -14042,8 +14065,7 @@ class DispatcherGateTests(unittest.TestCase):
         those would infer authorship from something other than the gate's own accepted write, and
         an old stub costs a reader some context while a wrong overwrite costs a person their words.
 
-        So the gate does not merely decline to edit it: it asks the backend nothing about it at
-        all, neither `gh pr view` nor `gh pr edit`.
+        So the gate reads it only to look for AI attribution, finds none, and edits nothing.
         """
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")
@@ -14067,10 +14089,51 @@ class DispatcherGateTests(unittest.TestCase):
             result = host.gate_check(self._described_task(), record)
 
         self.assertEqual(result.status, "green", "an unrefreshed description never colours the gate")
-        self.assertEqual(self._pr_calls(host, "view"), [], "an unowned PR is not even read")
         self.assertEqual(self._pr_calls(host, "edit"), [])
         self.assertEqual((host.pr_title, host.pr_body), (stub_title, stub_body))
         self.assertEqual(record.gate_pr_authorship, {}, "and it is not adopted on the way past")
+
+    def test_ai_attribution_is_removed_from_a_pr_the_gate_did_not_open(self) -> None:
+        body = (
+            "Fixes the parser.\n\nTests: unit suite green.\n\n"
+            "🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\n"
+            "Co-Authored-By: Claude <noreply@anthropic.com>\n"
+            "Co-Authored-By: Ada Lovelace <ada@example.org>"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")
+            host = GithubGateHost(
+                Path(tmp),
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_title="A worker's own title",
+                pr_body=body,
+            )
+            record = self._record(ws)
+            result = host.gate_check(self._described_task(), record)
+        self.assertEqual(result.status, "green")
+        self.assertEqual(
+            host.pr_body,
+            "Fixes the parser.\n\nTests: unit suite green.\n\n\nCo-Authored-By: Ada Lovelace <ada@example.org>",
+        )
+        self.assertEqual(host.pr_title, "A worker's own title")
+        self.assertEqual(record.gate_pr_authorship, {}, "the cleaned PR is not adopted")
+
+    def test_a_person_s_pr_naming_a_tool_in_prose_is_left_alone(self) -> None:
+        body = "Generated by the build script; see the Claude Code docs for the hook."
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/ummanu-633")
+            host = GithubGateHost(
+                Path(tmp),
+                self._github_adapter(),
+                pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_body=body,
+            )
+            host.gate_check(self._described_task(), self._record(ws))
+        self.assertEqual(self._pr_calls(host, "edit"), [])
+        self.assertEqual(host.pr_body, body)
 
     def test_a_record_from_another_pull_request_owns_nothing_here(self) -> None:
         """The record is about one pull request. A PR whose number it does not name — the card's
@@ -14212,8 +14275,8 @@ class DispatcherGateTests(unittest.TestCase):
             host.gate_check(task, self._record(ws))
         body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
         self.assertIn("truncated", body)
-        self.assertLess(len(body), 2 * PR_BODY_SECTION_CHARS)
-        self.assertIn("What the worker reports", body, "a long statement must not eat the report")
+        self.assertLess(len(body), 3 * PR_BODY_SECTION_CHARS)
+        self.assertIn("Переписал `_ensure_pr`", body, "a long statement must not eat the report")
 
     def test_github_gate_red_on_failed_pr_ci(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -14335,6 +14398,7 @@ class DispatcherGateTests(unittest.TestCase):
                 "gate pr list",  # gh pr list (which number did it get, to record it?)
                 "gate pr view",  # gh pr view (what did GitHub store? that is what is digested)
                 "gate repo view",  # gh repo view --json nameWithOwner
+                "gate gh api",  # gh api .../actions/runs?head_sha=
                 "gate gh api",  # gh api .../check-runs
                 "gate gh api",  # gh api .../status
             ],

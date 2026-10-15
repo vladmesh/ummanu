@@ -31,9 +31,13 @@ def memory_limit_mib(value: object, profile_id: str) -> int:
     return value
 
 
+#: The name prefix of every head's systemd scope.
+HEAD_SCOPE_PREFIX = "ummanu-head-"
+
+
 def scope_unit(run_id: str) -> str:
     # The hash also keeps arbitrary run ids out of a unit name.
-    return f"ummanu-head-{hashlib.sha256(run_id.encode()).hexdigest()[:24]}.scope"
+    return f"{HEAD_SCOPE_PREFIX}{hashlib.sha256(run_id.encode()).hexdigest()[:24]}.scope"
 
 
 def scope_argv(

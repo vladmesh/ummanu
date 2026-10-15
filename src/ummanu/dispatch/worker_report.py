@@ -40,6 +40,7 @@ from ummanu.dispatch.state import (
     OutcomeTerminalPath,
     attempt_request_id as _attempt_request_id,
 )
+from ummanu.dispatch.tui import READINESS_BUSY, delivery_readiness_state
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.watchdog import reset_idle as _reset_idle, reset_wait as _reset_wait
 from ummanu.dispatch.worker_comments import task_doc_comment_keys as _task_doc_comment_keys
@@ -713,11 +714,16 @@ def deliver_worker_comments(
     if not comments:
         return None
     handed = _task_doc_comment_keys(record.workspace) | set(record.worker_comment_deliveries)
-    pending = [comment.key for comment in comments if comment.key not in handed]
+    owed = set(record.worker_comments_owed)
+    pending = [comment.key for comment in comments if comment.key in owed or comment.key not in handed]
     if not pending or not runtime.host.worker_takes_comments(record):
         return None
     ref = task["ref"]
-    record.worker_comment_deliveries = (*record.worker_comment_deliveries, *pending)
+    record.worker_comment_deliveries = (
+        *record.worker_comment_deliveries,
+        *(key for key in pending if key not in record.worker_comment_deliveries),
+    )
+    record.worker_comments_owed = ()
     records[ref] = record
     runtime.save_records(payload, records)
     try:
@@ -725,8 +731,25 @@ def deliver_worker_comments(
         runtime.host.deliver_worker_comments(task, record)
     except HostError as exc:
         _record_worker_delivery_evidence(record, exc, failure=True)
+        busy = delivery_readiness_state(exc) == READINESS_BUSY
+        if busy:
+            # Nothing reached a head that is mid-turn: the pointer is owed again once the turn ends.
+            record.worker_comment_deliveries = tuple(
+                key for key in record.worker_comment_deliveries if key not in pending
+            )
+            record.worker_comments_owed = tuple(pending)
         records[ref] = record
         runtime.save_records(payload, records)
+        if busy:
+            return {
+                "status": "ok",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": "worker-comments-deferred",
+                "comments": pending,
+                "reason": scrub_host_output(str(exc)),
+            }
         return {
             "status": "degraded",
             "step": "advance",

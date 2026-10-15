@@ -51,6 +51,14 @@ python3 -m tests.broad
 python3 -m ummanu role-skills audit --check
 ```
 
+Typecheck separately with the command CI's `typecheck` job runs. It checks the file list in
+`[tool.mypy]` of `pyproject.toml` and needs the `typecheck` extra, which the dispatcher installs in a
+worker's workspace environment (`.venv/bin/python -m pip install -e '.[typecheck]'` in a checkout):
+
+```bash
+python3 -m mypy
+```
+
 `python3 -m tests.broad` is the local `unit` and `component` profile, not the gate: a pull request is
 judged by the exact-SHA GitHub CI run described in [Testing](docs/TESTING.md). When a change touches
 another suite, run it by module name (`python3 -m unittest tests.test_bootstrap`) rather than through

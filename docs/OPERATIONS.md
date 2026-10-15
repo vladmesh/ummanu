@@ -1577,9 +1577,10 @@ else: no reopen, no reservation, no head. `sprint comment-delivery` answers `not
 
 ## The two-sprint pilot
 
-The default is one open sprint per installation. A second is enabled by an instance setting. Admission
-rules are in [Protocols](PROTOCOLS.md#the-open-sprint-limit): in practice the second sprint must touch
-nothing the first touches. Each sprint declares its own observer.
+The default is one open sprint per installation. Up to three are enabled by an instance setting.
+Admission rules are in [Protocols](PROTOCOLS.md#the-open-sprint-limit): in practice each sprint must
+touch nothing another open sprint touches. Each sprint declares its own observer, and the dispatcher
+runs one observer head per open sprint.
 
 Role `po` operations `close`, `reopen` and `record_budget` take the sprint reference as an argument and
 do not check the observer binding, so with two open sprints an observer head declaring `--role po` can
@@ -1593,7 +1594,7 @@ Add to `instance.yaml` like any config change ([Changing installation config](#c
 open_sprint_limit: 2
 ```
 
-Only `1` and `2` are accepted. Anything else keeps the limit at one and `ummanu doctor` reports an
+Only `1`, `2` and `3` are accepted. Anything else keeps the limit at one and `ummanu doctor` reports an
 `open_sprint_limit` finding. The value is read at each admission; nothing restarts.
 
 ### Verifying it took effect
@@ -1676,8 +1677,8 @@ Tests often start child interpreters with an environment built from scratch, whi
 prefix is already set. A venv made ready before this file existed is still accepted and gains the file on
 its next bring-up. Children started with an interpreter outside the workspace venv are not covered.
 
-When the adapter declares `broad_check` without `broad_check.interpreter`, the candidate's `.[dev]` is
-installed into this environment, so worker and reviewer tools and the inner broad suite resolve there.
+When the adapter declares `broad_check` without `broad_check.interpreter`, the candidate's
+`.[dev,typecheck]` is installed into this environment, so worker and reviewer tools and the inner broad suite resolve there.
 That install may need package-index access; an unavailable index is a bring-up failure, never
 permission to install into the production virtualenv. An adapter with no `broad_check` gets a bare
 environment. Adapter setup runs with neither virtualenv active and the production venv off `PATH`. A
@@ -1849,7 +1850,7 @@ The fence runs before these, as the `observer-fence` step with action `observer-
 | state | status | tick |
 | --- | --- | --- |
 | drained, the sprint's observer not launched yet (`observer_not_launched`) or deferred by the drain (`observer_launch_deferred`, reason `pipeline is draining`) | `deferred` | `ok`, exit 0 |
-| anything else: a due launch that failed (a deferral with any other reason), a dead or mismatched head, an abandoned bring-up, a corrupt declaration; and every fence outside a pause | `critical` | `degraded`, exit 3 |
+| anything else: a due launch that failed (a deferral with any other reason), a dead or mismatched head, an abandoned bring-up, a corrupt declaration; and every fence outside a pause | `critical` | `degraded`, exit 0 |
 
 Either way the sprint's cards stay fenced. A recovered host with an open sprint, drained before its
 first tick, therefore reports a green drained tick. On the first tick after `resume` the fence is
@@ -3331,9 +3332,18 @@ project directories, such as the sprint:1475 rename, and before the next tick, w
   line with the same digest; the retry appends a new `rebind` line, and the applied attempt is the one whose digest
   matches the published state. A second run finds nothing and writes nothing. `--dry-run` writes nothing.
 
-`ummanu doctor` reports `automation_busy_without_advance` for the curator when its supervised head has been answered
-`supervised-busy-skip` for longer than `BUSY_WITHOUT_ADVANCE_HOURS` (6 h) with no `advance` or successful
-`memory_write` in `runs.jsonl` and no head started since. The head is stuck: inspect and stop it rather than wait.
+`ummanu doctor` reports `automation_busy_without_advance` for a standing agent whose dispatch has been answered
+`supervised-busy-skip` past its threshold (`BUSY_WITHOUT_ADVANCE_HOURS`: 6 h for the curator and the steward's
+three-hourly sweep; the first skip for retro and the steward's deep sweep) with no progress record (`advance`,
+`deep-sweep-advance` for the deep sweep, or a successful `memory_write`) and no head started since. The head is stuck:
+inspect and stop it rather than wait. `ummanu automations health` is red for an agent whose last three head
+dispatches were busy skips. A steward tick refused over a head launched more than `STALE_BUSY_HEAD_SECONDS` (6 h)
+ago closes its report card Blocked with the run id, launch time and refusal; a shorter skip closes it Done.
+Doctor reports `automation_lock_refused` (red) when an agent's latest three or more `runs.jsonl` records are all
+`lock-refused`, naming the holder pid and the first refusal; any later record from a tick clears it. Every
+`runs.jsonl` record carries `source`: `unit:<service>`, `automation:<head scope>` or `manual`.
+A standing head launched with its prompt on its command line that exits within `LAUNCH_CONFIRM_SECONDS` (10 s)
+fails its tick: `supervised-start-failed`, a nonzero unit exit, and the steward report closed with the failure.
 A head that only finished its turn and sat idle (a Codex TUI keeps its composer open after the turn) is
 not this finding any more: the next tick ends it with `stop_if_quiescent` once its supervisor shows no turn
 open, no delivery in flight and no output for `IDLE_HEAD_GRACE_SECONDS` (10 min), logs
@@ -3489,8 +3499,19 @@ reason under `skipped_ready`, and the scan continues with the next card.
 - `unauthenticated`: re-authenticate that runtime's CLI in the profile's runtime home, then wait for the TTL.
 - `unavailable`: do not restart cards; check provider status and re-read after the TTL.
 - `exhausted`: wait for the quota; cards with a fallback already moved.
+- A red verdict with an expiry is probed again every hour and a ready probe ends it early.
+  `ummanu dispatcher resource-reprobe --instance <dir> --resource <id>` probes now and records the
+  answer, replacing a held verdict.
 - `probe_broken`: run the registry's probe string by hand under the dispatcher's environment and repair
   what it names; `doctor` prints the failing line.
+
+### Claim capacity
+
+`head_capacity` in `instance.yaml` (default 3) bounds the cards with a head (code, research, infra)
+active at once across the installation; decision, operation and wait cards take no slot. A project's
+`policy.code_concurrency` (default 1, 0 claims none) bounds its own active code cards inside that.
+`ummanu status` prints both. A card the limits keep in Ready is skipped with the reason `waiting for a
+slot` and the cards holding the slots.
 
 ### Head status in a live workspace
 

@@ -34,6 +34,7 @@ from ummanu.dispatch.observer import (
     load_observers,
     observer_alive,
     observer_decision,
+    observer_unreachable,
     stage_event,
 )
 from ummanu.dispatch.state import now_rfc3339
@@ -71,6 +72,7 @@ REASON_DEAD = "observer_head_dead"
 REASON_MISMATCH = "observer_head_mismatch"
 REASON_DEFERRED = "observer_launch_deferred"
 REASON_ABANDONED = "observer_handle_abandoned"
+REASON_UNREACHABLE = "observer_unreachable"
 REASON_BOARD_UNAVAILABLE = "sprint_board_unavailable"
 
 # A launch that has not been attempted is not a failure: the sprint stays fenced, with the outcome
@@ -268,6 +270,15 @@ def _sprint_verdict(
         return {
             "reason": REASON_ABANDONED,
             "message": f"declared observer {head} has an abandoned terminal from a failed bring-up",
+            "head": head,
+        }
+    if observer_unreachable(record):
+        return {
+            "reason": REASON_UNREACHABLE,
+            "message": (
+                f"declared observer {head} refused its wakes through every replacement it may get "
+                f"and waits for the owner ({record.delivery.last_failure_reason})"
+            ),
             "head": head,
         }
     if record.state == "deferred" and paused and record.deferred_reason == DRAIN_DEFERRED_REASON:

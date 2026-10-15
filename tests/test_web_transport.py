@@ -433,6 +433,7 @@ class StatusMappingTests(unittest.TestCase):
         "text": "hi",
         "seq": "1",
         "title": "a title",
+        "attachment": "0" * 64 + ".png",
     }
 
     def _body(self, route) -> bytes:
@@ -445,6 +446,8 @@ class StatusMappingTests(unittest.TestCase):
             ).encode("utf-8")
         if route.body == "form":
             return self.BODIES["form"]
+        if route.body == "image":
+            return b"\x89PNG\r\n\x1a\n"
         if route.method != "POST":
             return b""
         return json.dumps(self.JSON_BODIES[route.pattern]).encode("utf-8")
@@ -538,6 +541,8 @@ class RouteTableTests(TransportFixture):
         ("POST", "/po/sessions"),
         ("GET", "/po/sessions/{session}"),
         ("POST", "/po/sessions/{session}/messages"),
+        ("POST", "/po/sessions/{session}/attachments"),
+        ("GET", "/po/sessions/{session}/attachments/{name}"),
         ("POST", "/po/sessions/{session}/stop"),
         ("POST", "/po/sessions/{session}/close"),
         ("POST", "/po/sessions/{session}/title"),
@@ -1175,6 +1180,9 @@ class ExplodingApp:
             self.raised += 1
             raise self.exc
         return self.app.handle(method, path, **kwargs)
+
+    def body_limit(self, method: str, path: str) -> int:
+        return self.app.body_limit(method, path)
 
 
 #: An exception whose text is exactly what must not be published: a credential in a DSN. Nothing has

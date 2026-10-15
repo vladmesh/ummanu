@@ -68,7 +68,6 @@ class StatusCliTests(unittest.TestCase):
             )
             (data_dir / "memory" / "index.sqlite").write_text("index", encoding="utf-8")
             (data_dir / "board").mkdir()
-            (data_dir / "board" / "cards.ndjson").write_text('{"ref":"ummanu-727"}\n', encoding="utf-8")
             (data_dir / "dispatcher" / "pause.json").write_text(
                 json.dumps({"mode": "freeze", "actor": "ummanu", "since": "2999-01-01T00:00:00Z"}),
                 encoding="utf-8",
@@ -193,7 +192,7 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(payload["host"]["units"][0]["enabled"], "enabled")
         self.assertEqual(payload["installation"]["projects"], 1)
         self.assertEqual(payload["installation"]["heads"][0]["role"], "worker")
-        self.assertEqual(payload["installation"]["cards"]["total"], 1)
+        self.assertIsNone(payload["installation"]["cards"]["total"], "this installation has no board store")
         self.assertIsNotNone(payload["host"]["resources"]["disk_free_bytes"])
         self.assertEqual(len(payload["host"]["resources"]["load_average"]), 3)
         self.assertEqual(payload["checkpoint"]["last_commit"], "abc123")
@@ -245,7 +244,7 @@ class StatusCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\nname: test\ndata_dir: " + str(data_dir) + "\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-                "host:\n  unit_prefix: ummanu-\n",
+                "host:\n  unit_prefix: ummanu-\nhead_capacity: 5\n",
                 encoding="utf-8",
             )
             output = io.StringIO()
@@ -271,6 +270,8 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("Ummanu status:", output.getvalue())
         self.assertTrue(snapshot["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["panel"]["live"])
+        self.assertIn("capacity: 5 cards with a head at once; code cards per project: none", output.getvalue())
+        self.assertEqual(snapshot["installation"]["capacity"], {"head_capacity": 5, "code_concurrency": {}})
 
     def test_status_json_includes_stopped_sprint_and_its_frozen_resume(self):
         """A stopped sprint reports the freshness of its own record, not of later events."""
@@ -346,6 +347,7 @@ class StatusCliTests(unittest.TestCase):
                 snapshot = collect_status(report, offline=True, sprint_client=board)
 
         self.assertEqual(validate(snapshot, "status", "status.json"), [])
+        self.assertEqual(snapshot["installation"]["cards"]["total"], board.card_count())
         sprint = snapshot["installation"]["sprints"]["items"][0]
         self.assertEqual(sprint["status"], "stopped")
         self.assertEqual(sprint["stop_reason"], "budget_hard_limit")
@@ -699,6 +701,36 @@ class StatusCliTests(unittest.TestCase):
             ["missing-on-host: (none)", "unmanaged-on-host: (none)"],
             text,
         )
+
+    def test_doctor_reports_a_stored_memory_scope_outside_the_machine_id_grammar_and_keeps_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fact = root / "state" / "memory" / "facts" / "codegen_orchestrator" / "drifted.md"
+            fact.parent.mkdir(parents=True)
+            fact.write_text("a drifted fact\n", encoding="utf-8")
+            (root / "state" / "memory" / "facts" / "codegen-orchestrator").mkdir()
+            (root / "state" / "memory" / "facts" / "codegen-orchestrator" / "kept.md").write_text(
+                "a fact in the registered scope\n", encoding="utf-8"
+            )
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: test\n"
+                f"data_dir: {root / 'data'}\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["doctor", "--offline", "--json", "--instance", str(instance)])
+            payload = json.loads(output.getvalue())
+            self.assertEqual(fact.read_text(encoding="utf-8"), "a drifted fact\n")
+        self.assertEqual(code, 1, payload)
+        invalid = [finding for finding in payload["findings"] if finding["code"] == "machine_id_invalid"]
+        self.assertEqual(
+            [(finding["field"], finding["name"], finding["source"]) for finding in invalid],
+            [("memory scope", "codegen_orchestrator", str(fact.parent))],
+        )
+        self.assertIn("must match [a-z0-9][a-z0-9-]*", invalid[0]["message"])
 
     def test_doctor_json_reports_an_unresolved_divergence_even_offline(self):
         with tempfile.TemporaryDirectory() as tmp:

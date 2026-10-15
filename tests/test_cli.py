@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 import json
@@ -61,6 +62,8 @@ def init_instance_repo(instance_dir: Path) -> None:
     git(instance_dir, "add", "instance.yaml")
     git(instance_dir, "commit", "--quiet", "-m", "config")
 
+UMMANU_BINDING = "id: ummanu\nrepo: /srv/ummanu\nenabled: false\nadapter: ummanu\ndefault_branch: main\n"
+
 
 class BoardCommandInstanceTests(unittest.TestCase):
     """Every board command names the installation it talks to, reads included.
@@ -80,14 +83,19 @@ class BoardCommandInstanceTests(unittest.TestCase):
         return top.choices[name].__dict__["_subparsers"]._group_actions[0].choices  # type: ignore[union-attr]
 
     def test_every_task_and_sprint_subcommand_takes_an_instance(self) -> None:
-        for group in ("task", "sprint"):
-            for name, parser in self._subparsers(group).items():
-                options = {
-                    option
-                    for action in parser._actions  # type: ignore[union-attr]
-                    for option in action.option_strings
-                }
-                self.assertIn("--instance", options, f"{group} {name} names no installation")
+        pending = [
+            (f"{group} {name}", parser)
+            for group in ("task", "sprint")
+            for name, parser in self._subparsers(group).items()
+        ]
+        while pending:
+            command, parser = pending.pop()
+            nested = [action for action in parser._actions if isinstance(action, argparse._SubParsersAction)]
+            if nested:
+                pending.extend((f"{command} {name}", child) for name, child in nested[0].choices.items())
+                continue
+            options = {option for action in parser._actions for option in action.option_strings}
+            self.assertIn("--instance", options, f"{command} names no installation")
 
 
 class CliTests(unittest.TestCase):
@@ -845,6 +853,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("fact from cli\n", encoding="utf-8")
 
@@ -980,6 +990,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("verified cli fact\n", encoding="utf-8")
             _propose_code, propose_output = self.run_cli(
@@ -1059,6 +1071,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("cli retryable fact\n", encoding="utf-8")
             propose_code, propose_output = self.run_cli(
@@ -1146,6 +1160,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
+            (instance_dir / "projects").mkdir()
+            (instance_dir / "projects" / "ummanu.yaml").write_text(UMMANU_BINDING, encoding="utf-8")
             fact = root / "fact.md"
             fact.write_text("fact from cli\n", encoding="utf-8")
 

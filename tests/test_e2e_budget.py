@@ -697,5 +697,40 @@ class SprintBudgetEntityTests(SprintFixture):
         self.assertEqual(self.sprint("sprint:13")["e2e"]["summary"], "e2e: 0 of 3")
 
 
+    def charge(self, run: str, *, card: str = "ummanu-12", reference: str = "sprint:14", **fields: Any) -> dict[str, Any]:
+        return self.writer.charge_manual_e2e(role="po", actor="po", reference=reference, run=run, card=card, **fields)
+
+    def test_a_manual_run_is_charged_once_by_its_run_id_and_refused_past_the_budget(self) -> None:
+        self._create(goal="manual", reference="sprint:14", e2e_budget=1)
+        self.arrange_card_sprint("ummanu-12", "sprint:14")
+        url = "https://github.com/vladmesh/codegen/actions/runs/38039163997"
+
+        code, output, errors = self.cli("sprint", "e2e-charge", "--ref", "sprint:14", "--role", "po", "--run", url, "--card", "ummanu-12")
+
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(json.loads(output)["sprint"]["e2e"]["summary"], "e2e: 1 of 1")
+        self.assertEqual(self.charge(url)["event_id"], json.loads(output)["event_id"])
+        self.assertEqual(self.charge("38039163997", request_id="by-id")["action"], "already_charged")
+        shown = self.sprint("sprint:14")["e2e"]
+        self.assertEqual((shown["used"], [c["dispatch_id"] for c in shown["charges"]]), (1, ["manual-run-38039163997"]))
+        with self.assertRaises(TaskError) as refused:
+            self.charge("38039163998")
+        self.assertEqual(refused.exception.code, "e2e_budget_spent")
+        self.assertEqual(self.sprint("sprint:14")["e2e"]["used"], 1)
+        self.assertEqual(len(self.writer.audit.events("sprint:14", kind="e2e_charged")), 1)
+
+    def test_a_charge_names_a_run_and_a_card_of_the_sprint(self) -> None:
+        self._create(goal="manual", reference="sprint:14")
+        for run, card in (("not-a-run", "ummanu-12"), ("https://example.com/runs/1", "ummanu-12"), ("1", "ummanu-12"), ("1", "")):
+            with self.subTest(run=run, card=card), self.assertRaises(TaskError) as refused:
+                self.charge(run, card=card)
+            self.assertEqual(refused.exception.code, "validation")
+        with self.assertRaises(TaskError) as refused:
+            self.writer.charge_manual_e2e(role="observer", actor="observer", reference="sprint:14", run="1", card="ummanu-12")
+        self.assertEqual(refused.exception.code, "role_forbidden")
+        self.assertEqual(self.sprint("sprint:14")["e2e"]["summary"], "e2e: 0 of 3")
+        self.assertEqual(self.writer.audit.events("sprint:14", kind="e2e_charged"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

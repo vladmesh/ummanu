@@ -1099,8 +1099,51 @@ class StewardResourceSignalTests(unittest.TestCase):
 
         changed, current = steward_signals._resource_signals({"resource_status": {"claude": "ready"}})
 
-        self.assertEqual(changed, {"claude": "unauthenticated"})
+        self.assertEqual(changed, {"claude": {"status": "unauthenticated", "last_transition": {}}})
         self.assertEqual(current, {"claude": "unauthenticated"})
+
+    def test_a_recovery_names_the_red_reason_it_ended(self) -> None:
+        for red in ("unknown", "unavailable"):
+            with self.subTest(red):
+                health = HeadHealth(None, self.data_dir)
+                health.record("openai-sub", red, f"{red}: provider said no", now=100.0)
+                health.record("openai-sub", "ready", "probe succeeded", now=200.0)
+
+                changed, _ = steward_signals._resource_signals({"resource_status": {"openai-sub": red}})
+
+                self.assertEqual(
+                    changed["openai-sub"]["last_transition"],
+                    {
+                        "from": red,
+                        "to": "ready",
+                        "from_reason": f"{red}: provider said no",
+                        "reason": "probe succeeded",
+                        "at": 200.0,
+                    },
+                )
+                batch = {
+                    "signals": {
+                        "pipeline_ticks": [],
+                        "new_blocked": [],
+                        "stale": [],
+                        "resource_flip": changed,
+                        "new_orphan_workspaces": [],
+                    }
+                }
+                self.assertIn(
+                    f"- openai-sub: {red} -> ready at 1970-01-01 00:03 UTC: probe succeeded "
+                    f"(was: {red}: provider said no)",
+                    steward_signals.render_markdown(batch),
+                )
+
+    def test_a_same_status_verdict_keeps_the_last_transition(self) -> None:
+        health = HeadHealth(None, self.data_dir)
+        health.record("openai-sub", "unavailable", "503", now=100.0)
+        health.record("openai-sub", "ready", "probe succeeded", now=200.0)
+        health.record("openai-sub", "ready", "probe succeeded", now=500.0)
+
+        transition = health.snapshot()["openai-sub"]["last_transition"]
+        self.assertEqual((transition["from"], transition["at"]), ("unavailable", 200.0))
 
     def test_a_stale_worktree_copy_cannot_flip_the_production_status(self) -> None:
         self.write_production({"claude": "ready"})
@@ -1208,6 +1251,30 @@ class HealthAgentStateTests(unittest.TestCase):
 
         self.assertTrue(problems)
         self.assertIn("last healthy tick", problems[0])
+
+    def test_a_role_whose_last_dispatches_were_all_busy_skips_is_red(self) -> None:
+        skip = {"event": "dispatch", "action": "supervised-busy-skip"}
+        self.write_runs(
+            "retro",
+            [{"ts": _ts(5), "event": "dispatch", "action": "supervised-started"}]
+            + [{"ts": _ts(minutes), **skip} for minutes in (4, 3, 2)],
+        )
+
+        problems, _ = health._runs_status("retro")
+
+        self.assertEqual(problems, ["last 3 head dispatches were busy skips: a standing head holds the role"])
+
+    def test_a_fresh_head_after_busy_skips_clears_the_streak(self) -> None:
+        skip = {"event": "dispatch", "action": "supervised-busy-skip"}
+        self.write_runs(
+            "retro",
+            [{"ts": _ts(minutes), **skip} for minutes in (5, 4, 3)]
+            + [{"ts": _ts(2), "event": "dispatch", "action": "supervised-started"}],
+        )
+
+        problems, _ = health._runs_status("retro")
+
+        self.assertEqual(problems, [])
 
 
 class HealthExpectedStateTests(unittest.TestCase):

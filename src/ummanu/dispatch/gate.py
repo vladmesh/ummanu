@@ -226,7 +226,7 @@ def _github_gate(
     refused = gate_pr._publish_branch(host, record, workspace, branch, sha, task["project"])
     if refused is not None:
         return refused
-    gate_pr._ensure_pr(host, workspace, task, record, branch, base)
+    gate_pr._ensure_pr(host, workspace, task, record, branch, base, sha, required or [])
     repo = github_ci._name_with_owner(host, workspace)
     rerun_run_id = str(getattr(record, "gate_infrastructure_rerun_run_id", "") or "")
     rerun_sha = str(getattr(record, "gate_infrastructure_reruns_sha", "") or "")
@@ -258,6 +258,15 @@ def _github_gate(
         return GateResult("green", f"CI green for `{branch}` @ `{short}`", attestation=receipt)
     if rollup == "FAILURE":
         job = safe_one_line((failed or {}).get("name") or (failed or {}).get("context") or "?") or "?"
+        if (failed or {}).get("conclusion") == github_ci.MISSING_CONCLUSION:
+            return GateResult(
+                "red",
+                f"CI red: required check «{job}» was never posted on `{branch}` @ `{short}`"
+                " and every workflow run for it has completed",
+                f"candidate = {sha}\nrequired checks = {', '.join(required or [])}",
+                fingerprint=_fingerprint("github-missing-check", job, sha),
+                attestation=receipt,
+            )
         fragment = github_ci._failed_log(host, repo, failed or {})
         where = f"job «{job}»"
         if fragment.step:

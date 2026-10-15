@@ -15,6 +15,7 @@ from scripts.ci_selection import (
     SelectionError,
     changed_paths,
     import_graph,
+    manifest_moves,
     plan_digest,
     read_plan,
     select,
@@ -126,9 +127,27 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(mode, "affected")
         self.assertIn("tests/test_other.py", selected["unit"])
         self.assertEqual(why["tests/test_other.py"], ["conservative opaque consumer"])
-        self.assertEqual(self.choose([("M", ("tests/test_other.py",))], after=source)[0], "full")
+        source["tests/helper.py"] = "from ummanu.leaf import *\n"
+        self.assertEqual(self.choose([("M", ("tests/helper.py",))], after=source)[0], "full")
+
+    def test_an_opaque_top_level_test_file_selects_itself_and_its_importers_only(self):
+        source = self.sources()
+        source["tests/test_direct.py"] = "import subprocess\nsubprocess.run(['true'])\n"
         source["tests/test_other.py"] = "from ummanu.leaf import *\n"
-        self.assertEqual(self.choose([("M", ("tests/test_other.py",))], after=source)[0], "full")
+        mode, _, selected, why = self.choose([("M", ("tests/test_other.py",))], before=source, after=source)
+        self.assertEqual((mode, selected), ("affected", {"unit": ["tests/test_other.py"]}))
+        self.assertEqual(why["tests/test_other.py"], ["changed test"])
+
+    def test_manifest_edit_selects_the_test_files_it_assigned_to_a_suite(self):
+        change = [("M", ("tests/ci-shards.txt",))]
+        mode, _, selected, why = select(self.grouped(), change, self.sources(), self.sources(),
+                                        frozenset({"tests/test_transitive.py"}))
+        self.assertEqual((mode, selected), ("affected", {"component": ["tests/test_transitive.py"]}))
+        self.assertEqual(why["tests/test_transitive.py"], ["suite changed in the manifest"])
+        self.assertEqual(self.choose(change)[0], "full")
+        base = "# header\nunit tests/test_direct.py\nunit tests/test_transitive.py\n"
+        self.assertEqual(manifest_moves(base, self.grouped()),
+                         {"tests/test_other.py", "tests/test_transitive.py"})
 
     def test_selection_never_executes_module_body_and_refuses_ambiguous_import(self):
         sources = self.sources()

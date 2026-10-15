@@ -10,7 +10,7 @@ import yaml
 
 from ummanu.config import validate_instance
 from ummanu.dispatch.e2e import parse_e2e
-from ummanu.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
+from ummanu.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT, CAUSE_PROJECT_NOT_ENABLED
 from ummanu.dispatch.launcher import (
     HeadLaunchError,
     claude_launch_model as _claude_launch_model,
@@ -21,6 +21,7 @@ from ummanu.dispatch.launcher import (
 from ummanu.dispatch.observer import OBSERVER_ROLE
 from ummanu.dispatch.types import DispatcherError, HostError
 from ummanu.head_registry import HeadRegistryConfigError, installed_heads
+from ummanu.kernel.capacity_policy import code_concurrency, head_capacity
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.projects.contract import ContractVerdict, decide as _decide_broad_check_contract
 from ummanu.projects.integration_base import IntegrationBaseError, resolve_integration_base, seed_ref_refusal
@@ -96,14 +97,30 @@ class InstanceCatalog:
         if not binding:
             registered = getattr(self, "registered_bindings", self.bindings)
             if any(name in registered for name in candidates):
-                raise HostError(f"project {project!r} is registered but not enabled for workloads")
+                raise HostError(
+                    f"project {project!r} is registered but not enabled for workloads",
+                    bring_up_cause=CAUSE_PROJECT_NOT_ENABLED,
+                )
             raise HostError(
-                f"project {project!r} is not registered in the instance and is not enabled for workloads"
+                f"project {project!r} is not registered in the instance and is not enabled for workloads",
+                bring_up_cause=CAUSE_PROJECT_NOT_ENABLED,
             )
         repo = binding.get("repo")
         if not isinstance(repo, str) or not repo:
             raise HostError(f"project {project!r} has no repo path")
         return binding
+
+    def head_capacity(self) -> int:
+        """How many cards with a head the installation runs at once (`head_capacity`)."""
+        return head_capacity(self.instance)
+
+    def code_concurrency(self, project: str) -> int:
+        """How many code cards of `project` may be active at once (`policy.code_concurrency`).
+
+        A project with no registered binding declares no policy and has the default; the claim's
+        contract preflight refuses its card anyway.
+        """
+        return code_concurrency(self.registered_bindings.get(project) or {})
 
     def project_availability(self, project: str) -> ProjectAvailability:
         """Inspect one enabled binding using the recovery checkout rule."""

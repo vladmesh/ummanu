@@ -179,8 +179,9 @@ def wrap_role_command(
 
     The installation binding is written into the command because the head's terminal is not the
     launcher's child; without it a non-default instance's heads read the home default `runtime.env`.
-    `identity` names must be in the role's allowlist, else refused. `local_run_policy` is passed as an
-    explicit role-env argument so no inherited or runtime.env value can grant the exception.
+    `identity` names must be in the role's allowlist and name no launch secret, else refused.
+    `local_run_policy` is passed as an explicit role-env argument so no inherited or runtime.env
+    value can grant the exception.
     """
     if binding not in ROLE_ENV_BINDINGS:
         known = ", ".join(ROLE_ENV_BINDINGS)
@@ -191,6 +192,11 @@ def wrap_role_command(
         return role_env.wrap_shell_command(role, command, workspace=workspace or None)
     if local_run_policy is not None and role not in role_env.RUFF_ROLES:
         raise HeadCommandError(f"role {role!r} carries no local-run policy")
+    secret = sorted(set(identity or {}) & set(role_env.LAUNCH_SECRET_ENV))
+    if secret:
+        raise HeadCommandError(
+            f"role {role!r} binding {', '.join(secret)} is a secret; pass it in the launch environment"
+        )
     unknown = sorted(set(identity or {}) - set(role_env.ROLE_ALLOWLIST.get(role, ())))
     if unknown:
         raise HeadCommandError(f"role {role!r} carries no binding named {', '.join(unknown)}")

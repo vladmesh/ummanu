@@ -56,7 +56,6 @@ integration-board tests/test_board_schema_gate_backend.py
 integration-board tests/test_release_schema_boundary.py
 unit tests/test_entrypoint_guard.py
 unit tests/test_closed_product_registry.py
-unit tests/test_old_name_guard.py
 component tests/test_config_check.py
 unit tests/test_env_prefix.py
 unit tests/test_environment_aliases.py
@@ -247,6 +246,8 @@ unit tests/test_sprint_read.py
 unit tests/test_sprint_admission.py
 unit tests/test_sprint_close_model.py
 unit tests/test_sprint_write.py
+unit tests/test_sprint_dod.py
+integration-board tests/test_sprint_dod_backend.py
 unit tests/test_local_run_policy.py
 integration-board tests/test_sprints_sql_backend.py
 integration-board tests/test_sql_board_bulk_reads.py
@@ -338,3 +339,7 @@ integration-dispatcher tests/test_broad_check_process.py
 unit tests/test_installation_retirement.py
 unit tests/test_cli_cold_composition.py
 unit tests/test_process_receipts.py
+unit tests/test_automation_run_findings.py
+unit tests/test_dispatcher_tick_exit.py
+unit tests/test_ready_skips.py
+unit tests/test_runs_journal.py

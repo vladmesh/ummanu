@@ -184,6 +184,7 @@ CREATE TABLE sprints (
     po_session         text,                          -- the PO session it answers to (0016)
     allowed_productions text[] NOT NULL DEFAULT '{}', -- projects its operations may touch (0016)
     owner_decisions jsonb NOT NULL DEFAULT '[]', -- quoted sprint authority (0027, J9)
+    dod_items          jsonb,                         -- addressable DoD items (0031, J12)
     local_run_exceptions jsonb NOT NULL DEFAULT '[]', -- exact command authority at create (0026, J8)
     e2e_budget         integer NOT NULL DEFAULT 3,    -- e2e runs it may dispatch (0023)
     e2e_used           integer NOT NULL DEFAULT 0,    -- e2e runs it dispatched (0023)
@@ -199,6 +200,7 @@ CREATE TABLE sprints (
     CONSTRAINT sprint_e2e_counts_are_not_negative CHECK (e2e_budget >= 0 AND e2e_used >= 0),
     CONSTRAINT sprint_owner_decisions_are_array CHECK (jsonb_typeof(owner_decisions) = 'array'),
     CONSTRAINT sprint_local_runs_are_array CHECK (jsonb_typeof(local_run_exceptions) = 'array'),
+    CONSTRAINT sprint_dod_items_are_array CHECK (dod_items IS NULL OR jsonb_typeof(dod_items) = 'array'),
     CONSTRAINT sprint_ref_is_a_sprint_reference CHECK (ref ~ '^sprint:'),
     CONSTRAINT sprint_number_agrees_with_ref CHECK (
         (ref ~ '^sprint:[0-9]+$') = (sprint_number IS NOT NULL) AND
@@ -720,6 +722,7 @@ also reclassifies existing rows, preserving their IDs, text, dedup keys and read
 | (J9) `sprints.owner_decisions` | append-only quoted entries with stable IDs and PO audit attribution; latest scoped answer wins; empty for released sprints |
 | (J11) `po_feed.metadata` | optional native input source, visible summary, sprint ref and delivered comment position; NULL for historical expanded text |
 | (J10) `sprint_resumes.po_request` | optional `{card, action}` identifying a board-owned PO wait; admission locks and validates the actual card, not references extracted from prose; NULL for released resumes |
+| (J12) `sprints.dod_items` | ordered `{id, text, state, weight, weight_reason, evidence, met_by}` items (`board/sprint_dod.py`); NULL for a sprint whose DoD is only free text |
 | (J8) `sprints.local_run_exceptions` | creation-only list of `{project, argv, rationale}`; exact vectors for registered, reserved projects; default `[]` |
 
 No extension bag may hold a field the schema names. Link sets, budget counters, resume fields and
@@ -812,6 +815,7 @@ Revisions (`src/ummanu/board/migrations/versions/`):
 | `0028_owner_turns` | reclassifies released `card_waits_for_person`, `e2e_budget_spent`, `e2e_after_merge` rows as notices, preserving IDs, quotations, dedup keys and read history; adds `po_card_escalated` with matching current kind/class constraints. The `owner_event_routine_notice` trigger normalizes actual 0023/0024/0025 producers' obsolete class during release activation, so their real occurrences remain notices. Downgrade refuses while any changed kind exists rather than fabricate old attention. No new table or column. |
 | `0029_po_channel` | nullable typed PO wait on `sprint_resumes`, object CHECK; released six-field resumes, delivery cursors and audit are unchanged. Task PO execution assignment and per-run disposition use existing extension bags. Downgrade refuses while a typed PO wait exists. |
 | `0030_po_input_context` | nullable object metadata on `po_feed`; accepted queue context is copied with turn claim; historical bytes are unchanged; downgrade refuses to lose recorded delivery positions |
+| `0031_sprint_dod_items` | nullable DoD item array on `sprints`, array CHECK; every existing sprint stays NULL (free-text DoD, unstructured); downgrade refuses while any sprint has items |
 
 `0007` upgrades an occupied `0006` store in place: it assigns keys in stable reference order,
 advances the sequence past the backfill, runs `SET CONSTRAINTS ALL IMMEDIATE`, then makes the column
@@ -823,7 +827,7 @@ non-null, unique and range-checked. Refs, numbers, relations, comments and audit
 admit.
 
 Catalogue at head, counted from a real `postgres:16` by `tests/test_board_store_schema.py`
-(including `alembic_version`): 31 tables, 61 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
+(including `alembic_version`): 31 tables, 62 `CHECK`, 45 foreign keys, 31 primary keys, 19 `UNIQUE`,
 5 partial unique indexes.
 
 ---
@@ -1205,7 +1209,7 @@ and restore reads stay outside latency-sensitive paths.
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
-  (`0030_po_input_context`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
+  (`0031_sprint_dod_items`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
 - **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a

@@ -478,6 +478,33 @@ class ProductIssueStoreTests(ProductIssueFixture, unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
 
+    def test_product_ids_outside_the_machine_id_grammar_are_refused_before_any_write(self) -> None:
+        before = (self.audit_events(), self.request_state())
+        for field, product_id, projects in (
+            ("product id", "продукт", ["ummanu"]),
+            ("product id", "café", ["ummanu"]),
+            ("product id", "two words", ["ummanu"]),
+            ("product id", "under_score", ["ummanu"]),
+            ("project id", "ummanu", ["codegen_orchestrator"]),
+        ):
+            with self.subTest(product_id=product_id, projects=projects):
+                with self.assertRaisesRegex(TaskError, rf"{field} .* must match \[a-z0-9\]\[a-z0-9-\]\*") as raised:
+                    self.store.create_product(
+                        product_id=product_id,
+                        projects=projects,
+                        title="Продукт",
+                        description="",
+                        actor="po",
+                    )
+                self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual((self.audit_events(), self.request_state()), before)
+        self.assert_product_absent("ummanu")
+
+        product = self.store.create_product(
+            product_id="ummanu", projects=["ummanu"], title="Продукт", description="", actor="po"
+        )
+        self.assertEqual((product["id"], product["title"]), ("ummanu", "Продукт"))
+
     def test_request_id_conflicts_are_rejected_before_a_second_write(self) -> None:
         self.store.create_product(
             product_id="ummanu",
@@ -867,6 +894,74 @@ class ProductIssueDescriptionAppendTests(ProductIssueFixture, unittest.TestCase)
         self.assertEqual(self.issue(issue["ref"])["description"], shown["description"])
         self.assertEqual([event["request_id"] for event in self._updates(issue["ref"])], ["cli"])
 
+
+
+class ProductProjectEditTests(ProductIssueFixture, unittest.TestCase):
+    """`product edit`: the PO adds and removes registered projects of a Product, audited."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        for project in ("service-template", "codegen-product-kit"):
+            (self.root / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
+        self.create_product(
+            product_id="codegen",
+            projects=["ummanu", "service-template"],
+            title="Codegen",
+            description="",
+            actor="po",
+            request_id="codegen-create",
+        )
+
+    def _edit(self, request_id: str, *, add=(), remove=(), **values: object) -> dict:
+        values.setdefault("reason", "service-template is frozen")
+        values.setdefault("actor", "po")
+        return self.store.edit_product_projects(
+            product_id="codegen", add=list(add), remove=list(remove), request_id=request_id, **values
+        )
+
+    def _updates(self) -> list[dict]:
+        return [
+            event
+            for event in self.audit_events()
+            if event.get("ref") == "product:codegen" and event.get("kind") == "entity.updated"
+        ]
+
+    def test_the_cli_replaces_the_project_set_once_with_one_audit_event(self) -> None:
+        output = io.StringIO()
+        with (
+            mock.patch("ummanu.product_issue_commands.board_client", return_value=self.client),
+            contextlib.redirect_stdout(output),
+        ):
+            code = main(
+                ["product", "edit", "--id", "codegen", "--role", "po", "--actor", "po",
+                 "--remove-project", "service-template", "--add-project", "codegen-product-kit",
+                 "--reason", "service-template is frozen", "--request-id", "swap-template",
+                 "--instance", str(self.root), "--data-dir", str(self.root / "data")]
+            )
+
+        self.assertEqual(code, 0, output.getvalue())
+        self.assertEqual(self.product_project_binding("codegen"), ["codegen-product-kit", "ummanu"])
+        replay = self._edit("swap-template", add=["codegen-product-kit"], remove=["service-template"])
+        self.assertEqual(replay["projects"], ["codegen-product-kit", "ummanu"])
+        self.assertEqual(self._edit("no-change", remove=["service-template"])["projects"], replay["projects"])
+        [event] = self._updates()
+        self.assertEqual((event["request_id"], event["actor"]["role"]), ("swap-template", "po"))
+
+    def test_refusals_write_nothing(self) -> None:
+        for request_id, values, code in (
+            ("empty", {}, "validation"),
+            ("both", {"add": ["ummanu"], "remove": ["ummanu"]}, "validation"),
+            ("unknown", {"add": ["not-registered"]}, "validation"),
+            ("last", {"remove": ["ummanu", "service-template"]}, "validation"),
+            ("reason", {"add": ["codegen-product-kit"], "reason": " "}, "validation"),
+            ("role", {"add": ["codegen-product-kit"], "role": "observer", "actor": "observer"}, "role_forbidden"),
+            ("codegen-create", {"add": ["codegen-product-kit"]}, "validation"),
+        ):
+            with self.subTest(request_id=request_id), self.assertRaises(TaskError) as raised:
+                self._edit(request_id, **values)
+            self.assertEqual(raised.exception.code, code)
+        self.assertEqual(self.product_project_binding("codegen"), ["service-template", "ummanu"])
+        self.assertEqual(self._updates(), [])
 
 if __name__ == "__main__":
     unittest.main()

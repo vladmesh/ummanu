@@ -24,6 +24,9 @@ from ummanu.runtime.role_env import (
     workspace_pycache_pth,
 )
 
+# One line per declared interpreter the workspace test guard left unguarded, in the namespace.
+TEST_GUARD_SKIPS_FILE = "test-guard-skips"
+
 
 class WorkspaceEnvironmentMixin:
 
@@ -183,7 +186,7 @@ class WorkspaceEnvironmentMixin:
         if self._candidate_environment_install_required(project) and (root / "pyproject.toml").is_file():
             before = self._workspace_extra_files(root)
             self._run(
-                [str(environment / "bin" / "python3"), "-m", "pip", "install", "-e", ".[dev]"],
+                [str(environment / "bin" / "python3"), "-m", "pip", "install", "-e", ".[dev,typecheck]"],
                 "workspace candidate dependencies",
                 cwd=root,
             )
@@ -196,42 +199,30 @@ class WorkspaceEnvironmentMixin:
         self._install_workspace_test_guards(root, project=project)
 
     def _install_workspace_test_guards(self, root: Path, *, project: str = "") -> None:
+        """Guard the workspace venv, and the declared interpreter's venv when it is candidate-local.
+
+        Each declared interpreter left unguarded gets one line in `TEST_GUARD_SKIPS_FILE`.
+        """
         if self.mode == "noop":
             return
         from ummanu.runtime.test_guard import install_environment, install_workspace
 
         environments = [self._workspace_environment(root)]
+        skipped: list[str] = []
         if project:
             declaration = self.catalog.adapter(project).get("broad_check", {})
             interpreter = declaration.get("interpreter") if isinstance(declaration, dict) else None
             if interpreter:
-                path = Path(interpreter)
-                path = path if path.is_absolute() else root / path
-                # Setup may not have created the adapter-owned venv yet. Worker
-                # preparation repeats this step after setup; retained environments
-                # take this same path without rebuilding their dependencies.
-                if path.is_file() and path.parent.name == "bin":
-                    # Resolve the bin directory, not the executable symlink: a
-                    # local venv normally links Python to its system binary.
-                    # External declarations remain supported, but are never
-                    # optional destinations for candidate guard writes.
-                    try:
-                        prefix = path.parent.resolve(strict=True).parent
-                        sites = [site for site in prefix.glob("lib/python3*/site-packages") if site.is_dir()]
-                        eligible = (
-                            prefix.is_relative_to(root.resolve(strict=True))
-                            and (prefix / "pyvenv.cfg").is_file()
-                            and len(sites) == 1
-                            and sites[0].resolve(strict=True).is_relative_to(prefix)
-                        )
-                    except (OSError, RuntimeError, ValueError):
-                        eligible = False
-                    if eligible:
-                        environments.append(prefix)
+                prefix, reason = _optional_guard_prefix(root, str(interpreter))
+                if prefix is not None:
+                    environments.append(prefix)
+                else:
+                    skipped.append(f"optional interpreter {interpreter} not guarded: {reason}\n")
         try:
             install_workspace(root)
             for environment in dict.fromkeys(environments):
                 install_environment(root, environment)
+            write_text_atomic(root / WORKSPACE_NAMESPACE / TEST_GUARD_SKIPS_FILE, "".join(skipped))
         except (OSError, RuntimeError, ValueError) as exc:
             raise HostError(f"workspace test guard unavailable: {exc}") from None
 
@@ -332,3 +323,31 @@ class WorkspaceEnvironmentMixin:
         )
         prefix = f"PATH={shlex.quote(safe_path)}; unset VIRTUAL_ENV; export PATH; "
         self._run_shell(prefix + command, cwd, label)
+
+
+def _optional_guard_prefix(root: Path, interpreter: str) -> tuple[Path | None, str]:
+    """The candidate-local venv prefix a declared interpreter may guard, or why it may not."""
+    path = Path(interpreter)
+    path = path if path.is_absolute() else root / path
+    # Setup may not have created the adapter-owned venv yet; worker preparation repeats this
+    # step after setup, and retained environments take this same path.
+    if not path.is_file():
+        return None, "interpreter is absent"
+    if path.parent.name != "bin":
+        return None, "interpreter is not in a bin directory"
+    # Resolve the bin directory, not the executable symlink: a local venv normally links Python
+    # to its system binary. External declarations stay supported but never receive guard writes.
+    try:
+        prefix = path.parent.resolve(strict=True).parent
+        if not prefix.is_relative_to(root.resolve(strict=True)):
+            return None, "prefix is outside the candidate"
+        if not (prefix / "pyvenv.cfg").is_file():
+            return None, "prefix has no pyvenv.cfg"
+        sites = [site for site in prefix.glob("lib/python3*/site-packages") if site.is_dir()]
+        if len(sites) != 1:
+            return None, "prefix has no single site-packages"
+        if not sites[0].resolve(strict=True).is_relative_to(prefix):
+            return None, "site-packages escapes the prefix"
+    except (OSError, RuntimeError, ValueError) as exc:
+        return None, f"prefix is unresolvable ({type(exc).__name__})"
+    return prefix, ""

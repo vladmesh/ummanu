@@ -150,7 +150,6 @@ _READY_RESET_METADATA = {
 }
 # Dispatcher Assessment moves require decisions; human escape-hatch moves do not.
 _DECISION_BOUND_ROLES: frozenset[Role] = frozenset({Role.DISPATCHER})
-_SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 # A Product or an Issue is not an execution task: it never takes a claim or a task transition,
 # whatever column it currently sits in.
 _TYPED_RECORD_TYPES = {"issue", "product"}

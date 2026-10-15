@@ -145,11 +145,29 @@ Always first, on launch and after a restart:
 3. With an active card (current task, or one in Ready, In progress, Validate or Assessment), cut no
    second one.
 4. If the sprint is closed or stopped, start nothing.
+5. If `dod.structured` is true and an item has no weight, weigh every item before the first card,
+   comparing them with each other by expected difficulty (not value), one call per item:
+   ```bash
+   python3 -P -m ummanu sprint dod set-weight --ref <sprint-ref> --role observer --actor observer \
+     --item d2 --weight 5 --reason "<why this size beside the others>"
+   ```
+   Weights are 1, 2, 3, 5, 8 or 13. Re-estimate an item the same way when what you learned changes its
+   size; each call is a history event with its reason. Never re-estimate to move the progress.
 
 ## 2. Check whether the goal is reached
 
 Before each new card, check the DoD from structured evidence and merged state; if reached, close. The DoD
 is not decomposed into phases or tick-boxes; the path is rewritten at every step.
+
+With addressable items, mark an item met as soon as merged evidence proves it, naming that evidence, and
+reopen it with a reason if the evidence turns out wrong:
+```bash
+python3 -P -m ummanu sprint dod meet --ref <sprint-ref> --role observer --actor observer \
+  --item d2 --evidence "<card, PR or sprint comment>"
+python3 -P -m ummanu sprint dod reopen --ref <sprint-ref> --role observer --actor observer \
+  --item d2 --reason "<why the evidence does not hold>"
+```
+Only the PO adds items (`sprint dod add`). A free-text DoD (`dod.structured` false) has no items to mark.
 
 ## 3. Choose the next step
 
@@ -200,7 +218,8 @@ budget is the loop breaker.
 A card is fresh, self-sufficient for a head without your context, in one of the sprint's
 `repositories`, linked to the sprint at once. Its spec: Goal, Context (pointers, not copy-paste),
 checkable Acceptance criteria, Out of scope. Work that pulls changes beyond its repository is a chain
-with `--blocked-by`.
+with `--blocked-by`. CI, the pull request and the exact-SHA gate are machinery-owned: a CI item of the
+DoD stays a sprint-close condition and never becomes a card's Acceptance criterion.
 
 ```bash
 python3 -P -m ummanu task create --role observer --actor observer \
@@ -329,6 +348,8 @@ show`/`status`; green cards and research are free.
 When the DoD is confirmed against the default branch and the live system:
 
 1. No active cards remain, all analysed; every Assessment card settled by `task decide` and carried out.
+   With addressable items, every item is met: your close is refused while one is open. Only the PO
+   closes a sprint early; there is no observer-side drop of an item.
 2. Every non-blocking review remark taken into account or rejected with a reason.
 3. The affected checkouts clean, every pull request merged.
 4. A final resume: the goal, evidence per DoD item, cards, hotfixes, key conclusions, and the actual

@@ -119,6 +119,8 @@ class SprintCreateIntent:
     # Omitted at the empty default to preserve released create request identity.
     local_run_exceptions: tuple[LocalRunException, ...] = ()
     owner_decisions: tuple[dict[str, Any], ...] = ()
+    # The wording of each DoD item, in order; omitted when empty, as the two fields above.
+    dod_items: tuple[str, ...] = ()
 
     @classmethod
     def from_document(cls, document: Mapping[str, Any]) -> SprintCreateIntent:
@@ -143,6 +145,7 @@ class SprintCreateIntent:
             local_run_exceptions=parse_local_run_exceptions(
                 document.get("local_run_exceptions", []), projects=_strings(document.get("reservations"))
             ),
+            dod_items=_strings(document.get("dod_items")),
         )
 
     def to_document(self) -> dict[str, Any]:
@@ -163,6 +166,8 @@ class SprintCreateIntent:
         }
         if self.owner_decisions:
             document["owner_decisions"] = list(self.owner_decisions)
+        if self.dod_items:
+            document["dod_items"] = list(self.dod_items)
         if self.po_session:
             document["po_session"] = self.po_session
         if self.allowed_productions:

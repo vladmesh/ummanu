@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ummanu.board import e2e_budget as sprint_e2e, owner_decisions, owner_events
+from ummanu.board import e2e_budget as sprint_e2e, owner_decisions, owner_events, sprint_dod
 from ummanu.board.backend import (
     BOARD_STORE_KIND,
     BoardIdentityError,
@@ -60,7 +60,14 @@ from ummanu.board.sprint_write import (
     SprintMutationReceipt,
     SprintWriteSnapshot,
 )
-from ummanu.board.task_protocol.rows import _digest, _now, _rfc3339, admit_role, is_significant_observer_event
+from ummanu.board.task_protocol.rows import (
+    _charge_time,
+    _digest,
+    _now,
+    _rfc3339,
+    admit_role,
+    is_significant_observer_event,
+)
 from ummanu.board.tick_snapshot import select_cards, select_sprints
 from ummanu.kernel.errors import TaskError
 from ummanu.kernel.sprint_policy import (
@@ -87,6 +94,7 @@ from ummanu.sprint_observer import (
     installed_head_profiles,
     is_executable,
     parse_observer,
+    pinned_executor,
     stored_executors,
 )
 from ummanu.tasks import TaskReader, task_audit_for
@@ -119,6 +127,7 @@ SPRINT_METADATA = {
     ALLOWED_PRODUCTIONS_FIELD,
     LOCAL_RUN_EXCEPTIONS_FIELD,
     owner_decisions.FIELD,
+    sprint_dod.FIELD,
     sprint_e2e.SPRINT_E2E_BUDGET,
     sprint_e2e.SPRINT_E2E_USED,
     sprint_e2e.SPRINT_E2E_CHARGES,
@@ -519,12 +528,17 @@ class SprintReader:
             decisions = owner_decisions.stored_decisions(meta.get(owner_decisions.FIELD))
         except (ValueError, KeyError, TypeError) as exc:
             raise TaskError("backend_error", f"malformed sprint owner_decisions: {exc}", 1) from None
+        try:
+            dod_items = sprint_dod.stored_items(meta.get(sprint_dod.FIELD))
+        except (ValueError, KeyError, TypeError) as exc:
+            raise TaskError("backend_error", f"malformed sprint DoD items: {exc}", 1) from None
         result: dict[str, Any] = {
             "owner_decisions": decisions,
             "id": entity_id("sprint", task_id),
             "ref": _text(raw.get("reference")),
             "goal": meta.get("sprint_goal", ""),
             "definition_of_done": meta.get("sprint_definition_of_done", ""),
+            "dod": sprint_dod.section(dod_items),
             "repositories": repositories,
             **_ownership(meta),
             **_observer(meta),
@@ -835,6 +849,7 @@ class SprintWriter(SprintLifecycleMixin):
         e2e_budget: int | None = None,
         local_run_exceptions: list[dict[str, Any]] | None = None,
         standing_decisions: list[dict[str, Any]] | None = None,
+        dod_items: list[str] | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"}, actor=actor)
         request_id = request_id or str(uuid.uuid4())
@@ -856,6 +871,7 @@ class SprintWriter(SprintLifecycleMixin):
             e2e_budget=e2e_budget,
             local_run_exceptions=local_run_exceptions,
             standing_decisions=standing_decisions,
+            dod_items=dod_items,
         )
         # Lock admission with row creation; resolve request ownership first.
         with sprint_admission_lock(self.data_dir):
@@ -959,6 +975,7 @@ class SprintWriter(SprintLifecycleMixin):
         e2e_budget: int | None = None,
         local_run_exceptions: list[dict[str, Any]] | None = None,
         standing_decisions: list[dict[str, Any]] | None = None,
+        dod_items: list[str] | None = None,
     ) -> SprintCreateIntent:
         """Normalize and stage a replayable sprint request. Refuse identical request
         ids with different intent before side effects; preserve declared observer and
@@ -996,6 +1013,8 @@ class SprintWriter(SprintLifecycleMixin):
             raise TaskError("authorization_refused", "only the PO records quoted owner decisions", 3)
         if e2e_budget + sum(entry["value"] for entry in decisions if entry["kind"] == "e2e_grant") > 2_147_483_647:
             raise TaskError("validation", "e2e budget exceeds the supported finite counter", 2)
+        if any(not str(text).strip() for text in dod_items or []):
+            raise TaskError("validation", "a Definition of Done item needs its wording", 2)
         return SprintCreateIntent(
             role=Role(role),
             actor=actor,
@@ -1019,6 +1038,7 @@ class SprintWriter(SprintLifecycleMixin):
             e2e_budget=e2e_budget,
             local_run_exceptions=exceptions,
             owner_decisions=tuple(decisions),
+            dod_items=tuple(str(text).strip() for text in dod_items or []),
         )
 
     @staticmethod
@@ -1407,6 +1427,8 @@ class SprintWriter(SprintLifecycleMixin):
                 [entry.to_document() for entry in intent.local_run_exceptions],
                 sort_keys=True, separators=(",", ":"),
             )
+        if intent.dod_items:
+            values[sprint_dod.FIELD] = sprint_dod.encode(sprint_dod.new_items(list(intent.dod_items)))
         if entries:
             assert event is not None
             values[owner_decisions.FIELD] = json.dumps(owner_decisions.attributed(entries, event), sort_keys=True, separators=(",", ":"))
@@ -1749,6 +1771,221 @@ class SprintWriter(SprintLifecycleMixin):
             mutation,
         )
 
+    def set_executors(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        worker: str | None = None,
+        reviewer: str | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Re-pin an open sprint's worker and/or reviewer profile; role `po` only. A role left
+        out keeps its pin, and a card already cut keeps the profiles it was written with.
+        """
+        self._role(role, {"po"}, actor=actor)
+        if worker is None and reviewer is None:
+            raise TaskError("validation", "sprint executors needs --worker, --reviewer or both", 2)
+        stated = self._executor_intent(worker=worker, reviewer=reviewer)
+        return self._set_executors_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            pins={executor: profile for executor, profile in stated.items() if profile},
+            request_id=request_id or str(uuid.uuid4()),
+        )
+
+    @_sql_atomic
+    def _set_executors_atomic(
+        self, *, role: str, actor: str, reference: str, pins: dict[str, str], request_id: str
+    ) -> dict[str, Any]:
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        previous: dict[str, str] = {}
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("pins")) != ("executors_set", reference, pins):
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a re-pin is "
+                    "repeated only with the same sprint, --worker and --reviewer",
+                    2,
+                )
+        else:
+            sprint = self.reader.show(reference)
+            status = str(sprint.get("status") or "")
+            if status != SprintState.OPEN.value:
+                raise TaskError("closed", f"sprint {reference} is {status}; its executors are final", 3)
+            previous = {executor: pinned_executor(sprint, executor) for executor in pins}
+            if previous == pins:
+                return {"action": "already_set", "sprint": sprint, "event_id": None}
+
+        def mutation(sprint: SprintWriteSnapshot) -> None:
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(sprint),
+                values={EXECUTOR_FIELDS[executor]: encode_executor(profile) for executor, profile in pins.items()},
+            )
+
+        return self._write(
+            "executors_set",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"pins": pins, "previous": previous},
+            mutation,
+        )
+
+    def switch_po_session(
+        self, *, role: str, actor: str, reference: str, session_id: str, request_id: str
+    ) -> dict[str, Any]:
+        """Point an open sprint at another open PO session; role `po` only, idempotent on the
+        request id. The switch is audited and announced on the sprint as the PO service.
+        """
+        self._role(role, {"po"}, actor=actor)
+        session_id = str(session_id or "").strip()
+        request_id = str(request_id or "").strip()
+        if not session_id:
+            raise TaskError("validation", "--session names an open PO session; it is empty", 2)
+        if not request_id:
+            raise TaskError("validation", "switching the PO session requires --request-id", 2)
+        return self._switch_po_session_atomic(
+            role=role, actor=actor, reference=reference, session_id=session_id, request_id=request_id
+        )
+
+    @_sql_atomic
+    def _switch_po_session_atomic(
+        self, *, role: str, actor: str, reference: str, session_id: str, request_id: str
+    ) -> dict[str, Any]:
+        from ummanu.po.sprints import RESOLVER_ACTOR
+
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("po_session")) != (
+                "po_session_set",
+                reference,
+                session_id,
+            ):
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a switch is "
+                    "repeated only with the same sprint and --session",
+                    2,
+                )
+            return self._write("po_session_set", role, actor, reference, request_id, payload, lambda _: None)
+        sprint = self.reader.show(reference)
+        status = str(sprint.get("status") or "")
+        if status != SprintState.OPEN.value:
+            raise TaskError("closed", f"sprint {reference} is {status}; it answers to no PO session", 3)
+        state = self._po_session_state(session_id)
+        if state is None:
+            raise TaskError("validation", f"there is no PO session {session_id}", 2)
+        if state != "open":
+            raise TaskError("validation", f"PO session {session_id} is {state}; a sprint answers to an open one", 2)
+        previous = sprint.get("po_session") or None
+        if previous == session_id:
+            return {"action": "already_set", "sprint": sprint, "event_id": None}
+
+        def mutation(snapshot: SprintWriteSnapshot) -> None:
+            self.client.call(
+                "saveTaskMetadata", task_id=_sprint_number(snapshot), values={PO_SESSION_FIELD: session_id}
+            )
+
+        result = self._write(
+            "po_session_set",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"po_session": session_id, "previous": previous},
+            mutation,
+        )
+        self._comment_atomic(
+            role=role,
+            actor=RESOLVER_ACTOR,
+            reference=reference,
+            body=f"the PO session of {reference} switched from {previous or 'none'} to {session_id} by {actor}",
+            request_id=f"{request_id}-comment",
+        )
+        return result
+
+    def charge_manual_e2e(
+        self, *, role: str, actor: str, reference: str, run: str, card: str, request_id: str | None = None
+    ) -> dict[str, Any]:
+        """Charge one manually dispatched e2e run of `card` to its open sprint's budget; role
+        `po` only. Keyed by the run id: a repeat charges nothing, and a spent budget refuses.
+        """
+        self._role(role, {"po"}, actor=actor)
+        run_id = sprint_e2e.manual_run_id(run)
+        card = str(card or "").strip()
+        if not card:
+            raise TaskError("validation", "--card names the card the run belongs to; it is empty", 2)
+        if TaskReader(self.client).show(card).get("sprint") != reference:
+            raise TaskError("validation", f"{card} is not a card of {reference}", 2)
+        return self._charge_manual_e2e_atomic(
+            role=role,
+            actor=actor,
+            reference=reference,
+            run_id=run_id,
+            card=card,
+            request_id=request_id or f"e2e-charge-{run_id}",
+        )
+
+    @_sql_atomic
+    def _charge_manual_e2e_atomic(
+        self, *, role: str, actor: str, reference: str, run_id: str, card: str, request_id: str
+    ) -> dict[str, Any]:
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        dispatch_id = sprint_e2e.MANUAL_DISPATCH_PREFIX + run_id
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("run"), payload.get("card")) != (
+                "e2e_charged",
+                reference,
+                run_id,
+                card,
+            ):
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a charge is "
+                    "repeated only with the same sprint, --run and --card",
+                    2,
+                )
+        else:
+            sprint = self.reader.show(reference)
+            status = str(sprint.get("status") or "")
+            if status != SprintState.OPEN.value:
+                raise TaskError("closed", f"sprint {reference} is {status}; it takes no e2e charge", 3)
+            if any(charge["dispatch_id"] == dispatch_id for charge in sprint["e2e"]["charges"]):
+                return {"action": "already_charged", "sprint": sprint, "event_id": None}
+
+        def mutation(snapshot: SprintWriteSnapshot) -> None:
+            charge = self.client.call(
+                "chargeSprintE2e", sprint_ref=reference, task_ref=card, dispatch_id=dispatch_id, at=_charge_time()
+            )
+            if not charge.get("charged"):
+                raise TaskError(
+                    "e2e_budget_spent",
+                    f"sprint {reference} has no e2e run left (e2e: {charge['used']} of {charge['budget']}) "
+                    "or a standing owner decision refuses more; raise the budget before the run",
+                    3,
+                )
+
+        return self._write(
+            "e2e_charged",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"run": run_id, "card": card, "dispatch_id": dispatch_id},
+            mutation,
+        )
+
     def _decision_inputs(self, entries: Any) -> list[dict[str, Any]]:
         try:
             parsed = owner_decisions.parse_decisions(entries)
@@ -1822,6 +2059,113 @@ class SprintWriter(SprintLifecycleMixin):
             self.client.call("saveTaskMetadata", task_id=_sprint_number(snapshot), values=values)
 
         return self._write("owner_decisions_recorded", role, actor, reference, request_id, payload, mutation)
+
+    def add_dod_items(
+        self, *, role: str, actor: str, reference: str, texts: list[str], reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Append open items to the sprint's DoD: the PO's audited change, also how a free-text
+        DoD becomes addressable.
+        """
+        self._role(role, {"po"}, actor=actor)
+        texts = [str(text).strip() for text in texts]
+        if not texts:
+            raise TaskError("validation", "adding to the Definition of Done needs at least one --text", 2)
+        payload = {"texts": texts, "reason": _required(reason, "adding Definition of Done items needs a --reason")}
+        return self._dod_write(
+            "dod_items_added", role, actor, reference, request_id, payload,
+            lambda items, _event: sprint_dod.new_items(texts, existing=items or []),
+        )
+
+    def set_dod_weight(
+        self, *, role: str, actor: str, reference: str, item: str, weight: int, reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Weigh one DoD item; a later call re-estimates it, and each call is its own history event."""
+        self._role(role, {"po", "observer"}, actor=actor)
+        payload = {"item": item, "weight": weight, "reason": _required(reason, "a weight needs a --reason")}
+        return self._dod_write(
+            "dod_item_weighed", role, actor, reference, request_id, payload,
+            lambda items, _event: sprint_dod.weighed(_structured(items), item, weight, payload["reason"]),
+        )
+
+    def meet_dod_item(
+        self, *, role: str, actor: str, reference: str, item: str, evidence: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        self._role(role, {"po", "observer"}, actor=actor)
+        payload = {"item": item, "evidence": _required(evidence, "a met item needs its --evidence")}
+
+        def change(items: list[dict[str, Any]] | None, event: dict[str, Any]) -> list[dict[str, Any]]:
+            by = {"role": role, "actor": actor, "at": str(event["occurred_at"])}
+            return sprint_dod.met(_structured(items), item, payload["evidence"], by)
+
+        return self._dod_write("dod_item_met", role, actor, reference, request_id, payload, change)
+
+    def reopen_dod_item(
+        self, *, role: str, actor: str, reference: str, item: str, reason: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Take back a met item whose evidence did not hold."""
+        self._role(role, {"po", "observer"}, actor=actor)
+        payload = {"item": item, "reason": _required(reason, "reopening an item needs a --reason")}
+        return self._dod_write(
+            "dod_item_reopened", role, actor, reference, request_id, payload,
+            lambda items, _event: sprint_dod.reopened(_structured(items), item),
+        )
+
+    def _dod_write(
+        self,
+        kind: str,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str | None,
+        payload: dict[str, Any],
+        change: Callable[[list[dict[str, Any]] | None, dict[str, Any]], list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        request_id = request_id or str(uuid.uuid4())
+        self._guard_observer_identity(role=role, actor=actor, reference=reference, request_id=request_id)
+        return self._dod_write_atomic(
+            kind=kind, role=role, actor=actor, reference=reference, request_id=request_id,
+            payload=payload, change=change,
+        )
+
+    @_sql_atomic
+    def _dod_write_atomic(
+        self,
+        *,
+        kind: str,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str,
+        payload: dict[str, Any],
+        change: Callable[[list[dict[str, Any]] | None, dict[str, Any]], list[dict[str, Any]]],
+    ) -> dict[str, Any]:
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            if (known.get("kind"), known.get("ref"), known.get("payload")) != (kind, reference, payload):
+                raise TaskError("validation", "request id already belongs to another sprint write", 2)
+            return self._write(kind, role, actor, reference, request_id, payload, lambda _: None)
+        items = sprint_dod.items_of(self.reader.show(reference, include_cards=False)["dod"])
+        # Refuse a change the items cannot take before anything is staged.
+        try:
+            change(items, {"occurred_at": _now()})
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+
+        def mutation(snapshot: SprintWriteSnapshot) -> None:
+            event = self.audit.pending_event(request_id)
+            assert event is not None
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(snapshot),
+                values={sprint_dod.FIELD: sprint_dod.encode(change(items, event))},
+            )
+
+        return self._write(kind, role, actor, reference, request_id, payload, mutation)
 
     def raise_e2e_budget(
         self,
@@ -2403,6 +2747,12 @@ class SprintWriter(SprintLifecycleMixin):
             "production_allowed",
             "owner_decisions_recorded",
             "resume_recorded",
+            "executors_set",
+            "e2e_charged",
+            "dod_items_added",
+            "dod_item_weighed",
+            "dod_item_met",
+            "dod_item_reopened",
         }:
             raise TaskError("closed", "sprint is closed", 3)
         event = self._event(kind, role, actor, reference, request_id, payload, sprint)
@@ -2546,6 +2896,19 @@ def _scanned_roots(paths: list[Any], *, refusal: Callable[[str, str], TaskError]
 def _roots_overlap(left: Path, right: Path) -> bool:
     """Whether two canonical roots name one tree, which includes one nested in the other."""
     return left == right or left in right.parents or right in left.parents
+
+
+def _required(text: str, refusal: str) -> str:
+    """The stripped text of a required option, or the validation refusal naming it."""
+    if not str(text or "").strip():
+        raise TaskError("validation", refusal, 2)
+    return str(text).strip()
+
+
+def _structured(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    if items is None:
+        raise ValueError(f"{sprint_dod.UNSTRUCTURED}; the PO adds items with `sprint dod add`")
+    return items
 
 
 def _unique_strings(values: list[str]) -> list[str]:

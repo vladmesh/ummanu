@@ -43,8 +43,8 @@
     },
     "adapter": {
       "type": "string",
-      "minLength": 1,
-      "description": "Adapter id, resolved under adapters/."
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Adapter id, kebab-case, resolved under adapters/."
     },
     "default_branch": {
       "type": "string",
@@ -67,7 +67,8 @@
       "properties": {
         "code_concurrency": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "How many of this project's code cards may be active at once. Absent means 1; 0 claims none."
         }
       }
     }

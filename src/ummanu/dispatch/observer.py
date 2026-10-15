@@ -67,6 +67,7 @@ from ummanu.dispatch.tui import (
 )
 from ummanu.dispatch.types import HostError
 from ummanu.dispatch.watchdog import (
+    HEARTBEAT_NOT_YET_WRITTEN,
     head_run_process_status,
     heartbeat_is_dead,
     heartbeat_is_live_match,
@@ -85,6 +86,7 @@ from ummanu.kernel.errors import TaskError
 from ummanu.role_skills import skill_delivery
 from ummanu.runtime import head as head_ops
 from ummanu.runtime.codex_preflight import CodexFanoutRecordingError
+from ummanu.runtime.head.identity import current_boot_id
 from ummanu.runtime.role_env import observer_binding
 from ummanu.sprint_observer import (
     KIND_HEAD,
@@ -108,6 +110,8 @@ OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
 # Bounded refused deliveries prevent an unreachable head from retrying forever.
 OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT = 3
+# Heads one unacknowledged batch may replace before the sprint waits fenced on the owner.
+OBSERVER_MAX_REPLACEMENTS = 2
 
 EVENT_LAUNCHED = "observer_launched"
 EVENT_RELAUNCHED = "observer_relaunched"
@@ -173,14 +177,21 @@ confirmed-dead process permits a replacement.
     )
 
 
-def observer_head_is_dead(status: dict[str, Any]) -> bool:
+def observer_head_is_dead(record: ObserverRecord, status: dict[str, Any]) -> bool:
     """Whether the observer's recorded process is positively dead.
 
-Require a readable identity naming a pid that is gone or unreaped on this boot.
-Missing, partial, unreadable, legacy pid-only and foreign live identities do
-not authorize a replacement.
+A readable identity naming a pid gone or unreaped on this boot, or no identity
+at all from a head launched in an earlier boot. Anything else is inconclusive.
     """
-    return heartbeat_is_dead(status)
+    return heartbeat_is_dead(status) or _unwritten_in_earlier_boot(record, status)
+
+
+def _unwritten_in_earlier_boot(record: ObserverRecord, status: dict[str, Any]) -> bool:
+    return (
+        str(status.get("state") or "") == HEARTBEAT_NOT_YET_WRITTEN
+        and bool(record.launched_boot)
+        and record.launched_boot != current_boot_id()
+    )
 
 
 def observer_alive(
@@ -202,6 +213,8 @@ alive during its grace period. Reuse a supplied status when available.
         }
     if status.get("known"):
         return {"alive": heartbeat_is_live_match(status), "reason": "pid", "pid_known": True}
+    if _unwritten_in_earlier_boot(record, status):
+        return {"alive": False, "reason": "launched-in-an-earlier-boot", "pid_known": True}
     grace = initial_output_stall_seconds()
     if record.launched_at and now - record.launched_at <= grace:
         return {"alive": True, "reason": "pid-not-written-yet", "pid_known": False}
@@ -211,14 +224,16 @@ alive during its grace period. Reuse a supplied status when available.
 def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Observer state as an operator reads it, without opening a transcript."""
     rows = []
+    now = time.time()
     for ref, record in sorted(load_observers(payload).items()):
-        liveness = observer_alive(record)
+        liveness = observer_alive(record, now=now)
+        idle_reason = _idle_reason_at(record, now)
         rows.append(
             {
                 "sprint": ref,
                 "head": record.head,
                 "state": record.state,
-                "state_reason": record.state_reason,
+                "state_reason": idle_reason or record.state_reason,
                 "workspace": record.workspace,
                 "handle": record.handle,
                 "leaf": record.leaf,
@@ -239,8 +254,8 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "deferred_reason": record.deferred_reason,
                 "stopped_reason": record.stopped_reason,
                 "paused": record.paused_at > 0,
-                "idle_since": record.idle_since,
-                "idle_reason": record.idle_reason,
+                "idle_since": record.idle_since if idle_reason else 0.0,
+                "idle_reason": idle_reason,
                 "delivery": record.delivery.to_json(),
                 "wake_liveness": record.wake_liveness.to_json(),
                 "launch_attempts": record.launch_attempts,
@@ -248,6 +263,15 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _idle_reason_at(record: ObserverRecord, now: float) -> str:
+    """The idle explanation of a head idle right now, its quiet age read at `now`; empty otherwise."""
+    if record.state != "idle-grace":
+        return ""
+    if not record.idle_since:
+        return record.idle_reason
+    return f"{record.idle_reason}; its terminal has been quiet for {int(now - record.idle_since)}s"
 
 
 def observer_ack_deadline_seconds() -> int:
@@ -350,7 +374,7 @@ Deliberate stops and pending stops are not deaths.
     ):
         return None
     try:
-        return record.launches if observer_head_is_dead(observer_head_status(record)) else None
+        return record.launches if observer_head_is_dead(record, observer_head_status(record)) else None
     except Exception:  # noqa: BLE001 - the bell's reading never decides a tick
         return None
 
@@ -515,12 +539,13 @@ def _reconcile_open_sprint(
     # intent and an abandoned handle both mean "not the live observer of this sprint" whatever the
     # process is doing — so the two are kept apart instead of one standing in for the other.
     head_status = observer_head_status(record) if head_may_be_running else {}
-    head_process_alive = head_may_be_running and bool(observer_alive(record, status=head_status)["alive"])
+    head_liveness = observer_alive(record, status=head_status) if head_may_be_running else {}
+    head_process_alive = bool(head_liveness.get("alive"))
     # Positive death of this record's launch identity, from the same reading. It is what makes a
     # bring-up over a headless open sprint conditional on the head rather than on the queue: a
     # process that is provably gone cannot be woken and cannot be the second head a launch would
     # put beside a live one.
-    head_is_dead = head_may_be_running and observer_head_is_dead(head_status)
+    head_is_dead = head_may_be_running and observer_head_is_dead(record, head_status)
     head_is_live = (
         head_may_be_running and not unresolved_intent and not record.abandoned_handle and head_process_alive
     )
@@ -564,7 +589,7 @@ def _reconcile_open_sprint(
                 "action": "observer-idle",
                 "head": record.head,
                 "launches": record.launches,
-                "reason": work["reason"],
+                "reason": _idle_reason_at(record, time.time()),
             }
         if work["state"] == "waiting":
             _set_observer_state(record, "waiting", reason=work["reason"])
@@ -620,6 +645,22 @@ def _reconcile_open_sprint(
             # bring-up whose replacement the host refused was never attempted again — this card's
             # own deadlock, reached by another route (secretary-1478 round 3).
             dead_head_bringup = head_is_dead
+        elif not head_is_dead and head_liveness and not head_liveness["pid_known"] and not head_process_alive:
+            # The fence holds this sprint on the same unread identity, so it is not an idle head.
+            reason = (
+                "the observer head's launch identity cannot be read "
+                f"({head_liveness['reason']}), so it is neither confirmed nor provably dead"
+            )
+            _set_observer_state(record, "unconfirmed", reason=reason)
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-unconfirmed",
+                "head": record.head,
+                "launches": record.launches,
+                "reason": reason,
+            }
         elif not head_is_dead:
             _set_observer_state(record, "idle", reason="no unacknowledged significant card event")
             return {
@@ -852,6 +893,7 @@ def _reset_delivery_to_idle(
     delivery.held_since = 0.0
     delivery.deadline = 0.0
     delivery.attempts = 0
+    delivery.replacements = 0
     delivery.next_at = 0.0
     delivery.reason = ""
 
@@ -1089,9 +1131,12 @@ def _fail_delivery(
     if record.delivery.attempts < observer_wake_max_attempts():
         return outcome
     attempts = record.delivery.attempts
+    if record.delivery.replacements >= OBSERVER_MAX_REPLACEMENTS:
+        return _hold_unreachable_observer(runtime, ref, record, outcome)
     # The replacement opens its own delivery attempt count: the next failing batch gets the same
     # bounded retries before it costs the sprint another head.
     record.delivery.attempts = 0
+    record.delivery.replacements += 1
     # An emergency replacement. The head has refused every wake it was given, so it is stuck or
     # gone; a stop that refused because it looked busy would leave the sprint on the head that is
     # not working and park the replacement behind a bounded backoff for as long as it stays stuck.
@@ -1109,6 +1154,47 @@ def _fail_delivery(
     if unlaunched:
         replaced["reason"] += f"; that replacement did not come up: {unlaunched}"
     return replaced
+
+
+def observer_unreachable(record: ObserverRecord) -> bool:
+    """Whether the last head one unacknowledged batch may replace has refused its wakes too."""
+    delivery = record.delivery
+    return (
+        delivery.stage != DeliveryStage.IDLE
+        and delivery.replacements >= OBSERVER_MAX_REPLACEMENTS
+        and delivery.attempts >= observer_wake_max_attempts()
+    )
+
+
+def _hold_unreachable_observer(
+    runtime: Any, ref: str, record: ObserverRecord, outcome: dict[str, Any]
+) -> dict[str, Any]:
+    """Keep the head and the fence, and tell the owner once per batch, instead of another replacement.
+
+    The wakes keep retrying on their capped backoff, so a head that takes the batch after all is
+    acknowledged and released the ordinary way.
+    """
+    delivery = record.delivery
+    evidence = (
+        f"{delivery.replacements} replaced heads refused the wakes of batch {delivery.delivery_id} "
+        f"(through {delivery.through_event}); {delivery.wake_failures} wakes failed in total, "
+        f"the last at {delivery.last_failure_method}: {delivery.last_failure_reason}"
+    )
+    owner_events.record(
+        owner_events.OBSERVER_DEAD,
+        ref,
+        f"The observer of {ref} cannot be reached: {evidence}. The dispatcher stopped replacing it and "
+        "keeps the sprint fenced until a head acknowledges the batch.",
+        f"{owner_events.OBSERVER_DEAD}:{ref}:unreachable:{delivery.through_event}",
+        to=getattr(getattr(runtime, "reader", None), "client", None),
+    )
+    _set_observer_state(record, "unreachable", reason=evidence)
+    return {
+        **outcome,
+        "action": "observer-unreachable",
+        "reason": f"{outcome['reason']}; no further replacement: {evidence}",
+        "replacements": delivery.replacements,
+    }
 
 
 def _wake_pending(ref: str, record: ObserverRecord) -> dict[str, Any]:
@@ -1729,14 +1815,10 @@ def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict
         last_activity = float(status.get("last_activity"))
     except (TypeError, ValueError):
         return {"state": "unknown", "reason": "the observer terminal has no activity timestamp"}
-    age = time.time() - last_activity
     return {
         "state": "idle",
         "since": last_activity,
-        "reason": (
-            "the observer head finished its turn and its terminal has been quiet for "
-            f"{int(age)}s with no unacknowledged significant card event"
-        ),
+        "reason": "the observer head finished its turn with no unacknowledged significant card event",
     }
 
 
@@ -2474,6 +2556,7 @@ identity before the host responds so interrupted launches remain recoverable.
     record.state = "launching"
     record.state_reason = ""
     record.launched_at = now
+    record.launched_boot = current_boot_id()
     record.last_action = "launching"
     record.last_action_at = now
     record.deferred_reason = ""

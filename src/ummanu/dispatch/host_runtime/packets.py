@@ -33,6 +33,7 @@ from ummanu.dispatch.helpers import (
     _round_record_line,
     _round_report_ids,
     _round_worker_check,
+    _task_doc_report_generation,
     safe_one_line as _safe_one_line,
 )
 from ummanu.dispatch.launch import REVIEW_ROLE, WORKER_ROLE
@@ -55,6 +56,7 @@ from ummanu.dispatch.worker_comments import (
     WORKER_COMMENT_ROLES,
     WorkerComment,
     select_worker_comments,
+    task_doc_comment_keys,
     worker_comments_record_line,
     worker_comments_section,
 )
@@ -64,6 +66,7 @@ from ummanu.runtime.launch_prefix import pythonpath_prefix
 from ummanu.runtime.prompt_document import (
     PromptDocumentError,
     nudge_for as _nudge_for,
+    worker_style,
     write_prompt_document as _write_prompt_document,
 )
 from ummanu.runtime.role_env import WORKSPACE_ENV_DIR
@@ -97,14 +100,6 @@ def _gate_attestation_for_prompt(
     if receipt is not None:
         return receipt.as_dict() if receipt.validated_sha == current_sha else {}
     return _accepted_gate_receipt(source, current_sha)
-
-WORKER_STYLE = Path(__file__).resolve().parents[4] / "packaging" / "worker-style.md"
-
-
-def _worker_style() -> str:
-    """The code style every worker is given, from the checkout this dispatcher runs."""
-    return WORKER_STYLE.read_text(encoding="utf-8").strip()
-
 
 def _body_file_path(data_dir: Path, kind: str, reference: str, review_round: int) -> str:
     """Where a head writes its report/verdict body: a directory private to this user, never the
@@ -146,6 +141,38 @@ def _no_candidate_review_subject(task: dict[str, Any]) -> list[str]:
         "`## How to verify` section, a command or observation you can repeat.",
         "",
     ]
+
+def _round_section(
+    record: DispatcherRecord | None,
+    generation: int,
+    comments: tuple[WorkerComment, ...],
+    round_owes: list[str],
+    previous: tuple[str, str],
+) -> list[str]:
+    """The operative summary a worker reads first: this generation, what it owes, what is new.
+
+    New is judged against the TASK.md this checkout already holds, which is the one the worker read.
+    """
+    workspace = record.workspace if record else ""
+    if not workspace or not (Path(workspace) / "TASK.md").is_file():
+        return ["## This round", "", f"Report generation {generation}. First TASK.md of this attempt: read it whole.", ""]
+    same_round = _task_doc_report_generation(workspace) == generation
+    known = task_doc_comment_keys(workspace)
+    news = [] if same_round else list(round_owes)
+    fresh = sum(1 for comment in comments if comment.key not in known)
+    if fresh:
+        news.append(f"{fresh} new comment{'s' if fresh > 1 else ''}")
+    sha, outcome = previous
+    lines = ["## This round", "", f"Report generation {generation}" + (", the same round as before." if same_round else ".")]
+    if sha and not same_round:
+        lines.append(f"Previous submission `{_safe_one_line(sha, limit=12)}` {outcome}.")
+    lines.append(
+        f"New since your last TASK.md: {', '.join(news)}. Read those sections first; the rest is the standing contract."
+        if news
+        else "Nothing new for this round since your last TASK.md beyond the generation number."
+    )
+    return [*lines, ""]
+
 
 def _body_file_instructions(body_file: str) -> list[str]:
     """Spell out the delivery path: file first with a normal editing tool, then one plain command.
@@ -719,10 +746,27 @@ class PromptPacketMixin:
                 gate_red,
                 "",
             ]
+        owes = [
+            label
+            for label, present in (
+                ("the observer decision", bool(decision)),
+                ("protocol prerequisites", bool(prerequisites)),
+                ("the reviewer findings", bool(review_red) and (bool(decision) or feedback.verdict == "red")),
+                ("the mechanical gate failure", bool(gate_red)),
+            )
+            if present
+        ]
+        if gate_red:
+            previous = (record.rejected_sha, "was bounced by the mechanical gate")
+        elif "the reviewer findings" in owes and record is not None:
+            previous = (record.previous_reviewed_sha, f"was {feedback.verdict.upper()} in review")
+        else:
+            previous = ("", "")
+        round_summary = _round_section(record, generation, comments, owes, previous)
         check_contract = self._packet_check_contract(str(task.get("project") or ""))
         broad_command, show_command = self._broad_check_commands(check_contract)
         sections += self._local_run_section(task, local_run_policy=local_run_policy)
-        sections += ["## Code style", "", _worker_style(), ""]
+        sections += ["## Code style", "", worker_style(), ""]
         sections += [
             "## Prior blocker dispositions in the worker report",
             "",
@@ -831,23 +875,29 @@ class PromptPacketMixin:
             "asserted, and why the new contract is the right one. A silently rewritten assertion is",
             "treated as a defect of this round.",
             "",
-            "Run every check in the foreground and wait for it there. Do not put work in the",
+            "Run every local check in the foreground and wait for it there. Do not put work in the",
             "background and do not write a loop that waits for it: you have nothing to wait with.",
             "A background job reports back only at the start of your next turn, so receiving it",
-            "means ending this one, while any tool call keeps the turn open — including a no-op",
-            "call made to pass the time. A head that spent 23 minutes alternating between `true`",
-            "and announcing it would stop polling, then waited on a loop whose condition could",
-            "never hold, is why this paragraph exists (secretary-1161, 2026-08-06). Run only the",
-            "checks the contract above permits, and run each of them in the foreground.",
+            "means ending this one, while any tool call keeps the turn open, a no-op included.",
+            "Run only the checks the contract above permits.",
             "",
+            *(
+                [
+                    "The gate owns the pull request and CI: after your done report it publishes the",
+                    "branch, opens or updates the PR and runs CI on that exact commit; a red CI comes",
+                    "back to you as a red gate with its log. Do not open a PR and do not wait for CI.",
+                    "",
+                ]
+                if has_candidate(task)
+                else []
+            ),
             # In the packet every worker gets: a home file reaches only one model family.
-            "Do not add AI co-authorship to your commits. No `Co-Authored-By:` trailer naming",
-            "Claude, Codex, an assistant or any model or vendor, and no generated-by attribution",
-            "line: the dispatcher checks every commit message on your branch before it publishes",
-            "anything, and a violation bounces the card back to you as a red gate. Human",
-            "co-authors are fine. If the gate does bounce one, repair the message in this checkout",
-            "with `git commit --amend` or `git rebase -i` and report done again; nothing is",
-            "rewritten or force-pushed for you.",
+            "No AI attribution anywhere, whatever your harness defaults ask for: no `Co-Authored-By:`",
+            "trailer naming Claude, Codex, an assistant or any model or vendor, and no generated-by",
+            "line, in a commit message or a PR body. The gate checks every commit message before",
+            "it publishes anything and bounces a violation as a red gate; repair it in this checkout",
+            "with `git commit --amend` or `git rebase -i` and report done again. Human co-authors",
+            "are fine.",
             "",
             *(
                 [
@@ -893,7 +943,7 @@ class PromptPacketMixin:
             worker_comments_record_line(comments),
             "",
         ]
-        return "\n".join([*self._render_check_header(check_contract), *sections])
+        return "\n".join([*round_summary, *self._render_check_header(check_contract), *sections])
 
     def worker_comments(self, task: dict[str, Any]) -> tuple[WorkerComment, ...]:
         """The PO, owner and observer comments this card's worker is handed, oldest first."""
@@ -994,6 +1044,8 @@ class PromptPacketMixin:
             "branch introduced the defect or it was pre-existing, and whether the repair appears local or",
             "would change architecture, a compatibility promise, a product contract, or a trust boundary.",
             "Report evidence; do not silently widen the supported boundary or decide sprint scope.",
+            "When the worker reports with evidence that a card requirement cannot be done as written,",
+            "answer that evidence first: accept it, or show why it is wrong. Do not repeat the requirement.",
             "",
             *(style_checklist() if has_candidate(task) else []),
             *(

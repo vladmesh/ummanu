@@ -523,11 +523,13 @@ def terminal_effect(
     blocked_reason: str | None = None,
     decision: str = "",
     release_merge: dict[str, Any] | None = None,
+    release_claim: bool = False,
 ) -> dict[str, Any]:
     """The lifecycle-owned terminal effect and its non-blocking finisher.
 
     `release_merge` marks a Done whose release landed a commit on the base; the observer is then
-    woken on that commit's post-merge CI result instead of on this move.
+    woken on that commit's post-merge CI result instead of on this move. `release_claim` clears
+    the claim of a Blocked card no work ever held.
     """
     taxonomy: TerminalTaxonomy | None = None
     try:
@@ -579,6 +581,7 @@ def terminal_effect(
         outcome_owed=obligation,
         terminal_taxonomy=taxonomy.to_record() if taxonomy is not None else None,
         **({"release_merge": release_merge} if release_merge is not None else {}),
+        **({"release_claim": True} if release_claim else {}),
     )
     effect_obligation = effect.get("outcome_owed") if isinstance(effect, dict) else None
     if isinstance(effect_obligation, dict):

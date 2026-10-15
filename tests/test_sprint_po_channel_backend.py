@@ -17,19 +17,19 @@ from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.sprints import SprintFixture
-from tests.sql_backend_fixtures import PostgresBoard
+from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, NEUTRAL_PO_NOTES, REQUEST_PO_NOTES
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
-from tests.po_channel_fixtures import ADMINISTRATIVE_PO_NOTES, REQUEST_PO_NOTES, NEUTRAL_PO_NOTES
+from tests.sql_backend_fixtures import PostgresBoard
 from ummanu.board.owner_events import OwnerEventStore
 from ummanu.board.po_execution import assignment, create_assignment
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.cli import main
 from ummanu.dispatch.po_cards import ServicePoChannel, advance_po_card, claim_po_card
 from ummanu.dispatch.state import new_attempt_id
+from ummanu.po.context_budget import rollover_request_id
 from ummanu.po.runner import PoRunner
 from ummanu.po.service import PoService, listening
 from ummanu.po.sprints import BoardSprintSessions
-from ummanu.po.context_budget import rollover_request_id
 from ummanu.po.store import COMPLETED, PoStore, RequestConflict
 from ummanu.sprint_observer import head_choice
 from ummanu.sprints import SprintReader, SprintWriter
@@ -90,9 +90,9 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
                 delivery, through = f"syntax-delivery-{index}", f"syntax-event-{index}"
                 bad = self.entry(code["ref"], selected_step=body, next_safe_step=body)
                 for entry in (bad, {**bad, "po_request": {"card": code["ref"], "action": body}}):
-                    self.assert_refused(lambda entry=entry: self.writer.resume(role="observer", actor="observer",
-                        reference=self.ref, entry=entry, delivery_id=delivery, through_event=through,
-                        request_id=request), request)
+                    self.assert_refused(lambda entry=entry, delivery=delivery, through=through, request=request:
+                        self.writer.resume(role="observer", actor="observer", reference=self.ref, entry=entry,
+                        delivery_id=delivery, through_event=through, request_id=request), request)
                 corrected = {**bad, "current_task": operation["ref"],
                              "po_request": {"card": operation["ref"], "action": body}}
                 accepted = self.writer.resume(role="observer", actor="observer", reference=self.ref,
@@ -226,7 +226,7 @@ class ObserverPoAdmissionBackendTests(SprintFixture):
                     request_id="concurrent", delivery_id="d", through_event="e")
             except TaskError as exc:
                 outcomes.append(exc.code)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - the thread hands any failure to the asserting test.
                 outcomes.append(exc)
             finally:
                 finished.set()
@@ -277,9 +277,9 @@ class StandalonePoExecutionBackendTests(SprintFixture):
         self.tasks = TaskWriter(self.client, data_dir=self.tmp.name)
         self.reader = TaskReader(self.client)
         self.request = "dispatcher-e2e-cap-ummanu-12-3"
-        self.fields = dict(role="dispatcher", actor="dispatcher", project="ummanu", task_type="decision",
-            title="PO budget disposition", description="GATE: choose a safe disposition without a grant",
-            po_execution=create_assignment(self.request, "e2e_budget", ["ummanu-12"]), request_id=self.request)
+        self.fields = {"role": "dispatcher", "actor": "dispatcher", "project": "ummanu", "task_type": "decision",
+            "title": "PO budget disposition", "description": "GATE: choose a safe disposition without a grant",
+            "po_execution": create_assignment(self.request, "e2e_budget", ["ummanu-12"]), "request_id": self.request}
 
     def test_assignment_create_dedup_and_route_persistence_are_atomic(self):
         before = self.client.card_count()
@@ -698,6 +698,58 @@ class SprintPoChannelBackendTests(SprintFixture):
         recorded = [event for event in self._events() if event.get("kind") == "po_session_set"]
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0]["actor"], {"role": "po", "id": "po-service"})
+
+    def switch(self, session: str, request_id: str, reference: str = "sprint:switch") -> dict:
+        return self.writer.switch_po_session(
+            role="po", actor="po", reference=reference, session_id=session, request_id=request_id
+        )
+
+    def test_set_po_session_moves_an_open_sprint_to_another_open_session_once(self) -> None:
+        self.add_session("s-old")
+        self.add_session("s-now")
+        self._create(goal="switch", reference="sprint:switch", po_session="s-old")
+        out = io.StringIO()
+        with self.board_injected(), mock.patch.dict(os.environ, {"BOARD_ACTOR": "po"}), contextlib.redirect_stdout(out):
+            code = main(
+                ["sprint", "set-po-session", "--ref", "sprint:switch", "--role", "po", "--session", "s-now",
+                 "--request-id", "switch-1", "--instance", str(self.instance), "--data-dir", self.tmp.name]
+            )
+        self.assertEqual(code, 0, out.getvalue())
+
+        again = self.switch("s-now", "switch-1")
+
+        self.assertEqual(again["event_id"], json.loads(out.getvalue())["event_id"])
+        self.assertEqual(self.switch("s-now", "switch-2")["action"], "already_set")
+        self.assertEqual(self.sprint("sprint:switch")["po_session"], "s-now")
+        [event] = [event for event in self._events() if event.get("kind") == "po_session_set"]
+        self.assertEqual(
+            (event["actor"], event["payload"]),
+            ({"role": "po", "id": "po"}, {"po_session": "s-now", "previous": "s-old"}),
+        )
+        comments = self.sprint_reader().show("sprint:switch", include_comments=True)["comments"]
+        self.assertEqual(
+            [comment["body"] for comment in comments if "s-now" in comment["body"]],
+            ["[po]\nthe PO session of sprint:switch switched from s-old to s-now by po"],
+        )
+
+    def test_set_po_session_refuses_a_session_that_is_not_open_and_a_reused_request(self) -> None:
+        self.add_session("s-old")
+        self.add_session("s-now")
+        self.add_session("s-closed", "closed")
+        self._create(goal="switch", reference="sprint:switch", po_session="s-old")
+        self.switch("s-now", "switch-1")
+        before = self._events()
+        for session, request_id in (("s-nowhere", "r-1"), ("s-closed", "r-2"), ("s-old", "switch-1"), ("", "r-3")):
+            with self.subTest(session=session), self.assertRaises(TaskError) as raised:
+                self.switch(session, request_id)
+            self.assertEqual(raised.exception.code, "validation")
+        with self.assertRaises(TaskError) as raised:
+            self.writer.switch_po_session(
+                role="observer", actor="observer", reference="sprint:switch", session_id="s-old", request_id="r-4"
+            )
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertEqual(self._events(), before)
+        self.assertEqual(self.sprint("sprint:switch")["po_session"], "s-now")
 
     def allow(self, project: str, request_id: str, **fields: str) -> dict:
         call = {"role": "po", "actor": "po", "reference": "sprint:allow", "project": project,

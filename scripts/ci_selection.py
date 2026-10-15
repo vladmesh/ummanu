@@ -2,7 +2,9 @@
 
 Only Python under src/ummanu and tests has a static import contract. Opaque
 consumers (source readers, subprocesses, dynamic loading) conservatively depend
-on every Python module. Changing an opaque module itself requires the full run.
+on every Python module except the top-level test files. Changing an opaque module
+other than a top-level test file requires the full run. An edit of the suite
+manifest selects the test files whose suite it added or changed.
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ from pathlib import Path
 MAX_PLAN_BYTES = 1_000_000
 MAX_FILES = 4000
 MAX_SOURCE_BYTES = 30_000_000
+MANIFEST = "tests/ci-shards.txt"
 
 
 class SelectionError(ValueError):
@@ -70,6 +73,22 @@ def documentation(path: str) -> bool:
     return path.endswith(".md") or (
         path.startswith("docs/") and path.endswith((".rst", ".txt", ".png", ".jpg", ".svg"))
     )
+
+
+def runner_test(name: str) -> bool:
+    """A top-level test file: the suite runner loads it, no other module may depend on it opaquely."""
+    return re.fullmatch(r"tests\.test_[A-Za-z0-9_]+", name) is not None
+
+
+def manifest_moves(base_text: str, grouped: dict[str, list[str]]) -> set[str]:
+    """Test paths whose suite in `grouped` differs from the base manifest text, new entries included."""
+    base = {}
+    for line in base_text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and not parts[0].startswith("#"):
+            suite, path = parts
+            base[path] = suite
+    return {path for suite, paths in grouped.items() for path in paths if base.get(path) != suite}
 
 
 def module_name(path: str) -> str | None:
@@ -198,14 +217,16 @@ def import_graph(sources: dict[str, str]) -> tuple[dict[str, set[str]], set[str]
         add(name, package)
     # Unknown dependencies are universal, never silently absent from the graph.
     for name in opaque:
-        dependencies = set(graph) if name.startswith("tests.") else {
+        dependencies = {target for target in graph if not runner_test(target)} if name.startswith("tests.") else {
             target for target in graph if target == "ummanu" or target.startswith("ummanu.")}
         graph[name].update(dependencies - {name})
     return graph, opaque
 
 
 def select(grouped: dict[str, list[str]], changes: list[tuple[str, tuple[str, ...]]],
-           base_sources: dict[str, str], candidate_sources: dict[str, str]) -> tuple[str, list[str], dict[str, list[str]], dict[str, list[str]]]:
+           base_sources: dict[str, str], candidate_sources: dict[str, str],
+           moved: frozenset[str] = frozenset()) -> tuple[str, list[str], dict[str, list[str]], dict[str, list[str]]]:
+    """`moved` names the test files a modified manifest assigned to a new suite."""
     all_paths = [path for paths in grouped.values() for path in paths]
 
     def full(reason):
@@ -217,7 +238,9 @@ def select(grouped: dict[str, list[str]], changes: list[tuple[str, tuple[str, ..
     if all(documentation(p) for p in paths):
         return "docs-only", ["all old and new paths are documentation"], {}, {}
     code = {p for p in paths if not documentation(p)}
-    if any(module_name(p) is None for p in code):
+    if (("M", (MANIFEST,)) in changes):
+        code.discard(MANIFEST)
+    if any(module_name(p) is None for p in code | moved):
         return full("unknown path or shared infrastructure/configuration change")
     if any(status[0] in "DRT" for status, items in changes if any(p in code for p in items)):
         return full("removed, renamed or type-changed Python topology")
@@ -227,8 +250,8 @@ def select(grouped: dict[str, list[str]], changes: list[tuple[str, tuple[str, ..
                                  else import_graph(candidate_sources))
     except (ValueError, SyntaxError, UnicodeError) as exc:
         return full(f"unsafe analysis: {exc}")
-    changed = {module_name(p) for p in code}
-    if changed & (old_opaque | new_opaque):
+    changed = {module_name(p) for p in code | moved}
+    if {name for name in changed if not runner_test(name)} & (old_opaque | new_opaque):
         return full("changed code has opaque runtime/source dependencies")
     graph = {name: old_graph.get(name, set()) | new_graph.get(name, set())
              for name in old_graph.keys() | new_graph.keys()}
@@ -247,7 +270,8 @@ def select(grouped: dict[str, list[str]], changes: list[tuple[str, tuple[str, ..
         name = module_name(path)
         if name not in affected:
             continue
-        explanations[path] = (["changed test"] if name in changed else
+        explanations[path] = (["suite changed in the manifest"] if path in moved else
+                              ["changed test"] if name in changed else
                               ["conservative opaque consumer"] if name in old_opaque | new_opaque else
                               [f"consumes {dep}" for dep in sorted(graph[name] & affected)])
     return "affected", ["base/candidate import closure including conservative opaque consumers"], selected, explanations
@@ -272,15 +296,19 @@ def build_plan(root: Path, grouped: dict[str, list[str]], candidate_sha: str,
             changes = changed_paths(git_bytes(root, "diff", "--name-status", "-z", "--find-renames",
                                               merge_base, candidate_sha, "--"))
             # Docs classification needs only diff evidence; source analysis is CI-only static work.
+            moved = frozenset()
+            if ("M", (MANIFEST,)) in changes:
+                base_manifest = git_bytes(root, "show", f"{merge_base}:{MANIFEST}").decode("utf-8")
+                moved = frozenset(manifest_moves(base_manifest, grouped))
             code_changes = [(status, items) for status, items in changes
-                            if any(not documentation(p) for p in items)]
-            if (not code_changes or any(module_name(p) is None for _, items in code_changes
-                                       for p in items if not documentation(p))
+                            if any(not documentation(p) for p in items) and (status, items) != ("M", (MANIFEST,))]
+            if (not (code_changes or moved) or any(module_name(p) is None for _, items in code_changes
+                                                   for p in items if not documentation(p))
                     or any(status[0] in "DRT" for status, _ in code_changes)):
-                mode, reasons, selected, explanations = select(grouped, changes, {}, {})
+                mode, reasons, selected, explanations = select(grouped, changes, {}, {}, moved)
             else:
                 mode, reasons, selected, explanations = select(
-                    grouped, changes, snapshot(root, merge_base), snapshot(root, candidate_sha))
+                    grouped, changes, snapshot(root, merge_base), snapshot(root, candidate_sha), moved)
         except (SelectionError, UnicodeError, ValueError) as exc:
             reasons = [f"full fallback: {exc}"]
     elif event not in {"push", "workflow_dispatch"}:

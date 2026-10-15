@@ -681,6 +681,15 @@ class RoleRoutingGenerationTests(unittest.TestCase):
                 {"bad": {**profiles["opus-medium"], "effort": "unbounded"}},
             )
 
+    def test_a_profile_name_outside_the_machine_id_grammar_is_refused(self) -> None:
+        resources = {"claude-sub": {"account": "subscription"}}
+        profile = {"resource": "claude-sub", "adapter": "claude", "model": "opus", "effort": "medium"}
+        for name in ("опус", "opus_medium", "Opus", "opus medium"):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                heads.HeadRegistryError, r"profile name .* must match \[a-z0-9\]\[a-z0-9-\]\*"
+            ):
+                heads.validate_registry(resources, {name: profile})
+
     def test_a_selected_installation_without_a_usable_snapshot_fails_by_its_path(self) -> None:
         """The product default is for no installation at all, not for a broken one.
 

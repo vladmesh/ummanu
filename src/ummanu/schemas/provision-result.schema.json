@@ -14,7 +14,7 @@
       "required": ["id", "adapter"],
       "properties": {
         "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
-        "adapter": {"type": "string", "minLength": 1}
+        "adapter": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"}
       }
     },
     "input_revision": {

@@ -438,7 +438,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 host._prepare_workspace_environment(str(workspace), project="other-project")
 
             candidate_python = str(workspace / ".ummanu-task-env" / "venv" / "bin" / "python3")
-            self.assertIn([candidate_python, "-m", "pip", "install", "-e", ".[dev]"], commands)
+            self.assertIn([candidate_python, "-m", "pip", "install", "-e", ".[dev,typecheck]"], commands)
 
     def test_install_output_is_recorded_as_exact_generated_bytes_only_when_new(self) -> None:
         """secretary-1920: what the editable install creates is the dispatcher's, nothing else is."""

@@ -299,6 +299,8 @@ class DispatcherTaskWrites:
                     if stored.hotfix not in refs:
                         raise TaskError("backend_error", "hotfix changed during mark admission", 1)
                     self._after_merge_hotfix_obligation(self.reader.show(carrier), stored)
+                if all(getattr(current.after_merge, name) == value for name, value in changes.items()):
+                    return current
                 for name, value in changes.items():
                     setattr(current.after_merge, name, value)
                 self.client.call("saveTaskMetadata", task_id=_task_number(task),

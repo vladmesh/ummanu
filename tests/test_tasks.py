@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -76,6 +77,22 @@ def open_sprint(ref: str = "sprint:test", project: str = "ummanu"):
 
 # The sprint the assessment fixture's card belongs to.
 SPRINT = "sprint:1031"
+
+
+ADAPTER_BODY = (
+    "setup:\n  commands: ['true']\n"
+    "smoke:\n  command: 'true'\n"
+    "validation:\n  ci: github\n"
+    "artifact_policy:\n  write_project_files: false\n"
+)
+
+
+def register_projects(instance: Path, *entries: str) -> None:
+    """Write one project registry entry per YAML body into the instance."""
+    registry = instance / "projects"
+    registry.mkdir(exist_ok=True)
+    for index, body in enumerate(entries):
+        (registry / f"entry-{index}.yaml").write_text(body, encoding="utf-8")
 
 
 class FakeSprintReader:
@@ -524,6 +541,7 @@ class TaskCliTests(CardStoreCase):
                 mock.patch.dict("os.environ", {}, clear=True),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
+                register_projects(Path(tmp), "id: ummanu\nenabled: true\n")
                 code = main(
                     ["task", "create", "--role", "po", "--instance", tmp, "--data-dir", tmp,
                      "--project", "ummanu", "--type", "infra", "--title", "T", *extra]
@@ -533,6 +551,51 @@ class TaskCliTests(CardStoreCase):
             self.assertEqual(
                 (kwargs["task_type"], kwargs["review"], kwargs["live_impact"]), ("infra", review, live_impact)
             )
+
+    def test_create_refuses_a_project_no_head_can_run_a_card_on(self) -> None:
+        broad = f"broad_check:\n  interpreter: {sys.executable}\n  import_package: {{package}}\n"
+        cases = (
+            ("ghost", "research", "project_not_registered"),
+            ("paused", "infra", "project_not_enabled"),
+            ("paused", "decision", None),
+            ("docs", "code", "broad_check_not_attestable"),
+            ("docs", "research", None),
+            ("live", "code", None),
+        )
+        for project, kind, refusal in cases:
+            writer = mock.Mock()
+            writer.return_value.create.return_value = {"action": "created"}
+            errors = io.StringIO()
+            with (
+                self.subTest(project=project, kind=kind),
+                tempfile.TemporaryDirectory() as tmp,
+                mock.patch("ummanu.tasks.TaskWriter", writer),
+                mock.patch("ummanu.task_commands.card_client"),
+                mock.patch.dict("os.environ", {}, clear=True),
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(errors),
+            ):
+                register_projects(
+                    Path(tmp),
+                    "id: paused\nenabled: false\n",
+                    "id: docs\nenabled: true\nadapter: docs\n",
+                    "id: live\nenabled: true\nadapter: live\n",
+                )
+                (Path(tmp) / "adapters").mkdir()
+                for adapter, package in (("docs", "doctest"), ("live", "thing")):
+                    (Path(tmp) / "adapters" / f"{adapter}.yaml").write_text(
+                        ADAPTER_BODY + broad.format(package=package), encoding="utf-8"
+                    )
+                code = main(
+                    ["task", "create", "--role", "po", "--instance", tmp, "--data-dir", tmp,
+                     "--project", project, "--type", kind, "--title", "T"]
+                )
+            if refusal is None:
+                self.assertEqual(code, 0, errors.getvalue())
+                writer.return_value.create.assert_called_once()
+            else:
+                self.assertEqual((code, json.loads(errors.getvalue())["error"]["code"]), (2, refusal))
+                writer.return_value.create.assert_not_called()
 
     def test_show_renders_kind_review_and_live_impact(self) -> None:
         client = self.card_store(reader_seed())
@@ -709,6 +772,22 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
             self.writer.move(role="po", actor="p", reference="ummanu-468", target="ready", reason="")
         self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertBoardUnchanged(before)
+
+    def test_create_refuses_a_slug_outside_the_machine_id_grammar_before_any_write(self) -> None:
+        before = self.board_snapshot()
+        for slug in ("задача", "café", "two words", "under_score", "-leading", "Upper", "a" * 31):
+            with self.subTest(slug=slug):
+                with self.assertRaisesRegex(TaskError, r"slug .* must match \[a-z0-9\]\[a-z0-9-\]\*") as raised:
+                    self.writer.create(
+                        role="po",
+                        actor="p",
+                        project="ummanu",
+                        task_type="code",
+                        title="Задача с русским заголовком",
+                        slug=slug,
+                    )
+                self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
     def test_generic_create_keeps_in_progress_closed_to_steward_reports(self) -> None:
@@ -1424,6 +1503,26 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertNotIn("review", self.stored_metadata("ummanu-468"))
         self.assertEqual((card["review"], card["live_impact"]), ("required", False))
 
+    def test_create_refuses_a_dependency_nothing_can_release(self) -> None:
+        self.add_card(reference="ummanu-760", title="Blocked predecessor", state="blocked", metadata={"project": "ummanu"})
+        self.add_card(reference="ummanu-761", title="Archived", state="done", archived=True, metadata={"project": "ummanu"})
+        self.add_card(reference="ummanu-762", title="Ready predecessor", state="ready", metadata={"project": "ummanu"})
+        refused = {
+            "ummanu-763": {"blocked_by": "ummanu-760"},
+            "ummanu-764": {"blocked_by": "ummanu-761"},
+            "ummanu-765": {"blocked_by": "ummanu-762", "supersedes": "ummanu-762", "seed_ref": "a" * 40},
+        }
+        before = self.board_snapshot()
+        for reference, fields in refused.items():
+            with self.subTest(reference=reference), self.assertRaises(TaskError) as raised:
+                self.create_kind(reference, "code", **fields)
+            self.assertEqual(raised.exception.code, "dependency_unreleasable")
+        self.assertBoardUnchanged(before)
+
+        created = self.create_kind("ummanu-766", "code", blocked_by="ummanu-762")
+
+        self.assertEqual(created["task"]["blocked_by"], "ummanu-762")
+
     def test_create_accepts_a_review_override_in_both_directions(self) -> None:
         self.create_kind("ummanu-540", "code", review="skipped")
         self.create_kind("ummanu-541", "research", review="required")
@@ -2013,7 +2112,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
         before = self.board_snapshot()
 
-        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+        with self.assertRaisesRegex(TaskError, "waiting for a code slot of project ummanu .*ummanu-999") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
@@ -2168,13 +2267,44 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
         before = self.board_snapshot()
 
-        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+        with self.assertRaisesRegex(TaskError, "waiting for a code slot of project ummanu .*ummanu-999") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
                 reference="ummanu-468",
                 worker="ummanu-468-runtime",
             )
+
+        self.assertEqual(raised.exception.code, "capacity_reached")
+        self.assertBoardUnchanged(before)
+
+    def test_a_project_code_concurrency_of_two_admits_a_second_code_card(self) -> None:
+        self.clear_card_metadata("ummanu-468", "claim")
+        self.add_card(
+            reference="ummanu-999",
+            title="Other code",
+            state="in_progress",
+            metadata={"project": "ummanu", "task_type": "code", "claim": "other-worker"},
+        )
+
+        claimed = self.writer.claim(
+            role="dispatcher", actor="d", reference="ummanu-468", worker="ummanu-468-runtime", code_cap=2
+        )
+
+        self.assertEqual(claimed["task"]["state"], "in_progress")
+
+    def test_a_full_installation_names_the_cards_holding_its_slots(self) -> None:
+        self.clear_card_metadata("ummanu-468", "claim")
+        self.add_card(
+            reference="other-1",
+            title="Research elsewhere",
+            state="in_progress",
+            metadata={"project": "other", "task_type": "research", "claim": "other-worker"},
+        )
+        before = self.board_snapshot()
+
+        with self.assertRaisesRegex(TaskError, r"waiting for a slot \(head_capacity 1\): other-1") as raised:
+            self.writer.claim(role="dispatcher", actor="d", reference="ummanu-468", worker="w", cap=1)
 
         self.assertEqual(raised.exception.code, "capacity_reached")
         self.assertBoardUnchanged(before)
@@ -2191,7 +2321,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
         before = self.board_snapshot()
 
-        with self.assertRaisesRegex(TaskError, "one active code task") as raised:
+        with self.assertRaisesRegex(TaskError, "waiting for a code slot of project ummanu .*ummanu-999") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
