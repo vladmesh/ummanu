@@ -690,7 +690,7 @@ class WorkerLifecycleTests(unittest.TestCase):
         [(run, pointer, subject)] = host.backend.deliveries
         self.assertEqual(run.run_id, "worker-running-run")
         self.assertEqual(subject, "worker-report")
-        self.assertIn("generation 2", pointer.text)
+        self.assertIn("round 2 of ummanu-1412", pointer.text)
         self.assertEqual(record.worker_head_run["run_id"], "worker-running-run")
         self.assertEqual(record.worker_head_run["lifecycle"], "working")
 
