@@ -343,6 +343,7 @@ class StatusLineTests(Fixture):
                 "name": "interactive",
                 "head_registry": {"error": "none here"},
                 "interactive_workspace": iw.describe(self.data),
+                "capacity": {"head_capacity": 3, "code_concurrency": {}},
                 "sprints": {"error": None, "items": []},
             },
             "dispatcher": {"active_attempts": [], "observers": [], "last_tick": None},
