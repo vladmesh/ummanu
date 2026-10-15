@@ -1577,9 +1577,10 @@ else: no reopen, no reservation, no head. `sprint comment-delivery` answers `not
 
 ## The two-sprint pilot
 
-The default is one open sprint per installation. A second is enabled by an instance setting. Admission
-rules are in [Protocols](PROTOCOLS.md#the-open-sprint-limit): in practice the second sprint must touch
-nothing the first touches. Each sprint declares its own observer.
+The default is one open sprint per installation. Up to three are enabled by an instance setting.
+Admission rules are in [Protocols](PROTOCOLS.md#the-open-sprint-limit): in practice each sprint must
+touch nothing another open sprint touches. Each sprint declares its own observer, and the dispatcher
+runs one observer head per open sprint.
 
 Role `po` operations `close`, `reopen` and `record_budget` take the sprint reference as an argument and
 do not check the observer binding, so with two open sprints an observer head declaring `--role po` can
@@ -1593,7 +1594,7 @@ Add to `instance.yaml` like any config change ([Changing installation config](#c
 open_sprint_limit: 2
 ```
 
-Only `1` and `2` are accepted. Anything else keeps the limit at one and `ummanu doctor` reports an
+Only `1`, `2` and `3` are accepted. Anything else keeps the limit at one and `ummanu doctor` reports an
 `open_sprint_limit` finding. The value is read at each admission; nothing restarts.
 
 ### Verifying it took effect

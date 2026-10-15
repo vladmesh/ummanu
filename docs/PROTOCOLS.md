@@ -2385,7 +2385,7 @@ state read, visit resolution, staged board/audit write) is serialized per card.
 
 ### The open-sprint limit
 
-The instance setting `open_sprint_limit` is `1` or `2`; absent means `1`. A value the schema refuses
+The instance setting `open_sprint_limit` is an integer from `1` to `3`; absent means `1`. A value the schema refuses
 fails closed to `1` (never widening the limit or stopping admission), and `validate_instance` reports
 an `open_sprint_limit` finding. The limit is read from installation config at admission time, so
 changes need no restart; an unreadable config answers `1`.
@@ -2395,10 +2395,10 @@ first board write, in this order:
 
 1. **disjoint project reservations**, at either limit: a project another open sprint reserves is
    refused, naming the project and holder;
-2. **a different product**, at limit 2 only: two open sprints may not share the owning Product. A
+2. **a different product**, at a limit above 1 only: two open sprints may not share the owning Product. A
    sprint with no product cannot be proven disjoint and is refused, whichever side it is on (the
    candidate is judged on its own value first);
-3. **non-overlapping canonical repository roots**, at limit 2 only, compared as absolute resolved
+3. **non-overlapping canonical repository roots**, at a limit above 1 only, compared as absolute resolved
    paths; nesting counts as overlap. A stored root that is not absolute is refused on either side, not
    resolved at check time. The candidate's own roots are judged before any pairwise comparison, whether
    or not another sprint is open;

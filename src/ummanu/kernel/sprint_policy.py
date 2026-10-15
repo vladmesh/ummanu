@@ -10,7 +10,7 @@ from ummanu.board.legacy_codec import positive_int
 DEFAULT_BUDGET_SIGNAL = 3
 DEFAULT_BUDGET_HARD = 6
 DEFAULT_OPEN_SPRINT_LIMIT = 1
-MAX_OPEN_SPRINT_LIMIT = 2
+MAX_OPEN_SPRINT_LIMIT = 3
 
 
 def budget_thresholds(config: Mapping[str, Any] | None = None) -> dict[str, int]:
