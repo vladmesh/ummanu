@@ -263,6 +263,7 @@ class EveryPageCarriesTheBarTests(RouteFixture):
                 "/sprints",
                 "/sprints/new",
                 "/sprints/ummanu-9",
+                "/sprints/ummanu-9/heads/r-1",
                 "/projects",
                 "/projects/ummanu",
                 "/history",
@@ -536,7 +537,7 @@ class BarCostsNoExtraReadTests(RouteFixture):
                 bar = bar_of(self.get(path, app=app))
                 self.assertIn("74%", bar)
                 self.assertIn("41%", bar)
-        self.assertEqual(len(paths) * 5, 65, "the walk really did render many pages")
+        self.assertEqual(len(paths) * 5, 70, "the walk really did render many pages")
         self.assertEqual(self.fetched, [CLAUDE_USAGE_URL, CODEX_USAGE_URL])
 
     def test_the_next_cache_window_asks_once_more_and_not_once_per_page(self) -> None:
