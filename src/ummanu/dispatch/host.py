@@ -84,6 +84,7 @@ from ummanu.dispatch.provider_failure import (
 )
 from ummanu.dispatch.review import command_terminal_status as _command_terminal_status
 from ummanu.dispatch.runtime_provenance import ProductionRuntime, RuntimeProvenance
+from ummanu.dispatch.stale_round import WorkspaceReading, read_round_workspace
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.tui import (
@@ -822,6 +823,16 @@ class CommandHostRuntime(ObserverHostMixin, WorkspaceEnvironmentMixin, HeadLifec
         except HostError:
             return ""
         return completed.stdout.strip()
+
+    def round_workspace(self, task: dict[str, Any], record: DispatcherRecord) -> WorkspaceReading:
+        """The worker checkout's commits, diff and newest change since its integration base."""
+        if self.mode == "noop" or not record.workspace:
+            return WorkspaceReading(unknown="no workspace to read")
+        try:
+            base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
+        except HostError as exc:
+            return WorkspaceReading(unknown=str(exc))
+        return read_round_workspace(self._run, record.workspace, f"origin/{base}")
 
     def reconcile_reviewed_base_move(
         self,

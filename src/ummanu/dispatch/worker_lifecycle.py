@@ -657,6 +657,38 @@ class WorkerReportNudge:
         )
 
 
+@dataclass
+class StaleRound:
+    """When report round `generation` opened, and its one stale record once a tick found it stale.
+
+    `body` is frozen before the comment and `recorded` set after it, so a replay resends the same body.
+    """
+
+    generation: int = 0
+    started_at: float = 0.0
+    body: str = ""
+    recorded: bool = False
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "generation": self.generation,
+            "started_at": self.started_at,
+            "body": self.body,
+            "recorded": self.recorded,
+        }
+
+    @classmethod
+    def from_json(cls, value: Any) -> StaleRound:
+        if not isinstance(value, dict) or not value:
+            return cls()
+        return cls(
+            generation=int(value.get("generation") or 0),
+            started_at=float(value.get("started_at") or 0.0),
+            body=str(value.get("body") or ""),
+            recorded=bool(value.get("recorded")),
+        )
+
+
 class WorkerContinuationStage(StrEnum):
     NONE = "none"
     VALIDATION_MOVE_PENDING = "validation_move_pending"

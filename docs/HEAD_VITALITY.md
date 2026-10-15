@@ -406,6 +406,28 @@ details are in [PROTOCOLS.md](PROTOCOLS.md#provider-failure-of-a-heads-turn), wi
 | `Dead` | Reclaim via `dispatch.wait_vitality._trigger_wait_watchdog`. |
 | No episode / `Unverifiable`, ceiling elapsed | Operator escalation, head untouched (`_escalate_unobservable_wait`): one idempotent durable comment naming the evidence gap and a degraded `{kind}-unobserved-wait-escalated` outcome. Before that, an authoritative deterministic refusal seen `deterministic_refusal_limit` times escalates without waiting for the ceiling. |
 
+### Stale round record
+
+On every worker wait tick, after the reduction, `dispatch.stale_round.record_stale_round` computes the
+round's facts: elapsed time since the round was handed to the worker (`worker_stale_round.started_at`,
+stamped on the first wait tick of each report generation from `worker_started_at`), commits and newest
+commit time since the fork from `origin/<integration base>`, the diff against that fork (files, lines
+added and removed, uncommitted edits included) and the newest file mtime in the checkout outside `.git`
+and `.ummanu-task-env`. An unreadable checkout is an explicit `unknown` reason, never zeros.
+
+The round is stale when either rule holds:
+
+- `estimate`: elapsed exceeds `ESTIMATE_FACTOR` (2) times the card's effective estimate;
+- `quiet`: the checkout is readable, the verdict is `HealthyActive`, `HealthyQuiet` or `SuspectedStall`,
+  and nothing changed (commit or file) for `UMMANU_STALE_ROUND_QUIET_MINUTES` (default 30), counted no
+  earlier than the round start.
+
+The first stale tick of a round writes one dispatcher comment starting `Stale round:` with the rule,
+elapsed time, estimate, commits, diff size and last change. Its request id is keyed on the attempt and
+the report generation, and its body is frozen on the record before the write, so later ticks and replays
+write nothing new and the next round can write again. The record changes nothing else: no move, stop,
+interrupt, budget charge, owner event or observer wake.
+
 ### The guard
 
 Every watchdog-driven destructive step passes

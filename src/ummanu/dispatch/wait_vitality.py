@@ -48,6 +48,7 @@ from ummanu.dispatch.launch import (
 )
 from ummanu.dispatch.provider_failure import provider_failure_outcome as _provider_failure_outcome
 from ummanu.dispatch.review import start_review as _start_review
+from ummanu.dispatch.stale_round import record_stale_round as _record_stale_round
 from ummanu.dispatch.state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
@@ -163,6 +164,17 @@ def wait_watchdog(
             now=now,
             answer_owed_since=answer_owed_since_for_wait(record, kind),
         )
+    if kind == "worker":
+        with tick_stage("observation"):
+            _record_stale_round(
+                runtime,
+                task,
+                record,
+                records,
+                payload,
+                episode.verdict if episode is not None else None,
+                now=now,
+            )
     # THE DECISION IS THE VERDICT (S1-4): the persisted episode -- reduced from this
     # very tick's observations on every shape the status carries, including the
     # not-live ones -- chooses between waiting, nudging and recovering. The old

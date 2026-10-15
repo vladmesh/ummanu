@@ -695,6 +695,7 @@ class CardStageTests(unittest.TestCase):
             (wait_vitality, "_provider_failure_outcome", self.clock.work(5)),
             (wait_vitality, "answer_owed_since_for_wait", mock.Mock(return_value=None)),
             (wait_vitality, "reduce_and_store_vitality_episode", reduce),
+            (wait_vitality, "_record_stale_round", mock.Mock(return_value=None)),
             (wait_vitality, "_decide_wait_by_verdict", decide),
         )
         with contextlib.ExitStack() as stack:

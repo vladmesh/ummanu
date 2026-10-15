@@ -142,6 +142,7 @@ unit tests/test_runtime_infra_tidy.py
 unit tests/test_automation_state_retirement.py
 unit tests/test_head_vitality_guard.py
 unit tests/test_wait_outcome.py
+unit tests/test_stale_round_facts.py
 unit tests/test_local_pty_vitality.py
 unit tests/test_local_pty_journal_turn.py
 unit tests/test_local_pty_journal_retention.py
@@ -152,6 +153,7 @@ unit tests/test_head_vitality_policy.py
 integration-heads tests/test_head_vitality_policy_execution.py
 unit tests/test_head_vitality_regression.py
 integration-heads tests/test_head_vitality_wait_decisions.py
+integration-heads tests/test_stale_round.py
 unit tests/test_health_suite_command.py
 component tests/test_hermetic_codex.py
 unit tests/test_codex_home.py

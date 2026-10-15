@@ -20,6 +20,7 @@ from ummanu.dispatch import wait_vitality as wait
 from ummanu.dispatch.head_vitality_episode import VitalityEpisode, VitalityVerdict
 from ummanu.dispatch.head_vitality_guard import GuardDecision, GuardRefusal
 from ummanu.dispatch.head_vitality_policy import RecoveryDecision, RecoveryIntent
+from ummanu.dispatch.stale_round import WorkspaceReading
 from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.watchdog import HEARTBEAT_LIVE_MATCH
 
@@ -35,15 +36,15 @@ GOLDENS = {
     "worker/paused": "390b45a3641a09bc418275ed069eb4f8c81524a190ff4744c2a793e5d6f853dc",
     "worker/identity": "5617a0253b444da1e59015265d62cc610a9144f539608801ed48c6ff5466c13a",
     "worker/provider-forward": "7d18cafb5a775bf6b9f47e70d63ba7cdee5a0ce50d2c0054053a3f21aaaf1ad5",
-    "worker/healthy": "76884c7034a3cc5180e91cf0d87d389b5dbbfc3171c62743ce597eac62f8f94b",
-    "worker/healthy-degraded": "bab7530cab398d4c5212e63e73d800eb4ad23c6ecc659654691a2dc125a6f5c4",
-    "worker/healthy-escalation": "3c3921092de837f026d44ba431e1837afb59a21d92e419eb407dbb431a99babb",
-    "worker/suspected": "3651a1476319ad8773093d8d2909c6205e90daab1d370fb66764a21ea907f8f6",
-    "worker/retained": "4a22b49999005d088cd513698fa2a37fdd635715a5b7cd71c4a5d4252faa0ab6",
-    "worker/retained-degraded": "8f4dc17f0f83883729760bf6b99c7e5eda0023732911c9510ead4d28506e897d",
-    "worker/no-observation": "c73dc86cf6802fdbc430bc71eeb6023bf77ce539ac3ad9f73498daee5f79f607",
-    "worker/no-observation-degraded": "ae942d0518cd76d787da202cedd02c81cbbab305e4cccb417356a9d11d09d887",
-    "worker/unobservable": "928ebe2baeeb4a52d331de5e6a56126a4ae84cd77a6ff86185b0793b2e9fcb43",
+    "worker/healthy": "6f6d6ab508d75a177d836e6219c8403df1d313ec3b671fa42b743ba40ea65835",
+    "worker/healthy-degraded": "27b65ce911f5e2dbeb66b8f9b53c0824e6bde17a350af044747260aa5b0ede89",
+    "worker/healthy-escalation": "8243c6a3ef3c775b95bf492e25c559b0547bd0580634c127140878a748f0827b",
+    "worker/suspected": "cc74baae06530d200221b73a8e327686afee8775cb99dfa2b98f690ad7070aaf",
+    "worker/retained": "5a1b773767cd1a11b1fee33f4a65f0eaa5837013a048666de78f6f06490133c2",
+    "worker/retained-degraded": "fa7ee0a5561f009715ee9e3484047d863bfcb5abb7c280a2acc48267c02d44af",
+    "worker/no-observation": "dc2a682e8b5e60d60fcce85c9758c0202879d8463d3a99340b313510eee97030",
+    "worker/no-observation-degraded": "f1dc38e8f324ffc6828edf071987fe968cf733b0de89ac432c8e605b7198d2c7",
+    "worker/unobservable": "484b450738c7aad056c88bfc7bf652bff2e3bf38c20c7e0076f57609c25f8834",
     "worker/recovery-missing": "78093f19702d98c34271262535440d19967e9001eb685ca90423e02a2a73f21b",
     "worker/observe": "621cb42486f459fadbbcc8536dbe9252ca331f21974de9cf63aeff80fc40d934",
     "worker/observe-escalated": "3c1c35e06bf68e5fc03417944c688c1da7930338e761ba0b8f073ff3952d8115",
@@ -171,6 +172,7 @@ class WaitOutcomeTests(unittest.TestCase):
             comment = patch(runtime.writer, "comment")
             patch(runtime.host, "worker_status", status)
             patch(runtime.host, "review_status", status)
+            patch(runtime.host, "round_workspace", WorkspaceReading())
             patch(wait, "_provider_failure_outcome", forwarded if case == "provider-forward" else None)
             patch(wait, "reduce_and_store_vitality_episode", episode)
             patch(wait, "_recovery_policy_decision", None if case == "recovery-missing" else (decision, episode))

@@ -25,6 +25,7 @@ from ummanu.dispatch.host import (
 )
 from ummanu.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
 from ummanu.dispatch.launcher import claude_launch_model, role_launch_env
+from ummanu.dispatch.stale_round import WorkspaceReading
 from ummanu.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_REVIEW_FREEZE,
@@ -673,6 +674,8 @@ class FakeHost:
         self.stopped_reviews: list[str] = []
         self.review_stop_initiators: list[str] = []
         self.commit = "c0ffee1234567890"
+        # What the worker checkout says against its base; a test ages it to make a round quiet.
+        self.round_workspace_result = WorkspaceReading()
         # The retained checkout a headless recovery binds (secretary-1544): bound and clean on the
         # card's own branch by default; a test that models a lost or foreign checkout sets the
         # refusal reason, and one that models a worker stopped mid-edit sets `dirty`.
@@ -1690,6 +1693,9 @@ class FakeHost:
     def head_commit(self, record) -> str:
         self.calls.append("head_commit")
         return self.commit
+
+    def round_workspace(self, task: dict, record) -> WorkspaceReading:
+        return self.round_workspace_result
 
     def reconcile_reviewed_base_move(
         self, task: dict, record, reviewed_commit: str, current_commit: str
