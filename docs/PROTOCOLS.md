@@ -2286,9 +2286,9 @@ What `SprintWriter._write` answers for every sprint write it handles when the sp
 
 A late budget charge updates the totals `show` reports but cannot stop the sprint again or change its
 status (the hard-limit edge is taken only from `open`). A restore rebuilds fields from a backup and is
-accepted on any status. `po_session_set` is written only by the PO service's resolver, which refuses to
-start a re-seed on a sprint that is not open; a repeat that finishes one begun while the sprint was open
-still records its session.
+accepted on any status. `po_session_set` is written by the PO service's resolver, which refuses to
+start a re-seed on a sprint that is not open (a repeat that finishes one begun while the sprint was open
+still records its session), and by `sprint set-po-session`, which refuses a sprint that is not open.
 
 ### Budget
 
@@ -2519,7 +2519,8 @@ session id or `null`) and `allowed_productions` (a list); a sprint opened before
 `[]`. The observer launch document prints both, as `## PO session` and `## Allowed productions`. The
 checkpoint export carries each only where set, restore writes it back, and sprint parity compares both.
 Neither is changed after create except `po_session` by the PO service's resolver below (the audit kind
-of that write is `po_session_set`, role `po`, actor `po-service`), and `allowed_productions`, which the
+of that write is `po_session_set`, role `po`, actor `po-service`) and by the PO's switch below, and
+`allowed_productions`, which the
 PO only extends with `sprint allow-production` ([Production rights](#production-rights), audit kind
 `production_allowed`).
 
@@ -2542,6 +2543,19 @@ answers `{session_id, created, repeated}`:
   none> no longer exists; opened <new> seeded with <why-doc path | no why-document found> and NOTES.md`,
   and then records the new session as its `po_session`. Closed replacements say `is closed`;
   missing replacements say `no longer exists`.
+
+**The switch.** The PO points an open sprint at another open PO session:
+
+```bash
+python3 -P -m ummanu sprint set-po-session --ref <sprint> --role po --session <session id> --request-id <ID>
+```
+
+The session has to exist and be open, else `validation`. The write records `po_session_set` (role `po`,
+the caller's actor, payload `po_session` and `previous`) and a sprint comment (role `po`, actor
+`po-service`): `the PO session of <sprint> switched from <old or none> to <new> by <actor>`. A repeat of
+the request id replays; the same request id with another session is `validation`; a session equal to
+the recorded one answers `already_set` with nothing written; a sprint that is not open is refused
+(`closed`). The switch seeds nothing: the session is already one the owner works in.
 
 `po.context_budget_bytes` in `instance.yaml` declares the sprint session budget, default `262144`.
 It must be a positive integer; malformed or unreadable configuration refuses before writes.

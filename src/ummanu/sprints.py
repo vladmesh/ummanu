@@ -1823,6 +1823,81 @@ class SprintWriter(SprintLifecycleMixin):
             mutation,
         )
 
+    def switch_po_session(
+        self, *, role: str, actor: str, reference: str, session_id: str, request_id: str
+    ) -> dict[str, Any]:
+        """Point an open sprint at another open PO session; role `po` only, idempotent on the
+        request id. The switch is audited and announced on the sprint as the PO service.
+        """
+        self._role(role, {"po"}, actor=actor)
+        session_id = str(session_id or "").strip()
+        request_id = str(request_id or "").strip()
+        if not session_id:
+            raise TaskError("validation", "--session names an open PO session; it is empty", 2)
+        if not request_id:
+            raise TaskError("validation", "switching the PO session requires --request-id", 2)
+        return self._switch_po_session_atomic(
+            role=role, actor=actor, reference=reference, session_id=session_id, request_id=request_id
+        )
+
+    @_sql_atomic
+    def _switch_po_session_atomic(
+        self, *, role: str, actor: str, reference: str, session_id: str, request_id: str
+    ) -> dict[str, Any]:
+        from ummanu.po.sprints import RESOLVER_ACTOR
+
+        self.client._execute("SELECT ref FROM sprints WHERE ref = %s FOR UPDATE", (reference,))
+        known = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if known is not None:
+            payload = known.get("payload") if isinstance(known.get("payload"), dict) else {}
+            if (known.get("kind"), known.get("ref"), payload.get("po_session")) != (
+                "po_session_set",
+                reference,
+                session_id,
+            ):
+                raise TaskError(
+                    "validation",
+                    f"request id {request_id!r} already belongs to another sprint write; a switch is "
+                    "repeated only with the same sprint and --session",
+                    2,
+                )
+            return self._write("po_session_set", role, actor, reference, request_id, payload, lambda _: None)
+        sprint = self.reader.show(reference)
+        status = str(sprint.get("status") or "")
+        if status != SprintState.OPEN.value:
+            raise TaskError("closed", f"sprint {reference} is {status}; it answers to no PO session", 3)
+        state = self._po_session_state(session_id)
+        if state is None:
+            raise TaskError("validation", f"there is no PO session {session_id}", 2)
+        if state != "open":
+            raise TaskError("validation", f"PO session {session_id} is {state}; a sprint answers to an open one", 2)
+        previous = sprint.get("po_session") or None
+        if previous == session_id:
+            return {"action": "already_set", "sprint": sprint, "event_id": None}
+
+        def mutation(snapshot: SprintWriteSnapshot) -> None:
+            self.client.call(
+                "saveTaskMetadata", task_id=_sprint_number(snapshot), values={PO_SESSION_FIELD: session_id}
+            )
+
+        result = self._write(
+            "po_session_set",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"po_session": session_id, "previous": previous},
+            mutation,
+        )
+        self._comment_atomic(
+            role=role,
+            actor=RESOLVER_ACTOR,
+            reference=reference,
+            body=f"the PO session of {reference} switched from {previous or 'none'} to {session_id} by {actor}",
+            request_id=f"{request_id}-comment",
+        )
+        return result
+
     def _decision_inputs(self, entries: Any) -> list[dict[str, Any]]:
         try:
             parsed = owner_decisions.parse_decisions(entries)

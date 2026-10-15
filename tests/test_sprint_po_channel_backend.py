@@ -699,6 +699,58 @@ class SprintPoChannelBackendTests(SprintFixture):
         self.assertEqual(len(recorded), 1)
         self.assertEqual(recorded[0]["actor"], {"role": "po", "id": "po-service"})
 
+    def switch(self, session: str, request_id: str, reference: str = "sprint:switch") -> dict:
+        return self.writer.switch_po_session(
+            role="po", actor="po", reference=reference, session_id=session, request_id=request_id
+        )
+
+    def test_set_po_session_moves_an_open_sprint_to_another_open_session_once(self) -> None:
+        self.add_session("s-old")
+        self.add_session("s-now")
+        self._create(goal="switch", reference="sprint:switch", po_session="s-old")
+        out = io.StringIO()
+        with self.board_injected(), mock.patch.dict(os.environ, {"BOARD_ACTOR": "po"}), contextlib.redirect_stdout(out):
+            code = main(
+                ["sprint", "set-po-session", "--ref", "sprint:switch", "--role", "po", "--session", "s-now",
+                 "--request-id", "switch-1", "--instance", str(self.instance), "--data-dir", self.tmp.name]
+            )
+        self.assertEqual(code, 0, out.getvalue())
+
+        again = self.switch("s-now", "switch-1")
+
+        self.assertEqual(again["event_id"], json.loads(out.getvalue())["event_id"])
+        self.assertEqual(self.switch("s-now", "switch-2")["action"], "already_set")
+        self.assertEqual(self.sprint("sprint:switch")["po_session"], "s-now")
+        [event] = [event for event in self._events() if event.get("kind") == "po_session_set"]
+        self.assertEqual(
+            (event["actor"], event["payload"]),
+            ({"role": "po", "id": "po"}, {"po_session": "s-now", "previous": "s-old"}),
+        )
+        comments = self.sprint_reader().show("sprint:switch", include_comments=True)["comments"]
+        self.assertEqual(
+            [comment["body"] for comment in comments if "s-now" in comment["body"]],
+            ["[po]\nthe PO session of sprint:switch switched from s-old to s-now by po"],
+        )
+
+    def test_set_po_session_refuses_a_session_that_is_not_open_and_a_reused_request(self) -> None:
+        self.add_session("s-old")
+        self.add_session("s-now")
+        self.add_session("s-closed", "closed")
+        self._create(goal="switch", reference="sprint:switch", po_session="s-old")
+        self.switch("s-now", "switch-1")
+        before = self._events()
+        for session, request_id in (("s-nowhere", "r-1"), ("s-closed", "r-2"), ("s-old", "switch-1"), ("", "r-3")):
+            with self.subTest(session=session), self.assertRaises(TaskError) as raised:
+                self.switch(session, request_id)
+            self.assertEqual(raised.exception.code, "validation")
+        with self.assertRaises(TaskError) as raised:
+            self.writer.switch_po_session(
+                role="observer", actor="observer", reference="sprint:switch", session_id="s-old", request_id="r-4"
+            )
+        self.assertEqual(raised.exception.code, "role_forbidden")
+        self.assertEqual(self._events(), before)
+        self.assertEqual(self.sprint("sprint:switch")["po_session"], "s-now")
+
     def allow(self, project: str, request_id: str, **fields: str) -> dict:
         call = {"role": "po", "actor": "po", "reference": "sprint:allow", "project": project,
                 "reason": "ummanu is the development server", "request_id": request_id, **fields}
