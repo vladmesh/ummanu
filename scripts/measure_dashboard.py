@@ -33,9 +33,9 @@ That rule lives in exactly four places, and nowhere else:
      genuinely wants to tolerate a status says so with `tolerate=` and a written reason; a 3xx is
      refused even then, because a followed redirect would measure a different installation, and
      a proxy would send the request elsewhere without even a response to show for it.
-  2. :func:`prepare` proves the whole scenario is reproducible — data directory and a
-     session whose own JSON says a turn is **running**, which is the only kind of session a `/po`
-     page polls at all — before any clock starts.
+  2. :func:`prepare` proves the whole scenario is reproducible before any clock starts: a data
+     directory and a session whose own JSON says a turn is running, the only kind of session a
+     `/po` page polls at all.
   3. :func:`measure_concurrent` proves the round was *launched by a due poll*: the poll for the
      round falls due on its own cadence, its clock starts, and the four requests are released then,
      together with the poll's own request, so they go out while it is **in flight**. That ordering
@@ -70,7 +70,7 @@ this script to another host or port, and the list below stays the
 complete inventory of what a run asks for.
 
 Standard library only. What it imports from the product is the product's own resolution of an
-installation — where a data directory comes from — because a second copy of that rule here would
+installation (where a data directory comes from), because a second copy of that rule here would
 be a second thing to keep in step.
 """
 
