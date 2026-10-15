@@ -23,12 +23,8 @@ STORE_METHODS = {
 
 class ProductIssueFixtureGuards(unittest.TestCase):
     def test_every_method_is_counted(self) -> None:
-        # 16 and 30 originally; secretary-1669 removed five store cases that wrote a card through
-        # the retired implementation. secretary-1670 removed the 11 lane cases, the 11 store cases
-        # and the file-journal upgrade gate case that only it had, together with it. secretary-1765
-        # added the observer's issue and its audit fields.
         self.assertEqual(len(SWIMLANE_METHODS), 5)
-        self.assertEqual(len(STORE_METHODS), 14)
+        self.assertEqual(len(STORE_METHODS), 15)
 
     def test_bodies_do_not_reach_into_board_storage(self) -> None:
         forbidden_attrs = {

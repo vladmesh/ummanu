@@ -23,8 +23,8 @@ SUITES = (
     test_sprint_listing_budget,
 )
 EXPECTED_METHODS = {
-    "tests.test_sprints": 113,
-    "tests.test_sprint_executors": 21,
+    "tests.test_sprints": 114,
+    "tests.test_sprint_executors": 25,
     "tests.test_sprint_restore": 24,
     "tests.test_sprint_listing_budget": 4,
 }
@@ -46,7 +46,7 @@ AFTER_REACH_INS = {
 }
 EXPECTED_CLASSES = {
     "tests.test_sprints.SprintOwnershipTests": 21,
-    "tests.test_sprints.TwoOpenSprintAdmissionTests": 18,
+    "tests.test_sprints.TwoOpenSprintAdmissionTests": 19,
     "tests.test_sprints.TwoOpenSprintIsolationTests": 9,
     "tests.test_sprints.SprintTests": 21,
     "tests.test_sprints.SprintStatusHeadlessCommandTests": 3,
@@ -60,6 +60,7 @@ EXPECTED_CLASSES = {
     "tests.test_sprint_executors.ObserverPromptExecutorTests": 3,
     "tests.test_sprint_executors.SprintCardExecutorTests": 4,
     "tests.test_sprint_executors.SprintExecutorRecoveryTests": 4,
+    "tests.test_sprint_executors.SprintExecutorRepinTests": 4,
     "tests.test_sprint_executors.CardEditExecutorTests": 3,
     "tests.test_sprint_restore.SprintRestoreTests": 24,
     "tests.test_sprint_listing_budget.SprintListingBudgetTests": 4,
@@ -210,27 +211,11 @@ class _HelperBypass:
 
 class SprintFixtureGuards(unittest.TestCase):
     def test_every_method_is_counted(self) -> None:
-        """204 originally; secretary-1669 removed the 24 cases that wrote a card through the retired
-        implementation.
-
-        secretary-1670 removed the 33 remaining cases that only the retired Sprint implementation
-        had, with it, moved three SQL-only cases in from tests/test_sprints_sql_backend.py, and
-        rewrote the four listing-budget cases in store statements: 180 - 33 + 3 + 4 = 154.
-
-        secretary-1712 added two single-writer guard cases for the steward's own report card: 156.
-
-        secretary-1765 added the observer's end-to-end close of its own sprint: 157.
-
-        secretary-1842 added two local-run declaration cases and two snapshot/restore cases: 161.
-
-        ummanu-69 added the quoted owner-decision and paid-budget roundtrip case: 162.
-
-        ummanu-92 added close/retry preservation of previously archived cards and cleanup: 163.
-        """
+        """Every sprint suite case is counted, so a new case is a deliberate baseline change."""
         methods = {qualified: value for module in SUITES for qualified, value in _methods(module).items()}
         by_module = {module.__name__: len(_methods(module)) for module in SUITES}
         self.assertEqual(by_module, EXPECTED_METHODS)
-        self.assertEqual(len(methods), 162)
+        self.assertEqual(len(methods), 167)
         by_class: dict[str, int] = {}
         for qualified in methods:
             owner = qualified.rsplit(".", 1)[0]
