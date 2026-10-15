@@ -848,19 +848,23 @@ def _supervised_bring_up(
         print(f"dispatch[{agent}]: head {run_id} is still up ({refusal}) — no dispatch")
         return 0
     if not receipt.ok:
-        # Nothing of a failed bring-up is recorded as this role's head. A prompt that was typed and
-        # never started a turn has already been stopped by `start`; a head its stop would not
-        # confirm is asked once more here, because an unrecorded live head is one no later tick
-        # would ever end. Either way the tick fails, and the unit records it.
+        # A failed bring-up is recorded as this role's head only while it may still be alive. A
+        # prompt that was typed and never started a turn has already been stopped by `start`; a
+        # head its stop would not confirm is asked once more here. If that stop is not confirmed
+        # either, the run is kept as this role's head marked `stop_unconfirmed`, so the next tick
+        # reuses its run id and is refused busy instead of raising a second head beside it.
+        # Either way the tick fails, and the unit records it.
         if receipt.status == HEAD_ALIVE and receipt.run is not None:
             stopped = runtime.stop(
                 receipt.run,
                 StopInitiator(actor=HANDOVER_INITIATOR, reason=FAILED_BRING_UP_REASON),
             )
             if not stopped.ok:
+                state.save_head_run({**receipt.run.to_json(), "stop_unconfirmed": True})
                 print(
                     f"dispatch[{agent}]: the head {receipt.run.run_id} this tick failed to point at "
-                    f"its skill would not confirm it stopped ({stopped.reason or stopped.status})"
+                    f"its skill would not confirm it stopped ({stopped.reason or stopped.status}); "
+                    "it stays recorded as this role's head"
                 )
         failure = LocalPtyDispatchError(receipt.reason or receipt.status)
         reports.failed(cmd, failure)
