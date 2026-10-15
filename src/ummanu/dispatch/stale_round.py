@@ -2,7 +2,8 @@
 
 While the dispatcher waits for a worker report it computes the round's facts every tick. The first
 tick that finds the round stale writes one `Stale round:` card comment, keyed on the attempt and the
-report generation. Nothing else changes: no move, stop, interrupt, charge or owner event.
+report generation, its facts under `STALE_ROUND_KEY` in the event payload. That record wakes the
+sprint observer; nothing else changes: no move, stop, interrupt, charge or owner event.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ummanu.board.estimate import estimate_view
+from ummanu.board.task_protocol.rows import stale_round_fact
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
 from ummanu.dispatch.types import HostError
@@ -161,7 +163,7 @@ def record_stale_round(
 ) -> None:
     """Write the round's one `Stale round:` comment on its first stale tick.
 
-    The body is frozen on the record before the comment, so a replay sends the same bytes.
+    Body and fact are frozen on the record before the comment, so a replay sends the same bytes.
     """
     ref = str(task["ref"])
     marker = record.worker_stale_round
@@ -174,7 +176,7 @@ def record_stale_round(
         runtime.save_records(payload, records)
     if marker.recorded:
         return
-    if not marker.body:
+    if not marker.fact:
         estimate = estimate_view(task)
         facts = round_facts(record, runtime.host.round_workspace(task, record), now)
         rule = stale_rule(
@@ -186,13 +188,14 @@ def record_stale_round(
         if not rule:
             return
         marker.body = _stale_body(rule, facts, estimate, generation=record.report_generation, now=now)
+        marker.fact = _stale_fact(ref, rule, facts, estimate, generation=record.report_generation)
         records[ref] = record
         runtime.save_records(payload, records)
-    runtime.writer.comment(
-        role="dispatcher",
+    runtime.writer.stale_round(
         actor=runtime.owner,
         reference=ref,
         body=marker.body,
+        fact=marker.fact,
         request_id=attempt_request_id(
             record.attempt_id or "", "stale-round", ref, suffix=str(record.report_generation)
         ),
@@ -226,6 +229,47 @@ def _stale_body(
         f" Elapsed {round(facts.elapsed_seconds / 60)} min; estimate {estimate_text}."
         f" {workspace_text} Recorded only: nothing was moved, stopped, interrupted or charged."
     )
+
+
+def _stale_fact(
+    ref: str, rule: str, facts: RoundFacts, estimate: Mapping[str, Any] | None, *, generation: int
+) -> dict[str, Any]:
+    return {
+        "card": ref,
+        "rule": rule,
+        "generation": generation,
+        "elapsed_seconds": round(facts.elapsed_seconds),
+        "estimate_minutes": int(estimate["minutes"]) if estimate else None,
+        "commits": facts.commits,
+        "files_changed": facts.files_changed,
+        "lines_added": facts.lines_added,
+        "lines_removed": facts.lines_removed,
+        "last_change_at": _utc(facts.last_change_at) if facts.last_change_at else "",
+        "workspace_unknown": facts.unknown,
+    }
+
+
+def render_stale_fact(fact: Mapping[str, Any]) -> str:
+    """One stale-round fact in words, for the observer wake."""
+    estimate = fact.get("estimate_minutes")
+    if fact.get("workspace_unknown"):
+        workspace = f"workspace unknown: {fact['workspace_unknown']}"
+    else:
+        workspace = (
+            f"{fact.get('commits')} commits, {fact.get('files_changed')} files,"
+            f" +{fact.get('lines_added')}/-{fact.get('lines_removed')} lines,"
+            f" last change {fact.get('last_change_at') or 'none'}"
+        )
+    return (
+        f"Stale round on {fact.get('card')}: rule {fact.get('rule')}, report generation {fact.get('generation')}."
+        f" Elapsed {round(int(fact.get('elapsed_seconds') or 0) / 60)} min;"
+        f" estimate {f'{estimate} min' if estimate is not None else 'none'}; {workspace}."
+    )
+
+
+def wake_facts(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The stale-round facts among a batch of observer wake events, in order."""
+    return [fact for event in events if (fact := stale_round_fact(event)) is not None]
 
 
 def _utc(epoch: float) -> str:

@@ -61,6 +61,7 @@ from ummanu.dispatch.observer_state import (
     put_observers,
 )
 from ummanu.dispatch.post_merge import render_fact, wake_facts
+from ummanu.dispatch.stale_round import render_stale_fact, wake_facts as stale_wake_facts
 from ummanu.dispatch.tui import (
     READINESS_BUSY,
     delivery_readiness_state,
@@ -864,6 +865,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         "sprint": sprint,
         # The post-merge CI results in this batch, stated in the wake itself (secretary-1736).
         "post_merge": wake_facts(significant),
+        "stale_round": stale_wake_facts(significant),
         "pending_from": _event_id(significant[0]),
         "occurred_at": str(latest.get("occurred_at") or ""),
         "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
@@ -1752,6 +1754,7 @@ acknowledgement or its acknowledgement deadline expired; event age is not a trig
             sprint=event["sprint"],
             change=str(event.get("change") or "linked-card"),
             post_merge=list(event.get("post_merge") or []),
+            stale_round=list(event.get("stale_round") or []),
         )
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
         evidence = _evidence_of(exc)
@@ -2966,13 +2969,21 @@ def render_observer_wake_context(
     change: str,
     delivery: ObserverDelivery | None = None,
     post_merge: list[dict[str, Any]] | None = None,
+    stale_round: list[dict[str, Any]] | None = None,
 ) -> str:
     """Wake text with the same live owner-decision context a replacement launch receives.
 
     A post-merge CI result in the batch is stated first, as the fact it is: `green`, `red`,
     `absent` or `timeout`, with the run and, for a red one, the failed checks and classification.
+    A stale worker round is stated the same way, with its card and round facts.
     """
     changed = "The sprint entity changed." if change == "sprint-entity" else "A linked card changed."
+    stale = [render_stale_fact(fact) for fact in stale_round or []]
+    if stale:
+        changed = (
+            "A worker round went stale. Record one `Stale round decision:` comment on its card "
+            "(continue, partial or reslice) with a reason:\n\n" + "\n\n".join(stale) + "\n\n" + changed
+        )
     facts = [render_fact(fact) for fact in post_merge or [] if isinstance(fact, dict)]
     if facts:
         changed = (

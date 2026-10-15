@@ -423,10 +423,16 @@ The round is stale when either rule holds:
   earlier than the round start.
 
 The first stale tick of a round writes one dispatcher comment starting `Stale round:` with the rule,
-elapsed time, estimate, commits, diff size and last change. Its request id is keyed on the attempt and
-the report generation, and its body is frozen on the record before the write, so later ticks and replays
-write nothing new and the next round can write again. The record changes nothing else: no move, stop,
-interrupt, budget charge, owner event or observer wake.
+elapsed time, estimate, commits, diff size and last change, through `TaskWriter.stale_round`. The same
+facts ride in the event payload under `stale_round` (card, rule, generation, elapsed seconds, estimate
+minutes, commits, files, lines added and removed, last change, unknown reason). Its request id is keyed
+on the attempt and the report generation, and its body and fact are frozen on the record before the
+write, so later ticks and replays write nothing new and the next round can write again.
+
+That event is one sprint observer wake: `tasks.is_significant_card_event` reads it through
+`stale_round_fact`, and the wake text names the card and its facts. The observer answers with one
+`Stale round decision:` card comment. The record changes nothing else: no move, stop, interrupt, budget
+charge or owner event.
 
 ### The guard
 

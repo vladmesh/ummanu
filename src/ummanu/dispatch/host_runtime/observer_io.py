@@ -506,6 +506,7 @@ class ObserverHostMixin:
         sprint: dict[str, Any],
         change: str = "linked-card",
         post_merge: list[dict[str, Any]] | None = None,
+        stale_round: list[dict[str, Any]] | None = None,
     ) -> str:
         """Give an idle observer one event-driven turn without replacing its head."""
         if self.mode == "noop":
@@ -521,7 +522,7 @@ class ObserverHostMixin:
         waking = self._observer_lifecycle_run(record)
         delivery = getattr(record, "delivery", None)
         message = _render_observer_wake_context(
-            sprint, change=change, delivery=delivery, post_merge=post_merge
+            sprint, change=change, delivery=delivery, post_merge=post_merge, stale_round=stale_round
         )
         document = Path(workspace) / OBSERVER_PROMPT_FILE
         try:

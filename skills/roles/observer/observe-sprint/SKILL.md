@@ -286,6 +286,11 @@ python3 -P -m ummanu task create --role observer --actor observer \
   --seed-ref <predecessor candidate full 40-character sha> --supersedes <predecessor card ref>
 ```
 
+A stale-round wake names a live card and its round facts. Record exactly one `task comment` on it that
+starts `Stale round decision:` with `continue`, `partial` or `reslice` and a reason. The estimate is a
+reference point, never a ceiling. `partial` asks the worker in that comment to commit and file
+`task report --kind partial`; `reslice` follows the preempt path below.
+
 ### Classifying RED and Blocked evidence
 
 You classify, with the sprint context; a reviewer gives evidence and does not decide scope. Record the

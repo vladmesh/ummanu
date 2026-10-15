@@ -146,6 +146,7 @@ from ummanu.board.task_protocol.rows import (
     POST_MERGE_CI_RESULTS as POST_MERGE_CI_RESULTS,
     RELEASE_MERGE_KEY as RELEASE_MERGE_KEY,
     RUNTIME_TAILS as RUNTIME_TAILS,
+    STALE_ROUND_KEY,
     WAIT_CANCELLED as WAIT_CANCELLED,
     WAIT_OUTCOME_KEY as WAIT_OUTCOME_KEY,
     ArtifactOwnershipTaskError as ArtifactOwnershipTaskError,
@@ -1618,11 +1619,32 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         observer wake predicate reads (`post_merge_ci_fact`); the body is the same fact
         for a human reading the card.
         """
-        role = self._role("dispatcher", COMMENT_ROLES, actor=actor)
         if str(fact.get("result") or "") not in POST_MERGE_CI_RESULTS:
             raise TaskError("validation", "post-merge CI result must be one of " + ", ".join(POST_MERGE_CI_RESULTS), 2)
+        return self._dispatcher_fact_comment(actor, reference, body, POST_MERGE_CI_KEY, fact, request_id)
+
+    def stale_round(
+        self,
+        *,
+        actor: str,
+        reference: str,
+        body: str,
+        fact: dict[str, Any],
+        request_id: str,
+    ) -> dict[str, Any]:
+        """Record a stale worker round as one dispatcher comment on the card, its facts in the
+        event payload the observer wake predicate reads (`stale_round_fact`).
+        """
+        if not str(fact.get("rule") or ""):
+            raise TaskError("validation", "stale round fact needs its rule", 2)
+        return self._dispatcher_fact_comment(actor, reference, body, STALE_ROUND_KEY, fact, request_id)
+
+    def _dispatcher_fact_comment(
+        self, actor: str, reference: str, body: str, key: str, fact: dict[str, Any], request_id: str
+    ) -> dict[str, Any]:
+        role = self._role("dispatcher", COMMENT_ROLES, actor=actor)
         body = self._redact_for_board(body)
-        payload = {"marker": role, "body_sha256": _digest(body), POST_MERGE_CI_KEY: dict(fact)}
+        payload = {"marker": role, "body_sha256": _digest(body), key: dict(fact)}
         return self._write(
             "commented",
             role,

@@ -12,6 +12,8 @@ from unittest import mock
 
 from tests.dispatcher_fixtures import CARD_REF, STOPPED_STATUS, DispatcherRuntimeFixture
 from ummanu.board.estimate import DEFAULT_ESTIMATE_MINUTES
+from ummanu.board.owner_events import OwnerEventStore
+from ummanu.board.task_protocol.rows import is_significant_card_event, stale_round_fact
 from ummanu.dispatch import wait_vitality, worker_continuation
 from ummanu.dispatch.stale_round import DEFAULT_QUIET_MINUTES, ESTIMATE_FACTOR, WorkspaceReading
 
@@ -139,6 +141,37 @@ class StaleRoundTests(DispatcherRuntimeFixture, unittest.TestCase):
             self._tick_at(self.start + ESTIMATE_SECONDS + 1 + step * STEP, busy=True)
 
         self.assertEqual(len(self._stale_comments()), 1)
+
+    def test_a_stale_round_is_one_observer_wake_with_its_facts_and_no_owner_event(self) -> None:
+        owner_events = OwnerEventStore(self.board.credentials)
+        before = owner_events.events()
+        self._walk_to(self.start + ESTIMATE_SECONDS + 1, busy=True)
+        for step in range(1, 3):
+            self._tick_at(self.start + ESTIMATE_SECONDS + 1 + step * STEP, busy=True)
+
+        woken = [
+            event
+            for event in self.writer.audit.events(CARD_REF)
+            if is_significant_card_event(event, linked_refs={CARD_REF})
+        ]
+        [fact] = [stale_round_fact(event) for event in woken]
+        self.assertEqual(
+            fact,
+            {
+                "card": CARD_REF,
+                "rule": "estimate",
+                "generation": 1,
+                "elapsed_seconds": ESTIMATE_SECONDS + 1,
+                "estimate_minutes": DEFAULT_ESTIMATE_MINUTES,
+                "commits": 0,
+                "files_changed": 0,
+                "lines_added": 0,
+                "lines_removed": 0,
+                "last_change_at": _utc(self.start + ESTIMATE_SECONDS + 1),
+                "workspace_unknown": "",
+            },
+        )
+        self.assertEqual(owner_events.events(), before)
 
     def test_a_rework_round_is_recorded_again(self) -> None:
         self.host.round_workspace_result = WorkspaceReading(newest_file_at=self.start)
