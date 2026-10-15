@@ -71,6 +71,7 @@ unit tests/test_local_check.py
 unit tests/test_local_check_runner.py
 integration-dispatcher tests/test_local_check_pytest.py
 unit tests/test_candidate_history.py
+unit tests/test_card_estimate.py
 integration-recovery tests/test_checkpoint.py
 integration-recovery tests/test_postgres_recovery.py
 integration-recovery tests/test_fresh_postgres_install.py

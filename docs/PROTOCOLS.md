@@ -152,6 +152,16 @@ at create and at `task edit --review-head`, unless it is the head the sprint pin
 before the choice was stored reads as `required`. The store keeps the value in `tasks.review` and
 `tasks.live_impact`, and export/restore carries both.
 
+**Estimate** (`--estimate-minutes N`, `code`, `research` and `infra` only) is the observer's expected
+worker time for the card in minutes, a positive integer. Zero, a negative or non-integer value, or the
+flag on a `decision`, `operation` or `wait` card is refused (`validation`) with nothing written. The
+value is one typed field of the card's extension bag (`extensions.extra.estimate_minutes`; no column,
+no migration), written only at create, part of the create's request identity, and carried by
+export/restore with the bag. `task show` and `task list` carry `estimate: {minutes, source}` on a
+worker card: `source` is `card` for a stored value and `default` otherwise, where the default is 120
+minutes. It is a reference point, not a ceiling or a budget: nothing stops,
+parks, blocks or charges a card by it.
+
 **Lifecycle by kind.** A `code` card delivers a candidate: after `report:done` the dispatcher runs
 the mechanical gate (branch, pull request, CI), then review if required, and Done means the candidate
 was merged. A `research` or `infra` card has no candidate. The worker's checkout need not be committed

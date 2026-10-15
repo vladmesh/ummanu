@@ -16,6 +16,7 @@ from ummanu._fsutil import file_lock
 from ummanu.board import po_execution as execution_field, po_origin as origin_field, wait_card
 from ummanu.board.audit_contract import card_transition_of, is_protocol_event
 from ummanu.board.backend import entity_number
+from ummanu.board.estimate import ESTIMATE_MINUTES
 from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.legacy_codec import (
     TASK_STATE_BY_COLUMN as _STATE_BY_COLUMN,
@@ -697,6 +698,7 @@ def _create_metadata(
     review: str,
     live_impact: bool,
     touches_production: str,
+    estimate_minutes: int | None,
     wait_spec: str,
     po_origin: str,
     po_execution: str,
@@ -726,6 +728,9 @@ def _create_metadata(
     if touches_production:
         # Not a column: a typed field of the extension bag (board/production_rights.py).
         values[TOUCHES_PRODUCTION] = touches_production
+    if estimate_minutes is not None:
+        # Nor the observer's expected worker time (board/estimate.py).
+        values[ESTIMATE_MINUTES] = str(estimate_minutes)
     if wait_spec:
         # Not a column either: the wait card's spec (board/wait_card.py).
         values[wait_card.WAIT_SPEC] = wait_spec
@@ -771,6 +776,7 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         review=_text(payload.get("review")),
         live_impact=payload.get("live_impact") is True,
         touches_production=_text(payload.get("touches_production")),
+        estimate_minutes=payload.get("estimate_minutes") if type(payload.get("estimate_minutes")) is int else None,
         wait_spec=_text(payload.get("wait_spec")),
         po_origin=(
             origin_field.origin_text(_text(origin.get("session")), _text(origin.get("request")))

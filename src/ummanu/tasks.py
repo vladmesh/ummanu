@@ -33,6 +33,11 @@ from ummanu.board.completion_evidence import (
     render_po_completion_record,
     research_report_refusal,
 )
+from ummanu.board.estimate import (
+    create_refusal as estimate_create_refusal,
+    estimate_view,
+    parse_minutes,
+)
 from ummanu.board.events import BoardEventPending
 from ummanu.board.extension_bag import EXTENSION_BAG
 from ummanu.board.host import MutationResult, TransitionRequest
@@ -591,6 +596,9 @@ class TaskReader:
             # The production an operation card touches, beside the kind it belongs to.
             if (production := card_production(result)) is not None:
                 result["touches_production"] = production
+        # The observer's expected worker time, from the card or the default.
+        if (estimate := estimate_view(result)) is not None:
+            result["estimate"] = estimate
         # A wait card's one structured block: target, deadline, last observation, state.
         if (waiting := wait_card.wait_view(result)) is not None:
             result["wait"] = waiting
@@ -721,6 +729,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         review: str = "",
         live_impact: bool = False,
         touches_production: str = "",
+        estimate_minutes: str = "",
         wait: Mapping[str, Any] | None = None,
         origin: Mapping[str, Any] | None = None,
         po_execution: Mapping[str, Any] | None = None,
@@ -759,6 +768,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             review=review,
             live_impact=live_impact,
             touches_production=touches_production,
+            estimate_minutes=estimate_minutes,
             wait=wait,
             origin=origin,
             po_execution=po_execution,
@@ -796,6 +806,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         review: str = "",
         live_impact: bool = False,
         touches_production: str = "",
+        estimate_minutes: str = "",
         wait: Mapping[str, Any] | None = None,
         origin: Mapping[str, Any] | None = None,
         po_execution: Mapping[str, Any] | None = None,
@@ -862,6 +873,9 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             known = ", ".join(sorted(TASK_TYPE_VALUES))
             raise TaskError("validation", f"unknown task type {task_type!r} (known: {known})", 2) from None
         task_type = task_type_value.value
+        if refusal := estimate_create_refusal(task_type, estimate_minutes):
+            raise TaskError("validation", refusal, 2)
+        estimate = parse_minutes(estimate_minutes)
         # Whether review runs is the review choice; who reviews is the reviewer head and the sprint
         # pin. The two are resolved independently, and only a caller contradicting itself is refused.
         review = review.strip()
@@ -1131,6 +1145,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
             "review": review,
             **({"live_impact": True} if live_impact else {}),
             **({"touches_production": touches_production} if touches_production else {}),
+            **({"estimate_minutes": estimate} if estimate is not None else {}),
             # The flags as given: a retry recomputes the same request, never the same clock.
             **({"wait_request": wait_request} if waits else {}),
             # Where a delegated card came from: part of the identity, so a replay is the same turn's.
@@ -1220,6 +1235,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                     review=review,
                     live_impact=live_impact,
                     touches_production=touches_production,
+                    estimate_minutes=estimate,
                     wait_spec=spec.text() if spec is not None else "",
                     po_origin=(
                         origin_field.origin_text(origin_record["session"], origin_record["request"])
@@ -1314,6 +1330,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
         steward_report: bool,
         event: dict[str, Any],
         request_id: str,
+        estimate_minutes: int | None = None,
         wait_spec: str = "",
         po_origin: str = "",
         po_execution: str = "",
@@ -1372,6 +1389,7 @@ class TaskWriter(DispatcherTaskWrites, SprintGuardMixin, RecoveryMixin):
                         review=review,
                         live_impact=live_impact,
                         touches_production=touches_production,
+                        estimate_minutes=estimate_minutes,
                         wait_spec=wait_spec,
                         po_origin=po_origin,
                         po_execution=po_execution,

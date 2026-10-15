@@ -1302,6 +1302,11 @@ project id or `none` (`board/production_rights.py`, [Protocols](PROTOCOLS.md#pro
 `task create` writes it, and it is read only through `touches_production`, which treats a malformed value
 as none at all. No other kind carries it.
 
+`estimate_minutes` of a `code`, `research` or `infra` card, a positive integer as text
+(`board/estimate.py`, [Protocols](PROTOCOLS.md#card-kinds-live-impact-and-the-review-choice)). Only
+`task create` writes it, and it is read only through `estimate_view`, which treats a malformed value as
+absent.
+
 A `wait` card's three keys, with no column either (`board/wait_card.py`,
 [Protocols](PROTOCOLS.md#wait-cards)), each JSON text: `wait`, the spec, written once by `task create`;
 `wait_state`, the dispatcher's observation, frozen result and delivery records, written only by the
