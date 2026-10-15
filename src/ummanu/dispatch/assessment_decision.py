@@ -9,10 +9,10 @@ from ummanu.board.protocol_artifacts import (
     validate_rework_prerequisites,
 )
 from ummanu.dispatch import attempt_accounting, release_lifecycle
+from ummanu.dispatch.assessment_park import complete_park as _complete_park
 from ummanu.dispatch.decision_pointer import decision_pointer
 from ummanu.dispatch.helpers import _last_marker_body
 from ummanu.dispatch.review_packet import retain_rework_review
-from ummanu.dispatch.review_verdict import complete_park as _complete_park
 from ummanu.dispatch.state import DispatcherRecord, attempt_request_id as _attempt_request_id
 from ummanu.dispatch.tick_telemetry import tick_stage
 from ummanu.dispatch.types import STOPPED_BY_REVIEW_VERDICT, HostError

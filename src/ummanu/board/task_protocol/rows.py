@@ -362,9 +362,8 @@ def _transition_reason(reason: str, target: str) -> str:
     return reason if reason.strip() else f"Card transition to {target}"
 
 
-def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
-    """The current Assessment visit and its one canonical decision."""
-    ordered = list(events)
+def _latest_park(ordered: list[dict[str, Any]]) -> int:
+    """The index of the last transition into Assessment, -1 when the card was never parked."""
     latest_park = -1
     for index, event in enumerate(ordered):
         payload = _event_payload(event)
@@ -374,6 +373,13 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
             and str(lifecycle.get("target") or "") == "assessment"
         ):
             latest_park = index
+    return latest_park
+
+
+def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
+    """The current Assessment visit and its one canonical decision."""
+    ordered = list(events)
+    latest_park = _latest_park(ordered)
     if latest_park < 0:
         return "", None
     visit = str(ordered[latest_park].get("event_id") or ordered[latest_park].get("request_id") or "")
@@ -385,6 +391,15 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
         if not recorded_visit or recorded_visit == visit:
             return visit, event
     return visit, None
+
+
+def partial_report_park(events: Iterable[dict[str, Any]]) -> bool:
+    """Whether the current Assessment visit was opened by a partial report: the last report before it."""
+    ordered = list(events)
+    for event in reversed(ordered[: max(_latest_park(ordered), 0)]):
+        if _event_action(event) == "reported":
+            return str(_event_payload(event).get("marker") or "") == "report:partial"
+    return False
 
 
 def standing_decision(events: Iterable[dict[str, Any]]) -> str:

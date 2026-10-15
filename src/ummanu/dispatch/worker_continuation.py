@@ -23,7 +23,7 @@ from ummanu.dispatch.handoff_liveness import (
     observe_pending_handoff,
     provider_evidence,
 )
-from ummanu.dispatch.helpers import scrub_host_output
+from ummanu.dispatch.helpers import WORKER_REPORT_MARKERS, scrub_host_output
 from ummanu.dispatch.host_runtime.contracts import _record_worker_delivery_evidence
 from ummanu.dispatch.launch import (
     STAGE_REWORK,
@@ -85,7 +85,7 @@ def recover_worker_continuation(
     ref = task["ref"]
     continuation = record.worker_continuation
     if continuation.delivery_pending:
-        if marker in {"report:done", "report:blocked"}:
+        if marker in WORKER_REPORT_MARKERS:
             # A report after the resume phase opened proves the continuation reached the retained
             # conversation: do not rewrite TASK.md or replay the prompt over a completed turn.
             continuation.confirm_delivery()

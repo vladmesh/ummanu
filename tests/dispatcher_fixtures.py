@@ -231,8 +231,8 @@ class DispatcherRuntimeFixture:
             for line in document.splitlines()
             if "--request-id" in line
         ]
-        self.assertEqual(len(request_ids), 3, "one done and one blocked id per classification")
-        self.assertEqual(len(set(request_ids)), 3, "the two classifications share an id")
+        self.assertEqual(len(request_ids), 4, "one done, one partial and one blocked id per classification")
+        self.assertEqual(len(set(request_ids)), 4, "two report commands share an id")
         for request_id in request_ids:
             self.assertTrue(request_id.endswith(f"-{expected}"), request_id)
         self.assertIn(f"ummanu-report-ummanu-510-{expected}.md", document)

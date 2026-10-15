@@ -178,11 +178,12 @@ def _gate_red_repeat_count(task: dict[str, Any], fingerprint: str) -> int:
     )
 
 
-WORKER_REPORT_MARKERS = {"report:done", "report:blocked"}
+WORKER_REPORT_MARKERS = {"report:done", "report:blocked", "report:partial"}
 # The actions the dispatcher issues a report request id for. One per command in `TASK.md`: the done
-# report and one per block classification, since a request id claims its payload.
+# and partial reports and one per block classification, since a request id claims its payload.
 _REPORT_ACTIONS = (
     "worker-report-done",
+    "worker-report-partial",
     "worker-report-blocked-external_fact",
     "worker-report-blocked-wrong_task_definition",
 )

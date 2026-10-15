@@ -18,9 +18,11 @@ from ummanu.board.completion_evidence import (
     render_infra_completion_record,
 )
 from ummanu.dispatch import attempt_accounting
+from ummanu.dispatch.assessment_park import begin_park as _begin_park, complete_park as _complete_park
 from ummanu.dispatch.gate import reset_infrastructure_reruns as _reset_infrastructure_reruns
 from ummanu.dispatch.head_vitality_episode import VitalityVerdict
 from ummanu.dispatch.helpers import (
+    WORKER_REPORT_MARKERS,
     _last_marker_body,
     _round_blocked_report_classification,
     _round_done_report_body,
@@ -68,7 +70,7 @@ def worker_report_marker(
         ref,
         _round_report_ids(record.workspace, record.attempt_id or attempt_id, ref, record.report_generation),
     )
-    if marker in {"report:done", "report:blocked"}:
+    if marker in WORKER_REPORT_MARKERS:
         # Persist the terminal path before looking up the source handoff.
         # A failed lookup must not turn every later Validate, gate or
         # reviewer effect into a path that claims no report was consumed.
@@ -89,7 +91,7 @@ def handle_worker_report(
     *,
     marker: str | None,
 ) -> dict[str, Any] | None:
-    """Consume a done/blocked report after continuation recovery, or leave the wait open."""
+    """Consume a done, blocked or partial report after continuation recovery, or leave the wait open."""
     ref = task["ref"]
     continuation = record.worker_continuation
     if marker == "report:done":
@@ -251,7 +253,53 @@ def handle_worker_report(
             "attempt_id": attempt_id,
             "to": "blocked",
         }
+    if marker == "report:partial":
+        return _park_partial_report(runtime, task, record, records, payload, attempt_id)
     return None
+
+
+def _park_partial_report(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    attempt_id: str,
+) -> dict[str, Any]:
+    """Park a partial report in Assessment, holding its worker for a rework or reslice decision.
+
+    The report body on the card is the Assessment evidence; the move is keyed like a verdict park,
+    so a replay after a crash between the intent and the move moves the card once.
+    """
+    ref = task["ref"]
+    continuation = record.worker_continuation
+    # Accounted on the first pass and on a replay alike, as for done: the round owns one occurrence.
+    attempt_accounting.record_attempt_usage(runtime, ref, record, role=WORKER_ROLE, attempt_id=attempt_id)
+    if continuation.parked:
+        return _complete_park(runtime, record, records, payload, attempt_id, ref=ref)
+    record.worker_answer_owed_since = 0.0
+    try:
+        runtime.host.retain_worker(record)
+        continuation.begin_retention(time.time())
+    except HostError:
+        unconfirmed = runtime._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
+        if unconfirmed is not None:
+            return unconfirmed
+    _reset_wait(record, "worker")
+    return _begin_park(
+        runtime,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        phase="worker",
+        verdict_outcome="partial",
+        move_reason=(
+            "worker report:partial. The card is parked in Assessment: the worker of this round is "
+            "held, waiting for a rework or reslice decision."
+        ),
+    )
 
 
 def _record_infra_completion(
