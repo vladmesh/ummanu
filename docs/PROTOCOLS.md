@@ -1897,6 +1897,7 @@ board export, checkpoint and restore carry their metadata and comments.
 
 ```bash
 python3 -P -m ummanu product create --role po --id ummanu --project ummanu --title Ummanu
+python3 -P -m ummanu product edit --role po --id ummanu --add-project PROJECT --remove-project PROJECT --reason REASON
 python3 -P -m ummanu issue create --role po --product ummanu --kind feature --priority P2 --title TITLE
 python3 -P -m ummanu issue create --role observer --kind improvement --priority P3 --title TITLE
 python3 -P -m ummanu issue list --product ummanu
@@ -1913,7 +1914,7 @@ Who writes what:
 
 | Verb | `po` | `observer` |
 | --- | --- | --- |
-| `product create` | yes | not offered |
+| `product create`, `product edit` | yes | not offered |
 | `issue create` | yes, any product (`--product` required) | yes, under the [identity guard](#the-sprint-guard), for its sprint's product |
 | `issue update-priority`, `issue append`, `issue edit` | yes | `role_forbidden` |
 | `issue close` | yes | `role_forbidden` (an observer's `sprint close` closes its sprint's declared issues on its verdicts, in its name) |
@@ -1932,7 +1933,10 @@ role, a worker or reviewer head the profile the dispatcher launched), and a PO s
 exit 2, before anything is read.
 
 A Product id is stable and unique; its non-empty project set may contain only ids registered under
-the instance `projects/` directory. Every new issue requires its Product, one kind (`bug`, `feature`,
+the instance `projects/` directory. `product edit` adds and removes projects of that set (each option
+repeatable, an added one must be registered, the set never becomes empty) with a non-empty reason, as
+one `entity.updated` audit event; a repeat of the request id replays, the same request id with another
+change is `validation`, and a change that leaves the set as it is writes nothing. Every new issue requires its Product, one kind (`bug`, `feature`,
 `question`, `improvement`) and one priority (`P0`–`P3`). A priority change requires a non-empty
 reason, adds an `[issue:priority]` board comment and a durable audit event. Only the PO closes an
 issue with `issue close`, with exactly one of `resolved`, `invalid`, `duplicate` or `wont_do`; closure
