@@ -21,6 +21,7 @@ from unittest import mock
 
 from tests.observer_identity import as_observer, unbound_observer
 from ummanu import product_issue_commands, sprint_commands, task_commands
+from ummanu.board import sprint_dod
 from ummanu.board.roles import BOARD_ROLES, Role
 from ummanu.cli import build_parser, main
 from ummanu.product_issues import ProductIssueStore
@@ -432,7 +433,14 @@ class CloseDispositionPlanTests(SprintWriterFixture):
             {"ref": "ummanu-2", "state": "done", "sprint": SPRINT},
             {"ref": "ummanu-3", "state": "assessment", "sprint": SPRINT},
         ]
-        sprint = {"id": "sprint_postgres_1465", "ref": SPRINT, "goal": "g", "issues": ["issue:1"], "reservations": ["ummanu"]}
+        sprint = {
+            "id": "sprint_postgres_1465",
+            "ref": SPRINT,
+            "goal": "g",
+            "issues": ["issue:1"],
+            "reservations": ["ummanu"],
+            "dod": sprint_dod.section(None),
+        }
         committed = {"kind": "closed", "ref": SPRINT, "payload": {}}
         with (
             mock.patch.object(self.writer.reader, "show", return_value=sprint),
